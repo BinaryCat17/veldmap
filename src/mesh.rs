@@ -70,9 +70,52 @@ pub fn create_sphere(lat_segments: u32, lon_segments: u32) -> (Vec<Vertex>, Vec<
     (vertices, indices)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dem::DemData;
+
+    #[test]
+    fn test_create_terrain_patch_dimensions() {
+        let dem = DemData {
+            heights: vec![0.0; 4 * 4],
+            width: 4,
+            height: 4,
+            lat_start: 0.0,
+            lon_start: 0.0,
+        };
+        let (vertices, indices) = create_terrain_patch(&dem);
+        
+        assert_eq!(vertices.len(), 16);
+        // (W-1) * (H-1) * 2 triangles * 3 indices
+        // 3 * 3 * 2 * 3 = 54
+        assert_eq!(indices.len(), 54);
+    }
+
+    #[test]
+    fn test_create_terrain_patch_empty() {
+        let dem = DemData {
+            heights: vec![],
+            width: 0,
+            height: 0,
+            lat_start: 0.0,
+            lon_start: 0.0,
+        };
+        // This might panic or produce empty depending on implementation
+        // Current implementation uses y in 0..dem.height - 1, which works fine for 0 or 1.
+        let (vertices, indices) = create_terrain_patch(&dem);
+        assert_eq!(vertices.len(), 0);
+        assert_eq!(indices.len(), 0);
+    }
+}
+
 pub fn create_terrain_patch(dem: &crate::dem::DemData) -> (Vec<Vertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
+
+    if dem.width < 2 || dem.height < 2 {
+        return (vertices, indices);
+    }
 
     let lat_step = 1.0 / (dem.height as f32 - 1.0);
     let lon_step = 1.0 / (dem.width as f32 - 1.0);
