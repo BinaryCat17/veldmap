@@ -12,6 +12,8 @@ mod camera;
 mod geo;
 mod mesh;
 mod dem;
+#[cfg(test)]
+mod engine_tests;
 
 use engine::State;
 
