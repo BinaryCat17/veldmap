@@ -7,7 +7,7 @@
 - [x] Task: Conductor - User Manual Verification 'Phase 1: Подготовка данных и парсинг' (Protocol in workflow.md)
 
 ## Phase 2: Генерация геометрии (Mesh)
-- [ ] Task: Реализация алгоритма построения сетки рельефа.
+- [x] Task: Реализация алгоритма построения сетки рельефа. 2139a5a
     - [ ] Написать тесты для генератора мешей (проверка количества вершин и индексов).
     - [ ] Реализовать создание вершинных и индексных буферов.
 - [ ] Task: Conductor - User Manual Verification 'Phase 2: Генерация геометрии (Mesh)' (Protocol in workflow.md)
