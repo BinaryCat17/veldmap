@@ -1,0 +1,17 @@
+# Plan: Реализация базового рендеринга рельефа
+
+## Phase 1: Подготовка данных и парсинг [checkpoint: cf59bda]
+- [x] Task: Разработка структуры для хранения данных высот и парсера DEM. 3e0c926
+    - [ ] Написать тесты для парсера (проверка корректности чтения высот).
+    - [ ] Реализовать парсинг данных из файлов в `data/geoids/`.
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Подготовка данных и парсинг' (Protocol in workflow.md)
+
+## Phase 2: Генерация геометрии (Mesh) [checkpoint: 9f89c9a]
+- [x] Task: Реализация алгоритма построения сетки рельефа. 2139a5a
+    - [ ] Написать тесты для генератора мешей (проверка количества вершин и индексов).
+    - [ ] Реализовать создание вершинных и индексных буферов.
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Генерация геометрии (Mesh)' (Protocol in workflow.md)
+
+## Phase 3: Рендеринг и интеграция [checkpoint: 6bff598]
+- [x] Task: Обновление движка и шейдеров для отображения рельефа. b3bdbbf
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Рендеринг и интеграция' (Protocol in workflow.md)
