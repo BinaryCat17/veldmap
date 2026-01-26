@@ -10,7 +10,7 @@
 - [x] Task: Реализация алгоритма построения сетки рельефа. 2139a5a
     - [ ] Написать тесты для генератора мешей (проверка количества вершин и индексов).
     - [ ] Реализовать создание вершинных и индексных буферов.
-- [ ] Task: Conductor - User Manual Verification 'Phase 2: Генерация геометрии (Mesh)' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 2: Генерация геометрии (Mesh)' (Protocol in workflow.md)
 
 ## Phase 3: Рендеринг и интеграция
 - [ ] Task: Обновление движка и шейдеров для отображения рельефа.
