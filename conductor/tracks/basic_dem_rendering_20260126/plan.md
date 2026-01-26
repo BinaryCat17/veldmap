@@ -4,7 +4,7 @@
 - [x] Task: Разработка структуры для хранения данных высот и парсера DEM. 3e0c926
     - [ ] Написать тесты для парсера (проверка корректности чтения высот).
     - [ ] Реализовать парсинг данных из файлов в `data/geoids/`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 1: Подготовка данных и парсинг' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 1: Подготовка данных и парсинг' (Protocol in workflow.md)
 
 ## Phase 2: Генерация геометрии (Mesh)
 - [ ] Task: Реализация алгоритма построения сетки рельефа.
