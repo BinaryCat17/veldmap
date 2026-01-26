@@ -12,9 +12,6 @@
     - [ ] Реализовать создание вершинных и индексных буферов.
 - [x] Task: Conductor - User Manual Verification 'Phase 2: Генерация геометрии (Mesh)' (Protocol in workflow.md)
 
-## Phase 3: Рендеринг и интеграция
+## Phase 3: Рендеринг и интеграция [checkpoint: 6bff598]
 - [x] Task: Обновление движка и шейдеров для отображения рельефа. b3bdbbf
-    - [ ] Написать тесты для интеграции данных меша в состояние `wgpu`.
-    - [ ] Обновить `shader.wgsl` для работы с динамическим рельефом.
-    - [ ] Интегрировать рендеринг меша в основной цикл в `engine.rs`.
-- [ ] Task: Conductor - User Manual Verification 'Phase 3: Рендеринг и интеграция' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Phase 3: Рендеринг и интеграция' (Protocol in workflow.md)
