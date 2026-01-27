@@ -7,12 +7,15 @@ pub fn lat_lon_to_cartesian(lat: f32, lon: f32, alt: f32) -> Vec3 {
     let lon_rad = lon.to_radians();
     
     let r = EARTH_RADIUS + alt;
-    
-    // В wgpu стандартно: Y - вверх, X - вправо, Z - на нас
-    // Но для глобуса удобнее: Y - ось вращения (полюса)
     let x = r * lat_rad.cos() * lon_rad.cos();
     let y = r * lat_rad.sin();
     let z = r * lat_rad.cos() * lon_rad.sin();
     
     Vec3::new(x, y, z)
+}
+
+pub fn cartesian_to_latlon(x: f32, y: f32, z: f32) -> (f32, f32) {
+    let lon = z.atan2(x).to_degrees();
+    let lat = y.atan2((x * x + z * z).sqrt()).to_degrees();
+    (lat, lon)
 }

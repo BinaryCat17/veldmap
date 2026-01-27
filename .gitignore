@@ -1,5 +1,8 @@
-target/
-data/
+**/target/
+veldmap-render/data/
 *.tif
 *.zip
 *.log
+.DS_Store
+.idea/
+.vscode/

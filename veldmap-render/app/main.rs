@@ -7,6 +7,7 @@ use winit::{
 };
 use std::sync::Arc;
 use veldmap::VeldMap;
+use veldmap_data::{DataProvider, Config, TerrainProvider};
 
 #[tokio::main]
 async fn main() {
@@ -19,15 +20,22 @@ async fn main() {
 
     let mut veldmap = VeldMap::new(window.clone()).await;
     
+    let data_provider = Arc::new(DataProvider::new(Config {
+        base_path: std::env::current_dir().unwrap().join("data"),
+        use_cache: true,
+        offline_only: true,
+    }));
+
+    if let Ok(geoid) = data_provider.get_geoid().await {
+        veldmap.set_geoid(&geoid);
+    }
+
     let mut last_cursor_pos: Option<(f64, f64)> = None;
     let mut is_left_clicked = false;
 
     let result = event_loop.run(move |event, elwt| {
         match event {
-            Event::WindowEvent {
-                ref event,
-                window_id,
-            } if window_id == window.id() => {
+            Event::WindowEvent { ref event, window_id } if window_id == window.id() => {
                 match event {
                     WindowEvent::CloseRequested => elwt.exit(),
                     WindowEvent::KeyboardInput {
@@ -41,12 +49,8 @@ async fn main() {
                     WindowEvent::Resized(physical_size) => {
                         veldmap.resize(physical_size.width, physical_size.height);
                     }
-                    WindowEvent::MouseInput {
-                        state: click_state,
-                        button: MouseButton::Left,
-                        ..
-                    } => {
-                        is_left_clicked = *click_state == ElementState::Pressed;
+                    WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                        is_left_clicked = *state == ElementState::Pressed;
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
                         let scroll = match delta {
@@ -67,6 +71,11 @@ async fn main() {
                     }
                     WindowEvent::RedrawRequested => {
                         veldmap.update();
+                        
+                        let _visible = veldmap.get_visible_tiles();
+                        // В реальном приложении здесь будет логика запроса тайлов
+                        // через канал связи с потоком загрузки данных.
+
                         if let Err(e) = veldmap.render() {
                             eprintln!("Render error: {}", e);
                         }
