@@ -5,6 +5,6 @@ members = [
     "veldmap-render",
     "veldmap-server",
     "veldmap-app",
-    "veldmap-geo-math",
+    "veldmap-geo-math", "veldmap-tools",
 ]
 resolver = "2"
