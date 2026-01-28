@@ -6,12 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-tokio = { version = "1.37", features = ["full"] }
-sqlite = "0.36" # For MBTiles and local caching
-tiff = "0.9"    # For GeoTIFF (Copernicus DEM)
-image = "0.25"
-lru = "0.12"
-async-trait = "0.1"
+serde_json = "1.0"
+ureq = { version = "2.9", features = ["json"] }
 veldmap-core = { path = "../veldmap-core" }
-    # Memory cache

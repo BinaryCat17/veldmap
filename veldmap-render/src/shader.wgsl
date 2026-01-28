@@ -9,7 +9,7 @@ struct CameraUniform {
 var<uniform> camera: CameraUniform;
 
 @group(0) @binding(1)
-var texture_dem: texture_2d_array<f32>;
+var<storage, read> dem_data: array<f32>;
 @group(0) @binding(2)
 var sampler_dem: sampler;
 @group(0) @binding(3)
@@ -25,8 +25,10 @@ struct VertexOutput {
 @vertex
 fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
-    let x = f32(i32(in_vertex_index) << 1u & 2) - 1.0;
-    let y = f32(i32(in_vertex_index) & 2) - 1.0;
+    // Create one large triangle that covers the screen [-1, 1]
+    let x = f32(i32(in_vertex_index) == 1) * 4.0 - 1.0;
+    let y = f32(i32(in_vertex_index) == 2) * 4.0 - 1.0;
+    
     out.uv = vec2<f32>(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
     out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
     return out;
@@ -48,33 +50,32 @@ fn get_geoid_height(latlon: vec2<f32>) -> f32 {
     return textureSampleLevel(texture_geoid, sampler_dem, vec2<f32>(u, v), 0.0).r;
 }
 
-// Новая логика получения высоты через таблицу индирекции
 fn get_height(p: vec3<f32>) -> f32 {
     let latlon = cartesian_to_latlon(p);
     
-    // 1. Ищем индекс тайла в таблице индирекции (128x64)
     let u_indir = (latlon.y / PI) * 0.5 + 0.5;
     let v_indir = 0.5 - (latlon.x / PI);
     let tile_index = textureLoad(texture_indir, vec2<i32>(i32(u_indir * 128.0), i32(v_indir * 64.0)), 0).r;
     
-    // Если 255 - детальных данных нет, возвращаем только геоид
     if (tile_index >= 254u) {
         return 0.0;
     }
     
-    // 2. Если тайл есть, сэмплируем из массива
-    // Для этого нужно знать границы тайла. Пока считаем, что тайл покрывает ячейку индирекции.
     let local_u = fract(u_indir * 128.0);
     let local_v = fract(v_indir * 64.0);
     
-    return textureSampleLevel(texture_dem, sampler_dem, vec2<f32>(local_u, local_v), i32(tile_index), 0.0).r;
+    let tx = u32(local_u * 256.0);
+    let ty = u32(local_v * 256.0);
+    let idx = tile_index * (256u * 256u) + ty * 256u + tx;
+    
+    // Return height from storage buffer
+    return dem_data[idx];
 }
 
 fn calculate_terrain_normal(p: vec3<f32>) -> vec3<f32> {
-    let eps = 100.0; // 100 метров для градиента
+    let eps = 100.0; 
     let h_center = get_height(p);
     
-    // Смещение вдоль поверхности для поиска нормали
     let tangent = normalize(cross(p, vec3<f32>(0.0, 1.0, 0.0)));
     let bitangent = normalize(cross(p, tangent));
     
@@ -82,16 +83,15 @@ fn calculate_terrain_normal(p: vec3<f32>) -> vec3<f32> {
     let h_y = get_height(p + bitangent * eps);
     
     let n_ellips = normalize(p);
-    let slope = vec3<f32>(h_center - h_x, eps, h_center - h_y);
     return normalize(n_ellips + (tangent * (h_center - h_x) / eps + bitangent * (h_center - h_y) / eps));
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, 0.0, 1.0);
-    var target = camera.proj_inv * ndc;
-    target = target / target.w;
-    let rd = normalize((camera.view_inv * vec4<f32>(target.xyz, 0.0)).xyz);
+    var target_pos = camera.proj_inv * ndc;
+    target_pos = target_pos / target_pos.w;
+    let rd = normalize((camera.view_inv * vec4<f32>(target_pos.xyz, 0.0)).xyz);
     let ro = camera.position;
 
     let inv_abc_top = vec3<f32>(1.0 / (WGS84_A + 9000.0), 1.0 / (WGS84_A + 9000.0), 1.0 / (WGS84_B + 9000.0));

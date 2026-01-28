@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", default-features = false, features = ["macros", "tokio", "http1", "json"] }
 tokio = { version = "1.37", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -12,4 +12,6 @@ tower-http = { version = "0.5", features = ["cors", "fs"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 anyhow = "1.0"
-# GIS tools could be added here, e.g., for GDAL bindings or COG processing
+async-trait = "0.1"
+tiff = "0.9"
+veldmap-core = { path = "../veldmap-core" }

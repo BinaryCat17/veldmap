@@ -6,11 +6,12 @@ use winit::{
     keyboard::{PhysicalKey, KeyCode},
 };
 use std::sync::Arc;
-use veldmap_render::create_renderer;
+use veldmap_render::{create_renderer, RenderConfig, RenderBackend};
 use veldmap_data::{create_data_provider, Config};
+use veldmap_server::create_server;
+use veldmap_core::server_module::ServerConfig;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     env_logger::init();
     let event_loop = EventLoop::new().unwrap();
     let window = Arc::new(WindowBuilder::new()
@@ -18,23 +19,51 @@ async fn main() {
         .build(&event_loop)
         .unwrap());
 
-    // Используем фабрику для создания рендерера
-    let veldmap = create_renderer(window.clone()).await;
+    // Используем фабрику для создания рендерера с указанием Vulkan
+    let veldmap = pollster::block_on(create_renderer(window.clone(), RenderConfig {
+        backend: RenderBackend::Vulkan,
+    }));
+
     
-    // Используем фабрику для создания провайдера данных
-    let data_provider = create_data_provider(Config {
-        base_path: std::env::current_dir().unwrap().join("data"),
-        use_cache: true,
-        offline_only: true,
+    // 1. Запускаем сервер данных (Master) в отдельном системном потоке
+    std::thread::spawn(move || {
+        let config = ServerConfig {
+            addr: "127.0.0.1:3000".parse().unwrap(),
+            data_path: std::env::current_dir().unwrap().join("data"),
+        };
+        let server = create_server(config);
+        println!("Server starting on 127.0.0.1:3000...");
+        if let Err(e) = server.run() {
+            eprintln!("Server error: {}", e);
+        }
     });
 
-    if let Ok(geoid) = data_provider.get_geoid() {
-        veldmap.set_geoid(geoid);
-    }
+    // 2. Создаем клиентский провайдер данных
+    let data_provider = create_data_provider(Config {
+        server_url: "http://127.0.0.1:3000".to_string(),
+        cache_path: Some(std::env::current_dir().unwrap().join("cache")),
+        use_cache: true,
+    });
+
+    // 3. Загружаем геоид в фоне, чтобы не блокировать окно
+    let geoid_provider = data_provider.clone();
+    let geoid_veldmap = veldmap.clone();
+    std::thread::spawn(move || {
+        // Даем серверу немного времени на старт
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        println!("Loading geoid from server...");
+        if let Ok(geoid) = geoid_provider.get_geoid() {
+            println!("Geoid loaded successfully!");
+            geoid_veldmap.set_geoid(geoid);
+        } else {
+            eprintln!("Failed to load geoid");
+        }
+    });
 
     let mut last_cursor_pos: Option<(f64, f64)> = None;
     let mut is_left_clicked = false;
 
+    println!("Starting event loop...");
     let result = event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { ref event, window_id } if window_id == window.id() => {
