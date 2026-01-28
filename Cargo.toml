@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "veldmap-core",
+    "veldmap-data",
+    "veldmap-render",
+    "veldmap-server",
+]
+resolver = "2"
