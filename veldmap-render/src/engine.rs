@@ -131,8 +131,12 @@ impl Renderer for State {
     }
 
     fn upload_tile(&self, id: TileId, dem: Arc<DemTile>) {
-        let mut tm = self.tile_manager.lock().unwrap();
-        if let Some(slot) = tm.assign_slot(id) {
+        let slot_opt = {
+            let mut tm = self.tile_manager.lock().unwrap();
+            tm.assign_slot(id)
+        };
+
+        if let Some(slot) = slot_opt {
             let offset = slot as u64 * (TILE_SIZE as u64 * TILE_SIZE as u64 * 4);
             let expected_len = (TILE_SIZE * TILE_SIZE) as usize;
             
