@@ -45,18 +45,28 @@ fn main() {
         use_cache: true,
     });
 
-    // 3. Загружаем геоид в фоне, чтобы не блокировать окно
-    let geoid_provider = data_provider.clone();
-    let geoid_veldmap = veldmap.clone();
+    // 3. Загружаем геоид и корневой тайл в фоне, чтобы не блокировать окно
+    let data_provider_clone = data_provider.clone();
+    let veldmap_thread = veldmap.clone();
     std::thread::spawn(move || {
-        // Даем серверу немного времени на старт
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Даем системе и рендереру время на инициализацию
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        
         println!("Loading geoid from server...");
-        if let Ok(geoid) = geoid_provider.get_geoid() {
+        if let Ok(geoid) = data_provider_clone.get_geoid() {
             println!("Geoid loaded successfully!");
-            geoid_veldmap.set_geoid(geoid);
+            veldmap_thread.set_geoid(geoid);
         } else {
             eprintln!("Failed to load geoid");
+        }
+
+        println!("Loading root terrain tile (0/0/0)...");
+        let root_id = veldmap_core::data_module::TileId { z: 0, x: 0, y: 0 };
+        if let Ok(tile) = data_provider_clone.get_tile(root_id) {
+            println!("Root tile loaded successfully, uploading to renderer...");
+            veldmap_thread.upload_tile(root_id, tile);
+        } else {
+            eprintln!("Failed to load root tile");
         }
     });
 

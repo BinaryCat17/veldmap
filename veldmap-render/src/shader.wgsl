@@ -51,95 +51,211 @@ fn get_geoid_height(latlon: vec2<f32>) -> f32 {
 }
 
 fn get_height(p: vec3<f32>) -> f32 {
+
     let latlon = cartesian_to_latlon(p);
+
     
+
     let u_indir = (latlon.y / PI) * 0.5 + 0.5;
+
     let v_indir = 0.5 - (latlon.x / PI);
-    let tile_index = textureLoad(texture_indir, vec2<i32>(i32(u_indir * 128.0), i32(v_indir * 64.0)), 0).r;
+
+    let tile_index = textureLoad(texture_indir, vec2<i32>(0, 0), 0).r;
+
     
+
     if (tile_index >= 254u) {
-        return 0.0;
+
+        return -99999.0; // Special value for "no data"
+
     }
+
     
-    let local_u = fract(u_indir * 128.0);
-    let local_v = fract(v_indir * 64.0);
+
+    // For 1x1 indirection (root tile covers whole world), local UV is global UV
+
+    let local_u = fract(u_indir);
+
+    let local_v = fract(v_indir);
+
     
+
     let tx = u32(local_u * 256.0);
+
     let ty = u32(local_v * 256.0);
+
     let idx = tile_index * (256u * 256u) + ty * 256u + tx;
+
     
+
     // Return height from storage buffer
+
     return dem_data[idx];
+
 }
+
+
+
+
 
 fn calculate_terrain_normal(p: vec3<f32>) -> vec3<f32> {
+
     let eps = 100.0; 
+
     let h_center = get_height(p);
+
+    if (h_center < -90000.0) { return normalize(p); }
+
     
+
     let tangent = normalize(cross(p, vec3<f32>(0.0, 1.0, 0.0)));
+
     let bitangent = normalize(cross(p, tangent));
+
     
+
     let h_x = get_height(p + tangent * eps);
+
     let h_y = get_height(p + bitangent * eps);
+
     
+
     let n_ellips = normalize(p);
+
     return normalize(n_ellips + (tangent * (h_center - h_x) / eps + bitangent * (h_center - h_y) / eps));
+
 }
 
+
+
 @fragment
+
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+
     let ndc = vec4<f32>(in.uv.x * 2.0 - 1.0, (1.0 - in.uv.y) * 2.0 - 1.0, 0.0, 1.0);
+
     var target_pos = camera.proj_inv * ndc;
+
     target_pos = target_pos / target_pos.w;
+
     let rd = normalize((camera.view_inv * vec4<f32>(target_pos.xyz, 0.0)).xyz);
+
     let ro = camera.position;
 
+
+
     let inv_abc_top = vec3<f32>(1.0 / (WGS84_A + 9000.0), 1.0 / (WGS84_A + 9000.0), 1.0 / (WGS84_B + 9000.0));
+
     let ro_norm = ro * inv_abc_top;
+
     let rd_norm = rd * inv_abc_top;
+
     let a = dot(rd_norm, rd_norm);
+
     let b = 2.0 * dot(ro_norm, rd_norm);
+
     let c = dot(ro_norm, ro_norm) - 1.0;
+
     let det = b * b - 4.0 * a * c;
+
     
+
     if (det < 0.0) { return vec4<f32>(0.002, 0.005, 0.02, 1.0); }
+
     
+
     var t = (-b - sqrt(det)) / (2.0 * a);
+
     let t_max = (-b + sqrt(det)) / (2.0 * a);
+
     
+
     let steps = 160;
+
     let step_size = (t_max - t) / f32(steps);
+
     
+
     var hit = false;
+
     var p: vec3<f32>;
+
     
+
     for (var i = 0; i < steps; i++) {
+
         p = ro + rd * t;
+
         let latlon = cartesian_to_latlon(p);
-        let h_total = get_height(p) + get_geoid_height(latlon);
+
+        let h_dem = get_height(p);
+
+        let h_total = max(h_dem, 0.0) + get_geoid_height(latlon);
+
         
+
         let cos_lat = cos(latlon.x);
+
         let sin_lat = sin(latlon.x);
+
         let r_ellips = sqrt(1.0 / ( (cos_lat*cos_lat)/(WGS84_A*WGS84_A) + (sin_lat*sin_lat)/(WGS84_B*WGS84_B) ));
+
         
+
         if (length(p) < r_ellips + h_total) {
+
             hit = true;
+
             break;
+
         }
+
         t += step_size;
+
     }
+
+
 
     if (!hit) { return vec4<f32>(0.002, 0.005, 0.02, 1.0); }
 
+
+
     let latlon = cartesian_to_latlon(p);
+
     let h_dem = get_height(p);
+
+    
+
+    if (h_dem < -90000.0) {
+
+        // Visual feedback for missing data: Dark magenta with a grid pattern
+
+        let grid = sin(latlon.x * 50.0) * sin(latlon.y * 50.0);
+
+        let color = select(vec3<f32>(0.1, 0.0, 0.1), vec3<f32>(0.2, 0.0, 0.2), grid > 0.0);
+
+        return vec4<f32>(color, 1.0);
+
+    }
+
+
+
     let normal = calculate_terrain_normal(p);
+
     let sun_dir = normalize(vec3<f32>(1.0, 1.0, 1.0));
+
     let diff = max(dot(normal, sun_dir), 0.1);
 
+
+
     var base_color = vec3<f32>(0.2, 0.5, 0.2);
+
     if (h_dem < 0.0) { base_color = vec3<f32>(0.05, 0.15, 0.4); }
+
     else if (h_dem > 100.0) { base_color = vec3<f32>(0.5, 0.4, 0.3); }
 
+
+
     return vec4<f32>(base_color * diff, 1.0);
+
 }

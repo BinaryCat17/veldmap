@@ -39,12 +39,34 @@ impl VeldMapServerImpl {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let mut decoder = Decoder::new(file).map_err(|e| e.to_string())?;
         let (w, h) = decoder.dimensions().map_err(|e| e.to_string())?;
+        
         let data: Vec<f32> = match decoder.read_image().map_err(|e| e.to_string())? {
             DecodingResult::F32(v) => v,
             DecodingResult::U16(v) => v.into_iter().map(|x| x as f32).collect(),
             DecodingResult::I16(v) => v.into_iter().map(|x| x as f32).collect(),
             _ => return Err("Unsupported TIFF format".to_string()),
         };
+
+        // Crop to 256x256 to avoid massive JSON payloads
+        let target_w = 256;
+        let target_h = 256;
+        
+        if w > target_w as u32 || h > target_h as u32 {
+            println!("Cropping TIF from {}x{} to {}x{}", w, h, target_w, target_h);
+            let mut cropped = Vec::with_capacity(target_w * target_h);
+            for y in 0..target_h {
+                for x in 0..target_w {
+                    let idx = (y * w as usize) + x;
+                    if idx < data.len() {
+                        cropped.push(data[idx]);
+                    } else {
+                        cropped.push(0.0);
+                    }
+                }
+            }
+            return Ok(DemTile { heights: cropped, width: target_w as u64, height: target_h as u64 });
+        }
+
         Ok(DemTile { heights: data, width: w as u64, height: h as u64 })
     }
 
@@ -72,6 +94,26 @@ impl VeldMapServerImpl {
                 heights.push((val as f32 - 32768.0) * 0.01);
             }
         }
+
+        // Crop to 256x256
+        let target_w = 256;
+        let target_h = 256;
+        if w > target_w || h > target_h {
+            println!("Cropping PGM from {}x{} to {}x{}", w, h, target_w, target_h);
+            let mut cropped = Vec::with_capacity(target_w * target_h);
+            for y in 0..target_h {
+                for x in 0..target_w {
+                    let idx = (y * w) + x;
+                    if idx < heights.len() {
+                        cropped.push(heights[idx]);
+                    } else {
+                        cropped.push(0.0);
+                    }
+                }
+            }
+            return Ok(DemTile { heights: cropped, width: target_w as u64, height: target_h as u64 });
+        }
+
         Ok(DemTile { heights, width: w as u64, height: h as u64 })
     }
 }
@@ -119,13 +161,23 @@ async fn get_terrain_tile(
     let path = server.find_local_path(id, "dem", "tif");
     
     let result = if path.exists() {
+        println!("Serving tile: {:?}", path);
         server.load_tiff(&path)
     } else {
-        let rostov = server.config.data_path.join("dem").join("rostov_tile.tif");
-        if rostov.exists() {
-            server.load_tiff(&rostov)
+        // Fallback: search for ANY .tif in data/dem
+        let dem_dir = server.config.data_path.join("dem");
+        let fallback = std::fs::read_dir(&dem_dir).ok()
+            .and_then(|mut entries| entries.find_map(|e| {
+                let p = e.ok()?.path();
+                if p.extension()?.to_str()? == "tif" { Some(p) } else { None }
+            }));
+
+        if let Some(p) = fallback {
+            println!("Tile {}/{}/{} not found, using fallback: {:?}", z, x, y, p);
+            server.load_tiff(&p)
         } else {
-            Err("Tile not found".to_string())
+            eprintln!("No terrain data found in {:?}", dem_dir);
+            Err("No terrain data available".to_string())
         }
     };
 
@@ -138,8 +190,22 @@ async fn get_terrain_tile(
 async fn get_geoid(
     State(server): State<Arc<VeldMapServerImpl>>,
 ) -> impl IntoResponse {
-    let path = server.config.data_path.join("geoids/egm2008-5.pgm");
-    match server.load_pgm(&path) {
+    let geoid_dir = server.config.data_path.join("geoids");
+    let geoid_path = std::fs::read_dir(&geoid_dir).ok()
+        .and_then(|mut entries| entries.find_map(|e| {
+            let p = e.ok()?.path();
+            if p.extension()?.to_str()? == "pgm" { Some(p) } else { None }
+        }));
+
+    let result = if let Some(path) = geoid_path {
+        println!("Serving geoid: {:?}", path);
+        server.load_pgm(&path)
+    } else {
+        eprintln!("No geoid (.pgm) found in {:?}", geoid_dir);
+        Err("Geoid not found".to_string())
+    };
+
+    match result {
         Ok(tile) => (StatusCode::OK, Json(DemTileResponse { heights: tile.heights, width: tile.width, height: tile.height })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
     }

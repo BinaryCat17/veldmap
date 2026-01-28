@@ -12,7 +12,7 @@ impl TileManager {
         Self {
             loaded_tiles: HashMap::new(),
             free_slots: (0..max_tiles).rev().collect(),
-            indirection_data: vec![255; 128 * 64],
+            indirection_data: vec![255; 1],
         }
     }
 
@@ -20,7 +20,7 @@ impl TileManager {
         self.indirection_data.fill(255);
         for (id, &slot) in &self.loaded_tiles {
             if id.z == 0 {
-                 self.indirection_data.fill(slot as u8);
+                 self.indirection_data[0] = slot as u8;
             }
         }
     }

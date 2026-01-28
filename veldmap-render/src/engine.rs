@@ -124,8 +124,8 @@ impl Renderer for State {
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &self.indirection_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 &tm.indirection_data,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(128), rows_per_image: Some(64) },
-                wgpu::Extent3d { width: 128, height: 64, depth_or_array_layers: 1 }
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }
             );
         }
     }
@@ -134,10 +134,18 @@ impl Renderer for State {
         let mut tm = self.tile_manager.lock().unwrap();
         if let Some(slot) = tm.assign_slot(id) {
             let offset = slot as u64 * (TILE_SIZE as u64 * TILE_SIZE as u64 * 4);
+            let expected_len = (TILE_SIZE * TILE_SIZE) as usize;
+            
+            let data_to_write = if dem.heights.len() > expected_len {
+                &dem.heights[..expected_len]
+            } else {
+                &dem.heights
+            };
+
             self.queue.write_buffer(
                 &self.dem_storage_buffer,
                 offset,
-                bytemuck::cast_slice(&dem.heights),
+                bytemuck::cast_slice(data_to_write),
             );
         }
     }
@@ -266,7 +274,7 @@ impl State {
 
         let indirection_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Indirection Texture"),
-            size: wgpu::Extent3d { width: 128, height: 64, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,

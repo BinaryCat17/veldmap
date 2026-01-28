@@ -11,7 +11,7 @@ The project is organized as a Cargo Workspace with the following modules:
 *   **`veldmap-data`**: A data provider module that handles loading Digital Elevation Models (DEM) and imagery (GeoTIFF, etc.). It implements `TerrainProvider` and `ImageryProvider` interfaces.
 *   **`veldmap-geo-math`**: A module implementing precise geographic math (WGS84 ellipsoid conversions) implementing the `GeoMath` interface.
 *   **`veldmap-app`**: A standalone demo application (`winit` + `wgpu`) showcasing how to assemble and use the engine components.
-*   **`veldmap-server`**: (Planned) A high-level controller that orchestrates data loading and rendering logic.
+*   **`veldmap-server`**: A high-level data server based on `axum` that serves DEM tiles and geoid data over HTTP.
 
 ## Architecture
 
