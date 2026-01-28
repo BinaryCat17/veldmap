@@ -1,29 +1,18 @@
 [package]
-name = "veldmap"
+name = "veldmap-render"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "veldmap"
+name = "veldmap_render"
 path = "src/lib.rs"
-
-[[bin]]
-name = "veldmap-app"
-path = "app/main.rs"
 
 [dependencies]
 wgpu = "24.0.0"
-winit = "0.29"
 glam = { version = "0.29.0", features = ["bytemuck"] }
 bytemuck = { version = "1.16", features = ["derive"] }
-tokio = { version = "1.37", features = ["full"] }
-pollster = "0.3"
-env_logger = "0.11"
 log = "0.4"
-tiff = "0.9"
-image = "0.25"
 anyhow = "1.0"
 raw-window-handle = "0.6"
 libc = "0.2"
-veldmap-data = { path = "../veldmap-data" }
 veldmap-core = { path = "../veldmap-core" }

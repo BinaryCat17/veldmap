@@ -6,8 +6,8 @@ use winit::{
     keyboard::{PhysicalKey, KeyCode},
 };
 use std::sync::Arc;
-use veldmap::VeldMap;
-use veldmap_data::{DataProvider, Config, TerrainProvider};
+use veldmap_render::create_renderer;
+use veldmap_data::{create_data_provider, Config};
 
 #[tokio::main]
 async fn main() {
@@ -18,16 +18,18 @@ async fn main() {
         .build(&event_loop)
         .unwrap());
 
-    let mut veldmap = VeldMap::new(window.clone()).await;
+    // Используем фабрику для создания рендерера
+    let veldmap = create_renderer(window.clone()).await;
     
-    let data_provider = Arc::new(DataProvider::new(Config {
+    // Используем фабрику для создания провайдера данных
+    let data_provider = create_data_provider(Config {
         base_path: std::env::current_dir().unwrap().join("data"),
         use_cache: true,
         offline_only: true,
-    }));
+    });
 
-    if let Ok(geoid) = data_provider.get_geoid().await {
-        veldmap.set_geoid(&geoid);
+    if let Ok(geoid) = data_provider.get_geoid() {
+        veldmap.set_geoid(geoid);
     }
 
     let mut last_cursor_pos: Option<(f64, f64)> = None;
@@ -72,10 +74,6 @@ async fn main() {
                     WindowEvent::RedrawRequested => {
                         veldmap.update();
                         
-                        let _visible = veldmap.get_visible_tiles();
-                        // В реальном приложении здесь будет логика запроса тайлов
-                        // через канал связи с потоком загрузки данных.
-
                         if let Err(e) = veldmap.render() {
                             eprintln!("Render error: {}", e);
                         }

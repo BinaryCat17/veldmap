@@ -1,8 +1,10 @@
-use crate::camera::OrbitCamera;
-use crate::tiling::{TileManager, TileId};
-use veldmap_data::DemTile;
+use crate::camera::{OrbitCamera, CameraController};
+use crate::tiling::TileManager;
+use veldmap_core::data_module::{TileId, DemTile};
+use veldmap_core::render_module::Renderer;
 use glam::{DMat4, Mat4};
 use wgpu::util::DeviceExt;
+use std::sync::{Arc, Mutex};
 
 const MAX_DEM_TILES: usize = 64;
 const TILE_SIZE: u32 = 256;
@@ -20,20 +22,149 @@ pub struct State {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    pub width: u32,
-    pub height: u32,
+    config: Mutex<wgpu::SurfaceConfiguration>,
+    pub width: Mutex<u32>,
+    pub height: Mutex<u32>,
     render_pipeline: wgpu::RenderPipeline,
-    camera_uniform: CameraUniform,
+    camera_uniform: Mutex<CameraUniform>,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     
     dem_array: wgpu::Texture,
     indirection_texture: wgpu::Texture,
-    pub tile_manager: TileManager,
+    pub tile_manager: Mutex<TileManager>,
 
-    pub camera: OrbitCamera,
-    pub camera_controller: crate::camera::CameraController,
+    pub camera: Mutex<OrbitCamera>,
+    pub camera_controller: CameraController,
+}
+
+impl Renderer for State {
+    fn render(&self) -> Result<(), String> {
+        let width = *self.width.lock().unwrap();
+        let height = *self.height.lock().unwrap();
+        if width == 0 || height == 0 { return Ok(()); }
+
+        let output = self.surface.get_current_texture().map_err(|e| format!("{:?}", e))?;
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Ray Marching Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None, ..Default::default()
+            });
+            rp.set_pipeline(&self.render_pipeline);
+            rp.set_bind_group(0, &self.camera_bind_group, &[]);
+            rp.draw(0..3, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        output.present();
+        Ok(())
+    }
+
+    fn resize(&self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            let mut w = self.width.lock().unwrap();
+            let mut h = self.height.lock().unwrap();
+            let mut config = self.config.lock().unwrap();
+            
+            *w = width;
+            *h = height;
+            config.width = width;
+            config.height = height;
+            self.surface.configure(&self.device, &config);
+            drop(config); // Освобождаем перед вызовом update
+            self.update();
+        }
+    }
+
+    fn update(&self) {
+        let (eye, view_inv, proj_inv) = {
+            let camera = self.camera.lock().unwrap();
+            let width = *self.width.lock().unwrap();
+            let height = *self.height.lock().unwrap();
+
+            let eye = camera.get_position();
+            let rotation_inv = DMat4::from_quat(camera.orientation.conjugate());
+            let translation_inv = DMat4::from_translation(-eye);
+            let view = (rotation_inv * translation_inv).as_mat4();
+            let view_inv = view.inverse();
+            let aspect = if height > 0 { width as f32 / height as f32 } else { 1.0 };
+            let proj = Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
+            let proj_inv = proj.inverse();
+            (eye, view_inv, proj_inv)
+        };
+
+        {
+            let mut uniform = self.camera_uniform.lock().unwrap();
+            uniform.view_inv = view_inv.to_cols_array_2d();
+            uniform.proj_inv = proj_inv.to_cols_array_2d();
+            uniform.position = [eye.x as f32, eye.y as f32, eye.z as f32];
+            self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[*uniform]));
+        }
+        
+        {
+            let mut tm = self.tile_manager.lock().unwrap();
+            tm.update_indirection();
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &self.indirection_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &tm.indirection_data,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(128), rows_per_image: Some(64) },
+                wgpu::Extent3d { width: 128, height: 64, depth_or_array_layers: 1 }
+            );
+        }
+    }
+
+    fn upload_tile(&self, id: TileId, dem: Arc<DemTile>) {
+        let mut tm = self.tile_manager.lock().unwrap();
+        if let Some(slot) = tm.assign_slot(id) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.dem_array,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: slot as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&dem.heights),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * dem.width as u32),
+                    rows_per_image: Some(dem.height as u32),
+                },
+                wgpu::Extent3d { width: dem.width as u32, height: dem.height as u32, depth_or_array_layers: 1 },
+            );
+        }
+    }
+
+    fn set_geoid(&self, dem: Arc<DemTile>) {
+        let size = wgpu::Extent3d { width: dem.width as u32, height: dem.height as u32, depth_or_array_layers: 1 };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("EGM2008 Geoid"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&dem.heights),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * dem.width as u32), rows_per_image: Some(dem.height as u32) },
+            size,
+        );
+    }
+
+    fn camera_zoom(&self, delta: f64) {
+        let mut camera = self.camera.lock().unwrap();
+        self.camera_controller.process_mouse_scroll(delta, &mut camera);
+    }
+
+    fn camera_move(&self, dx: f64, dy: f64) {
+        let mut camera = self.camera.lock().unwrap();
+        self.camera_controller.process_mouse_motion(dx, dy, &mut camera);
+    }
 }
 
 impl State {
@@ -175,110 +306,13 @@ impl State {
         });
 
         Self {
-            surface, device, queue, config, width: 800, height: 600, render_pipeline,
-            camera_uniform: CameraUniform { view_inv: Mat4::IDENTITY.to_cols_array_2d(), proj_inv: Mat4::IDENTITY.to_cols_array_2d(), position: [0.0; 3], padding: 0.0 },
+            surface, device, queue, config: Mutex::new(config), width: Mutex::new(800), height: Mutex::new(600), render_pipeline,
+            camera_uniform: Mutex::new(CameraUniform { view_inv: Mat4::IDENTITY.to_cols_array_2d(), proj_inv: Mat4::IDENTITY.to_cols_array_2d(), position: [0.0; 3], padding: 0.0 }),
             camera_buffer, camera_bind_group,
             dem_array, indirection_texture,
-            tile_manager: TileManager::new(MAX_DEM_TILES),
-            camera: OrbitCamera::new(12_000_000.0, 0.0, 0.0),
-            camera_controller: crate::camera::CameraController::new(0.003),
+            tile_manager: Mutex::new(TileManager::new(MAX_DEM_TILES)),
+            camera: Mutex::new(OrbitCamera::new(12_000_000.0, 0.0, 0.0)),
+            camera_controller: CameraController::new(0.003),
         }
-    }
-
-    pub fn set_geoid(&mut self, dem: &DemTile) {
-        let size = wgpu::Extent3d { width: dem.width as u32, height: dem.height as u32, depth_or_array_layers: 1 };
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("EGM2008 Geoid"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            bytemuck::cast_slice(&dem.heights),
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * dem.width as u32), rows_per_image: Some(dem.height as u32) },
-            size,
-        );
-        let _geoid_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    }
-
-    pub fn upload_tile(&mut self, id: TileId, dem: &DemTile) {
-        if let Some(slot) = self.tile_manager.assign_slot(id) {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.dem_array,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: 0, z: slot as u32 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                bytemuck::cast_slice(&dem.heights),
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * dem.width as u32),
-                    rows_per_image: Some(dem.height as u32),
-                },
-                wgpu::Extent3d { width: dem.width as u32, height: dem.height as u32, depth_or_array_layers: 1 },
-            );
-        }
-    }
-
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.width = width;
-            self.height = height;
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
-            self.update();
-        }
-    }
-
-    pub fn update(&mut self) {
-        let eye = self.camera.get_position();
-        let rotation_inv = DMat4::from_quat(self.camera.orientation.conjugate());
-        let translation_inv = DMat4::from_translation(-eye);
-        let view = (rotation_inv * translation_inv).as_mat4();
-        let view_inv = view.inverse();
-        let aspect = if self.height > 0 { self.width as f32 / self.height as f32 } else { 1.0 };
-        let proj = Mat4::perspective_rh(45.0f32.to_radians(), aspect, 0.1, 1000.0);
-        let proj_inv = proj.inverse();
-
-        self.camera_uniform.view_inv = view_inv.to_cols_array_2d();
-        self.camera_uniform.proj_inv = proj_inv.to_cols_array_2d();
-        self.camera_uniform.position = [eye.x as f32, eye.y as f32, eye.z as f32];
-
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
-        
-        self.tile_manager.update_indirection();
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &self.indirection_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &self.tile_manager.indirection_data,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(128), rows_per_image: Some(64) },
-            wgpu::Extent3d { width: 128, height: 64, depth_or_array_layers: 1 }
-        );
-    }
-
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        if self.width == 0 || self.height == 0 { return Ok(()); }
-        let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Ray Marching Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })],
-                depth_stencil_attachment: None, ..Default::default()
-            });
-            rp.set_pipeline(&self.render_pipeline);
-            rp.set_bind_group(0, &self.camera_bind_group, &[]);
-            rp.draw(0..3, 0..1);
-        }
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-        Ok(())
     }
 }

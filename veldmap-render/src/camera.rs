@@ -1,6 +1,5 @@
 use glam::{DVec3, DQuat};
-
-const EARTH_RADIUS: f64 = 6_371_000.0;
+use veldmap_core::geo_math_module::WGS84_A as EARTH_RADIUS;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -23,6 +22,7 @@ impl OrbitCamera {
     }
 
     pub fn get_position(&self) -> DVec3 {
+        // Здесь Y-up система координат для рендерера
         self.orientation * DVec3::new(0.0, 0.0, self.distance)
     }
 }

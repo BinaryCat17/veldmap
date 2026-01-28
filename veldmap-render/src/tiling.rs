@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-pub use veldmap_data::TileId;
+pub use veldmap_core::data_module::TileId;
 
 pub struct TileManager {
     pub loaded_tiles: HashMap<TileId, usize>,
