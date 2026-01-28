@@ -35,6 +35,41 @@ impl VeldMapServerImpl {
             .join(format!("{}.{}", id.y, ext))
     }
 
+    fn process_raw_data(&self, mut data: Vec<f32>, w: usize, h: usize) -> Result<DemTile, String> {
+        let target_w = 256;
+        let target_h = 256;
+
+        if w == target_w && h == target_h {
+             return Ok(DemTile { heights: data, width: w as u64, height: h as u64 });
+        }
+
+        // Simple Nearest Neighbor Downsampling
+        // We use this to fit large source files into a single tile request for the demo
+        if w > target_w || h > target_h {
+            let mut resized = Vec::with_capacity(target_w * target_h);
+            
+            let x_ratio = w as f32 / target_w as f32;
+            let y_ratio = h as f32 / target_h as f32;
+
+            for y in 0..target_h {
+                let src_y = (y as f32 * y_ratio).floor() as usize;
+                for x in 0..target_w {
+                    let src_x = (x as f32 * x_ratio).floor() as usize;
+                    let idx = src_y * w + src_x;
+                    if idx < data.len() {
+                        resized.push(data[idx]);
+                    } else {
+                        resized.push(0.0);
+                    }
+                }
+            }
+            return Ok(DemTile { heights: resized, width: target_w as u64, height: target_h as u64 });
+        }
+        
+        // If smaller, return as is (or could pad/upscale, but keeping simple for now)
+        Ok(DemTile { heights: data, width: w as u64, height: h as u64 })
+    }
+
     fn load_tiff(&self, path: &Path) -> Result<DemTile, String> {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let mut decoder = Decoder::new(file).map_err(|e| e.to_string())?;
@@ -47,27 +82,7 @@ impl VeldMapServerImpl {
             _ => return Err("Unsupported TIFF format".to_string()),
         };
 
-        // Crop to 256x256 to avoid massive JSON payloads
-        let target_w = 256;
-        let target_h = 256;
-        
-        if w > target_w as u32 || h > target_h as u32 {
-            println!("Cropping TIF from {}x{} to {}x{}", w, h, target_w, target_h);
-            let mut cropped = Vec::with_capacity(target_w * target_h);
-            for y in 0..target_h {
-                for x in 0..target_w {
-                    let idx = (y * w as usize) + x;
-                    if idx < data.len() {
-                        cropped.push(data[idx]);
-                    } else {
-                        cropped.push(0.0);
-                    }
-                }
-            }
-            return Ok(DemTile { heights: cropped, width: target_w as u64, height: target_h as u64 });
-        }
-
-        Ok(DemTile { heights: data, width: w as u64, height: h as u64 })
+        self.process_raw_data(data, w as usize, h as usize)
     }
 
     fn load_pgm(&self, path: &Path) -> Result<DemTile, String> {
@@ -94,27 +109,8 @@ impl VeldMapServerImpl {
                 heights.push((val as f32 - 32768.0) * 0.01);
             }
         }
-
-        // Crop to 256x256
-        let target_w = 256;
-        let target_h = 256;
-        if w > target_w || h > target_h {
-            println!("Cropping PGM from {}x{} to {}x{}", w, h, target_w, target_h);
-            let mut cropped = Vec::with_capacity(target_w * target_h);
-            for y in 0..target_h {
-                for x in 0..target_w {
-                    let idx = (y * w) + x;
-                    if idx < heights.len() {
-                        cropped.push(heights[idx]);
-                    } else {
-                        cropped.push(0.0);
-                    }
-                }
-            }
-            return Ok(DemTile { heights: cropped, width: target_w as u64, height: target_h as u64 });
-        }
-
-        Ok(DemTile { heights, width: w as u64, height: h as u64 })
+        
+        self.process_raw_data(heights, w, h)
     }
 }
 

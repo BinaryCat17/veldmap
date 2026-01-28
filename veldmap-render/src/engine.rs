@@ -124,8 +124,8 @@ impl Renderer for State {
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture: &self.indirection_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 &tm.indirection_data,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
-                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 }
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(128), rows_per_image: Some(32) },
+                wgpu::Extent3d { width: 64, height: 32, depth_or_array_layers: 1 }
             );
         }
     }
@@ -274,11 +274,11 @@ impl State {
 
         let indirection_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Indirection Texture"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: 64, height: 32, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Uint,
+            format: wgpu::TextureFormat::Rg8Uint,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });

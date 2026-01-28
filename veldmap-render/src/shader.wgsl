@@ -50,80 +50,99 @@ fn get_geoid_height(latlon: vec2<f32>) -> f32 {
     return textureSampleLevel(texture_geoid, sampler_dem, vec2<f32>(u, v), 0.0).r;
 }
 
-fn get_height(p: vec3<f32>) -> f32 {
+struct TileInfo {
+    index: u32,
+    zoom: u32,
+    local_uv: vec2<f32>,
+    valid: bool,
+};
 
+fn get_tile_info(p: vec3<f32>) -> TileInfo {
     let latlon = cartesian_to_latlon(p);
-
-    
-
     let u_indir = (latlon.y / PI) * 0.5 + 0.5;
-
     let v_indir = 0.5 - (latlon.x / PI);
-
-    let tile_index = textureLoad(texture_indir, vec2<i32>(0, 0), 0).r;
-
     
-
+    // Sample indirection texture (64x32 grid)
+    let indir_x = i32(u_indir * 64.0);
+    let indir_y = i32(v_indir * 32.0);
+    
+    let tile_data = textureLoad(texture_indir, vec2<i32>(indir_x, indir_y), 0).rg;
+    let tile_index = tile_data.r;
+    let tile_zoom = tile_data.g;
+    
     if (tile_index >= 254u) {
-
-        return -99999.0; // Special value for "no data"
-
+        return TileInfo(0u, 0u, vec2<f32>(0.0), false);
     }
-
     
-
-    // For 1x1 indirection (root tile covers whole world), local UV is global UV
-
-    let local_u = fract(u_indir);
-
-    let local_v = fract(v_indir);
-
+    let scale = pow(2.0, f32(tile_zoom));
+    let local_u = fract(u_indir * scale);
+    let local_v = fract(v_indir * scale);
     
-
-    let tx = u32(local_u * 256.0);
-
-    let ty = u32(local_v * 256.0);
-
-    let idx = tile_index * (256u * 256u) + ty * 256u + tx;
-
-    
-
-    // Return height from storage buffer
-
-    return dem_data[idx];
-
+    return TileInfo(tile_index, tile_zoom, vec2<f32>(local_u, local_v), true);
 }
 
+fn sample_dem_raw(tile_index: u32, x: i32, y: i32) -> f32 {
+    // 256x256 tiles. Wrap X, Clamp Y.
+    let tx = u32((x + 256) % 256);
+    let ty = u32(clamp(y, 0, 255));
+    let idx = tile_index * (256u * 256u) + ty * 256u + tx;
+    return dem_data[idx];
+}
 
+fn sample_dem_bilinear(info: TileInfo) -> f32 {
+    if (!info.valid) { return -99999.0; }
 
+    let u_px = info.local_uv.x * 256.0 - 0.5;
+    let v_px = info.local_uv.y * 256.0 - 0.5;
+    
+    let x0 = i32(floor(u_px));
+    let y0 = i32(floor(v_px));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+    
+    let wx = fract(u_px);
+    let wy = fract(v_px);
+    
+    let h00 = sample_dem_raw(info.index, x0, y0);
+    let h10 = sample_dem_raw(info.index, x1, y0);
+    let h01 = sample_dem_raw(info.index, x0, y1);
+    let h11 = sample_dem_raw(info.index, x1, y1);
+    
+    let h0 = mix(h00, h10, wx);
+    let h1 = mix(h01, h11, wx);
+    return mix(h0, h1, wy);
+}
 
+fn get_height(p: vec3<f32>) -> f32 {
+    let info = get_tile_info(p);
+    return sample_dem_bilinear(info);
+}
 
 fn calculate_terrain_normal(p: vec3<f32>) -> vec3<f32> {
-
-    let eps = 100.0; 
-
-    let h_center = get_height(p);
-
-    if (h_center < -90000.0) { return normalize(p); }
-
+    let info = get_tile_info(p);
+    if (!info.valid) { return normalize(p); }
     
-
+    let h_center = sample_dem_bilinear(info);
+    
+    // Dynamic epsilon: approx half a pixel size in meters
+    // Earth circ ~ 40M meters. 
+    // Grid size = 256 * 2^zoom
+    let grid_dim = 256.0 * pow(2.0, f32(info.zoom));
+    let pixel_size = 40000000.0 / grid_dim;
+    let eps = pixel_size * 0.5; 
+    
     let tangent = normalize(cross(p, vec3<f32>(0.0, 1.0, 0.0)));
-
     let bitangent = normalize(cross(p, tangent));
-
     
-
     let h_x = get_height(p + tangent * eps);
-
     let h_y = get_height(p + bitangent * eps);
-
     
-
     let n_ellips = normalize(p);
-
-    return normalize(n_ellips + (tangent * (h_center - h_x) / eps + bitangent * (h_center - h_y) / eps));
-
+    // Gradient
+    let grad_x = (h_center - h_x) / eps;
+    let grad_y = (h_center - h_y) / eps;
+    
+    return normalize(n_ellips + tangent * grad_x + bitangent * grad_y);
 }
 
 

@@ -12,15 +12,27 @@ impl TileManager {
         Self {
             loaded_tiles: HashMap::new(),
             free_slots: (0..max_tiles).rev().collect(),
-            indirection_data: vec![255; 1],
+            indirection_data: vec![255; 64 * 32 * 2],
         }
     }
 
     pub fn update_indirection(&mut self) {
         self.indirection_data.fill(255);
+        
+        // Find if we have the root tile
+        let mut root_slot = None;
         for (id, &slot) in &self.loaded_tiles {
             if id.z == 0 {
-                 self.indirection_data[0] = slot as u8;
+                root_slot = Some(slot);
+                break;
+            }
+        }
+
+        // Fill texture: R=Slot, G=Zoom
+        if let Some(slot) = root_slot {
+            for i in 0..(64 * 32) {
+                self.indirection_data[i * 2] = slot as u8;     // R: Slot ID
+                self.indirection_data[i * 2 + 1] = 0;          // G: Zoom Level (0)
             }
         }
     }
