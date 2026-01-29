@@ -18,11 +18,44 @@ pub struct Geodetic {
     pub alt: f64,
 }
 
-#[uniffi::export(callback_interface)]
-pub trait GeoMath: Send + Sync {
-    fn lat_lon_to_ecef(&self, lat: f64, lon: f64, alt: f64) -> Geocentric;
-    fn ecef_to_lat_lon(&self, x: f64, y: f64, z: f64) -> Geodetic;
-    
-    /// Converts lat/lon to Web Mercator tile coordinates
-    fn lat_lon_to_tile(&self, lat: f64, lon: f64, z: u32) -> TileId;
+#[derive(uniffi::Record, Debug, Clone, Copy)]
+
+pub struct BoundingBox {
+
+    pub min_lat: f64,
+
+    pub min_lon: f64,
+
+    pub max_lat: f64,
+
+    pub max_lon: f64,
+
 }
+
+
+
+#[uniffi::export(callback_interface)]
+
+pub trait GeoMath: Send + Sync {
+
+    fn lat_lon_to_ecef(&self, lat: f64, lon: f64, alt: f64) -> Geocentric;
+
+    fn ecef_to_lat_lon(&self, x: f64, y: f64, z: f64) -> Geodetic;
+
+    
+
+    /// Converts lat/lon to Web Mercator tile coordinates
+
+    fn lat_lon_to_tile(&self, lat: f64, lon: f64, z: u32) -> TileId;
+
+    
+
+    /// Returns the bounding box for a given tile
+
+    fn tile_to_bbox(&self, id: TileId) -> BoundingBox;
+
+}
+
+
+    
+    
