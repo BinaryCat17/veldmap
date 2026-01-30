@@ -11,7 +11,7 @@ use iced::widget::{
 use iced::widget::image::Handle;
 use iced::{Alignment, Element, Length, Task, Color, Theme};
 use crate::gui::common::{BrowserItem, icon_text, is_previewable};
-use crate::gui::utils::generate_preview;
+use crate::gui::utils::{generate_preview_with_progress, RawImage};
 use veldmap_core::{RemoteDataSource, DataProduct, SearchFilter};
 use veldmap_data_provider::create_cdse_provider;
 use std::sync::Arc;
@@ -72,7 +72,7 @@ pub enum Message {
     DownloadProgress(f32),
     DownloadCompleted(Result<PathBuf, String>),
     ViewFile(String),
-    PreviewReady(Result<Vec<u8>, String>),
+    PreviewReady(Result<RawImage, String>),
     ClosePreview,
     ClearError,
 }
@@ -155,7 +155,10 @@ impl VeldMapToolsGui {
                         let q = if filter_type == search::SearchFilterType::General { query } else { String::new() };
                         source.search(q, filters).await
                     }, Message::SearchResultsReceived)
-                } else { Task::none() }
+                } else { 
+                    self.error_message = Some("Cannot search: API not connected.".into());
+                    Task::none() 
+                }
             }
             Message::SearchResultsReceived(res) => {
                 match res {
@@ -297,30 +300,45 @@ impl VeldMapToolsGui {
             Message::ViewFile(s3_key) => {
                 let is_local = !s3_key.contains('/');
                 let dest = if is_local { PathBuf::from("data/dem/source").join(&s3_key) } else { Self::get_local_path(&s3_key) };
+                let filename = s3_key.split('/').last().unwrap_or("file").to_string();
                 
-                if dest.exists() {
-                    return Task::perform(async move { generate_preview(&dest).map_err(|e| e.to_string()) }, Message::PreviewReady);
-                }
+                let source = self.source.clone();
+                self.status_message = format!("Opening {}...", filename);
+                self.download_progress = Some(0.0);
 
-                if let Some(source) = &self.source {
-                    let source = source.clone();
-                    self.download_progress = Some(0.0);
-                    return Task::stream(stream! {
-                        let s_task = source.clone();
-                        let k_task = s3_key.clone();
-                        let d_task = dest.clone();
-                        let _ = tokio::spawn(async move { s_task.download(k_task, d_task.to_string_lossy().to_string()).await }).await;
-                        yield Message::DownloadProgress(1.0);
-                        let res = generate_preview(&dest).map_err(|e| e.to_string());
-                        yield Message::PreviewReady(res);
+                return Task::stream(stream! {
+                    if !dest.exists() {
+                        if let Some(s) = source {
+                            let k = s3_key.clone();
+                            let d = dest.clone();
+                            let _ = tokio::spawn(async move { s.download(k, d.to_string_lossy().to_string()).await }).await;
+                        }
+                    }
+                    
+                    let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+                    let d = dest.clone();
+                    let handle = tokio::task::spawn_blocking(move || {
+                        generate_preview_with_progress(&d, Some(tx))
                     });
-                }
-                Task::none()
+
+                    while let Some(p) = rx.recv().await {
+                        yield Message::DownloadProgress(p);
+                    }
+                    
+                    match handle.await {
+                        Ok(Ok(raw)) => yield Message::PreviewReady(Ok(raw)),
+                        Ok(Err(e)) => yield Message::PreviewReady(Err(e.to_string())),
+                        Err(_) => yield Message::PreviewReady(Err("Thread panic".into())),
+                    }
+                });
             }
             Message::PreviewReady(res) => {
                 self.download_progress = None;
                 match res {
-                    Ok(bytes) => { self.current_image = Some(Handle::from_bytes(bytes)); }
+                    Ok(raw) => { 
+                        self.current_image = Some(Handle::from_rgba(raw.width, raw.height, raw.pixels)); 
+                        self.status_message = "Preview loaded".into(); 
+                    }
                     Err(e) => { self.error_message = Some(format!("Preview Error: {}", e)); }
                 }
                 Task::none()
@@ -349,14 +367,17 @@ impl VeldMapToolsGui {
         ].spacing(10);
 
         let error_view: Element<Message> = if let Some(err) = &self.error_message {
-            row![
-                text(err).size(12).color(Color::from_rgb(1.0, 0.3, 0.3)),
-                button("X").on_press(Message::ClearError).padding(2)
-            ].spacing(10).into()
+            container(row![
+                button("X").on_press(Message::ClearError).padding(5),
+                text(err).size(13).color(Color::from_rgb(1.0, 0.4, 0.4)).width(Length::Fill),
+            ].spacing(15).align_y(Alignment::Center))
+            .padding(10)
+            .style(|_| container::Style::default().background(Color::from_rgb(0.25, 0.1, 0.1)))
+            .into()
         } else { column![].into() };
 
         let progress_view: Element<Message> = if let Some(p) = self.download_progress {
-            column![text(format!("Loading... {:.0}%", p * 100.0)).size(12), progress_bar(0.0..=1.0, p).height(5)].spacing(5).into()
+            column![text(format!("Processing... {:.0}%", p * 100.0)).size(12), progress_bar(0.0..=1.0, p).height(5)].spacing(5).into()
         } else { column![].into() };
 
         let main_content: Element<Message> = if let Some(handle) = &self.current_image {

@@ -1,31 +1,44 @@
 use anyhow::Result;
-use image::{ImageBuffer, Rgba, ImageFormat};
+use image::{ImageBuffer, Rgba};
 use std::fs::File;
-use std::io::Cursor;
-use log::{info, error};
 
-pub fn generate_preview(file_path: &std::path::Path) -> Result<Vec<u8>> {
+#[derive(Clone)]
+pub struct RawImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+pub fn generate_preview_with_progress(
+    file_path: &std::path::Path,
+    progress_tx: Option<tokio::sync::mpsc::Sender<f32>>
+) -> Result<RawImage> {
     let ext = file_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-    info!("Generating preview for: {:?} (ext: {})", file_path, ext);
-    
+    let send_progress = |p: f32| {
+        if let Some(tx) = &progress_tx {
+            let _ = tx.try_send(p);
+        }
+    };
+
     if ext == "tif" || ext == "tiff" {
         use tiff::decoder::{Decoder, DecodingResult};
+        
+        send_progress(0.1); 
         let file = File::open(file_path)?;
         let mut decoder = Decoder::new(file)?;
         let (w, h) = decoder.dimensions()?;
 
+        send_progress(0.2); 
         let data = match decoder.read_image() {
             Ok(DecodingResult::F32(v)) => v,
             Ok(DecodingResult::I16(v)) => v.into_iter().map(|x| x as f32).collect(),
             Ok(DecodingResult::U16(v)) => v.into_iter().map(|x| x as f32).collect(),
             Ok(DecodingResult::U8(v)) => v.into_iter().map(|x| x as f32).collect(),
-            Err(e) => {
-                error!("TIFF decode error: {:?}", e);
-                return Err(anyhow::anyhow!("TIFF decode error: {:?}", e));
-            }
+            Err(e) => return Err(anyhow::anyhow!("TIFF decode error: {:?}", e)),
             _ => return Err(anyhow::anyhow!("Unsupported TIFF data format")),
         };
 
+        send_progress(0.6); 
         let mut min_val = f32::MAX;
         let mut max_val = f32::MIN;
         for &val in &data {
@@ -39,9 +52,11 @@ pub fn generate_preview(file_path: &std::path::Path) -> Result<Vec<u8>> {
         let range = max_val - min_val;
         let mut img_buf: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(w, h);
 
+        send_progress(0.8); 
         for (i, val) in data.iter().enumerate() {
             let x = (i as u32) % w;
             let y = (i as u32) / w;
+            
             let pixel = if *val <= -1000.0 {
                 Rgba([0, 0, 0, 0])
             } else {
@@ -52,13 +67,21 @@ pub fn generate_preview(file_path: &std::path::Path) -> Result<Vec<u8>> {
             img_buf.put_pixel(x, y, pixel);
         }
 
-        let mut png_data = Vec::new();
-        img_buf.write_to(&mut Cursor::new(&mut png_data), ImageFormat::Png)?;
-        return Ok(png_data);
+        send_progress(1.0);
+        return Ok(RawImage {
+            width: w,
+            height: h,
+            pixels: img_buf.into_raw(),
+        });
     }
 
-    let img = image::open(file_path)?;
-    let mut png_data = Vec::new();
-    img.write_to(&mut Cursor::new(&mut png_data), ImageFormat::Png)?;
-    Ok(png_data)
+    send_progress(0.3);
+    let img = image::open(file_path)?.to_rgba8();
+    let (w, h) = img.dimensions();
+    send_progress(1.0);
+    Ok(RawImage {
+        width: w,
+        height: h,
+        pixels: img.into_raw(),
+    })
 }
