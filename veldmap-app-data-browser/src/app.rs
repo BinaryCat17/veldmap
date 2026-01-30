@@ -1,22 +1,19 @@
-pub mod common;
-pub mod search;
-pub mod browse;
-pub mod downloaded;
-pub mod preview;
-pub mod utils;
-
 use iced::widget::{
     button, column, container, horizontal_space, row, scrollable, text, vertical_space, progress_bar,
 };
 use iced::widget::image::Handle;
 use iced::{Alignment, Element, Length, Task, Color, Theme};
-use crate::gui::common::{BrowserItem, icon_text, is_previewable};
-use crate::gui::utils::{generate_preview_with_progress, RawImage};
+use crate::common::{BrowserItem, icon_text, is_previewable};
+use crate::utils::{generate_preview_with_progress, RawImage};
 use veldmap_core::{RemoteDataSource, DataProduct, SearchFilter};
-use veldmap_data_provider::create_cdse_provider;
+use veldmap_data_provider::{create_cdse_provider, CdseConfig};
 use std::sync::Arc;
 use std::path::PathBuf;
 use async_stream::stream;
+use crate::search;
+use crate::downloaded;
+use crate::preview;
+use crate::browse;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewMode {
@@ -26,23 +23,24 @@ pub enum ViewMode {
 }
 
 pub struct VeldMapToolsGui {
-    view_mode: ViewMode,
-    status_message: String,
-    error_message: Option<String>,
+    pub view_mode: ViewMode,
+    pub status_message: String,
+    pub error_message: Option<String>,
     pub search_state: search::SearchState,
     pub browse_items: Vec<BrowserItem>,
     pub downloaded_state: downloaded::DownloadedState,
-    token_stack: Vec<String>,
-    current_token: Option<String>,
-    next_token: Option<String>,
-    current_browse_path: String,
-    search_results: Vec<DataProduct>,
-    local_files: Vec<BrowserItem>,
-    selected_product: Option<String>,
-    product_files: Vec<BrowserItem>,
-    download_progress: Option<f32>,
-    current_image: Option<Handle>,
-    source: Option<Arc<dyn RemoteDataSource>>,
+    pub token_stack: Vec<String>,
+    pub current_token: Option<String>,
+    pub next_token: Option<String>,
+    pub current_browse_path: String,
+    pub search_results: Vec<DataProduct>,
+    pub local_files: Vec<BrowserItem>,
+    pub selected_product: Option<String>,
+    pub product_files: Vec<BrowserItem>,
+    pub download_progress: Option<f32>,
+    pub current_image: Option<Handle>,
+    pub source: Option<Arc<dyn RemoteDataSource>>,
+    pub config: CdseConfig, // Сохраняем конфиг для Retry
 }
 
 #[derive(Clone)]
@@ -83,44 +81,36 @@ impl std::fmt::Debug for Message {
     }
 }
 
-impl Default for VeldMapToolsGui {
-    fn default() -> Self {
-        Self {
-            view_mode: ViewMode::Search,
-            status_message: "Ready".to_string(),
-            error_message: None,
-            search_state: search::SearchState::default(),
-            browse_items: Vec::new(),
-            downloaded_state: downloaded::DownloadedState::default(),
-            token_stack: Vec::new(),
-            current_token: None,
-            next_token: None,
-            current_browse_path: String::new(),
-            search_results: Vec::new(),
-            local_files: Vec::new(),
-            selected_product: None,
-            product_files: Vec::new(),
-            download_progress: None,
-            current_image: None,
-            source: None,
-        }
-    }
-}
-
 impl VeldMapToolsGui {
-    pub fn new() -> (Self, Task<Message>) {
+    pub fn new(config: CdseConfig) -> (Self, Task<Message>) {
         (
-            Self::default(),
-            Task::perform(async { create_cdse_provider().await.map_err(|e| e.to_string()) }, Message::SourceInitialized),
+            Self {
+                view_mode: ViewMode::Search,
+                status_message: "Connecting...".to_string(),
+                error_message: None,
+                search_state: search::SearchState::default(),
+                browse_items: Vec::new(),
+                downloaded_state: downloaded::DownloadedState::default(),
+                token_stack: Vec::new(),
+                current_token: None,
+                next_token: None,
+                current_browse_path: String::new(),
+                search_results: Vec::new(),
+                local_files: Vec::new(),
+                selected_product: None,
+                product_files: Vec::new(),
+                download_progress: None,
+                current_image: None,
+                source: None,
+                config: config.clone(),
+            },
+            Task::perform(async move { create_cdse_provider(config).await.map_err(|e| e.to_string()) }, Message::SourceInitialized),
         )
     }
 
-    fn get_local_path(s3_key: &str) -> PathBuf {
-        let filename = s3_key.split('/').last().unwrap_or("downloaded");
-        PathBuf::from("data/dem/source").join(filename)
+    pub fn title(&self) -> String {
+        "VeldMap Data Browser".into()
     }
-
-    pub fn theme(&self) -> Theme { Theme::Dark }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
@@ -155,10 +145,7 @@ impl VeldMapToolsGui {
                         let q = if filter_type == search::SearchFilterType::General { query } else { String::new() };
                         source.search(q, filters).await
                     }, Message::SearchResultsReceived)
-                } else { 
-                    self.error_message = Some("Cannot search: API not connected.".into());
-                    Task::none() 
-                }
+                } else { Task::none() }
             }
             Message::SearchResultsReceived(res) => {
                 match res {
@@ -177,10 +164,10 @@ impl VeldMapToolsGui {
             Message::FilesReceived(res) => {
                 match res {
                     Ok(files) => {
-                        self.product_files = files.into_iter().map(|s3_key| {
-                            let name = s3_key.split('/').last().unwrap_or(&s3_key).to_string();
-                            let exists_locally = Self::get_local_path(&s3_key).exists();
-                            BrowserItem { s3_key, name, is_folder: false, exists_locally }
+                        self.product_files = files.into_iter().map(|identifier| {
+                            let name = identifier.split('/').last().unwrap_or(&identifier).to_string();
+                            let exists_locally = self.get_local_path(&identifier).exists();
+                            BrowserItem { s3_key: identifier, name, is_folder: false, exists_locally }
                         }).collect();
                     }
                     Err(e) => { self.error_message = Some(format!("List Error: {}", e)); }
@@ -231,11 +218,11 @@ impl VeldMapToolsGui {
             Message::BrowserItemsReceived(res) => {
                 match res {
                     Ok((items, next)) => {
-                        self.browse_items = items.into_iter().map(|s3_key| {
-                            let is_folder = s3_key.ends_with('/');
-                            let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
-                            let exists_locally = if is_folder { false } else { Self::get_local_path(&s3_key).exists() };
-                            BrowserItem { s3_key, name, is_folder, exists_locally }
+                        self.browse_items = items.into_iter().map(|identifier| {
+                            let is_folder = identifier.ends_with('/');
+                            let name = identifier.trim_end_matches('/').split('/').last().unwrap_or(&identifier).to_string();
+                            let exists_locally = if is_folder { false } else { self.get_local_path(&identifier).exists() };
+                            BrowserItem { s3_key: identifier, name, is_folder, exists_locally }
                         }).collect();
                         self.next_token = next;
                     }
@@ -270,24 +257,25 @@ impl VeldMapToolsGui {
             Message::SourceInitialized(res) => {
                 match res {
                     Ok(s) => { self.source = Some(s); self.status_message = "Connected".into(); self.error_message = None; }
-                    Err(e) => { self.error_message = Some(format!("Connection Failed: {}", e)); }
+                    Err(e) => { self.error_message = Some(format!("Connection Failed: {}. Check VPN/Credentials.", e)); }
                 }
                 Task::none()
             }
             Message::RetryConnection => {
                 self.error_message = None;
                 self.status_message = "Connecting...".into();
-                Task::perform(async { create_cdse_provider().await.map_err(|e| e.to_string()) }, Message::SourceInitialized)
+                let config = self.config.clone();
+                Task::perform(async move { create_cdse_provider(config).await.map_err(|e| e.to_string()) }, Message::SourceInitialized)
             }
-            Message::DownloadFile(s3_key) => {
-                let dest = Self::get_local_path(&s3_key);
+            Message::DownloadFile(identifier) => {
+                let dest = self.get_local_path(&identifier);
                 if dest.exists() { return Task::none(); }
                 if let Some(source) = &self.source {
                     let source = source.clone();
                     self.download_progress = Some(0.0);
                     return Task::stream(stream! {
                         let s_task = source.clone();
-                        let k_task = s3_key.clone();
+                        let k_task = identifier.clone();
                         let d_task = dest.clone();
                         let _ = tokio::spawn(async move { s_task.download(k_task, d_task.to_string_lossy().to_string()).await }).await;
                         yield Message::DownloadProgress(1.0);
@@ -297,10 +285,10 @@ impl VeldMapToolsGui {
                 Task::none()
             }
             Message::DownloadProgress(p) => { self.download_progress = Some(p); Task::none() }
-            Message::ViewFile(s3_key) => {
-                let is_local = !s3_key.contains('/');
-                let dest = if is_local { PathBuf::from("data/dem/source").join(&s3_key) } else { Self::get_local_path(&s3_key) };
-                let filename = s3_key.split('/').last().unwrap_or("file").to_string();
+            Message::ViewFile(identifier) => {
+                let is_local = !identifier.contains('/');
+                let dest = if is_local { PathBuf::from("data/dem/source").join(&identifier) } else { self.get_local_path(&identifier) };
+                let filename = identifier.split('/').last().unwrap_or("file").to_string();
                 
                 let source = self.source.clone();
                 self.status_message = format!("Opening {}...", filename);
@@ -309,7 +297,7 @@ impl VeldMapToolsGui {
                 return Task::stream(stream! {
                     if !dest.exists() {
                         if let Some(s) = source {
-                            let k = s3_key.clone();
+                            let k = identifier.clone();
                             let d = dest.clone();
                             let _ = tokio::spawn(async move { s.download(k, d.to_string_lossy().to_string()).await }).await;
                         }
@@ -347,8 +335,14 @@ impl VeldMapToolsGui {
             Message::DownloadCompleted(res) => {
                 self.download_progress = None;
                 if let Ok(path) = res {
-                    for item in self.browse_items.iter_mut() { if Self::get_local_path(&item.s3_key) == path { item.exists_locally = true; } }
-                    for item in self.product_files.iter_mut() { if Self::get_local_path(&item.s3_key) == path { item.exists_locally = true; } }
+                    for item in self.browse_items.iter_mut() {
+                        let item_path = PathBuf::from("data/dem/source").join(item.s3_key.split('/').last().unwrap_or(""));
+                        if item_path == path { item.exists_locally = true; }
+                    }
+                    for item in self.product_files.iter_mut() {
+                        let item_path = PathBuf::from("data/dem/source").join(item.s3_key.split('/').last().unwrap_or(""));
+                        if item_path == path { item.exists_locally = true; }
+                    }
                 }
                 Task::none()
             }
@@ -358,7 +352,7 @@ impl VeldMapToolsGui {
 
     pub fn view(&self) -> Element<'_, Message> {
         let title_bar = column![
-            text("VeldMap Tools").size(24),
+            text("VeldMap Data Browser").size(24),
             row![
                 button("Search").on_press(Message::SwitchMode(ViewMode::Search)).padding(8),
                 button("Browse").on_press(Message::SwitchMode(ViewMode::Browse)).padding(8),
@@ -425,5 +419,14 @@ impl VeldMapToolsGui {
 
         container(column![title_bar, vertical_space().height(10), error_view, progress_view, main_content].spacing(10).padding(20))
             .width(Length::Fill).height(Length::Fill).into()
+    }
+
+    pub fn theme(&self) -> Theme {
+        Theme::Dark
+    }
+
+    fn get_local_path(&self, identifier: &str) -> PathBuf {
+        let filename = identifier.split('/').last().unwrap_or("downloaded");
+        PathBuf::from("data/dem/source").join(filename)
     }
 }

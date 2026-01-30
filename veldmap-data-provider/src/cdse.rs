@@ -1,141 +1,97 @@
-use anyhow::Result;
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::config::{Credentials, Region};
-use aws_sdk_s3::Client;
-use std::env;
-use log::info;
-use veldmap_core::{RemoteDataSource, DataProduct, SearchFilter};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use aws_config::Region;
+use aws_sdk_s3::{Client as S3Client, config::Credentials};
+use log::{info, error};
+use veldmap_core::data_provider_module::{RemoteDataSource, DataProduct, SearchFilter, ListResult};
+use crate::CdseConfig;
 
+#[derive(Debug)]
 pub struct CdseDataSource {
-    client: Client,
-    bucket: String,
-    access_token: Arc<RwLock<Option<String>>>,
+    s3: S3Client,
 }
 
 impl CdseDataSource {
-    pub async fn new() -> Result<Self> {
-        let access_key = env::var("COPERNICUS_ACCESS_KEY")?;
-        let secret_key = env::var("COPERNICUS_ACCESS_SECRET")?;
-        let credentials = Credentials::new(access_key, secret_key, None, None, "env");
+    pub async fn new(config: CdseConfig) -> anyhow::Result<Self> {
+        let creds = Credentials::new(
+            &config.access_key,
+            &config.secret_key,
+            None,
+            None,
+            "Static",
+        );
 
-        let config = aws_config::defaults(BehaviorVersion::latest())
-            .region(Region::new("cdse"))
-            .endpoint_url("https://eodata.dataspace.copernicus.eu")
-            .credentials_provider(credentials)
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(Region::new(config.region))
+            .credentials_provider(creds)
+            .endpoint_url(config.endpoint)
             .load()
             .await;
 
-        let s3_config = aws_sdk_s3::config::Builder::from(&config)
-            .force_path_style(true)
-            .build();
-
-        Ok(Self {
-            client: Client::from_conf(s3_config),
-            bucket: "eodata".to_string(),
-            access_token: Arc::new(RwLock::new(None)),
-        })
-    }
-
-    async fn get_access_token(&self) -> Result<String> {
-        if let Some(token) = &*self.access_token.read().await {
-            return Ok(token.clone());
-        }
-
-        let mut write_guard = self.access_token.write().await;
-        if let Some(token) = &*write_guard {
-            return Ok(token.clone());
-        }
-
-        let username = env::var("COPERNICUS_USERNAME")?;
-        let password = env::var("COPERNICUS_PASSWORD")?;
-
-        let response = reqwest::Client::new()
-            .post("https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token")
-            .form(&[
-                ("client_id", "cdse-public"),
-                ("username", &username),
-                ("password", &password),
-                ("grant_type", "password"),
-            ])
-            .send()
-            .await?;
-
-        let json: serde_json::Value = response.json().await?;
-        let token = json["access_token"].as_str().ok_or_else(|| anyhow::anyhow!("No access token"))?.to_string();
-        *write_guard = Some(token.clone());
-        Ok(token)
+        let s3 = S3Client::new(&sdk_config);
+        Ok(Self { s3 })
     }
 }
 
 #[async_trait]
 impl RemoteDataSource for CdseDataSource {
     async fn search(&self, query: String, filters: Vec<SearchFilter>) -> Result<Vec<DataProduct>, String> {
-        let token = self.get_access_token().await.map_err(|e| e.to_string())?;
-        let url = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products";
+        let mut url = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products".to_string();
+        let mut params = Vec::new();
 
-        let mut filter_parts = Vec::new();
         if !query.is_empty() {
-            filter_parts.push(format!("contains(Name, '{}')", query));
+            params.push(format!("contains(Name,'{}')", query));
         }
 
-        for f in filters {
-            match f.name.as_str() {
-                "gridId" => filter_parts.push(format!("Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'gridId' and att/OData.CSC.StringAttribute/Value eq '{}')", f.value)),
-                "Collection" => filter_parts.push(format!("Collection/Name eq '{}'", f.value)),
-                _ => {}
+        for filter in filters {
+            if filter.name == "gridId" {
+                params.push(format!("Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'gridId' and att/Value eq '{}')", filter.value));
+            } else if filter.name == "Collection" {
+                params.push(format!("Collection/Name eq '{}'", filter.value));
             }
         }
 
-        let filter_str = filter_parts.join(" and ");
-        info!("CDSE OData Filter: {}", filter_str);
+        if !params.is_empty() {
+            url.push_str("?$filter=");
+            url.push_str(&params.join(" and "));
+        }
 
-        let response = reqwest::Client::new()
-            .get(url)
-            .header("Accept", "application/json")
-            .header("Authorization", format!("Bearer {}", token))
-            .query(&[("$filter", filter_str.as_str()), ("$top", "50"), ("$expand", "Attributes")])
+        let client = reqwest::Client::new();
+        let res = client.get(&url)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("Network error (OData): {}. Check VPN.", e))?
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| format!("JSON error: {}", e))?;
 
-        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-        let mut results = Vec::new();
-        if let Some(products) = json["value"].as_array() {
-            for p in products {
-                if let (Some(name), Some(path)) = (p["Name"].as_str(), p["S3Path"].as_str()) {
-                    let mut found_grid_id = None;
-                    if let Some(attrs) = p["Attributes"].as_array() {
-                        for attr in attrs {
-                            if attr["Name"] == "gridId" {
-                                found_grid_id = attr["Value"].as_str().map(|s| s.to_string());
-                                break;
-                            }
-                        }
-                    }
-                    results.push(DataProduct {
-                        name: name.to_string(),
-                        path: path.to_string(),
-                        grid_id: found_grid_id,
-                    });
-                }
+        let products = res["value"].as_array().ok_or("No value in response")?.iter().map(|item| {
+            DataProduct {
+                name: item["Name"].as_str().unwrap_or("Unknown").to_string(),
+                path: item["S3Path"].as_str().unwrap_or("").to_string(),
+                timestamp: item["ContentDate"]["Start"].as_str().map(|s| s.to_string()),
             }
-        }
-        Ok(results)
+        }).collect();
+
+        Ok(products)
     }
 
-    async fn list_path(&self, prefix: String, token: Option<String>) -> Result<veldmap_core::ListResult, String> {
-        let mut req = self.client.list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(prefix)
-            .delimiter("/")
-            .max_keys(50);
+    async fn list_path(&self, path: String, token: Option<String>) -> Result<ListResult, String> {
+        let bucket = "eodata";
+        let prefix = if path.is_empty() { String::new() } else if path.ends_with('/') { path } else { format!("{}/", path) };
 
-        if let Some(t) = token { req = req.continuation_token(t); }
+        let mut req = self.s3.list_objects_v2()
+            .bucket(bucket)
+            .prefix(&prefix)
+            .delimiter("/");
 
-        let res = req.send().await.map_err(|e| e.to_string())?;
+        if let Some(t) = token {
+            req = req.continuation_token(t);
+        }
+
+        let res = req.send().await.map_err(|e| {
+            error!("S3 List Error: {:?}", e);
+            format!("S3 error: {}. Check VPN/Credentials.", e)
+        })?;
 
         let mut items: Vec<String> = res.common_prefixes().iter()
             .filter_map(|cp| cp.prefix().map(|p| p.to_string()))
@@ -147,32 +103,35 @@ impl RemoteDataSource for CdseDataSource {
 
         items.extend(files);
         let next = res.next_continuation_token().map(|t| t.to_string());
-        Ok(veldmap_core::ListResult { items, next_token: next })
+        Ok(ListResult { items, next_token: next })
     }
 
-    async fn download(&self, key: String, destination: String) -> Result<(), String> {
-        let clean_key = key.trim_start_matches("/eodata/");
-        let result = self.client.get_object()
-            .bucket(&self.bucket)
-            .key(clean_key)
+    async fn download(&self, identifier: String, destination: String) -> Result<(), String> {
+        info!("Downloading {} to {}", identifier, destination);
+
+        let (bucket, key) = if identifier.starts_with("s3://") {
+            let parts: Vec<&str> = identifier[5..].splitn(2, '/').collect();
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            ("eodata".to_string(), identifier)
+        };
+        
+        let res = self.s3.get_object()
+            .bucket(bucket)
+            .key(key)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("S3 download error: {}. Check VPN.", e))?;
 
-        let dest_path = std::path::Path::new(&destination);
-        if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let mut body = res.body;
+        let mut file = std::fs::File::create(destination).map_err(|e| e.to_string())?;
+
+        use futures_util::StreamExt;
+        while let Some(bytes) = body.next().await {
+            let bytes = bytes.map_err(|e| e.to_string())?;
+            std::io::Write::write_all(&mut file, &bytes).map_err(|e| e.to_string())?;
         }
 
-        let mut body = result.body.into_async_read();
-        let mut file = tokio::fs::File::create(dest_path).await.map_err(|e| e.to_string())?;
-
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut buffer = [0u8; 16384];
-        while let Ok(n) = body.read(&mut buffer).await {
-            if n == 0 { break; }
-            file.write_all(&buffer[0..n]).await.map_err(|e| e.to_string())?;
-        }
         Ok(())
     }
 }

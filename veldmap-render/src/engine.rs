@@ -1,7 +1,7 @@
 use crate::camera::{OrbitCamera, CameraController};
 use crate::tiling::TileManager;
 use crate::{RenderConfig, RenderBackend};
-use veldmap_core::data_module::{TileId, DemTile};
+use veldmap_core::common_module::{TileId, DemTile};
 use veldmap_core::render_module::Renderer;
 use glam::{DMat4, Mat4};
 use wgpu::util::DeviceExt;

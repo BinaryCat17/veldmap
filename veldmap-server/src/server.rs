@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{Read, BufReader, BufRead};
 use tiff::decoder::{Decoder, DecodingResult};
-use veldmap_core::data_module::{TileId, DemTile};
+use veldmap_core::common_module::{TileId, DemTile};
 use veldmap_core::server_module::{VeldMapServer, ServerConfig};
 use axum::{
     extract::{Path as AxumPath, State},
@@ -35,42 +35,36 @@ impl VeldMapServerImpl {
             .join(format!("{}.{}", id.y, ext))
     }
 
-    fn process_raw_data(&self, mut data: Vec<f32>, w: usize, h: usize) -> Result<DemTile, String> {
+    fn process_raw_data(&self, id: Option<TileId>, data: Vec<f32>, w: usize, h: usize) -> Result<Arc<DemTile>, String> {
         let target_w = 256;
         let target_h = 256;
 
-        if w == target_w && h == target_h {
-             return Ok(DemTile { heights: data, width: w as u64, height: h as u64 });
-        }
-
-        // Simple Nearest Neighbor Downsampling
-        // We use this to fit large source files into a single tile request for the demo
-        if w > target_w || h > target_h {
+        let (final_data, final_w, final_h) = if w == target_w && h == target_h {
+             (data, w, h)
+        } else if w > target_w || h > target_h {
             let mut resized = Vec::with_capacity(target_w * target_h);
-            
             let x_ratio = w as f32 / target_w as f32;
             let y_ratio = h as f32 / target_h as f32;
-
             for y in 0..target_h {
                 let src_y = (y as f32 * y_ratio).floor() as usize;
                 for x in 0..target_w {
                     let src_x = (x as f32 * x_ratio).floor() as usize;
                     let idx = src_y * w + src_x;
-                    if idx < data.len() {
-                        resized.push(data[idx]);
-                    } else {
-                        resized.push(0.0);
-                    }
+                    resized.push(if idx < data.len() { data[idx] } else { 0.0 });
                 }
             }
-            return Ok(DemTile { heights: resized, width: target_w as u64, height: target_h as u64 });
-        }
-        
-        // If smaller, return as is (or could pad/upscale, but keeping simple for now)
-        Ok(DemTile { heights: data, width: w as u64, height: h as u64 })
+            (resized, target_w, target_h)
+        } else {
+            (data, w, h)
+        };
+
+        let min_alt = *final_data.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
+        let max_alt = *final_data.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
+
+        Ok(DemTile::new(id, final_data, final_w as u64, final_h as u64, min_alt, max_alt))
     }
 
-    fn load_tiff(&self, path: &Path) -> Result<DemTile, String> {
+    fn load_tiff(&self, id: Option<TileId>, path: &Path) -> Result<Arc<DemTile>, String> {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let mut decoder = Decoder::new(file).map_err(|e| e.to_string())?;
         let (w, h) = decoder.dimensions().map_err(|e| e.to_string())?;
@@ -82,10 +76,10 @@ impl VeldMapServerImpl {
             _ => return Err("Unsupported TIFF format".to_string()),
         };
 
-        self.process_raw_data(data, w as usize, h as usize)
+        self.process_raw_data(id, data, w as usize, h as usize)
     }
 
-    fn load_pgm(&self, path: &Path) -> Result<DemTile, String> {
+    fn load_pgm(&self, path: &Path) -> Result<Arc<DemTile>, String> {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let mut reader = BufReader::new(file);
         let mut line = String::new();
@@ -110,7 +104,7 @@ impl VeldMapServerImpl {
             }
         }
         
-        self.process_raw_data(heights, w, h)
+        self.process_raw_data(None, heights, w, h)
     }
 }
 
@@ -153,14 +147,13 @@ async fn get_terrain_tile(
     AxumPath((z, x, y)): AxumPath<(u32, u32, u32)>,
     State(server): State<Arc<VeldMapServerImpl>>,
 ) -> impl IntoResponse {
-    let id = TileId { z, x, y };
+    let id = TileId { z: z as i32, x: x as i32, y: y as i32 };
     let path = server.find_local_path(id, "dem", "tif");
     
     let result = if path.exists() {
         println!("Serving tile: {:?}", path);
-        server.load_tiff(&path)
+        server.load_tiff(Some(id), &path)
     } else {
-        // Fallback: search for ANY .tif in data/dem
         let dem_dir = server.config.data_path.join("dem");
         let fallback = std::fs::read_dir(&dem_dir).ok()
             .and_then(|mut entries| entries.find_map(|e| {
@@ -170,15 +163,14 @@ async fn get_terrain_tile(
 
         if let Some(p) = fallback {
             println!("Tile {}/{}/{} not found, using fallback: {:?}", z, x, y, p);
-            server.load_tiff(&p)
+            server.load_tiff(Some(id), &p)
         } else {
-            eprintln!("No terrain data found in {:?}", dem_dir);
             Err("No terrain data available".to_string())
         }
     };
 
     match result {
-        Ok(tile) => (StatusCode::OK, Json(DemTileResponse { heights: tile.heights, width: tile.width, height: tile.height })).into_response(),
+        Ok(tile) => (StatusCode::OK, Json(DemTileResponse { heights: tile.heights.clone(), width: tile.width, height: tile.height })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
     }
 }
@@ -197,12 +189,11 @@ async fn get_geoid(
         println!("Serving geoid: {:?}", path);
         server.load_pgm(&path)
     } else {
-        eprintln!("No geoid (.pgm) found in {:?}", geoid_dir);
         Err("Geoid not found".to_string())
     };
 
     match result {
-        Ok(tile) => (StatusCode::OK, Json(DemTileResponse { heights: tile.heights, width: tile.width, height: tile.height })).into_response(),
+        Ok(tile) => (StatusCode::OK, Json(DemTileResponse { heights: tile.heights.clone(), width: tile.width, height: tile.height })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
     }
 }

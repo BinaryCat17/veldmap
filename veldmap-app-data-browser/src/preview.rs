@@ -1,7 +1,7 @@
 use iced::widget::{button, column, Image};
 use iced::widget::image::Handle;
 use iced::{Element, Length};
-use crate::gui::Message;
+use crate::app::Message;
 
 pub fn view<'a>(handle: &'a Handle) -> Element<'a, Message> {
     column![

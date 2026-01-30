@@ -2,7 +2,7 @@ use iced::widget::{
     button, column, row, scrollable, text, text_input, horizontal_space, pick_list
 };
 use iced::{Element, Length, Color, Alignment};
-use crate::gui::Message;
+use crate::app::Message;
 use veldmap_core::DataProduct;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,7 +52,7 @@ pub fn view<'a>(state: &'a SearchState, results: &'a [DataProduct]) -> Element<'
             column![
                 text(&item.name).size(15),
                 row![
-                    text(item.grid_id.as_deref().unwrap_or("")).size(10).color(Color::from_rgb(0.4, 0.7, 0.4)),
+                    text(item.timestamp.as_deref().unwrap_or("No timestamp")).size(10).color(Color::from_rgb(0.4, 0.7, 0.4)),
                     horizontal_space().width(20),
                     text(&item.path).size(10).color(Color::from_rgb(0.6, 0.6, 0.6)),
                 ]

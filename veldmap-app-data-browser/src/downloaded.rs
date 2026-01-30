@@ -2,8 +2,8 @@ use iced::widget::{
     button, column, row, scrollable, text, text_input, horizontal_space, pick_list, container
 };
 use iced::{Element, Length, Color, Alignment};
-use crate::gui::common::{icon_text, BrowserItem, is_previewable};
-use crate::gui::Message;
+use crate::common::{icon_text, BrowserItem, is_previewable};
+use crate::app::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileFilter {

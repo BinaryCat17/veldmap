@@ -1,4 +1,4 @@
-use crate::data_module::TileId;
+use crate::common_module::TileId;
 
 // Planet constants (WGS84)
 pub const WGS84_A: f64 = 6378137.0;

@@ -2,7 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::fs;
 use serde::{Deserialize, Serialize};
-use veldmap_core::data_module::{TerrainProvider, TileId, DemTile};
+use veldmap_core::common_module::{TileId, DemTile};
+use veldmap_core::local_storage_module::TerrainProvider;
 use crate::Config;
 
 #[derive(Serialize, Deserialize)]
@@ -31,19 +32,18 @@ impl DataProvider {
         })
     }
 
-    fn fetch_from_server(&self, url: &str) -> Result<DemTile, String> {
+    fn fetch_from_server(&self, id: Option<TileId>, url: &str) -> Result<Arc<DemTile>, String> {
         let response = ureq::get(url)
             .call()
             .map_err(|e| e.to_string())?;
         
-        let data: DemTileResponse = response.into_json()
+        let data: DemTileResponse = serde_json::from_reader(response.into_reader())
             .map_err(|e| e.to_string())?;
+
+        let min_alt = *data.heights.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
+        let max_alt = *data.heights.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
             
-        Ok(DemTile {
-            heights: data.heights,
-            width: data.width,
-            height: data.height,
-        })
+        Ok(DemTile::new(id, data.heights, data.width, data.height, min_alt, max_alt))
     }
 }
 
@@ -54,7 +54,9 @@ impl TerrainProvider for DataProvider {
                 if path.exists() {
                     if let Ok(content) = fs::read_to_string(&path) {
                         if let Ok(data) = serde_json::from_str::<DemTileResponse>(&content) {
-                            return Ok(Arc::new(DemTile { heights: data.heights, width: data.width, height: data.height }));
+                            let min_alt = *data.heights.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
+                            let max_alt = *data.heights.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
+                            return Ok(DemTile::new(Some(id), data.heights, data.width, data.height, min_alt, max_alt));
                         }
                     }
                 }
@@ -62,7 +64,7 @@ impl TerrainProvider for DataProvider {
         }
 
         let url = format!("{}/v1/terrain/{}/{}/{}", self.config.server_url, id.z, id.x, id.y);
-        let tile = self.fetch_from_server(&url)?;
+        let tile = self.fetch_from_server(Some(id), &url)?;
 
         if self.config.use_cache {
             if let Some(path) = self.get_cache_path(Some(id)) {
@@ -76,7 +78,7 @@ impl TerrainProvider for DataProvider {
             }
         }
 
-        Ok(Arc::new(tile))
+        Ok(tile)
     }
 
     fn get_geoid(&self) -> Result<Arc<DemTile>, String> {
@@ -85,7 +87,9 @@ impl TerrainProvider for DataProvider {
                 if path.exists() {
                     if let Ok(content) = fs::read_to_string(&path) {
                         if let Ok(data) = serde_json::from_str::<DemTileResponse>(&content) {
-                            return Ok(Arc::new(DemTile { heights: data.heights, width: data.width, height: data.height }));
+                            let min_alt = *data.heights.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
+                            let max_alt = *data.heights.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(&0.0);
+                            return Ok(DemTile::new(None, data.heights, data.width, data.height, min_alt, max_alt));
                         }
                     }
                 }
@@ -93,7 +97,7 @@ impl TerrainProvider for DataProvider {
         }
 
         let url = format!("{}/v1/geoid", self.config.server_url);
-        let tile = self.fetch_from_server(&url)?;
+        let tile = self.fetch_from_server(None, &url)?;
 
         if self.config.use_cache {
             if let Some(path) = self.get_cache_path(None) {
@@ -107,6 +111,6 @@ impl TerrainProvider for DataProvider {
             }
         }
 
-        Ok(Arc::new(tile))
+        Ok(tile)
     }
 }

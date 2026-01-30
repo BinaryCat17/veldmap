@@ -2,8 +2,8 @@ use iced::widget::{
     button, column, row, scrollable, text, horizontal_space, container
 };
 use iced::{Element, Length, Color, Alignment};
-use crate::gui::common::{icon_text, BrowserItem, is_previewable};
-use crate::gui::Message;
+use crate::common::{icon_text, BrowserItem, is_previewable};
+use crate::app::Message;
 
 pub fn view<'a>(path: &'a str, items: &'a [BrowserItem], status: &'a str, can_prev: bool, can_next: bool) -> Element<'a, Message> {
     let nav_buttons = row![

@@ -3,9 +3,7 @@ name = "veldmap-geo-math"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "veldmap_geo_math"
-path = "src/lib.rs"
-
 [dependencies]
 veldmap-core = { path = "../veldmap-core" }
+uniffi = "0.28"
+log = "0.4"

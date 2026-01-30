@@ -2,7 +2,7 @@ mod provider;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use veldmap_core::data_module::TerrainProvider;
+use veldmap_core::local_storage_module::TerrainProvider;
 use crate::provider::DataProvider;
 
 pub struct Config {
