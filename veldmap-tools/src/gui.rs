@@ -1,4 +1,6 @@
-use iced::widget::{column, container, text, text_input, button, row, scrollable, vertical_space, pick_list, image as image_widget};
+use iced::widget::{column, container, text, text_input, button, row, scrollable, vertical_space, horizontal_space, pick_list};
+use iced::widget::Image;
+use iced::widget::image::Handle;
 use iced::{Alignment, Element, Length, Task, Color};
 use crate::copernicus::CopernicusSource;
 use std::sync::Arc;
@@ -74,7 +76,7 @@ pub struct VeldMapToolsGui {
     product_files: Vec<String>,
     
     // Preview
-    current_image: Option<image::Handle>,
+    current_image: Option<Handle>,
     
     // Index state
     index_products: Vec<ProductItem>,
@@ -173,7 +175,6 @@ impl VeldMapToolsGui {
                 Task::none()
             }
             Message::SearchPressed => {
-                // ... (Index search logic same as before)
                 if self.view_mode == ViewMode::Index {
                     self.status_message = format!("Searching index for {}...", self.search_query);
                     let query = self.search_query.to_lowercase();
@@ -200,7 +201,6 @@ impl VeldMapToolsGui {
                     Task::none()
                 }
             }
-            // BROWSE LOGIC
             Message::BrowseRootSelected(root) => {
                 self.current_browse_root = root;
                 self.current_browse_path = root.path().to_string();
@@ -323,7 +323,6 @@ impl VeldMapToolsGui {
                 Task::none()
             }
             Message::DownloadFile(s3_key) => {
-                // Same download logic
                 if let Some(source) = &self.source {
                     let source = source.clone();
                     let key = s3_key.clone();
@@ -347,7 +346,6 @@ impl VeldMapToolsGui {
                 }
             }
             Message::ViewFile(s3_key) => {
-                // First download, then generate preview
                 if let Some(source) = &self.source {
                     let source = source.clone();
                     let key = s3_key.clone();
@@ -356,11 +354,9 @@ impl VeldMapToolsGui {
                     self.status_message = "Downloading for preview...".to_string();
 
                     Task::perform(async move {
-                        // Check if file exists first to skip download
                         if !dest.exists() {
                             source.download_file(&key, &dest).await.map_err(|e| e.to_string())?;
                         }
-                        // Generate preview
                         CopernicusSource::generate_preview(&dest).map_err(|e| e.to_string())
                     }, Message::PreviewReady)
                 } else {
@@ -370,7 +366,7 @@ impl VeldMapToolsGui {
             Message::PreviewReady(result) => {
                 match result {
                     Ok(bytes) => {
-                        self.current_image = Some(image::Handle::from_bytes(bytes));
+                        self.current_image = Some(Handle::from_bytes(bytes));
                         self.status_message = "Preview loaded".to_string();
                     }
                     Err(e) => {
@@ -395,7 +391,6 @@ impl VeldMapToolsGui {
                 Task::none()
             }
             Message::BuildIndex => {
-                // ... (Index build logic)
                 if let Some(source) = &self.source {
                     self.status_message = "Building index...".to_string();
                     self.is_building_index = true;
@@ -456,7 +451,7 @@ impl VeldMapToolsGui {
                 // IMAGE PREVIEW
                 column![
                     button("Close Preview").on_press(Message::ClosePreview).padding(5),
-                    image_widget(handle.clone()).width(Length::Fill).height(Length::Fill)
+                    Image::new(handle.clone()).width(Length::Fill).height(Length::Fill)
                 ].spacing(10)
             } else {
                 // FILE VIEW
@@ -502,7 +497,7 @@ impl VeldMapToolsGui {
                 ].spacing(15)
             }
         } else {
-            // LIST VIEW (Simplified for brevity, same as before but calling Element::from() where needed)
+            // LIST VIEW
             match self.view_mode {
                 ViewMode::Browse => {
                     column![
@@ -524,17 +519,21 @@ impl VeldMapToolsGui {
                                     let label = if is_folder { format!("📁 {}", name) } else { format!("📄 {}", name) };
                                     
                                     if is_folder {
-                                        button(text(label).size(15))
+                                        let btn = button(text(label).size(15))
                                             .on_press(Message::BrowsePath(p.clone()))
                                             .width(Length::Fill)
-                                            .padding(8).into()
+                                            .padding(8);
+                                        Element::from(btn)
                                     } else {
-                                        // It's a file in browse mode
                                         let is_tif = name.to_lowercase().ends_with(".tif");
                                         let btn = button(
                                             row![
                                                 text(label).size(15),
-                                                if is_tif { text("(View available)").size(10).color(Color::from_rgb(0.0, 0.5, 0.0)) } else { text("").size(0) }
+                                                if is_tif { 
+                                                    Element::from(text("(View available)").size(10).color(Color::from_rgb(0.0, 0.5, 0.0))) 
+                                                } else { 
+                                                    Element::from(horizontal_space().width(0)) 
+                                                }
                                             ].spacing(10)
                                         )
                                         .on_press(if is_tif { Message::ViewFile(p.clone()) } else { Message::DownloadFile(p.clone()) })
@@ -561,7 +560,7 @@ impl VeldMapToolsGui {
                                     .padding(10);
                                 Element::from(btn)
                             } else {
-                                Element::from(vertical_space().width(0))
+                                Element::from(horizontal_space().width(0))
                             }
                         ].spacing(10).align_y(Alignment::Center),
                         text(&self.status_message).size(12),
