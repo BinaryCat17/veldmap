@@ -132,7 +132,6 @@ async fn main() -> anyhow::Result<()> {
     let mut last_size = (100u32, 100u32);
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut is_occluded = false;
-    let mut is_focused = true;
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
@@ -194,15 +193,12 @@ async fn main() -> anyhow::Result<()> {
             Event::UserEvent(_) | Event::AboutToWait => {
                 let mut last_draw_cmd = None;
                 while let Ok(cmd) = rx.try_recv() {
-                    match cmd {
-                        AppCommand::Draw(_, _, _) => {
-                            last_draw_cmd = Some(cmd);
-                        }
-                    }
+                    last_draw_cmd = Some(cmd);
                 }
 
                 if let Some(AppCommand::Draw(data, w, h)) = last_draw_cmd {
-                    if w > 0 && h > 0 && data.len() >= (w * h * 4) as usize {
+                    // Строгая проверка: не трогаем GPU если окно скрыто или размер нулевой
+                    if !is_occluded && w > 0 && h > 0 && data.len() >= (w * h * 4) as usize {
                         if (w, h) != last_size || app_texture.is_none() {
                             let texture = device.create_texture(&wgpu::TextureDescriptor {
                                 label: Some("App Texture"),
@@ -244,9 +240,7 @@ async fn main() -> anyhow::Result<()> {
                                 },
                                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                             );
-                            if !is_occluded {
-                                window.request_redraw();
-                            }
+                            window.request_redraw();
                         }
                     }
                 }
@@ -298,7 +292,6 @@ async fn main() -> anyhow::Result<()> {
                 is_occluded = occluded;
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
-                log::info!("Window resized: {}x{}", size.width, size.height);
                 if size.width > 0 && size.height > 0 {
                     config.width = size.width;
                     config.height = size.height;
@@ -361,10 +354,7 @@ async fn main() -> anyhow::Result<()> {
                     let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await;
                 });
             }
-            Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
-                is_focused = focused;
-                log::info!("Window focus changed: {}", focused);
-            }
+            Event::WindowEvent { event: WindowEvent::Focused(_), .. } => {}
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 window_target.exit();
             }
