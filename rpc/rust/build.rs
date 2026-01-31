@@ -5,7 +5,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "../../proto/common.proto", 
             "../../proto/services.proto",
             "../../proto/storage.proto",
-            "../../proto/geomath.proto"
+            "../../proto/geomath.proto",
+            "../../proto/render.proto",
+            "../../proto/ui.proto"
         ],
         &["../../proto/"],
     )?;

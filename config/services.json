@@ -11,6 +11,10 @@
     "geo-math": {
       "location": "local",
       "path": "plugins/veldmap_geo_math.wasm"
+    },
+    "veldmap-app-data-browser": {
+      "location": "local",
+      "path": "plugins/veldmap_app_data_browser.wasm"
     }
   }
 }

@@ -21,13 +21,17 @@ impl VeldmapNode {
         self.endpoint.node_id()
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub fn dispatcher(&self) -> Arc<Dispatcher> {
+        self.dispatcher.clone()
+    }
+
+    pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         log::info!("Veldmap Iroh Node listening. Node ID: {}", self.endpoint.node_id());
         
-        while let Some(conn) = self.endpoint.accept().await {
+        while let Some(incoming) = self.endpoint.accept().await {
             let dispatcher = self.dispatcher.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(conn, dispatcher).await {
+                if let Err(e) = handle_connection(incoming, dispatcher).await {
                     log::error!("Connection error: {}", e);
                 }
             });
@@ -44,8 +48,8 @@ impl VeldmapNode {
 }
 
 async fn handle_connection(incoming: iroh::endpoint::Incoming, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
-    let connection = incoming.await?;
-    log::info!("New connection from {}", connection.remote_node_id()?);
+    let connection = incoming.accept()?.await?;
+    // log::info!("New connection from {}", connection.remote_node_id());
 
     loop {
         match connection.accept_bi().await {

@@ -11,7 +11,11 @@ MODULES = [
     "veldmap-geo-math",
     "veldmap-data-provider",
     "veldmap-local-storage",
-    "veldmap-tile-server"
+    "veldmap-tile-server",
+    "veldmap-render",
+    "veldmap-core-wasm",
+    "veldmap-app-data-browser",
+    "veldmap-app-desktop-client"
 ]
 
 def run(cmd, cwd=None):
@@ -23,7 +27,7 @@ def run(cmd, cwd=None):
         sys.exit(1)
 
 def build_all():
-    """Build RPC, WASM modules, and Core."""
+    """Build RPC, WASM modules, and Host."""
     # 1. Build RPC Layer
     print("\n[1/3] Building RPC Layer...")
     run(["cargo", "build", "-p", "veldmap-rust-rpc"])
@@ -45,9 +49,9 @@ def build_all():
         print(f"Deploying {wasm_file_name} to {PLUGINS_DIR}/")
         shutil.copy(source_path, dest_path)
 
-    # 3. Build Core Orchestrator
-    print("\n[3/3] Building Core Orchestrator...")
-    run(["cargo", "build", "-p", "veldmap-core"])
+    # 3. Build Native Host
+    print("\n[3/3] Building Native Host...")
+    run(["cargo", "build", "-p", "veldmap-native-host"])
 
 def clean():
     """Remove build artifacts."""

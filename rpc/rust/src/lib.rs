@@ -3,27 +3,29 @@ pub mod common {
 }
 
 pub mod services {
-
     include!(concat!(env!("OUT_DIR"), "/veldmap.services.rs"));
-
 }
-
-
 
 pub mod geomath {
-
     include!(concat!(env!("OUT_DIR"), "/veldmap.geomath.rs"));
-
 }
-
-
 
 pub mod storage {
-
     include!(concat!(env!("OUT_DIR"), "/veldmap.storage.rs"));
-
 }
 
+pub mod render {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.render.rs"));
+}
 
+pub mod ui {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
+}
 
 pub mod host;
+
+
+
+#[cfg(feature = "client")]
+
+pub mod client;

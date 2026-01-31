@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package veldmap.ui;
+
+message UIEvent {
+    oneof event {
+        ClickEvent click = 1;
+        KeyEvent key = 2;
+        ResizeEvent resize = 3;
+        InitEvent init = 4;
+    }
+}
+
+message ClickEvent {
+    float x = 1;
+    float y = 2;
+    uint32 button = 3;
+}
+
+message KeyEvent {
+    uint32 key_code = 1;
+    bool pressed = 2;
+}
+
+message ResizeEvent {
+    uint32 width = 1;
+    uint32 height = 2;
+}
+
+message InitEvent {}
+
+// Описание того, что Хост должен сделать с окном
+message UIDisplayCommand {
+    oneof command {
+        DrawFrame draw_frame = 1;
+        UpdateWidgets update_widgets = 2;
+    }
+}
+
+message DrawFrame {
+    bytes rgba_data = 1;
+    uint32 width = 2;
+    uint32 height = 3;
+}
+
+message UpdateWidgets {
+    string json_layout = 1; // Упрощенно: описание дерева виджетов
+}

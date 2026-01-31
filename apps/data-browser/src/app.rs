@@ -5,7 +5,10 @@ use iced::widget::image::Handle;
 use iced::{Alignment, Element, Length, Task, Color, Theme};
 use crate::common::{BrowserItem, icon_text, is_previewable};
 use crate::utils::{generate_preview_with_progress, RawImage};
-use veldmap_core::{RemoteDataSource, DataProduct, SearchFilter};
+use veldmap_rust_rpc::client::VeldmapClient;
+use veldmap_rust_rpc::services::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse};
+use veldmap_rust_rpc::common::{DataProduct, SearchFilter};
+use prost::Message;
 use std::sync::Arc;
 use std::path::PathBuf;
 use async_stream::stream;
@@ -38,7 +41,7 @@ pub struct VeldMapToolsGui {
     pub product_files: Vec<BrowserItem>,
     pub download_progress: Option<f32>,
     pub current_image: Option<Handle>,
-    pub source: Option<Arc<dyn RemoteDataSource>>,
+    pub client: Option<Arc<VeldmapClient>>,
 }
 
 #[derive(Clone)]
@@ -62,7 +65,7 @@ pub enum Message {
     LocalSearchChanged(String),
     LocalFilterChanged(downloaded::FileFilter),
     DeleteLocalFile(String),
-    SourceInitialized(Result<Arc<dyn RemoteDataSource>, String>),
+    SourceInitialized(Result<Arc<VeldmapClient>, String>),
     RetryConnection,
     DownloadFile(String),
     DownloadProgress(f32),
@@ -84,7 +87,7 @@ impl VeldMapToolsGui {
         (
             Self {
                 view_mode: ViewMode::Search,
-                status_message: "Initializing plugins...".to_string(),
+                status_message: "Connecting to VeldMap Core...".to_string(),
                 error_message: None,
                 search_state: search::SearchState::default(),
                 browse_items: Vec::new(),
@@ -99,10 +102,10 @@ impl VeldMapToolsGui {
                 product_files: Vec::new(),
                 download_progress: None,
                 current_image: None,
-                source: None,
+                client: None,
             },
             Task::perform(async move { 
-                veldmap_core::create_data_provider().await.map_err(|e| e.to_string()) 
+                VeldmapClient::connect("127.0.0.1:5050").await.map(Arc::new).map_err(|e| e.to_string())
             }, Message::SourceInitialized),
         )
     }
@@ -119,7 +122,7 @@ impl VeldMapToolsGui {
                 self.current_image = None;
                 self.download_progress = None;
                 match self.view_mode {
-                    ViewMode::Browse if self.browse_items.is_empty() && self.source.is_some() => return self.update(Message::BrowseFetchPage(None)),
+                    ViewMode::Browse if self.browse_items.is_empty() && self.client.is_some() => return self.update(Message::BrowseFetchPage(None)),
                     ViewMode::Downloaded => return self.update(Message::ScanLocalFiles),
                     _ => {}
                 }
@@ -128,9 +131,9 @@ impl VeldMapToolsGui {
             Message::SearchInputChanged(q) => { self.search_state.query = q; Task::none() }
             Message::SearchFilterTypeChanged(ft) => { self.search_state.filter_type = ft; Task::none() }
             Message::SearchPressed => {
-                if let Some(source) = &self.source {
+                if let Some(client) = &self.client {
                     self.status_message = format!("Searching...");
-                    let source = source.clone();
+                    let client = client.clone();
                     let query = self.search_state.query.clone();
                     let filter_type = self.search_state.filter_type;
                     self.selected_product = None;
@@ -142,7 +145,11 @@ impl VeldMapToolsGui {
                             _ => {}
                         }
                         let q = if filter_type == search::SearchFilterType::General { query } else { String::new() };
-                        source.search(q, filters).await
+                        
+                        let req = SearchRequest { query: q, filters };
+                        let res_bytes = client.call("data-provider", "search", req.encode_to_vec()).await.map_err(|e| e.to_string())?;
+                        let response = SearchResponse::decode(&res_bytes[..]).map_err(|e| e.to_string())?;
+                        Ok(response.products)
                     }, Message::SearchResultsReceived)
                 } else { Task::none() }
             }
@@ -154,10 +161,15 @@ impl VeldMapToolsGui {
                 Task::none()
             }
             Message::ProductSelected(prod) => {
-                if let Some(source) = &self.source {
+                if let Some(client) = &self.client {
                     self.selected_product = Some(prod.name.clone());
-                    let source = source.clone();
-                    Task::perform(async move { source.list_path(prod.path, None).await.map(|res| res.items) }, Message::FilesReceived)
+                    let client = client.clone();
+                    Task::perform(async move { 
+                        let req = ListPathRequest { path: prod.path, token: String::new() };
+                        let res_bytes = client.call("data-provider", "list_path", req.encode_to_vec()).await.map_err(|e| e.to_string())?;
+                        let response = ListPathResponse::decode(&res_bytes[..]).map_err(|e| e.to_string())?;
+                        Ok(response.items)
+                    }, Message::FilesReceived)
                 } else { Task::none() }
             }
             Message::FilesReceived(res) => {
@@ -193,12 +205,17 @@ impl VeldMapToolsGui {
                 self.update(Message::BrowseFetchPage(None))
             }
             Message::BrowseFetchPage(token) => {
-                if let Some(source) = &self.source {
+                if let Some(client) = &self.client {
                     self.status_message = format!("Browsing...");
-                    let source = source.clone();
+                    let client = client.clone();
                     self.current_token = token.clone();
                     let path = self.current_browse_path.clone();
-                    Task::perform(async move { source.list_path(path, token).await.map(|res| (res.items, res.next_token)) }, Message::BrowserItemsReceived)
+                    Task::perform(async move { 
+                        let req = ListPathRequest { path, token: token.unwrap_or_default() };
+                        let res_bytes = client.call("data-provider", "list_path", req.encode_to_vec()).await.map_err(|e| e.to_string())?;
+                        let response = ListPathResponse::decode(&res_bytes[..]).map_err(|e| e.to_string())?;
+                        Ok((response.items, response.next_token))
+                    }, Message::BrowserItemsReceived)
                 } else { Task::none() }
             }
             Message::NextPage => {
@@ -225,7 +242,7 @@ impl VeldMapToolsGui {
                             let exists_locally = if is_folder { false } else { base_path.join(&name).exists() };
                             BrowserItem { s3_key: identifier, name, is_folder, exists_locally }
                         }).collect();
-                        self.next_token = next;
+                        self.next_token = if next.is_empty() { None } else { Some(next) };
                     }
                     Err(e) => { self.error_message = Some(format!("Browse Error: {}", e)); }
                 }
@@ -257,27 +274,25 @@ impl VeldMapToolsGui {
             }
             Message::SourceInitialized(res) => {
                 match res {
-                    Ok(s) => { self.source = Some(s); self.status_message = "Connected".into(); self.error_message = None; }
-                    Err(e) => { self.error_message = Some(format!("Plugin Failed: {}. Check 'plugins/' folder.", e)); }
+                    Ok(c) => { self.client = Some(c); self.status_message = "Connected to Core".into(); self.error_message = None; }
+                    Err(e) => { self.error_message = Some(format!("Connection Failed: {}. Make sure VeldMap Core is running.", e)); }
                 }
                 Task::none()
             }
             Message::RetryConnection => {
                 self.error_message = None;
                 self.status_message = "Reconnecting...".into();
-                Task::perform(async move { veldmap_core::create_data_provider().await.map_err(|e| e.to_string()) }, Message::SourceInitialized)
+                Task::perform(async move { VeldmapClient::connect("127.0.0.1:5050").await.map(Arc::new).map_err(|e| e.to_string()) }, Message::SourceInitialized)
             }
             Message::DownloadFile(identifier) => {
                 let dest = self.get_local_path(&identifier);
                 if dest.exists() { return Task::none(); }
-                if let Some(source) = &self.source {
-                    let source = source.clone();
+                if let Some(client) = &self.client {
+                    let client = client.clone();
                     self.download_progress = Some(0.0);
                     return Task::stream(stream! {
-                        let s_task = source.clone();
-                        let k_task = identifier.clone();
-                        let d_task = dest.clone();
-                        let _ = tokio::spawn(async move { s_task.download(k_task, d_task.to_string_lossy().to_string()).await }).await;
+                        let req = DownloadRequest { identifier: identifier.clone(), destination: dest.to_string_lossy().to_string() };
+                        let _ = client.call("data-provider", "download", req.encode_to_vec()).await;
                         yield Message::DownloadProgress(1.0);
                         yield Message::DownloadCompleted(Ok(dest));
                     });
@@ -290,16 +305,15 @@ impl VeldMapToolsGui {
                 let dest = if is_local { PathBuf::from("data/dem/source").join(&identifier) } else { self.get_local_path(&identifier) };
                 let filename = identifier.split('/').last().unwrap_or("file").to_string();
                 
-                let source = self.source.clone();
+                let client = self.client.clone();
                 self.status_message = format!("Opening {}...", filename);
                 self.download_progress = Some(0.0);
 
                 return Task::stream(stream! {
                     if !dest.exists() {
-                        if let Some(s) = source {
-                            let k = identifier.clone();
-                            let d = dest.clone();
-                            let _ = tokio::spawn(async move { s.download(k, d.to_string_lossy().to_string()).await }).await;
+                        if let Some(c) = client {
+                            let req = DownloadRequest { identifier: identifier.clone(), destination: dest.to_string_lossy().to_string() };
+                            let _ = c.call("data-provider", "download", req.encode_to_vec()).await;
                         }
                     }
                     
@@ -406,10 +420,10 @@ impl VeldMapToolsGui {
         } else {
             match self.view_mode {
                 ViewMode::Search => search::view(&self.search_state, &self.search_results),
-                ViewMode::Browse => if self.source.is_none() {
+                ViewMode::Browse => if self.client.is_none() {
                     column![
-                        text("No Data Provider Plugin found in 'plugins/'.").color(Color::from_rgb(0.8, 0.4, 0.4)),
-                        button("Retry Loading Plugins").on_press(Message::RetryConnection).padding(10)
+                        text("Connecting to VeldMap Core...").color(Color::from_rgb(0.8, 0.4, 0.4)),
+                        button("Retry Connection").on_press(Message::RetryConnection).padding(10)
                     ].spacing(10).into()
                 } else {
                     browse::view(&self.current_browse_path, &self.browse_items, &self.status_message, !self.token_stack.is_empty(), self.next_token.is_some())

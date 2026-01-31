@@ -6,10 +6,15 @@ use iroh::Endpoint;
 use veldmap_rust_rpc::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
+pub trait NativeService: Send + Sync {
+    fn call(&self, method: &str, payload: Vec<u8>) -> Result<Vec<u8>>;
+}
+
 #[derive(Clone)]
 pub enum ServiceLocation {
     LocalWasm(Arc<Mutex<Plugin>>),
     RemoteIroh(iroh::NodeId),
+    Native(Arc<dyn NativeService>),
 }
 
 pub struct Dispatcher {
@@ -39,6 +44,9 @@ impl Dispatcher {
         };
 
         match location {
+            ServiceLocation::Native(service) => {
+                service.call(method, payload)
+            }
             ServiceLocation::LocalWasm(plugin) => {
                 let request = RpcRequest {
                     service: service_name.to_string(),
@@ -97,4 +105,3 @@ impl Dispatcher {
         Ok(response.payload)
     }
 }
-

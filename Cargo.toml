@@ -1,13 +1,14 @@
 [workspace]
 members = [
-    "core",
+    "core/native",
+    "modules/core",
     "rpc/rust",
     "modules/render",
     "modules/data-provider",
     "modules/local-storage",
     "modules/tile-server",
     "modules/geo-math",
-    "app/data-browser",
-    "app/desktop-client",
+    "apps/data-browser",
+    "apps/desktop-client",
 ]
 resolver = "2"
