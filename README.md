@@ -1,70 +1,35 @@
-# VeldMap - Modular 3D Earth Rendering Engine
+# VeldMap
 
-VeldMap is a high-performance, modular 3D Earth rendering engine written in Rust. It is designed to be easily embedded into applications on various platforms (Desktop, Web/WASM, Mobile) using a unified interface.
-
-## Project Structure
-
-The project is organized as a Cargo Workspace with the following modules:
-
-*   **`veldmap-core`**: The central hub defining abstract interfaces (Traits), shared data types, and FFI bindings via [UniFFI](https://github.com/mozilla/uniffi-rs). It acts as the "Source of Truth" for the entire system.
-*   **`veldmap-render`**: A GPU-accelerated rendering module based on `wgpu`. It implements the `Renderer` interface from `core`.
-*   **`veldmap-data`**: A data provider module that handles loading Digital Elevation Models (DEM) and imagery (GeoTIFF, etc.). It implements `TerrainProvider` and `ImageryProvider` interfaces.
-*   **`veldmap-geo-math`**: A module implementing precise geographic math (WGS84 ellipsoid conversions) implementing the `GeoMath` interface.
-*   **`veldmap-app`**: A standalone demo application (`winit` + `wgpu`) showcasing how to assemble and use the engine components.
-*   **`veldmap-server`**: A high-level data server based on `axum` that serves DEM tiles and geoid data over HTTP.
+A modern, decentralized P2P terrain visualization platform.
 
 ## Architecture
 
-VeldMap follows an **Interface-First** approach:
+VeldMap is built as a microservice orchestration system using WebAssembly (WASM) and P2P networking:
 
-1.  **Core Interfaces**: All interactions between modules happen through traits defined in `veldmap-core`.
-2.  **Private Implementations**: Modules like `render` and `data` are private and expose only a single **Factory Function** to create an instance of their interface (e.g., `create_renderer()`, `create_data_provider()`).
-3.  **UniFFI**: The core interfaces are decorated with `#[uniffi::export]`, allowing automatic generation of bindings for Kotlin, Swift, Python, and other languages.
+- **`proto/`**: Single Source of Truth. Defines all service interfaces using Protocol Buffers.
+- **`veldmap-rust-rpc`**: Generated Rust bindings for Protobuf messages.
+- **`veldmap-core`**: The Orchestrator (Host). Manages WASM plugins via **Extism** and P2P communication via **Iroh**.
+- **WASM Microservices**:
+    - **`data-provider`**: External data sources (e.g., Copernicus CDSE).
+    - **`local-storage`**: Local DEM data management.
+    - **`tile-server`**: Map tiling logic.
 
-## Getting Started
+## Communication
 
-### Prerequisites
+All modules communicate exclusively via **Protobuf**. 
+- Local modules are called via **Extism Host-to-WASM** calls.
+- Remote modules communicate over **Iroh** P2P connections.
+- State synchronization is handled via **iroh-gossip** and CRDTs.
 
-*   Rust (latest stable)
-*   Vulkan / Metal / DX12 compatible GPU
+## Development
 
-### Running the Demo App
-
-To run the demonstration application which renders a 3D view of the Earth:
-
+### Building Plugins
+To build a plugin as a WASM module:
 ```bash
-cargo run -p veldmap-app
+cd veldmap-data-provider
+cargo build --target wasm32-wasip1
 ```
 
-### Running Tests
-
-```bash
-cargo test
-```
-
-## Module Details
-
-### veldmap-core
-Defines `TileId`, `DemTile`, and traits:
-*   `Renderer`: `render()`, `resize()`, `update()`, `camera_move()`, etc.
-*   `TerrainProvider`: `get_tile()`, `get_geoid()`.
-*   `GeoMath`: `lat_lon_to_ecef()`, `ecef_to_lat_lon()`.
-
-### veldmap-geo-math
-Implements precise WGS84 ellipsoid math. Z-axis points to the North Pole (ECEF).
-
-### veldmap-render
-Implements the `Renderer` trait using `wgpu`. It handles:
-*   Ray-marching of the terrain.
-*   Virtual texturing (indirection textures).
-*   Camera control.
-
-### veldmap-data
-Implements `TerrainProvider`. Supports:
-*   GeoTIFF loading for DEM.
-*   Local file caching.
-*   PGM format for Geoids (EGM2008).
-
-## License
-
-[License Name]
+### Running the Core
+The core loads services defined in `config/services.json`. 
+WASM modules should be placed in the `plugins/` directory.

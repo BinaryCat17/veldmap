@@ -1,0 +1,19 @@
+[package]
+name = "veldmap-render"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "veldmap_render"
+path = "src/lib.rs"
+
+[dependencies]
+wgpu = "24.0.0"
+glam = { version = "0.29.0", features = ["bytemuck"] }
+bytemuck = { version = "1.16", features = ["derive"] }
+log = "0.4"
+anyhow = "1.0"
+raw-window-handle = "0.6"
+libc = "0.2"
+veldmap-core = { path = "../../core" }
+veldmap-rust-rpc = { path = "../../rpc/rust" }

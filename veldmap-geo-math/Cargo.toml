@@ -1,9 +1,0 @@
-[package]
-name = "veldmap-geo-math"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-veldmap-core = { path = "../veldmap-core" }
-uniffi = "0.28"
-log = "0.4"

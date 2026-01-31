@@ -1,0 +1,13 @@
+[package]
+name = "veldmap-geo-math"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.4"
+veldmap-rust-rpc = { path = "../../rpc/rust" }
+prost = "0.13"
+anyhow = "1.0"

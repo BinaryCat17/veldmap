@@ -1,12 +1,13 @@
 [workspace]
 members = [
-    "veldmap-core",
-    "veldmap-local-storage",
-    "veldmap-data-provider",
-    "veldmap-geo-math",
-    "veldmap-render",
-    "veldmap-server",
-    "veldmap-app-data-browser",
-    "veldmap-app-desktop-client",
+    "core",
+    "rpc/rust",
+    "modules/render",
+    "modules/data-provider",
+    "modules/local-storage",
+    "modules/tile-server",
+    "modules/geo-math",
+    "app/data-browser",
+    "app/desktop-client",
 ]
 resolver = "2"

@@ -1,0 +1,11 @@
+syntax = "proto3";
+package veldmap.storage;
+import "common.proto";
+import "services.proto";
+
+service LocalStorage {
+  rpc GetTile(veldmap.services.GetTileRequest) returns (veldmap.services.GetTileResponse);
+  rpc GetGeoid(veldmap.storage.GetGeoidRequest) returns (veldmap.services.GetTileResponse);
+}
+
+message GetGeoidRequest {}

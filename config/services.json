@@ -1,0 +1,16 @@
+{
+  "services": {
+    "data-provider": {
+      "location": "local",
+      "path": "plugins/veldmap_data_provider.wasm"
+    },
+    "local-storage": {
+      "location": "local",
+      "path": "plugins/veldmap_local_storage.wasm"
+    },
+    "geo-math": {
+      "location": "local",
+      "path": "plugins/veldmap_geo_math.wasm"
+    }
+  }
+}

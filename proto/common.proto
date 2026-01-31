@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package veldmap.common;
+
+message TileId {
+  int32 x = 1;
+  int32 y = 2;
+  int32 z = 3;
+}
+
+message DemTile {
+  TileId id = 1;
+  repeated float heights = 2;
+  uint64 width = 3;
+  uint64 height = 4;
+  float min_alt = 5;
+  float max_alt = 6;
+}
+
+message SearchFilter {
+  string name = 1;
+  string value = 2;
+}
+
+message DataProduct {
+  string name = 1;
+  string path = 2;
+  string timestamp = 3;
+}
