@@ -2,9 +2,11 @@ use iced_core::{Font, Color, Element, Alignment, Theme};
 use iced_widget::{row, text};
 use iced_tiny_skia::Renderer;
 
-pub const APP_FONT_DATA: &[u8] = include_bytes!("../../../assets/NotoColorEmoji.ttf");
+pub const EMOJI_FONT_DATA: &[u8] = include_bytes!("../../../assets/NotoColorEmoji.ttf");
+pub const DEJAVU_FONT_DATA: &[u8] = include_bytes!("../../../assets/DejaVuSans.ttf");
 
-pub const APP_FONT: Font = Font::with_name("AppFont");
+pub const APP_FONT: Font = Font::with_name("DejaVu Sans");
+pub const EMOJI_FONT: Font = Font::with_name("Noto Color Emoji");
 
 #[derive(Debug, Clone)]
 pub struct BrowserItem {
@@ -16,7 +18,7 @@ pub struct BrowserItem {
 
 pub fn icon_text<'a, Message: 'a>(icon: &'a str, label: &'a str, color: Color) -> Element<'a, Message, Theme, Renderer> {
     row![
-        text(icon).font(APP_FONT).size(18),
+        text(icon).font(EMOJI_FONT).size(18),
         text(label).font(APP_FONT).size(15).color(color)
     ].spacing(10).align_y(Alignment::Center).into()
 }

@@ -7049,6 +7049,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "cosmic-text",
  "extism-pdk",
  "iced_core",
  "iced_graphics",

@@ -24,14 +24,14 @@ impl Default for SearchState {
 
 pub fn view<'a>(_state: &'a SearchState, _results: &'a [DataProduct]) -> Element<'a, Message, Theme, Renderer> {
     column![
-        container(text("VELD_MAP DATA BROWSER").size(40))
+        container(text("VELD_MAP DATA BROWSER").font(crate::common::APP_FONT).size(40))
             .width(Length::Fill)
             .height(Length::Fixed(100.0))
             .center_x(Length::Fill)
             .style(|_| container::Style::default().background(Color::from_rgb(0.5, 0.0, 0.0))),
         
         container(
-            button(container(text("CLICK TO SEARCH").size(20)).padding(20))
+            button(container(text("CLICK TO SEARCH").font(crate::common::APP_FONT).size(20)).padding(20))
                 .on_press(Message::SearchPressed)
         )
         .width(Length::Fill)

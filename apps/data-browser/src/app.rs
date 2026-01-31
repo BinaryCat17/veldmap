@@ -131,18 +131,18 @@ impl VeldMapToolsGui {
     pub fn view(&self) -> Element<'_, Message, Theme, Renderer> {
         let _ = veldmap_rust_rpc::host::call_service("system", "log", "App: view() called".as_bytes().to_vec());
         let title_bar = column![
-            text("VeldMap Tools").size(24),
+            text("VeldMap Tools").font(crate::common::APP_FONT).size(24),
             row![
-                button("Search").on_press(Message::SwitchMode(ViewMode::Search)).padding(8),
-                button("Browse").on_press(Message::SwitchMode(ViewMode::Browse)).padding(8),
-                button("Downloaded").on_press(Message::SwitchMode(ViewMode::Downloaded)).padding(8),
+                button(text("Search").font(crate::common::APP_FONT)).on_press(Message::SwitchMode(ViewMode::Search)).padding(8),
+                button(text("Browse").font(crate::common::APP_FONT)).on_press(Message::SwitchMode(ViewMode::Browse)).padding(8),
+                button(text("Downloaded").font(crate::common::APP_FONT)).on_press(Message::SwitchMode(ViewMode::Downloaded)).padding(8),
             ].spacing(10),
         ].spacing(10);
 
         let error_view: Element<Message, Theme, Renderer> = if let Some(err) = &self.error_message {
             container(row![
-                button("X").on_press(Message::ClearError).padding(5),
-                text(err).size(13).color(Color::from_rgb(1.0, 0.4, 0.4)).width(Length::Fill),
+                button(text("X").font(crate::common::APP_FONT)).on_press(Message::ClearError).padding(5),
+                text(err).font(crate::common::APP_FONT).size(13).color(Color::from_rgb(1.0, 0.4, 0.4)).width(Length::Fill),
             ].spacing(15).align_y(Alignment::Center))
             .padding(10)
             .style(|_| container::Style::default().background(Color::from_rgb(0.25, 0.1, 0.1)))
@@ -150,7 +150,7 @@ impl VeldMapToolsGui {
         } else { column![].into() };
 
         let progress_view: Element<Message, Theme, Renderer> = if let Some(p) = self.download_progress {
-            column![text(format!("Processing... {:.0}%", p * 100.0)).size(12), progress_bar(0.0..=1.0, p)].spacing(5).into()
+            column![text(format!("Processing... {:.0}%", p * 100.0)).font(crate::common::APP_FONT).size(12), progress_bar(0.0..=1.0, p)].spacing(5).into()
         } else { column![].into() };
 
         let main_content: Element<Message, Theme, Renderer> = if let Some(handle) = &self.current_image {
