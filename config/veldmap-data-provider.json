@@ -1,6 +1,0 @@
-{
-    "access_key": "${CDSE_ACCESS_KEY}",
-    "secret_key": "${CDSE_SECRET_KEY}",
-    "region": "eu-central-1",
-    "endpoint": "https://eodata.dataspace.copernicus.eu"
-}

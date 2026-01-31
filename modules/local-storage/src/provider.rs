@@ -1,4 +1,4 @@
-use veldmap_rust_rpc::services::{GetTileRequest, GetTileResponse};
+use veldmap_rust_rpc::storage::{GetTileRequest, GetTileResponse};
 use veldmap_rust_rpc::common::{DemTile, TileId};
 use prost::Message;
 
@@ -18,7 +18,6 @@ pub fn handle_get_tile(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let response = GetTileResponse {
         tile: Some(tile),
         error: String::new(),
-        sync: None,
     };
 
     Ok(response.encode_to_vec())

@@ -23,10 +23,10 @@ async fn main() -> anyhow::Result<()> {
     let event_loop = EventLoopBuilder::<()>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     
-    let window = WindowBuilder::new()
+    let window = Arc::new(WindowBuilder::new()
         .with_title("VeldMap")
         .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
-        .build(&event_loop)?;
+        .build(&event_loop)?);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
 
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     });
     
-    let surface = instance.create_surface(&window)?;
+    let surface = instance.create_surface(window.clone())?;
     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
         compatible_surface: Some(&surface),
         ..Default::default()
@@ -57,7 +57,6 @@ async fn main() -> anyhow::Result<()> {
     };
     surface.configure(&device, &config);
 
-    // Подготовка ресурсов для отрисовки текстуры приложения
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Blit Shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
@@ -131,6 +130,9 @@ async fn main() -> anyhow::Result<()> {
     let mut app_texture: Option<wgpu::Texture> = None;
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut last_size = (100u32, 100u32);
+    let mut cursor_pos = (0.0f32, 0.0f32);
+    let mut is_occluded = false;
+    let mut is_focused = true;
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
@@ -143,13 +145,28 @@ async fn main() -> anyhow::Result<()> {
     let d_call = dispatcher.clone();
     let mut host_call = Function::new("veldmap_host_call", [ValType::I64], [ValType::I64], UserData::new(()),
         move |plugin, inputs, outputs, _| {
+            let start = std::time::Instant::now();
+            
+            // Получаем сырые байты запроса из памяти WASM
             let req_buf: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
+            
             let request = RpcRequest::decode(&req_buf[..])?;
+            let service_name = request.service.clone();
+            let method_name = request.method.clone();
+            
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(d_call.call(&request.service, &request.method, request.payload))
             });
+            
+            let duration = start.elapsed();
+            if duration.as_millis() > 100 {
+                log::info!("Host call {}:{} took {}ms", service_name, method_name, duration.as_millis());
+            }
+
             let (payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
             let res_buf = RpcResponse { payload, error, sync: None }.encode_to_vec();
+            
+            // Выделяем новую память в плагине под ответ
             let res_mem = plugin.memory_new(&res_buf)?;
             outputs[0] = Val::I64(res_mem.offset() as i64);
             Ok(())
@@ -162,129 +179,145 @@ async fn main() -> anyhow::Result<()> {
     let d_clone = dispatcher.clone();
     let proxy_clone = proxy.clone();
     tokio::spawn(async move {
-        // Задержка перед инициализацией приложения, чтобы окно точно было готово
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        
         let node = Arc::new(veldmap_native_host::node::VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
         tokio::spawn(async move { let _ = node.run().await; });
-
         log::info!("Core ready. Launching App...");
         let _ = d_clone.call("veldmap-app-data-browser", "init", vec![]).await;
         let _ = proxy_clone.send_event(());
     });
-
-    log::info!("VeldMap Ready.");
 
     event_loop.run(move |event: Event<()>, window_target: &EventLoopWindowTarget<()>| {
         window_target.set_control_flow(ControlFlow::Wait);
 
         match event {
             Event::UserEvent(_) | Event::AboutToWait => {
-                let mut redraw_needed = false;
+                let mut last_draw_cmd = None;
                 while let Ok(cmd) = rx.try_recv() {
                     match cmd {
-                        AppCommand::Draw(data, w, h) => {
-                            if data.len() < (w * h * 4) as usize { continue; }
-                            
-                            if app_texture.is_none() || last_size != (w, h) {
-                                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                                    label: Some("App Texture"),
-                                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                                    mip_level_count: 1,
-                                    sample_count: 1,
-                                    dimension: wgpu::TextureDimension::D2,
-                                    format: wgpu::TextureFormat::Rgba8Unorm,
-                                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                                    view_formats: &[],
-                                });
-                                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                    label: Some("App Bind Group"),
-                                    layout: &bind_group_layout,
-                                    entries: &[
-                                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                                    ],
-                                });
-                                app_texture = Some(texture);
-                                app_bind_group = Some(bind_group);
-                                last_size = (w, h);
-                            }
-
-                            if let Some(texture) = &app_texture {
-                                queue.write_texture(
-                                    wgpu::TexelCopyTextureInfo {
-                                        texture,
-                                        mip_level: 0,
-                                        origin: wgpu::Origin3d::ZERO,
-                                        aspect: wgpu::TextureAspect::All,
-                                    },
-                                    &data,
-                                    wgpu::TexelCopyBufferLayout {
-                                        offset: 0,
-                                        bytes_per_row: Some(4 * w),
-                                        rows_per_image: Some(h),
-                                    },
-                                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                                );
-                                redraw_needed = true;
-                            }
+                        AppCommand::Draw(_, _, _) => {
+                            last_draw_cmd = Some(cmd);
                         }
                     }
                 }
 
-                if redraw_needed {
-                    if let Some(bind_group) = &app_bind_group {
-                        match surface.get_current_texture() {
-                            Ok(frame) => {
-                                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                                {
-                                    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: None,
-                                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                            view: &view,
-                                            resolve_target: None,
-                                            ops: wgpu::Operations {
-                                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                                store: wgpu::StoreOp::Store,
-                                            },
-                                        })],
-                                        depth_stencil_attachment: None,
-                                        ..Default::default()
-                                    });
-                                    rp.set_pipeline(&render_pipeline);
-                                    rp.set_bind_group(0, bind_group, &[]);
-                                    rp.draw(0..3, 0..1);
-                                }
-                                queue.submit(Some(encoder.finish()));
-                                frame.present();
+                if let Some(AppCommand::Draw(data, w, h)) = last_draw_cmd {
+                    if w > 0 && h > 0 && data.len() >= (w * h * 4) as usize {
+                        if (w, h) != last_size || app_texture.is_none() {
+                            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                                label: Some("App Texture"),
+                                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: wgpu::TextureFormat::Rgba8Unorm,
+                                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                                view_formats: &[],
+                            });
+                            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("App Bind Group"),
+                                layout: &bind_group_layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                                ],
+                            });
+                            app_texture = Some(texture);
+                            app_bind_group = Some(bind_group);
+                            last_size = (w, h);
+                        }
+
+                        if let Some(texture) = &app_texture {
+                            queue.write_texture(
+                                wgpu::TexelCopyTextureInfo {
+                                    texture,
+                                    mip_level: 0,
+                                    origin: wgpu::Origin3d::ZERO,
+                                    aspect: wgpu::TextureAspect::All,
+                                },
+                                &data,
+                                wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(4 * w),
+                                    rows_per_image: Some(h),
+                                },
+                                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                            );
+                            if !is_occluded {
+                                window.request_redraw();
                             }
-                            Err(wgpu::SurfaceError::Outdated) | Err(wgpu::SurfaceError::Lost) => {
-                                surface.configure(&device, &config);
-                            }
-                            Err(e) => log::error!("Surface error: {:?}", e),
                         }
                     }
                 }
             }
+            Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
+                if !is_occluded && config.width > 0 && config.height > 0 {
+                    if let Some(bind_group) = &app_bind_group {
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            match surface.get_current_texture() {
+                                Ok(frame) => {
+                                    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                                    {
+                                        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                            label: None,
+                                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                                view: &view,
+                                                resolve_target: None,
+                                                ops: wgpu::Operations {
+                                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                                    store: wgpu::StoreOp::Store,
+                                                },
+                                            })],
+                                            depth_stencil_attachment: None,
+                                            ..Default::default()
+                                        });
+                                        rp.set_pipeline(&render_pipeline);
+                                        rp.set_bind_group(0, bind_group, &[]);
+                                        rp.draw(0..3, 0..1);
+                                    }
+                                    queue.submit(Some(encoder.finish()));
+                                    frame.present();
+                                }
+                                Err(wgpu::SurfaceError::Outdated) => {
+                                    surface.configure(&device, &config);
+                                }
+                                Err(e) => {
+                                    log::warn!("Surface error: {:?}", e);
+                                }
+                            }
+                        }));
+                        if let Err(_) = res {
+                            log::error!("Panic during rendering caught!");
+                        }
+                    }
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::Occluded(occluded), .. } => {
+                is_occluded = occluded;
+            }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
+                log::info!("Window resized: {}x{}", size.width, size.height);
                 if size.width > 0 && size.height > 0 {
                     config.width = size.width;
                     config.height = size.height;
                     surface.configure(&device, &config);
                     
+                    window.request_redraw();
+
                     use veldmap_rust_rpc::ui::{UiEvent, ResizeEvent, ui_event};
                     let ev = UiEvent {
                         event: Some(ui_event::Event::Resize(ResizeEvent { width: size.width, height: size.height })),
                     };
-                    let _ = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(dispatcher.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()))
+                    let d_clone = dispatcher.clone();
+                    tokio::spawn(async move {
+                        let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await;
                     });
                 }
             }
-            Event::WindowEvent { event: WindowEvent::CursorMoved { .. }, .. } => {
-                // Игнорируем движение мыши для разгрузки WASM-плагина
+            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+                cursor_pos = (position.x as f32, position.y as f32);
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
                 use veldmap_rust_rpc::ui::{UiEvent, ClickEvent, ui_event};
@@ -297,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
                         _ => 0,
                     };
                     let ev = UiEvent {
-                        event: Some(ui_event::Event::Click(ClickEvent { x: -1.0, y: -1.0, button: btn })),
+                        event: Some(ui_event::Event::Click(ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn })),
                     };
                     let d_clone = dispatcher.clone();
                     tokio::spawn(async move {
@@ -307,9 +340,19 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::KeyboardInput { event: key_event, .. }, .. } => {
                 use veldmap_rust_rpc::ui::{UiEvent, KeyEvent, ui_event};
+                
+                let key_code = if let winit::keyboard::Key::Named(named) = key_event.logical_key {
+                    match named {
+                        winit::keyboard::NamedKey::Enter => 13,
+                        winit::keyboard::NamedKey::Backspace => 8,
+                        winit::keyboard::NamedKey::Escape => 27,
+                        _ => 0,
+                    }
+                } else { 0 };
+
                 let ev = UiEvent {
                     event: Some(ui_event::Event::Key(KeyEvent { 
-                        key_code: 0,
+                        key_code,
                         pressed: key_event.state == winit::event::ElementState::Pressed 
                     })),
                 };
@@ -317,6 +360,10 @@ async fn main() -> anyhow::Result<()> {
                 tokio::spawn(async move {
                     let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await;
                 });
+            }
+            Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
+                is_focused = focused;
+                log::info!("Window focus changed: {}", focused);
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 window_target.exit();

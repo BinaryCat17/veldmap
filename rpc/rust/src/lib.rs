@@ -2,6 +2,10 @@ pub mod common {
     include!(concat!(env!("OUT_DIR"), "/veldmap.common.rs"));
 }
 
+pub mod dataprovider {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.dataprovider.rs"));
+}
+
 pub mod services {
     include!(concat!(env!("OUT_DIR"), "/veldmap.services.rs"));
 }
@@ -24,8 +28,5 @@ pub mod ui {
 
 pub mod host;
 
-
-
 #[cfg(feature = "client")]
-
 pub mod client;

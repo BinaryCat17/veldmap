@@ -15,18 +15,24 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
     };
     
     let req_buf = request.encode_to_vec();
-
-    // Выделяем управляемую память Extism
     let mem = Memory::from_bytes(&req_buf)?;
     
-    // Вызываем хост-функцию
+    // Делаем вызов
     let res_ptr = unsafe { veldmap_host_call(mem.offset() as i64) };
     
-    // Получаем ответ
+    // СРАЗУ освобождаем память запроса, она больше не нужна
+    mem.free();
+    
+    if res_ptr == 0 {
+        return Err(anyhow::anyhow!("Host call to {}:{} returned null (OOM?)", service, method));
+    }
+
     let res_mem = Memory::find(res_ptr as u64)
         .ok_or_else(|| anyhow::anyhow!("Failed to find response memory block"))?;
     
     let res_buf = res_mem.to_vec();
+    // Освобождаем память ответа
+    res_mem.free();
 
     let response = RpcResponse::decode(&res_buf[..])?;
     if !response.error.is_empty() {
@@ -34,6 +40,11 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
     }
     
     Ok(response.payload)
+}
+
+#[cfg(feature = "pdk")]
+pub fn host_log(msg: &str) {
+    let _ = call_service("system", "log", msg.as_bytes().to_vec());
 }
 
 #[cfg(feature = "pdk")]

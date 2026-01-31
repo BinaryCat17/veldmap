@@ -2,57 +2,10 @@ syntax = "proto3";
 
 package veldmap.services;
 
-import "common.proto";
-
 // Metadata for CRDT and P2P synchronization
 message SyncMetadata {
   string origin_id = 1;      // Device/Node ID that created this message
   uint64 lamport_clock = 2; // Logic clock for ordering
-}
-
-// DATA PROVIDER SERVICE
-message SearchRequest {
-  string query = 1;
-  repeated veldmap.common.SearchFilter filters = 2;
-}
-
-message SearchResponse {
-  repeated veldmap.common.DataProduct products = 1;
-  string error = 2;
-  SyncMetadata sync = 3;
-}
-
-message ListPathRequest {
-  string path = 1;
-  string token = 2;
-}
-
-message ListPathResponse {
-  repeated string items = 1;
-  string next_token = 2;
-  string error = 3;
-}
-
-message DownloadRequest {
-  string identifier = 1;
-  string destination = 2;
-}
-
-message DownloadResponse {
-  bool success = 1;
-  string error = 2;
-  string download_url = 3;
-}
-
-// STORAGE SERVICE
-message GetTileRequest {
-  veldmap.common.TileId id = 1;
-}
-
-message GetTileResponse {
-  veldmap.common.DemTile tile = 1;
-  string error = 2;
-  SyncMetadata sync = 3;
 }
 
 // UNIVERSAL RPC CONTAINER

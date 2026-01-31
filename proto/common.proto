@@ -16,14 +16,3 @@ message DemTile {
   float min_alt = 5;
   float max_alt = 6;
 }
-
-message SearchFilter {
-  string name = 1;
-  string value = 2;
-}
-
-message DataProduct {
-  string name = 1;
-  string path = 2;
-  string timestamp = 3;
-}

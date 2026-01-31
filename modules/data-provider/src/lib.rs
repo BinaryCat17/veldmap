@@ -1,24 +1,12 @@
 mod cdse;
 
 use extism_pdk::*;
-use veldmap_rust_rpc::services::{RpcRequest, RpcResponse, SearchRequest};
+use veldmap_rust_rpc::services::{RpcRequest, RpcResponse};
+use veldmap_rust_rpc::dataprovider::{SearchRequest, DownloadRequest, ListPathRequest};
 use prost::Message;
-use serde::Deserialize;
-
-#[derive(Deserialize, Debug)]
-pub struct LocalConfig {
-    pub api_endpoint: String,
-    // Другие специфичные для модуля настройки
-}
 
 #[plugin_fn]
 pub fn handle_rpc(input: Vec<u8>) -> FnResult<Vec<u8>> {
-    // Загружаем конфиг, который передал нам Host (ядро)
-    let _config: LocalConfig = match config::get("config") {
-        Ok(Some(c)) => serde_json::from_str(&c)?,
-        _ => return Err(anyhow::anyhow!("Configuration not found for module").into()),
-    };
-
     let request = RpcRequest::decode(&input[..])
         .map_err(|e| anyhow::anyhow!("Failed to decode RpcRequest: {}", e))?;
     
@@ -31,8 +19,15 @@ pub fn handle_rpc(input: Vec<u8>) -> FnResult<Vec<u8>> {
             }
         }
         "download" => {
-            let download_req = veldmap_rust_rpc::services::DownloadRequest::decode(&request.payload[..])?;
+            let download_req = DownloadRequest::decode(&request.payload[..])?;
             match cdse::download(download_req) {
+                Ok(res) => (res.encode_to_vec(), String::new()),
+                Err(e) => (Vec::new(), e.to_string()),
+            }
+        }
+        "list_path" => {
+            let list_req = ListPathRequest::decode(&request.payload[..])?;
+            match cdse::list_path(list_req) {
                 Ok(res) => (res.encode_to_vec(), String::new()),
                 Err(e) => (Vec::new(), e.to_string()),
             }
@@ -40,11 +35,6 @@ pub fn handle_rpc(input: Vec<u8>) -> FnResult<Vec<u8>> {
         _ => (Vec::new(), format!("Method {} not found in data-provider", request.method)),
     };
 
-    let response = RpcResponse {
-        payload,
-        error,
-        sync: None,
-    };
-
+    let response = RpcResponse { payload, error, sync: None };
     Ok(response.encode_to_vec())
 }

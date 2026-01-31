@@ -3,6 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.compile_protos(
         &[
             "../../proto/common.proto", 
+            "../../proto/dataprovider.proto",
             "../../proto/services.proto",
             "../../proto/storage.proto",
             "../../proto/geomath.proto",

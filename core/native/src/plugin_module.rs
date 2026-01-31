@@ -24,7 +24,6 @@ pub async fn load_services(dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
 pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions: Vec<Function>) -> anyhow::Result<()> {
     let manifest_path = "config/services.json";
     if !std::path::Path::new(manifest_path).exists() {
-        log::warn!("Services manifest not found at {}", manifest_path);
         return Ok(());
     }
 
@@ -42,28 +41,28 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 
                 let wasm_bytes = fs::read(&wasm_path)?;
                 let mut extism_manifest = Manifest::new([Wasm::data(wasm_bytes)]);
-                
-                // Разрешаем HTTP запросы ко всем хостам (или можно ограничить списком)
                 extism_manifest = extism_manifest.with_allowed_host("*");
                 
                 let service_config_path = format!("config/{}.json", name);
-                let service_config = fs::read_to_string(&service_config_path).unwrap_or_else(|_| "{}".to_string());
+                let mut service_config = fs::read_to_string(&service_config_path).unwrap_or_else(|_| "{}".to_string());
+                
+                for (key, value) in std::env::vars() {
+                    let placeholder = format!("${{{}}}", key);
+                    service_config = service_config.replace(&placeholder, &value);
+                }
+
                 extism_manifest.config.insert("config".to_string(), service_config);
 
-                log::info!("Loading local WASM service: {} from {}...", name, wasm_path);
-                // Загружаем плагин с переданными хост-функциями
+                // Загружаем плагин без лишнего вывода в консоль
                 let plugin = Plugin::new(&extism_manifest, functions.iter().cloned(), true)?;
-                log::info!("Plugin {} created successfully.", name);
-                
                 dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(Mutex::new(plugin))));
-                log::info!("Registered local service: {}", name);
             }
             "remote" => {
                 let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
                 let node_id: iroh::NodeId = node_id_str.parse()?;
                 dispatcher.register_service(name.clone(), ServiceLocation::RemoteIroh(node_id));
             }
-            _ => log::warn!("Unknown service location for {}: {}", name, entry.location),
+            _ => {}
         }
     }
     Ok(())
