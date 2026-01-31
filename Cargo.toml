@@ -12,3 +12,32 @@ members = [
     "apps/desktop-client",
 ]
 resolver = "2"
+
+[profile.release]
+opt-level = 3         # Максимальная скорость для нативного кода
+lto = false           # Отключаем LTO для мгновенной линковки хоста
+codegen-units = 16    # Параллельная сборка
+panic = "abort"
+strip = true          # Удаляем символы для уменьшения размера
+
+# Специальные настройки для WASM-модулей (чтобы они оставались маленькими)
+[profile.release.package.veldmap-app-data-browser]
+opt-level = "s"
+
+[profile.release.package.veldmap-core-wasm]
+opt-level = "s"
+
+[profile.release.package.veldmap-data-provider]
+opt-level = "s"
+
+[profile.release.package.veldmap-geo-math]
+opt-level = "s"
+
+[profile.release.package.veldmap-local-storage]
+opt-level = "s"
+
+[profile.release.package.veldmap-tile-server]
+opt-level = "s"
+
+[profile.release.package.veldmap-render]
+opt-level = "s"

@@ -2,7 +2,7 @@ use anyhow::Result;
 use image::{ImageBuffer, Rgba};
 use std::fs::File;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RawImage {
     pub width: u32,
     pub height: u32,

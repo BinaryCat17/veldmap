@@ -1,35 +1,47 @@
 # VeldMap
 
-A modern, decentralized P2P terrain visualization platform.
+Современная децентрализованная P2P платформа для визуализации ландшафта, построенная на архитектуре WASM-плагинов.
 
-## Architecture
+## Архитектура "Everything is a Plugin"
 
-VeldMap is built as a microservice orchestration system using WebAssembly (WASM) and P2P networking:
+VeldMap спроектирован как виртуальная операционная система для картографии. Вся логика, сервисы и даже пользовательские интерфейсы (Apps) являются изолированными WASM-модулями.
 
-- **`proto/`**: Single Source of Truth. Defines all service interfaces using Protocol Buffers.
-- **`veldmap-rust-rpc`**: Generated Rust bindings for Protobuf messages.
-- **`veldmap-core`**: The Orchestrator (Host). Manages WASM plugins via **Extism** and P2P communication via **Iroh**.
-- **WASM Microservices**:
-    - **`data-provider`**: External data sources (e.g., Copernicus CDSE).
-    - **`local-storage`**: Local DEM data management.
-    - **`tile-server`**: Map tiling logic.
+- **`core/native`**: Нативный рантайм на Rust. Создает системное окно, инициализирует GPU (wgpu) и предоставляет плагинам доступ к системным сервисам.
+- **`modules/core`**: "Мозг" системы (WASM). Логический роутер, управляющий маршрутизацией запросов между плагинами и P2P сетью.
+- **`apps/`**: Пользовательские приложения (WASM). Описывают свой интерфейс и логику, общаясь с хостом через UI Bridge.
+- **`modules/`**: Микросервисы (WASM). Данные, рендеринг, математика.
+- **`proto/`**: Единый источник истины. Определяет все интерфейсы через Protocol Buffers.
 
-## Communication
+## Системные сервисы
 
-All modules communicate exclusively via **Protobuf**. 
-- Local modules are called via **Extism Host-to-WASM** calls.
-- Remote modules communicate over **Iroh** P2P connections.
-- State synchronization is handled via **iroh-gossip** and CRDTs.
+Плагины общаются с внешним миром через нативные сервисы Хоста:
+- **`system`**: Доступ к файловой системе, логированию и базовой сети.
+- **`app`**: Управление окном, ввод пользователя и вывод графики (UI Bridge).
 
-## Development
+## Коммуникация
 
-### Building Plugins
-To build a plugin as a WASM module:
+Все взаимодействия происходят исключительно через **Protobuf RPC**:
+1. **Local**: Host-to-WASM и WASM-to-WASM (через мост хоста).
+2. **Remote**: Между узлами через P2P протокол **Iroh**.
+
+## Разработка
+
+### Сборка всего стека
+Для сборки RPC-слоя, всех WASM-модулей и нативного хоста:
 ```bash
-cd veldmap-data-provider
-cargo build --target wasm32-wasip1
+python3 build.py build
 ```
 
-### Running the Core
-The core loads services defined in `config/services.json`. 
-WASM modules should be placed in the `plugins/` directory.
+### Запуск
+Запуск нативного рантайма с автоматической загрузкой плагинов:
+```bash
+python3 run-native.py
+```
+
+## Структура проекта
+- `/apps` — WASM приложения (GUI).
+- `/modules` — WASM микросервисы (Logic).
+- `/core/native` — Нативный хост (Runtime).
+- `/core/web` — Планируемая JS-оболочка для браузеров.
+- `/rpc/rust` — Общий код сериализации.
+- `/proto` — Описания интерфейсов.

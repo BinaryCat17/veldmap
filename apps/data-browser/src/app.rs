@@ -1,17 +1,13 @@
-use iced::widget::{
-    button, column, container, horizontal_space, row, scrollable, text, vertical_space, progress_bar,
+use iced_widget::{
+    button, column, container, row, text, progress_bar,
 };
-use iced::widget::image::Handle;
-use iced::{Alignment, Element, Length, Task, Color, Theme};
-use crate::common::{BrowserItem, icon_text, is_previewable};
-use crate::utils::{generate_preview_with_progress, RawImage};
-use veldmap_rust_rpc::client::VeldmapClient;
-use veldmap_rust_rpc::services::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse};
+use iced_core::image::Handle;
+use iced_core::{Alignment, Element, Length, Color, Theme};
+use iced_tiny_skia::Renderer;
+use iced_runtime::Task;
+use veldmap_rust_rpc::services::{SearchRequest, SearchResponse};
 use veldmap_rust_rpc::common::{DataProduct, SearchFilter};
-use prost::Message;
-use std::sync::Arc;
-use std::path::PathBuf;
-use async_stream::stream;
+use prost::Message as ProstMessage;
 use crate::search;
 use crate::downloaded;
 use crate::preview;
@@ -24,62 +20,42 @@ pub enum ViewMode {
     Downloaded,
 }
 
-pub struct VeldMapToolsGui {
-    pub view_mode: ViewMode,
-    pub status_message: String,
-    pub error_message: Option<String>,
-    pub search_state: search::SearchState,
-    pub browse_items: Vec<BrowserItem>,
-    pub downloaded_state: downloaded::DownloadedState,
-    pub token_stack: Vec<String>,
-    pub current_token: Option<String>,
-    pub next_token: Option<String>,
-    pub current_browse_path: String,
-    pub search_results: Vec<DataProduct>,
-    pub local_files: Vec<BrowserItem>,
-    pub selected_product: Option<String>,
-    pub product_files: Vec<BrowserItem>,
-    pub download_progress: Option<f32>,
-    pub current_image: Option<Handle>,
-    pub client: Option<Arc<VeldmapClient>>,
-}
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Message {
     SwitchMode(ViewMode),
     SearchInputChanged(String),
     SearchFilterTypeChanged(search::SearchFilterType),
     SearchPressed,
     SearchResultsReceived(Result<Vec<DataProduct>, String>),
+    ClearError,
     ProductSelected(DataProduct),
-    FilesReceived(Result<Vec<String>, String>),
-    BackToList,
-    BrowseFetchPage(Option<String>),
-    NextPage,
-    PrevPage,
-    BrowserItemsReceived(Result<(Vec<String>, Option<String>), String>),
     BrowsePath(String),
     BrowseUp,
-    ScanLocalFiles,
-    LocalFilesReceived(Vec<BrowserItem>),
+    ViewFile(String),
+    DeleteLocalFile(String),
+    PrevPage,
+    NextPage,
     LocalSearchChanged(String),
     LocalFilterChanged(downloaded::FileFilter),
-    DeleteLocalFile(String),
-    SourceInitialized(Result<Arc<VeldmapClient>, String>),
-    RetryConnection,
-    DownloadFile(String),
-    DownloadProgress(f32),
-    DownloadCompleted(Result<PathBuf, String>),
-    ViewFile(String),
-    PreviewReady(Result<RawImage, String>),
     ClosePreview,
-    ClearError,
 }
 
-impl std::fmt::Debug for Message {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Message")
-    }
+pub struct VeldMapToolsGui {
+    pub view_mode: ViewMode,
+    pub status_message: String,
+    pub error_message: Option<String>,
+    pub search_state: search::SearchState,
+    pub search_results: Vec<DataProduct>,
+    pub download_progress: Option<f32>,
+    pub current_image: Option<Handle>,
+    pub downloaded_state: downloaded::DownloadedState,
+    pub token_stack: Vec<String>,
+    pub current_token: Option<String>,
+    pub next_token: Option<String>,
+    pub current_browse_path: String,
+    pub product_files: Vec<crate::common::BrowserItem>,
+    pub browse_items: Vec<crate::common::BrowserItem>,
+    pub local_files: Vec<crate::common::BrowserItem>,
 }
 
 impl VeldMapToolsGui {
@@ -87,71 +63,55 @@ impl VeldMapToolsGui {
         (
             Self {
                 view_mode: ViewMode::Search,
-                status_message: "Connecting to VeldMap Core...".to_string(),
+                status_message: "VeldMap Data Browser Ready".to_string(),
                 error_message: None,
                 search_state: search::SearchState::default(),
-                browse_items: Vec::new(),
+                search_results: Vec::new(),
+                download_progress: None,
+                current_image: None,
                 downloaded_state: downloaded::DownloadedState::default(),
                 token_stack: Vec::new(),
                 current_token: None,
                 next_token: None,
                 current_browse_path: String::new(),
-                search_results: Vec::new(),
-                local_files: Vec::new(),
-                selected_product: None,
                 product_files: Vec::new(),
-                download_progress: None,
-                current_image: None,
-                client: None,
+                browse_items: Vec::new(),
+                local_files: Vec::new(),
             },
-            Task::perform(async move { 
-                VeldmapClient::connect("127.0.0.1:5050").await.map(Arc::new).map_err(|e| e.to_string())
-            }, Message::SourceInitialized),
+            Task::none(),
         )
     }
-
-    pub fn title(&self) -> String { "VeldMap Data Browser".into() }
-
-    pub fn theme(&self) -> Theme { Theme::Dark }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SwitchMode(mode) => {
                 self.view_mode = mode;
-                self.selected_product = None;
                 self.current_image = None;
                 self.download_progress = None;
-                match self.view_mode {
-                    ViewMode::Browse if self.browse_items.is_empty() && self.client.is_some() => return self.update(Message::BrowseFetchPage(None)),
-                    ViewMode::Downloaded => return self.update(Message::ScanLocalFiles),
-                    _ => {}
-                }
                 Task::none()
             }
             Message::SearchInputChanged(q) => { self.search_state.query = q; Task::none() }
             Message::SearchFilterTypeChanged(ft) => { self.search_state.filter_type = ft; Task::none() }
             Message::SearchPressed => {
-                if let Some(client) = &self.client {
-                    self.status_message = format!("Searching...");
-                    let client = client.clone();
-                    let query = self.search_state.query.clone();
-                    let filter_type = self.search_state.filter_type;
-                    self.selected_product = None;
-                    Task::perform(async move {
-                        let mut filters = Vec::new();
-                        match filter_type {
-                            search::SearchFilterType::GridId => filters.push(SearchFilter { name: "gridId".into(), value: query.clone() }),
-                            search::SearchFilterType::Collection => filters.push(SearchFilter { name: "Collection".into(), value: query.clone() }),
-                            _ => {}
+                let mut filters = Vec::new();
+                match self.search_state.filter_type {
+                    search::SearchFilterType::GridId => filters.push(SearchFilter { name: "gridId".into(), value: self.search_state.query.clone() }),
+                    search::SearchFilterType::Collection => filters.push(SearchFilter { name: "Collection".into(), value: self.search_state.query.clone() }),
+                    _ => {}
+                }
+                let q = if self.search_state.filter_type == search::SearchFilterType::General { self.search_state.query.clone() } else { String::new() };
+                
+                let req = SearchRequest { query: q, filters };
+                match veldmap_rust_rpc::host::call_service("data-provider", "search", req.encode_to_vec()) {
+                    Ok(res_bytes) => {
+                        if let Ok(response) = SearchResponse::decode(&res_bytes[..]) {
+                            self.search_results = response.products;
+                            self.status_message = format!("Found {} results", self.search_results.len());
                         }
-                        let q = if filter_type == search::SearchFilterType::General { query } else { String::new() };
-                        
-                        let req = SearchRequest { query: q, filters };
-                        let res_bytes = client.call("data-provider", "search", req.encode_to_vec()).await.map_err(|e| e.to_string())?;
-                        let response = SearchResponse::decode(&res_bytes[..]).map_err(|e| e.to_string())?;
-                        Ok(response.products)
-                    }, Message::SearchResultsReceived)
-                } else { Task::none() }
+                    }
+                    Err(e) => { self.error_message = Some(format!("Search Error: {}", e)); }
+                }
+                Task::none()
             }
             Message::SearchResultsReceived(res) => {
                 match res {
@@ -160,212 +120,16 @@ impl VeldMapToolsGui {
                 }
                 Task::none()
             }
-            Message::ProductSelected(prod) => {
-                if let Some(client) = &self.client {
-                    self.selected_product = Some(prod.name.clone());
-                    let client = client.clone();
-                    Task::perform(async move { 
-                        let req = ListPathRequest { path: prod.path, token: String::new() };
-                        let res_bytes = client.call("data-provider", "list_path", req.encode_to_vec()).await.map_err(|e| e.to_string())?;
-                        let response = ListPathResponse::decode(&res_bytes[..]).map_err(|e| e.to_string())?;
-                        Ok(response.items)
-                    }, Message::FilesReceived)
-                } else { Task::none() }
-            }
-            Message::FilesReceived(res) => {
-                match res {
-                    Ok(files) => {
-                        let base_path = PathBuf::from("data/dem/source");
-                        self.product_files = files.into_iter().map(|identifier| {
-                            let name = identifier.split('/').last().unwrap_or(&identifier).to_string();
-                            let exists_locally = base_path.join(&name).exists();
-                            BrowserItem { s3_key: identifier, name, is_folder: false, exists_locally }
-                        }).collect();
-                    }
-                    Err(e) => { self.error_message = Some(format!("List Error: {}", e)); }
-                }
-                Task::none()
-            }
-            Message::BackToList => { self.selected_product = None; Task::none() }
-            Message::BrowsePath(path) => {
-                if path.is_empty() || path.ends_with('/') {
-                    self.current_browse_path = path;
-                    self.token_stack.clear();
-                    self.current_token = None;
-                    self.update(Message::BrowseFetchPage(None))
-                } else { self.update(Message::DownloadFile(path)) }
-            }
-            Message::BrowseUp => {
-                let current = self.current_browse_path.trim_end_matches('/');
-                if let Some(idx) = current.rfind('/') {
-                    self.current_browse_path = current[..=idx].to_string();
-                } else { self.current_browse_path = String::new(); }
-                self.token_stack.clear();
-                self.current_token = None;
-                self.update(Message::BrowseFetchPage(None))
-            }
-            Message::BrowseFetchPage(token) => {
-                if let Some(client) = &self.client {
-                    self.status_message = format!("Browsing...");
-                    let client = client.clone();
-                    self.current_token = token.clone();
-                    let path = self.current_browse_path.clone();
-                    Task::perform(async move { 
-                        let req = ListPathRequest { path, token: token.unwrap_or_default() };
-                        let res_bytes = client.call("data-provider", "list_path", req.encode_to_vec()).await.map_err(|e| e.to_string())?;
-                        let response = ListPathResponse::decode(&res_bytes[..]).map_err(|e| e.to_string())?;
-                        Ok((response.items, response.next_token))
-                    }, Message::BrowserItemsReceived)
-                } else { Task::none() }
-            }
-            Message::NextPage => {
-                if let Some(token) = &self.next_token {
-                    self.token_stack.push(self.current_token.clone().unwrap_or_else(|| "ROOT".to_string()));
-                    return self.update(Message::BrowseFetchPage(Some(token.clone())));
-                }
-                Task::none()
-            }
-            Message::PrevPage => {
-                if let Some(prev_token) = self.token_stack.pop() {
-                    let t = if prev_token == "ROOT" { None } else { Some(prev_token) };
-                    return self.update(Message::BrowseFetchPage(t));
-                }
-                Task::none()
-            }
-            Message::BrowserItemsReceived(res) => {
-                match res {
-                    Ok((items, next)) => {
-                        let base_path = PathBuf::from("data/dem/source");
-                        self.browse_items = items.into_iter().map(|identifier| {
-                            let is_folder = identifier.ends_with('/');
-                            let name = identifier.trim_end_matches('/').split('/').last().unwrap_or(&identifier).to_string();
-                            let exists_locally = if is_folder { false } else { base_path.join(&name).exists() };
-                            BrowserItem { s3_key: identifier, name, is_folder, exists_locally }
-                        }).collect();
-                        self.next_token = if next.is_empty() { None } else { Some(next) };
-                    }
-                    Err(e) => { self.error_message = Some(format!("Browse Error: {}", e)); }
-                }
-                Task::none()
-            }
-            Message::ScanLocalFiles => {
-                Task::perform(async move {
-                    let mut items = Vec::new();
-                    let dir = PathBuf::from("data/dem/source");
-                    if let Ok(entries) = std::fs::read_dir(dir) {
-                        for entry in entries.flatten() {
-                            if let Ok(name) = entry.file_name().into_string() {
-                                if !entry.path().is_dir() {
-                                    items.push(BrowserItem { s3_key: name.clone(), name: name.clone(), is_folder: false, exists_locally: true });
-                                }
-                            }
-                        }
-                    }
-                    items
-                }, Message::LocalFilesReceived)
-            }
-            Message::LocalFilesReceived(items) => { self.local_files = items; Task::none() }
+            Message::ClearError => { self.error_message = None; Task::none() }
             Message::LocalSearchChanged(q) => { self.downloaded_state.search_query = q; Task::none() }
             Message::LocalFilterChanged(f) => { self.downloaded_state.filter = f; Task::none() }
-            Message::DeleteLocalFile(name) => {
-                let path = PathBuf::from("data/dem/source").join(&name);
-                if path.exists() { let _ = std::fs::remove_file(path); }
-                self.update(Message::ScanLocalFiles)
-            }
-            Message::SourceInitialized(res) => {
-                match res {
-                    Ok(c) => { self.client = Some(c); self.status_message = "Connected to Core".into(); self.error_message = None; }
-                    Err(e) => { self.error_message = Some(format!("Connection Failed: {}. Make sure VeldMap Core is running.", e)); }
-                }
-                Task::none()
-            }
-            Message::RetryConnection => {
-                self.error_message = None;
-                self.status_message = "Reconnecting...".into();
-                Task::perform(async move { VeldmapClient::connect("127.0.0.1:5050").await.map(Arc::new).map_err(|e| e.to_string()) }, Message::SourceInitialized)
-            }
-            Message::DownloadFile(identifier) => {
-                let dest = self.get_local_path(&identifier);
-                if dest.exists() { return Task::none(); }
-                if let Some(client) = &self.client {
-                    let client = client.clone();
-                    self.download_progress = Some(0.0);
-                    return Task::stream(stream! {
-                        let req = DownloadRequest { identifier: identifier.clone(), destination: dest.to_string_lossy().to_string() };
-                        let _ = client.call("data-provider", "download", req.encode_to_vec()).await;
-                        yield Message::DownloadProgress(1.0);
-                        yield Message::DownloadCompleted(Ok(dest));
-                    });
-                }
-                Task::none()
-            }
-            Message::DownloadProgress(p) => { self.download_progress = Some(p); Task::none() }
-            Message::ViewFile(identifier) => {
-                let is_local = !identifier.contains('/');
-                let dest = if is_local { PathBuf::from("data/dem/source").join(&identifier) } else { self.get_local_path(&identifier) };
-                let filename = identifier.split('/').last().unwrap_or("file").to_string();
-                
-                let client = self.client.clone();
-                self.status_message = format!("Opening {}...", filename);
-                self.download_progress = Some(0.0);
-
-                return Task::stream(stream! {
-                    if !dest.exists() {
-                        if let Some(c) = client {
-                            let req = DownloadRequest { identifier: identifier.clone(), destination: dest.to_string_lossy().to_string() };
-                            let _ = c.call("data-provider", "download", req.encode_to_vec()).await;
-                        }
-                    }
-                    
-                    let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-                    let d = dest.clone();
-                    let handle = tokio::task::spawn_blocking(move || {
-                        generate_preview_with_progress(&d, Some(tx))
-                    });
-
-                    while let Some(p) = rx.recv().await {
-                        yield Message::DownloadProgress(p);
-                    }
-                    
-                    match handle.await {
-                        Ok(Ok(raw)) => yield Message::PreviewReady(Ok(raw)),
-                        Ok(Err(e)) => yield Message::PreviewReady(Err(e.to_string())),
-                        Err(_) => yield Message::PreviewReady(Err("Thread panic".into())),
-                    }
-                });
-            }
-            Message::PreviewReady(res) => {
-                self.download_progress = None;
-                match res {
-                    Ok(raw) => { 
-                        self.current_image = Some(Handle::from_rgba(raw.width, raw.height, raw.pixels)); 
-                        self.status_message = "Preview loaded".into(); 
-                    }
-                    Err(e) => { self.error_message = Some(format!("Preview Error: {}", e)); }
-                }
-                Task::none()
-            }
             Message::ClosePreview => { self.current_image = None; Task::none() }
-            Message::DownloadCompleted(res) => {
-                self.download_progress = None;
-                if let Ok(path) = res {
-                    let base_path = PathBuf::from("data/dem/source");
-                    for item in self.browse_items.iter_mut() {
-                        let name = item.s3_key.split('/').last().unwrap_or("");
-                        if base_path.join(name) == path { item.exists_locally = true; }
-                    }
-                    for item in self.product_files.iter_mut() {
-                        let name = item.s3_key.split('/').last().unwrap_or("");
-                        if base_path.join(name) == path { item.exists_locally = true; }
-                    }
-                }
-                Task::none()
-            }
-            Message::ClearError => { self.error_message = None; Task::none() }
+            _ => Task::none(),
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self) -> Element<'_, Message, Theme, Renderer> {
+        let _ = veldmap_rust_rpc::host::call_service("system", "log", "App: view() called".as_bytes().to_vec());
         let title_bar = column![
             text("VeldMap Tools").size(24),
             row![
@@ -375,7 +139,7 @@ impl VeldMapToolsGui {
             ].spacing(10),
         ].spacing(10);
 
-        let error_view: Element<Message> = if let Some(err) = &self.error_message {
+        let error_view: Element<Message, Theme, Renderer> = if let Some(err) = &self.error_message {
             container(row![
                 button("X").on_press(Message::ClearError).padding(5),
                 text(err).size(13).color(Color::from_rgb(1.0, 0.4, 0.4)).width(Length::Fill),
@@ -385,59 +149,21 @@ impl VeldMapToolsGui {
             .into()
         } else { column![].into() };
 
-        let progress_view: Element<Message> = if let Some(p) = self.download_progress {
-            column![text(format!("Processing... {:.0}%", p * 100.0)).size(12), progress_bar(0.0..=1.0, p).height(5)].spacing(5).into()
+        let progress_view: Element<Message, Theme, Renderer> = if let Some(p) = self.download_progress {
+            column![text(format!("Processing... {:.0}%", p * 100.0)).size(12), progress_bar(0.0..=1.0, p)].spacing(5).into()
         } else { column![].into() };
 
-        let main_content: Element<Message> = if let Some(handle) = &self.current_image {
+        let main_content: Element<Message, Theme, Renderer> = if let Some(handle) = &self.current_image {
             preview::view(handle)
-        } else if let Some(product_name) = &self.selected_product {
-            column![
-                button("← Back").on_press(Message::BackToList).padding(5),
-                text(format!("Product: {}", product_name)).size(18),
-                scrollable(column(self.product_files.iter().map(|item| {
-                    let previewable = is_previewable(&item.name);
-                    let label_color = if item.exists_locally { Color::from_rgb(0.3, 0.8, 0.3) } else { Color::WHITE };
-                    let download_btn: Element<Message> = if item.exists_locally { 
-                        horizontal_space().width(0).into() 
-                    } else { 
-                        button("Download").on_press(Message::DownloadFile(item.s3_key.clone())).padding(3).into() 
-                    };
-                    let controls: Element<Message> = if previewable {
-                        row![download_btn, button("View").on_press(Message::ViewFile(item.s3_key.clone())).padding(3)].spacing(5).into()
-                    } else if item.exists_locally {
-                        text("Ready").size(12).into()
-                    } else {
-                        button("Download").on_press(Message::DownloadFile(item.s3_key.clone())).padding(3).into()
-                    };
-                    row![
-                        icon_text(if item.exists_locally { "✅" } else { "📄" }, &item.name, label_color),
-                        horizontal_space().width(Length::Fill),
-                        controls
-                    ].spacing(20).align_y(Alignment::Center).into()
-                }).collect::<Vec<Element<Message>>>()).spacing(8)).height(Length::Fill)
-            ].spacing(15).into()
         } else {
             match self.view_mode {
                 ViewMode::Search => search::view(&self.search_state, &self.search_results),
-                ViewMode::Browse => if self.client.is_none() {
-                    column![
-                        text("Connecting to VeldMap Core...").color(Color::from_rgb(0.8, 0.4, 0.4)),
-                        button("Retry Connection").on_press(Message::RetryConnection).padding(10)
-                    ].spacing(10).into()
-                } else {
-                    browse::view(&self.current_browse_path, &self.browse_items, &self.status_message, !self.token_stack.is_empty(), self.next_token.is_some())
-                },
+                ViewMode::Browse => browse::view(&self.current_browse_path, &self.browse_items, &self.status_message, !self.token_stack.is_empty(), self.next_token.is_some()),
                 ViewMode::Downloaded => downloaded::view(&self.downloaded_state, &self.local_files),
             }
         };
 
-        container(column![title_bar, vertical_space().height(10), error_view, progress_view, main_content].spacing(10).padding(20))
+        container(column![title_bar, error_view, progress_view, main_content].spacing(10).padding(20))
             .width(Length::Fill).height(Length::Fill).into()
-    }
-
-    fn get_local_path(&self, identifier: &str) -> PathBuf {
-        let filename = identifier.split('/').last().unwrap_or("downloaded");
-        PathBuf::from("data/dem/source").join(filename)
     }
 }

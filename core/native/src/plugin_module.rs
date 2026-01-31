@@ -43,14 +43,20 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 let wasm_bytes = fs::read(&wasm_path)?;
                 let mut extism_manifest = Manifest::new([Wasm::data(wasm_bytes)]);
                 
+                // Разрешаем HTTP запросы ко всем хостам (или можно ограничить списком)
+                extism_manifest = extism_manifest.with_allowed_host("*");
+                
                 let service_config_path = format!("config/{}.json", name);
                 let service_config = fs::read_to_string(&service_config_path).unwrap_or_else(|_| "{}".to_string());
                 extism_manifest.config.insert("config".to_string(), service_config);
 
+                log::info!("Loading local WASM service: {} from {}...", name, wasm_path);
                 // Загружаем плагин с переданными хост-функциями
                 let plugin = Plugin::new(&extism_manifest, functions.iter().cloned(), true)?;
+                log::info!("Plugin {} created successfully.", name);
+                
                 dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(Mutex::new(plugin))));
-                log::info!("Registered local service: {} from {}", name, wasm_path);
+                log::info!("Registered local service: {}", name);
             }
             "remote" => {
                 let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;

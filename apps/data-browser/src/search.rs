@@ -1,70 +1,45 @@
-use iced::widget::{
-    button, column, row, scrollable, text, text_input, horizontal_space, pick_list
-};
-use iced::{Element, Length, Color, Alignment};
+use iced_widget::{button, container, column, text};
+use iced_core::{Element, Length, Theme, Color};
+use iced_tiny_skia::Renderer;
 use crate::app::Message;
-use veldmap_core::DataProduct;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SearchFilterType {
-    General,
-    GridId,
-    Collection,
-}
-
-impl std::fmt::Display for SearchFilterType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            SearchFilterType::General => "Name / Text",
-            SearchFilterType::GridId => "Grid ID (N55_E037)",
-            SearchFilterType::Collection => "Collection Name",
-        })
-    }
-}
+use veldmap_rust_rpc::common::DataProduct;
 
 pub struct SearchState {
     pub query: String,
     pub filter_type: SearchFilterType,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFilterType {
+    General,
+    Collection,
+    GridId,
+}
+
 impl Default for SearchState {
     fn default() -> Self {
-        Self {
-            query: String::new(),
-            filter_type: SearchFilterType::General,
-        }
+        Self { query: String::new(), filter_type: SearchFilterType::General }
     }
 }
 
-pub fn view<'a>(state: &'a SearchState, results: &'a [DataProduct]) -> Element<'a, Message> {
-    let controls = row![
-        pick_list(&[SearchFilterType::General, SearchFilterType::GridId, SearchFilterType::Collection][..], Some(state.filter_type), Message::SearchFilterTypeChanged)
-            .padding(10),
-        text_input("Enter search query...", &state.query)
-            .on_input(Message::SearchInputChanged)
-            .on_submit(Message::SearchPressed)
-            .padding(10),
-        button("Find").on_press(Message::SearchPressed).padding(10),
-    ].spacing(10).align_y(Alignment::Center);
-
-    let list = column(results.iter().map(|item| {
-        button(
-            column![
-                text(&item.name).size(15),
-                row![
-                    text(item.timestamp.as_deref().unwrap_or("No timestamp")).size(10).color(Color::from_rgb(0.4, 0.7, 0.4)),
-                    horizontal_space().width(20),
-                    text(&item.path).size(10).color(Color::from_rgb(0.6, 0.6, 0.6)),
-                ]
-            ]
-        )
-        .on_press(Message::ProductSelected(item.clone()))
-        .width(Length::Fill)
-        .padding(8).into()
-    }).collect::<Vec<Element<Message>>>()).spacing(5);
-
+pub fn view<'a>(_state: &'a SearchState, _results: &'a [DataProduct]) -> Element<'a, Message, Theme, Renderer> {
     column![
-        controls,
-        scrollable(list).height(Length::Fill)
-    ].spacing(15).into()
+        container(text("VELD_MAP DATA BROWSER").size(40))
+            .width(Length::Fill)
+            .height(Length::Fixed(100.0))
+            .center_x(Length::Fill)
+            .style(|_| container::Style::default().background(Color::from_rgb(0.5, 0.0, 0.0))),
+        
+        container(
+            button(container(text("CLICK TO SEARCH").size(20)).padding(20))
+                .on_press(Message::SearchPressed)
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(|_| container::Style::default().background(Color::from_rgb(0.1, 0.1, 0.2)))
+    ]
+    .spacing(20)
+    .into()
 }

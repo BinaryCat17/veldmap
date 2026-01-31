@@ -39,11 +39,11 @@ def build_all():
 
     for module in MODULES:
         print(f"\n--- Module: {module} ---")
-        run(["cargo", "build", "-p", module, "--target", WASM_TARGET])
+        run(["cargo", "build", "-p", module, "--target", WASM_TARGET, "--release"])
         
         # Rust lib names use underscores instead of hyphens
         wasm_file_name = module.replace("-", "_") + ".wasm"
-        source_path = os.path.join("target", WASM_TARGET, "debug", wasm_file_name)
+        source_path = os.path.join("target", WASM_TARGET, "release", wasm_file_name)
         dest_path = os.path.join(PLUGINS_DIR, wasm_file_name)
         
         print(f"Deploying {wasm_file_name} to {PLUGINS_DIR}/")
@@ -51,7 +51,7 @@ def build_all():
 
     # 3. Build Native Host
     print("\n[3/3] Building Native Host...")
-    run(["cargo", "build", "-p", "veldmap-native-host"])
+    run(["cargo", "build", "-p", "veldmap-native-host", "--release"])
 
 def clean():
     """Remove build artifacts."""

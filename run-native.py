@@ -10,7 +10,7 @@ def main():
     print("-> Launching VeldMap Host...")
     try:
         # В этой архитектуре Хост сам загрузит core.wasm и apps/*.wasm
-        subprocess.run(["cargo", "run", "-p", "veldmap-native-host"])
+        subprocess.run(["cargo", "run", "-p", "veldmap-native-host", "--release"])
     except KeyboardInterrupt:
         print("\nShutting down.")
 
