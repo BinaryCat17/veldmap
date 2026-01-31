@@ -24,7 +24,7 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
     mem.free();
     
     if res_ptr == 0 {
-        return Err(anyhow::anyhow!("Host call to {}:{} returned null (OOM?)", service, method));
+        return Err(anyhow::anyhow!("Host call to {}:{} failed (plugin returned null, possibly execution error or OOM)", service, method));
     }
 
     let res_mem = Memory::find(res_ptr as u64)

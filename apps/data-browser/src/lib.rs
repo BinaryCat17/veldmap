@@ -22,12 +22,12 @@ use iced_runtime::user_interface::{self, UserInterface};
 
 lazy_static! {
     static ref GUI: Mutex<Option<VeldMapToolsGui>> = Mutex::new(None);
-    static ref CANVAS_SIZE: Mutex<(u32, u32)> = Mutex::new((1024, 768));
+    static ref CANVAS_SIZE: Mutex<(u32, u32)> = Mutex::new((1, 1));
     static ref CURSOR_POSITION: Mutex<Point> = Mutex::new(Point::ORIGIN);
     static ref PENDING_EVENTS: Mutex<Vec<iced_core::Event>> = Mutex::new(Vec::new());
 }
 
-const SCALE_FACTOR: f32 = 1.5;
+const SCALE_FACTOR: f32 = 1.0;
 
 thread_local! {
     static INTERFACE_CACHE: RefCell<user_interface::Cache> = RefCell::new(user_interface::Cache::default());
@@ -116,83 +116,114 @@ pub fn handle_rpc(input: Vec<u8>) -> FnResult<Vec<u8>> {
 }
 
 fn render_and_send() {
-    let mut gui_lock = GUI.lock().unwrap();
+    let mut gui_lock = match GUI.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => {
+            log::error!("GUI Mutex poisoned! Resetting...");
+            let mut lock = poisoned.into_inner();
+            *lock = None;
+            lock
+        }
+    };
     let gui = match gui_lock.as_mut() { Some(g) => g, None => return };
 
-    let (width, height) = *CANVAS_SIZE.lock().unwrap();
+    let (width, height) = match CANVAS_SIZE.lock() {
+        Ok(lock) => *lock,
+        Err(_) => (1024, 768)
+    };
     if width == 0 || height == 0 { return; }
 
-    let cursor_pos = *CURSOR_POSITION.lock().unwrap();
+    let cursor_pos = match CURSOR_POSITION.lock() {
+        Ok(lock) => *lock,
+        Err(_) => Point::ORIGIN
+    };
     let cursor = mouse::Cursor::Available(cursor_pos);
     
-    let events = std::mem::take(&mut *PENDING_EVENTS.lock().unwrap());
+    let events = match PENDING_EVENTS.lock() {
+        Ok(mut lock) => std::mem::take(&mut *lock),
+        Err(_) => Vec::new()
+    };
 
     let mut pixels = vec![0u8; (width * height * 4) as usize];
-    let mut pixmap = tiny_skia::PixmapMut::from_bytes(&mut pixels, width, height).unwrap();
+    let mut pixmap = match tiny_skia::PixmapMut::from_bytes(&mut pixels, width, height) {
+        Some(p) => p,
+        None => {
+            log::error!("Failed to create pixmap for {}x{}", width, height);
+            return;
+        }
+    };
     pixmap.fill(tiny_skia::Color::from_rgba8(20, 23, 26, 255)); 
 
     let viewport = Viewport::with_physical_size(Size::new(width, height), SCALE_FACTOR);
     
-    RENDERER.with(|renderer_cell| {
-        let mut renderer = renderer_cell.borrow_mut();
-        
-        FONTS_LOADED.with(|loaded_cell| {
-            let mut loaded = loaded_cell.borrow_mut();
-            if !*loaded {
-                let fs = iced_graphics::text::font_system();
-                let mut fs_write = fs.write().unwrap();
-                let db = fs_write.raw().db_mut();
-                db.load_font_data(common::DEJAVU_FONT_DATA.to_vec());
-                db.load_font_data(common::EMOJI_FONT_DATA.to_vec());
-                *loaded = true;
-            }
-        });
-
-        INTERFACE_CACHE.with(|cache_cell| {
-            let mut cache = std::mem::take(&mut *cache_cell.borrow_mut());
-            let mut messages = Vec::new();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        RENDERER.with(|renderer_cell| {
+            let mut renderer = renderer_cell.borrow_mut();
             
-            {
-                let mut ui = UserInterface::build(
+            FONTS_LOADED.with(|loaded_cell| {
+                let mut loaded = loaded_cell.borrow_mut();
+                if !*loaded {
+                    let fs = iced_graphics::text::font_system();
+                    if let Ok(mut fs_write) = fs.write() {
+                        let db = fs_write.raw().db_mut();
+                        let _ = db.load_font_data(common::DEJAVU_FONT_DATA.to_vec());
+                        let _ = db.load_font_data(common::EMOJI_FONT_DATA.to_vec());
+                        *loaded = true;
+                    }
+                }
+            });
+
+            INTERFACE_CACHE.with(|cache_cell| {
+                let mut cache = std::mem::take(&mut *cache_cell.borrow_mut());
+                let mut messages = Vec::new();
+                
+                {
+                    let mut ui = UserInterface::build(
+                        gui.view(),
+                        viewport.logical_size(),
+                        cache,
+                        &mut *renderer,
+                    );
+
+                    let mut clipboard = iced_core::clipboard::Null;
+                    ui.update(&events, cursor, &mut *renderer, &mut clipboard, &mut messages);
+                    cache = ui.into_cache();
+                }
+
+                if !messages.is_empty() {
+                    for message in messages {
+                        let _ = gui.update(message);
+                    }
+                }
+
+                let mut user_interface = UserInterface::build(
                     gui.view(),
                     viewport.logical_size(),
                     cache,
                     &mut *renderer,
                 );
 
-                let mut clipboard = iced_core::clipboard::Null;
-                ui.update(&events, cursor, &mut *renderer, &mut clipboard, &mut messages);
-                cache = ui.into_cache();
-            }
-
-            if !messages.is_empty() {
-                for message in messages {
-                    let _ = gui.update(message);
+                user_interface.draw(&mut *renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
+                
+                if let Ok(mut mask) = tiny_skia::Mask::new(width, height).ok_or("Mask error") {
+                    renderer.draw(
+                        &mut pixmap,
+                        &mut mask,
+                        &viewport,
+                        &[Rectangle { x: 0.0, y: 0.0, width: width as f32, height: height as f32 }],
+                        Color::TRANSPARENT,
+                    );
                 }
-            }
 
-            let mut user_interface = UserInterface::build(
-                gui.view(),
-                viewport.logical_size(),
-                cache,
-                &mut *renderer,
-            );
-
-            user_interface.draw(&mut *renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-            
-            let mut mask = tiny_skia::Mask::new(width, height).expect("Failed to create mask");
-
-            renderer.draw(
-                &mut pixmap,
-                &mut mask,
-                &viewport,
-                &[Rectangle { x: 0.0, y: 0.0, width: width as f32, height: height as f32 }],
-                Color::TRANSPARENT,
-            );
-
-            *cache_cell.borrow_mut() = user_interface.into_cache();
+                *cache_cell.borrow_mut() = user_interface.into_cache();
+            });
         });
-    });
+    }));
+
+    if res.is_err() {
+        log::error!("Panic caught during UI rendering!");
+        return;
+    }
 
     let frame = DrawFrame { rgba_data: pixels, width, height };
     let cmd = UiDisplayCommand { command: Some(ui_display_command::Command::DrawFrame(frame)) };

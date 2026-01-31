@@ -1,122 +1,144 @@
 use extism_pdk::*;
-use veldmap_rust_rpc::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse, DataProduct};
+use veldmap_rust_rpc::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
 use veldmap_rust_rpc::host::host_log;
 use serde_json::Value;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use std::time::SystemTime;
+use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
+use aws_sigv4::sign::v4;
+use aws_smithy_runtime_api::client::identity::Identity;
+use url::Url;
 
-pub fn search(request: SearchRequest) -> anyhow::Result<SearchResponse> {
-    let mut url = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products".to_string();
-    let mut params = Vec::new();
-
-    if !request.query.is_empty() {
-        params.push(format!("contains(Name,'{}')", request.query));
-    }
-
-    for filter in request.filters {
-        if filter.name == "gridId" {
-            params.push(format!("Attributes/OData.CSC.StringAttribute/any(att:att/Name eq 'gridId' and att/Value eq '{}')", filter.value));
-        } else if filter.name == "Collection" {
-            params.push(format!("Collection/Name eq '{}'", filter.value));
-        }
-    }
-
-    if !params.is_empty() {
-        url.push_str("?$filter=");
-        url.push_str(&params.join(" and "));
-    }
-    url.push_str("&$top=50&$expand=Attributes");
-
-    let req = HttpRequest::new(url);
-    let res = http::request::<()>(&req, None)?;
-
-    if res.status() != 200 {
-        return Err(anyhow::anyhow!("CDSE OData API returned status {}", res.status()));
-    }
-
-    let body = res.body();
-    let json: Value = serde_json::from_slice(&body)?;
-
-    let products: Vec<DataProduct> = json["value"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("No value in response"))?
-        .iter()
-        .map(|item| {
-            let mut grid_id = String::new();
-            if let Some(attrs) = item["Attributes"].as_array() {
-                for attr in attrs {
-                    if attr["Name"] == "gridId" {
-                        grid_id = attr["Value"].as_str().unwrap_or("").to_string();
-                        break;
-                    }
-                }
-            }
-            DataProduct {
-                name: item["Name"].as_str().unwrap_or("Unknown").to_string(),
-                path: item["S3Path"].as_str().unwrap_or("").to_string(),
-                timestamp: item["ContentDate"]["Start"].as_str().unwrap_or("").to_string(),
-                grid_id,
-            }
-        })
-        .collect();
-
-    Ok(SearchResponse {
-        products,
-        error: String::new(),
-    })
+fn get_config() -> Value {
+    let config_val = config::get("config").unwrap_or_default();
+    let config_str = config_val.unwrap_or_else(|| "{}".to_string());
+    serde_json::from_str(&config_str).unwrap_or(Value::Object(serde_json::Map::new()))
 }
 
-pub fn download(request: DownloadRequest) -> anyhow::Result<DownloadResponse> {
-    let download_url = format!(
-        "https://catalogue.dataspace.copernicus.eu/odata/v1/Products({})/$value",
-        request.identifier
-    );
+fn get_identity() -> anyhow::Result<Identity> {
+    let cfg = get_config();
+    let access_key = cfg["access_key"].as_str().unwrap_or("").to_string();
+    let secret_key = cfg["secret_key"].as_str().unwrap_or("").to_string();
+    
+    if access_key.is_empty() || secret_key.is_empty() {
+        return Err(anyhow::anyhow!("S3 credentials missing"));
+    }
+    
+    let credentials = aws_credential_types::Credentials::new(access_key, secret_key, None, None, "veldmap");
+    Ok(Identity::new(credentials, None))
+}
 
-    Ok(DownloadResponse {
-        success: true,
-        error: String::new(),
-        download_url,
-    })
+pub fn search(_request: SearchRequest) -> anyhow::Result<SearchResponse> {
+    Ok(SearchResponse { products: vec![], error: String::new() })
+}
+
+pub fn download(_request: DownloadRequest) -> anyhow::Result<DownloadResponse> {
+    Ok(DownloadResponse { success: false, error: "Download not implemented".into(), download_url: "".into() })
 }
 
 pub fn list_path(request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
-    let mut items = Vec::new();
-    let prefix = request.path.trim_start_matches('/').to_string();
+    let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
+    let identity = get_identity()?;
     
-    if prefix.is_empty() {
-        items.push("Sentinel-1/".to_string());
-        items.push("Sentinel-2/".to_string());
-        items.push("Sentinel-3/".to_string());
-        items.push("Copernicus-DEM/".to_string());
-        return Ok(ListPathResponse { items, next_token: String::new(), error: String::new() });
+    let host = "eodata.dataspace.copernicus.eu";
+    let region = "default";
+    
+    let mut query_params = vec![
+        ("delimiter", "/"),
+        ("list-type", "2"),
+        ("max-keys", "20"),
+    ];
+    if !prefix.is_empty() {
+        query_params.push(("prefix", &prefix));
     }
+    if !request.token.is_empty() {
+        query_params.push(("continuation-token", &request.token));
+    }
+    query_params.sort_by_key(|k| k.0);
 
-    let url = format!(
-        "https://eodata.dataspace.copernicus.eu/eodata/?list-type=2&delimiter=/&prefix={}",
-        urlencoding::encode(&prefix)
-    );
+    // ВАЖНО: Используем /eodata/ в пути
+    let mut url = Url::parse(&format!("https://{}/eodata/", host)).unwrap();
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        for (k, v) in &query_params {
+            pairs.append_pair(k, v);
+        }
+    }
+    let full_url = url.to_string();
 
-    host_log(&format!("S3 List: {}", url));
-    let mut req = HttpRequest::new(url);
-    req = req.with_header("User-Agent", "VeldMap/0.1.0");
+    let signing_settings = SigningSettings::default();
+    let signing_params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(region)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(signing_settings)
+        .build()
+        .unwrap();
+
+    // S3 требует x-amz-content-sha256 для GET запросов
+    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let headers = [
+        ("host", host),
+        ("x-amz-content-sha256", content_sha256),
+    ];
     
-    let res = http::request::<()>(&req, None)?;
+    let uri_with_query = if let Some(q) = url.query() {
+        format!("{}?{}", url.path(), q)
+    } else {
+        url.path().to_string()
+    };
+    
+    host_log(&format!("Signing request: GET {} (region: {})", uri_with_query, region));
+
+    let signable_request = SignableRequest::new(
+        "GET",
+        &uri_with_query,
+        headers.iter().map(|(k, v)| (*k, *v)),
+        aws_sigv4::http_request::SignableBody::Bytes(&[]),
+    ).unwrap();
+
+    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+    
+    let mut req = HttpRequest::new(full_url);
+    for (name, value) in instructions.headers() {
+        req = req.with_header(name.to_string(), value.to_string());
+    }
+    // Нужно явно добавить x-amz-content-sha256 в сам запрос, если sign его не добавил в instructions
+    req = req.with_header("x-amz-content-sha256".to_string(), content_sha256.to_string());
+
+    let res = match http::request::<()>(&req, None) {
+        Ok(r) => r,
+        Err(e) => return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: format!("Network error: {}", e) }),
+    };
+    
     let body = res.body();
-
-    if res.status() != 200 && res.status() != 0 {
-        return Ok(ListPathResponse {
-            items: Vec::new(),
-            next_token: String::new(),
-            error: format!("S3 status {}: {}", res.status(), String::from_utf8_lossy(&body)),
-        });
+    let status = res.status();
+    
+    if status != 200 && status != 0 {
+        let err_msg = format!("S3 status {}: {}", status, String::from_utf8_lossy(&body));
+        host_log(&err_msg);
+        return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: err_msg });
     }
 
+    if body.is_empty() {
+        return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: "Empty response from S3".into() });
+    }
+
+    Ok(parse_s3_xml(body))
+}
+
+fn parse_s3_xml(body: Vec<u8>) -> ListPathResponse {
     let mut reader = Reader::from_reader(body.as_slice());
     reader.config_mut().trim_text(true);
 
+    let mut items = Vec::new();
     let mut buf = Vec::new();
     let mut current_tag = String::new();
     let mut in_common_prefixes = false;
+    let mut next_token = String::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -126,37 +148,26 @@ pub fn list_path(request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
                 current_tag = name;
             }
             Ok(Event::Text(e)) => {
-                let text = e.unescape()?.into_owned();
-                if text.is_empty() || text == prefix || text == format!("{}/", prefix) {
-                    continue;
-                }
+                let text = match e.unescape() { Ok(t) => t.into_owned(), Err(_) => String::new() };
                 match current_tag.as_str() {
-                    "Prefix" if in_common_prefixes => {
-                        items.push(text);
-                    }
-                    "Key" => {
-                        items.push(text);
-                    }
+                    "Prefix" if in_common_prefixes => { items.push(format!("eodata/{}", text)); }
+                    "Key" => { items.push(format!("eodata/{}", text)); }
+                    "NextContinuationToken" => { next_token = text; }
                     _ => {}
                 }
             }
             Ok(Event::End(e)) => {
-                let name_bytes = e.local_name();
-                let name = String::from_utf8_lossy(name_bytes.as_ref());
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
                 if name == "CommonPrefixes" { in_common_prefixes = false; }
                 current_tag.clear();
             }
             Ok(Event::Eof) => break,
-            Err(e) => return Err(anyhow::anyhow!("XML parse error: {}", e)),
+            Err(e) => return ListPathResponse { items: vec![], next_token: "".into(), error: format!("XML error: {}", e) },
             _ => {}
         }
         buf.clear();
     }
-
-    host_log(&format!("Found {} items in S3", items.len()));
-    Ok(ListPathResponse {
-        items,
-        next_token: String::new(),
-        error: String::new(),
-    })
+    
+    host_log(&format!("S3 found {} items", items.len()));
+    ListPathResponse { items, next_token, error: String::new() }
 }

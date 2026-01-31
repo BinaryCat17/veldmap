@@ -43,6 +43,9 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 let mut extism_manifest = Manifest::new([Wasm::data(wasm_bytes)]);
                 extism_manifest = extism_manifest.with_allowed_host("*");
                 
+                // Увеличиваем лимиты памяти (2048 страниц = 128МБ)
+                extism_manifest.memory.max_pages = Some(2048);
+                
                 let service_config_path = format!("config/{}.json", name);
                 let mut service_config = fs::read_to_string(&service_config_path).unwrap_or_else(|_| "{}".to_string());
                 
