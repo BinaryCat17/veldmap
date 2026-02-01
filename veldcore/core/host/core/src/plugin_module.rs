@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
 use serde::Deserialize;
 use extism::{Manifest, Wasm, Plugin, Function};
 use crate::dispatcher::{Dispatcher, ServiceLocation};
@@ -74,7 +75,7 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                     }
                 }
 
-                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(Mutex::new(plugin))));
+                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(AsyncMutex::new(plugin))));
             }
             "remote" => {
                 let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;

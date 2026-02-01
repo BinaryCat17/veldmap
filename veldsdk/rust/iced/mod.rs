@@ -108,7 +108,7 @@ macro_rules! define_iced_module {
                     let event = $crate::rpc::ui::UiEvent::decode(&request.payload[..])
                         .map_err(|e| anyhow::anyhow!("Failed to decode UiEvent: {}", e))?;
                     runtime.handle_event(event)?;
-                    runtime.tick()?;
+                    // runtime.tick() removed to avoid blocking the main UI event stream
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
                     Ok(response.encode_to_vec())
                 }

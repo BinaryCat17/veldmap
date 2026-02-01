@@ -68,8 +68,8 @@ pub fn download(state: &LocalState, request: DownloadRequest) -> anyhow::Result<
     download_headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
 
     match veldsdk::core::fs_download(url.clone(), request.destination, download_headers) {
-        Ok(_) => Ok(DownloadResponse { success: true, error: "".into(), download_url: url }),
-        Err(e) => Ok(DownloadResponse { success: false, error: format!("Host download failed: {}", e), download_url: "".into() }),
+        Ok(task_id) => Ok(DownloadResponse { success: true, error: "".into(), download_url: url, task_id }),
+        Err(e) => Ok(DownloadResponse { success: false, error: format!("Host download failed: {}", e), download_url: "".into(), task_id: "".into() }),
     }
 }
 

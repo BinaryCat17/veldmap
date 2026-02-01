@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
     let is_visible = Arc::new(AtomicBool::new(true));
+    let ui_busy = Arc::new(AtomicBool::new(false));
 
     // ... (WGPU initialization code) ...
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -101,12 +102,13 @@ async fn main() -> anyhow::Result<()> {
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut last_size = (100u32, 100u32);
     let mut cursor_pos = (0.0f32, 0.0f32);
+    let mut last_cursor_sent_time = std::time::Instant::now();
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
-    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService)));
+    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new())));
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone()))));
 
     let d_call = dispatcher.clone();
@@ -255,15 +257,46 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
-                if state == winit::event::ElementState::Pressed {
-                    let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
-                    let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Click(veldmap_host_core::ui::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn })) };
-                    let d_clone = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
-                }
+                let pressed = state == winit::event::ElementState::Pressed;
+                let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
+                let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Click(veldmap_host_core::ui::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed })) };
+                let d_clone = dispatcher.clone();
+                let busy_clone = ui_busy.clone();
+                tokio::spawn(async move { 
+                    busy_clone.store(true, Ordering::SeqCst);
+                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
+                    busy_clone.store(false, Ordering::SeqCst);
+                });
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
+                
+                // Only send move event if not busy and throttled
+                if !ui_busy.load(Ordering::SeqCst) && last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(50) {
+                    let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::CursorMoved(veldmap_host_core::ui::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) };
+                    let d_clone = dispatcher.clone();
+                    let busy_clone = ui_busy.clone();
+                    busy_clone.store(true, Ordering::SeqCst);
+                    tokio::spawn(async move { 
+                        let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
+                        busy_clone.store(false, Ordering::SeqCst);
+                    });
+                    last_cursor_sent_time = std::time::Instant::now();
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
+                let (dx, dy) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 20.0, y * 20.0),
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                };
+                let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Scroll(veldmap_host_core::ui::ScrollEvent { delta_x: dx, delta_y: dy })) };
+                let d_clone = dispatcher.clone();
+                let busy_clone = ui_busy.clone();
+                tokio::spawn(async move { 
+                    busy_clone.store(true, Ordering::SeqCst);
+                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
+                    busy_clone.store(false, Ordering::SeqCst);
+                });
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             _ => (),

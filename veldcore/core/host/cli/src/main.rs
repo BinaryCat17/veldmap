@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
-    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService)));
+    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new())));
 
     let d_call = dispatcher.clone();
     let mut host_call = Function::new("veldmap_host_call", [ValType::I64], [ValType::I64], UserData::new(()),

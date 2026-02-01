@@ -46,4 +46,5 @@ message DownloadResponse {
   bool success = 1;
   string error = 2;
   string download_url = 3;
+  string task_id = 4;
 }

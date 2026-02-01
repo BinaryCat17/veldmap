@@ -42,7 +42,16 @@ pub fn view(state: &LocalState) -> Element<'_, Message, Theme, Renderer> {
     let status_view = text(&state.status_message).font(crate::common::APP_FONT).size(14).color(common::COLOR_TEXT_DIM);
 
     let progress_view: Element<Message, Theme, Renderer> = if let Some(p) = state.download_progress {
-        column![text(format!("Processing... {:.0}%", p * 100.0)).font(crate::common::APP_FONT).size(14), progress_bar(0.0..=1.0, p)].spacing(8).into()
+        column![
+            text(format!("Processing... {:.0}%", p * 100.0)).font(crate::common::APP_FONT).size(14),
+            row![
+                progress_bar(0.0..=1.0, p),
+                button(text("Cancel").font(crate::common::APP_FONT).size(12))
+                    .on_press(Message::CancelDownload)
+                    .padding(5)
+                    .style(common::ghost_button_style),
+            ].spacing(10).align_y(Alignment::Center)
+        ].spacing(8).into()
     } else { column![].into() };
 
     let main_content: Element<Message, Theme, Renderer> = if let Some(handle) = &state.current_image {

@@ -28,6 +28,7 @@ pub struct IcedRuntime<S, M> {
     font_data: Vec<(&'static str, &'static [u8])>,
     
     tasks: RefCell<Vec<BoxedFuture<M>>>,
+    pixel_buffer: RefCell<Vec<u8>>,
 }
 
 unsafe impl<S, M> Send for IcedRuntime<S, M> {}
@@ -57,6 +58,7 @@ impl<S: 'static, M: Send + 'static> IcedRuntime<S, M> {
             needs_redrawing: RefCell::new(true),
             font_data,
             tasks: RefCell::new(Vec::new()),
+            pixel_buffer: RefCell::new(Vec::new()),
         }
     }
 }
@@ -72,14 +74,12 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
             let waker = noop_waker_ref();
             let mut cx = Context::from_waker(waker);
             
-            // Опрашиваем задачи и собираем сообщения
             tasks.retain_mut(|task| {
                 match task.as_mut().poll(&mut cx) {
                     Poll::Ready(maybe_msg) => {
                         if let Some(msg) = maybe_msg {
                             new_messages.push(msg);
                         }
-                        *self.needs_redrawing.borrow_mut() = true;
                         false
                     },
                     Poll::Pending => true,
@@ -87,7 +87,6 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
             });
         }
 
-        // Если появились новые сообщения, запускаем цикл обновления
         if !new_messages.is_empty() {
             let mut state = self.state.borrow_mut();
             let mut tasks = self.tasks.borrow_mut();
@@ -95,18 +94,25 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
                 let command = (self.update_fn)(&mut state, msg);
                 tasks.extend(command.0);
             }
+            *self.needs_redrawing.borrow_mut() = true;
         }
         Ok(())
     }
 
     fn handle_event(&self, event_proto: UiEvent) -> anyhow::Result<()> {
-        // ... (код обработки событий остается таким же, как был)
         if let Some(ev) = event_proto.event {
             match ev {
                 crate::rpc::ui::ui_event::Event::Resize(r) => { 
                     *self.canvas_size.borrow_mut() = (r.width, r.height);
                     *self.scale_factor.borrow_mut() = r.scale_factor;
                     *self.needs_redrawing.borrow_mut() = true;
+                }
+                crate::rpc::ui::ui_event::Event::CursorMoved(c) => {
+                    let sf = *self.scale_factor.borrow();
+                    let pos = Point::new(c.x / sf, c.y / sf);
+                    *self.cursor_position.borrow_mut() = pos;
+                    let mut events = self.pending_events.borrow_mut();
+                    events.push(Event::Mouse(mouse::Event::CursorMoved { position: pos }));
                 }
                 crate::rpc::ui::ui_event::Event::Click(c) => {
                     let sf = *self.scale_factor.borrow();
@@ -121,10 +127,17 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
                     };
 
                     let mut events = self.pending_events.borrow_mut();
-                    events.push(Event::Mouse(mouse::Event::CursorMoved { position: pos }));
-                    events.push(Event::Mouse(mouse::Event::ButtonPressed(button)));
-                    events.push(Event::Mouse(mouse::Event::ButtonReleased(button)));
-                    *self.needs_redrawing.borrow_mut() = true;
+                    if c.pressed {
+                        events.push(Event::Mouse(mouse::Event::ButtonPressed(button)));
+                    } else {
+                        events.push(Event::Mouse(mouse::Event::ButtonReleased(button)));
+                    }
+                }
+                crate::rpc::ui::ui_event::Event::Scroll(s) => {
+                    let mut events = self.pending_events.borrow_mut();
+                    events.push(Event::Mouse(mouse::Event::WheelScrolled { 
+                        delta: mouse::ScrollDelta::Pixels { x: s.delta_x, y: s.delta_y } 
+                    }));
                 }
                 crate::rpc::ui::ui_event::Event::Key(k) => {
                     let key = if k.key_code == 13 {
@@ -157,7 +170,6 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
                                 physical_key,
                             }));
                         }
-                        *self.needs_redrawing.borrow_mut() = true;
                     }
                 }
                 _ => {}
@@ -167,10 +179,6 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
     }
 
     fn render(&self) -> anyhow::Result<()> {
-        if !*self.needs_redrawing.borrow() && self.tasks.borrow().is_empty() {
-            return Ok(());
-        }
-
         let (width, height) = *self.canvas_size.borrow();
         if width == 0 || height == 0 { return Ok(()); }
 
@@ -190,19 +198,16 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
             }
         }
 
-        let mut pixels = vec![0u8; (width * height * 4) as usize];
-        let mut pixmap = tiny_skia::PixmapMut::from_bytes(&mut pixels, width, height)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create pixmap"))?;
-        
-        pixmap.fill(tiny_skia::Color::from_rgba8(20, 23, 26, 255)); 
-
+        let mut captured_messages = Vec::new();
+        let ui_cache;
         let viewport = Viewport::with_physical_size(Size::new(width, height), sf);
-        let mut renderer = self.renderer.borrow_mut();
-        let mut cache = std::mem::take(&mut *self.interface_cache.borrow_mut());
+        let mut should_draw = *self.needs_redrawing.borrow() || !events.is_empty();
 
-        let mut messages = Vec::new();
         {
+            let mut renderer = self.renderer.borrow_mut();
+            let cache = std::mem::take(&mut *self.interface_cache.borrow_mut());
             let state = self.state.borrow();
+            
             let mut ui = UserInterface::build(
                 (self.view_fn)(&state),
                 viewport.logical_size(),
@@ -211,45 +216,54 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
             );
 
             let mut clipboard = iced_core::clipboard::Null;
-            ui.update(&events, cursor, &mut *renderer, &mut clipboard, &mut messages);
-            cache = ui.into_cache();
-        }
-
-        if !messages.is_empty() {
-            let mut state = self.state.borrow_mut();
-            for message in messages {
-                let command = (self.update_fn)(&mut state, message);
-                self.tasks.borrow_mut().extend(command.0);
+            let (state, _event_statuses) = ui.update(&events, cursor, &mut *renderer, &mut clipboard, &mut captured_messages);
+            
+            if matches!(state, user_interface::State::Outdated) || !captured_messages.is_empty() {
+                should_draw = true;
             }
+
+            if should_draw {
+                let mut pixels_borrow = self.pixel_buffer.borrow_mut();
+                if pixels_borrow.len() != (width * height * 4) as usize {
+                    *pixels_borrow = vec![0u8; (width * height * 4) as usize];
+                }
+                
+                let mut pixmap = tiny_skia::PixmapMut::from_bytes(pixels_borrow.as_mut_slice(), width, height)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to create pixmap"))?;
+                
+                pixmap.fill(tiny_skia::Color::from_rgba8(20, 23, 26, 255)); 
+
+                ui.draw(&mut *renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
+
+                if let Some(mut mask) = tiny_skia::Mask::new(width, height) {
+                    renderer.draw(
+                        &mut pixmap,
+                        &mut mask,
+                        &viewport,
+                        &[Rectangle { x: 0.0, y: 0.0, width: width as f32, height: height as f32 }],
+                        Color::TRANSPARENT,
+                    );
+                }
+                
+                UiBridge::display_frame(pixels_borrow.clone(), width, height)?;
+            }
+            
+            ui_cache = ui.into_cache();
         }
 
-        let cache = {
-            let state = self.state.borrow();
-            let mut user_interface = UserInterface::build(
-                (self.view_fn)(&state),
-                viewport.logical_size(),
-                cache,
-                &mut *renderer,
-            );
-
-            user_interface.draw(&mut *renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-            user_interface.into_cache()
-        };
-        
-        if let Some(mut mask) = tiny_skia::Mask::new(width, height) {
-            renderer.draw(
-                &mut pixmap,
-                &mut mask,
-                &viewport,
-                &[Rectangle { x: 0.0, y: 0.0, width: width as f32, height: height as f32 }],
-                Color::TRANSPARENT,
-            );
+        if !captured_messages.is_empty() {
+            let mut state_mut = self.state.borrow_mut();
+            let mut tasks = self.tasks.borrow_mut();
+            for message in captured_messages {
+                let command = (self.update_fn)(&mut state_mut, message);
+                tasks.extend(command.0);
+            }
+            *self.needs_redrawing.borrow_mut() = true;
         }
 
-        *self.interface_cache.borrow_mut() = cache;
+        *self.interface_cache.borrow_mut() = ui_cache;
         *self.needs_redrawing.borrow_mut() = false;
 
-        UiBridge::display_frame(pixels, width, height)?;
         Ok(())
     }
 }

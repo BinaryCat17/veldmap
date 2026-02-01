@@ -1,5 +1,9 @@
 use crate::rpc::host::call_service;
-use crate::rpc::services::{LogRequest, LogLevel, FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest};
+use crate::rpc::services::{
+    LogRequest, LogLevel, FsReadRequest, FsReadResponse, FsWriteRequest, 
+    FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest,
+    TaskResponse, TaskStatusRequest, TaskStatusResponse, TaskCancelRequest
+};
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use prost::Message;
 use std::future::Future;
@@ -68,8 +72,7 @@ pub async fn yield_now() {
 }
 
 pub struct HostLogger;
-// ... (implementation same as before)
-// ...
+
 impl Log for HostLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool { true }
     fn log(&self, record: &Record) {
@@ -112,9 +115,23 @@ pub fn fs_write(path: impl Into<String>, data: Vec<u8>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn fs_download(url: impl Into<String>, path: impl Into<String>, headers: std::collections::HashMap<String, String>) -> anyhow::Result<()> {
+pub fn fs_download(url: impl Into<String>, path: impl Into<String>, headers: std::collections::HashMap<String, String>) -> anyhow::Result<String> {
     let req = FsDownloadRequest { url: url.into(), path: path.into(), headers };
-    call_service("system", "fs_download", req.encode_to_vec())?;
+    let res_buf = call_service("system", "fs_download", req.encode_to_vec())?;
+    let res = TaskResponse::decode(&res_buf[..])?;
+    Ok(res.task_id)
+}
+
+pub fn task_status(task_id: impl Into<String>) -> anyhow::Result<TaskStatusResponse> {
+    let req = TaskStatusRequest { task_id: task_id.into() };
+    let res_buf = call_service("system", "task_status", req.encode_to_vec())?;
+    let res = TaskStatusResponse::decode(&res_buf[..])?;
+    Ok(res)
+}
+
+pub fn task_cancel(task_id: impl Into<String>) -> anyhow::Result<()> {
+    let req = TaskCancelRequest { task_id: task_id.into() };
+    call_service("system", "task_cancel", req.encode_to_vec())?;
     Ok(())
 }
 

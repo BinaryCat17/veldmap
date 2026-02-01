@@ -17,6 +17,7 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, IcedSetting
         search_state: crate::search::SearchState::default(),
         search_results: Vec::new(),
         download_progress: None,
+        active_download_task: None,
         current_image: None,
         downloaded_state: crate::downloaded::DownloadedState::default(),
         token_stack: Vec::new(),
@@ -155,16 +156,74 @@ pub fn handle_browse_up(state: &mut LocalState) -> Command<Message> {
 
 pub fn handle_download(state: &mut LocalState, s3_key: String) -> Command<Message> {
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
-    state.status_message = format!("Downloading {}...", filename);
+    state.status_message = format!("Requesting {}...", filename);
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key, destination: dest };
     
     rpc_command!("data-provider", "download", req.encode_to_vec(), DownloadResponse, move |res| {
-        Message::DownloadFinished(res.and_then(|resp| if resp.success { Ok(filename) } else { Err(resp.error) }))
+        Message::DownloadStarted(res.and_then(|resp| if resp.success { Ok(resp.task_id) } else { Err(resp.error) }))
     })
 }
 
-pub fn handle_download_finished(state: &mut LocalState, res: Result<String, String>) -> Command<Message> {
+pub fn handle_download_started(state: &mut LocalState, res: Result<String, String>) -> Command<Message> {
+    match res {
+        Ok(task_id) => {
+            state.active_download_task = Some(task_id);
+            state.download_progress = Some(0.0);
+            state.status_message = "Download started".into();
+            return poll_progress();
+        }
+        Err(e) => { state.error_message = Some(e); }
+    }
+    Command::none()
+}
+
+pub fn handle_update_progress(state: &mut LocalState) -> Command<Message> {
+    if let Some(task_id) = &state.active_download_task {
+        match veldsdk::core::task_status(task_id) {
+            Ok(status) => {
+                state.download_progress = Some(status.progress);
+                if status.completed {
+                    let err = status.error.clone();
+                    state.active_download_task = None;
+                    state.download_progress = None;
+                    
+                    if err.is_empty() {
+                        return on_download_finished(state, Ok(()));
+                    } else {
+                        return on_download_finished(state, Err(err));
+                    }
+                } else {
+                    return poll_progress();
+                }
+            }
+            Err(e) => { 
+                state.error_message = Some(format!("Status check failed: {}", e));
+                state.active_download_task = None;
+                state.download_progress = None;
+            }
+        }
+    }
+    Command::none()
+}
+
+fn poll_progress() -> Command<Message> {
+    Command::perform(async {
+        veldsdk::yield_now().await;
+    }, |_| Message::UpdateDownloadProgress)
+}
+
+pub fn handle_cancel_download(state: &mut LocalState) -> Command<Message> {
+    if let Some(task_id) = &state.active_download_task {
+        let _ = veldsdk::core::task_cancel(task_id);
+        state.active_download_task = None;
+        state.download_progress = None;
+        state.status_message = "Download cancelled".into();
+    }
+    Command::none()
+}
+
+fn on_download_finished(state: &mut LocalState, res: Result<(), String>) -> Command<Message> {
     match res {
         Ok(_) => {
             state.status_message = "Download complete".into();
@@ -219,7 +278,10 @@ pub fn handle_preview_loaded(state: &mut LocalState, res: Result<Handle, String>
     Command::none()
 }
 
-pub fn handle_clear_error(_state: &mut LocalState) -> Command<Message> { Command::none() }
+pub fn handle_clear_error(state: &mut LocalState) -> Command<Message> { 
+    state.error_message = None;
+    Command::none() 
+}
 pub fn handle_local_search(state: &mut LocalState, q: String) -> Command<Message> { state.downloaded_state.search_query = q; Command::none() }
 pub fn handle_local_filter(state: &mut LocalState, f: crate::downloaded::FileFilter) -> Command<Message> { state.downloaded_state.filter = f; Command::none() }
 pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { state.current_image = None; Command::none() }

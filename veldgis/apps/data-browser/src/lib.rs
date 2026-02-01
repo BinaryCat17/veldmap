@@ -22,6 +22,7 @@ pub struct LocalState {
     pub search_state: search::SearchState,
     pub search_results: Vec<DataProduct>,
     pub download_progress: Option<f32>,
+    pub active_download_task: Option<String>,
     pub current_image: Option<Handle>,
     pub downloaded_state: downloaded::DownloadedState,
     pub token_stack: Vec<String>,
@@ -50,7 +51,9 @@ pub enum Message {
     LocalSearchChanged(String),
     LocalFilterChanged(downloaded::FileFilter),
     DownloadFile(String),
-    DownloadFinished(Result<String, String>),
+    DownloadStarted(Result<String, String>),
+    UpdateDownloadProgress,
+    CancelDownload,
     DeleteLocalFile(String),
     ViewFile(String),
     PreviewLoaded(Result<Handle, String>),
@@ -79,7 +82,9 @@ define_iced_module! {
         LocalSearchChanged(query) => handlers::handle_local_search;
         LocalFilterChanged(filter) => handlers::handle_local_filter;
         DownloadFile(path) => handlers::handle_download;
-        DownloadFinished(res) => handlers::handle_download_finished;
+        DownloadStarted(res) => handlers::handle_download_started;
+        UpdateDownloadProgress => handlers::handle_update_progress;
+        CancelDownload => handlers::handle_cancel_download;
         DeleteLocalFile(path) => handlers::handle_delete;
         ViewFile(path) => handlers::handle_view;
         PreviewLoaded(res) => handlers::handle_preview_loaded;

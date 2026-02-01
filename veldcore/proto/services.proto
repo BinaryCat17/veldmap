@@ -67,3 +67,21 @@ message FsDownloadRequest {
   string path = 2;
   map<string, string> headers = 3;
 }
+
+message TaskResponse {
+  string task_id = 1;
+}
+
+message TaskStatusRequest {
+  string task_id = 1;
+}
+
+message TaskStatusResponse {
+  float progress = 1;
+  bool completed = 2;
+  string error = 3;
+}
+
+message TaskCancelRequest {
+  string task_id = 1;
+}

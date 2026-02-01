@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as AsyncMutex;
 use extism::Plugin;
 use anyhow::Result;
 use iroh::Endpoint;
@@ -23,7 +24,7 @@ impl NativeService for CoreService {
 
 #[derive(Clone)]
 pub enum ServiceLocation {
-    LocalWasm(Arc<Mutex<Plugin>>),
+    LocalWasm(Arc<AsyncMutex<Plugin>>),
     RemoteIroh(iroh::NodeId),
     Native(Arc<dyn NativeService>),
 }
@@ -68,7 +69,7 @@ impl Dispatcher {
                 let mut req_buf = Vec::new();
                 request.encode(&mut req_buf)?;
 
-                let mut plugin = plugin.lock().map_err(|_| anyhow::anyhow!("Mutex poisoned"))?;
+                let mut plugin = plugin.lock().await;
                 // eprintln!("[DISPATCHER] Calling handle_rpc in WASM plugin {} (method: {}, payload: {} bytes)", service_name, method, req_buf.len());
                 let res_buf = plugin.call::<&[u8], &[u8]>("handle_rpc", &req_buf)?;
                 
