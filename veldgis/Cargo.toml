@@ -17,7 +17,7 @@ panic = "abort"
 lto = true
 codegen-units = 1
 
-[profile.release.package.veldmap-app-data-browser]
+[profile.release.package.veldmap-data-browser]
 opt-level = 3
 
 [profile.release.package.veldmap-data-provider]

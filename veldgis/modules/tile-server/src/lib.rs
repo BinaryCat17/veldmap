@@ -6,7 +6,8 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub(crate) struct LocalConfig {
-    pub _port: u16,
+    #[allow(dead_code)]
+    pub port: u16,
 }
 
 pub(crate) struct LocalState;

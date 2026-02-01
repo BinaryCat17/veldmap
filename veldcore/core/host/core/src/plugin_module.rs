@@ -17,25 +17,31 @@ struct ServicesManifest {
     services: HashMap<String, ServiceEntry>,
 }
 
-pub async fn load_services(dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
-    load_services_with_functions(dispatcher, vec![]).await
+pub async fn load_services(dispatcher: Arc<Dispatcher>, config_dir: &str) -> anyhow::Result<()> {
+    load_services_with_functions(dispatcher, vec![], config_dir).await
 }
 
-pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions: Vec<Function>) -> anyhow::Result<()> {
-    let manifest_path = "config/services.json";
-    if !std::path::Path::new(manifest_path).exists() {
+pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions: Vec<Function>, config_dir: &str) -> anyhow::Result<()> {
+    let manifest_path = std::path::Path::new(config_dir).join("services.json");
+    if !manifest_path.exists() {
+        log::warn!("Manifest not found at {:?}", manifest_path);
         return Ok(());
     }
 
-    let content = fs::read_to_string(manifest_path)?;
+    let content = fs::read_to_string(&manifest_path)?;
     let manifest: ServicesManifest = serde_json::from_str(&content)?;
+
+    // Корень проекта — это папка, в которой лежит папка config
+    let project_root = std::path::Path::new(config_dir).parent().unwrap_or(std::path::Path::new("."));
 
     for (name, entry) in manifest.services {
         match entry.location.as_str() {
             "local" => {
-                let wasm_path = entry.path.ok_or_else(|| anyhow::anyhow!("Missing path for local service {}", name))?;
-                if !std::path::Path::new(&wasm_path).exists() {
-                    log::error!("WASM file not found: {}", wasm_path);
+                let rel_wasm_path = entry.path.ok_or_else(|| anyhow::anyhow!("Missing path for local service {}", name))?;
+                let wasm_path = project_root.join(&rel_wasm_path);
+                
+                if !wasm_path.exists() {
+                    log::error!("WASM file not found: {:?} (resolved from {})", wasm_path, rel_wasm_path);
                     continue;
                 }
                 
@@ -46,9 +52,9 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 // Увеличиваем лимиты памяти (4096 страниц = 256МБ)
                 extism_manifest.memory.max_pages = Some(4096);
                 
-                let service_config_path = format!("config/{}.json", name);
+                let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
                 let mut service_config = fs::read_to_string(&service_config_path)
-                    .map_err(|e| anyhow::anyhow!("Configuration file not found for service '{}' at {}: {}", name, service_config_path, e))?;
+                    .map_err(|e| anyhow::anyhow!("Configuration file not found for service '{}' at {:?}: {}", name, service_config_path, e))?;
                 
                 for (key, value) in std::env::vars() {
                     let placeholder = format!("${{{}}}", key);

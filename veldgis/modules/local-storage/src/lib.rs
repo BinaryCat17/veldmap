@@ -6,7 +6,8 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub(crate) struct LocalConfig {
-    pub _data_dir: String,
+    #[allow(dead_code)]
+    pub data_dir: String,
 }
 
 pub(crate) struct LocalState;

@@ -25,7 +25,15 @@ async fn main() -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    log::info!("VeldMap GUI Host starting...");
+    let mut config_dir = "config".to_string();
+    let args: Vec<String> = std::env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--config" && i + 1 < args.len() {
+            config_dir = args[i + 1].clone();
+        }
+    }
+
+    log::info!("VeldMap GUI Host starting (config: {})...", config_dir);
 
     let event_loop = EventLoopBuilder::<()>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
@@ -132,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
     );
     host_call.set_namespace("env");
 
-    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call]).await?;
+    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call], &config_dir).await?;
 
     let d_clone = dispatcher.clone();
     tokio::spawn(async move {
@@ -144,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             interval.tick().await;
-            if let Err(e) = d_clone.call("veldmap-app-data-browser", "render", vec![]).await {
+            if let Err(e) = d_clone.call("data-browser", "render", vec![]).await {
                 log::error!("Render call failed: {}", e);
             }
         }
@@ -202,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
                     window.request_redraw();
                     let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Resize(veldmap_host_core::ui::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
                     let d_clone = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
+                    tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
@@ -210,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
                     let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
                     let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Click(veldmap_host_core::ui::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn })) };
                     let d_clone = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
+                    tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 }
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {

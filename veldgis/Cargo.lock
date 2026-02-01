@@ -3032,7 +3032,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "veldmap-app-data-browser"
+name = "veldmap-data-browser"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3060,21 +3060,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "veldmap-app-desktop-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "extism-pdk",
- "log",
- "once_cell",
- "prost 0.13.5",
- "serde",
- "serde_json",
- "veldmap-gis-api",
- "veldsdk",
-]
-
-[[package]]
 name = "veldmap-data-provider"
 version = "0.1.0"
 dependencies = [
@@ -3093,6 +3078,21 @@ dependencies = [
  "time",
  "url",
  "urlencoding",
+ "veldmap-gis-api",
+ "veldsdk",
+]
+
+[[package]]
+name = "veldmap-desktop-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "extism-pdk",
+ "log",
+ "once_cell",
+ "prost 0.13.5",
+ "serde",
+ "serde_json",
  "veldmap-gis-api",
  "veldsdk",
 ]

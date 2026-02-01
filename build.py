@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 # Project configuration
-PLUGINS_DIR = "plugins"
+PLUGINS_DIR = "veldgis/plugins"
 WASM_TARGET = "wasm32-wasip1"
 CORE_MANIFEST = "veldcore/Cargo.toml"
 GIS_MANIFEST = "veldgis/Cargo.toml"
@@ -15,8 +15,8 @@ MODULES = [
     "veldmap-local-storage",
     "veldmap-tile-server",
     "veldmap-render",
-    "veldmap-app-data-browser",
-    "veldmap-app-desktop-client"
+    "veldmap-data-browser",
+    "veldmap-desktop-client"
 ]
 
 def run(cmd, cwd=None):

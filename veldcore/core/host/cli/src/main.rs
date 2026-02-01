@@ -16,7 +16,15 @@ async fn main() -> anyhow::Result<()> {
     }
     env_logger::init();
 
-    log::info!("VeldMap CLI Host starting...");
+    let mut config_dir = "config".to_string();
+    let args: Vec<String> = std::env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--config" && i + 1 < args.len() {
+            config_dir = args[i + 1].clone();
+        }
+    }
+
+    log::info!("VeldMap CLI Host starting (config: {})...", config_dir);
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
@@ -41,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     );
     host_call.set_namespace("env");
 
-    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call]).await?;
+    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call], &config_dir).await?;
 
     let node = Arc::new(VeldmapNode::new(endpoint, dispatcher.clone()).await?);
     log::info!("Node ID: {}", node.node_id());

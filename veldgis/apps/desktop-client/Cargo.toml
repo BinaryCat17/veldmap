@@ -1,5 +1,5 @@
 [package]
-name = "veldmap-app-desktop-client"
+name = "veldmap-desktop-client"
 version = "0.1.0"
 edition = "2021"
 
