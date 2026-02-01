@@ -1,6 +1,8 @@
 //! Iced integration for VeldMap WASM plugins.
 
 use iced_core::Font;
+use std::pin::Pin;
+use std::future::Future;
 
 pub mod runtime;
 
@@ -11,11 +13,23 @@ pub struct IcedSettings {
 }
 
 /// Internal trait used by the macro to drive the UI.
-/// This is an implementation detail and should not be used directly.
 #[doc(hidden)]
 pub trait RawIcedRuntime: Send + Sync {
     fn handle_event(&self, event: crate::rpc::ui::UiEvent) -> anyhow::Result<()>;
     fn render(&self) -> anyhow::Result<()>;
+    fn tick(&self) -> anyhow::Result<()>;
+}
+
+pub type BoxedFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+#[doc(hidden)]
+pub struct SendPtr<T>(pub *mut T);
+unsafe impl<T> Send for SendPtr<T> {}
+
+impl<T> SendPtr<T> {
+    pub unsafe fn as_mut(&self) -> &mut T {
+        &mut *self.0
+    }
 }
 
 #[cfg(all(feature = "pdk", feature = "iced"))]
@@ -28,7 +42,7 @@ macro_rules! define_iced_module {
         init: $init_func:path,
         view: $view_func:path,
         handlers: {
-            $($msg_variant:ident $( ( $($arg:ident),* ) )? => $handler_func:path),* $(,)?
+            $($msg_variant:ident $( ( $($arg:ident),* ) )? => async $handler_func:path);* $(;)?
         }
     ) => {
         #[extism_pdk::plugin_fn]
@@ -44,13 +58,18 @@ macro_rules! define_iced_module {
             let result = $init_func(config);
             let boxed_state: anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match result {
                 Ok((state, settings)) => {
-                    fn internal_update(state: &mut $state_type, message: $message_type) {
+                    fn internal_update(state: &mut $state_type, message: $message_type) -> Option<$crate::iced::BoxedFuture> {
                         #[allow(unused_imports)]
                         use $message_type::*;
                         match message {
                             $(
                                 $msg_variant $( ( $($arg),* ) )? => {
-                                    $handler_func(state, $($($arg),*)?)
+                                    let sptr = $crate::iced::SendPtr(state as *mut _);
+                                    let fut = async move {
+                                        let s = unsafe { sptr.as_mut() };
+                                        $handler_func(s, $($($arg),*)?).await;
+                                    };
+                                    Some(Box::pin(fut))
                                 }
                             )*
                         }
@@ -98,10 +117,12 @@ macro_rules! define_iced_module {
                     let event = $crate::rpc::ui::UiEvent::decode(&request.payload[..])
                         .map_err(|e| anyhow::anyhow!("Failed to decode UiEvent: {}", e))?;
                     runtime.handle_event(event)?;
+                    runtime.tick()?;
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
                     Ok(response.encode_to_vec())
                 }
                 "render" => {
+                    runtime.tick()?; 
                     runtime.render()?;
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
                     Ok(response.encode_to_vec())

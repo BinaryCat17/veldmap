@@ -3161,6 +3161,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "extism-pdk",
+ "futures-util",
  "iced_core",
  "iced_graphics",
  "iced_renderer",

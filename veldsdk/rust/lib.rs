@@ -3,6 +3,9 @@ pub mod rpc;
 #[cfg(feature = "pdk")]
 pub mod core;
 
+#[cfg(feature = "pdk")]
+pub use crate::core::yield_now;
+
 #[cfg(feature = "graphics")]
 pub mod graphics;
 

@@ -59,20 +59,20 @@ define_iced_module! {
     init: handlers::module_init,
     view: view::view,
     handlers: {
-        SwitchMode(mode) => handlers::handle_switch_mode,
-        SearchInputChanged(query) => handlers::handle_search_input,
-        SearchFilterTypeChanged(filter) => handlers::handle_search_filter,
-        SearchPressed => handlers::handle_search_press,
-        ClearError => handlers::handle_clear_error,
-        ProductSelected(product) => handlers::handle_product_selected,
-        BackToList => handlers::handle_back_to_list,
-        BrowsePath(path) => handlers::handle_browse_path,
-        BrowseUp => handlers::handle_browse_up,
-        LocalSearchChanged(query) => handlers::handle_local_search,
-        LocalFilterChanged(filter) => handlers::handle_local_filter,
-        DownloadFile(path) => handlers::handle_download,
-        DeleteLocalFile(path) => handlers::handle_delete,
-        ViewFile(path) => handlers::handle_view,
-        ClosePreview => handlers::handle_close_preview,
+        SwitchMode(mode) => async handlers::handle_switch_mode;
+        SearchInputChanged(query) => async handlers::handle_search_input;
+        SearchFilterTypeChanged(filter) => async handlers::handle_search_filter;
+        SearchPressed => async handlers::handle_search_press;
+        ClearError => async handlers::handle_clear_error;
+        ProductSelected(product) => async handlers::handle_product_selected;
+        BackToList => async handlers::handle_back_to_list;
+        BrowsePath(path) => async handlers::handle_browse_path;
+        BrowseUp => async handlers::handle_browse_up;
+        LocalSearchChanged(query) => async handlers::handle_local_search;
+        LocalFilterChanged(filter) => async handlers::handle_local_filter;
+        DownloadFile(path) => async handlers::handle_download;
+        DeleteLocalFile(path) => async handlers::handle_delete;
+        ViewFile(path) => async handlers::handle_view;
+        ClosePreview => async handlers::handle_close_preview;
     }
 }

@@ -36,28 +36,25 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, IcedSetting
     Ok((state, settings))
 }
 
-pub fn handle_switch_mode(state: &mut LocalState, mode: ViewMode) {
+pub async fn handle_switch_mode(state: &mut LocalState, mode: ViewMode) {
     state.view_mode = mode;
     state.current_image = None;
     state.download_progress = None;
     state.selected_product = None;
     if state.view_mode == ViewMode::Browse && state.browse_items.is_empty() {
-        perform_browse(state, String::new());
+        perform_browse_async(state, String::new()).await;
     } else if state.view_mode == ViewMode::Downloaded {
         refresh_local_files(state);
     }
 }
 
-pub fn handle_search_input(state: &mut LocalState, q: String) {
-    state.search_state.query = q;
-}
+pub async fn handle_search_input(state: &mut LocalState, q: String) { state.search_state.query = q; }
+pub async fn handle_search_filter(state: &mut LocalState, ft: crate::search::SearchFilterType) { state.search_state.filter_type = ft; }
 
-pub fn handle_search_filter(state: &mut LocalState, ft: crate::search::SearchFilterType) {
-    state.search_state.filter_type = ft;
-}
-
-pub fn handle_search_press(state: &mut LocalState) {
+pub async fn handle_search_press(state: &mut LocalState) {
     state.status_message = "Searching CDSE...".to_string();
+    veldsdk::yield_now().await;
+
     let mut filters = Vec::new();
     match state.search_state.filter_type {
         crate::search::SearchFilterType::GridId => filters.push(SearchFilter { name: "gridId".into(), value: state.search_state.query.clone() }),
@@ -82,10 +79,11 @@ pub fn handle_search_press(state: &mut LocalState) {
     }
 }
 
-pub fn handle_product_selected(state: &mut LocalState, prod: DataProduct) {
+pub async fn handle_product_selected(state: &mut LocalState, prod: DataProduct) {
     state.status_message = format!("Loading files for {}...", prod.name);
+    veldsdk::yield_now().await;
+
     let local_files = veldsdk::core::fs_list("data/dem/source").unwrap_or_default();
-    
     let req = ListPathRequest { path: prod.path.clone(), token: String::new() };
     match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
         Ok(res_bytes) => {
@@ -104,26 +102,27 @@ pub fn handle_product_selected(state: &mut LocalState, prod: DataProduct) {
     }
 }
 
-pub fn handle_back_to_list(state: &mut LocalState) {
-    state.selected_product = None;
+pub async fn handle_back_to_list(state: &mut LocalState) { state.selected_product = None; }
+
+pub async fn handle_browse_path(state: &mut LocalState, path: String) {
+    perform_browse_async(state, path).await;
 }
 
-pub fn handle_browse_path(state: &mut LocalState, path: String) {
-    perform_browse(state, path);
-}
-
-pub fn handle_browse_up(state: &mut LocalState) {
+pub async fn handle_browse_up(state: &mut LocalState) {
     let current = state.current_browse_path.trim_end_matches('/');
     if let Some(idx) = current.rfind('/') {
         let parent = current[..=idx].to_string();
-        perform_browse(state, parent);
+        perform_browse_async(state, parent).await;
     } else {
-        perform_browse(state, String::new());
+        perform_browse_async(state, String::new()).await;
     }
 }
 
-pub fn handle_download(state: &mut LocalState, s3_key: String) {
+pub async fn handle_download(state: &mut LocalState, s3_key: String) {
     let filename = s3_key.split('/').last().unwrap_or("file");
+    state.status_message = format!("Downloading {}...", filename);
+    veldsdk::yield_now().await;
+
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key, destination: dest };
     match veldsdk::rpc::host::call_service("data-provider", "download", req.encode_to_vec()) {
@@ -131,17 +130,13 @@ pub fn handle_download(state: &mut LocalState, s3_key: String) {
             if let Ok(response) = DownloadResponse::decode(&res_bytes[..]) {
                 if response.success {
                     state.status_message = "Download complete".into();
-                    // Обновляем список, чтобы поставить галочку
                     if let ViewMode::Browse = state.view_mode {
                         let path = state.current_browse_path.clone();
-                        perform_browse(state, path);
+                        perform_browse_async(state, path).await;
                     } else if state.selected_product.is_some() {
-                        // Если мы в режиме выбора файлов продукта
                         let local_files = veldsdk::core::fs_list("data/dem/source").unwrap_or_default();
                         for item in &mut state.product_files {
-                            if local_files.contains(&item.name) {
-                                item.exists_locally = true;
-                            }
+                            if local_files.contains(&item.name) { item.exists_locally = true; }
                         }
                     }
                 } else {
@@ -153,20 +148,16 @@ pub fn handle_download(state: &mut LocalState, s3_key: String) {
     }
 }
 
-pub fn handle_delete(state: &mut LocalState, path: String) {
+pub async fn handle_delete(state: &mut LocalState, path: String) {
     match veldsdk::core::fs_delete(&path) {
-        Ok(_) => {
-            state.status_message = format!("Deleted {}", path);
-            refresh_local_files(state);
-        }
-        Err(e) => {
-            state.error_message = Some(format!("Failed to delete {}: {}", path, e));
-        }
+        Ok(_) => { state.status_message = format!("Deleted {}", path); refresh_local_files(state); }
+        Err(e) => { state.error_message = Some(format!("Failed to delete {}: {}", path, e)); }
     }
 }
 
-pub fn handle_view(state: &mut LocalState, path: String) {
+pub async fn handle_view(state: &mut LocalState, path: String) {
     state.status_message = format!("Loading preview for {}...", path);
+    veldsdk::yield_now().await;
     match veldsdk::core::fs_read(&path) {
         Ok(data) => {
             if path.ends_with(".jpg") || path.ends_with(".png") {
@@ -178,88 +169,49 @@ pub fn handle_view(state: &mut LocalState, path: String) {
                         state.current_image = Some(Handle::from_rgba(w, h, rgba));
                         state.status_message = "TIFF Preview loaded".into();
                     }
-                    Err(e) => {
-                        state.error_message = Some(format!("Failed to decode TIFF: {}", e));
-                    }
+                    Err(e) => { state.error_message = Some(format!("Failed to decode TIFF: {}", e)); }
                 }
-            } else {
-                state.error_message = Some("Unsupported file format for preview".into());
-            }
+            } else { state.error_message = Some("Unsupported file format for preview".into()); }
         }
-        Err(e) => {
-            state.error_message = Some(format!("Failed to read file: {}", e));
-        }
+        Err(e) => { state.error_message = Some(format!("Failed to read file: {}", e)); }
     }
 }
 
-pub fn handle_clear_error(state: &mut LocalState) {
-    state.error_message = None;
-}
-
-pub fn handle_local_search(state: &mut LocalState, q: String) {
-    state.downloaded_state.search_query = q;
-}
-
-pub fn handle_local_filter(state: &mut LocalState, f: crate::downloaded::FileFilter) {
-    state.downloaded_state.filter = f;
-}
-
-pub fn handle_close_preview(state: &mut LocalState) {
-    state.current_image = None;
-}
+pub async fn handle_clear_error(state: &mut LocalState) { state.error_message = None; }
+pub async fn handle_local_search(state: &mut LocalState, q: String) { state.downloaded_state.search_query = q; }
+pub async fn handle_local_filter(state: &mut LocalState, f: crate::downloaded::FileFilter) { state.downloaded_state.filter = f; }
+pub async fn handle_close_preview(state: &mut LocalState) { state.current_image = None; }
 
 // Helper functions
 
-fn perform_browse(state: &mut LocalState, path: String) {
+async fn perform_browse_async(state: &mut LocalState, path: String) {
     state.status_message = format!("Listing /{}...", path);
+    veldsdk::yield_now().await;
+
     let local_files = veldsdk::core::fs_list("data/dem/source").unwrap_or_default();
-    
     let req = ListPathRequest { path: path.clone(), token: String::new() };
     match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
         Ok(res_bytes) => {
             if let Ok(response) = ListPathResponse::decode(&res_bytes[..]) {
-                if !response.error.is_empty() {
-                    state.error_message = Some(format!("Browse API Error: {}", response.error));
-                    state.status_message = "Browse failed".to_string();
-                } else {
-                    state.browse_items = response.items.into_iter().map(|s3_key| {
-                        let is_folder = s3_key.ends_with('/');
-                        let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
-                        let exists_locally = !is_folder && local_files.contains(&name);
-                        BrowserItem { s3_key, name, is_folder, exists_locally }
-                    }).collect();
-                    state.current_browse_path = path;
-                    state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token) };
-                    state.status_message = format!("Loaded {} items", state.browse_items.len());
-                }
-            } else {
-                state.error_message = Some("Failed to decode ListPathResponse".into());
+                state.browse_items = response.items.into_iter().map(|s3_key| {
+                    let is_folder = s3_key.ends_with('/');
+                    let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
+                    let exists_locally = !is_folder && local_files.contains(&name);
+                    BrowserItem { s3_key, name, is_folder, exists_locally }
+                }).collect();
+                state.current_browse_path = path;
+                state.status_message = format!("Loaded {} items", state.browse_items.len());
             }
         }
-        Err(e) => { 
-            state.error_message = Some(format!("Browse RPC Error: {}", e)); 
-            state.status_message = "Browse failed".to_string();
-        }
+        Err(e) => { state.error_message = Some(format!("Browse Error: {}", e)); }
     }
 }
 
 fn refresh_local_files(state: &mut LocalState) {
-    state.status_message = "Refreshing local files...".to_string();
     let path = "data/dem/source";
-    match veldsdk::core::fs_list(path) {
-        Ok(entries) => {
-            state.local_files = entries.into_iter().map(|name| {
-                BrowserItem {
-                    s3_key: format!("{}/{}", path, name),
-                    name,
-                    is_folder: false,
-                    exists_locally: true,
-                }
-            }).collect();
-            state.status_message = format!("Found {} local files", state.local_files.len());
-        }
-        Err(e) => {
-            state.error_message = Some(format!("Failed to list local files: {}", e));
-        }
+    if let Ok(entries) = veldsdk::core::fs_list(path) {
+        state.local_files = entries.into_iter().map(|name| {
+            BrowserItem { s3_key: format!("{}/{}", path, name), name, is_folder: false, exists_locally: true }
+        }).collect();
     }
 }
