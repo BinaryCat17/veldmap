@@ -1,6 +1,6 @@
 mod render;
 
-use veldsdk::rpc::define_module;
+use veldsdk::define_module;
 use veldmap_gis_api::render::*;
 use serde::Deserialize;
 

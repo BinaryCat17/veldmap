@@ -5,7 +5,7 @@ use veldmap_gis_api::common::Empty;
 use iced_core::{mouse, keyboard, Point};
 use crate::app::VeldMapToolsGui;
 use crate::common;
-use veldsdk::iced_runtime::IcedRuntime;
+use veldsdk::iced::IcedRuntime;
 
 pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {
     let (gui, _task) = VeldMapToolsGui::new();

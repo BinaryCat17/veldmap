@@ -30,7 +30,7 @@ tiny-skia = { version = "0.11", optional = true }
 prost-build = "0.13"
 
 [features]
-default = ["graphics"]
+default = []
 # Фича 'graphics' соответствует папке 'graphics/'
 graphics = []
 # Фича 'iced' соответствует папке 'iced/' и требует 'graphics'

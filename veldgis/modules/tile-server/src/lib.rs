@@ -1,6 +1,6 @@
 mod server;
 
-use veldsdk::rpc::define_module;
+use veldsdk::define_module;
 use veldsdk::rpc::tile_server::{TileRequest, TileResponse};
 use serde::Deserialize;
 

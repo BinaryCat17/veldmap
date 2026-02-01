@@ -7,13 +7,13 @@ mod downloaded;
 mod preview;
 mod handlers;
 
-use veldsdk::rpc::define_module;
+use veldsdk::define_module;
 use veldsdk::rpc::ui::UiEvent;
 use veldsdk::rpc::services::RpcResponse;
 use veldmap_gis_api::common::Empty;
 use serde::Deserialize;
 use crate::app::{VeldMapToolsGui, Message};
-use veldsdk::iced_runtime::IcedRuntime;
+use veldsdk::iced::IcedRuntime;
 
 // Контейнер для типов, которые не реализуют Send/Sync.
 pub(crate) struct UnsafeSync<T>(pub T);

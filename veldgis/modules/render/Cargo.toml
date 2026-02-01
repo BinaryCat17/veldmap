@@ -7,11 +7,11 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+veldsdk = { path = "../../../veldsdk/rust" }
+veldmap-gis-api = { path = "../../lib/rust/gis-api" }
 extism-pdk = "1.1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
 anyhow = "1.0"
-veldmap-rust-rpc = { path = "../../../../veldcore/sdk/rust/rpc", features = ["pdk"] }
-veldmap-logger = { path = "../../../../veldcore/sdk/rust/logger" }
 prost = "0.13"
