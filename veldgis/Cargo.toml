@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "lib/rust/geo-math",
+    "modules/render",
+    "modules/data-provider",
+    "modules/local-storage",
+    "modules/tile-server",
+    "apps/data-browser",
+    "apps/desktop-client",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[profile.release.package.veldmap-app-data-browser]
+opt-level = 3
+
+[profile.release.package.veldmap-data-provider]
+opt-level = "s"
+
+[profile.release.package.veldmap-geo-math]
+opt-level = "s"
+
+[profile.release.package.veldmap-local-storage]
+opt-level = "s"
+
+[profile.release.package.veldmap-tile-server]
+opt-level = "s"
+
+[profile.release.package.veldmap-render]
+opt-level = "s"

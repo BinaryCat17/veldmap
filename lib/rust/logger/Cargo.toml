@@ -1,8 +1,0 @@
-[package]
-name = "veldmap-logger"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-veldmap-rust-rpc = { path = "../rpc", features = ["pdk"] }
-log = "0.4"

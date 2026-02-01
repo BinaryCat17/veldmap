@@ -7,12 +7,14 @@ import sys
 # Project configuration
 PLUGINS_DIR = "plugins"
 WASM_TARGET = "wasm32-wasip1"
+CORE_MANIFEST = "veldcore/Cargo.toml"
+GIS_MANIFEST = "veldgis/Cargo.toml"
+
 MODULES = [
     "veldmap-data-provider",
     "veldmap-local-storage",
     "veldmap-tile-server",
     "veldmap-render",
-    "veldmap-core-wasm",
     "veldmap-app-data-browser",
     "veldmap-app-desktop-client"
 ]
@@ -27,35 +29,36 @@ def run(cmd, cwd=None):
 
 def build_all():
     """Build RPC, WASM modules, and Host."""
-    # 1. Build RPC Layer
+    # 1. Build RPC Layer (in Core workspace)
     print("\n[1/3] Building RPC Layer...")
-    run(["cargo", "build", "-p", "veldmap-rust-rpc"])
+    run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-rust-rpc"])
 
-    # 2. Build WASM Modules
+    # 2. Build WASM Modules (in GIS workspace)
     print("\n[2/3] Building WASM Modules...")
     if not os.path.exists(PLUGINS_DIR):
         os.makedirs(PLUGINS_DIR)
 
     for module in MODULES:
         print(f"\n--- Module: {module} ---")
-        run(["cargo", "build", "-p", module, "--target", WASM_TARGET, "--release"])
+        run(["cargo", "build", "--manifest-path", GIS_MANIFEST, "-p", module, "--target", WASM_TARGET, "--release"])
         
         # Rust lib names use underscores instead of hyphens
         wasm_file_name = module.replace("-", "_") + ".wasm"
-        source_path = os.path.join("target", WASM_TARGET, "release", wasm_file_name)
+        source_path = os.path.join("veldgis/target", WASM_TARGET, "release", wasm_file_name)
         dest_path = os.path.join(PLUGINS_DIR, wasm_file_name)
         
         print(f"Deploying {wasm_file_name} to {PLUGINS_DIR}/")
         shutil.copy(source_path, dest_path)
 
-    # 3. Build Native Host
-    print("\n[3/3] Building Native Host...")
-    run(["cargo", "build", "-p", "veldmap-native-host", "--release"])
+    # 3. Build Native Hosts (in Core workspace)
+    print("\n[3/3] Building Native Hosts...")
+    run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-host-gui", "--release"])
+    run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-host-cli", "--release"])
 
 def clean():
     """Remove build artifacts."""
     print("Cleaning project...")
-    folders_to_remove = ["target", PLUGINS_DIR]
+    folders_to_remove = ["veldcore/target", "veldgis/target", PLUGINS_DIR]
     for folder in folders_to_remove:
         if os.path.exists(folder):
             print(f"Removing {folder}/")

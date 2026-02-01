@@ -1,0 +1,33 @@
+[package]
+name = "veldmap-app-data-browser"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = "1.1.0"
+veldmap-rust-rpc = { path = "../../../../veldcore/core/bindings/rust", features = ["pdk"] }
+veldmap-logger = { path = "../../../../veldcore/sdk/rust/logger" }
+prost = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+once_cell = "1.19"
+anyhow = "1.0"
+log = "0.4"
+lazy_static = "1.4"
+veldmap-ui-bridge = { path = "../../../../veldcore/sdk/rust/ui-bridge" }
+veldmap-iced-wasm-runtime = { path = "../../../../veldcore/sdk/rust/iced-wasm-runtime" }
+iced_core = { version = "0.14.0" }
+iced_widget = { version = "0.14.0", default-features = false, features = ["image"] }
+iced_tiny_skia = { version = "0.14.0", default-features = false, features = ["image"] }
+iced_runtime = { version = "0.14.0", default-features = false }
+iced_graphics = { version = "0.14.0", default-features = false }
+iced_renderer = { version = "0.14.0", default-features = false, features = ["tiny-skia"] }
+tiny-skia = "0.11"
+cosmic-text = "0.15"
+tokio = { version = "1.0", features = ["sync", "macros"] }
+async-stream = "0.3"
+image = "0.25"
+tiff = "0.9"

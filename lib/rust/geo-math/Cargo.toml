@@ -1,8 +1,0 @@
-[package]
-name = "veldmap-geo-math"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-veldmap-rust-rpc = { path = "../rpc" }
-anyhow = "1.0"

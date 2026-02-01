@@ -1,9 +1,0 @@
-{
-  "api_endpoint": "https://catalogue.dataspace.copernicus.eu/odata/v1",
-  "access_key": "${COPERNICUS_ACCESS_KEY}",
-  "secret_key": "${COPERNICUS_ACCESS_SECRET}",
-  "username": "${COPERNICUS_USERNAME}",
-  "password": "${COPERNICUS_PASSWORD}",
-  "endpoint": "https://eodata.dataspace.copernicus.eu",
-  "region": "cdse"
-}

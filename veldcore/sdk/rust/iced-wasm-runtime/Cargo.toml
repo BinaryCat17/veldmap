@@ -1,0 +1,20 @@
+[package]
+name = "veldmap-iced-wasm-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+veldmap-ui-bridge = { path = "../ui-bridge" }
+veldmap-rust-rpc = { path = "../../../core/bindings/rust", features = ["pdk"] }
+iced_core = { version = "0.14.0" }
+iced_widget = { version = "0.14.0", default-features = false, features = ["image"] }
+iced_tiny_skia = { version = "0.14.0", default-features = false, features = ["image"] }
+iced_runtime = { version = "0.14.0", default-features = false }
+iced_graphics = { version = "0.14.0", default-features = false }
+iced_renderer = { version = "0.14.0", default-features = false, features = ["tiny-skia"] }
+tiny-skia = "0.11"
+anyhow = "1.0"
+prost = "0.13"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

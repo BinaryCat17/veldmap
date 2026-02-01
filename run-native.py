@@ -6,11 +6,10 @@ import sys
 def main():
     print("Starting VeldMap Native Runtime...")
     
-    # 1. Запускаем Native Host (который теперь содержит в себе и Core, и Окно)
+    # 1. Запускаем Native Host из воркспейса veldcore
     print("-> Launching VeldMap Host...")
     try:
-        # В этой архитектуре Хост сам загрузит core.wasm и apps/*.wasm
-        subprocess.run(["cargo", "run", "-p", "veldmap-native-host", "--release"])
+        subprocess.run(["cargo", "run", "--manifest-path", "veldcore/Cargo.toml", "-p", "veldmap-host-gui", "--release"])
     except KeyboardInterrupt:
         print("\nShutting down.")
 
