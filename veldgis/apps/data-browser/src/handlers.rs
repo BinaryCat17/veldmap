@@ -4,7 +4,8 @@ use crate::common::BrowserItem;
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, SearchFilter, DataProduct};
 use prost::Message as ProstMessage;
 use iced_core::image::Handle;
-use veldsdk::iced::{IcedSettings, Command};
+use veldsdk::iced::IcedSettings;
+use veldsdk::core::Command;
 use veldsdk::rpc_command;
 use crate::LocalConfig;
 

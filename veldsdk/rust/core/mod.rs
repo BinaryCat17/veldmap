@@ -6,6 +6,55 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+/// A command that describes a side effect to be performed.
+pub struct Command<M>(pub Vec<BoxedFuture<M>>);
+
+pub type BoxedFuture<M> = Pin<Box<dyn Future<Output = Option<M>> + Send + 'static>>;
+
+impl<M> Command<M> {
+    /// Creates an empty command.
+    pub fn none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Creates a command from a future that returns a result, wrapping it in a message.
+    pub fn perform<F, T, G>(future: F, msg_wrap: G) -> Self 
+    where 
+        F: Future<Output = T> + Send + 'static,
+        G: FnOnce(T) -> M + Send + 'static,
+        T: 'static,
+        M: 'static 
+    {
+        Self(vec![Box::pin(async move { Some(msg_wrap(future.await)) })])
+    }
+
+    /// Creates a command from a raw future that returns an option of message.
+    pub fn perform_raw<F>(future: F) -> Self 
+    where 
+        F: Future<Output = Option<M>> + Send + 'static,
+        M: 'static 
+    {
+        Self(vec![Box::pin(future)])
+    }
+
+    /// Creates a command from a future that doesn't return anything.
+    pub fn perform_action<F>(future: F) -> Self 
+    where 
+        F: Future<Output = ()> + Send + 'static,
+        M: 'static 
+    {
+        Self(vec![Box::pin(async move { future.await; None })])
+    }
+
+    pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
+        let mut futures = Vec::new();
+        for cmd in commands {
+            futures.extend(cmd.0);
+        }
+        Self(futures)
+    }
+}
+
 /// Yields execution back to the host, allowing other tasks (like rendering) to run.
 pub async fn yield_now() {
     struct YieldNow(bool);

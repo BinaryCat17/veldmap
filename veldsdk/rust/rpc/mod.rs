@@ -12,6 +12,32 @@ pub mod host;
 pub mod client;
 
 #[cfg(feature = "pdk")]
+#[macro_export]
+macro_rules! rpc_call {
+    ($service:expr, $method:expr, $payload:expr, $resp_type:ty) => {
+        async move {
+            $crate::core::yield_now().await;
+            let res = $crate::rpc::host::call_service($service, $method, $payload);
+            res.and_then(|bytes| {
+                <$resp_type as ::prost::Message>::decode(&bytes[..])
+                    .map_err(|e| ::anyhow::anyhow!("Decode error: {}", e))
+            }).map_err(|e| e.to_string())
+        }
+    };
+}
+
+#[cfg(feature = "pdk")]
+#[macro_export]
+macro_rules! rpc_command {
+    ($service:expr, $method:expr, $payload:expr, $resp_type:ty, $processor:expr) => {
+        $crate::core::Command::perform(
+            $crate::rpc_call!($service, $method, $payload, $resp_type),
+            $processor
+        )
+    };
+}
+
+#[cfg(feature = "pdk")]
 pub static MODULE_STATE: once_cell::sync::OnceCell<anyhow::Result<Box<dyn std::any::Any + Send + Sync>>> = once_cell::sync::OnceCell::new();
 
 #[cfg(feature = "pdk")]

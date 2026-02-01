@@ -85,20 +85,43 @@ define_iced_module! {
 - Обработчики возвращают `Command<Message>` для выполнения побочных эффектов.
 - Данные из вариантов `Message` (например, `path` в `DownloadFile(path)`) автоматически распаковываются макросом и передаются в функцию.
 
-```rust
 // Пример в handlers.rs
-pub fn handle_download(state: &mut LocalState, path: String) -> Command<Message> {
-    state.status_message = format!("Downloading {}...", path);
-    Command::perform(async move {
-        // Логика работы с файлами или сетью
-        Message::DownloadFinished(Ok(path))
-    })
+pub fn handle_search(state: &mut LocalState) -> Command<Message> {
+    state.status_message = "Searching...".into();
+    let req = SearchRequest { query: state.query.clone(), ..Default::default() };
+    
+    // Используем макрос для лаконичного RPC-вызова
+    rpc_command!("data-provider", "search", req.encode_to_vec(), SearchResponse, Message::SearchResult)
 }
 ```
+
+### Управление асинхронностью (Commands)
+
+VeldMap SDK использует декларативный подход к асинхронности. Вместо блокирующих вызовов или прямого управления потоками, обработчики возвращают `Command<M>`, которую рантайм выполняет в фоне.
+
+#### Основные инструменты:
+
+1.  **`rpc_command!`**: Самый быстрый способ сделать RPC-запрос. Принимает имя сервиса, метод, данные, тип ответа и обработчик (вариант Message или замыкание).
+    ```rust
+    rpc_command!("service", "method", payload, ResponseType, Message::Result)
+    ```
+
+2.  **`rpc_call!`**: Макрос-кирпичик для использования внутри `async move` блоков. Выполняет запрос, декодирует Protobuf и возвращает `Result<T, String>`. Инкапсулирует в себя обработку ошибок и переключение контекста.
+
+3.  **`Command::perform`**: Универсальный конструктор для любых асинхронных задач (чтение файлов, сложные вычисления).
+    ```rust
+    Command::perform(async move {
+        let data = core::fs_read("file.txt").await?;
+        Ok(process(data))
+    }, Message::Finished)
+    ```
+
+4.  **`yield_now()`**: Функция для принудительной передачи управления хосту. Полезна в начале тяжелых задач, чтобы UI успел отрисовать промежуточное состояние (например, статус "Загрузка...").
 
 ---
 
 ## Сборка и запуск
+
 
 Для удобства оркестрации в корне проекта находятся Python-скрипты:
 

@@ -1,6 +1,7 @@
 #[cfg(feature = "graphics")]
 use crate::graphics::UiBridge;
-use crate::iced::{RawIcedRuntime, BoxedFuture, Command};
+use crate::iced::RawIcedRuntime;
+use crate::core::{Command, BoxedFuture};
 use crate::rpc::ui::UiEvent;
 use iced_core::{mouse, keyboard, Size, Theme, Color, Rectangle, Point, Pixels, Font, Event};
 use iced_graphics::Viewport;

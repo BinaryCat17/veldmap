@@ -1,8 +1,6 @@
 //! Iced integration for VeldMap WASM plugins.
 
 use iced_core::Font;
-use std::pin::Pin;
-use std::future::Future;
 
 pub mod runtime;
 
@@ -12,85 +10,12 @@ pub struct IcedSettings {
     pub fonts: Vec<(&'static str, &'static [u8])>,
 }
 
-/// A command that describes a side effect to be performed.
-pub struct Command<M>(pub(crate) Vec<BoxedFuture<M>>);
-
-impl<M> Command<M> {
-    /// Creates an empty command.
-    pub fn none() -> Self {
-        Self(Vec::new())
-    }
-
-    /// Creates a command from a future that returns a result, wrapping it in a message.
-    pub fn perform<F, T, G>(future: F, msg_wrap: G) -> Self 
-    where 
-        F: Future<Output = T> + Send + 'static,
-        G: FnOnce(T) -> M + Send + 'static,
-        T: 'static,
-        M: 'static 
-    {
-        Self(vec![Box::pin(async move { Some(msg_wrap(future.await)) })])
-    }
-
-    /// Creates a command from a raw future that returns an option of message.
-    pub fn perform_raw<F>(future: F) -> Self 
-    where 
-        F: Future<Output = Option<M>> + Send + 'static,
-        M: 'static 
-    {
-        Self(vec![Box::pin(future)])
-    }
-
-    /// Creates a command from a future that doesn't return anything.
-    pub fn perform_action<F>(future: F) -> Self 
-    where 
-        F: Future<Output = ()> + Send + 'static,
-        M: 'static 
-    {
-        Self(vec![Box::pin(async move { future.await; None })])
-    }
-
-    pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
-        let mut futures = Vec::new();
-        for cmd in commands {
-            futures.extend(cmd.0);
-        }
-        Self(futures)
-    }
-}
-
 /// Internal trait used by the macro to drive the UI.
 #[doc(hidden)]
 pub trait RawIcedRuntime: Send + Sync {
     fn handle_event(&self, event: crate::rpc::ui::UiEvent) -> anyhow::Result<()>;
     fn render(&self) -> anyhow::Result<()>;
     fn tick(&self) -> anyhow::Result<()>;
-}
-
-pub type BoxedFuture<M> = Pin<Box<dyn Future<Output = Option<M>> + Send + 'static>>;
-
-#[macro_export]
-macro_rules! rpc_call {
-    ($service:expr, $method:expr, $payload:expr, $resp_type:ty) => {
-        async move {
-            $crate::core::yield_now().await;
-            let res = $crate::rpc::host::call_service($service, $method, $payload);
-            res.and_then(|bytes| {
-                <$resp_type as ::prost::Message>::decode(&bytes[..])
-                    .map_err(|e| ::anyhow::anyhow!("Decode error: {}", e))
-            }).map_err(|e| e.to_string())
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! rpc_command {
-    ($service:expr, $method:expr, $payload:expr, $resp_type:ty, $processor:expr) => {
-        $crate::iced::Command::perform(
-            $crate::rpc_call!($service, $method, $payload, $resp_type),
-            $processor
-        )
-    };
 }
 
 #[doc(hidden)]
@@ -129,7 +54,7 @@ macro_rules! define_iced_module {
             let result = $init_func(config);
             let boxed_state: anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match result {
                 Ok((state, settings)) => {
-                    fn internal_update(state: &mut $state_type, message: $message_type) -> $crate::iced::Command<$message_type> {
+                    fn internal_update(state: &mut $state_type, message: $message_type) -> $crate::core::Command<$message_type> {
                         #[allow(unused_imports)]
                         use $message_type::*;
                         match message {
