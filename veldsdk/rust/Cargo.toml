@@ -8,7 +8,7 @@ build = "build.rs"
 path = "lib.rs"
 
 [dependencies]
-# Базовые системные зависимости (всегда включены)
+# Базовые системные зависимости
 prost = "0.13"
 anyhow = "1.0"
 log = "0.4"
@@ -17,7 +17,7 @@ serde_json = "1.0"
 extism-pdk = "1.1.0"
 once_cell = "1.19"
 
-# Опциональные тяжелые зависимости (включаются только через фичу 'iced')
+# Опциональные тяжелые зависимости
 iced_core = { version = "0.14.0", optional = true }
 iced_widget = { version = "0.14.0", default-features = false, features = ["image"], optional = true }
 iced_tiny_skia = { version = "0.14.0", default-features = false, features = ["image"], optional = true }
@@ -30,10 +30,8 @@ tiny-skia = { version = "0.11", optional = true }
 prost-build = "0.13"
 
 [features]
-default = []
-# Фича 'graphics' соответствует папке 'graphics/'
+default = ["pdk"]
 graphics = []
-# Фича 'iced' соответствует папке 'iced/' и требует 'graphics'
 iced = [
     "graphics",
     "iced_core", 
@@ -44,3 +42,5 @@ iced = [
     "iced_renderer", 
     "tiny-skia"
 ]
+pdk = []
+client = []

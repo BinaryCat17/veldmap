@@ -123,7 +123,7 @@ impl<Message, G: Application<Message>> IcedRuntime<Message, G> {
             }
         }
 
-        let mut cache = {
+        let cache = {
             let gui = self.gui.borrow();
             let mut user_interface = UserInterface::build(
                 gui.view(),

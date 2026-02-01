@@ -1,12 +1,12 @@
 mod server;
 
 use veldsdk::define_module;
-use veldsdk::rpc::tile_server::{TileRequest, TileResponse};
+use veldmap_gis_api::tileserver::{TileRequest, TileResponse};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub(crate) struct LocalConfig {
-    pub port: u16,
+    pub _port: u16,
 }
 
 pub(crate) struct LocalState;

@@ -2,7 +2,7 @@ use crate::{LocalConfig, LocalState, UnsafeSync};
 use veldsdk::rpc::ui::UiEvent;
 use veldsdk::rpc::services::RpcResponse;
 use veldmap_gis_api::common::Empty;
-use iced_core::{mouse, keyboard, Point};
+use iced_core::{mouse, keyboard};
 use crate::app::VeldMapToolsGui;
 use crate::common;
 use veldsdk::iced::IcedRuntime;

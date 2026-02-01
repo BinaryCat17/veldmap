@@ -1,4 +1,4 @@
-use veldsdk::rpc::tile_server::{TileRequest, TileResponse};
+use veldmap_gis_api::tileserver::{TileRequest, TileResponse};
 use crate::{LocalConfig, LocalState};
 
 pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {

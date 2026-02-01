@@ -9,7 +9,6 @@ mod handlers;
 
 use veldsdk::define_module;
 use veldsdk::rpc::ui::UiEvent;
-use veldsdk::rpc::services::RpcResponse;
 use veldmap_gis_api::common::Empty;
 use serde::Deserialize;
 use crate::app::{VeldMapToolsGui, Message};

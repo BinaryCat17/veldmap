@@ -1,6 +1,5 @@
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
 use log::info;
-use serde::Deserialize;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::time::SystemTime;
@@ -14,14 +13,13 @@ use crate::{LocalConfig, LocalState};
 
 pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
     let credentials = aws_credential_types::Credentials::new(
-        config.access_key.clone(), 
-        config.secret_key.clone(), 
+        config.access_key, 
+        config.secret_key, 
         None, None, "veldmap"
     );
     let identity = Identity::new(credentials, None);
     
     Ok(LocalState {
-        config,
         identity,
     })
 }

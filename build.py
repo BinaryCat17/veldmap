@@ -9,7 +9,6 @@ PLUGINS_DIR = "plugins"
 WASM_TARGET = "wasm32-wasip1"
 CORE_MANIFEST = "veldcore/Cargo.toml"
 GIS_MANIFEST = "veldgis/Cargo.toml"
-INTERFACE_MANIFEST = "veldsdk/rust/Cargo.toml"
 
 MODULES = [
     "veldmap-data-provider",
@@ -29,13 +28,9 @@ def run(cmd, cwd=None):
         sys.exit(1)
 
 def build_all():
-    """Build RPC, WASM modules, and Host."""
-    # 1. Build Interface Layer
-    print("\n[1/3] Building Interface Layer...")
-    run(["cargo", "build", "--manifest-path", INTERFACE_MANIFEST])
-
-    # 2. Build WASM Modules (in GIS workspace)
-    print("\n[2/3] Building WASM Modules...")
+    """Build WASM modules and Host."""
+    # 1. Build WASM Modules (in GIS workspace)
+    print("\n[1/2] Building WASM Modules...")
     if not os.path.exists(PLUGINS_DIR):
         os.makedirs(PLUGINS_DIR)
 
@@ -51,15 +46,15 @@ def build_all():
         print(f"Deploying {wasm_file_name} to {PLUGINS_DIR}/")
         shutil.copy(source_path, dest_path)
 
-    # 3. Build Native Hosts (in Core workspace)
-    print("\n[3/3] Building Native Hosts...")
+    # 2. Build Native Hosts (in Core workspace)
+    print("\n[2/2] Building Native Hosts...")
     run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-host-gui", "--release"])
     run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-host-cli", "--release"])
 
 def clean():
     """Remove build artifacts."""
     print("Cleaning project...")
-    folders_to_remove = ["veldcore/target", "veldgis/target", "veldinterface/rust/target", PLUGINS_DIR]
+    folders_to_remove = ["veldcore/target", "veldgis/target", "veldsdk/rust/target", PLUGINS_DIR]
     for folder in folders_to_remove:
         if os.path.exists(folder):
             print(f"Removing {folder}/")

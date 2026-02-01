@@ -1,7 +1,7 @@
 #[cfg(feature = "pdk")]
 use extism_pdk::*;
 #[cfg(feature = "pdk")]
-use crate::services::{RpcRequest, RpcResponse};
+use crate::rpc::services::{RpcRequest, RpcResponse};
 #[cfg(feature = "pdk")]
 use prost::Message;
 

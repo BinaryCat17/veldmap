@@ -11,7 +11,6 @@ pub(crate) struct LocalConfig {
 }
 
 pub(crate) struct LocalState {
-    pub config: LocalConfig,
     pub identity: Identity,
 }
 
