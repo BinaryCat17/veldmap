@@ -14,7 +14,9 @@ use crate::browse;
 use crate::utils;
 use crate::common::{self, BrowserItem, is_previewable, icon_text};
 
-impl veldsdk::iced::Application<Message> for VeldMapToolsGui {
+impl veldsdk::iced::Application for VeldMapToolsGui {
+    type Message = Message;
+
     fn update(&mut self, message: Message) {
         let _ = self.update(message);
     }

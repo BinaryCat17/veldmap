@@ -1,30 +1,34 @@
 #[cfg(feature = "graphics")]
 use crate::graphics::UiBridge;
-use crate::iced::Application;
-use iced_core::{mouse, Size, Theme, Color, Rectangle, Point, Pixels, Font};
+use crate::iced::{Application, UiRuntime};
+use iced_core::{mouse, Size, Theme, Color, Rectangle, Point, Pixels, Font, Event};
 use iced_graphics::Viewport;
 use iced_runtime::user_interface::{self, UserInterface};
 use iced_tiny_skia::Renderer;
 use std::cell::RefCell;
-use std::marker::PhantomData;
 
-/// Manages the Iced GUI lifecycle and rendering inside the WASM environment.
-pub struct IcedRuntime<Message, G: Application<Message>> {
-    gui: RefCell<G>,
+/// Internal implementation of the Iced runtime.
+pub struct IcedRuntime<T: Application> {
+    gui: RefCell<T>,
     renderer: RefCell<Renderer>,
     interface_cache: RefCell<user_interface::Cache>,
     canvas_size: RefCell<(u32, u32)>,
     scale_factor: RefCell<f32>,
     cursor_position: RefCell<Point>,
-    pending_events: RefCell<Vec<iced_core::Event>>,
+    pending_events: RefCell<Vec<Event>>,
     fonts_loaded: RefCell<bool>,
     needs_redrawing: RefCell<bool>,
     font_data: Vec<(&'static str, &'static [u8])>,
-    _marker: PhantomData<Message>,
 }
 
-impl<Message, G: Application<Message>> IcedRuntime<Message, G> {
-    pub fn new(gui: G, default_font: Font, font_data: Vec<(&'static str, &'static [u8])>) -> Self {
+// We are in WASM, which is single-threaded for now. 
+// IcedRuntime uses RefCells, so it's not thread-safe in a generic context,
+// but for our plugin architecture, we can safely treat it as such.
+unsafe impl<T: Application> Send for IcedRuntime<T> {}
+unsafe impl<T: Application> Sync for IcedRuntime<T> {}
+
+impl<T: Application> IcedRuntime<T> {
+    pub fn new(gui: T, default_font: Font, font_data: Vec<(&'static str, &'static [u8])>) -> Self {
         let renderer = Renderer::new(default_font, Pixels(16.0));
         
         Self {
@@ -38,32 +42,33 @@ impl<Message, G: Application<Message>> IcedRuntime<Message, G> {
             fonts_loaded: RefCell::new(false),
             needs_redrawing: RefCell::new(true),
             font_data,
-            _marker: PhantomData,
         }
     }
+}
 
-    pub fn update_size(&self, width: u32, height: u32, scale_factor: f32) {
+impl<T: Application + 'static> UiRuntime for IcedRuntime<T> {
+    fn update_size(&self, width: u32, height: u32, scale_factor: f32) {
         *self.canvas_size.borrow_mut() = (width, height);
         *self.scale_factor.borrow_mut() = scale_factor;
         *self.needs_redrawing.borrow_mut() = true;
     }
 
-    pub fn update_cursor(&self, x: f32, y: f32) {
+    fn update_cursor(&self, x: f32, y: f32) {
         let sf = *self.scale_factor.borrow();
         *self.cursor_position.borrow_mut() = Point::new(x / sf, y / sf);
         *self.needs_redrawing.borrow_mut() = true;
     }
 
-    pub fn cursor_position(&self) -> Point {
+    fn cursor_position(&self) -> Point {
         *self.cursor_position.borrow()
     }
 
-    pub fn push_event(&self, event: iced_core::Event) {
+    fn push_event(&self, event: Event) {
         self.pending_events.borrow_mut().push(event);
         *self.needs_redrawing.borrow_mut() = true;
     }
 
-    pub fn render(&self) -> anyhow::Result<()> {
+    fn render(&self) -> anyhow::Result<()> {
         if !*self.needs_redrawing.borrow() {
             return Ok(());
         }
@@ -76,7 +81,6 @@ impl<Message, G: Application<Message>> IcedRuntime<Message, G> {
         let cursor = mouse::Cursor::Available(cursor_pos);
         let events = std::mem::take(&mut *self.pending_events.borrow_mut());
 
-        // Load fonts only once
         if !*self.fonts_loaded.borrow() {
             let fs = iced_graphics::text::font_system();
             if let Ok(mut fs_write) = fs.write() {

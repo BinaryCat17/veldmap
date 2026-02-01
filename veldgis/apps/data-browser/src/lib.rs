@@ -11,18 +11,12 @@ use veldsdk::define_module;
 use veldsdk::rpc::ui::UiEvent;
 use veldmap_gis_api::common::Empty;
 use serde::Deserialize;
-use crate::app::{VeldMapToolsGui, Message};
-use veldsdk::iced::IcedRuntime;
-
-// Контейнер для типов, которые не реализуют Send/Sync.
-pub(crate) struct UnsafeSync<T>(pub T);
-unsafe impl<T> Sync for UnsafeSync<T> {}
-unsafe impl<T> Send for UnsafeSync<T> {}
+use veldsdk::iced::UiRuntime;
 
 #[derive(Deserialize)]
 pub(crate) struct LocalConfig {}
 
-pub(crate) struct LocalState(pub(crate) UnsafeSync<IcedRuntime<Message, VeldMapToolsGui>>);
+pub(crate) struct LocalState(pub(crate) Box<dyn UiRuntime>);
 
 define_module! {
     config: LocalConfig,

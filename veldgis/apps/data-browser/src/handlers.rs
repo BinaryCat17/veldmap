@@ -1,15 +1,14 @@
-use crate::{LocalConfig, LocalState, UnsafeSync};
+use crate::{LocalConfig, LocalState};
 use veldsdk::rpc::ui::UiEvent;
 use veldsdk::rpc::services::RpcResponse;
 use veldmap_gis_api::common::Empty;
 use iced_core::{mouse, keyboard};
 use crate::app::VeldMapToolsGui;
 use crate::common;
-use veldsdk::iced::IcedRuntime;
 
 pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {
     let (gui, _task) = VeldMapToolsGui::new();
-    let runtime = IcedRuntime::new(
+    let runtime = veldsdk::iced::create_runtime(
         gui, 
         iced_core::Font::with_name("VeldMap"),
         vec![
@@ -18,11 +17,11 @@ pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {
         ]
     );
     
-    Ok(LocalState(UnsafeSync(runtime)))
+    Ok(LocalState(runtime))
 }
 
 pub(crate) fn handle_ui_event(state: &LocalState, event_proto: UiEvent) -> anyhow::Result<RpcResponse> {
-    let runtime = &state.0.0;
+    let runtime = &state.0;
     if let Some(ev) = event_proto.event {
         match ev {
             veldsdk::rpc::ui::ui_event::Event::Resize(r) => { 
@@ -81,6 +80,6 @@ pub(crate) fn handle_ui_event(state: &LocalState, event_proto: UiEvent) -> anyho
 }
 
 pub(crate) fn handle_render(state: &LocalState, _req: Empty) -> anyhow::Result<RpcResponse> {
-    state.0.0.render()?;
+    state.0.render()?;
     Ok(RpcResponse::default())
 }
