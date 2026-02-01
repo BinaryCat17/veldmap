@@ -16,6 +16,8 @@ use extism::{Function, UserData, Val, ValType};
 use veldmap_host_core::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 mod app_service;
 
 #[tokio::main]
@@ -44,10 +46,11 @@ async fn main() -> anyhow::Result<()> {
         .build(&event_loop)?);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
+    let is_visible = Arc::new(AtomicBool::new(true));
 
     // ... (WGPU initialization code) ...
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::PRIMARY,
+        backends: wgpu::Backends::VULKAN,
         ..Default::default()
     });
     let surface = instance.create_surface(window.clone())?;
@@ -59,14 +62,16 @@ async fn main() -> anyhow::Result<()> {
     let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
-        width: size.width,
-        height: size.height,
+        width: size.width.max(1),
+        height: size.height.max(1),
         present_mode: wgpu::PresentMode::Fifo,
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
-    surface.configure(&device, &config);
+    if size.width > 0 && size.height > 0 {
+        surface.configure(&device, &config);
+    }
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("Blit Shader"),
@@ -96,14 +101,13 @@ async fn main() -> anyhow::Result<()> {
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut last_size = (100u32, 100u32);
     let mut cursor_pos = (0.0f32, 0.0f32);
-    let is_occluded = false;
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService)));
-    dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy))));
+    dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone()))));
 
     let d_call = dispatcher.clone();
     let mut host_call = Function::new("veldmap_host_call", [ValType::I64], [ValType::I64], UserData::new(()),
@@ -143,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
     plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call], &config_dir).await?;
 
     let d_clone = dispatcher.clone();
+    let is_visible_clone = is_visible.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
@@ -152,8 +157,10 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             interval.tick().await;
-            if let Err(e) = d_clone.call("data-browser", "render", vec![]).await {
-                log::error!("Render call failed: {}", e);
+            if is_visible_clone.load(Ordering::Relaxed) {
+                if let Err(e) = d_clone.call("data-browser", "render", vec![]).await {
+                    log::error!("Render call failed: {}", e);
+                }
             }
         }
     });
@@ -162,12 +169,13 @@ async fn main() -> anyhow::Result<()> {
         window_target.set_control_flow(ControlFlow::Wait);
 
         match event {
-            Event::UserEvent(_) | Event::AboutToWait => {
+            Event::UserEvent(()) => {
                 let mut last_draw_cmd = None;
                 while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
 
                 if let Some(AppCommand::Draw(data, w, h)) = last_draw_cmd {
-                    if !is_occluded && w > 0 && h > 0 {
+                    let size = window.inner_size();
+                    if is_visible.load(Ordering::SeqCst) && size.width > 0 && size.height > 0 && w > 0 && h > 0 {
                         if (w, h) != last_size || app_texture.is_none() {
                             let texture = device.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
                             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -184,33 +192,66 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
-                if !is_occluded && config.width > 0 && config.height > 0 {
+                let size = window.inner_size();
+                if is_visible.load(Ordering::SeqCst) && size.width > 0 && size.height > 0 && config.width > 0 && config.height > 0 {
                     if let Some(bind_group) = &app_bind_group {
-                        if let Ok(frame) = surface.get_current_texture() {
-                            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                            {
-                                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: None, color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } })], depth_stencil_attachment: None, ..Default::default() });
-                                rp.set_pipeline(&render_pipeline);
-                                rp.set_bind_group(0, bind_group, &[]);
-                                rp.draw(0..3, 0..1);
+                        match surface.get_current_texture() {
+                            Ok(frame) => {
+                                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                                {
+                                    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
+                                        label: None, 
+                                        color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
+                                            view: &view, 
+                                            resolve_target: None, 
+                                            ops: wgpu::Operations { 
+                                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), 
+                                                store: wgpu::StoreOp::Store 
+                                            } 
+                                        })], 
+                                        depth_stencil_attachment: None, 
+                                        ..Default::default() 
+                                    });
+                                    rp.set_pipeline(&render_pipeline);
+                                    rp.set_bind_group(0, bind_group, &[]);
+                                    rp.draw(0..3, 0..1);
+                                }
+                                queue.submit(Some(encoder.finish()));
+                                frame.present();
                             }
-                            queue.submit(Some(encoder.finish()));
-                            log::trace!("Presenting frame...");
-                            frame.present();
-                            log::trace!("Frame presented.");
+                            Err(wgpu::SurfaceError::Outdated) => {
+                                log::debug!("Surface outdated, skipping frame");
+                            }
+                            Err(e) => {
+                                log::error!("Surface error: {:?}", e);
+                            }
                         }
                     }
                 }
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 if size.width > 0 && size.height > 0 {
+                    is_visible.store(true, Ordering::SeqCst);
                     config.width = size.width; config.height = size.height;
                     surface.configure(&device, &config);
                     window.request_redraw();
                     let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Resize(veldmap_host_core::ui::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
                     let d_clone = dispatcher.clone();
                     tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
+                } else {
+                    is_visible.store(false, Ordering::SeqCst);
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::Occluded(occluded), .. } => {
+                is_visible.store(!occluded, Ordering::SeqCst);
+                if !occluded {
+                    window.request_redraw();
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
+                if focused && is_visible.load(Ordering::SeqCst) {
+                    window.request_redraw();
                 }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {

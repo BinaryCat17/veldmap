@@ -4,9 +4,6 @@ plugins/
 
 # Project-specific ignores
 veldgis/data/
-veldgis/config/local-storage.json
-veldgis/config/data-provider.json
-veldgis/config/services.json
 cache/
 
 # Binary data
