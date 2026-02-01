@@ -1,4 +1,4 @@
-mod app;
+mod view;
 mod common;
 mod utils;
 mod search;
@@ -8,7 +8,6 @@ mod preview;
 mod handlers;
 
 use veldsdk::define_iced_module;
-use veldsdk::iced::IcedSettings;
 use iced_core::image::Handle;
 use veldmap_gis_api::dataprovider::DataProduct;
 use crate::common::BrowserItem;
@@ -17,7 +16,7 @@ use crate::common::BrowserItem;
 pub struct LocalConfig {}
 
 pub struct LocalState {
-    pub view_mode: crate::app::ViewMode,
+    pub view_mode: view::ViewMode,
     pub status_message: String,
     pub error_message: Option<String>,
     pub search_state: search::SearchState,
@@ -36,7 +35,7 @@ pub struct LocalState {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    SwitchMode(crate::app::ViewMode),
+    SwitchMode(view::ViewMode),
     SearchInputChanged(String),
     SearchFilterTypeChanged(search::SearchFilterType),
     SearchPressed,
@@ -53,56 +52,27 @@ pub enum Message {
     ClosePreview,
 }
 
-pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, IcedSettings)> {
-    let state = LocalState {
-        view_mode: app::ViewMode::Search,
-        status_message: "VeldMap Data Browser Ready".to_string(),
-        error_message: None,
-        search_state: search::SearchState::default(),
-        search_results: Vec::new(),
-        download_progress: None,
-        current_image: None,
-        downloaded_state: downloaded::DownloadedState::default(),
-        token_stack: Vec::new(),
-        next_token: None,
-        current_browse_path: String::new(),
-        selected_product: None,
-        product_files: Vec::new(),
-        browse_items: Vec::new(),
-        local_files: Vec::new(),
-    };
-    
-    let settings = IcedSettings {
-        default_font: iced_core::Font::with_name("VeldMap"),
-        fonts: vec![
-            ("DejaVuSans", common::DEJAVU_FONT_DATA),
-            ("NotoColorEmoji", common::EMOJI_FONT_DATA),
-        ],
-    };
-    Ok((state, settings))
-}
-
 define_iced_module! {
     config: LocalConfig,
     state: LocalState,
     message: Message,
-    init: module_init,
-    view: app::view,
+    init: handlers::module_init,
+    view: view::view,
     handlers: {
-        Message::SwitchMode(_) => handlers::handle_switch_mode,
-        Message::SearchInputChanged(_) => handlers::handle_search_input,
-        Message::SearchFilterTypeChanged(_) => handlers::handle_search_filter,
-        Message::SearchPressed => handlers::handle_search_press,
-        Message::ClearError => handlers::handle_clear_error,
-        Message::ProductSelected(_) => handlers::handle_product_selected,
-        Message::BackToList => handlers::handle_back_to_list,
-        Message::BrowsePath(_) => handlers::handle_browse_path,
-        Message::BrowseUp => handlers::handle_browse_up,
-        Message::LocalSearchChanged(_) => handlers::handle_local_search,
-        Message::LocalFilterChanged(_) => handlers::handle_local_filter,
-        Message::DownloadFile(_) => handlers::handle_download,
-        Message::DeleteLocalFile(_) => handlers::handle_delete,
-        Message::ViewFile(_) => handlers::handle_view,
-        Message::ClosePreview => handlers::handle_close_preview,
+        SwitchMode(mode) => handlers::handle_switch_mode,
+        SearchInputChanged(query) => handlers::handle_search_input,
+        SearchFilterTypeChanged(filter) => handlers::handle_search_filter,
+        SearchPressed => handlers::handle_search_press,
+        ClearError => handlers::handle_clear_error,
+        ProductSelected(product) => handlers::handle_product_selected,
+        BackToList => handlers::handle_back_to_list,
+        BrowsePath(path) => handlers::handle_browse_path,
+        BrowseUp => handlers::handle_browse_up,
+        LocalSearchChanged(query) => handlers::handle_local_search,
+        LocalFilterChanged(filter) => handlers::handle_local_filter,
+        DownloadFile(path) => handlers::handle_download,
+        DeleteLocalFile(path) => handlers::handle_delete,
+        ViewFile(path) => handlers::handle_view,
+        ClosePreview => handlers::handle_close_preview,
     }
 }
