@@ -47,7 +47,8 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 extism_manifest.memory.max_pages = Some(2048);
                 
                 let service_config_path = format!("config/{}.json", name);
-                let mut service_config = fs::read_to_string(&service_config_path).unwrap_or_else(|_| "{}".to_string());
+                let mut service_config = fs::read_to_string(&service_config_path)
+                    .map_err(|e| anyhow::anyhow!("Configuration file not found for service '{}' at {}: {}", name, service_config_path, e))?;
                 
                 for (key, value) in std::env::vars() {
                     let placeholder = format!("${{{}}}", key);
@@ -57,7 +58,16 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 extism_manifest.config.insert("config".to_string(), service_config);
 
                 // Загружаем плагин без лишнего вывода в консоль
-                let plugin = Plugin::new(&extism_manifest, functions.iter().cloned(), true)?;
+                let mut plugin = Plugin::new(&extism_manifest, functions.iter().cloned(), true)?;
+                
+                // Автоматически вызываем init при загрузке
+                if plugin.function_exists("init") {
+                    if let Err(e) = plugin.call::<(), ()>("init", ()) {
+                        log::error!("Failed to initialize plugin '{}': {}", name, e);
+                        continue;
+                    }
+                }
+
                 dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(Mutex::new(plugin))));
             }
             "remote" => {

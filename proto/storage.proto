@@ -2,10 +2,6 @@ syntax = "proto3";
 package veldmap.storage;
 import "common.proto";
 
-service LocalStorage {
-  rpc GetTile(GetTileRequest) returns (GetTileResponse);
-}
-
 message GetTileRequest {
   veldmap.common.TileId id = 1;
 }

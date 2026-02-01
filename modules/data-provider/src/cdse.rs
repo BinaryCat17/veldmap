@@ -1,7 +1,6 @@
-use extism_pdk::*;
 use veldmap_rust_rpc::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
-use veldmap_rust_rpc::host::host_log;
-use serde_json::Value;
+use log::info;
+use serde::Deserialize;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use std::time::SystemTime;
@@ -9,37 +8,34 @@ use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
+use extism_pdk::HttpRequest;
+use extism_pdk::http;
+use crate::{LocalConfig, LocalState};
 
-fn get_config() -> Value {
-    let config_val = config::get("config").unwrap_or_default();
-    let config_str = config_val.unwrap_or_else(|| "{}".to_string());
-    serde_json::from_str(&config_str).unwrap_or(Value::Object(serde_json::Map::new()))
+pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
+    let credentials = aws_credential_types::Credentials::new(
+        config.access_key.clone(), 
+        config.secret_key.clone(), 
+        None, None, "veldmap"
+    );
+    let identity = Identity::new(credentials, None);
+    
+    Ok(LocalState {
+        config,
+        identity,
+    })
 }
 
-fn get_identity() -> anyhow::Result<Identity> {
-    let cfg = get_config();
-    let access_key = cfg["access_key"].as_str().unwrap_or("").to_string();
-    let secret_key = cfg["secret_key"].as_str().unwrap_or("").to_string();
-    
-    if access_key.is_empty() || secret_key.is_empty() {
-        return Err(anyhow::anyhow!("S3 credentials missing"));
-    }
-    
-    let credentials = aws_credential_types::Credentials::new(access_key, secret_key, None, None, "veldmap");
-    Ok(Identity::new(credentials, None))
-}
-
-pub fn search(_request: SearchRequest) -> anyhow::Result<SearchResponse> {
+pub fn search(_state: &LocalState, _request: SearchRequest) -> anyhow::Result<SearchResponse> {
     Ok(SearchResponse { products: vec![], error: String::new() })
 }
 
-pub fn download(_request: DownloadRequest) -> anyhow::Result<DownloadResponse> {
+pub fn download(_state: &LocalState, _request: DownloadRequest) -> anyhow::Result<DownloadResponse> {
     Ok(DownloadResponse { success: false, error: "Download not implemented".into(), download_url: "".into() })
 }
 
-pub fn list_path(request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
+pub fn list_path(state: &LocalState, request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-    let identity = get_identity()?;
     
     let host = "eodata.dataspace.copernicus.eu";
     let region = "default";
@@ -70,7 +66,7 @@ pub fn list_path(request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
 
     let signing_settings = SigningSettings::default();
     let signing_params = v4::SigningParams::builder()
-        .identity(&identity)
+        .identity(&state.identity)
         .region(region)
         .name("s3")
         .time(SystemTime::now())
@@ -91,7 +87,7 @@ pub fn list_path(request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
         url.path().to_string()
     };
     
-    host_log(&format!("Signing request: GET {} (region: {})", uri_with_query, region));
+    info!("Signing request: GET {} (region: {})", uri_with_query, region);
 
     let signable_request = SignableRequest::new(
         "GET",
@@ -115,11 +111,11 @@ pub fn list_path(request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
     };
     
     let body = res.body();
-    let status = res.status();
+    let status = res.status_code();
     
     if status != 200 && status != 0 {
         let err_msg = format!("S3 status {}: {}", status, String::from_utf8_lossy(&body));
-        host_log(&err_msg);
+        info!("{}", err_msg);
         return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: err_msg });
     }
 
@@ -168,6 +164,6 @@ fn parse_s3_xml(body: Vec<u8>) -> ListPathResponse {
         buf.clear();
     }
     
-    host_log(&format!("S3 found {} items", items.len()));
+    info!("S3 found {} items", items.len());
     ListPathResponse { items, next_token, error: String::new() }
 }

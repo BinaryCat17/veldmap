@@ -7248,12 +7248,14 @@ dependencies = [
  "image",
  "lazy_static",
  "log",
+ "once_cell",
  "prost 0.13.5",
  "serde",
  "serde_json",
  "tiff 0.9.1",
  "tiny-skia",
  "tokio",
+ "veldmap-logger",
  "veldmap-rust-rpc",
 ]
 
@@ -7264,9 +7266,11 @@ dependencies = [
  "anyhow",
  "extism-pdk",
  "log",
+ "once_cell",
  "prost 0.13.5",
  "serde",
  "serde_json",
+ "veldmap-logger",
  "veldmap-rust-rpc",
 ]
 
@@ -7279,6 +7283,7 @@ dependencies = [
  "prost 0.13.5",
  "serde",
  "serde_json",
+ "veldmap-logger",
  "veldmap-rust-rpc",
 ]
 
@@ -7301,6 +7306,7 @@ dependencies = [
  "time",
  "url",
  "urlencoding",
+ "veldmap-logger",
  "veldmap-rust-rpc",
 ]
 
@@ -7309,10 +7315,6 @@ name = "veldmap-geo-math"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "extism-pdk",
- "prost 0.13.5",
- "serde",
- "serde_json",
  "veldmap-rust-rpc",
 ]
 
@@ -7326,6 +7328,15 @@ dependencies = [
  "prost 0.13.5",
  "serde",
  "serde_json",
+ "veldmap-logger",
+ "veldmap-rust-rpc",
+]
+
+[[package]]
+name = "veldmap-logger"
+version = "0.1.0"
+dependencies = [
+ "log",
  "veldmap-rust-rpc",
 ]
 
@@ -7361,6 +7372,7 @@ dependencies = [
  "prost 0.13.5",
  "serde",
  "serde_json",
+ "veldmap-logger",
  "veldmap-rust-rpc",
 ]
 
@@ -7371,9 +7383,11 @@ dependencies = [
  "anyhow",
  "extism-pdk",
  "log",
+ "once_cell",
  "prost 0.13.5",
  "prost-build",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -7387,6 +7401,7 @@ dependencies = [
  "prost 0.13.5",
  "serde",
  "serde_json",
+ "veldmap-logger",
  "veldmap-rust-rpc",
 ]
 

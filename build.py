@@ -8,7 +8,6 @@ import sys
 PLUGINS_DIR = "plugins"
 WASM_TARGET = "wasm32-wasip1"
 MODULES = [
-    "veldmap-geo-math",
     "veldmap-data-provider",
     "veldmap-local-storage",
     "veldmap-tile-server",

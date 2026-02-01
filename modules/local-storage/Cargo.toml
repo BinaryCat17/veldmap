@@ -8,7 +8,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 extism-pdk = "1.1.0"
-veldmap-rust-rpc = { path = "../../rpc/rust", features = ["pdk"] }
+veldmap-rust-rpc = { path = "../../lib/rust/rpc", features = ["pdk"] }
+veldmap-logger = { path = "../../lib/rust/logger" }
 prost = "0.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

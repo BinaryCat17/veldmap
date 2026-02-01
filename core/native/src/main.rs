@@ -183,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
         let node = Arc::new(veldmap_native_host::node::VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
         tokio::spawn(async move { let _ = node.run().await; });
         log::info!("Core ready. Launching App...");
-        let _ = d_clone.call("veldmap-app-data-browser", "init", vec![]).await;
+        let _ = d_clone.call("veldmap-app-data-browser", "render", veldmap_rust_rpc::common::Empty {}.encode_to_vec()).await;
         let _ = proxy_clone.send_event(());
     });
 

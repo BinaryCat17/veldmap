@@ -12,8 +12,3 @@ message Ecef {
   double y = 2;
   double z = 3;
 }
-
-service GeoMath {
-  rpc LlaToEcef(Lla) returns (Ecef);
-  rpc EcefToLla(Ecef) returns (Lla);
-}

@@ -1,9 +1,12 @@
 use veldmap_rust_rpc::storage::{GetTileRequest, GetTileResponse};
 use veldmap_rust_rpc::common::{DemTile, TileId};
-use prost::Message;
+use crate::{LocalConfig, LocalState};
 
-pub fn handle_get_tile(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let request = GetTileRequest::decode(&payload[..])?;
+pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {
+    Ok(LocalState)
+}
+
+pub fn handle_get_tile(_state: &LocalState, request: GetTileRequest) -> anyhow::Result<GetTileResponse> {
     let tile_id = request.id.unwrap_or(TileId { x: 0, y: 0, z: 0 });
 
     let tile = DemTile {
@@ -15,10 +18,8 @@ pub fn handle_get_tile(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         max_alt: 0.0,
     };
 
-    let response = GetTileResponse {
+    Ok(GetTileResponse {
         tile: Some(tile),
         error: String::new(),
-    };
-
-    Ok(response.encode_to_vec())
+    })
 }

@@ -2,12 +2,13 @@
 members = [
     "core/native",
     "modules/core",
-    "rpc/rust",
+    "lib/rust/rpc",
+    "lib/rust/geo-math",
+    "lib/rust/logger",
     "modules/render",
     "modules/data-provider",
     "modules/local-storage",
     "modules/tile-server",
-    "modules/geo-math",
     "apps/data-browser",
     "apps/desktop-client",
 ]

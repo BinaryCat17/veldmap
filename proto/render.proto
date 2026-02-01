@@ -38,9 +38,3 @@ message UploadTileResponse {
     bool success = 1;
     string error = 2;
 }
-
-service RenderService {
-    rpc RenderFrame(RenderFrameRequest) returns (RenderFrameResponse);
-    rpc UpdateCamera(UpdateCameraRequest) returns (UpdateCameraResponse);
-    rpc UploadTile(UploadTileRequest) returns (UploadTileResponse);
-}

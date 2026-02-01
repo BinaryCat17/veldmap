@@ -1,5 +1,4 @@
 use veldmap_rust_rpc::geomath::{Lla, Ecef};
-use prost::Message;
 
 pub const WGS84_A: f64 = 6378137.0;
 pub const WGS84_F: f64 = 1.0 / 298.257223563;
@@ -18,9 +17,11 @@ pub fn lla_to_ecef(lat: f64, lon: f64, alt: f64) -> (f64, f64, f64) {
     (x, y, z)
 }
 
-pub fn handle_lla_to_ecef(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let lla = Lla::decode(&payload[..])?;
+pub fn handle_lla_to_ecef(lla: Lla) -> anyhow::Result<Ecef> {
     let (x, y, z) = lla_to_ecef(lla.lat, lla.lon, lla.alt);
-    let ecef = Ecef { x, y, z };
-    Ok(ecef.encode_to_vec())
+    Ok(Ecef { x, y, z })
+}
+
+pub fn handle_ecef_to_lla(_ecef: Ecef) -> anyhow::Result<Lla> {
+    Err(anyhow::anyhow!("EcefToLla not implemented"))
 }

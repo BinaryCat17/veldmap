@@ -1,0 +1,12 @@
+syntax = "proto3";
+package veldmap.tileserver;
+
+message TileRequest {
+    string path = 1;
+}
+
+message TileResponse {
+    bytes data = 1;
+    string content_type = 2;
+    string error = 3;
+}

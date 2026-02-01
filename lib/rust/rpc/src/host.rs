@@ -43,11 +43,9 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
 }
 
 #[cfg(feature = "pdk")]
-pub fn host_log(msg: &str) {
-    let _ = call_service("system", "log", msg.as_bytes().to_vec());
-}
 
-#[cfg(feature = "pdk")]
 extern "C" {
+
     fn veldmap_host_call(ptr: i64) -> i64;
+
 }

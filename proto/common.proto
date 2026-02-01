@@ -3,10 +3,12 @@ syntax = "proto3";
 package veldmap.common;
 
 message TileId {
-  int32 x = 1;
-  int32 y = 2;
-  int32 z = 3;
+  uint32 x = 1;
+  uint32 y = 2;
+  uint32 z = 3;
 }
+
+message Empty {}
 
 message DemTile {
   TileId id = 1;

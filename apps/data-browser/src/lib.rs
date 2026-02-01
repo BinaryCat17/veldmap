@@ -1,11 +1,3 @@
-use veldmap_rust_rpc::ui::{DrawFrame, UiDisplayCommand, ui_display_command};
-use veldmap_rust_rpc::host::call_service;
-use prost::Message as ProstMessage;
-use std::sync::Mutex;
-use lazy_static::lazy_static;
-use std::cell::RefCell;
-use extism_pdk::{plugin_fn, FnResult};
-
 mod app;
 mod common;
 mod utils;
@@ -13,221 +5,47 @@ mod search;
 mod browse;
 mod downloaded;
 mod preview;
+mod handlers;
 
-use app::VeldMapToolsGui;
-use iced_graphics::Viewport;
-use iced_core::{Size, Theme, mouse, Color, Pixels, Rectangle, Point, keyboard};
+use veldmap_rust_rpc::define_module;
+use veldmap_rust_rpc::ui::UiEvent;
+use veldmap_rust_rpc::services::RpcResponse;
+use veldmap_rust_rpc::common::Empty;
+use iced_core::Point;
+use serde::Deserialize;
+use crate::app::VeldMapToolsGui;
 use iced_tiny_skia::Renderer;
-use iced_runtime::user_interface::{self, UserInterface};
+use iced_runtime::user_interface;
+use std::cell::RefCell;
 
-lazy_static! {
-    static ref GUI: Mutex<Option<VeldMapToolsGui>> = Mutex::new(None);
-    static ref CANVAS_SIZE: Mutex<(u32, u32)> = Mutex::new((1, 1));
-    static ref SCALE_FACTOR: Mutex<f32> = Mutex::new(1.0);
-    static ref CURSOR_POSITION: Mutex<Point> = Mutex::new(Point::ORIGIN);
-    static ref PENDING_EVENTS: Mutex<Vec<iced_core::Event>> = Mutex::new(Vec::new());
+// Контейнер для типов, которые не реализуют Send/Sync.
+// В WASM это безопасно, так как поток всегда один.
+pub(crate) struct UnsafeSync<T>(pub T);
+unsafe impl<T> Sync for UnsafeSync<T> {}
+unsafe impl<T> Send for UnsafeSync<T> {}
+
+#[derive(Deserialize)]
+pub(crate) struct LocalConfig {}
+
+pub(crate) struct LocalStateInner {
+    pub(crate) gui: RefCell<VeldMapToolsGui>,
+    pub(crate) canvas_size: RefCell<(u32, u32)>,
+    pub(crate) scale_factor: RefCell<f32>,
+    pub(crate) cursor_position: RefCell<Point>,
+    pub(crate) pending_events: RefCell<Vec<iced_core::Event>>,
+    pub(crate) renderer: RefCell<Renderer>,
+    pub(crate) interface_cache: RefCell<user_interface::Cache>,
+    pub(crate) fonts_loaded: RefCell<bool>,
 }
 
-thread_local! {
-    static INTERFACE_CACHE: RefCell<user_interface::Cache> = RefCell::new(user_interface::Cache::default());
-    static RENDERER: RefCell<Renderer> = RefCell::new(Renderer::new(common::APP_FONT, Pixels(16.0)));
-    static FONTS_LOADED: RefCell<bool> = RefCell::new(false);
-}
+pub(crate) struct LocalState(pub(crate) UnsafeSync<LocalStateInner>);
 
-#[plugin_fn]
-pub fn handle_rpc(input: Vec<u8>) -> FnResult<Vec<u8>> {
-    let request = veldmap_rust_rpc::services::RpcRequest::decode(&input[..])
-        .map_err(|e| anyhow::anyhow!("Failed to decode RpcRequest: {}", e))?;
-    
-    match request.method.as_str() {
-        "init" => {
-            let (gui, _task) = VeldMapToolsGui::new();
-            *GUI.lock().unwrap() = Some(gui);
-            render_and_send();
-        }
-        "handle_ui_event" => {
-            let event_proto = veldmap_rust_rpc::ui::UiEvent::decode(&request.payload[..]).unwrap();
-            if let Some(ev) = event_proto.event {
-                match ev {
-                    veldmap_rust_rpc::ui::ui_event::Event::Resize(r) => { 
-                        *CANVAS_SIZE.lock().unwrap() = (r.width, r.height); 
-                        *SCALE_FACTOR.lock().unwrap() = r.scale_factor;
-                    }
-                    veldmap_rust_rpc::ui::ui_event::Event::Click(c) => {
-                        let sf = *SCALE_FACTOR.lock().unwrap();
-                        let logical_x = c.x / sf;
-                        let logical_y = c.y / sf;
-                        *CURSOR_POSITION.lock().unwrap() = Point::new(logical_x, logical_y);
-                        
-                        let mut events = PENDING_EVENTS.lock().unwrap();
-                        let button = match c.button {
-                            1 => mouse::Button::Left,
-                            2 => mouse::Button::Right,
-                            3 => mouse::Button::Middle,
-                            _ => mouse::Button::Left,
-                        };
-                        events.push(iced_core::Event::Mouse(mouse::Event::CursorMoved { position: Point::new(logical_x, logical_y) }));
-                        events.push(iced_core::Event::Mouse(mouse::Event::ButtonPressed(button)));
-                        events.push(iced_core::Event::Mouse(mouse::Event::ButtonReleased(button)));
-                    }
-                    veldmap_rust_rpc::ui::ui_event::Event::Key(k) => {
-                        let mut events = PENDING_EVENTS.lock().unwrap();
-                        let key = if k.key_code == 13 {
-                            keyboard::Key::Named(keyboard::key::Named::Enter)
-                        } else if k.key_code == 8 {
-                            keyboard::Key::Named(keyboard::key::Named::Backspace)
-                        } else {
-                            keyboard::Key::Unidentified
-                        };
-
-                        if key != keyboard::Key::Unidentified {
-                            let physical_key = keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
-                            if k.pressed {
-                                events.push(iced_core::Event::Keyboard(keyboard::Event::KeyPressed {
-                                    key: key.clone(),
-                                    modifiers: keyboard::Modifiers::default(),
-                                    location: keyboard::Location::Standard,
-                                    text: None,
-                                    modified_key: key,
-                                    physical_key,
-                                    repeat: false,
-                                }));
-                            } else {
-                                events.push(iced_core::Event::Keyboard(keyboard::Event::KeyReleased {
-                                    key: key.clone(),
-                                    modifiers: keyboard::Modifiers::default(),
-                                    location: keyboard::Location::Standard,
-                                    modified_key: key,
-                                    physical_key,
-                                }));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            render_and_send();
-        }
-        "render" => { render_and_send(); }
-        _ => {}
-    };
-
-    let response = veldmap_rust_rpc::services::RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
-    Ok(response.encode_to_vec())
-}
-
-fn render_and_send() {
-    let mut gui_lock = match GUI.lock() {
-        Ok(lock) => lock,
-        Err(poisoned) => {
-            log::error!("GUI Mutex poisoned! Resetting...");
-            let mut lock = poisoned.into_inner();
-            *lock = None;
-            lock
-        }
-    };
-    let gui = match gui_lock.as_mut() { Some(g) => g, None => return };
-
-    let (width, height) = match CANVAS_SIZE.lock() {
-        Ok(lock) => *lock,
-        Err(_) => (1024, 768)
-    };
-    if width == 0 || height == 0 { return; }
-
-    let cursor_pos = match CURSOR_POSITION.lock() {
-        Ok(lock) => *lock,
-        Err(_) => Point::ORIGIN
-    };
-    let cursor = mouse::Cursor::Available(cursor_pos);
-    
-    let events = match PENDING_EVENTS.lock() {
-        Ok(mut lock) => std::mem::take(&mut *lock),
-        Err(_) => Vec::new()
-    };
-
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    let mut pixmap = match tiny_skia::PixmapMut::from_bytes(&mut pixels, width, height) {
-        Some(p) => p,
-        None => {
-            log::error!("Failed to create pixmap for {}x{}", width, height);
-            return;
-        }
-    };
-    pixmap.fill(tiny_skia::Color::from_rgba8(20, 23, 26, 255)); 
-
-    let sf = *SCALE_FACTOR.lock().unwrap();
-    let viewport = Viewport::with_physical_size(Size::new(width, height), sf);
-    
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        RENDERER.with(|renderer_cell| {
-            let mut renderer = renderer_cell.borrow_mut();
-            
-            FONTS_LOADED.with(|loaded_cell| {
-                let mut loaded = loaded_cell.borrow_mut();
-                if !*loaded {
-                    let fs = iced_graphics::text::font_system();
-                    if let Ok(mut fs_write) = fs.write() {
-                        let db = fs_write.raw().db_mut();
-                        let _ = db.load_font_data(common::DEJAVU_FONT_DATA.to_vec());
-                        let _ = db.load_font_data(common::EMOJI_FONT_DATA.to_vec());
-                        *loaded = true;
-                    }
-                }
-            });
-
-            INTERFACE_CACHE.with(|cache_cell| {
-                let mut cache = std::mem::take(&mut *cache_cell.borrow_mut());
-                let mut messages = Vec::new();
-                
-                {
-                    let mut ui = UserInterface::build(
-                        gui.view(),
-                        viewport.logical_size(),
-                        cache,
-                        &mut *renderer,
-                    );
-
-                    let mut clipboard = iced_core::clipboard::Null;
-                    ui.update(&events, cursor, &mut *renderer, &mut clipboard, &mut messages);
-                    cache = ui.into_cache();
-                }
-
-                if !messages.is_empty() {
-                    for message in messages {
-                        let _ = gui.update(message);
-                    }
-                }
-
-                let mut user_interface = UserInterface::build(
-                    gui.view(),
-                    viewport.logical_size(),
-                    cache,
-                    &mut *renderer,
-                );
-
-                user_interface.draw(&mut *renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-                
-                if let Ok(mut mask) = tiny_skia::Mask::new(width, height).ok_or("Mask error") {
-                    renderer.draw(
-                        &mut pixmap,
-                        &mut mask,
-                        &viewport,
-                        &[Rectangle { x: 0.0, y: 0.0, width: width as f32, height: height as f32 }],
-                        Color::TRANSPARENT,
-                    );
-                }
-
-                *cache_cell.borrow_mut() = user_interface.into_cache();
-            });
-        });
-    }));
-
-    if res.is_err() {
-        log::error!("Panic caught during UI rendering!");
-        return;
+define_module! {
+    config: LocalConfig,
+    state: LocalState,
+    init: handlers::module_init,
+    handlers: {
+        "handle_ui_event" => handlers::handle_ui_event : UiEvent => RpcResponse,
+        "render" => handlers::handle_render : Empty => RpcResponse,
     }
-
-    let frame = DrawFrame { rgba_data: pixels, width, height };
-    let cmd = UiDisplayCommand { command: Some(ui_display_command::Command::DrawFrame(frame)) };
-    let _ = call_service("app", "display", cmd.encode_to_vec());
 }
