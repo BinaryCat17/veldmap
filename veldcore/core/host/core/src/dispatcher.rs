@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use extism::Plugin;
 use anyhow::Result;
 use iroh::Endpoint;
-use veldmap_rust_rpc::services::{RpcRequest, RpcResponse};
+use crate::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
 pub trait NativeService: Send + Sync {

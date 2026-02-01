@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 extism = "1.1.0"
-veldmap-rust-rpc = { path = "../../bindings/rust", features = ["client"] }
 iroh = "0.31"
 iroh-gossip = "0.31"
 tokio = { version = "1.0", features = ["full"] }
@@ -16,3 +15,6 @@ anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
 regex = "1.10"
+
+[build-dependencies]
+prost-build = "0.13"

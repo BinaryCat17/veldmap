@@ -1,7 +1,7 @@
 mod provider;
 
-use veldmap_rust_rpc::define_module;
-use veldmap_rust_rpc::storage::{GetTileRequest, GetTileResponse};
+use veldsdk::rpc::define_module;
+use veldmap_gis_api::storage::{GetTileRequest, GetTileResponse};
 use serde::Deserialize;
 
 #[derive(Deserialize)]

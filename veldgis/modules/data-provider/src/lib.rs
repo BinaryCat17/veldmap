@@ -1,7 +1,7 @@
 mod cdse;
 
-use veldmap_rust_rpc::define_module;
-use veldmap_rust_rpc::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
+use veldsdk::rpc::define_module;
+use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
 use aws_smithy_runtime_api::client::identity::Identity;
 
 #[derive(serde::Deserialize, Clone)]

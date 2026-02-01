@@ -5,7 +5,7 @@ use iced_core::image::Handle;
 use iced_core::{Alignment, Element, Length, Color, Theme};
 use iced_tiny_skia::Renderer;
 use iced_runtime::Task;
-use veldmap_rust_rpc::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, DataProduct, SearchFilter};
+use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, DataProduct, SearchFilter};
 use prost::Message as ProstMessage;
 use crate::search;
 use crate::downloaded;
@@ -13,7 +13,7 @@ use crate::preview;
 use crate::browse;
 use crate::common::{self, BrowserItem, is_previewable, icon_text};
 
-impl veldmap_iced_wasm_runtime::Application<Message> for VeldMapToolsGui {
+impl veldsdk::iced_runtime::Application<Message> for VeldMapToolsGui {
     fn update(&mut self, message: Message) {
         let _ = self.update(message);
     }
@@ -96,7 +96,7 @@ impl VeldMapToolsGui {
     fn perform_browse(&mut self, path: String) {
         self.status_message = format!("Listing /{}...", path);
         let req = ListPathRequest { path: path.clone(), token: String::new() };
-        match veldmap_rust_rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
+        match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
             Ok(res_bytes) => {
                 if let Ok(response) = ListPathResponse::decode(&res_bytes[..]) {
                     if !response.error.is_empty() {
@@ -148,7 +148,7 @@ impl VeldMapToolsGui {
                 let q = if self.search_state.filter_type == search::SearchFilterType::General { self.search_state.query.clone() } else { String::new() };
                 
                 let req = SearchRequest { query: q, filters };
-                match veldmap_rust_rpc::host::call_service("data-provider", "search", req.encode_to_vec()) {
+                match veldsdk::rpc::host::call_service("data-provider", "search", req.encode_to_vec()) {
                     Ok(res_bytes) => {
                         if let Ok(response) = SearchResponse::decode(&res_bytes[..]) {
                             if !response.error.is_empty() {
@@ -166,7 +166,7 @@ impl VeldMapToolsGui {
             Message::ProductSelected(prod) => {
                 self.status_message = format!("Loading files for {}...", prod.name);
                 let req = ListPathRequest { path: prod.path.clone(), token: String::new() };
-                match veldmap_rust_rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
+                match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
                     Ok(res_bytes) => {
                         if let Ok(response) = ListPathResponse::decode(&res_bytes[..]) {
                             self.product_files = response.items.into_iter().map(|s3_key| {
@@ -201,7 +201,7 @@ impl VeldMapToolsGui {
                 let filename = s3_key.split('/').last().unwrap_or("file");
                 let dest = format!("data/dem/source/{}", filename);
                 let req = DownloadRequest { identifier: s3_key, destination: dest };
-                match veldmap_rust_rpc::host::call_service("data-provider", "download", req.encode_to_vec()) {
+                match veldsdk::rpc::host::call_service("data-provider", "download", req.encode_to_vec()) {
                     Ok(res_bytes) => {
                         if let Ok(response) = DownloadResponse::decode(&res_bytes[..]) {
                             if response.success {
@@ -219,7 +219,7 @@ impl VeldMapToolsGui {
                 Task::none()
             }
             Message::ViewFile(s3_key) => {
-                let _ = veldmap_rust_rpc::host::call_service("system", "log", format!("WASM: Viewing file {}", s3_key).as_bytes().to_vec());
+                let _ = veldsdk::rpc::host::call_service("system", "log", format!("WASM: Viewing file {}", s3_key).as_bytes().to_vec());
                 Task::none()
             }
             Message::ClearError => { self.error_message = None; Task::none() }

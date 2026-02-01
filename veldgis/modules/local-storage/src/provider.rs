@@ -1,5 +1,5 @@
-use veldmap_rust_rpc::storage::{GetTileRequest, GetTileResponse};
-use veldmap_rust_rpc::common::{DemTile, TileId};
+use veldmap_gis_api::storage::{GetTileRequest, GetTileResponse};
+use veldmap_gis_api::common::{DemTile, TileId};
 use crate::{LocalConfig, LocalState};
 
 pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lib/rust/geo-math",
+    "lib/rust/gis-api",
     "modules/render",
     "modules/data-provider",
     "modules/local-storage",

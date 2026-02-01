@@ -1,7 +1,7 @@
 use crate::camera::{OrbitCamera, CameraController};
 use crate::tiling::TileManager;
 use crate::{RenderConfig, RenderBackend};
-use veldmap_rust_rpc::common::{TileId, DemTile};
+use veldmap_gis_api::common::{TileId, DemTile};
 // Renderer trait now can be defined locally or moved to a more appropriate place
 pub trait Renderer {
     fn render(&mut self);

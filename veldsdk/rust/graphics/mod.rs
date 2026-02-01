@@ -1,5 +1,5 @@
-use veldmap_rust_rpc::ui::{DrawFrame, UiDisplayCommand, ui_display_command};
-use veldmap_rust_rpc::host::call_service;
+use crate::rpc::ui::{DrawFrame, UiDisplayCommand, ui_display_command};
+use crate::rpc::host::call_service;
 use prost::Message;
 
 pub struct UiBridge;

@@ -1,33 +1,9 @@
-pub mod common {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.common.rs"));
-}
-
-pub mod dataprovider {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.dataprovider.rs"));
-}
-
 pub mod services {
     include!(concat!(env!("OUT_DIR"), "/veldmap.services.rs"));
 }
 
-pub mod geomath {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.geomath.rs"));
-}
-
-pub mod storage {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.storage.rs"));
-}
-
-pub mod render {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.render.rs"));
-}
-
 pub mod ui {
     include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
-}
-
-pub mod tile_server {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.tileserver.rs"));
 }
 
 pub mod host;
@@ -52,7 +28,7 @@ macro_rules! define_module {
     ) => {
         #[extism_pdk::plugin_fn]
         pub fn init() -> extism_pdk::FnResult<()> {
-            let _ = veldmap_logger::init();
+            let _ = $crate::core::init();
             let config_json = extism_pdk::config::get("config")
                 .map_err(|e| extism_pdk::Error::msg(format!("Failed to get config: {}", e)))?
                 .ok_or_else(|| extism_pdk::Error::msg("Config not found"))?;
@@ -66,7 +42,7 @@ macro_rules! define_module {
                 Err(e) => Err(e),
             };
 
-            if $crate::MODULE_STATE.set(boxed_state).is_err() {
+            if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
                  return Err(extism_pdk::Error::msg("Module state already initialized").into());
             }
             Ok(())
@@ -75,13 +51,13 @@ macro_rules! define_module {
         #[extism_pdk::plugin_fn]
         pub fn handle_rpc(input: Vec<u8>) -> extism_pdk::FnResult<Vec<u8>> {
             use prost::Message;
-            use $crate::services::{RpcRequest, RpcResponse};
+            use $crate::rpc::services::{RpcRequest, RpcResponse};
 
             let request = RpcRequest::decode(&input[..])
                 .map_err(|e| anyhow::anyhow!("Failed to decode RpcRequest: {}", e))?;
             
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let state_any = match $crate::MODULE_STATE.get() {
+                let state_any = match $crate::rpc::MODULE_STATE.get() {
                     Some(Ok(s)) => s,
                     Some(Err(e)) => return (Vec::new(), format!("Module initialization failed: {}", e)),
                     None => return (Vec::new(), "Module not initialized (init not called)".to_string()),
@@ -119,7 +95,7 @@ macro_rules! define_module {
         }
     };
 
-    // Режим с кастомным обработчиком (как для core)
+    // Режим с кастомным обработчиком
     (
         config: $config_type:ty,
         state: $state_type:ty,
@@ -128,7 +104,7 @@ macro_rules! define_module {
     ) => {
         #[extism_pdk::plugin_fn]
         pub fn init() -> extism_pdk::FnResult<()> {
-            let _ = veldmap_logger::init();
+            let _ = $crate::core::init();
             let config_json = extism_pdk::config::get("config")
                 .map_err(|e| extism_pdk::Error::msg(format!("Failed to get config: {}", e)))?
                 .ok_or_else(|| extism_pdk::Error::msg("Config not found"))?;
@@ -142,7 +118,7 @@ macro_rules! define_module {
                 Err(e) => Err(e),
             };
 
-            if $crate::MODULE_STATE.set(boxed_state).is_err() {
+            if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
                  return Err(extism_pdk::Error::msg("Module state already initialized").into());
             }
             Ok(())
@@ -150,7 +126,7 @@ macro_rules! define_module {
 
         #[extism_pdk::plugin_fn]
         pub fn handle_rpc(input: Vec<u8>) -> extism_pdk::FnResult<Vec<u8>> {
-            let state_any = match $crate::MODULE_STATE.get() {
+            let state_any = match $crate::rpc::MODULE_STATE.get() {
                 Some(Ok(s)) => s,
                 Some(Err(e)) => return Err(anyhow::anyhow!("Module initialization failed: {}", e).into()),
                 None => return Err(anyhow::anyhow!("Module not initialized").into()),

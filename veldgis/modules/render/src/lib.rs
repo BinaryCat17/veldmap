@@ -1,7 +1,7 @@
 mod render;
 
-use veldmap_rust_rpc::define_module;
-use veldmap_rust_rpc::render::*;
+use veldsdk::rpc::define_module;
+use veldmap_gis_api::render::*;
 use serde::Deserialize;
 
 #[derive(Deserialize)]

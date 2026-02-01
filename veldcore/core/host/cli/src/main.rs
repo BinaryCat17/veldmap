@@ -6,7 +6,7 @@ use veldmap_host_core::{
 };
 use std::sync::Arc;
 use extism::{Function, UserData, Val, ValType};
-use veldmap_rust_rpc::services::{RpcRequest, RpcResponse};
+use veldmap_host_core::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
 #[tokio::main]

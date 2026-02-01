@@ -1,8 +1,8 @@
 mod handlers;
 
-use veldmap_rust_rpc::define_module;
-use veldmap_rust_rpc::services::RpcResponse;
-use veldmap_rust_rpc::common::Empty;
+use veldsdk::rpc::define_module;
+use veldsdk::rpc::services::RpcResponse;
+use veldmap_gis_api::common::Empty;
 use serde::Deserialize;
 
 #[derive(Deserialize)]

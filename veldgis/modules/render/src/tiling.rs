@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use veldmap_rust_rpc::common::TileId;
+use veldmap_gis_api::common::TileId;
 
 pub struct TileManager {
     pub loaded_tiles: HashMap<TileId, usize>,

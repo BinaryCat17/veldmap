@@ -1,4 +1,4 @@
-use veldmap_rust_rpc::geomath::{Lla, Ecef};
+use veldmap_gis_api::geomath::{Lla, Ecef};
 
 pub const WGS84_A: f64 = 6378137.0;
 pub const WGS84_F: f64 = 1.0 / 298.257223563;

@@ -1,6 +1,6 @@
 use crate::{LocalConfig, LocalState};
-use veldmap_rust_rpc::common::Empty;
-use veldmap_rust_rpc::services::RpcResponse;
+use veldmap_gis_api::common::Empty;
+use veldsdk::rpc::services::RpcResponse;
 
 pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {
     Ok(LocalState)

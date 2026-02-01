@@ -1,9 +1,0 @@
-[package]
-name = "veldmap-ui-bridge"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-veldmap-rust-rpc = { path = "../../../core/bindings/rust", features = ["pdk"] }
-prost = "0.13"
-anyhow = "1.0"

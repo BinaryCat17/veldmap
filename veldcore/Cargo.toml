@@ -3,10 +3,6 @@ members = [
     "core/host/core",
     "core/host/gui",
     "core/host/cli",
-    "core/bindings/rust",
-    "sdk/rust/logger",
-    "sdk/rust/ui-bridge",
-    "sdk/rust/iced-wasm-runtime",
 ]
 resolver = "2"
 

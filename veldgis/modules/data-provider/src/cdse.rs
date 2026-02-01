@@ -1,4 +1,4 @@
-use veldmap_rust_rpc::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
+use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
 use log::info;
 use serde::Deserialize;
 use quick_xml::events::Event;

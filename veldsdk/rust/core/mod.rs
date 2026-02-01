@@ -1,4 +1,4 @@
-use veldmap_rust_rpc::host::call_service;
+use crate::rpc::host::call_service;
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 
 pub struct HostLogger;

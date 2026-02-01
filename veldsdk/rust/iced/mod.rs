@@ -1,4 +1,5 @@
-use veldmap_ui_bridge::UiBridge;
+#[cfg(feature = "graphics")]
+use crate::graphics::UiBridge;
 use iced_core::{mouse, Size, Theme, Color, Rectangle, Point, Pixels, Font};
 use iced_graphics::Viewport;
 use iced_runtime::user_interface::{self, UserInterface};

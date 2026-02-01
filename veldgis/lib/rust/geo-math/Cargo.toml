@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-veldmap-rust-rpc = { path = "../../../../../veldcore/core/bindings/rust" }
+veldmap-rust-rpc = { path = "../../../../../veldcore/sdk/rust/rpc" }
 anyhow = "1.0"

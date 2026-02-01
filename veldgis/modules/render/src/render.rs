@@ -1,4 +1,4 @@
-use veldmap_rust_rpc::render::*;
+use veldmap_gis_api::render::*;
 use crate::{LocalConfig, LocalState};
 
 pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {

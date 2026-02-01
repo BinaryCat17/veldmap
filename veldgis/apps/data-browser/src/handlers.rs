@@ -1,11 +1,11 @@
 use crate::{LocalConfig, LocalState, UnsafeSync};
-use veldmap_rust_rpc::ui::UiEvent;
-use veldmap_rust_rpc::services::RpcResponse;
-use veldmap_rust_rpc::common::Empty;
+use veldsdk::rpc::ui::UiEvent;
+use veldsdk::rpc::services::RpcResponse;
+use veldmap_gis_api::common::Empty;
 use iced_core::{mouse, keyboard, Point};
 use crate::app::VeldMapToolsGui;
 use crate::common;
-use veldmap_iced_wasm_runtime::IcedRuntime;
+use veldsdk::iced_runtime::IcedRuntime;
 
 pub(crate) fn module_init(_cfg: LocalConfig) -> anyhow::Result<LocalState> {
     let (gui, _task) = VeldMapToolsGui::new();
@@ -25,10 +25,10 @@ pub(crate) fn handle_ui_event(state: &LocalState, event_proto: UiEvent) -> anyho
     let runtime = &state.0.0;
     if let Some(ev) = event_proto.event {
         match ev {
-            veldmap_rust_rpc::ui::ui_event::Event::Resize(r) => { 
+            veldsdk::rpc::ui::ui_event::Event::Resize(r) => { 
                 runtime.update_size(r.width, r.height, r.scale_factor);
             }
-            veldmap_rust_rpc::ui::ui_event::Event::Click(c) => {
+            veldsdk::rpc::ui::ui_event::Event::Click(c) => {
                 runtime.update_cursor(c.x, c.y);
                 let button = match c.button {
                     1 => mouse::Button::Left,
@@ -41,7 +41,7 @@ pub(crate) fn handle_ui_event(state: &LocalState, event_proto: UiEvent) -> anyho
                 runtime.push_event(iced_core::Event::Mouse(mouse::Event::ButtonPressed(button)));
                 runtime.push_event(iced_core::Event::Mouse(mouse::Event::ButtonReleased(button)));
             }
-            veldmap_rust_rpc::ui::ui_event::Event::Key(k) => {
+            veldsdk::rpc::ui::ui_event::Event::Key(k) => {
                 let key = if k.key_code == 13 {
                     keyboard::Key::Named(keyboard::key::Named::Enter)
                 } else if k.key_code == 8 {

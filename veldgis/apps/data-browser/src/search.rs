@@ -5,7 +5,7 @@ use iced_core::{Element, Length, Color, Alignment, Theme};
 use iced_tiny_skia::Renderer;
 use crate::app::Message;
 use crate::common;
-use veldmap_rust_rpc::dataprovider::DataProduct;
+use veldmap_gis_api::dataprovider::DataProduct;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchFilterType {

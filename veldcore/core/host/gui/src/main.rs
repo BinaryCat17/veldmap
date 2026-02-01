@@ -13,7 +13,7 @@ use winit::{
 use tokio::sync::mpsc;
 use std::sync::Arc;
 use extism::{Function, UserData, Val, ValType};
-use veldmap_rust_rpc::services::{RpcRequest, RpcResponse};
+use veldmap_host_core::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
 mod app_service;
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             let res_buf = RpcResponse { 
                 payload, 
                 error, 
-                sync: Some(veldmap_rust_rpc::services::SyncMetadata::default()) 
+                sync: Some(veldmap_host_core::services::SyncMetadata::default()) 
             }.encode_to_vec();
             
             let res_mem = plugin.memory_new(&res_buf)?;
@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             interval.tick().await;
-            if let Err(e) = d_clone.call("veldmap-app-data-browser", "render", veldmap_rust_rpc::common::Empty {}.encode_to_vec()).await {
+            if let Err(e) = d_clone.call("veldmap-app-data-browser", "render", vec![]).await {
                 log::error!("Render call failed: {}", e);
             }
         }
@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
                     config.width = size.width; config.height = size.height;
                     surface.configure(&device, &config);
                     window.request_redraw();
-                    let ev = veldmap_rust_rpc::ui::UiEvent { event: Some(veldmap_rust_rpc::ui::ui_event::Event::Resize(veldmap_rust_rpc::ui::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
+                    let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Resize(veldmap_host_core::ui::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
                     let d_clone = dispatcher.clone();
                     tokio::spawn(async move { let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 }
@@ -208,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
                 if state == winit::event::ElementState::Pressed {
                     let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
-                    let ev = veldmap_rust_rpc::ui::UiEvent { event: Some(veldmap_rust_rpc::ui::ui_event::Event::Click(veldmap_rust_rpc::ui::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn })) };
+                    let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Click(veldmap_host_core::ui::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn })) };
                     let d_clone = dispatcher.clone();
                     tokio::spawn(async move { let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 }

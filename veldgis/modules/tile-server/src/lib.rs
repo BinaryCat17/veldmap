@@ -1,7 +1,7 @@
 mod server;
 
-use veldmap_rust_rpc::define_module;
-use veldmap_rust_rpc::tile_server::{TileRequest, TileResponse};
+use veldsdk::rpc::define_module;
+use veldsdk::rpc::tile_server::{TileRequest, TileResponse};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
