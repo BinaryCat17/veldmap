@@ -123,6 +123,27 @@ impl VeldMapToolsGui {
         }
     }
 
+    fn refresh_local_files(&mut self) {
+        self.status_message = "Refreshing local files...".to_string();
+        let path = "data/dem/source";
+        match veldsdk::core::fs_list(path) {
+            Ok(entries) => {
+                self.local_files = entries.into_iter().map(|name| {
+                    BrowserItem {
+                        s3_key: format!("{}/{}", path, name),
+                        name,
+                        is_folder: false,
+                        exists_locally: true,
+                    }
+                }).collect();
+                self.status_message = format!("Found {} local files", self.local_files.len());
+            }
+            Err(e) => {
+                self.error_message = Some(format!("Failed to list local files: {}", e));
+            }
+        }
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SwitchMode(mode) => {
@@ -132,6 +153,8 @@ impl VeldMapToolsGui {
                 self.selected_product = None;
                 if self.view_mode == ViewMode::Browse && self.browse_items.is_empty() {
                     self.perform_browse(String::new());
+                } else if self.view_mode == ViewMode::Downloaded {
+                    self.refresh_local_files();
                 }
                 Task::none()
             }
@@ -215,11 +238,33 @@ impl VeldMapToolsGui {
                 }
                 Task::none()
             }
-            Message::DeleteLocalFile(_name) => {
+            Message::DeleteLocalFile(path) => {
+                match veldsdk::core::fs_delete(&path) {
+                    Ok(_) => {
+                        self.status_message = format!("Deleted {}", path);
+                        self.refresh_local_files();
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Failed to delete {}: {}", path, e));
+                    }
+                }
                 Task::none()
             }
-            Message::ViewFile(s3_key) => {
-                let _ = veldsdk::rpc::host::call_service("system", "log", format!("WASM: Viewing file {}", s3_key).as_bytes().to_vec());
+            Message::ViewFile(path) => {
+                self.status_message = format!("Loading preview for {}...", path);
+                match veldsdk::core::fs_read(&path) {
+                    Ok(data) => {
+                        if path.ends_with(".jpg") || path.ends_with(".png") {
+                            self.current_image = Some(Handle::from_bytes(data));
+                            self.status_message = "Preview loaded".into();
+                        } else {
+                            self.error_message = Some("Only JPG/PNG previews are supported".into());
+                        }
+                    }
+                    Err(e) => {
+                        self.error_message = Some(format!("Failed to read file: {}", e));
+                    }
+                }
                 Task::none()
             }
             Message::ClearError => { self.error_message = None; Task::none() }

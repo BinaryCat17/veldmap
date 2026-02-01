@@ -21,3 +21,43 @@ message RpcResponse {
   string error = 2;
   SyncMetadata sync = 3;
 }
+
+// SYSTEM SERVICE MESSAGES
+
+enum LogLevel {
+  TRACE = 0;
+  DEBUG = 1;
+  INFO = 2;
+  WARN = 3;
+  ERROR = 4;
+}
+
+message LogRequest {
+  LogLevel level = 1;
+  string message = 2;
+}
+
+message FsReadRequest {
+  string path = 1;
+}
+
+message FsReadResponse {
+  bytes data = 1;
+}
+
+message FsWriteRequest {
+  string path = 1;
+  bytes data = 2;
+}
+
+message FsListRequest {
+  string path = 1;
+}
+
+message FsListResponse {
+  repeated string entries = 1;
+}
+
+message FsDeleteRequest {
+  string path = 1;
+}
