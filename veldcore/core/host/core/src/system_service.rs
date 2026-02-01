@@ -1,7 +1,8 @@
 use crate::dispatcher::NativeService;
-use crate::services::{FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, FsDeleteRequest, LogRequest, LogLevel};
+use crate::services::{FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest, LogRequest, LogLevel};
 use prost::Message;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 pub struct SystemService;
@@ -45,6 +46,35 @@ impl NativeService for SystemService {
                     fs::create_dir_all(parent)?;
                 }
                 fs::write(&req.path, &req.data)?;
+                Ok(Vec::new())
+            }
+            "fs_download" => {
+                let req = FsDownloadRequest::decode(&payload[..])?;
+                if !Self::is_path_safe(&req.path) {
+                    return Err(anyhow::anyhow!("Access denied: invalid path {}", req.path));
+                }
+
+                log::info!("[SystemService] Downloading {} to {}", req.url, req.path);
+                
+                if let Some(parent) = Path::new(&req.path).parent() {
+                    fs::create_dir_all(parent)?;
+                }
+
+                let client = reqwest::blocking::Client::new();
+                let mut builder = client.get(&req.url);
+                
+                for (key, value) in req.headers {
+                    builder = builder.header(key, value);
+                }
+
+                let mut response = builder.send()?;
+                if !response.status().is_success() {
+                    return Err(anyhow::anyhow!("Download failed with status: {} - {}", response.status(), response.text().unwrap_or_default()));
+                }
+
+                let mut file = fs::File::create(&req.path)?;
+                response.copy_to(&mut file)?;
+
                 Ok(Vec::new())
             }
             "fs_list" => {

@@ -61,3 +61,9 @@ message FsListResponse {
 message FsDeleteRequest {
   string path = 1;
 }
+
+message FsDownloadRequest {
+  string url = 1;
+  string path = 2;
+  map<string, string> headers = 3;
+}

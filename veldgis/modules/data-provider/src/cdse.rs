@@ -28,8 +28,49 @@ pub fn search(_state: &LocalState, _request: SearchRequest) -> anyhow::Result<Se
     Ok(SearchResponse { products: vec![], error: String::new() })
 }
 
-pub fn download(_state: &LocalState, _request: DownloadRequest) -> anyhow::Result<DownloadResponse> {
-    Ok(DownloadResponse { success: false, error: "Download not implemented".into(), download_url: "".into() })
+pub fn download(state: &LocalState, request: DownloadRequest) -> anyhow::Result<DownloadResponse> {
+    let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
+    let host = "eodata.dataspace.copernicus.eu";
+    let region = "default";
+    
+    let url = format!("https://{}/eodata/{}", host, s3_key);
+    let uri = format!("/eodata/{}", s3_key);
+
+    let signing_settings = SigningSettings::default();
+    let signing_params = v4::SigningParams::builder()
+        .identity(&state.identity)
+        .region(region)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(signing_settings)
+        .build()
+        .unwrap();
+
+    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let headers = [
+        ("host", host),
+        ("x-amz-content-sha256", content_sha256),
+    ];
+    
+    let signable_request = SignableRequest::new(
+        "GET",
+        &uri,
+        headers.iter().map(|(k, v)| (*k, *v)),
+        aws_sigv4::http_request::SignableBody::Bytes(&[]),
+    ).unwrap();
+
+    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+    
+    let mut download_headers = std::collections::HashMap::new();
+    for (name, value) in instructions.headers() {
+        download_headers.insert(name.to_string(), value.to_string());
+    }
+    download_headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
+
+    match veldsdk::core::fs_download(url.clone(), request.destination, download_headers) {
+        Ok(_) => Ok(DownloadResponse { success: true, error: "".into(), download_url: url }),
+        Err(e) => Ok(DownloadResponse { success: false, error: format!("Host download failed: {}", e), download_url: "".into() }),
+    }
 }
 
 pub fn list_path(state: &LocalState, request: ListPathRequest) -> anyhow::Result<ListPathResponse> {

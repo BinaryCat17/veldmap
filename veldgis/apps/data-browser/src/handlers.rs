@@ -84,6 +84,8 @@ pub fn handle_search_press(state: &mut LocalState) {
 
 pub fn handle_product_selected(state: &mut LocalState, prod: DataProduct) {
     state.status_message = format!("Loading files for {}...", prod.name);
+    let local_files = veldsdk::core::fs_list("data/dem/source").unwrap_or_default();
+    
     let req = ListPathRequest { path: prod.path.clone(), token: String::new() };
     match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
         Ok(res_bytes) => {
@@ -91,7 +93,8 @@ pub fn handle_product_selected(state: &mut LocalState, prod: DataProduct) {
                 state.product_files = response.items.into_iter().map(|s3_key| {
                     let name = s3_key.split('/').last().unwrap_or(&s3_key).to_string();
                     let is_folder = s3_key.ends_with('/');
-                    BrowserItem { s3_key, name, is_folder, exists_locally: false }
+                    let exists_locally = local_files.contains(&name);
+                    BrowserItem { s3_key, name, is_folder, exists_locally }
                 }).collect();
                 state.selected_product = Some(prod.name.clone());
                 state.status_message = format!("Loaded {} items", state.product_files.len());
@@ -127,7 +130,20 @@ pub fn handle_download(state: &mut LocalState, s3_key: String) {
         Ok(res_bytes) => {
             if let Ok(response) = DownloadResponse::decode(&res_bytes[..]) {
                 if response.success {
-                    state.status_message = "Download started".into();
+                    state.status_message = "Download complete".into();
+                    // Обновляем список, чтобы поставить галочку
+                    if let ViewMode::Browse = state.view_mode {
+                        let path = state.current_browse_path.clone();
+                        perform_browse(state, path);
+                    } else if state.selected_product.is_some() {
+                        // Если мы в режиме выбора файлов продукта
+                        let local_files = veldsdk::core::fs_list("data/dem/source").unwrap_or_default();
+                        for item in &mut state.product_files {
+                            if local_files.contains(&item.name) {
+                                item.exists_locally = true;
+                            }
+                        }
+                    }
                 } else {
                     state.error_message = Some(format!("Download failed: {}", response.error));
                 }
@@ -196,6 +212,8 @@ pub fn handle_close_preview(state: &mut LocalState) {
 
 fn perform_browse(state: &mut LocalState, path: String) {
     state.status_message = format!("Listing /{}...", path);
+    let local_files = veldsdk::core::fs_list("data/dem/source").unwrap_or_default();
+    
     let req = ListPathRequest { path: path.clone(), token: String::new() };
     match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
         Ok(res_bytes) => {
@@ -207,7 +225,8 @@ fn perform_browse(state: &mut LocalState, path: String) {
                     state.browse_items = response.items.into_iter().map(|s3_key| {
                         let is_folder = s3_key.ends_with('/');
                         let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
-                        BrowserItem { s3_key, name, is_folder, exists_locally: false }
+                        let exists_locally = !is_folder && local_files.contains(&name);
+                        BrowserItem { s3_key, name, is_folder, exists_locally }
                     }).collect();
                     state.current_browse_path = path;
                     state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token) };

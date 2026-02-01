@@ -1,5 +1,5 @@
 use crate::rpc::host::call_service;
-use crate::rpc::services::{LogRequest, LogLevel, FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, FsDeleteRequest};
+use crate::rpc::services::{LogRequest, LogLevel, FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest};
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use prost::Message;
 
@@ -69,6 +69,17 @@ pub fn fs_write(path: impl Into<String>, data: Vec<u8>) -> anyhow::Result<()> {
         data,
     };
     call_service("system", "fs_write", req.encode_to_vec())?;
+    Ok(())
+}
+
+/// Downloads a file from a URL to the host's file system
+pub fn fs_download(url: impl Into<String>, path: impl Into<String>, headers: std::collections::HashMap<String, String>) -> anyhow::Result<()> {
+    let req = FsDownloadRequest {
+        url: url.into(),
+        path: path.into(),
+        headers,
+    };
+    call_service("system", "fs_download", req.encode_to_vec())?;
     Ok(())
 }
 
