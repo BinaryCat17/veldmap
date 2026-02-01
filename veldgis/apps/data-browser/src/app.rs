@@ -11,6 +11,7 @@ use crate::search;
 use crate::downloaded;
 use crate::preview;
 use crate::browse;
+use crate::utils;
 use crate::common::{self, BrowserItem, is_previewable, icon_text};
 
 impl veldsdk::iced::Application<Message> for VeldMapToolsGui {
@@ -59,7 +60,6 @@ pub struct VeldMapToolsGui {
     pub current_image: Option<Handle>,
     pub downloaded_state: downloaded::DownloadedState,
     pub token_stack: Vec<String>,
-    pub current_token: Option<String>,
     pub next_token: Option<String>,
     pub current_browse_path: String,
     pub selected_product: Option<String>,
@@ -81,7 +81,6 @@ impl VeldMapToolsGui {
                 current_image: None,
                 downloaded_state: downloaded::DownloadedState::default(),
                 token_stack: Vec::new(),
-                current_token: None,
                 next_token: None,
                 current_browse_path: String::new(),
                 selected_product: None,
@@ -257,8 +256,18 @@ impl VeldMapToolsGui {
                         if path.ends_with(".jpg") || path.ends_with(".png") {
                             self.current_image = Some(Handle::from_bytes(data));
                             self.status_message = "Preview loaded".into();
+                        } else if path.ends_with(".tif") || path.ends_with(".tiff") {
+                            match utils::decode_tiff(&data) {
+                                Ok((w, h, rgba)) => {
+                                    self.current_image = Some(Handle::from_rgba(w, h, rgba));
+                                    self.status_message = "TIFF Preview loaded".into();
+                                }
+                                Err(e) => {
+                                    self.error_message = Some(format!("Failed to decode TIFF: {}", e));
+                                }
+                            }
                         } else {
-                            self.error_message = Some("Only JPG/PNG previews are supported".into());
+                            self.error_message = Some("Unsupported file format for preview".into());
                         }
                     }
                     Err(e) => {

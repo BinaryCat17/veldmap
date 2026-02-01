@@ -1,7 +1,6 @@
 mod handlers;
 
 use veldsdk::define_module;
-use veldsdk::rpc::services::RpcResponse;
 use veldmap_gis_api::common::Empty;
 use serde::Deserialize;
 

@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut last_size = (100u32, 100u32);
     let mut cursor_pos = (0.0f32, 0.0f32);
-    let mut is_occluded = false;
+    let is_occluded = false;
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
