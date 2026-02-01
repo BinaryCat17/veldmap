@@ -21,13 +21,24 @@ impl<M> Command<M> {
         Self(Vec::new())
     }
 
-    /// Creates a command from a future that returns a message.
-    pub fn perform<F>(future: F) -> Self 
+    /// Creates a command from a future that returns a result, wrapping it in a message.
+    pub fn perform<F, T, G>(future: F, msg_wrap: G) -> Self 
     where 
-        F: Future<Output = M> + Send + 'static,
+        F: Future<Output = T> + Send + 'static,
+        G: FnOnce(T) -> M + Send + 'static,
+        T: 'static,
         M: 'static 
     {
-        Self(vec![Box::pin(async move { Some(future.await) })])
+        Self(vec![Box::pin(async move { Some(msg_wrap(future.await)) })])
+    }
+
+    /// Creates a command from a raw future that returns an option of message.
+    pub fn perform_raw<F>(future: F) -> Self 
+    where 
+        F: Future<Output = Option<M>> + Send + 'static,
+        M: 'static 
+    {
+        Self(vec![Box::pin(future)])
     }
 
     /// Creates a command from a future that doesn't return anything.
@@ -57,6 +68,30 @@ pub trait RawIcedRuntime: Send + Sync {
 }
 
 pub type BoxedFuture<M> = Pin<Box<dyn Future<Output = Option<M>> + Send + 'static>>;
+
+#[macro_export]
+macro_rules! rpc_call {
+    ($service:expr, $method:expr, $payload:expr, $resp_type:ty) => {
+        async move {
+            $crate::core::yield_now().await;
+            let res = $crate::rpc::host::call_service($service, $method, $payload);
+            res.and_then(|bytes| {
+                <$resp_type as ::prost::Message>::decode(&bytes[..])
+                    .map_err(|e| ::anyhow::anyhow!("Decode error: {}", e))
+            }).map_err(|e| e.to_string())
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! rpc_command {
+    ($service:expr, $method:expr, $payload:expr, $resp_type:ty, $processor:expr) => {
+        $crate::iced::Command::perform(
+            $crate::rpc_call!($service, $method, $payload, $resp_type),
+            $processor
+        )
+    };
+}
 
 #[doc(hidden)]
 pub struct SendPtr<T>(pub *mut T);

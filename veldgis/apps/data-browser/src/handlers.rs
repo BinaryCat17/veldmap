@@ -5,6 +5,7 @@ use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathReque
 use prost::Message as ProstMessage;
 use iced_core::image::Handle;
 use veldsdk::iced::{IcedSettings, Command};
+use veldsdk::rpc_command;
 use crate::LocalConfig;
 
 pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, IcedSettings)> {
@@ -71,21 +72,7 @@ pub fn handle_search_press(state: &mut LocalState) -> Command<Message> {
     let q = if state.search_state.filter_type == crate::search::SearchFilterType::General { state.search_state.query.clone() } else { String::new() };
     
     let req = SearchRequest { query: q, filters };
-    
-    Command::perform(async move {
-        // Мы все еще используем yield_now в начале, чтобы хост мог отрисовать "Searching..."
-        veldsdk::yield_now().await;
-        
-        match veldsdk::rpc::host::call_service("data-provider", "search", req.encode_to_vec()) {
-            Ok(res_bytes) => {
-                match SearchResponse::decode(&res_bytes[..]) {
-                    Ok(response) => Message::SearchResult(Ok(response)),
-                    Err(e) => Message::SearchResult(Err(format!("Decode Error: {}", e))),
-                }
-            }
-            Err(e) => Message::SearchResult(Err(format!("Search Error: {}", e))),
-        }
-    })
+    rpc_command!("data-provider", "search", req.encode_to_vec(), SearchResponse, Message::SearchResult)
 }
 
 pub fn handle_search_result(state: &mut LocalState, res: Result<SearchResponse, String>) -> Command<Message> {
@@ -105,21 +92,8 @@ pub fn handle_search_result(state: &mut LocalState, res: Result<SearchResponse, 
 
 pub fn handle_product_selected(state: &mut LocalState, prod: DataProduct) -> Command<Message> {
     state.status_message = format!("Loading files for {}...", prod.name);
-    let path = prod.path.clone();
-    
-    Command::perform(async move {
-        veldsdk::yield_now().await;
-        let req = ListPathRequest { path, token: String::new() };
-        match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
-            Ok(res_bytes) => {
-                match ListPathResponse::decode(&res_bytes[..]) {
-                    Ok(response) => Message::ProductFilesLoaded(Ok(response)),
-                    Err(e) => Message::ProductFilesLoaded(Err(format!("Decode Error: {}", e))),
-                }
-            }
-            Err(e) => Message::ProductFilesLoaded(Err(format!("List Error: {}", e))),
-        }
-    })
+    let req = ListPathRequest { path: prod.path.clone(), token: String::new() };
+    rpc_command!("data-provider", "list_path", req.encode_to_vec(), ListPathResponse, Message::ProductFilesLoaded)
 }
 
 pub fn handle_product_files_loaded(state: &mut LocalState, res: Result<ListPathResponse, String>) -> Command<Message> {
@@ -181,23 +155,11 @@ pub fn handle_browse_up(state: &mut LocalState) -> Command<Message> {
 pub fn handle_download(state: &mut LocalState, s3_key: String) -> Command<Message> {
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     state.status_message = format!("Downloading {}...", filename);
+    let dest = format!("data/dem/source/{}", filename);
+    let req = DownloadRequest { identifier: s3_key, destination: dest };
     
-    Command::perform(async move {
-        veldsdk::yield_now().await;
-        let dest = format!("data/dem/source/{}", filename);
-        let req = DownloadRequest { identifier: s3_key, destination: dest };
-        match veldsdk::rpc::host::call_service("data-provider", "download", req.encode_to_vec()) {
-            Ok(res_bytes) => {
-                match DownloadResponse::decode(&res_bytes[..]) {
-                    Ok(response) => {
-                        if response.success { Message::DownloadFinished(Ok(filename)) }
-                        else { Message::DownloadFinished(Err(format!("Download failed: {}", response.error))) }
-                    }
-                    Err(e) => Message::DownloadFinished(Err(format!("Decode Error: {}", e))),
-                }
-            }
-            Err(e) => Message::DownloadFinished(Err(format!("Download Error: {}", e))),
-        }
+    rpc_command!("data-provider", "download", req.encode_to_vec(), DownloadResponse, move |res| {
+        Message::DownloadFinished(res.and_then(|resp| if resp.success { Ok(filename) } else { Err(resp.error) }))
     })
 }
 
@@ -231,20 +193,18 @@ pub fn handle_view(state: &mut LocalState, path: String) -> Command<Message> {
     state.status_message = format!("Loading preview for {}...", path);
     Command::perform(async move {
         veldsdk::yield_now().await;
-        match veldsdk::core::fs_read(&path) {
-            Ok(data) => {
-                if path.ends_with(".jpg") || path.ends_with(".png") {
-                    Message::PreviewLoaded(Ok(Handle::from_bytes(data)))
-                } else if path.ends_with(".tif") || path.ends_with(".tiff") {
-                    match utils::decode_tiff(&data) {
-                        Ok((w, h, rgba)) => Message::PreviewLoaded(Ok(Handle::from_rgba(w, h, rgba))),
-                        Err(e) => Message::PreviewLoaded(Err(format!("Failed to decode TIFF: {}", e))),
-                    }
-                } else { Message::PreviewLoaded(Err("Unsupported file format for preview".into())) }
-            }
-            Err(e) => Message::PreviewLoaded(Err(format!("Failed to read file: {}", e))),
+        let data = veldsdk::core::fs_read(&path).map_err(|e| format!("Read error: {}", e))?;
+        
+        let ext = path.to_lowercase();
+        if ext.ends_with(".jpg") || ext.ends_with(".png") {
+            Ok(Handle::from_bytes(data))
+        } else if ext.ends_with(".tif") || ext.ends_with(".tiff") {
+            let (w, h, rgba) = utils::decode_tiff(&data).map_err(|e| format!("TIFF error: {}", e))?;
+            Ok(Handle::from_rgba(w, h, rgba))
+        } else { 
+            Err("Unsupported file format".into()) 
         }
-    })
+    }, Message::PreviewLoaded)
 }
 
 pub fn handle_preview_loaded(state: &mut LocalState, res: Result<Handle, String>) -> Command<Message> {
@@ -266,18 +226,10 @@ pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { state.
 // Helper functions
 
 fn perform_browse_cmd(path: String) -> Command<Message> {
-    Command::perform(async move {
-        veldsdk::yield_now().await;
-        let req = ListPathRequest { path: path.clone(), token: String::new() };
-        match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
-            Ok(res_bytes) => {
-                match ListPathResponse::decode(&res_bytes[..]) {
-                    Ok(response) => Message::BrowsePathLoaded(Ok((path, response))),
-                    Err(e) => Message::BrowsePathLoaded(Err(format!("Decode Error: {}", e))),
-                }
-            }
-            Err(e) => Message::BrowsePathLoaded(Err(format!("Browse Error: {}", e))),
-        }
+    let p = path.clone();
+    let req = ListPathRequest { path: path.clone(), token: String::new() };
+    rpc_command!("data-provider", "list_path", req.encode_to_vec(), ListPathResponse, move |res| {
+        Message::BrowsePathLoaded(res.map(|resp| (p, resp)))
     })
 }
 

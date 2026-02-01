@@ -1,11 +1,10 @@
 use crate::dispatcher::NativeService;
 use crate::services::{
     FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, 
-    FsDeleteRequest, FsDownloadRequest, LogRequest, LogLevel
+    FsDownloadRequest, LogRequest
 };
 use prost::Message;
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 pub struct SystemService;
