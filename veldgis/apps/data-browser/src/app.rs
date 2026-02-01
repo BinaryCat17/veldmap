@@ -14,17 +14,10 @@ use crate::browse;
 use crate::utils;
 use crate::common::{self, BrowserItem, is_previewable, icon_text};
 
-impl veldsdk::iced::Application for VeldMapToolsGui {
-    type Message = Message;
+use serde::Deserialize;
 
-    fn update(&mut self, message: Message) {
-        let _ = self.update(message);
-    }
-
-    fn view(&self) -> Element<'_, Message, Theme, Renderer> {
-        self.view()
-    }
-}
+#[derive(Deserialize, Clone)]
+pub struct LocalConfig {}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewMode {
@@ -71,7 +64,7 @@ pub struct VeldMapToolsGui {
 }
 
 impl VeldMapToolsGui {
-    pub fn new() -> (Self, Task<Message>) {
+    pub fn new(_config: LocalConfig) -> (Self, Task<Message>) {
         (
             Self {
                 view_mode: ViewMode::Search,

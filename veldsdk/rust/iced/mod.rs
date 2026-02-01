@@ -1,54 +1,46 @@
 //! Iced integration for VeldMap WASM plugins.
-//!
-//! This module provides a clean interface for building interactive GUIs.
 
-use iced_core::{Font, Theme, Point, Event};
+use iced_core::{Font, Theme};
 use iced_tiny_skia::Renderer;
+use serde::Deserialize;
 
 pub mod runtime;
-pub use runtime::IcedRuntime;
 
-/// The main trait for creating GUI applications.
+/// Settings for initializing the Iced runtime.
+pub struct IcedSettings {
+    pub default_font: Font,
+    pub fonts: Vec<(&'static str, &'static [u8])>,
+}
+
+/// The unified trait for building Iced-based VeldMap modules.
 /// 
-/// Implement this trait for your state struct to define your UI logic.
-pub trait Application {
-    /// The type of messages your application will handle.
+/// This trait combines state management, initialization, and UI rendering.
+pub trait IcedModule: Sized {
+    /// The type of messages your application handles.
     type Message: Send + 'static;
+    
+    /// The configuration type for your module.
+    type Config: for<'de> Deserialize<'de>;
 
-    /// Handles updates to the application state based on messages.
+    /// Initializes the module with the given configuration.
+    /// Returns the module instance and UI settings.
+    fn init(config: Self::Config) -> anyhow::Result<(Self, IcedSettings)>;
+
+    /// Handles updates to the module state based on messages.
     fn update(&mut self, message: Self::Message);
     
-    /// Returns the view for the current state of the application.
+    /// Returns the view for the current state of the module.
     fn view(&self) -> iced_core::Element<'_, Self::Message, Theme, Renderer>;
+
+    /// Optional: Decodes an RPC call into an Iced message.
+    /// This allows your UI to react to external RPC calls.
+    fn decode_rpc(_method: &str, _payload: &[u8]) -> anyhow::Result<Option<Self::Message>> {
+        Ok(None)
+    }
 }
 
-/// A handle to the active UI runtime.
-/// 
-/// This trait hides the complex internal generics of the Iced implementation.
-pub trait UiRuntime: Send + Sync {
-    /// Updates the dimensions and scale factor of the UI canvas.
-    fn update_size(&self, width: u32, height: u32, scale_factor: f32);
-    
-    /// Updates the absolute cursor position on the canvas.
-    fn update_cursor(&self, x: f32, y: f32);
-    
-    /// Returns the current logical cursor position.
-    fn cursor_position(&self) -> Point;
-    
-    /// Pushes a raw Iced event into the runtime queue.
-    fn push_event(&self, event: Event);
-    
-    /// Renders the current frame and sends it to the host.
+/// Internal trait used by the macro to drive the UI without knowing the Message type.
+pub trait RawIcedRuntime: Send + Sync {
+    fn handle_event(&self, event: crate::rpc::ui::UiEvent) -> anyhow::Result<()>;
     fn render(&self) -> anyhow::Result<()>;
-}
-
-/// Creates a new UI runtime for the given application.
-///
-/// This is the entry point for UI-enabled plugins.
-pub fn create_runtime<T: Application + 'static>(
-    gui: T, 
-    default_font: Font, 
-    fonts: Vec<(&'static str, &'static [u8])>
-) -> Box<dyn UiRuntime> {
-    Box::new(IcedRuntime::new(gui, default_font, fonts))
 }

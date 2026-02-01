@@ -5,25 +5,34 @@ mod search;
 mod browse;
 mod downloaded;
 mod preview;
-mod handlers;
 
-use veldsdk::define_module;
-use veldsdk::rpc::ui::UiEvent;
-use veldmap_gis_api::common::Empty;
-use serde::Deserialize;
-use veldsdk::iced::UiRuntime;
+use veldsdk::define_iced_module;
+use veldsdk::iced::{IcedModule, IcedSettings};
+use crate::app::VeldMapToolsGui;
 
-#[derive(Deserialize)]
-pub(crate) struct LocalConfig {}
+impl IcedModule for VeldMapToolsGui {
+    type Message = crate::app::Message;
+    type Config = crate::app::LocalConfig;
 
-pub(crate) struct LocalState(pub(crate) Box<dyn UiRuntime>);
+    fn init(config: Self::Config) -> anyhow::Result<(Self, IcedSettings)> {
+        let (gui, _task) = VeldMapToolsGui::new(config);
+        let settings = IcedSettings {
+            default_font: iced_core::Font::with_name("VeldMap"),
+            fonts: vec![
+                ("DejaVuSans", common::DEJAVU_FONT_DATA),
+                ("NotoColorEmoji", common::EMOJI_FONT_DATA),
+            ],
+        };
+        Ok((gui, settings))
+    }
 
-define_module! {
-    config: LocalConfig,
-    state: LocalState,
-    init: handlers::module_init,
-    handlers: {
-        "handle_ui_event" => handlers::handle_ui_event : UiEvent => RpcResponse,
-        "render" => handlers::handle_render : Empty => RpcResponse,
+    fn update(&mut self, message: Self::Message) {
+        let _ = self.update(message);
+    }
+
+    fn view(&self) -> iced_core::Element<'_, Self::Message, iced_core::Theme, iced_tiny_skia::Renderer> {
+        self.view()
     }
 }
+
+define_iced_module!(VeldMapToolsGui);

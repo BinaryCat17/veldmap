@@ -1,15 +1,16 @@
 #[cfg(feature = "graphics")]
 use crate::graphics::UiBridge;
-use crate::iced::{Application, UiRuntime};
-use iced_core::{mouse, Size, Theme, Color, Rectangle, Point, Pixels, Font, Event};
+use crate::iced::{IcedModule, RawIcedRuntime};
+use crate::rpc::ui::UiEvent;
+use iced_core::{mouse, keyboard, Size, Theme, Color, Rectangle, Point, Pixels, Font, Event};
 use iced_graphics::Viewport;
 use iced_runtime::user_interface::{self, UserInterface};
 use iced_tiny_skia::Renderer;
 use std::cell::RefCell;
 
 /// Internal implementation of the Iced runtime.
-pub struct IcedRuntime<T: Application> {
-    gui: RefCell<T>,
+pub struct IcedRuntime<T: IcedModule> {
+    app: RefCell<T>,
     renderer: RefCell<Renderer>,
     interface_cache: RefCell<user_interface::Cache>,
     canvas_size: RefCell<(u32, u32)>,
@@ -21,18 +22,15 @@ pub struct IcedRuntime<T: Application> {
     font_data: Vec<(&'static str, &'static [u8])>,
 }
 
-// We are in WASM, which is single-threaded for now. 
-// IcedRuntime uses RefCells, so it's not thread-safe in a generic context,
-// but for our plugin architecture, we can safely treat it as such.
-unsafe impl<T: Application> Send for IcedRuntime<T> {}
-unsafe impl<T: Application> Sync for IcedRuntime<T> {}
+unsafe impl<T: IcedModule> Send for IcedRuntime<T> {}
+unsafe impl<T: IcedModule> Sync for IcedRuntime<T> {}
 
-impl<T: Application> IcedRuntime<T> {
-    pub fn new(gui: T, default_font: Font, font_data: Vec<(&'static str, &'static [u8])>) -> Self {
+impl<T: IcedModule> IcedRuntime<T> {
+    pub fn new(app: T, default_font: Font, font_data: Vec<(&'static str, &'static [u8])>) -> Self {
         let renderer = Renderer::new(default_font, Pixels(16.0));
         
         Self {
-            gui: RefCell::new(gui),
+            app: RefCell::new(app),
             renderer: RefCell::new(renderer),
             interface_cache: RefCell::new(user_interface::Cache::default()),
             canvas_size: RefCell::new((1024, 768)),
@@ -46,26 +44,71 @@ impl<T: Application> IcedRuntime<T> {
     }
 }
 
-impl<T: Application + 'static> UiRuntime for IcedRuntime<T> {
-    fn update_size(&self, width: u32, height: u32, scale_factor: f32) {
-        *self.canvas_size.borrow_mut() = (width, height);
-        *self.scale_factor.borrow_mut() = scale_factor;
-        *self.needs_redrawing.borrow_mut() = true;
-    }
+impl<T: IcedModule + 'static> RawIcedRuntime for IcedRuntime<T> {
+    fn handle_event(&self, event_proto: UiEvent) -> anyhow::Result<()> {
+        if let Some(ev) = event_proto.event {
+            match ev {
+                crate::rpc::ui::ui_event::Event::Resize(r) => { 
+                    *self.canvas_size.borrow_mut() = (r.width, r.height);
+                    *self.scale_factor.borrow_mut() = r.scale_factor;
+                    *self.needs_redrawing.borrow_mut() = true;
+                }
+                crate::rpc::ui::ui_event::Event::Click(c) => {
+                    let sf = *self.scale_factor.borrow();
+                    let pos = Point::new(c.x / sf, c.y / sf);
+                    *self.cursor_position.borrow_mut() = pos;
+                    
+                    let button = match c.button {
+                        1 => mouse::Button::Left,
+                        2 => mouse::Button::Right,
+                        3 => mouse::Button::Middle,
+                        _ => mouse::Button::Left,
+                    };
 
-    fn update_cursor(&self, x: f32, y: f32) {
-        let sf = *self.scale_factor.borrow();
-        *self.cursor_position.borrow_mut() = Point::new(x / sf, y / sf);
-        *self.needs_redrawing.borrow_mut() = true;
-    }
+                    let mut events = self.pending_events.borrow_mut();
+                    events.push(Event::Mouse(mouse::Event::CursorMoved { position: pos }));
+                    events.push(Event::Mouse(mouse::Event::ButtonPressed(button)));
+                    events.push(Event::Mouse(mouse::Event::ButtonReleased(button)));
+                    *self.needs_redrawing.borrow_mut() = true;
+                }
+                crate::rpc::ui::ui_event::Event::Key(k) => {
+                    let key = if k.key_code == 13 {
+                        keyboard::Key::Named(keyboard::key::Named::Enter)
+                    } else if k.key_code == 8 {
+                        keyboard::Key::Named(keyboard::key::Named::Backspace)
+                    } else {
+                        keyboard::Key::Unidentified
+                    };
 
-    fn cursor_position(&self) -> Point {
-        *self.cursor_position.borrow()
-    }
-
-    fn push_event(&self, event: Event) {
-        self.pending_events.borrow_mut().push(event);
-        *self.needs_redrawing.borrow_mut() = true;
+                    if key != keyboard::Key::Unidentified {
+                        let physical_key = keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+                        let mut events = self.pending_events.borrow_mut();
+                        if k.pressed {
+                            events.push(Event::Keyboard(keyboard::Event::KeyPressed {
+                                key: key.clone(),
+                                modifiers: keyboard::Modifiers::default(),
+                                location: keyboard::Location::Standard,
+                                text: None,
+                                modified_key: key,
+                                physical_key,
+                                repeat: false,
+                            }));
+                        } else {
+                            events.push(Event::Keyboard(keyboard::Event::KeyReleased {
+                                key: key.clone(),
+                                modifiers: keyboard::Modifiers::default(),
+                                location: keyboard::Location::Standard,
+                                modified_key: key,
+                                physical_key,
+                            }));
+                        }
+                        *self.needs_redrawing.borrow_mut() = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     fn render(&self) -> anyhow::Result<()> {
@@ -104,9 +147,9 @@ impl<T: Application + 'static> UiRuntime for IcedRuntime<T> {
 
         let mut messages = Vec::new();
         {
-            let gui = self.gui.borrow();
+            let app = self.app.borrow();
             let mut ui = UserInterface::build(
-                gui.view(),
+                app.view(),
                 viewport.logical_size(),
                 cache,
                 &mut *renderer,
@@ -118,16 +161,16 @@ impl<T: Application + 'static> UiRuntime for IcedRuntime<T> {
         }
 
         if !messages.is_empty() {
-            let mut gui = self.gui.borrow_mut();
+            let mut app = self.app.borrow_mut();
             for message in messages {
-                gui.update(message);
+                app.update(message);
             }
         }
 
         let cache = {
-            let gui = self.gui.borrow();
+            let app = self.app.borrow();
             let mut user_interface = UserInterface::build(
-                gui.view(),
+                app.view(),
                 viewport.logical_size(),
                 cache,
                 &mut *renderer,
