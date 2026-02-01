@@ -45,11 +45,12 @@ async fn main() -> anyhow::Result<()> {
 
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats[0];
+    let size = window.inner_size();
     let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
-        width: 1024,
-        height: 768,
+        width: size.width,
+        height: size.height,
         present_mode: wgpu::PresentMode::Fifo,
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
@@ -301,13 +302,36 @@ async fn main() -> anyhow::Result<()> {
 
                     use veldmap_rust_rpc::ui::{UiEvent, ResizeEvent, ui_event};
                     let ev = UiEvent {
-                        event: Some(ui_event::Event::Resize(ResizeEvent { width: size.width, height: size.height })),
+                        event: Some(ui_event::Event::Resize(ResizeEvent { 
+                            width: size.width, 
+                            height: size.height,
+                            scale_factor: window.scale_factor() as f32 
+                        })),
                     };
                     let d_clone = dispatcher.clone();
                     tokio::spawn(async move {
                         let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await;
                     });
                 }
+            }
+            Event::WindowEvent { event: WindowEvent::ScaleFactorChanged { scale_factor, .. }, .. } => {
+                let size = window.inner_size();
+                config.width = size.width;
+                config.height = size.height;
+                surface.configure(&device, &config);
+
+                use veldmap_rust_rpc::ui::{UiEvent, ResizeEvent, ui_event};
+                let ev = UiEvent {
+                    event: Some(ui_event::Event::Resize(ResizeEvent { 
+                        width: size.width, 
+                        height: size.height,
+                        scale_factor: scale_factor as f32 
+                    })),
+                };
+                let d_clone = dispatcher.clone();
+                tokio::spawn(async move {
+                    let _ = d_clone.call("veldmap-app-data-browser", "handle_ui_event", ev.encode_to_vec()).await;
+                });
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);

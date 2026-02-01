@@ -23,11 +23,10 @@ use iced_runtime::user_interface::{self, UserInterface};
 lazy_static! {
     static ref GUI: Mutex<Option<VeldMapToolsGui>> = Mutex::new(None);
     static ref CANVAS_SIZE: Mutex<(u32, u32)> = Mutex::new((1, 1));
+    static ref SCALE_FACTOR: Mutex<f32> = Mutex::new(1.0);
     static ref CURSOR_POSITION: Mutex<Point> = Mutex::new(Point::ORIGIN);
     static ref PENDING_EVENTS: Mutex<Vec<iced_core::Event>> = Mutex::new(Vec::new());
 }
-
-const SCALE_FACTOR: f32 = 1.0;
 
 thread_local! {
     static INTERFACE_CACHE: RefCell<user_interface::Cache> = RefCell::new(user_interface::Cache::default());
@@ -52,10 +51,12 @@ pub fn handle_rpc(input: Vec<u8>) -> FnResult<Vec<u8>> {
                 match ev {
                     veldmap_rust_rpc::ui::ui_event::Event::Resize(r) => { 
                         *CANVAS_SIZE.lock().unwrap() = (r.width, r.height); 
+                        *SCALE_FACTOR.lock().unwrap() = r.scale_factor;
                     }
                     veldmap_rust_rpc::ui::ui_event::Event::Click(c) => {
-                        let logical_x = c.x / SCALE_FACTOR;
-                        let logical_y = c.y / SCALE_FACTOR;
+                        let sf = *SCALE_FACTOR.lock().unwrap();
+                        let logical_x = c.x / sf;
+                        let logical_y = c.y / sf;
                         *CURSOR_POSITION.lock().unwrap() = Point::new(logical_x, logical_y);
                         
                         let mut events = PENDING_EVENTS.lock().unwrap();
@@ -154,7 +155,8 @@ fn render_and_send() {
     };
     pixmap.fill(tiny_skia::Color::from_rgba8(20, 23, 26, 255)); 
 
-    let viewport = Viewport::with_physical_size(Size::new(width, height), SCALE_FACTOR);
+    let sf = *SCALE_FACTOR.lock().unwrap();
+    let viewport = Viewport::with_physical_size(Size::new(width, height), sf);
     
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         RENDERER.with(|renderer_cell| {

@@ -25,6 +25,7 @@ message KeyEvent {
 message ResizeEvent {
     uint32 width = 1;
     uint32 height = 2;
+    float scale_factor = 3;
 }
 
 message InitEvent {}
