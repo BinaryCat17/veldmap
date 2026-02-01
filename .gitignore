@@ -20,3 +20,5 @@ cache/
 # IDEs
 .idea/
 .vscode/
+
+data

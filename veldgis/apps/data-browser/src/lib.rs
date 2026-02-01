@@ -9,7 +9,7 @@ mod handlers;
 
 use veldsdk::define_iced_module;
 use iced_core::image::Handle;
-use veldmap_gis_api::dataprovider::DataProduct;
+use veldmap_gis_api::dataprovider::{DataProduct, SearchResponse, ListPathResponse};
 use crate::common::{BrowserItem, ViewMode};
 
 #[derive(serde::Deserialize, Clone)]
@@ -39,16 +39,21 @@ pub enum Message {
     SearchInputChanged(String),
     SearchFilterTypeChanged(search::SearchFilterType),
     SearchPressed,
+    SearchResult(Result<SearchResponse, String>),
     ClearError,
     ProductSelected(DataProduct),
+    ProductFilesLoaded(Result<ListPathResponse, String>),
     BackToList,
     BrowsePath(String),
+    BrowsePathLoaded(Result<(String, ListPathResponse), String>),
     BrowseUp,
     LocalSearchChanged(String),
     LocalFilterChanged(downloaded::FileFilter),
     DownloadFile(String),
+    DownloadFinished(Result<String, String>),
     DeleteLocalFile(String),
     ViewFile(String),
+    PreviewLoaded(Result<Handle, String>),
     ClosePreview,
 }
 
@@ -59,20 +64,25 @@ define_iced_module! {
     init: handlers::module_init,
     view: view::view,
     handlers: {
-        SwitchMode(mode) => async handlers::handle_switch_mode;
-        SearchInputChanged(query) => async handlers::handle_search_input;
-        SearchFilterTypeChanged(filter) => async handlers::handle_search_filter;
-        SearchPressed => async handlers::handle_search_press;
-        ClearError => async handlers::handle_clear_error;
-        ProductSelected(product) => async handlers::handle_product_selected;
-        BackToList => async handlers::handle_back_to_list;
-        BrowsePath(path) => async handlers::handle_browse_path;
-        BrowseUp => async handlers::handle_browse_up;
-        LocalSearchChanged(query) => async handlers::handle_local_search;
-        LocalFilterChanged(filter) => async handlers::handle_local_filter;
-        DownloadFile(path) => async handlers::handle_download;
-        DeleteLocalFile(path) => async handlers::handle_delete;
-        ViewFile(path) => async handlers::handle_view;
-        ClosePreview => async handlers::handle_close_preview;
+        SwitchMode(mode) => handlers::handle_switch_mode;
+        SearchInputChanged(query) => handlers::handle_search_input;
+        SearchFilterTypeChanged(filter) => handlers::handle_search_filter;
+        SearchPressed => handlers::handle_search_press;
+        SearchResult(res) => handlers::handle_search_result;
+        ClearError => handlers::handle_clear_error;
+        ProductSelected(product) => handlers::handle_product_selected;
+        ProductFilesLoaded(res) => handlers::handle_product_files_loaded;
+        BackToList => handlers::handle_back_to_list;
+        BrowsePath(path) => handlers::handle_browse_path;
+        BrowsePathLoaded(res) => handlers::handle_browse_path_loaded;
+        BrowseUp => handlers::handle_browse_up;
+        LocalSearchChanged(query) => handlers::handle_local_search;
+        LocalFilterChanged(filter) => handlers::handle_local_filter;
+        DownloadFile(path) => handlers::handle_download;
+        DownloadFinished(res) => handlers::handle_download_finished;
+        DeleteLocalFile(path) => handlers::handle_delete;
+        ViewFile(path) => handlers::handle_view;
+        PreviewLoaded(res) => handlers::handle_preview_loaded;
+        ClosePreview => handlers::handle_close_preview;
     }
 }

@@ -82,13 +82,17 @@ define_iced_module! {
 В отличие от классического Iced, здесь используется архитектура свободных функций, аналогичная системным модулям:
 - Логика обновления не загромождает один большой метод `update`, а распределяется по небольшим функциям в `handlers.rs`.
 - Каждая функция принимает `&mut LocalState` первым аргументом.
+- Обработчики возвращают `Command<Message>` для выполнения побочных эффектов.
 - Данные из вариантов `Message` (например, `path` в `DownloadFile(path)`) автоматически распаковываются макросом и передаются в функцию.
 
 ```rust
 // Пример в handlers.rs
-pub fn handle_download(state: &mut LocalState, path: String) {
+pub fn handle_download(state: &mut LocalState, path: String) -> Command<Message> {
     state.status_message = format!("Downloading {}...", path);
-    // ... логика работы с файлами или сетью
+    Command::perform(async move {
+        // Логика работы с файлами или сетью
+        Message::DownloadFinished(Ok(path))
+    })
 }
 ```
 

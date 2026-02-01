@@ -1,6 +1,6 @@
 #[cfg(feature = "graphics")]
 use crate::graphics::UiBridge;
-use crate::iced::{RawIcedRuntime, BoxedFuture};
+use crate::iced::{RawIcedRuntime, BoxedFuture, Command};
 use crate::rpc::ui::UiEvent;
 use iced_core::{mouse, keyboard, Size, Theme, Color, Rectangle, Point, Pixels, Font, Event};
 use iced_graphics::Viewport;
@@ -13,7 +13,7 @@ use futures_util::task::noop_waker_ref;
 /// Internal implementation of the Iced runtime that uses closures for flexibility.
 pub struct IcedRuntime<S, M> {
     state: RefCell<S>,
-    update_fn: fn(&mut S, M) -> Option<BoxedFuture>,
+    update_fn: fn(&mut S, M) -> Command<M>,
     view_fn: fn(&S) -> iced_core::Element<'_, M, Theme, Renderer>,
     
     renderer: RefCell<Renderer>,
@@ -26,7 +26,7 @@ pub struct IcedRuntime<S, M> {
     needs_redrawing: RefCell<bool>,
     font_data: Vec<(&'static str, &'static [u8])>,
     
-    tasks: RefCell<Vec<BoxedFuture>>,
+    tasks: RefCell<Vec<BoxedFuture<M>>>,
 }
 
 unsafe impl<S, M> Send for IcedRuntime<S, M> {}
@@ -35,7 +35,7 @@ unsafe impl<S, M> Sync for IcedRuntime<S, M> {}
 impl<S: 'static, M: Send + 'static> IcedRuntime<S, M> {
     pub fn new(
         state: S, 
-        update_fn: fn(&mut S, M) -> Option<BoxedFuture>,
+        update_fn: fn(&mut S, M) -> Command<M>,
         view_fn: fn(&S) -> iced_core::Element<'_, M, Theme, Renderer>,
         default_font: Font, 
         font_data: Vec<(&'static str, &'static [u8])>
@@ -62,22 +62,39 @@ impl<S: 'static, M: Send + 'static> IcedRuntime<S, M> {
 
 impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
     fn tick(&self) -> anyhow::Result<()> {
-        let mut tasks = self.tasks.borrow_mut();
-        if tasks.is_empty() { return Ok(()); }
-
-        let waker = noop_waker_ref();
-        let mut cx = Context::from_waker(waker);
+        let mut new_messages = Vec::new();
         
-        // Опрашиваем задачи и удаляем завершенные
-        tasks.retain_mut(|task| {
-            match task.as_mut().poll(&mut cx) {
-                Poll::Ready(_) => {
-                    *self.needs_redrawing.borrow_mut() = true;
-                    false
-                },
-                Poll::Pending => true,
+        {
+            let mut tasks = self.tasks.borrow_mut();
+            if tasks.is_empty() { return Ok(()); }
+
+            let waker = noop_waker_ref();
+            let mut cx = Context::from_waker(waker);
+            
+            // Опрашиваем задачи и собираем сообщения
+            tasks.retain_mut(|task| {
+                match task.as_mut().poll(&mut cx) {
+                    Poll::Ready(maybe_msg) => {
+                        if let Some(msg) = maybe_msg {
+                            new_messages.push(msg);
+                        }
+                        *self.needs_redrawing.borrow_mut() = true;
+                        false
+                    },
+                    Poll::Pending => true,
+                }
+            });
+        }
+
+        // Если появились новые сообщения, запускаем цикл обновления
+        if !new_messages.is_empty() {
+            let mut state = self.state.borrow_mut();
+            let mut tasks = self.tasks.borrow_mut();
+            for msg in new_messages {
+                let command = (self.update_fn)(&mut state, msg);
+                tasks.extend(command.0);
             }
-        });
+        }
         Ok(())
     }
 
@@ -200,9 +217,8 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
         if !messages.is_empty() {
             let mut state = self.state.borrow_mut();
             for message in messages {
-                if let Some(task) = (self.update_fn)(&mut state, message) {
-                    self.tasks.borrow_mut().push(task);
-                }
+                let command = (self.update_fn)(&mut state, message);
+                self.tasks.borrow_mut().extend(command.0);
             }
         }
 

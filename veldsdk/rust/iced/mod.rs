@@ -12,6 +12,42 @@ pub struct IcedSettings {
     pub fonts: Vec<(&'static str, &'static [u8])>,
 }
 
+/// A command that describes a side effect to be performed.
+pub struct Command<M>(pub(crate) Vec<BoxedFuture<M>>);
+
+impl<M> Command<M> {
+    /// Creates an empty command.
+    pub fn none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Creates a command from a future that returns a message.
+    pub fn perform<F>(future: F) -> Self 
+    where 
+        F: Future<Output = M> + Send + 'static,
+        M: 'static 
+    {
+        Self(vec![Box::pin(async move { Some(future.await) })])
+    }
+
+    /// Creates a command from a future that doesn't return anything.
+    pub fn perform_action<F>(future: F) -> Self 
+    where 
+        F: Future<Output = ()> + Send + 'static,
+        M: 'static 
+    {
+        Self(vec![Box::pin(async move { future.await; None })])
+    }
+
+    pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
+        let mut futures = Vec::new();
+        for cmd in commands {
+            futures.extend(cmd.0);
+        }
+        Self(futures)
+    }
+}
+
 /// Internal trait used by the macro to drive the UI.
 #[doc(hidden)]
 pub trait RawIcedRuntime: Send + Sync {
@@ -20,7 +56,7 @@ pub trait RawIcedRuntime: Send + Sync {
     fn tick(&self) -> anyhow::Result<()>;
 }
 
-pub type BoxedFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+pub type BoxedFuture<M> = Pin<Box<dyn Future<Output = Option<M>> + Send + 'static>>;
 
 #[doc(hidden)]
 pub struct SendPtr<T>(pub *mut T);
@@ -42,7 +78,7 @@ macro_rules! define_iced_module {
         init: $init_func:path,
         view: $view_func:path,
         handlers: {
-            $($msg_variant:ident $( ( $($arg:ident),* ) )? => async $handler_func:path);* $(;)?
+            $($msg_variant:ident $( ( $($arg:ident),* ) )? => $handler_func:path);* $(;)?
         }
     ) => {
         #[extism_pdk::plugin_fn]
@@ -58,18 +94,13 @@ macro_rules! define_iced_module {
             let result = $init_func(config);
             let boxed_state: anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match result {
                 Ok((state, settings)) => {
-                    fn internal_update(state: &mut $state_type, message: $message_type) -> Option<$crate::iced::BoxedFuture> {
+                    fn internal_update(state: &mut $state_type, message: $message_type) -> $crate::iced::Command<$message_type> {
                         #[allow(unused_imports)]
                         use $message_type::*;
                         match message {
                             $(
                                 $msg_variant $( ( $($arg),* ) )? => {
-                                    let sptr = $crate::iced::SendPtr(state as *mut _);
-                                    let fut = async move {
-                                        let s = unsafe { sptr.as_mut() };
-                                        $handler_func(s, $($($arg),*)?).await;
-                                    };
-                                    Some(Box::pin(fut))
+                                    $handler_func(state, $($($arg),*)?)
                                 }
                             )*
                         }
