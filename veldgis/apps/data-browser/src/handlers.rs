@@ -1,0 +1,235 @@
+use crate::{LocalState, Message, utils};
+use crate::app::ViewMode;
+use crate::common::BrowserItem;
+use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, SearchFilter};
+use prost::Message as ProstMessage;
+use iced_core::image::Handle;
+
+pub fn handle_switch_mode(state: &mut LocalState, msg: Message) {
+    if let Message::SwitchMode(mode) = msg {
+        state.view_mode = mode;
+        state.current_image = None;
+        state.download_progress = None;
+        state.selected_product = None;
+        if state.view_mode == ViewMode::Browse && state.browse_items.is_empty() {
+            perform_browse(state, String::new());
+        } else if state.view_mode == ViewMode::Downloaded {
+            refresh_local_files(state);
+        }
+    }
+}
+
+pub fn handle_search_input(state: &mut LocalState, msg: Message) {
+    if let Message::SearchInputChanged(q) = msg {
+        state.search_state.query = q;
+    }
+}
+
+pub fn handle_search_filter(state: &mut LocalState, msg: Message) {
+    if let Message::SearchFilterTypeChanged(ft) = msg {
+        state.search_state.filter_type = ft;
+    }
+}
+
+pub fn handle_search_press(state: &mut LocalState, _msg: Message) {
+    state.status_message = "Searching CDSE...".to_string();
+    let mut filters = Vec::new();
+    match state.search_state.filter_type {
+        crate::search::SearchFilterType::GridId => filters.push(SearchFilter { name: "gridId".into(), value: state.search_state.query.clone() }),
+        crate::search::SearchFilterType::Collection => filters.push(SearchFilter { name: "Collection".into(), value: state.search_state.query.clone() }),
+        _ => {}
+    }
+    let q = if state.search_state.filter_type == crate::search::SearchFilterType::General { state.search_state.query.clone() } else { String::new() };
+    
+    let req = SearchRequest { query: q, filters };
+    match veldsdk::rpc::host::call_service("data-provider", "search", req.encode_to_vec()) {
+        Ok(res_bytes) => {
+            if let Ok(response) = SearchResponse::decode(&res_bytes[..]) {
+                if !response.error.is_empty() {
+                    state.error_message = Some(format!("Search API Error: {}", response.error));
+                } else {
+                    state.search_results = response.products;
+                    state.status_message = format!("Found {} results", state.search_results.len());
+                }
+            }
+        }
+        Err(e) => { state.error_message = Some(format!("Search Error: {}", e)); }
+    }
+}
+
+pub fn handle_product_selected(state: &mut LocalState, msg: Message) {
+    if let Message::ProductSelected(prod) = msg {
+        state.status_message = format!("Loading files for {}...", prod.name);
+        let req = ListPathRequest { path: prod.path.clone(), token: String::new() };
+        match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
+            Ok(res_bytes) => {
+                if let Ok(response) = ListPathResponse::decode(&res_bytes[..]) {
+                    state.product_files = response.items.into_iter().map(|s3_key| {
+                        let name = s3_key.split('/').last().unwrap_or(&s3_key).to_string();
+                        let is_folder = s3_key.ends_with('/');
+                        BrowserItem { s3_key, name, is_folder, exists_locally: false }
+                    }).collect();
+                    state.selected_product = Some(prod.name.clone());
+                    state.status_message = format!("Loaded {} items", state.product_files.len());
+                }
+            }
+            Err(e) => { state.error_message = Some(format!("List Error: {}", e)); }
+        }
+    }
+}
+
+pub fn handle_back_to_list(state: &mut LocalState, _msg: Message) {
+    state.selected_product = None;
+}
+
+pub fn handle_browse_path(state: &mut LocalState, msg: Message) {
+    if let Message::BrowsePath(path) = msg {
+        perform_browse(state, path);
+    }
+}
+
+pub fn handle_browse_up(state: &mut LocalState, _msg: Message) {
+    let current = state.current_browse_path.trim_end_matches('/');
+    if let Some(idx) = current.rfind('/') {
+        let parent = current[..=idx].to_string();
+        perform_browse(state, parent);
+    } else {
+        perform_browse(state, String::new());
+    }
+}
+
+pub fn handle_download(state: &mut LocalState, msg: Message) {
+    if let Message::DownloadFile(s3_key) = msg {
+        let filename = s3_key.split('/').last().unwrap_or("file");
+        let dest = format!("data/dem/source/{}", filename);
+        let req = DownloadRequest { identifier: s3_key, destination: dest };
+        match veldsdk::rpc::host::call_service("data-provider", "download", req.encode_to_vec()) {
+            Ok(res_bytes) => {
+                if let Ok(response) = DownloadResponse::decode(&res_bytes[..]) {
+                    if response.success {
+                        state.status_message = "Download started".into();
+                    } else {
+                        state.error_message = Some(format!("Download failed: {}", response.error));
+                    }
+                }
+            }
+            Err(e) => { state.error_message = Some(format!("Download Error: {}", e)); }
+        }
+    }
+}
+
+pub fn handle_delete(state: &mut LocalState, msg: Message) {
+    if let Message::DeleteLocalFile(path) = msg {
+        match veldsdk::core::fs_delete(&path) {
+            Ok(_) => {
+                state.status_message = format!("Deleted {}", path);
+                refresh_local_files(state);
+            }
+            Err(e) => {
+                state.error_message = Some(format!("Failed to delete {}: {}", path, e));
+            }
+        }
+    }
+}
+
+pub fn handle_view(state: &mut LocalState, msg: Message) {
+    if let Message::ViewFile(path) = msg {
+        state.status_message = format!("Loading preview for {}...", path);
+        match veldsdk::core::fs_read(&path) {
+            Ok(data) => {
+                if path.ends_with(".jpg") || path.ends_with(".png") {
+                    state.current_image = Some(Handle::from_bytes(data));
+                    state.status_message = "Preview loaded".into();
+                } else if path.ends_with(".tif") || path.ends_with(".tiff") {
+                    match utils::decode_tiff(&data) {
+                        Ok((w, h, rgba)) => {
+                            state.current_image = Some(Handle::from_rgba(w, h, rgba));
+                            state.status_message = "TIFF Preview loaded".into();
+                        }
+                        Err(e) => {
+                            state.error_message = Some(format!("Failed to decode TIFF: {}", e));
+                        }
+                    }
+                } else {
+                    state.error_message = Some("Unsupported file format for preview".into());
+                }
+            }
+            Err(e) => {
+                state.error_message = Some(format!("Failed to read file: {}", e));
+            }
+        }
+    }
+}
+
+pub fn handle_clear_error(state: &mut LocalState, _msg: Message) {
+    state.error_message = None;
+}
+
+pub fn handle_local_search(state: &mut LocalState, msg: Message) {
+    if let Message::LocalSearchChanged(q) = msg {
+        state.downloaded_state.search_query = q;
+    }
+}
+
+pub fn handle_local_filter(state: &mut LocalState, msg: Message) {
+    if let Message::LocalFilterChanged(f) = msg {
+        state.downloaded_state.filter = f;
+    }
+}
+
+pub fn handle_close_preview(state: &mut LocalState, _msg: Message) {
+    state.current_image = None;
+}
+
+// Helper functions (formerly private methods in VeldMapToolsGui)
+
+fn perform_browse(state: &mut LocalState, path: String) {
+    state.status_message = format!("Listing /{}...", path);
+    let req = ListPathRequest { path: path.clone(), token: String::new() };
+    match veldsdk::rpc::host::call_service("data-provider", "list_path", req.encode_to_vec()) {
+        Ok(res_bytes) => {
+            if let Ok(response) = ListPathResponse::decode(&res_bytes[..]) {
+                if !response.error.is_empty() {
+                    state.error_message = Some(format!("Browse API Error: {}", response.error));
+                    state.status_message = "Browse failed".to_string();
+                } else {
+                    state.browse_items = response.items.into_iter().map(|s3_key| {
+                        let is_folder = s3_key.ends_with('/');
+                        let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
+                        BrowserItem { s3_key, name, is_folder, exists_locally: false }
+                    }).collect();
+                    state.current_browse_path = path;
+                    state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token) };
+                    state.status_message = format!("Loaded {} items", state.browse_items.len());
+                }
+            } else {
+                state.error_message = Some("Failed to decode ListPathResponse".into());
+            }
+        }
+        Err(e) => { 
+            state.error_message = Some(format!("Browse RPC Error: {}", e)); 
+            state.status_message = "Browse failed".to_string();
+        }
+    }
+}
+
+fn refresh_local_files(state: &mut LocalState) {
+    state.status_message = "Refreshing local files...".to_string();
+    let path = "data/dem/source";
+    match veldsdk::core::fs_list(path) {
+        Ok(entries) => {
+            state.local_files = entries.into_iter().map(|name| {
+                BrowserItem {
+                    s3_key: format!("{}/{}", path, name),
+                    name,
+                    is_folder: false,
+                    exists_locally: true,
+                }
+            }).collect();
+            state.status_message = format!("Found {} local files", state.local_files.len());
+        }
+        Err(e) => {
+            state.error_message = Some(format!("Failed to list local files: {}", e));
+        }
+    }
+}

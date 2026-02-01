@@ -139,7 +139,16 @@ macro_rules! define_module {
 #[cfg(all(feature = "pdk", feature = "iced"))]
 #[macro_export]
 macro_rules! define_iced_module {
-    ($module_type:ty) => {
+    (
+        config: $config_type:ty,
+        state: $state_type:ty,
+        message: $message_type:ty,
+        init: $init_func:path,
+        view: $view_func:path,
+        handlers: {
+            $($msg_variant:pat => $handler_func:path),* $(,)?
+        }
+    ) => {
         #[extism_pdk::plugin_fn]
         pub fn init() -> extism_pdk::FnResult<()> {
             let _ = $crate::core::init();
@@ -147,14 +156,26 @@ macro_rules! define_iced_module {
                 .map_err(|e| extism_pdk::Error::msg(format!("Failed to get config: {}", e)))?
                 .ok_or_else(|| extism_pdk::Error::msg("Config not found"))?;
             
-            let config = serde_json::from_str(&config_json)
+            let config: $config_type = serde_json::from_str(&config_json)
                 .map_err(|e| extism_pdk::Error::msg(format!("Failed to parse config: {}", e)))?;
 
-            let result = <$module_type as $crate::iced::IcedModule>::init(config);
+            let result = $init_func(config);
             let boxed_state: anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match result {
-                Ok((app, settings)) => {
+                Ok((state, settings)) => {
+                    fn internal_update(state: &mut $state_type, message: $message_type) {
+                        match message {
+                            $(
+                                $msg_variant => {
+                                    $handler_func(state, message)
+                                }
+                            )*
+                        }
+                    }
+
                     let runtime = $crate::iced::runtime::IcedRuntime::new(
-                        app, 
+                        state,
+                        internal_update,
+                        $view_func,
                         settings.default_font, 
                         settings.fonts
                     );
@@ -201,11 +222,7 @@ macro_rules! define_iced_module {
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
                     Ok(response.encode_to_vec())
                 }
-                _ => {
-                    // Здесь можно добавить вызов decode_rpc, но это потребует более сложного даункаста.
-                    // Для начала ограничимся стандартными методами UI.
-                    Err(anyhow::anyhow!("Method '{}' not found in Iced module", request.method).into())
-                }
+                _ => Err(anyhow::anyhow!("Method '{}' not found in Iced module", request.method).into()),
             }
         }
     };

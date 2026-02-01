@@ -1,6 +1,6 @@
 #[cfg(feature = "graphics")]
 use crate::graphics::UiBridge;
-use crate::iced::{IcedModule, RawIcedRuntime};
+use crate::iced::RawIcedRuntime;
 use crate::rpc::ui::UiEvent;
 use iced_core::{mouse, keyboard, Size, Theme, Color, Rectangle, Point, Pixels, Font, Event};
 use iced_graphics::Viewport;
@@ -8,9 +8,12 @@ use iced_runtime::user_interface::{self, UserInterface};
 use iced_tiny_skia::Renderer;
 use std::cell::RefCell;
 
-/// Internal implementation of the Iced runtime.
-pub struct IcedRuntime<T: IcedModule> {
-    app: RefCell<T>,
+/// Internal implementation of the Iced runtime that uses closures for flexibility.
+pub struct IcedRuntime<S, M> {
+    state: RefCell<S>,
+    update_fn: fn(&mut S, M),
+    view_fn: fn(&S) -> iced_core::Element<'_, M, Theme, Renderer>,
+    
     renderer: RefCell<Renderer>,
     interface_cache: RefCell<user_interface::Cache>,
     canvas_size: RefCell<(u32, u32)>,
@@ -22,15 +25,23 @@ pub struct IcedRuntime<T: IcedModule> {
     font_data: Vec<(&'static str, &'static [u8])>,
 }
 
-unsafe impl<T: IcedModule> Send for IcedRuntime<T> {}
-unsafe impl<T: IcedModule> Sync for IcedRuntime<T> {}
+unsafe impl<S, M> Send for IcedRuntime<S, M> {}
+unsafe impl<S, M> Sync for IcedRuntime<S, M> {}
 
-impl<T: IcedModule> IcedRuntime<T> {
-    pub fn new(app: T, default_font: Font, font_data: Vec<(&'static str, &'static [u8])>) -> Self {
+impl<S, M: Send + 'static> IcedRuntime<S, M> {
+    pub fn new(
+        state: S, 
+        update_fn: fn(&mut S, M),
+        view_fn: fn(&S) -> iced_core::Element<'_, M, Theme, Renderer>,
+        default_font: Font, 
+        font_data: Vec<(&'static str, &'static [u8])>
+    ) -> Self {
         let renderer = Renderer::new(default_font, Pixels(16.0));
         
         Self {
-            app: RefCell::new(app),
+            state: RefCell::new(state),
+            update_fn,
+            view_fn,
             renderer: RefCell::new(renderer),
             interface_cache: RefCell::new(user_interface::Cache::default()),
             canvas_size: RefCell::new((1024, 768)),
@@ -44,7 +55,7 @@ impl<T: IcedModule> IcedRuntime<T> {
     }
 }
 
-impl<T: IcedModule + 'static> RawIcedRuntime for IcedRuntime<T> {
+impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
     fn handle_event(&self, event_proto: UiEvent) -> anyhow::Result<()> {
         if let Some(ev) = event_proto.event {
             match ev {
@@ -147,9 +158,9 @@ impl<T: IcedModule + 'static> RawIcedRuntime for IcedRuntime<T> {
 
         let mut messages = Vec::new();
         {
-            let app = self.app.borrow();
+            let state = self.state.borrow();
             let mut ui = UserInterface::build(
-                app.view(),
+                (self.view_fn)(&state),
                 viewport.logical_size(),
                 cache,
                 &mut *renderer,
@@ -161,16 +172,16 @@ impl<T: IcedModule + 'static> RawIcedRuntime for IcedRuntime<T> {
         }
 
         if !messages.is_empty() {
-            let mut app = self.app.borrow_mut();
+            let mut state = self.state.borrow_mut();
             for message in messages {
-                app.update(message);
+                (self.update_fn)(&mut state, message);
             }
         }
 
         let cache = {
-            let app = self.app.borrow();
+            let state = self.state.borrow();
             let mut user_interface = UserInterface::build(
-                app.view(),
+                (self.view_fn)(&state),
                 viewport.logical_size(),
                 cache,
                 &mut *renderer,

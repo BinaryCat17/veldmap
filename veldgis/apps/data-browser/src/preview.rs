@@ -2,7 +2,7 @@ use iced_widget::{button, column, text, image as iced_image};
 use iced_core::image::Handle;
 use iced_core::{Element, Length, Theme};
 use iced_tiny_skia::Renderer;
-use crate::app::Message;
+use crate::Message;
 
 pub fn view<'a>(handle: &'a Handle) -> Element<'a, Message, Theme, Renderer> {
     column![

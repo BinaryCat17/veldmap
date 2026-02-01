@@ -3,7 +3,7 @@ use iced_widget::{
 };
 use iced_core::{Element, Length, Alignment, Theme};
 use iced_tiny_skia::Renderer;
-use crate::app::Message;
+use crate::Message;
 use crate::common;
 use crate::common::BrowserItem;
 
