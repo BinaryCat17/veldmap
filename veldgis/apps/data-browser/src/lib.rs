@@ -10,13 +10,13 @@ mod handlers;
 use veldsdk::define_iced_module;
 use iced_core::image::Handle;
 use veldmap_gis_api::dataprovider::DataProduct;
-use crate::common::BrowserItem;
+use crate::common::{BrowserItem, ViewMode};
 
 #[derive(serde::Deserialize, Clone)]
 pub struct LocalConfig {}
 
 pub struct LocalState {
-    pub view_mode: view::ViewMode,
+    pub view_mode: ViewMode,
     pub status_message: String,
     pub error_message: Option<String>,
     pub search_state: search::SearchState,
@@ -35,7 +35,7 @@ pub struct LocalState {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    SwitchMode(view::ViewMode),
+    SwitchMode(ViewMode),
     SearchInputChanged(String),
     SearchFilterTypeChanged(search::SearchFilterType),
     SearchPressed,

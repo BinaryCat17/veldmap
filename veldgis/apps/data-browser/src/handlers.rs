@@ -1,5 +1,5 @@
 use crate::{LocalState, utils, common};
-use crate::view::ViewMode;
+use crate::common::ViewMode;
 use crate::common::BrowserItem;
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, SearchFilter, DataProduct};
 use prost::Message as ProstMessage;

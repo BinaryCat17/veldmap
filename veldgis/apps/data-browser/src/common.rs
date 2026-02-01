@@ -16,6 +16,13 @@ pub const COLOR_PRIMARY_HOVER: Color = Color::from_rgb(0.15, 0.55, 1.0);
 pub const COLOR_TEXT: Color = Color::WHITE;
 pub const COLOR_TEXT_DIM: Color = Color::from_rgb(0.6, 0.6, 0.7);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Search,
+    Browse,
+    Downloaded,
+}
+
 #[derive(Debug, Clone)]
 pub struct BrowserItem {
     pub s3_key: String,

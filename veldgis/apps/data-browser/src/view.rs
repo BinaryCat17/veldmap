@@ -7,15 +7,8 @@ use crate::search;
 use crate::downloaded;
 use crate::preview;
 use crate::browse;
-use crate::common::{self, is_previewable, icon_text};
+use crate::common::{self, is_previewable, icon_text, ViewMode};
 use crate::{LocalState, Message};
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ViewMode {
-    Search,
-    Browse,
-    Downloaded,
-}
 
 pub fn view(state: &LocalState) -> Element<'_, Message, Theme, Renderer> {
     let title_bar = column![
