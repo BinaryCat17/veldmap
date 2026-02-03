@@ -7,8 +7,7 @@ use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
-use extism_pdk::HttpRequest;
-use extism_pdk::http;
+use veldsdk::core::{HttpRequest, http_request};
 use crate::{LocalConfig, LocalState};
 
 pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
@@ -144,13 +143,10 @@ pub fn list_path(state: &LocalState, request: ListPathRequest) -> anyhow::Result
     // Нужно явно добавить x-amz-content-sha256 в сам запрос, если sign его не добавил в instructions
     req = req.with_header("x-amz-content-sha256".to_string(), content_sha256.to_string());
 
-    let res = match http::request::<()>(&req, None) {
+    let (status, body) = match http_request(&req, None) {
         Ok(r) => r,
         Err(e) => return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: format!("Network error: {}", e) }),
     };
-    
-    let body = res.body();
-    let status = res.status_code();
     
     if status != 200 && status != 0 {
         let err_msg = format!("S3 status {}: {}", status, String::from_utf8_lossy(&body));

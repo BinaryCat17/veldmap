@@ -8,7 +8,6 @@ use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use prost::Message;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
 /// A command that describes a side effect to be performed.
 pub struct Command<M>(pub Vec<BoxedFuture<M>>);
@@ -62,10 +61,10 @@ impl<M> Command<M> {
 /// Yields execution back to the host, allowing other tasks (like rendering) to run.
 pub async fn yield_now() {
     struct YieldNow(bool);
-    impl Future for YieldNow {
+    impl std::future::Future for YieldNow {
         type Output = ();
-        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-            if self.0 { Poll::Ready(()) } else { self.0 = true; Poll::Pending }
+        fn poll(mut self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+            if self.0 { std::task::Poll::Ready(()) } else { self.0 = true; std::task::Poll::Pending }
         }
     }
     YieldNow(false).await;
@@ -184,4 +183,30 @@ pub fn fs_delete(path: impl Into<String>) -> anyhow::Result<()> {
     let req = FsDeleteRequest { path: path.into() };
     call_service("system", "fs_delete", req.encode_to_vec())?;
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+pub struct HttpRequest {
+    pub url: String,
+    pub method: Option<String>,
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+impl HttpRequest {
+    pub fn new(url: impl Into<String>) -> Self {
+        Self { url: url.into(), method: None, headers: std::collections::HashMap::new() }
+    }
+    pub fn with_method(mut self, method: impl Into<String>) -> Self {
+        self.method = Some(method.into());
+        self
+    }
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+}
+
+pub fn http_request(req: &HttpRequest, body: Option<&[u8]>) -> anyhow::Result<(u32, Vec<u8>)> {
+    let json = serde_json::to_string(req)?;
+    crate::rpc::host::http_request(&json, body)
 }

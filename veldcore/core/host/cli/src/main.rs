@@ -6,17 +6,30 @@ use veldmap_host_core::{
 };
 use std::sync::Arc;
 use extism::{Function, UserData, Val, ValType};
+use extism_convert::MemoryHandle;
 use veldmap_host_core::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info,veldmap_host_cli=info,veldmap_host_core=info");
+    }
+    env_logger::init();
+
+    let mut config_dir = "config".to_string();
+    let args: Vec<String> = std::env::args().collect();
+    for i in 0..args.len() {
+        if args[i] == "--config" && i + 1 < args.len() {
+            config_dir = args[i + 1].clone();
+        }
+    }
+
     log::info!("VeldMap CLI Host starting (config: {})...", config_dir);
 
-    let flags = wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        flags,
+        flags: wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER,
         ..Default::default()
     });
     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { ..Default::default() }).await
@@ -26,7 +39,6 @@ async fn main() -> anyhow::Result<()> {
     log::info!("Using headless GPU adapter: {} ({:?}, driver: {})", info.name, info.backend, info.driver);
 
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
-    
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(Arc::new(device), Arc::new(queue)));
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
@@ -36,9 +48,12 @@ async fn main() -> anyhow::Result<()> {
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone()))));
 
     let d_call = dispatcher.clone();
-    let mut host_call = Function::new("veldmap_host_call", [ValType::I64], [ValType::I64], UserData::new(()),
+    let mut veld_host_call = Function::new("veld_host_call", [ValType::I64, ValType::I64], [ValType::I64], UserData::new(()),
         move |plugin, inputs, outputs, _| {
-            let req_buf: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
+            let wasm_ptr = inputs[0].i64().unwrap() as u64;
+            let len = inputs[1].i64().unwrap() as u64;
+            let handle = unsafe { MemoryHandle::new(wasm_ptr, len) };
+            let req_buf = plugin.memory_bytes(handle)?;
             let request = RpcRequest::decode(&req_buf[..])?;
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(d_call.call(&request.service, &request.method, request.payload))
@@ -50,14 +65,13 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     );
-    host_call.set_namespace("env");
+    veld_host_call.set_namespace("env");
 
-    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call], &config_dir).await?;
+    plugin_module::load_services_with_functions(dispatcher.clone(), vec![veld_host_call], &config_dir).await?;
 
     let node = Arc::new(VeldmapNode::new(endpoint, dispatcher.clone()).await?);
     log::info!("Node ID: {}", node.node_id());
 
-    // CLI просто держит ноду запущенной
     node.run().await?;
 
     Ok(())

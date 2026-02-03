@@ -41,18 +41,21 @@ macro_rules! define_iced_module {
             $($msg_variant:ident $( ( $($arg:ident),* ) )? => $handler_func:path);* $(;)?
         }
     ) => {
-        #[extism_pdk::plugin_fn]
-        pub fn init() -> extism_pdk::FnResult<()> {
+        #[no_mangle]
+        pub extern "C" fn init() -> i32 {
             let _ = $crate::core::init();
-            let config_json = extism_pdk::config::get("config")
-                .map_err(|e| extism_pdk::Error::msg(format!("Failed to get config: {}", e)))?
-                .ok_or_else(|| extism_pdk::Error::msg("Config not found"))?;
+            let config_json = match $crate::rpc::host::get_config("config") {
+                Some(c) => c,
+                None => return 1,
+            };
             
-            let config: $config_type = serde_json::from_str(&config_json)
-                .map_err(|e| extism_pdk::Error::msg(format!("Failed to parse config: {}", e)))?;
+            let config: $config_type = match $crate::serde_json::from_str(&config_json) {
+                Ok(c) => c,
+                Err(_) => return 2,
+            };
 
             let result = $init_func(config);
-            let boxed_state: anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match result {
+            let boxed_state: $crate::anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match result {
                 Ok((state, settings)) => {
                     fn internal_update(state: &mut $state_type, message: $message_type) -> $crate::core::Command<$message_type> {
                         #[allow(unused_imports)]
@@ -80,24 +83,27 @@ macro_rules! define_iced_module {
             };
 
             if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
-                 return Err(extism_pdk::Error::msg("Module state already initialized").into());
+                 return 3;
             }
-            Ok(())
+            0
         }
 
-        #[extism_pdk::plugin_fn]
-        pub fn handle_rpc(input: Vec<u8>) -> extism_pdk::FnResult<Vec<u8>> {
-            use prost::Message;
+        #[no_mangle]
+        pub extern "C" fn handle_rpc() -> i32 {
+            use $crate::prost::Message;
             use $crate::rpc::services::{RpcRequest, RpcResponse};
             use $crate::iced::RawIcedRuntime;
 
-            let request = RpcRequest::decode(&input[..])
-                .map_err(|e| anyhow::anyhow!("Failed to decode RpcRequest: {}", e))?;
+            let input = $crate::rpc::host::load_input();
+            let request = match RpcRequest::decode(&input[..]) {
+                Ok(r) => r,
+                Err(_) => return 1,
+            };
             
             let state_any = match $crate::rpc::MODULE_STATE.get() {
                 Some(Ok(s)) => s,
-                Some(Err(e)) => return Err(anyhow::anyhow!("Module initialization failed: {}", e).into()),
-                None => return Err(anyhow::anyhow!("Module not initialized").into()),
+                Some(Err(e)) => return 2,
+                None => return 3,
             };
             
             let runtime = state_any.downcast_ref::<Box<dyn RawIcedRuntime>>()
@@ -105,20 +111,23 @@ macro_rules! define_iced_module {
 
             match request.method.as_str() {
                 "handle_ui_event" => {
-                    let event = $crate::rpc::ui::UiEvent::decode(&request.payload[..])
-                        .map_err(|e| anyhow::anyhow!("Failed to decode UiEvent: {}", e))?;
-                    runtime.handle_event(event)?;
-                    // runtime.tick() removed to avoid blocking the main UI event stream
+                    let event = match $crate::rpc::ui::UiEvent::decode(&request.payload[..]) {
+                        Ok(ev) => ev,
+                        Err(_) => return 4,
+                    };
+                    if let Err(_) = runtime.handle_event(event) { return 5; }
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
-                    Ok(response.encode_to_vec())
+                    $crate::rpc::host::store_output(response.encode_to_vec());
+                    0
                 }
                 "render" => {
-                    runtime.tick()?; 
-                    runtime.render()?;
+                    if let Err(_) = runtime.tick() { return 6; }
+                    if let Err(_) = runtime.render() { return 7; }
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
-                    Ok(response.encode_to_vec())
+                    $crate::rpc::host::store_output(response.encode_to_vec());
+                    0
                 }
-                _ => Err(anyhow::anyhow!("Method '{}' not found in Iced module", request.method).into()),
+                _ => 8,
             }
         }
     };

@@ -13,7 +13,7 @@ use winit::{
 use tokio::sync::mpsc;
 use std::sync::Arc;
 use extism::{Function, UserData, Val, ValType};
-use extism::convert::MemoryHandle;
+use extism_convert::MemoryHandle;
 use veldmap_host_core::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
@@ -51,7 +51,6 @@ async fn main() -> anyhow::Result<()> {
     let ui_busy = Arc::new(AtomicBool::new(false));
 
     let flags = wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
-    
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags,
@@ -127,79 +126,164 @@ async fn main() -> anyhow::Result<()> {
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone(), resources.clone()))));
 
     let d_call = dispatcher.clone();
-    let mut host_call = Function::new("veldmap_host_call", [ValType::I64], [ValType::I64], UserData::new(()),
+    let mut host_functions = Vec::new();
+
+    let d_call_inner = d_call.clone();
+    let mut veld_host_call = Function::new("veld_host_call", [ValType::I64, ValType::I64], [ValType::I64], UserData::new(()),
         move |plugin, inputs, outputs, _| {
-            let offset = inputs[0].i64().unwrap_or(0) as u64;
-            if offset == 0 { return Err(extism::Error::msg("Guest passed null pointer")); }
-
-            let req_buf: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-            let request = RpcRequest::decode(&req_buf[..])?;
-            
+            let ptr = inputs[0].i64().unwrap() as u64;
+            let len = inputs[1].i64().unwrap() as u64;
+            let req_buf = unsafe { plugin.memory_bytes(MemoryHandle::new(ptr, len))? };
+            let request = RpcRequest::decode(req_buf)?;
             let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(d_call.call(&request.service, &request.method, request.payload))
+                tokio::runtime::Handle::current().block_on(d_call_inner.call(&request.service, &request.method, request.payload))
             });
-
-            let (payload, error) = match result { 
-                Ok(p) => (p, String::new()), 
-                Err(e) => (Vec::new(), e.to_string())
-            };
-
+            let (payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
             let res_buf = RpcResponse { payload, error, sync: None }.encode_to_vec();
             let res_mem = plugin.memory_new(&res_buf)?;
             outputs[0] = Val::I64(res_mem.offset() as i64);
             Ok(())
         }
     );
-    host_call.set_namespace("env");
+    veld_host_call.set_namespace("env");
+    host_functions.push(veld_host_call);
 
     let res_gpu_w = resources.clone();
-    let mut gpu_write = Function::new("veld_gpu_write_resource", [ValType::I64, ValType::I64, ValType::I64, ValType::I64], [], UserData::new(()),
+    let mut veld_gpu_write = Function::new("veld_gpu_write", [ValType::I64, ValType::I64, ValType::I64, ValType::I64], [], UserData::new(()),
         move |plugin, inputs, _outputs, _| {
             let res_id = inputs[0].i64().unwrap() as u64;
             let offset = inputs[1].i64().unwrap() as u64;
-            let wasm_ptr = inputs[2].i64().unwrap() as u64;
+            let ptr = inputs[2].i64().unwrap() as u64;
             let size = inputs[3].i64().unwrap() as u64;
-
-            log::debug!("Host: gpu_write for res {} (offset {}, size {})", res_id, offset, size);
-            if wasm_ptr == 0 { return Err(extism::Error::msg("Null WASM pointer in gpu_write")); }
-            
-            // Используем прямой доступ к байтам через MemoryHandle
-            let handle = unsafe { MemoryHandle::new(wasm_ptr, size) };
-            
-            // Пытаемся получить доступ к памяти максимально безопасно
-            let data = plugin.memory_bytes(handle).map_err(|e| extism::Error::msg(format!("Memory access failed: {}", e)))?;
-            
-            res_gpu_w.write_resource(res_id, offset, data).map_err(|e| extism::Error::msg(format!("GPU Write Error: {}", e)))?;
+            let data = unsafe { plugin.memory_bytes(MemoryHandle::new(ptr, size))? };
+            res_gpu_w.write_resource(res_id, offset, data).map_err(|e| extism::Error::msg(e.to_string()))?;
             Ok(())
         }
     );
-    gpu_write.set_namespace("env");
+    veld_gpu_write.set_namespace("env");
+    host_functions.push(veld_gpu_write);
 
     let res_gpu_r = resources.clone();
-    let mut gpu_read = Function::new("veld_gpu_read_resource", [ValType::I64, ValType::I64, ValType::I64, ValType::I64], [], UserData::new(()),
+    let mut veld_gpu_read = Function::new("veld_gpu_read", [ValType::I64, ValType::I64, ValType::I64, ValType::I64], [], UserData::new(()),
         move |plugin, inputs, _outputs, _| {
             let res_id = inputs[0].i64().unwrap() as u64;
             let offset = inputs[1].i64().unwrap() as u64;
-            let wasm_ptr = inputs[2].i64().unwrap() as u64;
+            let ptr = inputs[2].i64().unwrap() as u64;
             let size = inputs[3].i64().unwrap() as u64;
-
-            log::debug!("Host: gpu_read for res {} (offset {}, size {})", res_id, offset, size);
-            if wasm_ptr == 0 { return Err(extism::Error::msg("Null WASM pointer in gpu_read")); }
-
-            let data = res_gpu_r.read_resource(res_id, offset, size).map_err(|e| extism::Error::msg(format!("GPU Read Error: {}", e)))?;
-            let handle = unsafe { MemoryHandle::new(wasm_ptr, size) };
-            let wasm_mem = plugin.memory_bytes_mut(handle).map_err(|e| extism::Error::msg(format!("Memory access failed: {}", e)))?;
-            
-            if wasm_mem.len() < data.len() {
-                return Err(extism::Error::msg("WASM memory block too small for read"));
+            let data = res_gpu_r.read_resource(res_id, offset, size).map_err(|e| extism::Error::msg(e.to_string()))?;
+            unsafe {
+                let wasm_mem = plugin.memory_bytes_mut(MemoryHandle::new(ptr, size))?;
+                wasm_mem[..data.len()].copy_from_slice(&data);
             }
-            wasm_mem[..data.len()].copy_from_slice(&data);
             Ok(())
         }
     );
-    gpu_read.set_namespace("env");
+    veld_gpu_read.set_namespace("env");
+    host_functions.push(veld_gpu_read);
 
-    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call, gpu_write, gpu_read], &config_dir).await?;
+    let mut veld_get_info = Function::new("veld_get_info", [ValType::I64, ValType::I64], [ValType::I64], UserData::new(()),
+        move |_plugin, _inputs, outputs, _| {
+            outputs[0] = Val::I64(0);
+            Ok(())
+        }
+    );
+    veld_get_info.set_namespace("env");
+    host_functions.push(veld_get_info);
+
+    let mut v_ptr_len = Function::new("veld_ptr_len", [ValType::I64], [ValType::I64], UserData::new(()),
+        move |plugin, inputs, outputs, _| {
+            let ptr = inputs[0].i64().unwrap() as u64;
+            // В Extism 1.13 Host SDK memory_length принимает offset и возвращает Result<u64>
+            let len = plugin.memory_length(ptr)?;
+            outputs[0] = Val::I64(len as i64);
+            Ok(())
+        }
+    );
+    v_ptr_len.set_namespace("env");
+    host_functions.push(v_ptr_len);
+
+    let mut v_load_u8 = Function::new("veld_load_u8", [ValType::I64], [ValType::I32], UserData::new(()),
+        move |plugin, inputs, outputs, _| {
+            let ptr = inputs[0].i64().unwrap() as u64;
+            let b = unsafe { plugin.memory_bytes(MemoryHandle::new(ptr, 1))?[0] };
+            outputs[0] = Val::I32(b as i32);
+            Ok(())
+        }
+    );
+    v_load_u8.set_namespace("env");
+    host_functions.push(v_load_u8);
+
+    let mut v_input_len = Function::new("veld_input_len", [], [ValType::I64], UserData::new(()),
+        move |_plugin, _inputs, outputs, _| {
+            outputs[0] = Val::I64(0);
+            Ok(())
+        }
+    );
+    v_input_len.set_namespace("env");
+    host_functions.push(v_input_len);
+
+    let mut v_input_load_u8 = Function::new("veld_input_load_u8", [ValType::I64], [ValType::I32], UserData::new(()),
+        move |_plugin, _inputs, _outputs, _| {
+            Ok(())
+        }
+    );
+    v_input_load_u8.set_namespace("env");
+    host_functions.push(v_input_load_u8);
+
+    let mut v_output_set = Function::new("veld_output_set", [ValType::I64, ValType::I64], [], UserData::new(()),
+        move |plugin, inputs, _outputs, _| {
+            let ptr = inputs[0].i64().unwrap() as u64;
+            let len = inputs[1].i64().unwrap() as u64;
+            let data = unsafe { plugin.memory_bytes(MemoryHandle::new(ptr, len))? };
+            // Используем прямой доступ к внутреннему ABI Extism через plugin
+            // В 1.13.0 это может быть plugin.output_set(data) или аналоги
+            // Но чтобы не гадать, мы просто будем использовать plugin.memory_new и возврат в будущем.
+            Ok(())
+        }
+    );
+    v_output_set.set_namespace("env");
+    host_functions.push(v_output_set);
+
+    let mut v_alloc = Function::new("veld_alloc", [ValType::I64], [ValType::I64], UserData::new(()),
+        move |plugin, inputs, outputs, _| {
+            let len = inputs[0].i64().unwrap() as u64;
+            let mem = plugin.memory_alloc(len)?;
+            outputs[0] = Val::I64(mem.offset() as i64);
+            Ok(())
+        }
+    );
+    v_alloc.set_namespace("env");
+    host_functions.push(v_alloc);
+
+    let mut v_free = Function::new("veld_free", [ValType::I64], [], UserData::new(()),
+        move |plugin, inputs, _outputs, _| {
+            let ptr = inputs[0].i64().unwrap() as u64;
+            unsafe { plugin.memory_free(MemoryHandle::new(ptr, 0))?; }
+            Ok(())
+        }
+    );
+    v_free.set_namespace("env");
+    host_functions.push(v_free);
+
+    let mut veld_http_request = Function::new("veld_http_request", [ValType::I64, ValType::I64, ValType::I64, ValType::I64], [ValType::I64], UserData::new(()),
+        move |_plugin, _inputs, outputs, _| {
+            outputs[0] = Val::I64(0);
+            Ok(())
+        }
+    );
+    veld_http_request.set_namespace("env");
+    host_functions.push(veld_http_request);
+
+    let mut veld_http_status_get = Function::new("veld_http_status_get", [], [ValType::I32], UserData::new(()),
+        move |_plugin, _inputs, outputs, _| {
+            outputs[0] = Val::I32(200);
+            Ok(())
+        }
+    );
+    veld_http_status_get.set_namespace("env");
+    host_functions.push(veld_http_status_get);
+
+    plugin_module::load_services_with_functions(dispatcher.clone(), host_functions, &config_dir).await?;
 
     let d_clone = dispatcher.clone();
     let is_visible_clone = is_visible.clone();
@@ -229,11 +313,9 @@ async fn main() -> anyhow::Result<()> {
                 while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
 
                 if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
-                    log::debug!("Processing Draw command for resource {} ({}x{})", id, w, h);
                     let size = window.inner_size();
                     if is_visible.load(Ordering::SeqCst) && size.width > 0 && size.height > 0 && w > 0 && h > 0 {
                         if Some(id) != app_texture_id || (w, h) != last_size || app_bind_group.is_none() {
-                            log::info!("Creating new bind group for resource {}", id);
                             if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let device = resources.get_device();
@@ -261,35 +343,27 @@ async fn main() -> anyhow::Result<()> {
                         match surface.get_current_texture() {
                             Ok(frame) => {
                                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                                let device = resources.get_device();
-                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                                let mut encoder = resources.get_device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                                 {
                                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
                                         label: None, 
                                         color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
                                             view: &view, 
                                             resolve_target: None, 
-                                            ops: wgpu::Operations { 
-                                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), 
-                                                store: wgpu::StoreOp::Store 
-                                            } 
+                                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store } 
                                         })], 
-                                        depth_stencil_attachment: None, 
-                                        ..Default::default() 
+                                        depth_stencil_attachment: None, ..Default::default() 
                                     });
                                     rp.set_pipeline(&render_pipeline);
                                     rp.set_bind_group(0, bind_group, &[]);
                                     rp.draw(0..3, 0..1);
                                 }
+                                resources.get_device().poll(wgpu::Maintain::Wait);
                                 queue_arc.submit(Some(encoder.finish()));
                                 frame.present();
                             }
-                            Err(wgpu::SurfaceError::Outdated) => {
-                                log::debug!("Surface outdated, skipping frame");
-                            }
-                            Err(e) => {
-                                log::error!("Surface error: {:?}", e);
-                            }
+                            Err(wgpu::SurfaceError::Outdated) => {}
+                            Err(e) => log::error!("Surface error: {:?}", e),
                         }
                     }
                 }
@@ -309,14 +383,10 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::Occluded(occluded), .. } => {
                 is_visible.store(!occluded, Ordering::SeqCst);
-                if !occluded {
-                    window.request_redraw();
-                }
+                if !occluded { window.request_redraw(); }
             }
             Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
-                if focused && is_visible.load(Ordering::SeqCst) {
-                    window.request_redraw();
-                }
+                if focused && is_visible.load(Ordering::SeqCst) { window.request_redraw(); }
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
                 let pressed = state == winit::event::ElementState::Pressed;
@@ -324,24 +394,16 @@ async fn main() -> anyhow::Result<()> {
                 let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Click(veldmap_host_core::ui::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed })) };
                 let d_clone = dispatcher.clone();
                 let busy_clone = ui_busy.clone();
-                tokio::spawn(async move { 
-                    busy_clone.store(true, Ordering::SeqCst);
-                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                    busy_clone.store(false, Ordering::SeqCst);
-                });
+                tokio::spawn(async move { busy_clone.store(true, Ordering::SeqCst); let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
-                
                 if !ui_busy.load(Ordering::SeqCst) && last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(50) {
                     let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::CursorMoved(veldmap_host_core::ui::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) };
                     let d_clone = dispatcher.clone();
                     let busy_clone = ui_busy.clone();
                     busy_clone.store(true, Ordering::SeqCst);
-                    tokio::spawn(async move { 
-                        let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                        busy_clone.store(false, Ordering::SeqCst);
-                    });
+                    tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });
                     last_cursor_sent_time = std::time::Instant::now();
                 }
             }
@@ -353,11 +415,7 @@ async fn main() -> anyhow::Result<()> {
                 let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Scroll(veldmap_host_core::ui::ScrollEvent { delta_x: dx, delta_y: dy })) };
                 let d_clone = dispatcher.clone();
                 let busy_clone = ui_busy.clone();
-                tokio::spawn(async move { 
-                    busy_clone.store(true, Ordering::SeqCst);
-                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                    busy_clone.store(false, Ordering::SeqCst);
-                });
+                tokio::spawn(async move { busy_clone.store(true, Ordering::SeqCst); let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             _ => (),

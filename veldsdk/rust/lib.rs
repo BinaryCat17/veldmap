@@ -1,16 +1,16 @@
-pub mod rpc;
-
-#[cfg(feature = "pdk")]
 pub mod core;
-
-#[cfg(feature = "pdk")]
-pub use crate::core::yield_now;
-
+pub mod rpc;
 #[cfg(feature = "graphics")]
 pub mod graphics;
-
 #[cfg(feature = "iced")]
 pub mod iced;
+
+pub use core::yield_now;
+
+// Re-exports for macros
+pub use serde_json;
+pub use prost;
+pub use anyhow;
 
 pub mod prelude {
     pub use crate::rpc::services::*;

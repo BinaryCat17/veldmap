@@ -19,8 +19,8 @@ macro_rules! rpc_call {
             $crate::core::yield_now().await;
             let res = $crate::rpc::host::call_service($service, $method, $payload);
             res.and_then(|bytes| {
-                <$resp_type as ::prost::Message>::decode(&bytes[..])
-                    .map_err(|e| ::anyhow::anyhow!("Decode error: {}", e))
+                <$resp_type as $crate::prost::Message>::decode(&bytes[..])
+                    .map_err(|e| $crate::anyhow::anyhow!("Decode error: {}", e))
             }).map_err(|e| e.to_string())
         }
     };
@@ -51,35 +51,41 @@ macro_rules! define_module {
             $($method:expr => $func:path : $req_type:ty => $res_type:ty),* $(,)?
         }
     ) => {
-        #[extism_pdk::plugin_fn]
-        pub fn init() -> extism_pdk::FnResult<()> {
+        #[no_mangle]
+        pub extern "C" fn init() -> i32 {
             let _ = $crate::core::init();
-            let config_json = extism_pdk::config::get("config")
-                .map_err(|e| extism_pdk::Error::msg(format!("Failed to get config: {}", e)))?
-                .ok_or_else(|| extism_pdk::Error::msg("Config not found"))?;
+            let config_json = match $crate::rpc::host::get_config("config") {
+                Some(c) => c,
+                None => return 1,
+            };
             
-            let config: $config_type = serde_json::from_str(&config_json)
-                .map_err(|e| extism_pdk::Error::msg(format!("Failed to parse config: {}", e)))?;
+            let config: $config_type = match $crate::serde_json::from_str(&config_json) {
+                Ok(c) => c,
+                Err(_) => return 2,
+            };
 
             let state_result = $init_func(config);
-            let boxed_state: anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
+            let boxed_state: $crate::anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
                 Ok(s) => Ok(Box::new(s)),
                 Err(e) => Err(e),
             };
 
             if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
-                 return Err(extism_pdk::Error::msg("Module state already initialized").into());
+                 return 3;
             }
-            Ok(())
+            0
         }
 
-        #[extism_pdk::plugin_fn]
-        pub fn handle_rpc(input: Vec<u8>) -> extism_pdk::FnResult<Vec<u8>> {
-            use prost::Message;
+        #[no_mangle]
+        pub extern "C" fn handle_rpc() -> i32 {
+            use $crate::prost::Message;
             use $crate::rpc::services::{RpcRequest, RpcResponse};
 
-            let request = RpcRequest::decode(&input[..])
-                .map_err(|e| anyhow::anyhow!("Failed to decode RpcRequest: {}", e))?;
+            let input = $crate::rpc::host::load_input();
+            let request = match RpcRequest::decode(&input[..]) {
+                Ok(r) => r,
+                Err(_) => return 1,
+            };
             
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let state_any = match $crate::rpc::MODULE_STATE.get() {
@@ -116,7 +122,8 @@ macro_rules! define_module {
             };
 
             let response = RpcResponse { payload, error, sync: None };
-            Ok(response.encode_to_vec())
+            $crate::rpc::host::store_output(response.encode_to_vec());
+            0
         }
     };
 
@@ -126,38 +133,45 @@ macro_rules! define_module {
         init: $init_func:path,
         custom_handler: $handler_func:path
     ) => {
-        #[extism_pdk::plugin_fn]
-        pub fn init() -> extism_pdk::FnResult<()> {
+        #[no_mangle]
+        pub extern "C" fn init() -> i32 {
             let _ = $crate::core::init();
-            let config_json = extism_pdk::config::get("config")
-                .map_err(|e| extism_pdk::Error::msg(format!("Failed to get config: {}", e)))?
-                .ok_or_else(|| extism_pdk::Error::msg("Config not found"))?;
+            let config_json = match $crate::rpc::host::get_config("config") {
+                Some(c) => c,
+                None => return 1,
+            };
             
-            let config: $config_type = serde_json::from_str(&config_json)
-                .map_err(|e| extism_pdk::Error::msg(format!("Failed to parse config: {}", e)))?;
+            let config: $config_type = match $crate::serde_json::from_str(&config_json) {
+                Ok(c) => c,
+                Err(_) => return 2,
+            };
 
             let state_result = $init_func(config);
-            let boxed_state: anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
+            let boxed_state: $crate::anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
                 Ok(s) => Ok(Box::new(s)),
                 Err(e) => Err(e),
             };
 
             if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
-                 return Err(extism_pdk::Error::msg("Module state already initialized").into());
+                 return 3;
             }
-            Ok(())
+            0
         }
 
-        #[extism_pdk::plugin_fn]
-        pub fn handle_rpc(input: Vec<u8>) -> extism_pdk::FnResult<Vec<u8>> {
+        #[no_mangle]
+        pub extern "C" fn handle_rpc() -> i32 {
             let state_any = match $crate::rpc::MODULE_STATE.get() {
                 Some(Ok(s)) => s,
-                Some(Err(e)) => return Err(anyhow::anyhow!("Module initialization failed: {}", e).into()),
-                None => return Err(anyhow::anyhow!("Module not initialized").into()),
+                Some(Err(e)) => return 1,
+                None => return 2,
             };
             let state = state_any.downcast_ref::<$state_type>().unwrap();
+            let input = $crate::rpc::host::load_input();
 
-            $handler_func(state, input)
+            match $handler_func(state, input) {
+                Ok(output) => { $crate::rpc::host::store_output(output); 0 },
+                Err(_) => 3,
+            }
         }
     };
 }
