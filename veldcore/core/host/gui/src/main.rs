@@ -24,7 +24,7 @@ mod app_service;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "debug,veldmap_host=debug,veldmap_host_gui=debug,veldmap_host_core=debug");
+        std::env::set_var("RUST_LOG", "info,veldmap_host=debug,veldmap_host_gui=debug,veldmap_host_core=debug,wgpu_core=warn,wgpu_hal=warn,naga=warn,iroh=warn");
     }
     env_logger::init();
 
@@ -193,7 +193,6 @@ async fn main() -> anyhow::Result<()> {
     let mut v_ptr_len = Function::new("veld_ptr_len", [ValType::I64], [ValType::I64], UserData::new(()),
         move |plugin, inputs, outputs, _| {
             let ptr = inputs[0].i64().unwrap() as u64;
-            // В Extism 1.13 Host SDK memory_length принимает offset и возвращает Result<u64>
             let len = plugin.memory_length(ptr)?;
             outputs[0] = Val::I64(len as i64);
             Ok(())
@@ -231,13 +230,7 @@ async fn main() -> anyhow::Result<()> {
     host_functions.push(v_input_load_u8);
 
     let mut v_output_set = Function::new("veld_output_set", [ValType::I64, ValType::I64], [], UserData::new(()),
-        move |plugin, inputs, _outputs, _| {
-            let ptr = inputs[0].i64().unwrap() as u64;
-            let len = inputs[1].i64().unwrap() as u64;
-            let data = unsafe { plugin.memory_bytes(MemoryHandle::new(ptr, len))? };
-            // Используем прямой доступ к внутреннему ABI Extism через plugin
-            // В 1.13.0 это может быть plugin.output_set(data) или аналоги
-            // Но чтобы не гадать, мы просто будем использовать plugin.memory_new и возврат в будущем.
+        move |_plugin, _inputs, _outputs, _| {
             Ok(())
         }
     );
