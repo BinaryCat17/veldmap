@@ -119,17 +119,38 @@ pub fn init_with_level(level: LevelFilter) -> Result<(), SetLoggerError> {
 
 pub fn init() -> Result<(), SetLoggerError> { init_with_level(LevelFilter::Info) }
 
-pub fn fs_read(path: impl Into<String>) -> anyhow::Result<Vec<u8>> {
+pub fn fs_read_resource(path: impl Into<String>) -> anyhow::Result<crate::rpc::services::ResourceHandle> {
     let req = FsReadRequest { path: path.into() };
     let res_buf = call_service("system", "fs_read", req.encode_to_vec())?;
     let res = FsReadResponse::decode(&res_buf[..])?;
-    Ok(res.data)
+    res.handle.ok_or_else(|| anyhow::anyhow!("No handle in response"))
+}
+
+pub fn fs_read(path: impl Into<String>) -> anyhow::Result<Vec<u8>> {
+    let handle = fs_read_resource(path)?;
+    crate::rpc::host::gpu_read_resource(handle.id, 0, handle.size)
+}
+
+pub fn fs_write_resource(path: impl Into<String>, handle: crate::rpc::services::ResourceHandle) -> anyhow::Result<()> {
+    let req = FsWriteRequest { path: path.into(), handle: Some(handle) };
+    call_service("system", "fs_write", req.encode_to_vec())?;
+    Ok(())
 }
 
 pub fn fs_write(path: impl Into<String>, data: Vec<u8>) -> anyhow::Result<()> {
-    let req = FsWriteRequest { path: path.into(), data };
-    call_service("system", "fs_write", req.encode_to_vec())?;
-    Ok(())
+    use crate::rpc::services::{GpuResourceRequest, CreateBuffer, GpuResourceResponse};
+    let size = data.len() as u64;
+    let create_req = GpuResourceRequest {
+        command: Some(crate::rpc::services::gpu_resource_request::Command::CreateBuffer(CreateBuffer {
+            size, usage: 0
+        }))
+    };
+    let res_buf = call_service("system", "create_resource", create_req.encode_to_vec())?;
+    let res = GpuResourceResponse::decode(&res_buf[..])?;
+    let handle = res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create resource"))?;
+    
+    crate::rpc::host::gpu_write_resource(handle.id, 0, &data)?;
+    fs_write_resource(path, handle)
 }
 
 pub fn fs_download(url: impl Into<String>, path: impl Into<String>, headers: std::collections::HashMap<String, String>) -> anyhow::Result<String> {

@@ -1,13 +1,14 @@
 use crate::rpc::ui::{DrawFrame, UiDisplayCommand, ui_display_command};
+use crate::rpc::services::ResourceHandle;
 use crate::rpc::host::call_service;
 use prost::Message;
 
 pub struct UiBridge;
 
 impl UiBridge {
-    pub fn display_frame(rgba_data: Vec<u8>, width: u32, height: u32) -> anyhow::Result<()> {
+    pub fn display_frame(handle: ResourceHandle, width: u32, height: u32) -> anyhow::Result<()> {
         let frame = DrawFrame {
-            rgba_data,
+            handle: Some(handle),
             width,
             height,
         };

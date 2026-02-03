@@ -43,6 +43,8 @@ message ResizeEvent {
 
 message InitEvent {}
 
+import "services.proto";
+
 // Описание того, что Хост должен сделать с окном
 message UIDisplayCommand {
     oneof command {
@@ -52,7 +54,7 @@ message UIDisplayCommand {
 }
 
 message DrawFrame {
-    bytes rgba_data = 1;
+    veldmap.services.ResourceHandle handle = 1;
     uint32 width = 2;
     uint32 height = 3;
 }

@@ -3038,7 +3038,6 @@ dependencies = [
  "anyhow",
  "async-stream",
  "cosmic-text",
- "extism-pdk",
  "iced_core",
  "iced_graphics",
  "iced_renderer",
@@ -3067,7 +3066,6 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-runtime-api",
- "extism-pdk",
  "http 1.4.0",
  "log",
  "prost 0.13.5",
@@ -3087,7 +3085,6 @@ name = "veldmap-desktop-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "extism-pdk",
  "log",
  "once_cell",
  "prost 0.13.5",
@@ -3118,7 +3115,6 @@ name = "veldmap-local-storage"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "extism-pdk",
  "log",
  "prost 0.13.5",
  "serde",
@@ -3132,7 +3128,6 @@ name = "veldmap-render"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "extism-pdk",
  "log",
  "prost 0.13.5",
  "serde",
@@ -3146,7 +3141,6 @@ name = "veldmap-tile-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "extism-pdk",
  "log",
  "prost 0.13.5",
  "serde",

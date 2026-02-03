@@ -3,6 +3,7 @@ pub mod plugin_module;
 pub mod dispatcher;
 pub mod node;
 pub mod system_service;
+pub mod resources;
 
 pub mod services {
     include!(concat!(env!("OUT_DIR"), "/veldmap.services.rs"));

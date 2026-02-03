@@ -8,6 +8,14 @@ message SyncMetadata {
   uint64 lamport_clock = 2; // Logic clock for ordering
 }
 
+// UNIVERSAL RESOURCE HANDLE
+message ResourceHandle {
+  uint64 id = 1;           // Local session ID
+  bytes content_hash = 2;  // Global BLAKE3/Iroh hash
+  uint64 size = 3;         // Data size
+  uint32 type = 4;         // 0: Buffer, 1: Texture, 2: SharedMemory
+}
+
 // UNIVERSAL RPC CONTAINER
 message RpcRequest {
   string service = 1;
@@ -42,12 +50,12 @@ message FsReadRequest {
 }
 
 message FsReadResponse {
-  bytes data = 1;
+  ResourceHandle handle = 1;
 }
 
 message FsWriteRequest {
   string path = 1;
-  bytes data = 2;
+  ResourceHandle handle = 2;
 }
 
 message FsListRequest {
@@ -67,6 +75,49 @@ message FsDownloadRequest {
   string path = 2;
   map<string, string> headers = 3;
 }
+
+// GPU / RESOURCE SERVICE
+
+message GpuResourceRequest {
+  oneof command {
+    CreateBuffer create_buffer = 1;
+    CreateTexture create_texture = 2;
+    MapResource map = 3;
+    UnmapResource unmap = 4;
+    DestroyResource destroy = 5;
+  }
+}
+
+message CreateBuffer {
+  uint64 size = 1;
+  uint32 usage = 2;
+}
+
+message CreateTexture {
+  uint32 width = 1;
+  uint32 height = 2;
+  uint32 format = 3;
+  uint32 usage = 4;
+}
+
+message MapResource {
+  uint64 id = 1;
+}
+
+message UnmapResource {
+  uint64 id = 1;
+}
+
+message DestroyResource {
+  uint64 id = 1;
+}
+
+message GpuResourceResponse {
+  ResourceHandle handle = 1;
+  string error = 2;
+}
+
+// ASYNC TASKS
 
 message TaskResponse {
   string task_id = 1;

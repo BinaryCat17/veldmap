@@ -2,12 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use veldmap_host_core::dispatcher::NativeService;
 use veldmap_host_core::ui::UiDisplayCommand;
+use veldmap_host_core::resources::ResourceManager;
 use prost::Message;
 use tokio::sync::mpsc;
 use winit::event_loop::EventLoopProxy;
 
 pub enum AppCommand {
-    Draw(Vec<u8>, u32, u32),
+    Draw(u64, u32, u32), // resource_id, width, height
 }
 
 pub struct AppService {
@@ -17,7 +18,7 @@ pub struct AppService {
 }
 
 impl AppService {
-    pub fn new(tx: mpsc::UnboundedSender<AppCommand>, proxy: EventLoopProxy<()>, is_visible: Arc<AtomicBool>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<AppCommand>, proxy: EventLoopProxy<()>, is_visible: Arc<AtomicBool>, _resources: Arc<ResourceManager>) -> Self {
         Self { tx, proxy, is_visible }
     }
 }
@@ -29,7 +30,8 @@ impl NativeService for AppService {
                 let cmd = UiDisplayCommand::decode(&payload[..])?;
                 match cmd.command {
                     Some(veldmap_host_core::ui::ui_display_command::Command::DrawFrame(frame)) => {
-                        let _ = self.tx.send(AppCommand::Draw(frame.rgba_data, frame.width, frame.height));
+                        let handle = frame.handle.ok_or_else(|| anyhow::anyhow!("Missing resource handle"))?;
+                        let _ = self.tx.send(AppCommand::Draw(handle.id, frame.width, frame.height));
                         if self.is_visible.load(Ordering::SeqCst) {
                             let _ = self.proxy.send_event(());
                         }

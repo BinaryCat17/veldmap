@@ -1,8 +1,9 @@
 use crate::dispatcher::NativeService;
+use crate::resources::{ResourceManager, Resource};
 use crate::services::{
     FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, 
     FsDownloadRequest, LogRequest, TaskResponse, TaskStatusRequest, TaskStatusResponse,
-    TaskCancelRequest
+    TaskCancelRequest, GpuResourceRequest, GpuResourceResponse, ResourceHandle
 };
 use prost::Message;
 use std::fs;
@@ -22,12 +23,14 @@ struct TaskState {
 
 pub struct SystemService {
     tasks: Arc<Mutex<HashMap<String, TaskState>>>,
+    resources: Arc<ResourceManager>,
 }
 
 impl SystemService {
-    pub fn new() -> Self {
+    pub fn new(resources: Arc<ResourceManager>) -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            resources,
         }
     }
 
@@ -44,17 +47,54 @@ impl SystemService {
 impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         match method {
+            "create_resource" => {
+                let req = GpuResourceRequest::decode(&payload[..])?;
+                let mut handle = ResourceHandle::default();
+                match req.command {
+                    Some(crate::services::gpu_resource_request::Command::CreateTexture(t)) => {
+                        handle.id = self.resources.create_texture(t.width, t.height, t.format, t.usage);
+                        handle.size = (t.width * t.height * 4) as u64; // TODO: handle formats
+                        handle.r#type = 1; // ResourceType::Texture
+                    }
+                    Some(crate::services::gpu_resource_request::Command::CreateBuffer(b)) => {
+                        handle.id = self.resources.create_buffer(b.size, b.usage);
+                        handle.size = b.size;
+                        handle.r#type = 0; // ResourceType::Buffer
+                    }
+                    _ => return Err(anyhow::anyhow!("Unsupported resource command")),
+                }
+                Ok(GpuResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
+            }
             "fs_read" => {
                 let req = FsReadRequest::decode(&payload[..])?;
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
                 let data = fs::read(&req.path)?;
-                Ok(FsReadResponse { data }.encode_to_vec())
+                let id = self.resources.create_buffer(data.len() as u64, 0);
+                self.resources.write_resource(id, 0, &data)?;
+                
+                let handle = ResourceHandle {
+                    id,
+                    size: data.len() as u64,
+                    r#type: 0,
+                    content_hash: self.resources.compute_hash(id).unwrap_or_default(),
+                };
+                Ok(FsReadResponse { handle: Some(handle) }.encode_to_vec())
             }
             "fs_write" => {
                 let req = FsWriteRequest::decode(&payload[..])?;
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
+                let handle = req.handle.ok_or_else(|| anyhow::anyhow!("Missing handle"))?;
+                
+                let data = match self.resources.get_resource(handle.id) {
+                    Some(Resource::Buffer(_buffer)) => {
+                        // Для записи в файл нам нужно вычитать данные из GPU буфера
+                        self.resources.read_resource(handle.id, 0, handle.size)?
+                    },
+                    _ => return Err(anyhow::anyhow!("Resource is not a buffer")),
+                };
+
                 if let Some(parent) = Path::new(&req.path).parent() { fs::create_dir_all(parent)?; }
-                fs::write(&req.path, &req.data)?;
+                fs::write(&req.path, &data)?;
                 Ok(Vec::new())
             }
             "fs_download" => {
@@ -97,9 +137,8 @@ impl NativeService for SystemService {
                     let mut downloaded: u64 = 0;
                     let mut stream = res.bytes_stream();
                     
-                    match fs::File::create(&req.path) {
-                        Ok(file) => {
-                            let mut async_file = tokio::fs::File::from_std(file);
+                    match tokio::fs::File::create(&req.path).await {
+                        Ok(mut async_file) => {
                             while let Some(chunk_res) = stream.next().await {
                                 match chunk_res {
                                     Ok(chunk) => {
@@ -170,7 +209,6 @@ impl NativeService for SystemService {
                         error: task.error.clone() 
                     }.encode_to_vec();
                     
-                    // Если задача завершена, удаляем её после того, как отдали статус в последний раз
                     if task.completed {
                         tasks.remove(&req.task_id);
                     }

@@ -63,16 +63,22 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 }
 
                 extism_manifest.config.insert("config".to_string(), service_config);
+                extism_manifest.allowed_hosts = Some(vec!["*".to_string()]);
+                
+                // Предотвращаем падение на локали в WASM
+                extism_manifest.config.insert("LANG".to_string(), "en_US.UTF-8".to_string());
 
                 // Загружаем плагин без лишнего вывода в консоль
                 let mut plugin = Plugin::new(&extism_manifest, functions.iter().cloned(), true)?;
                 
                 // Автоматически вызываем init при загрузке
                 if plugin.function_exists("init") {
+                    log::info!("Calling init for plugin '{}'...", name);
                     if let Err(e) = plugin.call::<(), ()>("init", ()) {
                         log::error!("Failed to initialize plugin '{}': {}", name, e);
                         continue;
                     }
+                    log::info!("Plugin '{}' initialized successfully.", name);
                 }
 
                 dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(AsyncMutex::new(plugin))));

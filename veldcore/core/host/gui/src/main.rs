@@ -13,6 +13,7 @@ use winit::{
 use tokio::sync::mpsc;
 use std::sync::Arc;
 use extism::{Function, UserData, Val, ValType};
+use extism::convert::MemoryHandle;
 use veldmap_host_core::services::{RpcRequest, RpcResponse};
 use prost::Message;
 
@@ -23,7 +24,7 @@ mod app_service;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "error,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info");
+        std::env::set_var("RUST_LOG", "debug,veldmap_host=debug,veldmap_host_gui=debug,veldmap_host_core=debug");
     }
     env_logger::init();
 
@@ -49,13 +50,24 @@ async fn main() -> anyhow::Result<()> {
     let is_visible = Arc::new(AtomicBool::new(true));
     let ui_busy = Arc::new(AtomicBool::new(false));
 
-    // ... (WGPU initialization code) ...
+    let flags = wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+    
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
+        flags,
         ..Default::default()
     });
+    
     let surface = instance.create_surface(window.clone())?;
-    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { compatible_surface: Some(&surface), ..Default::default() }).await.ok_or_else(|| anyhow::anyhow!("Compatible GPU adapter not found."))?;
+    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { 
+        compatible_surface: Some(&surface), 
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default() 
+    }).await.ok_or_else(|| anyhow::anyhow!("Compatible GPU adapter not found."))?;
+    
+    let info = adapter.get_info();
+    log::info!("Using GPU adapter: {} ({:?}, driver: {}, backend: {:?})", info.name, info.device_type, info.driver, info.backend);
+
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats[0];
@@ -79,7 +91,6 @@ async fn main() -> anyhow::Result<()> {
         source: wgpu::ShaderSource::Wgsl(include_str!("blit.wgsl").into()),
     });
 
-    // ... (Pipeline initialization) ...
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("Blit Bind Group Layout"),
         entries: &[
@@ -98,7 +109,11 @@ async fn main() -> anyhow::Result<()> {
     });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor { address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
 
-    let mut app_texture: Option<wgpu::Texture> = None;
+    let device_arc = Arc::new(device);
+    let queue_arc = Arc::new(queue);
+    let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(device_arc.clone(), queue_arc.clone()));
+
+    let mut app_texture_id: Option<u64> = None;
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut last_size = (100u32, 100u32);
     let mut cursor_pos = (0.0f32, 0.0f32);
@@ -108,8 +123,8 @@ async fn main() -> anyhow::Result<()> {
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
-    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new())));
-    dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone()))));
+    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone()))));
+    dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone(), resources.clone()))));
 
     let d_call = dispatcher.clone();
     let mut host_call = Function::new("veldmap_host_call", [ValType::I64], [ValType::I64], UserData::new(()),
@@ -120,34 +135,16 @@ async fn main() -> anyhow::Result<()> {
             let req_buf: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
             let request = RpcRequest::decode(&req_buf[..])?;
             
-            // Выполняем вызов сервиса. 
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(d_call.call(&request.service, &request.method, request.payload))
             });
 
             let (payload, error) = match result { 
-                Ok(p) => {
-                    if p.len() > 1024 * 1024 {
-                        log::info!("Host service {}::{} returned large payload: {} bytes", request.service, request.method, p.len());
-                    }
-                    (p, String::new())
-                }, 
-                Err(e) => {
-                    log::warn!("Host service error ({}::{}): {}", request.service, request.method, e);
-                    (Vec::new(), e.to_string())
-                }
+                Ok(p) => (p, String::new()), 
+                Err(e) => (Vec::new(), e.to_string())
             };
 
-            let res_buf = RpcResponse { 
-                payload, 
-                error, 
-                sync: Some(veldmap_host_core::services::SyncMetadata::default()) 
-            }.encode_to_vec();
-            
-            if res_buf.len() > 1024 * 1024 {
-                log::info!("Sending RpcResponse to WASM: {} bytes", res_buf.len());
-            }
-
+            let res_buf = RpcResponse { payload, error, sync: None }.encode_to_vec();
             let res_mem = plugin.memory_new(&res_buf)?;
             outputs[0] = Val::I64(res_mem.offset() as i64);
             Ok(())
@@ -155,7 +152,54 @@ async fn main() -> anyhow::Result<()> {
     );
     host_call.set_namespace("env");
 
-    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call], &config_dir).await?;
+    let res_gpu_w = resources.clone();
+    let mut gpu_write = Function::new("veld_gpu_write_resource", [ValType::I64, ValType::I64, ValType::I64, ValType::I64], [], UserData::new(()),
+        move |plugin, inputs, _outputs, _| {
+            let res_id = inputs[0].i64().unwrap() as u64;
+            let offset = inputs[1].i64().unwrap() as u64;
+            let wasm_ptr = inputs[2].i64().unwrap() as u64;
+            let size = inputs[3].i64().unwrap() as u64;
+
+            log::debug!("Host: gpu_write for res {} (offset {}, size {})", res_id, offset, size);
+            if wasm_ptr == 0 { return Err(extism::Error::msg("Null WASM pointer in gpu_write")); }
+            
+            // Используем прямой доступ к байтам через MemoryHandle
+            let handle = unsafe { MemoryHandle::new(wasm_ptr, size) };
+            
+            // Пытаемся получить доступ к памяти максимально безопасно
+            let data = plugin.memory_bytes(handle).map_err(|e| extism::Error::msg(format!("Memory access failed: {}", e)))?;
+            
+            res_gpu_w.write_resource(res_id, offset, data).map_err(|e| extism::Error::msg(format!("GPU Write Error: {}", e)))?;
+            Ok(())
+        }
+    );
+    gpu_write.set_namespace("env");
+
+    let res_gpu_r = resources.clone();
+    let mut gpu_read = Function::new("veld_gpu_read_resource", [ValType::I64, ValType::I64, ValType::I64, ValType::I64], [], UserData::new(()),
+        move |plugin, inputs, _outputs, _| {
+            let res_id = inputs[0].i64().unwrap() as u64;
+            let offset = inputs[1].i64().unwrap() as u64;
+            let wasm_ptr = inputs[2].i64().unwrap() as u64;
+            let size = inputs[3].i64().unwrap() as u64;
+
+            log::debug!("Host: gpu_read for res {} (offset {}, size {})", res_id, offset, size);
+            if wasm_ptr == 0 { return Err(extism::Error::msg("Null WASM pointer in gpu_read")); }
+
+            let data = res_gpu_r.read_resource(res_id, offset, size).map_err(|e| extism::Error::msg(format!("GPU Read Error: {}", e)))?;
+            let handle = unsafe { MemoryHandle::new(wasm_ptr, size) };
+            let wasm_mem = plugin.memory_bytes_mut(handle).map_err(|e| extism::Error::msg(format!("Memory access failed: {}", e)))?;
+            
+            if wasm_mem.len() < data.len() {
+                return Err(extism::Error::msg("WASM memory block too small for read"));
+            }
+            wasm_mem[..data.len()].copy_from_slice(&data);
+            Ok(())
+        }
+    );
+    gpu_read.set_namespace("env");
+
+    plugin_module::load_services_with_functions(dispatcher.clone(), vec![host_call, gpu_write, gpu_read], &config_dir).await?;
 
     let d_clone = dispatcher.clone();
     let is_visible_clone = is_visible.clone();
@@ -184,21 +228,29 @@ async fn main() -> anyhow::Result<()> {
                 let mut last_draw_cmd = None;
                 while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
 
-                if let Some(AppCommand::Draw(data, w, h)) = last_draw_cmd {
+                if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
+                    log::debug!("Processing Draw command for resource {} ({}x{})", id, w, h);
                     let size = window.inner_size();
                     if is_visible.load(Ordering::SeqCst) && size.width > 0 && size.height > 0 && w > 0 && h > 0 {
-                        if (w, h) != last_size || app_texture.is_none() {
-                            let texture = device.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[] });
-                            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bind_group_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }] });
-                            app_texture = Some(texture);
-                            app_bind_group = Some(bind_group);
-                            last_size = (w, h);
+                        if Some(id) != app_texture_id || (w, h) != last_size || app_bind_group.is_none() {
+                            log::info!("Creating new bind group for resource {}", id);
+                            if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id) {
+                                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                                let device = resources.get_device();
+                                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor { 
+                                    label: None, 
+                                    layout: &bind_group_layout, 
+                                    entries: &[
+                                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
+                                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
+                                    ] 
+                                });
+                                app_texture_id = Some(id);
+                                app_bind_group = Some(bind_group);
+                                last_size = (w, h);
+                            }
                         }
-                        if let Some(texture) = &app_texture {
-                            queue.write_texture(wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, &data, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) }, wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
-                            window.request_redraw();
-                        }
+                        window.request_redraw();
                     }
                 }
             }
@@ -209,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
                         match surface.get_current_texture() {
                             Ok(frame) => {
                                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                                let device = resources.get_device();
                                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                                 {
                                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
@@ -228,7 +281,7 @@ async fn main() -> anyhow::Result<()> {
                                     rp.set_bind_group(0, bind_group, &[]);
                                     rp.draw(0..3, 0..1);
                                 }
-                                queue.submit(Some(encoder.finish()));
+                                queue_arc.submit(Some(encoder.finish()));
                                 frame.present();
                             }
                             Err(wgpu::SurfaceError::Outdated) => {
@@ -245,7 +298,7 @@ async fn main() -> anyhow::Result<()> {
                 if size.width > 0 && size.height > 0 {
                     is_visible.store(true, Ordering::SeqCst);
                     config.width = size.width; config.height = size.height;
-                    surface.configure(&device, &config);
+                    surface.configure(&device_arc, &config);
                     window.request_redraw();
                     let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Resize(veldmap_host_core::ui::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
                     let d_clone = dispatcher.clone();
@@ -280,7 +333,6 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
                 
-                // Only send move event if not busy and throttled
                 if !ui_busy.load(Ordering::SeqCst) && last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(50) {
                     let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::CursorMoved(veldmap_host_core::ui::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) };
                     let d_clone = dispatcher.clone();

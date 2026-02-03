@@ -11,26 +11,29 @@ use prost::Message;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info,veldmap_host_cli=info,veldmap_host_core=info");
-    }
-    env_logger::init();
-
-    let mut config_dir = "config".to_string();
-    let args: Vec<String> = std::env::args().collect();
-    for i in 0..args.len() {
-        if args[i] == "--config" && i + 1 < args.len() {
-            config_dir = args[i + 1].clone();
-        }
-    }
-
     log::info!("VeldMap CLI Host starting (config: {})...", config_dir);
+
+    let flags = wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags,
+        ..Default::default()
+    });
+    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { ..Default::default() }).await
+        .ok_or_else(|| anyhow::anyhow!("No WGPU adapter found"))?;
+    
+    let info = adapter.get_info();
+    log::info!("Using headless GPU adapter: {} ({:?}, driver: {})", info.name, info.backend, info.driver);
+
+    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
+    
+    let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(Arc::new(device), Arc::new(queue)));
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
-    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new())));
+    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone()))));
 
     let d_call = dispatcher.clone();
     let mut host_call = Function::new("veldmap_host_call", [ValType::I64], [ValType::I64], UserData::new(()),

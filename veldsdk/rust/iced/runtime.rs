@@ -3,6 +3,7 @@ use crate::graphics::UiBridge;
 use crate::iced::RawIcedRuntime;
 use crate::core::{Command, BoxedFuture};
 use crate::rpc::ui::UiEvent;
+use prost::Message;
 use iced_core::{mouse, keyboard, Size, Theme, Color, Rectangle, Point, Pixels, Font, Event};
 use iced_graphics::Viewport;
 use iced_runtime::user_interface::{self, UserInterface};
@@ -29,6 +30,7 @@ pub struct IcedRuntime<S, M> {
     
     tasks: RefCell<Vec<BoxedFuture<M>>>,
     pixel_buffer: RefCell<Vec<u8>>,
+    texture_handle: RefCell<Option<crate::rpc::services::ResourceHandle>>,
 }
 
 unsafe impl<S, M> Send for IcedRuntime<S, M> {}
@@ -59,6 +61,7 @@ impl<S: 'static, M: Send + 'static> IcedRuntime<S, M> {
             font_data,
             tasks: RefCell::new(Vec::new()),
             pixel_buffer: RefCell::new(Vec::new()),
+            texture_handle: RefCell::new(None),
         }
     }
 }
@@ -223,12 +226,32 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
             }
 
             if should_draw {
-                let mut pixels_borrow = self.pixel_buffer.borrow_mut();
-                if pixels_borrow.len() != (width * height * 4) as usize {
-                    *pixels_borrow = vec![0u8; (width * height * 4) as usize];
+                let buffer_size = (width * height * 4) as usize;
+                let mut pixels = self.pixel_buffer.borrow_mut();
+                if pixels.len() != buffer_size {
+                    *pixels = vec![0u8; buffer_size];
                 }
                 
-                let mut pixmap = tiny_skia::PixmapMut::from_bytes(pixels_borrow.as_mut_slice(), width, height)
+                // Check or create GPU texture
+                let mut texture_borrow = self.texture_handle.borrow_mut();
+                let needs_new_texture = texture_borrow.as_ref().map_or(true, |h| h.size != buffer_size as u64);
+                
+                if needs_new_texture {
+                    use crate::rpc::services::{GpuResourceRequest, CreateTexture, GpuResourceResponse};
+                    let req = GpuResourceRequest {
+                        command: Some(crate::rpc::services::gpu_resource_request::Command::CreateTexture(CreateTexture {
+                            width, height, format: 37, // Rgba8Unorm
+                            usage: 8, // TEXTURE_BINDING
+                        }))
+                    };
+                    if let Ok(res_bytes) = crate::rpc::host::call_service("system", "create_resource", req.encode_to_vec()) {
+                        if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                            *texture_borrow = res.handle;
+                        }
+                    }
+                }
+                
+                let mut pixmap = tiny_skia::PixmapMut::from_bytes(pixels.as_mut_slice(), width, height)
                     .ok_or_else(|| anyhow::anyhow!("Failed to create pixmap"))?;
                 
                 pixmap.fill(tiny_skia::Color::from_rgba8(20, 23, 26, 255)); 
@@ -245,7 +268,11 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
                     );
                 }
                 
-                UiBridge::display_frame(pixels_borrow.clone(), width, height)?;
+                if let Some(handle_gpu) = texture_borrow.clone() {
+                    // Теперь это безопасно и чисто
+                    crate::rpc::host::gpu_write_resource(handle_gpu.id, 0, pixels.as_slice())?;
+                    UiBridge::display_frame(handle_gpu, width, height)?;
+                }
             }
             
             ui_cache = ui.into_cache();
