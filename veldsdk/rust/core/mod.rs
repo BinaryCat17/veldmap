@@ -95,7 +95,24 @@ static LOGGER: HostLogger = HostLogger;
 
 pub fn init_with_level(level: LevelFilter) -> Result<(), SetLoggerError> {
     match log::set_logger(&LOGGER) {
-        Ok(_) => { log::set_max_level(level); Ok(()) }
+        Ok(_) => { 
+            log::set_max_level(level); 
+            
+            // Set up panic hook to log to host
+            std::panic::set_hook(Box::new(|info| {
+                let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".to_string());
+                let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Box<Any>".to_string()
+                };
+                log::error!("WASM PANIC at {}: {}", location, payload);
+            }));
+            
+            Ok(()) 
+        }
         Err(_) => Ok(()),
     }
 }

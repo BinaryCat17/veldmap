@@ -255,14 +255,40 @@ pub fn handle_view(state: &mut LocalState, path: String) -> Command<Message> {
         veldsdk::yield_now().await;
         let data = veldsdk::core::fs_read(&path).map_err(|e| format!("Read error: {}", e))?;
         
+        log::info!("WASM: Loaded image data for {}: {} bytes", path, data.len());
+
         let ext = path.to_lowercase();
-        if ext.ends_with(".jpg") || ext.ends_with(".png") {
-            Ok(Handle::from_bytes(data))
-        } else if ext.ends_with(".tif") || ext.ends_with(".tiff") {
+        if ext.ends_with(".tif") || ext.ends_with(".tiff") {
             let (w, h, rgba) = utils::decode_tiff(&data).map_err(|e| format!("TIFF error: {}", e))?;
             Ok(Handle::from_rgba(w, h, rgba))
-        } else { 
-            Err("Unsupported file format".into()) 
+        } else {
+            // Используем Reader с лимитами или явную проверку формата
+            let format = if ext.ends_with(".png") { image::ImageFormat::Png } 
+                        else if ext.ends_with(".jpg") || ext.ends_with(".jpeg") { image::ImageFormat::Jpeg }
+                        else { 
+                            match image::guess_format(&data) {
+                                Ok(f) => f,
+                                Err(e) => return Err(format!("Unknown image format: {}", e))
+                            }
+                        };
+
+            match image::load_from_memory_with_format(&data, format) {
+                Ok(mut img) => {
+                    log::info!("WASM: Image decoded. Dimensions: {}x{}", img.width(), img.height());
+                    
+                    // Если изображение слишком большое, уменьшаем его для превью
+                    if img.width() > 2048 || img.height() > 2048 {
+                        log::info!("WASM: Image is too large, resizing for preview...");
+                        img = img.thumbnail(2048, 2048);
+                        log::info!("WASM: Resized to {}x{}", img.width(), img.height());
+                    }
+
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    Ok(Handle::from_rgba(w, h, rgba.into_raw()))
+                }
+                Err(e) => Err(format!("Image decode error (format {:?}): {}", format, e))
+            }
         }
     }, Message::PreviewLoaded)
 }

@@ -126,7 +126,12 @@ async fn main() -> anyhow::Result<()> {
             });
 
             let (payload, error) = match result { 
-                Ok(p) => (p, String::new()), 
+                Ok(p) => {
+                    if p.len() > 1024 * 1024 {
+                        log::info!("Host service {}::{} returned large payload: {} bytes", request.service, request.method, p.len());
+                    }
+                    (p, String::new())
+                }, 
                 Err(e) => {
                     log::warn!("Host service error ({}::{}): {}", request.service, request.method, e);
                     (Vec::new(), e.to_string())
@@ -139,6 +144,10 @@ async fn main() -> anyhow::Result<()> {
                 sync: Some(veldmap_host_core::services::SyncMetadata::default()) 
             }.encode_to_vec();
             
+            if res_buf.len() > 1024 * 1024 {
+                log::info!("Sending RpcResponse to WASM: {} bytes", res_buf.len());
+            }
+
             let res_mem = plugin.memory_new(&res_buf)?;
             outputs[0] = Val::I64(res_mem.offset() as i64);
             Ok(())
