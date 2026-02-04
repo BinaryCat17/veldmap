@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
-use extism::Plugin;
+use crate::WasmModule;
 use anyhow::Result;
 use iroh::Endpoint;
 use crate::services::{RpcRequest, RpcResponse};
@@ -24,7 +24,7 @@ impl NativeService for CoreService {
 
 #[derive(Clone)]
 pub enum ServiceLocation {
-    LocalWasm(Arc<AsyncMutex<Plugin>>),
+    LocalWasm(Arc<AsyncMutex<WasmModule>>),
     RemoteIroh(iroh::NodeId),
     Native(Arc<dyn NativeService>),
 }
@@ -59,21 +59,24 @@ impl Dispatcher {
             ServiceLocation::Native(service) => {
                 service.call(method, payload)
             }
-            ServiceLocation::LocalWasm(plugin) => {
+            ServiceLocation::LocalWasm(wasm_module) => {
                 let request = RpcRequest {
                     service: service_name.to_string(),
                     method: method.to_string(),
                     payload,
                     sync: None,
                 };
-                let mut req_buf = Vec::new();
-                request.encode(&mut req_buf)?;
+                let req_buf = request.encode_to_vec();
 
-                let mut plugin = plugin.lock().await;
+                let mut module = wasm_module.lock().await;
                 
-                // Use call_with_host_context to pass the CallContext
-                let ctx = crate::CallContext::new(req_buf.clone());
-                let _ = plugin.call_with_host_context::<&[u8], &[u8], crate::CallContext>("handle_rpc", &req_buf, ctx.clone())?;
+                // Set the call context in the HostState
+                let ctx = crate::CallContext::new(req_buf);
+                module.store.data_mut().call_context = Some(ctx.clone());
+
+                let instance = module.instance;
+                let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
+                let _ = handle_rpc.call_async(&mut module.store, ()).await?;
                 
                 // Extract output from shared context
                 let res_buf = {

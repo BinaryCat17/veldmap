@@ -3,8 +3,11 @@ use std::fs;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use serde::Deserialize;
-use extism::{Manifest, Wasm, Plugin, Function};
+use wasmtime::*;
+use wasmtime_wasi::WasiCtxBuilder;
 use crate::dispatcher::{Dispatcher, ServiceLocation};
+use crate::{HostState, WasmModule, CallContext};
+use crate::resources::ResourceManager;
 
 #[derive(Deserialize)]
 struct ServiceEntry {
@@ -18,12 +21,10 @@ struct ServicesManifest {
     services: HashMap<String, ServiceEntry>,
 }
 
-pub type HostFunctionFactory = dyn Fn(&str, &HashMap<String, serde_json::Value>) -> Vec<Function>;
-
 pub async fn load_services(
-    dispatcher: Arc<Dispatcher>, 
-    config_dir: &str, 
-    factory: Box<HostFunctionFactory>
+    dispatcher: Arc<Dispatcher>,
+    resources: Arc<ResourceManager>,
+    config_dir: &str,
 ) -> anyhow::Result<()> {
     let manifest_path = std::path::Path::new(config_dir).join("services.json");
     if !manifest_path.exists() {
@@ -34,6 +35,10 @@ pub async fn load_services(
     let content = fs::read_to_string(&manifest_path)?;
     let manifest: ServicesManifest = serde_json::from_str(&content)?;
     let project_root = std::path::Path::new(config_dir).parent().unwrap_or(std::path::Path::new("."));
+
+    let mut config = Config::new();
+    config.async_support(true);
+    let engine = Engine::new(&config)?;
 
     for (name, entry) in manifest.services {
         match entry.location.as_str() {
@@ -47,9 +52,7 @@ pub async fn load_services(
                 }
                 
                 let wasm_bytes = fs::read(&wasm_path)?;
-                let mut extism_manifest = Manifest::new([Wasm::data(wasm_bytes)]);
-                extism_manifest = extism_manifest.with_allowed_host("*");
-                extism_manifest.memory.max_pages = Some(32768);
+                let module = Module::from_binary(&engine, &wasm_bytes)?;
                 
                 let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
                 let mut service_config_str = fs::read_to_string(&service_config_path)
@@ -60,31 +63,58 @@ pub async fn load_services(
                     service_config_str = service_config_str.replace(&placeholder, &value);
                 }
 
-                let config_map: HashMap<String, serde_json::Value> = serde_json::from_str(&service_config_str)?;
-                let functions = factory(&name, &config_map);
-
-                extism_manifest.config.insert("config".to_string(), service_config_str);
-                extism_manifest.allowed_hosts = Some(vec!["*".to_string()]);
-                extism_manifest.config.insert("LANG".to_string(), "en_US.UTF-8".to_string());
-
-                let mut plugin = Plugin::new(&extism_manifest, functions, true)?;
+                let mut config_map: HashMap<String, serde_json::Value> = serde_json::from_str(&service_config_str)?;
+                config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
                 
-                if plugin.function_exists("init") {
-                    eprintln!("[PLUGIN_MODULE] Calling init for plugin '{}'...", name);
-                    match plugin.call::<(), i32>("init", ()) {
-                        Ok(0) => eprintln!("[PLUGIN_MODULE] Plugin '{}' initialized successfully.", name),
+                log::info!("[PLUGIN_MODULE] Loading service '{}'", name);
+                
+                let mut linker = Linker::new(&engine);
+                wasmtime_wasi::p1::add_to_linker_async(&mut linker, |s: &mut HostState| &mut s.wasi)?;
+                crate::abi::add_to_linker(&mut linker)?;
+
+                let wasi = WasiCtxBuilder::new()
+                    .inherit_stdout()
+                    .inherit_stderr()
+                    .build_p1();
+
+                let state = HostState {
+                    dispatcher: dispatcher.clone(),
+                    resources: resources.clone(),
+                    plugin_name: name.clone(),
+                    config: config_map,
+                    call_context: None,
+                    wasi,
+                    resource_limiter: StoreLimitsBuilder::new().memory_size(1024 * 1024 * 1024).build(),
+                };
+
+                let mut store = Store::new(&engine, state);
+                let instance = linker.instantiate_async(&mut store, &module).await?;
+
+                // Call init if it exists
+                if let Ok(init_func) = instance.get_typed_func::<(), i32>(&mut store, "init") {
+                    log::info!("[PLUGIN_MODULE] Calling init for plugin '{}'...", name);
+                    
+                    let init_input = service_config_str.as_bytes().to_vec();
+                    let ctx = CallContext::new(init_input);
+                    store.data_mut().call_context = Some(ctx);
+
+                    match init_func.call_async(&mut store, ()).await {
+                        Ok(0) => log::info!("[PLUGIN_MODULE] Plugin '{}' initialized successfully.", name),
                         Ok(code) => {
-                            eprintln!("[PLUGIN_MODULE] Plugin '{}' failed to initialize with code: {}", name, code);
+                            log::error!("[PLUGIN_MODULE] Plugin '{}' failed to initialize with code: {}", name, code);
                             continue;
                         }
                         Err(e) => {
-                            eprintln!("[PLUGIN_MODULE] Trap/Error while calling init for '{}': {}", name, e);
+                            log::error!("[PLUGIN_MODULE] Error while calling init for '{}': {}", name, e);
                             continue;
                         }
                     }
+                    // Reset call context after init
+                    store.data_mut().call_context = None;
                 }
 
-                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(AsyncMutex::new(plugin))));
+                let wasm_module = WasmModule { store, instance };
+                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(AsyncMutex::new(wasm_module))));
             }
             "remote" => {
                 let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
