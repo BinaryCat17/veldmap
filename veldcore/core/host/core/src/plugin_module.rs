@@ -85,7 +85,6 @@ pub async fn load_services(
                     call_context: None,
                     wasi,
                     resource_limiter: StoreLimitsBuilder::new().memory_size(1024 * 1024 * 1024).build(),
-                    last_http_status: std::sync::atomic::AtomicU32::new(0),
                 };
 
                 let mut store = Store::new(&engine, state);

@@ -2,10 +2,9 @@ use wasmtime::*;
 use crate::HostState;
 use crate::services::{RpcRequest, RpcResponse};
 use prost::Message;
-use std::sync::atomic::Ordering;
 
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
-    // 1. veld_host_call (ASYNC) - Ожидает кортеж (ptr, len)
+    // 1. veld_host_call (ASYNC)
     linker.func_wrap_async("env", "veld_host_call", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") {
@@ -52,7 +51,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // 2. veld_gpu_write (SYNC)
+    // 2. veld_gpu_write
     linker.func_wrap("env", "veld_gpu_write", |mut caller: Caller<'_, HostState>, id: u64, offset: u64, ptr: u64, len: u64| {
         let mem = match caller.get_export("memory") {
             Some(Extern::Memory(m)) => m,
@@ -65,7 +64,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // 3. veld_gpu_read (ASYNC) - Ожидает кортеж (id, offset, ptr, len)
+    // 3. veld_gpu_read (ASYNC)
     linker.func_wrap_async("env", "veld_gpu_read", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
         Box::new(async move {
             let resources = caller.data().resources.clone();
@@ -76,26 +75,17 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     Some(Extern::Memory(m)) => m,
                     _ => return Ok(()),
                 };
-                
                 let memory_data = mem.data_mut(&mut caller);
                 if let Some(target) = memory_data.get_mut(ptr as usize..(ptr as usize + len as usize)) {
                     let copy_len = data.len().min(len as usize);
                     target[..copy_len].copy_from_slice(&data[..copy_len]);
-                    
-                    if copy_len >= 4 {
-                        log::info!("[ABI] gpu_read(id={}) success. Head: {:02x?}", id, &target[..4]);
-                    }
-                } else {
-                    log::error!("[ABI] gpu_read(id={}) FAILED: WASM memory access denied at 0x{:x} (len={})", id, ptr, len);
                 }
-            } else if let Err(e) = data_res {
-                log::error!("[ABI] gpu_read(id={}) FAILED: {}", id, e);
             }
             Ok(())
         })
     })?;
 
-    // 4. veld_get_info (ASYNC) - Ожидает кортеж (ptr, len)
+    // 4. veld_get_info (ASYNC)
     linker.func_wrap_async("env", "veld_get_info", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") {
@@ -130,10 +120,10 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // 5. veld_free (SYNC)
+    // 5. veld_free
     linker.func_wrap("env", "veld_free", |_: Caller<'_, HostState>, _ptr: u64, _len: u64| {})?;
 
-    // 6. veld_load_u8 (SYNC)
+    // 6. veld_load_u8 (Keep for generic needs)
     linker.func_wrap("env", "veld_load_u8", |mut caller: Caller<'_, HostState>, ptr: u64| -> u32 {
         let mem = match caller.get_export("memory") {
             Some(Extern::Memory(m)) => m,
@@ -142,21 +132,33 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         mem.data(&caller).get(ptr as usize).cloned().unwrap_or(0) as u32
     })?;
 
-    // 7. veld_input_len (SYNC)
+    // 7. veld_input_len
     linker.func_wrap("env", "veld_input_len", |caller: Caller<'_, HostState>| -> u64 {
         caller.data().call_context.as_ref()
             .map(|ctx| ctx.0.lock().unwrap().input.len() as u64)
             .unwrap_or(0)
     })?;
 
-    // 8. veld_input_load_u8 (SYNC)
-    linker.func_wrap("env", "veld_input_load_u8", |caller: Caller<'_, HostState>, idx: u64| -> u32 {
-        caller.data().call_context.as_ref()
-            .and_then(|ctx| ctx.0.lock().unwrap().input.get(idx as usize).cloned())
-            .unwrap_or(0) as u32
+    // 8. veld_input_copy (NEW - Bulk copy)
+    linker.func_wrap("env", "veld_input_copy", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| {
+        let input_data = if let Some(ctx) = &caller.data().call_context {
+            ctx.0.lock().unwrap().input.clone()
+        } else {
+            return;
+        };
+
+        let mem = match caller.get_export("memory") {
+            Some(Extern::Memory(m)) => m,
+            _ => return,
+        };
+        
+        if let Some(target) = mem.data_mut(&mut caller).get_mut(ptr as usize..(ptr as usize + len as usize)) {
+            let copy_len = input_data.len().min(len as usize);
+            target[..copy_len].copy_from_slice(&input_data[..copy_len]);
+        }
     })?;
 
-    // 9. veld_output_set (SYNC)
+    // 9. veld_output_set
     linker.func_wrap("env", "veld_output_set", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| {
         let mem = match caller.get_export("memory") {
             Some(Extern::Memory(m)) => m,
@@ -171,8 +173,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // 12. veld_http_request (ASYNC) - Ожидает кортеж (req_ptr, req_len, body_ptr, body_len)
-    linker.func_wrap_async("env", "veld_http_request", |mut caller: Caller<'_, HostState>, (req_ptr, req_len, body_ptr, body_len): (u64, u64, u64, u64)| {
+    // 12. veld_http_request (ASYNC) - Now takes status_ptr
+    linker.func_wrap_async("env", "veld_http_request", |mut caller: Caller<'_, HostState>, (req_ptr, req_len, body_ptr, body_len, status_ptr): (u64, u64, u64, u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") {
                 Some(Extern::Memory(m)) => m,
@@ -202,11 +204,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
             let req_data: Req = match serde_json::from_str(&req_json) {
                 Ok(r) => r,
-                Err(e) => {
-                    log::error!("[ABI] HTTP Request JSON parse error: {}", e);
-                    caller.data().last_http_status.store(400, Ordering::SeqCst);
-                    return Ok(0u64);
-                }
+                Err(_) => return Ok(0u64),
             };
 
             let client = reqwest::Client::new();
@@ -222,20 +220,23 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             if let Some(b) = body { builder = builder.body(b); }
 
             let res_result = builder.send().await;
-            let res = match res_result {
-                Ok(r) => r,
+            let (status, body_bytes) = match res_result {
+                Ok(r) => {
+                    let s = r.status().as_u16() as u32;
+                    let b = r.bytes().await.unwrap_or_default().to_vec();
+                    (s, b)
+                }
                 Err(e) => {
-                    log::error!("[ABI] HTTP Execution Error: {}", e);
-                    caller.data().last_http_status.store(500, Ordering::SeqCst);
-                    return Ok(0u64);
+                    log::error!("[ABI] HTTP Error: {}", e);
+                    (500, Vec::new())
                 }
             };
 
-            let status = res.status().as_u16() as u32;
-            caller.data().last_http_status.store(status, Ordering::SeqCst);
-            
-            let body_bytes = res.bytes().await.unwrap_or_default().to_vec();
-            log::info!("[ABI] HTTP Response: status={}, body_len={}", status, body_bytes.len());
+            // Пишем статус напрямую в память WASM
+            let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+            if let Some(status_target) = mem.data_mut(&mut caller).get_mut(status_ptr as usize..(status_ptr as usize + 4)) {
+                status_target.copy_from_slice(&status.to_le_bytes());
+            }
 
             if let Some(Extern::Func(alloc_func)) = caller.get_export("veld_alloc") {
                 if let Ok(typed_alloc) = alloc_func.typed::<u64, u64>(&caller) {
@@ -250,10 +251,6 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             }
             Ok(0u64)
         })
-    })?;
-
-    linker.func_wrap("env", "veld_http_status_get", |caller: Caller<'_, HostState>| -> u32 {
-        caller.data().last_http_status.load(Ordering::SeqCst)
     })?;
 
     Ok(())

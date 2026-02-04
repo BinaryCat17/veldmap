@@ -3,7 +3,7 @@ use crate::rpc::services::{RpcRequest, RpcResponse};
 #[cfg(feature = "pdk")]
 use prost::Message;
 
-// --- VELD SYSTEM ABI (V1) ---
+// --- VELD SYSTEM ABI (V2) ---
 #[cfg(feature = "pdk")]
 #[allow(dead_code)]
 extern "C" {
@@ -11,11 +11,12 @@ extern "C" {
     fn veld_gpu_write(id: u64, offset: u64, ptr: u64, len: u64);
     fn veld_gpu_read(id: u64, offset: u64, ptr: u64, len: u64);
     fn veld_get_info(key_ptr: u64, key_len: u64) -> u64;
-    fn veld_http_request(req_ptr: u64, req_len: u64, body_ptr: u64, body_len: u64) -> u64;
+    fn veld_http_request(req_ptr: u64, req_len: u64, body_ptr: u64, body_len: u64, status_ptr: u64) -> u64;
     fn veld_load_u8(p: u64) -> u8;
     fn veld_input_len() -> u64;
-    fn veld_input_load_u8(i: u64) -> u8;
+    fn veld_input_copy(p: u64, n: u64);
     fn veld_output_set(p: u64, n: u64);
+    fn veld_free(p: u64, n: u64);
 }
 
 #[no_mangle]
@@ -27,7 +28,7 @@ pub extern "C" fn veld_alloc(size: u64) -> u64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn veld_free(ptr: u64, size: u64) {
+pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
     let _ = Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize);
 }
 
@@ -52,9 +53,7 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         let res_buf = std::slice::from_raw_parts(ptr, len);
         let response = RpcResponse::decode(res_buf)?;
         
-        // Мы НЕ вызываем хостовую veld_free, так как память выделена в WASM через veld_alloc.
-        // Мы освобождаем её локально.
-        veld_free(ptr as u64, len as u64);
+        veld_free_wasm(ptr as u64, len as u64);
 
         if !response.error.is_empty() { return Err(anyhow::anyhow!(response.error)); }
         Ok(response.payload)
@@ -90,7 +89,7 @@ pub fn get_config(key: &str) -> Option<String> {
         let buf = std::slice::from_raw_parts(ptr, len);
         let s = String::from_utf8_lossy(buf).into_owned();
         
-        veld_free(ptr as u64, len as u64);
+        veld_free_wasm(ptr as u64, len as u64);
         Some(s)
     }
 }
@@ -98,19 +97,24 @@ pub fn get_config(key: &str) -> Option<String> {
 #[cfg(feature = "pdk")]
 pub fn http_request(json_req: &str, body: Option<&[u8]>) -> anyhow::Result<(u32, Vec<u8>)> {
     unsafe {
+        let mut status: u32 = 0;
         let (b_ptr, b_len) = body.map(|b| (b.as_ptr() as u64, b.len() as u64)).unwrap_or((0, 0));
-        let res_ptr = veld_http_request(json_req.as_ptr() as u64, json_req.len() as u64, b_ptr, b_len);
+        
+        let res_ptr = veld_http_request(
+            json_req.as_ptr() as u64, 
+            json_req.len() as u64, 
+            b_ptr, 
+            b_len, 
+            &mut status as *mut u32 as u64
+        );
         
         if res_ptr == 0 { return Err(anyhow::anyhow!("HTTP failed")); }
-        
-        extern "C" { fn veld_http_status_get() -> i32; }
-        let status = veld_http_status_get() as u32;
         
         let ptr = (res_ptr & 0xFFFFFFFF) as *mut u8;
         let len = (res_ptr >> 32) as usize;
         
         let buf = std::slice::from_raw_parts(ptr, len).to_vec();
-        veld_free(ptr as u64, len as u64);
+        veld_free_wasm(ptr as u64, len as u64);
         
         Ok((status, buf))
     }
@@ -119,8 +123,10 @@ pub fn http_request(json_req: &str, body: Option<&[u8]>) -> anyhow::Result<(u32,
 pub fn load_input() -> Vec<u8> {
     unsafe {
         let len = veld_input_len();
+        if len == 0 { return Vec::new(); }
+        
         let mut buf = vec![0u8; len as usize];
-        for i in 0..len { buf[i as usize] = veld_input_load_u8(i); }
+        veld_input_copy(buf.as_mut_ptr() as u64, len);
         buf
     }
 }
