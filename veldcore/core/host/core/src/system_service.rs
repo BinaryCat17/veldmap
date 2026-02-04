@@ -53,7 +53,7 @@ impl NativeService for SystemService {
                 match req.command {
                     Some(crate::services::gpu_resource_request::Command::CreateTexture(t)) => {
                         handle.id = self.resources.create_texture(t.width, t.height, t.format, t.usage);
-                        handle.size = (t.width * t.height * 4) as u64; // TODO: handle formats
+                        handle.size = (t.width * t.height * 4) as u64; 
                         handle.r#type = 1; // ResourceType::Texture
                     }
                     Some(crate::services::gpu_resource_request::Command::CreateBuffer(b)) => {
@@ -72,6 +72,7 @@ impl NativeService for SystemService {
                 let metadata = fs::metadata(&req.path)?;
                 let size = metadata.len();
                 
+                // Zero-copy чтение напрямую в GPU буфер
                 let id = self.resources.create_buffer_mapped(size, 0, |view| {
                     use std::io::Read;
                     let mut file = fs::File::open(&req.path)?;
@@ -92,13 +93,7 @@ impl NativeService for SystemService {
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
                 let handle = req.handle.ok_or_else(|| anyhow::anyhow!("Missing handle"))?;
                 
-                let data = match self.resources.get_resource(handle.id) {
-                    Some(Resource::Buffer(_buffer)) => {
-                        // Для записи в файл нам нужно вычитать данные из GPU буфера
-                        self.resources.read_resource(handle.id, 0, handle.size)?
-                    },
-                    _ => return Err(anyhow::anyhow!("Resource is not a buffer")),
-                };
+                let data = self.resources.read_resource(handle.id, 0, handle.size)?;
 
                 if let Some(parent) = Path::new(&req.path).parent() { fs::create_dir_all(parent)?; }
                 fs::write(&req.path, &data)?;
@@ -115,7 +110,6 @@ impl NativeService for SystemService {
                 
                 let task_id_inner = task_id.clone();
                 let join_handle = tokio::spawn(async move {
-                    // ... (keep the existing download logic)
                     let client = reqwest::Client::new();
                     let mut builder = client.get(&req.url);
                     for (key, value) in req.headers { builder = builder.header(key, value); }
