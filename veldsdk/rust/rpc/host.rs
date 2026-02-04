@@ -45,35 +45,6 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         let res_ptr = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
         if res_ptr == 0 { return Err(anyhow::anyhow!("Veld System Call failed")); }
 
-        // Мы не знаем длину ответа напрямую от хоста через ABI, 
-        // но мы можем декодировать RpcResponse, если мы знаем где он кончается.
-        // На самом деле, хост должен как-то передать длину.
-        // Традиционно в таких ABI возвращается структура {ptr, len} или длина пишется перед данными.
-        
-        // В текущем ABI (см. abi.rs), хост возвращает res_ptr_u64.
-        // Но как нам узнать длину в WASM?
-        
-        // Вариант 1: Хост пишет длину в первые 8 байт.
-        // Вариант 2: Добавить функцию veld_last_call_len().
-        
-        // Давайте сделаем Вариант 1 в abi.rs (писать длину перед данными) или 
-        // изменим veld_host_call чтобы он возвращал упакованный u64 (32 бита ptr, 32 бита len), 
-        // но это ограничивает память.
-        
-        // Лучше всего: SDK вызывает хост, хост аллоцирует в SDK, SDK знает сколько аллоцировал? 
-        // Нет, хост вызывает veld_alloc(len).
-        
-        // Давайте в abi.rs возвращать длину через отдельную функцию или 
-        // возвращать u64 где верхние 32 бита - длина, нижние - указатель (для <4GB WASM это ок).
-        
-        // Но проще всего: SDK предоставляет функцию veld_set_result_len(len). 
-        // Или хост просто пишет в начало выделенной памяти.
-        
-        // Давайте переделаем abi.rs чтобы он возвращал длину + указатель.
-        // Но подождите, RpcResponse в Protobuf имеет самоописывающуюся длину? Нет.
-        
-        // Я обновлю abi.rs чтобы он возвращал длину в верхних 32 битах.
-        
         let combined = res_ptr;
         let ptr = (combined & 0xFFFFFFFF) as *mut u8;
         let len = (combined >> 32) as usize;
@@ -81,7 +52,8 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         let res_buf = std::slice::from_raw_parts(ptr, len);
         let response = RpcResponse::decode(res_buf)?;
         
-        // Освобождаем память
+        // Мы НЕ вызываем хостовую veld_free, так как память выделена в WASM через veld_alloc.
+        // Мы освобождаем её локально.
         veld_free(ptr as u64, len as u64);
 
         if !response.error.is_empty() { return Err(anyhow::anyhow!(response.error)); }

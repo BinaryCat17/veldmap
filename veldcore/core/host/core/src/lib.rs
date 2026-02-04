@@ -39,6 +39,7 @@ pub struct HostState {
     pub call_context: Option<CallContext>,
     pub wasi: wasmtime_wasi::p1::WasiP1Ctx,
     pub resource_limiter: wasmtime::StoreLimits,
+    pub last_http_status: std::sync::atomic::AtomicU32,
 }
 
 pub struct WasmModule {
