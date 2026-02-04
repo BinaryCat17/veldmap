@@ -1,8 +1,8 @@
 use crate::rpc::host::call_service;
 use crate::rpc::services::{
     LogRequest, LogLevel, FsReadRequest, FsReadResponse, FsWriteRequest, 
-    FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest,
-    TaskResponse, TaskStatusRequest, TaskStatusResponse, TaskCancelRequest
+    FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest, FsDownloadResponse,
+    TaskStatusRequest, TaskStatusResponse, TaskCancelRequest
 };
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use prost::Message;
@@ -155,8 +155,9 @@ pub fn fs_write(path: impl Into<String>, data: Vec<u8>) -> anyhow::Result<()> {
 pub fn fs_download(url: impl Into<String>, path: impl Into<String>, headers: std::collections::HashMap<String, String>) -> anyhow::Result<String> {
     let req = FsDownloadRequest { url: url.into(), path: path.into(), headers };
     let res_buf = call_service("system", "fs_download", req.encode_to_vec())?;
-    let res = TaskResponse::decode(&res_buf[..])?;
-    Ok(res.task_id)
+    let res = FsDownloadResponse::decode(&res_buf[..])?;
+    let task = res.task.ok_or_else(|| anyhow::anyhow!("No task in download response"))?;
+    Ok(task.task_id)
 }
 
 pub fn task_status(task_id: impl Into<String>) -> anyhow::Result<TaskStatusResponse> {

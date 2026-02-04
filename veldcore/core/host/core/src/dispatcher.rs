@@ -70,12 +70,25 @@ impl Dispatcher {
                 request.encode(&mut req_buf)?;
 
                 let mut plugin = plugin.lock().await;
-                // eprintln!("[DISPATCHER] Calling handle_rpc in WASM plugin {} (method: {}, payload: {} bytes)", service_name, method, req_buf.len());
-                let res_buf = plugin.call::<&[u8], &[u8]>("handle_rpc", &req_buf)?;
                 
-                let response = RpcResponse::decode(res_buf)?;
+                // Use call_with_host_context to pass the CallContext
+                let ctx = crate::CallContext::new(req_buf.clone());
+                let _ = plugin.call_with_host_context::<&[u8], &[u8], crate::CallContext>("handle_rpc", &req_buf, ctx.clone())?;
+                
+                // Extract output from shared context
+                let res_buf = {
+                    let inner = ctx.0.lock().unwrap();
+                    inner.output.clone()
+                };
+                
+                let response = match RpcResponse::decode(&res_buf[..]) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log::error!("[DISPATCHER] Failed to decode RpcResponse from WASM: {}. Raw size: {} bytes", e, res_buf.len());
+                        return Err(anyhow::anyhow!("Decode error: {}", e));
+                    }
+                };
                 if !response.error.is_empty() {
-                    // eprintln!("[DISPATCHER] Plugin returned error: {}", response.error);
                     return Err(anyhow::anyhow!(response.error));
                 }
                 Ok(response.payload)

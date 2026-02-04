@@ -68,13 +68,20 @@ impl NativeService for SystemService {
             "fs_read" => {
                 let req = FsReadRequest::decode(&payload[..])?;
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
-                let data = fs::read(&req.path)?;
-                let id = self.resources.create_buffer(data.len() as u64, 0);
-                self.resources.write_resource(id, 0, &data)?;
+                
+                let metadata = fs::metadata(&req.path)?;
+                let size = metadata.len();
+                
+                let id = self.resources.create_buffer_mapped(size, 0, |view| {
+                    use std::io::Read;
+                    let mut file = fs::File::open(&req.path)?;
+                    file.read_exact(view)?;
+                    Ok(())
+                })?;
                 
                 let handle = ResourceHandle {
                     id,
-                    size: data.len() as u64,
+                    size,
                     r#type: 0,
                     content_hash: self.resources.compute_hash(id).unwrap_or_default(),
                 };
@@ -102,12 +109,13 @@ impl NativeService for SystemService {
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
 
                 let task_id = uuid::Uuid::new_v4().to_string();
-                let tasks_clone = self.tasks.clone();
                 
+                let tasks_clone = self.tasks.clone();
                 if let Some(parent) = Path::new(&req.path).parent() { fs::create_dir_all(parent)?; }
                 
                 let task_id_inner = task_id.clone();
                 let join_handle = tokio::spawn(async move {
+                    // ... (keep the existing download logic)
                     let client = reqwest::Client::new();
                     let mut builder = client.get(&req.url);
                     for (key, value) in req.headers { builder = builder.header(key, value); }
@@ -197,7 +205,10 @@ impl NativeService for SystemService {
                     });
                 }
 
-                Ok(TaskResponse { task_id }.encode_to_vec())
+                use crate::services::FsDownloadResponse;
+                Ok(FsDownloadResponse { 
+                    task: Some(TaskResponse { task_id }) 
+                }.encode_to_vec())
             }
             "task_status" => {
                 let req = TaskStatusRequest::decode(&payload[..])?;

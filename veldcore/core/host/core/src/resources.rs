@@ -50,15 +50,21 @@ impl ResourceManager {
         id
     }
 
-    pub fn create_texture(&self, width: u32, height: u32, format: u32, usage: u32) -> u64 {
+    pub fn create_texture(&self, width: u32, height: u32, format_id: u32, usage: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let format = match format_id {
+            1 => wgpu::TextureFormat::R32Float,
+            2 => wgpu::TextureFormat::Rgba16Float,
+            3 => wgpu::TextureFormat::Rgba32Float,
+            _ => wgpu::TextureFormat::Rgba8Unorm,
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("Texture-{}", id)),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm, // TODO: map from 'format' arg
+            format,
             usage: wgpu::TextureUsages::from_bits_truncate(usage) 
                    | wgpu::TextureUsages::TEXTURE_BINDING 
                    | wgpu::TextureUsages::COPY_DST 
@@ -69,9 +75,41 @@ impl ResourceManager {
             texture: Arc::new(texture),
             width,
             height,
-            format,
+            format: format_id,
         });
         id
+    }
+
+    pub fn create_buffer_mapped<F>(&self, size: u64, usage: u32, fill_cb: F) -> anyhow::Result<u64> 
+    where F: FnOnce(&mut [u8]) -> anyhow::Result<()> 
+    {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("Buffer-{}", id)),
+            size,
+            usage: wgpu::BufferUsages::from_bits_truncate(usage) 
+                   | wgpu::BufferUsages::COPY_DST 
+                   | wgpu::BufferUsages::COPY_SRC 
+                   | wgpu::BufferUsages::MAP_READ 
+                   | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+        
+        {
+            let mut view = buffer.slice(..).get_mapped_range_mut();
+            fill_cb(&mut view)?;
+        }
+        buffer.unmap();
+
+        self.resources.insert(id, Resource::Buffer(Arc::new(buffer)));
+        Ok(id)
+    }
+
+    pub fn create_buffer_with_data(&self, data: &[u8], usage: u32) -> u64 {
+        self.create_buffer_mapped(data.len() as u64, usage, |view| {
+            view.copy_from_slice(data);
+            Ok(())
+        }).unwrap()
     }
 
     pub fn get_resource(&self, id: u64) -> Option<Resource> {

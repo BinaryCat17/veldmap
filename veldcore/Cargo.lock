@@ -6549,6 +6549,7 @@ dependencies = [
  "iroh",
  "log",
  "prost 0.13.5",
+ "serde_json",
  "tokio",
  "veldmap-host-core",
  "wgpu",

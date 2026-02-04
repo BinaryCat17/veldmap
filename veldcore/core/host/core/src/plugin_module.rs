@@ -18,11 +18,13 @@ struct ServicesManifest {
     services: HashMap<String, ServiceEntry>,
 }
 
-pub async fn load_services(dispatcher: Arc<Dispatcher>, config_dir: &str) -> anyhow::Result<()> {
-    load_services_with_functions(dispatcher, vec![], config_dir).await
-}
+pub type HostFunctionFactory = dyn Fn(&str, &HashMap<String, serde_json::Value>) -> Vec<Function>;
 
-pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions: Vec<Function>, config_dir: &str) -> anyhow::Result<()> {
+pub async fn load_services(
+    dispatcher: Arc<Dispatcher>, 
+    config_dir: &str, 
+    factory: Box<HostFunctionFactory>
+) -> anyhow::Result<()> {
     let manifest_path = std::path::Path::new(config_dir).join("services.json");
     if !manifest_path.exists() {
         log::warn!("Manifest not found at {:?}", manifest_path);
@@ -31,8 +33,6 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
 
     let content = fs::read_to_string(&manifest_path)?;
     let manifest: ServicesManifest = serde_json::from_str(&content)?;
-
-    // Корень проекта — это папка, в которой лежит папка config
     let project_root = std::path::Path::new(config_dir).parent().unwrap_or(std::path::Path::new("."));
 
     for (name, entry) in manifest.services {
@@ -49,36 +49,39 @@ pub async fn load_services_with_functions(dispatcher: Arc<Dispatcher>, functions
                 let wasm_bytes = fs::read(&wasm_path)?;
                 let mut extism_manifest = Manifest::new([Wasm::data(wasm_bytes)]);
                 extism_manifest = extism_manifest.with_allowed_host("*");
-                
-                // Увеличиваем лимиты памяти (32768 страниц = 2ГБ)
                 extism_manifest.memory.max_pages = Some(32768);
                 
                 let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
-                let mut service_config = fs::read_to_string(&service_config_path)
+                let mut service_config_str = fs::read_to_string(&service_config_path)
                     .map_err(|e| anyhow::anyhow!("Configuration file not found for service '{}' at {:?}: {}", name, service_config_path, e))?;
                 
                 for (key, value) in std::env::vars() {
                     let placeholder = format!("${{{}}}", key);
-                    service_config = service_config.replace(&placeholder, &value);
+                    service_config_str = service_config_str.replace(&placeholder, &value);
                 }
 
-                extism_manifest.config.insert("config".to_string(), service_config);
+                let config_map: HashMap<String, serde_json::Value> = serde_json::from_str(&service_config_str)?;
+                let functions = factory(&name, &config_map);
+
+                extism_manifest.config.insert("config".to_string(), service_config_str);
                 extism_manifest.allowed_hosts = Some(vec!["*".to_string()]);
-                
-                // Предотвращаем падение на локали в WASM
                 extism_manifest.config.insert("LANG".to_string(), "en_US.UTF-8".to_string());
 
-                // Загружаем плагин без лишнего вывода в консоль
-                let mut plugin = Plugin::new(&extism_manifest, functions.iter().cloned(), true)?;
+                let mut plugin = Plugin::new(&extism_manifest, functions, true)?;
                 
-                // Автоматически вызываем init при загрузке
                 if plugin.function_exists("init") {
-                    log::info!("Calling init for plugin '{}'...", name);
-                    if let Err(e) = plugin.call::<(), ()>("init", ()) {
-                        log::error!("Failed to initialize plugin '{}': {}", name, e);
-                        continue;
+                    eprintln!("[PLUGIN_MODULE] Calling init for plugin '{}'...", name);
+                    match plugin.call::<(), i32>("init", ()) {
+                        Ok(0) => eprintln!("[PLUGIN_MODULE] Plugin '{}' initialized successfully.", name),
+                        Ok(code) => {
+                            eprintln!("[PLUGIN_MODULE] Plugin '{}' failed to initialize with code: {}", name, code);
+                            continue;
+                        }
+                        Err(e) => {
+                            eprintln!("[PLUGIN_MODULE] Trap/Error while calling init for '{}': {}", name, e);
+                            continue;
+                        }
                     }
-                    log::info!("Plugin '{}' initialized successfully.", name);
                 }
 
                 dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(AsyncMutex::new(plugin))));

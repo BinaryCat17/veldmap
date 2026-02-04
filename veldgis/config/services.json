@@ -1,9 +1,5 @@
 {
   "services": {
-    "core": {
-      "location": "local",
-      "path": "plugins/veldmap_core_wasm.wasm"
-    },
     "data-provider": {
       "location": "local",
       "path": "plugins/veldmap_data_provider.wasm"

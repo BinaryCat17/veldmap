@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-extism = "1.1.0"
+extism = "1.13.0"
 iroh = "0.31"
 iroh-gossip = "0.31"
 tokio = { version = "1.0", features = ["full"] }
