@@ -1,4 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Регистрация фич для подавления ворнингов unexpected_cfgs в зависимых крейтах
     println!("cargo:rustc-check-cfg=cfg(feature, values(\"pdk\", \"wgpu\", \"app\", \"client\"))");
 
     let proto_files = &[

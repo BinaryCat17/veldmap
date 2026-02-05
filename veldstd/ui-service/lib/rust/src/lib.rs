@@ -9,10 +9,9 @@ pub mod proto {
 use veldsdk::prost::Message;
 use serde::Serialize;
 use std::task::{Context, Poll};
-use futures_util::task::noop_waker_ref;
+pub use futures_util::task::noop_waker_ref;
 
-// Генерируем транспорт для UI-сервиса в модуле raw. 
-// Теперь он сам делает декодирование ответов.
+// Генерируем транспорт для UI-сервиса. 
 veldsdk::rpc_proxy! {
     service: "ui-service",
     set_view: proto::SetViewRequest => proto::SetViewResponse,
@@ -50,6 +49,10 @@ impl<M> Column<M> {
         self.widget.spacing = s;
         self
     }
+    pub fn align_items(mut self, align: Alignment) -> Self {
+        self.widget.align_items = align as i32;
+        self
+    }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
         self
@@ -85,6 +88,10 @@ impl<M> Row<M> {
     }
     pub fn spacing(mut self, s: f32) -> Self {
         self.widget.spacing = s;
+        self
+    }
+    pub fn align_items(mut self, align: Alignment) -> Self {
+        self.widget.align_items = align as i32;
         self
     }
 }
@@ -166,6 +173,10 @@ impl<M> From<Button<M>> for Element<M> {
     fn from(b: Button<M>) -> Self {
         proto::Widget { r#type: Some(proto::widget::Type::Button(b.widget)) }.into()
     }
+}
+
+pub fn button<M>(content: impl Into<Element<M>>) -> Button<M> {
+    Button::new(content)
 }
 
 pub struct Container<M> {

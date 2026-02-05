@@ -18,43 +18,28 @@ pub mod client;
 #[cfg(feature = "pdk")]
 pub static MODULE_STATE: once_cell::sync::OnceCell<anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>> = once_cell::sync::OnceCell::new();
 
-/// Трейт для обобщенного декодирования RPC ответов.
-pub trait RpcDecode: Sized {
-    fn decode_rpc(bytes: &[u8]) -> anyhow::Result<Self>;
+/// Трейт-маркер для типизированного RPC ответа.
+pub trait RpcResponseDecoder {
+    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self> where Self: Sized;
 }
 
-// Базовая реализация для пустого ответа
-impl RpcDecode for () {
-    fn decode_rpc(_bytes: &[u8]) -> anyhow::Result<Self> { Ok(()) }
+// Реализация для всех сообщений
+impl<T: prost::Message + Default> RpcResponseDecoder for T {
+    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self> {
+        Ok(T::decode(bytes)?)
+    }
 }
 
-/// Внутренний макрос для реализации RpcDecode.
-#[macro_export]
-macro_rules! impl_rpc_decode_internal {
-    (()) => {
-        // Для () ничего не делаем, уже есть базовая реализация
-    };
-    ($t:ty) => {
-        impl $crate::rpc::RpcDecode for $t {
-            fn decode_rpc(bytes: &[u8]) -> $crate::anyhow::Result<Self> {
-                use $crate::prost::Message;
-                Ok(<$t>::decode(bytes)?)
-            }
-        }
-    };
-}
+// А теперь хитрый ход: мы НЕ реализуем RpcResponseDecoder для ().
+// Вместо этого мы добавим в макрос rpc_proxy ветку, которая проверяет тип.
 
 /// Макрос для генерации клиентских прокси-функций для RPC сервиса.
 #[macro_export]
 macro_rules! rpc_proxy {
     (
         service: $service:expr,
-        $( $method:ident : $req:ty => $res:tt ),* $(,)?
+        $( $method:ident : $req:ty => $res:ty ),* $(,)?
     ) => {
-        $(
-            $crate::impl_rpc_decode_internal!($res);
-        )*
-
         pub mod raw {
             use super::*;
             $(
@@ -62,7 +47,9 @@ macro_rules! rpc_proxy {
                     use $crate::prost::Message;
                     let payload = req.encode_to_vec();
                     let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
-                    $crate::rpc::RpcDecode::decode_rpc(&res_bytes[..])
+                    
+                    // Используем макрос-декодер для разрешения типа на этапе компиляции
+                    $crate::decode_rpc_final!($res, res_bytes)
                 }
 
                 #[cfg(feature = "pdk")]
@@ -78,6 +65,15 @@ macro_rules! rpc_proxy {
                 }
             )*
         }
+    };
+}
+
+/// Внутренний макрос для декодирования, который умеет в ().
+#[macro_export]
+macro_rules! decode_rpc_final {
+    ((), $bytes:expr) => { Ok(()) };
+    ($t:ty, $bytes:expr) => {
+        <$t as $crate::rpc::RpcResponseDecoder>::decode_from(&$bytes[..])
     };
 }
 
