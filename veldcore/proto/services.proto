@@ -80,40 +80,57 @@ message FsDownloadResponse {
   TaskResponse task = 1;
 }
 
+// IMAGE API
+
+message ImageInfoRequest {
+  string path = 1;
+}
+
+message ImageInfoResponse {
+  uint32 width = 1;
+  uint32 height = 2;
+  uint32 channels = 3;
+  string error = 4;
+}
+
+message ImageLoadRequest {
+  string path = 1;
+  uint32 target_width = 2;  // 0 means original
+  uint32 target_height = 3; // 0 means original
+  bool preserve_aspect = 4;
+}
+
+message ImageLoadResponse {
+  TaskResponse task = 1;
+}
+
+// DYNAMIC RESOURCE DISCOVERY
+
+message GetResourceRequest {
+  string name = 1;
+}
+
+message GetResourceResponse {
+  ResourceHandle handle = 1;
+  string error = 2;
+}
+
+import "wgpu.proto";
+
 // GPU / RESOURCE SERVICE
 
 message GpuResourceRequest {
   oneof command {
-    CreateBuffer create_buffer = 1;
-    CreateTexture create_texture = 2;
-    MapResource map = 3;
-    UnmapResource unmap = 4;
-    DestroyResource destroy = 5;
+    veldmap.wgpu.CreateBuffer create_buffer = 1;
+    veldmap.wgpu.CreateTexture create_texture = 2;
+    veldmap.wgpu.CreateSampler create_sampler = 3;
+    veldmap.wgpu.CreateBindGroup create_bind_group = 4;
+    veldmap.wgpu.CreateRenderPipeline create_pipeline = 5;
+    uint64 destroy_resource = 6;
+    uint64 map_resource = 7;
+    uint64 unmap_resource = 8;
+    veldmap.wgpu.CreateShaderModule create_shader = 9;
   }
-}
-
-message CreateBuffer {
-  uint64 size = 1;
-  uint32 usage = 2;
-}
-
-message CreateTexture {
-  uint32 width = 1;
-  uint32 height = 2;
-  uint32 format = 3;
-  uint32 usage = 4;
-}
-
-message MapResource {
-  uint64 id = 1;
-}
-
-message UnmapResource {
-  uint64 id = 1;
-}
-
-message DestroyResource {
-  uint64 id = 1;
 }
 
 message GpuResourceResponse {
@@ -135,6 +152,7 @@ message TaskStatusResponse {
   float progress = 1;
   bool completed = 2;
   string error = 3;
+  ResourceHandle result_handle = 4;
 }
 
 message TaskCancelRequest {

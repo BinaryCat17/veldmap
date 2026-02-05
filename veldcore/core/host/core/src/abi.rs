@@ -75,11 +75,20 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     Some(Extern::Memory(m)) => m,
                     _ => return Ok(()),
                 };
+                
                 let memory_data = mem.data_mut(&mut caller);
                 if let Some(target) = memory_data.get_mut(ptr as usize..(ptr as usize + len as usize)) {
                     let copy_len = data.len().min(len as usize);
                     target[..copy_len].copy_from_slice(&data[..copy_len]);
+                    
+                    if copy_len >= 4 {
+                        log::debug!("[ABI] gpu_read(id={}) read {} bytes. Head: {:02x?}", id, copy_len, &target[..4]);
+                    }
+                } else {
+                    log::error!("[ABI] gpu_read(id={}) FAILED: WASM memory access denied at 0x{:x} (len={})", id, ptr, len);
                 }
+            } else if let Err(e) = data_res {
+                log::error!("[ABI] gpu_read(id={}) FAILED: {}", id, e);
             }
             Ok(())
         })
@@ -123,7 +132,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // 5. veld_free
     linker.func_wrap("env", "veld_free", |_: Caller<'_, HostState>, _ptr: u64, _len: u64| {})?;
 
-    // 6. veld_load_u8 (Keep for generic needs)
+    // 6. veld_load_u8
     linker.func_wrap("env", "veld_load_u8", |mut caller: Caller<'_, HostState>, ptr: u64| -> u32 {
         let mem = match caller.get_export("memory") {
             Some(Extern::Memory(m)) => m,
@@ -139,7 +148,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             .unwrap_or(0)
     })?;
 
-    // 8. veld_input_copy (NEW - Bulk copy)
+    // 8. veld_input_copy
     linker.func_wrap("env", "veld_input_copy", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| {
         let input_data = if let Some(ctx) = &caller.data().call_context {
             ctx.0.lock().unwrap().input.clone()
@@ -173,7 +182,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // 12. veld_http_request (ASYNC) - Now takes status_ptr
+    // 12. veld_http_request (ASYNC)
     linker.func_wrap_async("env", "veld_http_request", |mut caller: Caller<'_, HostState>, (req_ptr, req_len, body_ptr, body_len, status_ptr): (u64, u64, u64, u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") {
@@ -207,6 +216,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 Err(_) => return Ok(0u64),
             };
 
+            log::info!("[ABI] HTTP {} {}", req_data.method.as_deref().unwrap_or("GET"), req_data.url);
+
             let client = reqwest::Client::new();
             let method = match req_data.method.as_deref().unwrap_or("GET") {
                 "POST" => reqwest::Method::POST,
@@ -232,7 +243,6 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 }
             };
 
-            // Пишем статус напрямую в память WASM
             let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
             if let Some(status_target) = mem.data_mut(&mut caller).get_mut(status_ptr as usize..(status_ptr as usize + 4)) {
                 status_target.copy_from_slice(&status.to_le_bytes());

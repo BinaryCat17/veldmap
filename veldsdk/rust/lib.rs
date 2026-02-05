@@ -18,6 +18,7 @@ pub mod prelude {
     pub use crate::core::*;
     #[cfg(feature = "graphics")]
     pub use crate::graphics::*;
-    #[cfg(feature = "iced")]
-    pub use crate::iced::*;
-}
+        #[cfg(feature = "iced")]
+        pub use crate::iced::runtime::GpuRenderer;
+    }
+    

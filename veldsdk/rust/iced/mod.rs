@@ -16,6 +16,7 @@ pub trait RawIcedRuntime: Send + Sync {
     fn handle_event(&self, event: crate::rpc::ui::UiEvent) -> anyhow::Result<()>;
     fn render(&self) -> anyhow::Result<()>;
     fn tick(&self) -> anyhow::Result<()>;
+    fn set_background_image(&self, handle: Option<crate::rpc::services::ResourceHandle>);
 }
 
 #[doc(hidden)]

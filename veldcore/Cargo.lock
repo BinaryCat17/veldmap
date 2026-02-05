@@ -6405,6 +6405,7 @@ dependencies = [
  "dashmap",
  "env_logger",
  "futures-util",
+ "image",
  "iroh",
  "iroh-gossip",
  "log",

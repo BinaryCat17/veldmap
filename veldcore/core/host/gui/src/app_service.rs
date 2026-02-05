@@ -9,6 +9,7 @@ use winit::event_loop::EventLoopProxy;
 
 pub enum AppCommand {
     Draw(u64, u32, u32), // resource_id, width, height
+    Render { width: u32, height: u32, command_buffer: veldmap_host_core::wgpu::CommandBuffer },
 }
 
 pub struct AppService {
@@ -32,6 +33,17 @@ impl NativeService for AppService {
                     Some(veldmap_host_core::ui::ui_display_command::Command::DrawFrame(frame)) => {
                         let handle = frame.handle.ok_or_else(|| anyhow::anyhow!("Missing resource handle"))?;
                         let _ = self.tx.send(AppCommand::Draw(handle.id, frame.width, frame.height));
+                        if self.is_visible.load(Ordering::SeqCst) {
+                            let _ = self.proxy.send_event(());
+                        }
+                        Ok(Vec::new())
+                    }
+                    Some(veldmap_host_core::ui::ui_display_command::Command::RenderCommands(render)) => {
+                        let _ = self.tx.send(AppCommand::Render { 
+                            width: render.width, 
+                            height: render.height, 
+                            command_buffer: render.command_buffer.unwrap_or_default()
+                        });
                         if self.is_visible.load(Ordering::SeqCst) {
                             let _ = self.proxy.send_event(());
                         }

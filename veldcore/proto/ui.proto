@@ -44,13 +44,21 @@ message ResizeEvent {
 message InitEvent {}
 
 import "services.proto";
+import "wgpu.proto";
 
 // Описание того, что Хост должен сделать с окном
 message UIDisplayCommand {
     oneof command {
         DrawFrame draw_frame = 1;
         UpdateWidgets update_widgets = 2;
+        RenderCommands render_commands = 3;
     }
+}
+
+message RenderCommands {
+    uint32 width = 1;
+    uint32 height = 2;
+    veldmap.wgpu.CommandBuffer command_buffer = 3;
 }
 
 message DrawFrame {

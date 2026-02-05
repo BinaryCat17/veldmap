@@ -10,7 +10,7 @@ use serde_json;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info,veldmap_host_cli=info,veldmap_host_core=info,wgpu_core=warn,wgpu_hal=warn,naga=warn,iroh=warn");
+        std::env::set_var("RUST_LOG", "info,veldmap_host_cli=info,veldmap_host_core=info,wgpu_core=warn,wgpu_hal=warn,naga=warn,iroh=warn,wasmtime_wasi=warn,cranelift_codegen=warn,tracing=warn");
     }
     env_logger::init();
 
@@ -36,7 +36,11 @@ async fn main() -> anyhow::Result<()> {
     log::info!("Using headless GPU adapter: {} ({:?}, driver: {})", info.name, info.backend, info.driver);
 
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
-    let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(Arc::new(device), Arc::new(queue)));
+    let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(
+        Arc::new(device), 
+        Arc::new(queue),
+        wgpu::TextureFormat::Rgba8Unorm
+    ));
 
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));

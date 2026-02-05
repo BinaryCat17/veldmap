@@ -1,6 +1,6 @@
 use iced_core::{Font, Color, Element, Alignment, Theme};
 use iced_widget::{row, text, container, button};
-use iced_tiny_skia::Renderer;
+use veldsdk::prelude::GpuRenderer as Renderer;
 
 pub const EMOJI_FONT_DATA: &[u8] = include_bytes!("../../../assets/NotoColorEmoji.ttf");
 pub const DEJAVU_FONT_DATA: &[u8] = include_bytes!("../../../assets/DejaVuSans.ttf");

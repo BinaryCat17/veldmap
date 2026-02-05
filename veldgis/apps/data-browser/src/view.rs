@@ -2,7 +2,7 @@ use iced_widget::{
     button, column, container, row, text, progress_bar, scrollable, Space
 };
 use iced_core::{Alignment, Element, Length, Color, Theme};
-use iced_tiny_skia::Renderer;
+use veldsdk::prelude::GpuRenderer as Renderer;
 use crate::search;
 use crate::downloaded;
 use crate::preview;
@@ -54,7 +54,14 @@ pub fn view(state: &LocalState) -> Element<'_, Message, Theme, Renderer> {
         ].spacing(8).into()
     } else { column![].into() };
 
-    let main_content: Element<Message, Theme, Renderer> = if let Some(handle) = &state.current_image {
+    let main_content: Element<Message, Theme, Renderer> = if state.current_gpu_image.is_some() {
+        column![
+            button(text("← Close GPU Preview").font(crate::common::APP_FONT)).on_press(Message::ClosePreview).padding(8).style(common::ghost_button_style),
+            text("GPU Texture Preview Ready (Rendered via WGPU Proxy)").font(crate::common::APP_FONT).size(20),
+            // Пока здесь пустое место, так как отрисовка идет через WgpuRecorder напрямую
+            Space::new().width(Length::Fill).height(Length::Fill),
+        ].spacing(20).into()
+    } else if let Some(handle) = &state.current_image {
         preview::view(handle)
     } else if let Some(product_name) = &state.selected_product {
         column![

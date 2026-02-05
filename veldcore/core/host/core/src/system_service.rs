@@ -3,7 +3,9 @@ use crate::resources::{ResourceManager, Resource};
 use crate::services::{
     FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, 
     FsDownloadRequest, LogRequest, TaskResponse, TaskStatusRequest, TaskStatusResponse,
-    TaskCancelRequest, GpuResourceRequest, GpuResourceResponse, ResourceHandle
+    TaskCancelRequest, GpuResourceRequest, GpuResourceResponse, ResourceHandle,
+    ImageInfoRequest, ImageInfoResponse, ImageLoadRequest, ImageLoadResponse,
+    GetResourceRequest, GetResourceResponse
 };
 use prost::Message;
 use std::fs;
@@ -13,12 +15,14 @@ use std::collections::HashMap;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio::task::AbortHandle;
+use image::GenericImageView;
 
 struct TaskState {
     progress: f32,
     completed: bool,
     error: String,
     abort_handle: Option<AbortHandle>,
+    result_handle: Option<ResourceHandle>,
 }
 
 pub struct SystemService {
@@ -47,6 +51,127 @@ impl SystemService {
 impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         match method {
+            "image_info" => {
+                let req = ImageInfoRequest::decode(&payload[..])?;
+                if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
+                
+                match image::image_dimensions(&req.path) {
+                    Ok((w, h)) => {
+                        Ok(ImageInfoResponse { 
+                            width: w, height: h, channels: 4, error: String::new() 
+                        }.encode_to_vec())
+                    }
+                    Err(e) => {
+                        Ok(ImageInfoResponse { 
+                            width: 0, height: 0, channels: 0, error: e.to_string() 
+                        }.encode_to_vec())
+                    }
+                }
+            }
+            "image_load" => {
+                let req = ImageLoadRequest::decode(&payload[..])?;
+                if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
+
+                let task_id = uuid::Uuid::new_v4().to_string();
+                let tasks_clone = self.tasks.clone();
+                let resources = self.resources.clone();
+                let path = req.path.clone();
+                
+                let task_id_inner = task_id.clone();
+                let join_handle = tokio::task::spawn_blocking(move || {
+                    let update_status = |progress: f32, err: String, handle: Option<ResourceHandle>| {
+                        let mut tasks = tasks_clone.lock().unwrap();
+                        if let Some(t) = tasks.get_mut(&task_id_inner) {
+                            t.progress = progress;
+                            if !err.is_empty() {
+                                t.error = err;
+                                t.completed = true;
+                            }
+                            if handle.is_some() {
+                                t.result_handle = handle;
+                                t.completed = true;
+                                t.progress = 1.0;
+                            }
+                        }
+                    };
+
+                    // Load and decode
+                    let img = match image::open(&path) {
+                        Ok(i) => i,
+                        Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                    };
+                    update_status(0.3, String::new(), None);
+
+                    // Resize if needed
+                    let final_img = if req.target_width > 0 || req.target_height > 0 {
+                        let tw = if req.target_width == 0 { img.width() } else { req.target_width };
+                        let th = if req.target_height == 0 { img.height() } else { req.target_height };
+                        
+                        if req.preserve_aspect {
+                            img.thumbnail(tw, th)
+                        } else {
+                            img.thumbnail_exact(tw, th)
+                        }
+                    } else {
+                        img
+                    };
+                    update_status(0.6, String::new(), None);
+
+                    let (w, h) = final_img.dimensions();
+                    let rgba = final_img.to_rgba8();
+                    update_status(0.8, String::new(), None);
+
+                    // Upload to GPU
+                    let tex_id = resources.create_texture(w, h, 0, 8); // 8 = TEXTURE_BINDING
+                    if let Err(e) = resources.write_resource(tex_id, 0, &rgba) {
+                        update_status(0.0, e.to_string(), None);
+                        return;
+                    }
+
+                    let handle = ResourceHandle {
+                        id: tex_id,
+                        size: (w * h * 4) as u64,
+                        r#type: 1, // Texture
+                        content_hash: resources.compute_hash(tex_id).unwrap_or_default(),
+                    };
+                    update_status(1.0, String::new(), Some(handle));
+                });
+
+                {
+                    let mut tasks = self.tasks.lock().unwrap();
+                    tasks.insert(task_id.clone(), TaskState { 
+                        progress: 0.0, 
+                        completed: false, 
+                        error: String::new(),
+                        abort_handle: Some(join_handle.abort_handle()),
+                        result_handle: None,
+                    });
+                }
+
+                Ok(ImageLoadResponse { 
+                    task: Some(TaskResponse { task_id }) 
+                }.encode_to_vec())
+            }
+            "get_resource" => {
+                let req = GetResourceRequest::decode(&payload[..])?;
+                if let Some(id) = self.resources.get_named_resource(&req.name) {
+                    if let Some(res) = self.resources.get_resource(id) {
+                        let mut handle = ResourceHandle { id, ..Default::default() };
+                        match res {
+                            Resource::Buffer(b) => { handle.size = b.size(); handle.r#type = 0; }
+                            Resource::Texture { width, height, .. } => { handle.size = (width * height * 4) as u64; handle.r#type = 1; }
+                            Resource::RenderPipeline(_) => { handle.r#type = 2; }
+                            Resource::BindGroup(_) => { handle.r#type = 3; }
+                            Resource::ShaderModule(_) => { handle.r#type = 4; }
+                        }
+                        Ok(GetResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
+                    } else {
+                        Ok(GetResourceResponse { handle: None, error: "Resource found in registry but not in storage".into() }.encode_to_vec())
+                    }
+                } else {
+                    Ok(GetResourceResponse { handle: None, error: format!("Resource '{}' not found", req.name) }.encode_to_vec())
+                }
+            }
             "create_resource" => {
                 let req = GpuResourceRequest::decode(&payload[..])?;
                 let mut handle = ResourceHandle::default();
@@ -57,9 +182,26 @@ impl NativeService for SystemService {
                         handle.r#type = 1; // ResourceType::Texture
                     }
                     Some(crate::services::gpu_resource_request::Command::CreateBuffer(b)) => {
+                        // Если mapped_at_creation, то создаем буфер с возможностью записи (не реализовано полностью тут, но поле есть)
                         handle.id = self.resources.create_buffer(b.size, b.usage);
                         handle.size = b.size;
                         handle.r#type = 0; // ResourceType::Buffer
+                    }
+                    Some(crate::services::gpu_resource_request::Command::CreateShader(s)) => {
+                        handle.id = self.resources.create_shader(&s.source, Some(&s.label));
+                        handle.r#type = 4; // Shader
+                    }
+                    Some(crate::services::gpu_resource_request::Command::CreatePipeline(p)) => {
+                        handle.id = self.resources.create_pipeline(p.shader_id, Some(&p.label))?;
+                        handle.r#type = 2; // RenderPipeline
+                    }
+                    Some(crate::services::gpu_resource_request::Command::CreateSampler(s)) => {
+                        // В ResourceManager пока нет отдельного метода для семплеров, но мы можем его добавить или вернуть 0
+                        handle.r#type = 5; // Sampler
+                    }
+                    Some(crate::services::gpu_resource_request::Command::CreateBindGroup(bg)) => {
+                        // В ResourceManager пока нет отдельного метода для BindGroup через Proto
+                        handle.r#type = 3; // BindGroup
                     }
                     _ => return Err(anyhow::anyhow!("Unsupported resource command")),
                 }
@@ -196,6 +338,7 @@ impl NativeService for SystemService {
                         completed: false, 
                         error: String::new(),
                         abort_handle: Some(join_handle.abort_handle()),
+                        result_handle: None,
                     });
                 }
 
@@ -211,7 +354,8 @@ impl NativeService for SystemService {
                     let response = TaskStatusResponse { 
                         progress: task.progress, 
                         completed: task.completed, 
-                        error: task.error.clone() 
+                        error: task.error.clone(),
+                        result_handle: task.result_handle.clone(),
                     }.encode_to_vec();
                     
                     if task.completed {

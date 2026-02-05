@@ -3,6 +3,7 @@ use crate::rpc::services::ResourceHandle;
 use crate::rpc::host::call_service;
 use prost::Message;
 
+pub mod wgpu_proxy;
 pub struct UiBridge;
 
 impl UiBridge {

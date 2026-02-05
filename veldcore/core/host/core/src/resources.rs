@@ -11,23 +11,38 @@ pub enum Resource {
         height: u32,
         format: u32,
     },
+    RenderPipeline(Arc<wgpu::RenderPipeline>),
+    BindGroup(Arc<wgpu::BindGroup>),
+    ShaderModule(Arc<wgpu::ShaderModule>),
 }
 
 pub struct ResourceManager {
     resources: DashMap<u64, Resource>,
+    named_resources: DashMap<String, u64>,
     next_id: AtomicU64,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl ResourceManager {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, surface_format: wgpu::TextureFormat) -> Self {
         Self {
             resources: DashMap::new(),
+            named_resources: DashMap::new(),
             next_id: AtomicU64::new(1),
             device,
             queue,
+            surface_format,
         }
+    }
+
+    pub fn register_named_resource(&self, name: &str, id: u64) {
+        self.named_resources.insert(name.to_string(), id);
+    }
+
+    pub fn get_named_resource(&self, name: &str) -> Option<u64> {
+        self.named_resources.get(name).map(|r| *r.value())
     }
 
     pub fn get_device(&self) -> Arc<wgpu::Device> {
@@ -42,12 +57,13 @@ impl ResourceManager {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         
+        // Добавляем COPY_DST всегда, чтобы мы могли писать в буфер из WASM
+        final_usage |= wgpu::BufferUsages::COPY_DST;
+
         if final_usage.intersects(wgpu::BufferUsages::MAP_READ) {
-            final_usage |= wgpu::BufferUsages::COPY_DST;
-        } else if final_usage.is_empty() {
-            final_usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
-        } else {
-            final_usage |= wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC;
+            // Оставляем как есть
+        } else if usage == 0 {
+            final_usage |= wgpu::BufferUsages::MAP_READ;
         }
 
         let aligned_size = Self::align_to(size, 4);
@@ -135,6 +151,124 @@ impl ResourceManager {
         self.resources.get(&id).map(|r| r.value().clone())
     }
 
+    pub fn register_pipeline(&self, id: u64, pipeline: Arc<wgpu::RenderPipeline>) {
+        self.resources.insert(id, Resource::RenderPipeline(pipeline));
+    }
+
+    pub fn register_bind_group(&self, id: u64, bind_group: Arc<wgpu::BindGroup>) {
+        self.resources.insert(id, Resource::BindGroup(bind_group));
+    }
+
+    pub fn create_shader(&self, source: &str, label: Option<&str>) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label,
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        self.resources.insert(id, Resource::ShaderModule(Arc::new(shader)));
+        id
+    }
+
+    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>) -> anyhow::Result<u64> {
+        let shader = match self.resources.get(&shader_id) {
+            Some(r) => match r.value() {
+                Resource::ShaderModule(s) => s.clone(),
+                _ => return Err(anyhow::anyhow!("Resource is not a shader")),
+            },
+            None => return Err(anyhow::anyhow!("Shader not found")),
+        };
+
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        
+        // Создаем стандартный Layout для UI (1 бинд-группа с текстурой и самплером)
+        let bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Proxy Pipeline BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { 
+                    binding: 0, 
+                    visibility: wgpu::ShaderStages::FRAGMENT, 
+                    ty: wgpu::BindingType::Texture { 
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true }, 
+                        view_dimension: wgpu::TextureViewDimension::D2, 
+                        multisampled: false 
+                    }, 
+                    count: None 
+                },
+                wgpu::BindGroupLayoutEntry { 
+                    binding: 1, 
+                    visibility: wgpu::ShaderStages::FRAGMENT, 
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), 
+                    count: None 
+                },
+            ],
+        });
+
+        // Бинд-группа 1: Глобальные Uniforms (Resolution)
+        let uniform_bg_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Proxy Uniform BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Proxy Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout, &uniform_bg_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label,
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: 32, // 2*f32 (pos) + 4*f32 (color) + 2*f32 (uv) = 8 * 4 bytes
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
+                            wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32x4 },
+                            wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
+                        ],
+                    }
+                ],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        self.resources.insert(id, Resource::RenderPipeline(Arc::new(pipeline)));
+        Ok(id)
+    }
+
     pub fn write_resource(&self, id: u64, offset: u64, data: &[u8]) -> anyhow::Result<()> {
         let resource = self.resources.get(&id).ok_or_else(|| anyhow::anyhow!("Resource not found"))?;
         match resource.value() {
@@ -142,7 +276,27 @@ impl ResourceManager {
                 self.queue.write_buffer(buffer, offset, data);
                 self.device.poll(wgpu::Maintain::Poll);
             },
-            Resource::Texture { texture, width, height, .. } => {
+            Resource::Texture { texture, width, height, format } => {
+                let block_size = match *format {
+                    1 | 3 => 4, // R32Float | Rgba32Float (Wait, Rgba32 is 16 bytes!)
+                    2 => 8, // Rgba16Float
+                    9 => 1, // R8Unorm
+                    _ => 4, // Default Rgba8Unorm
+                };
+                // Correct mapping:
+                // 0: Rgba8Unorm (4)
+                // 1: R32Float (4)
+                // 2: Rgba16Float (8)
+                // 3: Rgba32Float (16)
+                // 9: R8Unorm (1)
+                
+                let real_block_size = match *format {
+                    9 => 1,
+                    2 => 8,
+                    3 => 16,
+                    _ => 4,
+                };
+
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
@@ -153,13 +307,14 @@ impl ResourceManager {
                     data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(4 * width),
+                        bytes_per_row: Some(real_block_size * width),
                         rows_per_image: Some(*height),
                     },
                     wgpu::Extent3d { width: *width, height: *height, depth_or_array_layers: 1 }
                 );
                 self.device.poll(wgpu::Maintain::Poll);
             },
+            _ => return Err(anyhow::anyhow!("Writing to this resource type is not supported")),
         }
         Ok(())
     }
@@ -170,7 +325,7 @@ impl ResourceManager {
         let resource = self.resources.get(&id).ok_or_else(|| anyhow::anyhow!("Resource not found"))?;
         let buffer = match resource.value() {
             Resource::Buffer(b) => b.clone(),
-            _ => return Err(anyhow::anyhow!("Reading from textures is not supported yet")),
+            _ => return Err(anyhow::anyhow!("Reading from this resource type is not supported")),
         };
 
         // Пустая субмиссия для флаша всех предыдущих записей

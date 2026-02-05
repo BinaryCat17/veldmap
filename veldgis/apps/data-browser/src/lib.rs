@@ -23,7 +23,9 @@ pub struct LocalState {
     pub search_results: Vec<DataProduct>,
     pub download_progress: Option<f32>,
     pub active_download_task: Option<String>,
+    pub active_image_task: Option<String>,
     pub current_image: Option<Handle>,
+    pub current_gpu_image: Option<veldsdk::rpc::services::ResourceHandle>,
     pub downloaded_state: downloaded::DownloadedState,
     pub token_stack: Vec<String>,
     pub next_token: Option<String>,
@@ -57,6 +59,7 @@ pub enum Message {
     DeleteLocalFile(String),
     ViewFile(String),
     PreviewLoaded(Result<Handle, String>),
+    ImageStatusUpdated,
     ClosePreview,
 }
 
@@ -88,6 +91,7 @@ define_iced_module! {
         DeleteLocalFile(path) => handlers::handle_delete;
         ViewFile(path) => handlers::handle_view;
         PreviewLoaded(res) => handlers::handle_preview_loaded;
+        ImageStatusUpdated => handlers::handle_image_status;
         ClosePreview => handlers::handle_close_preview;
     }
 }

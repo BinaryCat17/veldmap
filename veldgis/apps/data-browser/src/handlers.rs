@@ -1,4 +1,4 @@
-use crate::{LocalState, utils, common, Message};
+use crate::{LocalState, common, Message};
 use crate::common::ViewMode;
 use crate::common::BrowserItem;
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, SearchFilter, DataProduct};
@@ -18,7 +18,9 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, IcedSetting
         search_results: Vec::new(),
         download_progress: None,
         active_download_task: None,
+        active_image_task: None,
         current_image: None,
+        current_gpu_image: None,
         downloaded_state: crate::downloaded::DownloadedState::default(),
         token_stack: Vec::new(),
         next_token: None,
@@ -251,46 +253,78 @@ pub fn handle_delete(state: &mut LocalState, path: String) -> Command<Message> {
 
 pub fn handle_view(state: &mut LocalState, path: String) -> Command<Message> {
     state.status_message = format!("Loading preview for {}...", path);
-    Command::perform(async move {
-        veldsdk::yield_now().await;
-        let data = veldsdk::core::fs_read(&path).map_err(|e| format!("Read error: {}", e))?;
-        
-        log::info!("WASM: Loaded image data for {}: {} bytes", path, data.len());
-
-        let ext = path.to_lowercase();
-        if ext.ends_with(".tif") || ext.ends_with(".tiff") {
-            let (w, h, rgba) = utils::decode_tiff(&data).map_err(|e| format!("TIFF error: {}", e))?;
-            Ok(Handle::from_rgba(w, h, rgba))
-        } else {
-            // Используем Reader с лимитами или явную проверку формата
-            let format = if ext.ends_with(".png") { image::ImageFormat::Png } 
-                        else if ext.ends_with(".jpg") || ext.ends_with(".jpeg") { image::ImageFormat::Jpeg }
-                        else { 
-                            match image::guess_format(&data) {
-                                Ok(f) => f,
-                                Err(e) => return Err(format!("Unknown image format: {}", e))
-                            }
-                        };
-
-            match image::load_from_memory_with_format(&data, format) {
-                Ok(mut img) => {
-                    log::info!("WASM: Image decoded. Dimensions: {}x{}", img.width(), img.height());
-                    
-                    // Если изображение слишком большое, уменьшаем его для превью
-                    if img.width() > 2048 || img.height() > 2048 {
-                        log::info!("WASM: Image is too large, resizing for preview...");
-                        img = img.thumbnail(2048, 2048);
-                        log::info!("WASM: Resized to {}x{}", img.width(), img.height());
-                    }
-
-                    let rgba = img.to_rgba8();
-                    let (w, h) = rgba.dimensions();
-                    Ok(Handle::from_rgba(w, h, rgba.into_raw()))
+    
+    // 1. Get info first
+    match veldsdk::core::image_info(&path) {
+        Ok(info) => {
+            if !info.error.is_empty() {
+                state.error_message = Some(format!("Image info error: {}", info.error));
+                return Command::none();
+            }
+            
+            log::info!("WASM: Image {} is {}x{}", path, info.width, info.height);
+            
+            // 2. Start async load with target size (max 2048)
+            match veldsdk::core::image_load(&path, 2048, 2048, true) {
+                Ok(task_id) => {
+                    state.active_image_task = Some(task_id);
+                    state.download_progress = Some(0.0);
+                    return poll_image_progress();
                 }
-                Err(e) => Err(format!("Image decode error (format {:?}): {}", format, e))
+                Err(e) => {
+                    state.error_message = Some(format!("Image load failed: {}", e));
+                }
             }
         }
-    }, Message::PreviewLoaded)
+        Err(e) => {
+            state.error_message = Some(format!("Failed to get image info: {}", e));
+        }
+    }
+    Command::none()
+}
+
+pub fn handle_image_status(state: &mut LocalState) -> Command<Message> {
+    if let Some(task_id) = &state.active_image_task {
+        match veldsdk::core::task_status(task_id) {
+            Ok(status) => {
+                state.download_progress = Some(status.progress);
+                if status.completed {
+                    let err = status.error.clone();
+                    let handle = status.result_handle;
+                    state.active_image_task = None;
+                    state.download_progress = None;
+                    
+                    if !err.is_empty() {
+                        state.error_message = Some(format!("Image load error: {}", err));
+                    } else if let Some(h) = handle {
+                        state.current_gpu_image = Some(h.clone());
+                        state.status_message = "Image loaded to GPU".into();
+                        
+                        // Сообщаем рантайму, что у нас есть фоновая текстура
+                        if let Some(Ok(boxed_runtime)) = veldsdk::rpc::MODULE_STATE.get() {
+                            if let Some(runtime) = boxed_runtime.downcast_ref::<Box<dyn veldsdk::iced::RawIcedRuntime>>() {
+                                runtime.set_background_image(Some(h));
+                            }
+                        }
+                    }
+                } else {
+                    return poll_image_progress();
+                }
+            }
+            Err(e) => { 
+                state.error_message = Some(format!("Status check failed: {}", e));
+                state.active_image_task = None;
+                state.download_progress = None;
+            }
+        }
+    }
+    Command::none()
+}
+
+fn poll_image_progress() -> Command<Message> {
+    Command::perform(async {
+        veldsdk::yield_now().await;
+    }, |_| Message::ImageStatusUpdated)
 }
 
 pub fn handle_preview_loaded(state: &mut LocalState, res: Result<Handle, String>) -> Command<Message> {

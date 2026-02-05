@@ -17,6 +17,10 @@ pub mod ui {
     include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
 }
 
+pub mod wgpu {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.wgpu.rs"));
+}
+
 pub struct CallContextInner {
     pub input: Vec<u8>,
     pub output: Vec<u8>,

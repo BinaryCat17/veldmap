@@ -1,0 +1,164 @@
+syntax = "proto3";
+
+package veldmap.wgpu;
+
+// Аналог wgpu::BufferAddress и т.д.
+message GpuBufferBinding {
+    uint64 buffer_id = 1;
+    uint64 offset = 2;
+    uint64 size = 3;
+}
+
+message GpuTextureBinding {
+    uint64 texture_id = 1;
+    uint32 view_dimension = 2; // 0: 2D, 1: 2DArray, etc
+}
+
+// РЕСУРСЫ
+
+message CreateBuffer {
+    uint64 size = 1;
+    uint32 usage = 2;
+    bool mapped_at_creation = 3;
+}
+
+message CreateTexture {
+    uint32 width = 1;
+    uint32 height = 2;
+    uint32 depth_or_array_layers = 3;
+    uint32 mip_level_count = 4;
+    uint32 sample_count = 5;
+    uint32 dimension = 6; // 0: 1D, 1: 2D, 2: 3D
+    uint32 format = 7;
+    uint32 usage = 8;
+}
+
+message CreateSampler {
+    uint32 address_mode_u = 1;
+    uint32 address_mode_v = 2;
+    uint32 address_mode_w = 3;
+    uint32 mag_filter = 4;
+    uint32 min_filter = 5;
+    uint32 mipmap_filter = 6;
+}
+
+message BindGroupEntry {
+    uint32 binding = 1;
+    oneof resource {
+        uint64 buffer_id = 2;
+        GpuBufferBinding buffer_binding = 3;
+        uint64 texture_view_id = 4;
+        uint64 sampler_id = 5;
+    }
+}
+
+message CreateBindGroup {
+    uint32 layout_id = 1;
+    repeated BindGroupEntry entries = 2;
+    string label = 3;
+}
+
+message VertexAttribute {
+    uint32 format = 1;
+    uint64 offset = 2;
+    uint32 shader_location = 3;
+}
+
+message VertexBufferLayout {
+    uint64 array_stride = 1;
+    uint32 step_mode = 2; // 0: Vertex, 1: Instance
+    repeated VertexAttribute attributes = 3;
+}
+
+message CreateShaderModule {
+    string source = 1;
+    string label = 2;
+}
+
+message CreateRenderPipeline {
+    uint64 shader_id = 1;
+    string vertex_entry = 2;
+    string fragment_entry = 3;
+    repeated VertexBufferLayout vertex_layouts = 4;
+    uint32 primitive_topology = 5;
+    uint32 strip_index_format = 6;
+    uint32 front_face = 7;
+    uint32 cull_mode = 8;
+    uint32 target_format = 9;
+    bool depth_enabled = 10;
+    string label = 11;
+}
+
+// КОМАНДЫ (COMMAND BUFFER)
+
+message WgpuCommand {
+    oneof command {
+        SetPipeline set_pipeline = 1;
+        SetBindGroup set_bind_group = 2;
+        SetVertexBuffer set_vertex_buffer = 3;
+        SetIndexBuffer set_index_buffer = 4;
+        Draw draw = 5;
+        DrawIndexed draw_indexed = 6;
+        SetViewport set_viewport = 7;
+        SetScissorRect set_scissor_rect = 8;
+    }
+}
+
+message SetPipeline {
+    uint64 pipeline_id = 1;
+}
+
+message SetBindGroup {
+    uint32 index = 1;
+    uint64 bind_group_id = 2;
+    repeated uint32 dynamic_offsets = 3;
+}
+
+message SetVertexBuffer {
+    uint32 slot = 1;
+    uint64 buffer_id = 2;
+    uint64 offset = 3;
+    uint64 size = 4;
+}
+
+message SetIndexBuffer {
+    uint64 buffer_id = 1;
+    uint32 index_format = 2; // 0: Uint16, 1: Uint32
+    uint64 offset = 3;
+    uint64 size = 4;
+}
+
+message Draw {
+    uint32 vertex_count = 1;
+    uint32 instance_count = 2;
+    uint32 first_vertex = 3;
+    uint32 first_instance = 4;
+}
+
+message DrawIndexed {
+    uint32 index_count = 1;
+    uint32 instance_count = 2;
+    uint32 first_index = 3;
+    int32 base_vertex = 4;
+    uint32 first_instance = 5;
+}
+
+message SetViewport {
+    float x = 1;
+    float y = 2;
+    float width = 3;
+    float height = 4;
+    float min_depth = 5;
+    float max_depth = 6;
+}
+
+message SetScissorRect {
+    uint32 x = 1;
+    uint32 y = 2;
+    uint32 width = 3;
+    uint32 height = 4;
+}
+
+message CommandBuffer {
+    repeated WgpuCommand commands = 1;
+}

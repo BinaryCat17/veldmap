@@ -2,7 +2,7 @@ use iced_widget::{
     button, column, row, scrollable, text, text_input, pick_list, Space, container
 };
 use iced_core::{Element, Length, Color, Alignment, Theme};
-use iced_tiny_skia::Renderer;
+use veldsdk::prelude::GpuRenderer as Renderer;
 use crate::Message;
 use crate::common;
 use veldmap_gis_api::dataprovider::DataProduct;

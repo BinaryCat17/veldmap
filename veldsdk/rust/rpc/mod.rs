@@ -6,6 +6,10 @@ pub mod ui {
     include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
 }
 
+pub mod wgpu {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.wgpu.rs"));
+}
+
 pub mod host;
 
 #[cfg(feature = "client")]
@@ -53,38 +57,25 @@ macro_rules! define_module {
     ) => {
         #[no_mangle]
         pub extern "C" fn init() -> i32 {
-            println!("[WASM-DEBUG] init() started");
             let _ = $crate::core::init();
-            println!("[WASM-DEBUG] core::init done");
-            
-            println!("[WASM-DEBUG] calling load_input()");
             let input = $crate::rpc::host::load_input();
-            println!("[WASM-DEBUG] load_input done, len: {}", input.len());
             
             let config_json = if input.is_empty() {
-                println!("[WASM-DEBUG] input empty, falling back to get_config");
                 match $crate::rpc::host::get_config("config") {
                     Some(c) => c,
                     None => return 1,
                 }
             } else {
-                println!("[WASM-DEBUG] parsing input as utf8");
                 match String::from_utf8(input) {
                     Ok(s) => s,
                     Err(_) => return 1,
                 }
             };
-            println!("[WASM-DEBUG] config json len: {}", config_json.len());
             
-            println!("[WASM-DEBUG] deserializing config");
             let config: $config_type = match $crate::serde_json::from_str(&config_json) {
                 Ok(c) => c,
-                Err(e) => {
-                    println!("[WASM-DEBUG] JSON error: {}", e);
-                    return 2;
-                }
+                Err(_) => return 2,
             };
-            println!("[WASM-DEBUG] config deserialized");
 
             let state_result = $init_func(config);
             let boxed_state: $crate::anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
@@ -95,7 +86,6 @@ macro_rules! define_module {
             if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
                  return 3;
             }
-            println!("[WASM-DEBUG] init() success");
             0
         }
 
@@ -158,38 +148,25 @@ macro_rules! define_module {
     ) => {
         #[no_mangle]
         pub extern "C" fn init() -> i32 {
-            println!("[WASM-DEBUG] init() started");
             let _ = $crate::core::init();
-            println!("[WASM-DEBUG] core::init done");
-            
-            println!("[WASM-DEBUG] calling load_input()");
             let input = $crate::rpc::host::load_input();
-            println!("[WASM-DEBUG] load_input done, len: {}", input.len());
             
             let config_json = if input.is_empty() {
-                println!("[WASM-DEBUG] input empty, falling back to get_config");
                 match $crate::rpc::host::get_config("config") {
                     Some(c) => c,
                     None => return 1,
                 }
             } else {
-                println!("[WASM-DEBUG] parsing input as utf8");
                 match String::from_utf8(input) {
                     Ok(s) => s,
                     Err(_) => return 1,
                 }
             };
-            println!("[WASM-DEBUG] config json len: {}", config_json.len());
             
-            println!("[WASM-DEBUG] deserializing config");
             let config: $config_type = match $crate::serde_json::from_str(&config_json) {
                 Ok(c) => c,
-                Err(e) => {
-                    println!("[WASM-DEBUG] JSON error: {}", e);
-                    return 2;
-                }
+                Err(_) => return 2,
             };
-            println!("[WASM-DEBUG] config deserialized");
 
             let state_result = $init_func(config);
             let boxed_state: $crate::anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
@@ -200,7 +177,6 @@ macro_rules! define_module {
             if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
                  return 3;
             }
-            println!("[WASM-DEBUG] init() success");
             0
         }
 

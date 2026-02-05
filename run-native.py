@@ -2,21 +2,33 @@
 import subprocess
 import os
 import sys
+import argparse
 
 def main():
-    print("Starting VeldMap Native Runtime...")
+    parser = argparse.ArgumentParser(description="VeldMap Run Script")
+    parser.add_argument("--debug", action="store_true", help="Run debug build")
+    parser.add_argument("--config", default="veldgis/config", help="Path to config directory")
+    
+    args = parser.parse_args()
+    
+    profile_flag = [] if args.debug else ["--release"]
+    profile_name = "debug" if args.debug else "release"
+    
+    print(f"Starting VeldMap Native Runtime ({profile_name})...")
     
     # 1. Запускаем Native Host из воркспейса veldcore
-    # Передаем путь к конфигам внутри veldgis
-    print("-> Launching VeldMap Host...")
+    print(f"-> Launching VeldMap Host ({profile_name})...")
+    
+    cmd = [
+        "cargo", "run", 
+        "--manifest-path", "veldcore/Cargo.toml", 
+        "-p", "veldmap-host-gui"
+    ] + profile_flag + [
+        "--", "--config", args.config
+    ]
+    
     try:
-        subprocess.run([
-            "cargo", "run", 
-            "--manifest-path", "veldcore/Cargo.toml", 
-            "-p", "veldmap-host-gui", 
-            "--release", 
-            "--", "--config", "veldgis/config"
-        ])
+        subprocess.run(cmd)
     except KeyboardInterrupt:
         print("\nShutting down.")
 

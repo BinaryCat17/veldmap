@@ -2,7 +2,9 @@ use crate::rpc::host::call_service;
 use crate::rpc::services::{
     LogRequest, LogLevel, FsReadRequest, FsReadResponse, FsWriteRequest, 
     FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest, FsDownloadResponse,
-    TaskStatusRequest, TaskStatusResponse, TaskCancelRequest
+    TaskStatusRequest, TaskStatusResponse, TaskCancelRequest,
+    ImageInfoRequest, ImageInfoResponse, ImageLoadRequest, ImageLoadResponse,
+    GetResourceRequest, GetResourceResponse
 };
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use prost::Message;
@@ -137,11 +139,12 @@ pub fn fs_write_resource(path: impl Into<String>, handle: crate::rpc::services::
 }
 
 pub fn fs_write(path: impl Into<String>, data: Vec<u8>) -> anyhow::Result<()> {
-    use crate::rpc::services::{GpuResourceRequest, CreateBuffer, GpuResourceResponse};
+    use crate::rpc::services::{GpuResourceRequest, GpuResourceResponse};
+    use crate::rpc::wgpu::CreateBuffer;
     let size = data.len() as u64;
     let create_req = GpuResourceRequest {
         command: Some(crate::rpc::services::gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-            size, usage: 0
+            size, usage: 0, mapped_at_creation: false
         }))
     };
     let res_buf = call_service("system", "create_resource", create_req.encode_to_vec())?;
@@ -184,6 +187,64 @@ pub fn fs_delete(path: impl Into<String>) -> anyhow::Result<()> {
     let req = FsDeleteRequest { path: path.into() };
     call_service("system", "fs_delete", req.encode_to_vec())?;
     Ok(())
+}
+
+pub fn image_info(path: impl Into<String>) -> anyhow::Result<ImageInfoResponse> {
+    let req = ImageInfoRequest { path: path.into() };
+    let res_buf = call_service("system", "image_info", req.encode_to_vec())?;
+    let res = ImageInfoResponse::decode(&res_buf[..])?;
+    Ok(res)
+}
+
+pub fn image_load(path: impl Into<String>, target_width: u32, target_height: u32, preserve_aspect: bool) -> anyhow::Result<String> {
+    let req = ImageLoadRequest { 
+        path: path.into(), target_width, target_height, preserve_aspect 
+    };
+    let res_buf = call_service("system", "image_load", req.encode_to_vec())?;
+    let res = ImageLoadResponse::decode(&res_buf[..])?;
+    let task = res.task.ok_or_else(|| anyhow::anyhow!("No task in image_load response"))?;
+    Ok(task.task_id)
+}
+
+pub fn get_resource(name: impl Into<String>) -> anyhow::Result<crate::rpc::services::ResourceHandle> {
+    let req = GetResourceRequest { name: name.into() };
+    let res_buf = call_service("system", "get_resource", req.encode_to_vec())?;
+    let res = GetResourceResponse::decode(&res_buf[..])?;
+    if !res.error.is_empty() { return Err(anyhow::anyhow!(res.error)); }
+    res.handle.ok_or_else(|| anyhow::anyhow!("No handle in response"))
+}
+
+pub fn create_shader(source: impl Into<String>, label: impl Into<String>) -> anyhow::Result<crate::rpc::services::ResourceHandle> {
+    use crate::rpc::services::{GpuResourceRequest, GpuResourceResponse};
+    use crate::rpc::wgpu::CreateShaderModule;
+    let req = GpuResourceRequest {
+        command: Some(crate::rpc::services::gpu_resource_request::Command::CreateShader(CreateShaderModule {
+            source: source.into(),
+            label: label.into(),
+        }))
+    };
+    let res_buf = call_service("system", "create_resource", req.encode_to_vec())?;
+    let res = GpuResourceResponse::decode(&res_buf[..])?;
+    res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create shader: {}", res.error))
+}
+
+pub fn create_pipeline(shader_id: u64, label: impl Into<String>) -> anyhow::Result<crate::rpc::services::ResourceHandle> {
+    use crate::rpc::services::{GpuResourceRequest, GpuResourceResponse};
+    use crate::rpc::wgpu::CreateRenderPipeline;
+    let req = GpuResourceRequest {
+        command: Some(crate::rpc::services::gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
+            shader_id,
+            label: label.into(),
+            vertex_entry: "vs_main".to_string(),
+            fragment_entry: "fs_main".to_string(),
+            vertex_layouts: Vec::new(),
+            primitive_topology: 0, // TriangleList
+            ..Default::default()
+        }))
+    };
+    let res_buf = call_service("system", "create_resource", req.encode_to_vec())?;
+    let res = GpuResourceResponse::decode(&res_buf[..])?;
+    res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create pipeline: {}", res.error))
 }
 
 #[derive(serde::Serialize)]

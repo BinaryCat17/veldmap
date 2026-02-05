@@ -2,7 +2,7 @@ use iced_widget::{
     button, column, container, row, scrollable, text, pick_list, text_input
 };
 use iced_core::{Element, Length, Alignment, Theme};
-use iced_tiny_skia::Renderer;
+use veldsdk::prelude::GpuRenderer as Renderer;
 use crate::Message;
 use crate::common;
 use crate::common::BrowserItem;
