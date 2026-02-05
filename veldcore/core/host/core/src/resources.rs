@@ -84,6 +84,7 @@ impl ResourceManager {
             1 => wgpu::TextureFormat::R32Float,
             2 => wgpu::TextureFormat::Rgba16Float,
             3 => wgpu::TextureFormat::Rgba32Float,
+            9 => wgpu::TextureFormat::R8Unorm,
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -95,8 +96,7 @@ impl ResourceManager {
             format,
             usage: wgpu::TextureUsages::from_bits_truncate(usage) 
                    | wgpu::TextureUsages::TEXTURE_BINDING 
-                   | wgpu::TextureUsages::COPY_DST 
-                   | wgpu::TextureUsages::COPY_SRC,
+                   | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         self.resources.insert(id, Resource::Texture { 
@@ -277,19 +277,6 @@ impl ResourceManager {
                 self.device.poll(wgpu::Maintain::Poll);
             },
             Resource::Texture { texture, width, height, format } => {
-                let block_size = match *format {
-                    1 | 3 => 4, // R32Float | Rgba32Float (Wait, Rgba32 is 16 bytes!)
-                    2 => 8, // Rgba16Float
-                    9 => 1, // R8Unorm
-                    _ => 4, // Default Rgba8Unorm
-                };
-                // Correct mapping:
-                // 0: Rgba8Unorm (4)
-                // 1: R32Float (4)
-                // 2: Rgba16Float (8)
-                // 3: Rgba32Float (16)
-                // 9: R8Unorm (1)
-                
                 let real_block_size = match *format {
                     9 => 1,
                     2 => 8,

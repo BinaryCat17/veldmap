@@ -82,7 +82,7 @@ impl GpuRenderer {
                     width: self.atlas_width,
                     height: self.atlas_height,
                     format: 9, // R8Unorm
-                    usage: 4 | 8, // CopyDst | TextureBinding
+                    usage: 2 | 4, // CopyDst | TextureBinding
                     dimension: 1, 
                     mip_level_count: 1,
                     sample_count: 1,
