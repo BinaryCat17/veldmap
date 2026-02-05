@@ -23,47 +23,38 @@ pub trait RpcDecode: Sized {
     fn decode_rpc(bytes: &[u8]) -> anyhow::Result<Self>;
 }
 
+// Базовая реализация для пустого ответа
 impl RpcDecode for () {
-    fn decode_rpc(_bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(())
-    }
+    fn decode_rpc(_bytes: &[u8]) -> anyhow::Result<Self> { Ok(()) }
 }
 
-/// Макрос для реализации RpcDecode для типов Protobuf.
+/// Внутренний макрос для реализации RpcDecode.
 #[macro_export]
-macro_rules! impl_rpc_decode {
-    ($($t:ty),*) => {
-        $(
-            impl $crate::rpc::RpcDecode for $t {
-                fn decode_rpc(bytes: &[u8]) -> $crate::anyhow::Result<Self> {
-                    use $crate::prost::Message;
-                    Ok(<$t>::decode(bytes)?)
-                }
+macro_rules! impl_rpc_decode_internal {
+    (()) => {
+        // Для () ничего не делаем, уже есть базовая реализация
+    };
+    ($t:ty) => {
+        impl $crate::rpc::RpcDecode for $t {
+            fn decode_rpc(bytes: &[u8]) -> $crate::anyhow::Result<Self> {
+                use $crate::prost::Message;
+                Ok(<$t>::decode(bytes)?)
             }
-        )*
+        }
     };
 }
-
-// Базовые реализации для системных типов
-impl_rpc_decode!(
-    core::FsReadResponse,
-    core::FsListResponse,
-    core::FsDownloadResponse,
-    core::ImageInfoResponse,
-    core::ImageLoadResponse,
-    core::GetResourceResponse,
-    core::CreateDataResponse,
-    core::TaskStatusResponse,
-    wgpu::GpuResourceResponse
-);
 
 /// Макрос для генерации клиентских прокси-функций для RPC сервиса.
 #[macro_export]
 macro_rules! rpc_proxy {
     (
         service: $service:expr,
-        $( $method:ident : $req:ty => $res:ty ),* $(,)?
+        $( $method:ident : $req:ty => $res:tt ),* $(,)?
     ) => {
+        $(
+            $crate::impl_rpc_decode_internal!($res);
+        )*
+
         pub mod raw {
             use super::*;
             $(

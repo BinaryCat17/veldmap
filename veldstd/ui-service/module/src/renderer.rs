@@ -2,7 +2,7 @@ use veldsdk::rpc::wgpu::*;
 use veldsdk::rpc::host::{call_service, gpu_write_resource};
 use iced_core::{Transformation, Size, Theme, Point, Pixels, Font, Color};
 use iced_core::text::{LineHeight, Highlighter, highlighter};
-use iced_runtime::user_interface::{self, UserInterface};
+use iced_runtime::user_interface::UserInterface;
 use cosmic_text::{FontSystem, SwashCache, Buffer, Metrics, Shaping};
 use std::collections::HashMap;
 use prost::Message;

@@ -1,25 +1,18 @@
-// Реэкспортируем системные протоколы для удобства плагинов
-pub mod core {
-    pub use veldsdk::rpc::core::*;
-}
-pub mod app {
-    pub use veldsdk::rpc::app::*;
-}
+// Реэкспортируем системные протоколы, чтобы сгенерированный ui.rs мог их найти
+pub use veldsdk::rpc::core;
+pub use veldsdk::rpc::app;
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
 }
 
-veldsdk::impl_rpc_decode!(
-    proto::SetViewResponse,
-    proto::RenderResponse,
-    proto::HandleUiEventResponse
-);
-
-pub use veldsdk::prost::Message;
+use veldsdk::prost::Message;
 use serde::Serialize;
+use std::task::{Context, Poll};
+use futures_util::task::noop_waker_ref;
 
-// Генерируем транспорт
+// Генерируем транспорт для UI-сервиса в модуле raw. 
+// Теперь он сам делает декодирование ответов.
 veldsdk::rpc_proxy! {
     service: "ui-service",
     set_view: proto::SetViewRequest => proto::SetViewResponse,
@@ -173,10 +166,6 @@ impl<M> From<Button<M>> for Element<M> {
     fn from(b: Button<M>) -> Self {
         proto::Widget { r#type: Some(proto::widget::Type::Button(b.widget)) }.into()
     }
-}
-
-pub fn button<M>(content: impl Into<Element<M>>) -> Button<M> {
-    Button::new(content)
 }
 
 pub struct Container<M> {
