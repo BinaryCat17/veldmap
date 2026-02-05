@@ -1,9 +1,9 @@
-pub mod services {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.services.rs"));
+pub mod core {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
 }
 
-pub mod ui {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
+pub mod app {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
 }
 
 pub mod wgpu {
@@ -92,7 +92,7 @@ macro_rules! define_module {
         #[no_mangle]
         pub extern "C" fn handle_rpc() -> i32 {
             use $crate::prost::Message;
-            use $crate::rpc::services::{RpcRequest, RpcResponse};
+            use $crate::rpc::core::{RpcRequest, RpcResponse};
 
             let input = $crate::rpc::host::load_input();
             let request = match RpcRequest::decode(&input[..]) {

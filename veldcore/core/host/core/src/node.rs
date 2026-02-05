@@ -1,7 +1,7 @@
 use iroh::Endpoint;
 use iroh_gossip::net::Gossip;
 use std::sync::Arc;
-use crate::services::{RpcRequest, RpcResponse};
+use crate::core::{RpcRequest, RpcResponse};
 use prost::Message;
 use crate::dispatcher::Dispatcher;
 

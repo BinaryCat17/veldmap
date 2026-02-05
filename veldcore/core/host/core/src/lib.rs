@@ -7,14 +7,15 @@ pub mod abi;
 pub mod dispatcher;
 pub mod node;
 pub mod system_service;
+pub mod gpu_service;
 pub mod resources;
 
-pub mod services {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.services.rs"));
+pub mod core {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
 }
 
-pub mod ui {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
+pub mod app {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
 }
 
 pub mod wgpu {

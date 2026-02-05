@@ -4,7 +4,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::WasmModule;
 use anyhow::Result;
 use iroh::Endpoint;
-use crate::services::{RpcRequest, RpcResponse};
+use crate::core::{RpcRequest, RpcResponse};
 use prost::Message;
 
 pub trait NativeService: Send + Sync {

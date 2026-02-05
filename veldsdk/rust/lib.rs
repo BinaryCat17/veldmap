@@ -1,7 +1,9 @@
 pub mod core;
 pub mod rpc;
-#[cfg(feature = "graphics")]
-pub mod graphics;
+#[cfg(feature = "wgpu")]
+pub mod wgpu;
+#[cfg(feature = "app")]
+pub mod app;
 #[cfg(feature = "iced")]
 pub mod iced;
 
@@ -13,12 +15,14 @@ pub use prost;
 pub use anyhow;
 
 pub mod prelude {
-    pub use crate::rpc::services::*;
+    pub use crate::rpc::core::*;
     #[cfg(feature = "pdk")]
     pub use crate::core::*;
-    #[cfg(feature = "graphics")]
-    pub use crate::graphics::*;
-        #[cfg(feature = "iced")]
-        pub use crate::iced::runtime::GpuRenderer;
-    }
+    #[cfg(feature = "wgpu")]
+    pub use crate::wgpu::*;
+    #[cfg(feature = "app")]
+    pub use crate::app::*;
+    #[cfg(feature = "iced")]
+    pub use crate::iced::runtime::GpuRenderer;
+}
     

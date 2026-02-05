@@ -1,7 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = &[
-        "../../../proto/services.proto",
-        "../../../proto/ui.proto",
+        "../../../proto/core.proto",
+        "../../../proto/app.proto",
         "../../../proto/wgpu.proto"
     ];
 

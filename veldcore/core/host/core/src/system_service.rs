@@ -1,9 +1,9 @@
 use crate::dispatcher::NativeService;
 use crate::resources::{ResourceManager, Resource};
-use crate::services::{
+use crate::core::{
     FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, 
     FsDownloadRequest, LogRequest, TaskResponse, TaskStatusRequest, TaskStatusResponse,
-    TaskCancelRequest, GpuResourceRequest, GpuResourceResponse, ResourceHandle,
+    TaskCancelRequest, ResourceHandle,
     ImageInfoRequest, ImageInfoResponse, ImageLoadRequest, ImageLoadResponse,
     GetResourceRequest, GetResourceResponse
 };
@@ -131,7 +131,6 @@ impl NativeService for SystemService {
                     let handle = ResourceHandle {
                         id: tex_id,
                         size: (w * h * 4) as u64,
-                        r#type: 1, // Texture
                         content_hash: resources.compute_hash(tex_id).unwrap_or_default(),
                     };
                     update_status(1.0, String::new(), Some(handle));
@@ -158,11 +157,10 @@ impl NativeService for SystemService {
                     if let Some(res) = self.resources.get_resource(id) {
                         let mut handle = ResourceHandle { id, ..Default::default() };
                         match res {
-                            Resource::Buffer(b) => { handle.size = b.size(); handle.r#type = 0; }
-                            Resource::Texture { width, height, .. } => { handle.size = (width * height * 4) as u64; handle.r#type = 1; }
-                            Resource::RenderPipeline(_) => { handle.r#type = 2; }
-                            Resource::BindGroup(_) => { handle.r#type = 3; }
-                            Resource::ShaderModule(_) => { handle.r#type = 4; }
+                            Resource::Data(v) => { handle.size = v.len() as u64; }
+                            Resource::Buffer(b) => { handle.size = b.size(); }
+                            Resource::Texture { width, height, .. } => { handle.size = (width * height * 4) as u64; }
+                            _ => {}
                         }
                         Ok(GetResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
                     } else {
@@ -172,60 +170,17 @@ impl NativeService for SystemService {
                     Ok(GetResourceResponse { handle: None, error: format!("Resource '{}' not found", req.name) }.encode_to_vec())
                 }
             }
-            "create_resource" => {
-                let req = GpuResourceRequest::decode(&payload[..])?;
-                let mut handle = ResourceHandle::default();
-                match req.command {
-                    Some(crate::services::gpu_resource_request::Command::CreateTexture(t)) => {
-                        handle.id = self.resources.create_texture(t.width, t.height, t.format, t.usage);
-                        handle.size = (t.width * t.height * 4) as u64; 
-                        handle.r#type = 1; // ResourceType::Texture
-                    }
-                    Some(crate::services::gpu_resource_request::Command::CreateBuffer(b)) => {
-                        // Если mapped_at_creation, то создаем буфер с возможностью записи (не реализовано полностью тут, но поле есть)
-                        handle.id = self.resources.create_buffer(b.size, b.usage);
-                        handle.size = b.size;
-                        handle.r#type = 0; // ResourceType::Buffer
-                    }
-                    Some(crate::services::gpu_resource_request::Command::CreateShader(s)) => {
-                        handle.id = self.resources.create_shader(&s.source, Some(&s.label));
-                        handle.r#type = 4; // Shader
-                    }
-                    Some(crate::services::gpu_resource_request::Command::CreatePipeline(p)) => {
-                        handle.id = self.resources.create_pipeline(p.shader_id, Some(&p.label))?;
-                        handle.r#type = 2; // RenderPipeline
-                    }
-                    Some(crate::services::gpu_resource_request::Command::CreateSampler(s)) => {
-                        // В ResourceManager пока нет отдельного метода для семплеров, но мы можем его добавить или вернуть 0
-                        handle.r#type = 5; // Sampler
-                    }
-                    Some(crate::services::gpu_resource_request::Command::CreateBindGroup(bg)) => {
-                        // В ResourceManager пока нет отдельного метода для BindGroup через Proto
-                        handle.r#type = 3; // BindGroup
-                    }
-                    _ => return Err(anyhow::anyhow!("Unsupported resource command")),
-                }
-                Ok(GpuResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
-            }
             "fs_read" => {
                 let req = FsReadRequest::decode(&payload[..])?;
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
                 
-                let metadata = fs::metadata(&req.path)?;
-                let size = metadata.len();
-                
-                // Zero-copy чтение напрямую в GPU буфер
-                let id = self.resources.create_buffer_mapped(size, 0, |view| {
-                    use std::io::Read;
-                    let mut file = fs::File::open(&req.path)?;
-                    file.read_exact(view)?;
-                    Ok(())
-                })?;
+                let data = fs::read(&req.path)?;
+                let size = data.len() as u64;
+                let id = self.resources.create_data_resource(data);
                 
                 let handle = ResourceHandle {
                     id,
                     size,
-                    r#type: 0,
                     content_hash: self.resources.compute_hash(id).unwrap_or_default(),
                 };
                 Ok(FsReadResponse { handle: Some(handle) }.encode_to_vec())
@@ -235,7 +190,14 @@ impl NativeService for SystemService {
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
                 let handle = req.handle.ok_or_else(|| anyhow::anyhow!("Missing handle"))?;
                 
-                let data = self.resources.read_resource(handle.id, 0, handle.size)?;
+                let data = if handle.id == 0 {
+                    // Если ID 0, значит данные должны быть где-то еще? 
+                    // В текущем proto FsWriteRequest нет поля data.
+                    // Давай добавим его или всегда требовать ResourceHandle.
+                    return Err(anyhow::anyhow!("Handle ID 0 not supported for fs_write yet"));
+                } else {
+                    self.resources.read_resource(handle.id, 0, handle.size)?
+                };
 
                 if let Some(parent) = Path::new(&req.path).parent() { fs::create_dir_all(parent)?; }
                 fs::write(&req.path, &data)?;
@@ -342,7 +304,7 @@ impl NativeService for SystemService {
                     });
                 }
 
-                use crate::services::FsDownloadResponse;
+                use crate::core::FsDownloadResponse;
                 Ok(FsDownloadResponse { 
                     task: Some(TaskResponse { task_id }) 
                 }.encode_to_vec())

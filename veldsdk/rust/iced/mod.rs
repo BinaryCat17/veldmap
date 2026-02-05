@@ -13,10 +13,10 @@ pub struct IcedSettings {
 /// Internal trait used by the macro to drive the UI.
 #[doc(hidden)]
 pub trait RawIcedRuntime: Send + Sync {
-    fn handle_event(&self, event: crate::rpc::ui::UiEvent) -> anyhow::Result<()>;
+    fn handle_event(&self, event: crate::rpc::app::UiEvent) -> anyhow::Result<()>;
     fn render(&self) -> anyhow::Result<()>;
     fn tick(&self) -> anyhow::Result<()>;
-    fn set_background_image(&self, handle: Option<crate::rpc::services::ResourceHandle>);
+    fn set_background_image(&self, handle: Option<crate::rpc::core::ResourceHandle>);
 }
 
 #[doc(hidden)]
@@ -92,7 +92,7 @@ macro_rules! define_iced_module {
         #[no_mangle]
         pub extern "C" fn handle_rpc() -> i32 {
             use $crate::prost::Message;
-            use $crate::rpc::services::{RpcRequest, RpcResponse};
+            use $crate::rpc::core::{RpcRequest, RpcResponse};
             use $crate::iced::RawIcedRuntime;
 
             let input = $crate::rpc::host::load_input();
@@ -112,7 +112,7 @@ macro_rules! define_iced_module {
 
             match request.method.as_str() {
                 "handle_ui_event" => {
-                    let event = match $crate::rpc::ui::UiEvent::decode(&request.payload[..]) {
+                    let event = match $crate::rpc::app::UiEvent::decode(&request.payload[..]) {
                         Ok(ev) => ev,
                         Err(_) => return 4,
                     };

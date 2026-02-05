@@ -1,7 +1,6 @@
-use crate::rpc::ui::{RenderCommands, UiDisplayCommand, ui_display_command};
 use crate::rpc::wgpu::{
     CommandBuffer, WgpuCommand, SetPipeline, SetBindGroup, SetVertexBuffer, 
-    SetIndexBuffer, Draw, DrawIndexed, SetViewport, SetScissorRect,
+    SetIndexBuffer, Draw, DrawIndexed, SetViewport, SetScissorRect, Submit,
     wgpu_command::Command
 };
 use crate::rpc::host::call_service;
@@ -9,16 +8,12 @@ use prost::Message;
 
 pub struct WgpuRecorder {
     commands: Vec<WgpuCommand>,
-    width: u32,
-    height: u32,
 }
 
 impl WgpuRecorder {
-    pub fn new(width: u32, height: u32) -> Self {
+    pub fn new(_width: u32, _height: u32) -> Self {
         Self {
             commands: Vec::with_capacity(128),
-            width,
-            height,
         }
     }
 
@@ -81,22 +76,34 @@ impl WgpuRecorder {
         }));
     }
 
-    pub fn submit(self) -> anyhow::Result<()> {
-        let cmd_buffer = CommandBuffer {
-            commands: self.commands,
-        };
-        
-        let render_cmds = RenderCommands {
-            width: self.width,
-            height: self.height,
-            command_buffer: Some(cmd_buffer),
-        };
-        
-        let display_cmd = UiDisplayCommand {
-            command: Some(ui_display_command::Command::RenderCommands(render_cmds)),
-        };
-        
-        call_service("app", "display", display_cmd.encode_to_vec())?;
-        Ok(())
+        pub fn submit(self, target_view_id: u64) -> anyhow::Result<()> {
+
+            let cmd_buffer = CommandBuffer {
+
+                commands: self.commands,
+
+            };
+
+            
+
+            let submit_req = Submit {
+
+                target_texture_view_id: target_view_id,
+
+                clear_color: None,
+
+                command_buffer: Some(cmd_buffer),
+
+            };
+
+            
+
+            call_service("wgpu", "submit", submit_req.encode_to_vec())?;
+
+            Ok(())
+
+        }
+
     }
-}
+
+    

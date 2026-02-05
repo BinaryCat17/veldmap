@@ -1,6 +1,6 @@
 use wasmtime::*;
 use crate::HostState;
-use crate::services::{RpcRequest, RpcResponse};
+use crate::core::{RpcRequest, RpcResponse};
 use prost::Message;
 
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {

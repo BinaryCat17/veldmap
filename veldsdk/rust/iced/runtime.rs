@@ -1,7 +1,7 @@
-use crate::graphics::wgpu_proxy::WgpuRecorder;
+use crate::wgpu::wgpu_proxy::WgpuRecorder;
 use crate::iced::RawIcedRuntime;
 use crate::core::{Command, BoxedFuture};
-use crate::rpc::ui::UiEvent;
+use crate::rpc::app::UiEvent;
 use iced_core::{Transformation, alignment, Size, Theme, Point, Pixels, Font, Event, Color};
 use iced_core::text::{LineHeight, Highlighter, highlighter};
 use iced_graphics::Viewport;
@@ -32,6 +32,9 @@ pub struct GpuRenderer {
     font_system: FontSystem,
     swash_cache: SwashCache,
     pub atlas_texture_id: Option<u64>,
+    pub atlas_bind_group_id: Option<u64>,
+    pub ui_pipeline_id: Option<u64>,
+    pub bgl_id: Option<u64>,
     glyph_cache: HashMap<cosmic_text::CacheKey, GlyphInfo>,
     atlas_data: Vec<u8>,
     atlas_width: u32,
@@ -40,32 +43,46 @@ pub struct GpuRenderer {
     current_atlas_y: u32,
     row_height: u32,
     atlas_dirty: bool,
+    font_map: HashMap<String, String>, // Alias -> FamilyName
 }
 
 impl GpuRenderer {
-    pub fn new() -> Self {
+    pub fn new(_default_font_name: &str, fonts: Vec<(&str, &[u8])>) -> Self {
         let mut font_system = FontSystem::new();
-        let font_data = include_bytes!("../../../veldgis/assets/DejaVuSans.ttf");
-        let source = cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(font_data.as_slice()));
-        font_system.db_mut().load_font_source(source);
+        let mut font_map = HashMap::new();
+
+        for (name, data) in fonts {
+            let source = cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(data.to_vec()));
+            let ids = font_system.db_mut().load_font_source(source);
+            // Пытаемся сопоставить имя из Iced с семейством из файла
+            if let Some(first_id) = ids.first() {
+                if let Some(info) = font_system.db().face(*first_id) {
+                     font_map.insert(name.to_string(), info.families[0].0.clone());
+                }
+            }
+        }
 
         Self { 
-            vertices: Vec::with_capacity(2048),
+            vertices: Vec::with_capacity(4096),
             font_system,
             swash_cache: SwashCache::new(),
             atlas_texture_id: None,
+            atlas_bind_group_id: None,
+            ui_pipeline_id: None,
+            bgl_id: None,
             glyph_cache: HashMap::new(),
             atlas_width: 1024,
             atlas_height: 1024,
             atlas_data: {
-                let mut data = vec![0; 1024 * 1024];
-                data[0] = 255; // White pixel at (0,0) for solid colors
+                let mut data = vec![0; 1024 * 1024 * 4]; // RGBA для поддержки Emoji
+                for i in 0..4 { data[i] = 255; } // Белый пиксель (0,0)
                 data
             },
-            current_atlas_x: 2, // Start after white pixel + margin
+            current_atlas_x: 2, 
             current_atlas_y: 0,
             row_height: 1,
             atlas_dirty: true,
+            font_map,
         }
     }
 
@@ -73,15 +90,46 @@ impl GpuRenderer {
         self.vertices.clear();
     }
 
-    fn ensure_atlas_texture(&mut self) {
-        if self.atlas_texture_id.is_none() {
-            use crate::rpc::services::{GpuResourceRequest, GpuResourceResponse};
-            use crate::rpc::wgpu::CreateTexture;
+    fn ensure_resources(&mut self) {
+        use crate::rpc::wgpu::{GpuResourceRequest, GpuResourceResponse};
+        use crate::rpc::wgpu::*;
+        use crate::rpc::host::call_service;
+
+        // 1. Bind Group Layout
+        if self.bgl_id.is_none() {
             let req = GpuResourceRequest {
-                command: Some(crate::rpc::services::gpu_resource_request::Command::CreateTexture(CreateTexture {
+                command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
+                    label: "Iced Atlas BGL".into(),
+                    entries: vec![
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: 2, // Fragment
+                            ty: Some(crate::rpc::wgpu::bind_group_layout_entry::Ty::Texture(TextureBindingLayout {
+                                sample_type: 1, view_dimension: 2, multisampled: false
+                            })),
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: 2, // Fragment
+                            ty: Some(crate::rpc::wgpu::bind_group_layout_entry::Ty::Sampler(SamplerBindingLayout { r#type: 1 })),
+                        },
+                    ],
+                }))
+            };
+            if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
+                if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                    self.bgl_id = res.handle.map(|h| h.id);
+                }
+            }
+        }
+
+        // 2. Atlas Texture
+        if self.atlas_texture_id.is_none() {
+            let req = GpuResourceRequest {
+                command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateTexture(CreateTexture {
                     width: self.atlas_width,
                     height: self.atlas_height,
-                    format: 9, // R8Unorm
+                    format: 0, // RGBA8Unorm
                     usage: 2 | 4, // CopyDst | TextureBinding
                     dimension: 1, 
                     mip_level_count: 1,
@@ -89,7 +137,7 @@ impl GpuRenderer {
                     depth_or_array_layers: 1,
                 }))
             };
-            if let Ok(res_bytes) = crate::rpc::host::call_service("system", "create_resource", req.encode_to_vec()) {
+            if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
                 if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
                     self.atlas_texture_id = res.handle.map(|h| h.id);
                     self.atlas_dirty = true;
@@ -97,6 +145,34 @@ impl GpuRenderer {
             }
         }
         
+        // 3. Atlas Bind Group
+        if self.atlas_bind_group_id.is_none() && self.atlas_texture_id.is_some() && self.bgl_id.is_some() {
+            let sampler_req = GpuResourceRequest {
+                command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateSampler(CreateSampler {
+                    mag_filter: 1, min_filter: 1, ..Default::default()
+                }))
+            };
+            let sampler_id = call_service("wgpu", "create_resource", sampler_req.encode_to_vec())
+                .ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok())
+                .and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
+
+            let req = GpuResourceRequest {
+                command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
+                    layout_id: self.bgl_id.unwrap(),
+                    entries: vec![
+                        BindGroupEntry { binding: 0, resource: Some(crate::rpc::wgpu::bind_group_entry::Resource::TextureViewId(self.atlas_texture_id.unwrap())) },
+                        BindGroupEntry { binding: 1, resource: Some(crate::rpc::wgpu::bind_group_entry::Resource::SamplerId(sampler_id)) },
+                    ],
+                    label: "Iced Atlas BG".into(),
+                }))
+            };
+            if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
+                if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                    self.atlas_bind_group_id = res.handle.map(|h| h.id);
+                }
+            }
+        }
+
         if self.atlas_dirty {
             if let Some(tid) = self.atlas_texture_id {
                 let _ = crate::rpc::host::gpu_write_resource(tid, 0, &self.atlas_data);
@@ -123,7 +199,6 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             iced_core::Background::Color(c) => [c.r, c.g, c.b, c.a],
             _ => [1.0, 1.0, 1.0, 1.0],
         };
-        // UV [0,0,0,0] maps to the white pixel at (0,0) in our atlas
         add_quad(&mut self.vertices, [quad.bounds.x, quad.bounds.y, quad.bounds.width, quad.bounds.height], color, [0.0, 0.0, 0.0, 0.0]);
     }
 
@@ -204,10 +279,15 @@ impl iced_core::text::Renderer for GpuRenderer {
     fn fill_editor(&mut self, _e: &Self::Editor, _pos: Point, _color: Color, _clip: iced_core::Rectangle) {}
     
     fn fill_text(&mut self, text: iced_core::Text, pos: Point, color: Color, _clip: iced_core::Rectangle) {
-        self.ensure_atlas_texture();
-        
         let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
-        buffer.set_text(&mut self.font_system, &text.content, cosmic_text::Attrs::new(), Shaping::Advanced);
+        
+        let font_family = match &text.font.family {
+            iced_core::font::Family::Name(name) => self.font_map.get(*name).map(|s| s.as_str()).unwrap_or("DejaVu Sans"),
+            _ => "DejaVu Sans",
+        };
+
+        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
+        buffer.set_text(&mut self.font_system, &text.content, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         let text_color = [color.r, color.g, color.b, color.a];
@@ -239,12 +319,32 @@ impl iced_core::text::Renderer for GpuRenderer {
                         let y = self.current_atlas_y;
 
                         for r in 0..height {
-                            let src_start = (r * width) as usize;
-                            let dest_start = ((y + r) * self.atlas_width + x) as usize;
-                            if src_start + width as usize <= image.data.len() && dest_start + width as usize <= self.atlas_data.len() {
-                                let src_slice = &image.data[src_start..(src_start + width as usize)];
-                                let dest_slice = &mut self.atlas_data[dest_start..(dest_start + width as usize)];
-                                dest_slice.copy_from_slice(src_slice);
+                            for c in 0..width {
+                                let src_idx = (r * width + c) as usize;
+                                let dest_idx = (((y + r) * self.atlas_width + (x + c)) * 4) as usize;
+                                
+                                if dest_idx + 4 <= self.atlas_data.len() {
+                                    match image.content {
+                                        cosmic_text::SwashContent::Mask => {
+                                            if src_idx < image.data.len() {
+                                                let val = image.data[src_idx];
+                                                self.atlas_data[dest_idx] = 255;
+                                                self.atlas_data[dest_idx+1] = 255;
+                                                self.atlas_data[dest_idx+2] = 255;
+                                                self.atlas_data[dest_idx+3] = val;
+                                            }
+                                        }
+                                        cosmic_text::SwashContent::Color => {
+                                            if src_idx * 4 + 4 <= image.data.len() {
+                                                self.atlas_data[dest_idx] = image.data[src_idx*4];
+                                                self.atlas_data[dest_idx+1] = image.data[src_idx*4+1];
+                                                self.atlas_data[dest_idx+2] = image.data[src_idx*4+2];
+                                                self.atlas_data[dest_idx+3] = image.data[src_idx*4+3];
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
 
@@ -280,9 +380,6 @@ impl iced_core::text::Renderer for GpuRenderer {
                 }
             }
         }
-        
-        // Final sync if dirty
-        self.ensure_atlas_texture();
     }
 }
 
@@ -301,9 +398,11 @@ pub struct IcedRuntime<S, M> {
     
     tasks: RefCell<Vec<BoxedFuture<M>>>,
     ui_pipeline: RefCell<Option<u64>>,
-    background_texture: RefCell<Option<crate::rpc::services::ResourceHandle>>,
-    vertex_buffer: RefCell<Option<crate::rpc::services::ResourceHandle>>,
-    uniform_buffer: RefCell<Option<crate::rpc::services::ResourceHandle>>,
+    ui_texture: RefCell<Option<crate::rpc::core::ResourceHandle>>,
+    background_texture: RefCell<Option<crate::rpc::core::ResourceHandle>>,
+    vertex_buffer: RefCell<Option<crate::rpc::core::ResourceHandle>>,
+    uniform_buffer: RefCell<Option<crate::rpc::core::ResourceHandle>>,
+    uniform_buffer_id: RefCell<Option<u64>>,
 }
 
 unsafe impl<S, M> Send for IcedRuntime<S, M> {}
@@ -314,14 +413,19 @@ impl<S: 'static, M: Send + 'static> IcedRuntime<S, M> {
         state: S, 
         update_fn: fn(&mut S, M) -> Command<M>,
         view_fn: fn(&S) -> iced_core::Element<'_, M, Theme, GpuRenderer>,
-        _default_font: Font, 
-        _font_data: Vec<(&'static str, &'static [u8])>
+        default_font: Font, 
+        font_data: Vec<(&'static str, &'static [u8])>
     ) -> Self {
+        let default_font_name = match default_font.family {
+            iced_core::font::Family::Name(name) => name,
+            _ => "DejaVu Sans",
+        };
+        
         Self {
             state: RefCell::new(state),
             update_fn,
             view_fn,
-            renderer: RefCell::new(GpuRenderer::new()),
+            renderer: RefCell::new(GpuRenderer::new(default_font_name, font_data)),
             interface_cache: RefCell::new(user_interface::Cache::default()),
             canvas_size: RefCell::new((1024, 768)),
             scale_factor: RefCell::new(1.0),
@@ -330,15 +434,17 @@ impl<S: 'static, M: Send + 'static> IcedRuntime<S, M> {
             needs_redrawing: RefCell::new(true),
             tasks: RefCell::new(Vec::new()),
             ui_pipeline: RefCell::new(None),
+            ui_texture: RefCell::new(None),
             background_texture: RefCell::new(None),
             vertex_buffer: RefCell::new(None),
             uniform_buffer: RefCell::new(None),
+            uniform_buffer_id: RefCell::new(None),
         }
     }
 }
 
 impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
-    fn set_background_image(&self, handle: Option<crate::rpc::services::ResourceHandle>) {
+    fn set_background_image(&self, handle: Option<crate::rpc::core::ResourceHandle>) {
         *self.background_texture.borrow_mut() = handle;
         *self.needs_redrawing.borrow_mut() = true;
     }
@@ -374,19 +480,19 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
     fn handle_event(&self, event_proto: UiEvent) -> anyhow::Result<()> {
         if let Some(ev) = event_proto.event {
             match ev {
-                crate::rpc::ui::ui_event::Event::Resize(r) => { 
+                crate::rpc::app::ui_event::Event::Resize(r) => { 
                     *self.canvas_size.borrow_mut() = (r.width, r.height);
                     *self.scale_factor.borrow_mut() = r.scale_factor;
                     *self.needs_redrawing.borrow_mut() = true;
                 }
-                crate::rpc::ui::ui_event::Event::CursorMoved(c) => {
+                crate::rpc::app::ui_event::Event::CursorMoved(c) => {
                     let sf = *self.scale_factor.borrow();
                     let pos = Point::new(c.x / sf, c.y / sf);
                     *self.cursor_position.borrow_mut() = pos;
                     let mut events = self.pending_events.borrow_mut();
                     events.push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
                 }
-                crate::rpc::ui::ui_event::Event::Click(c) => {
+                crate::rpc::app::ui_event::Event::Click(c) => {
                     let sf = *self.scale_factor.borrow();
                     let _pos = Point::new(c.x / sf, c.y / sf);
                     let button = match c.button {
@@ -444,49 +550,91 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
             if should_draw {
                 let mut recorder = WgpuRecorder::new(width, height);
                 
-                // 1. Setup Pipeline
+                // 1. Resources (Pipeline)
                 if self.ui_pipeline.borrow().is_none() {
                     let shader_source = include_str!("shaders.wgsl");
-                    if let Ok(sh) = crate::core::create_shader(shader_source, "GPU UI Shader") {
-                        if let Ok(pip) = crate::core::create_pipeline(sh.id, "GPU UI Pipeline") {
+                    if let Ok(sh) = crate::wgpu::create_shader(shader_source, "GPU UI Shader") {
+                        if let Ok(pip) = crate::wgpu::create_pipeline(sh.id, "GPU UI Pipeline") {
                             *self.ui_pipeline.borrow_mut() = Some(pip.id);
                         }
                     }
                 }
 
-                // 2. Setup Uniforms (Resolution)
+                // 2. Uniforms (Resolution)
                 if self.uniform_buffer.borrow().is_none() {
-                    use crate::rpc::services::{GpuResourceRequest, GpuResourceResponse};
-                    use crate::rpc::wgpu::CreateBuffer;
-                    let req = GpuResourceRequest {
-                        command: Some(crate::rpc::services::gpu_resource_request::Command::CreateBuffer(CreateBuffer {
+                    use crate::rpc::wgpu::{GpuResourceRequest, GpuResourceResponse};
+                    use crate::rpc::wgpu::*;
+                    
+                    // Создаем буфер
+                    let buf_req = GpuResourceRequest {
+                        command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateBuffer(CreateBuffer {
                             size: 16, usage: 64, mapped_at_creation: false
                         }))
                     };
-                    if let Ok(res_bytes) = crate::rpc::host::call_service("system", "create_resource", req.encode_to_vec()) {
-                        if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
-                            *self.uniform_buffer.borrow_mut() = res.handle;
+                    let buf_handle = crate::rpc::host::call_service("wgpu", "create_resource", buf_req.encode_to_vec())
+                        .ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok())
+                        .and_then(|r| r.handle);
+
+                    if let Some(bh) = buf_handle {
+                        // Сохраняем ID самого буфера для записи данных
+                        *self.uniform_buffer_id.borrow_mut() = Some(bh.id);
+
+                        // Создаем BGL для Uniform
+                        let bgl_req = GpuResourceRequest {
+                            command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
+                                label: "Iced Uniform BGL".into(),
+                                entries: vec![BindGroupLayoutEntry {
+                                    binding: 0,
+                                    visibility: 1 | 2, // Vertex | Fragment
+                                    ty: Some(crate::rpc::wgpu::bind_group_layout_entry::Ty::Buffer(BufferBindingLayout {
+                                        r#type: 1, // Uniform
+                                        has_dynamic_offset: false,
+                                        min_binding_size: 0,
+                                    })),
+                                }],
+                            }))
+                        };
+                        let bgl_id = crate::rpc::host::call_service("wgpu", "create_resource", bgl_req.encode_to_vec())
+                            .ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok())
+                            .and_then(|r| r.handle).map(|h| h.id);
+
+                        if let Some(bgl) = bgl_id {
+                            // Создаем BindGroup
+                            let bg_req = GpuResourceRequest {
+                                command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
+                                    layout_id: bgl,
+                                    entries: vec![BindGroupEntry { binding: 0, resource: Some(crate::rpc::wgpu::bind_group_entry::Resource::BufferId(bh.id)) }],
+                                    label: "Iced Uniform BG".into(),
+                                }))
+                            };
+                            let bg_handle = crate::rpc::host::call_service("wgpu", "create_resource", bg_req.encode_to_vec())
+                                .ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok())
+                                .and_then(|r| r.handle);
+                            
+                            *self.uniform_buffer.borrow_mut() = bg_handle;
                         }
                     }
                 }
 
-                if let Some(u_h) = &*self.uniform_buffer.borrow() {
-                    // Передаем логические пиксели в шейдер, так как вершины Iced в логических пикселях
+                if let Some(u_id) = &*self.uniform_buffer_id.borrow() {
                     let logical_w = width as f32 / sf;
                     let logical_h = height as f32 / sf;
                     let res_data: [f32; 2] = [logical_w, logical_h];
                     let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
-                    let _ = crate::rpc::host::gpu_write_resource(u_h.id, 0, data);
+                    let _ = crate::rpc::host::gpu_write_resource(*u_id, 0, data);
                 }
 
                 // 3. Tessellate actual UI
                 ui.draw(&mut *renderer_mut, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
                 
+                // Ensure Resources are ready BEFORE building vertex buffer
+                renderer_mut.ensure_resources();
+
                 let mut final_vertices = Vec::new();
                 
-                // Background First (Zero-Copy)
+                // Background First (Solid Color)
                 if let Some(_) = &*self.background_texture.borrow() {
-                    add_quad(&mut final_vertices, [0.0, 0.0, viewport.logical_size().width, viewport.logical_size().height], [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+                    add_quad(&mut final_vertices, [0.0, 0.0, viewport.logical_size().width, viewport.logical_size().height], [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0]);
                 }
                 
                 // Then actual UI vertices captured by GpuRenderer
@@ -495,14 +643,14 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
                 if !final_vertices.is_empty() { 
                     // 4. Update Vertex Buffer
                     if self.vertex_buffer.borrow().is_none() {
-                        use crate::rpc::services::{GpuResourceRequest, GpuResourceResponse};
+                        use crate::rpc::wgpu::{GpuResourceRequest, GpuResourceResponse};
                         use crate::rpc::wgpu::CreateBuffer;
                         let req = GpuResourceRequest {
-                            command: Some(crate::rpc::services::gpu_resource_request::Command::CreateBuffer(CreateBuffer {
+                            command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateBuffer(CreateBuffer {
                                 size: 1024 * 1024 * 4, usage: 32, mapped_at_creation: false
                             }))
                         };
-                        if let Ok(res_bytes) = crate::rpc::host::call_service("system", "create_resource", req.encode_to_vec()) {
+                        if let Ok(res_bytes) = crate::rpc::host::call_service("wgpu", "create_resource", req.encode_to_vec()) {
                             if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
                                 *self.vertex_buffer.borrow_mut() = res.handle;
                             }
@@ -515,19 +663,38 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
 
                         recorder.set_pipeline(pipeline);
                         recorder.set_vertex_buffer(0, v_h.id, 0, (final_vertices.len() * 32) as u64);
+                        
+                        // Группа 1: Uniforms
                         recorder.set_bind_group(1, u_h.id);
 
-                        // Use Atlas Texture
-                        renderer_mut.ensure_atlas_texture();
-                        if let Some(atlas_id) = renderer_mut.atlas_texture_id {
-                             recorder.set_bind_group(0, atlas_id);
-                        } else if let Some(bg) = &*self.background_texture.borrow() {
-                            recorder.set_bind_group(0, bg.id);
+                        // Группа 0: Atlas
+                        if let Some(atlas_bg) = renderer_mut.atlas_bind_group_id {
+                             recorder.set_bind_group(0, atlas_bg);
                         }
                         
                         recorder.draw(0..final_vertices.len() as u32, 0..1);
                     }
-                    let _ = recorder.submit();
+
+                    // 5. Ensure UI Texture
+                    if self.ui_texture.borrow().is_none() {
+                        use crate::rpc::wgpu::{GpuResourceRequest, GpuResourceResponse, CreateTexture};
+                        let req = GpuResourceRequest {
+                            command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateTexture(CreateTexture {
+                                width, height, format: 0, usage: 16 | 4, // RENDER_ATTACHMENT | TEXTURE_BINDING
+                                dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1
+                            }))
+                        };
+                        if let Ok(res_bytes) = crate::rpc::host::call_service("wgpu", "create_resource", req.encode_to_vec()) {
+                            if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                                *self.ui_texture.borrow_mut() = res.handle;
+                            }
+                        }
+                    }
+
+                    if let Some(ui_tex) = &*self.ui_texture.borrow() {
+                        let _ = recorder.submit(ui_tex.id);
+                        let _ = crate::app::AppBridge::display_frame(ui_tex.clone(), width, height);
+                    }
                 }
             }
             ui.into_cache()

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use veldmap_host_core::dispatcher::NativeService;
-use veldmap_host_core::ui::UiDisplayCommand;
+use veldmap_host_core::app::AppDisplayCommand;
 use veldmap_host_core::resources::ResourceManager;
 use prost::Message;
 use tokio::sync::mpsc;
@@ -9,7 +9,6 @@ use winit::event_loop::EventLoopProxy;
 
 pub enum AppCommand {
     Draw(u64, u32, u32), // resource_id, width, height
-    Render { width: u32, height: u32, command_buffer: veldmap_host_core::wgpu::CommandBuffer },
 }
 
 pub struct AppService {
@@ -28,22 +27,11 @@ impl NativeService for AppService {
     fn call(&self, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         match method {
             "display" => {
-                let cmd = UiDisplayCommand::decode(&payload[..])?;
+                let cmd = AppDisplayCommand::decode(&payload[..])?;
                 match cmd.command {
-                    Some(veldmap_host_core::ui::ui_display_command::Command::DrawFrame(frame)) => {
+                    Some(veldmap_host_core::app::app_display_command::Command::DrawFrame(frame)) => {
                         let handle = frame.handle.ok_or_else(|| anyhow::anyhow!("Missing resource handle"))?;
                         let _ = self.tx.send(AppCommand::Draw(handle.id, frame.width, frame.height));
-                        if self.is_visible.load(Ordering::SeqCst) {
-                            let _ = self.proxy.send_event(());
-                        }
-                        Ok(Vec::new())
-                    }
-                    Some(veldmap_host_core::ui::ui_display_command::Command::RenderCommands(render)) => {
-                        let _ = self.tx.send(AppCommand::Render { 
-                            width: render.width, 
-                            height: render.height, 
-                            command_buffer: render.command_buffer.unwrap_or_default()
-                        });
                         if self.is_visible.load(Ordering::SeqCst) {
                             let _ = self.proxy.send_event(());
                         }

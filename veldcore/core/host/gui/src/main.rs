@@ -23,8 +23,6 @@ fn execute_render_commands<'a>(
     rp: &mut wgpu::RenderPass<'a>,
     command_buffer: &'a veldmap_host_core::wgpu::CommandBuffer,
     resources: &'a veldmap_host_core::resources::ResourceManager,
-    bind_group_layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
 ) -> anyhow::Result<()> {
     use veldmap_host_core::wgpu::wgpu_command::Command;
 
@@ -43,39 +41,41 @@ fn execute_render_commands<'a>(
                 }
             }
             Command::SetBindGroup(bg) => {
-                let res = resources.get_resource(bg.bind_group_id);
-                match res {
-                    Some(veldmap_host_core::resources::Resource::BindGroup(bind_group)) => {
-                        rp.set_bind_group(bg.index, bind_group.as_ref(), &bg.dynamic_offsets);
-                    }
-                    Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) => {
-                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        let device = resources.get_device();
-                        let bg_res = device.create_bind_group(&wgpu::BindGroupDescriptor { 
-                            label: Some("Proxy Auto BG Texture"), 
-                            layout: &bind_group_layout, 
-                            entries: &[
-                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
-                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
-                            ] 
-                        });
-                        rp.set_bind_group(bg.index, &bg_res, &[]);
-                    }
-                    Some(veldmap_host_core::resources::Resource::Buffer(buf)) => {
-                        let device = resources.get_device();
-                        let uniform_bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                            label: None,
-                            entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }],
-                        });
-                        let bg_res = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("Proxy Auto BG Uniform"),
-                            layout: &uniform_bg_layout,
-                            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
-                        });
-                        rp.set_bind_group(bg.index, &bg_res, &[]);
-                    }
-                    _ => {
-                        log::warn!("Proxy: Resource {} not found or is not a BindGroup/Texture/Buffer", bg.bind_group_id);
+                if let Some(veldmap_host_core::resources::Resource::BindGroup(bind_group)) = resources.get_resource(bg.bind_group_id) {
+                    rp.set_bind_group(bg.index, bind_group.as_ref(), &bg.dynamic_offsets);
+                } else {
+                    // Обработка случая, если передали ID текстуры напрямую (для совместимости)
+                    let res = resources.get_resource(bg.bind_group_id);
+                    match res {
+                        Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) => {
+                            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                            let bgl = resources.get_ui_layout();
+                            let sampler = resources.get_ui_sampler();
+                            let bg_res = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor { 
+                                label: Some("Proxy Fallback Texture BG"), 
+                                layout: &bgl, 
+                                entries: &[
+                                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
+                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
+                                ] 
+                            });
+                            rp.set_bind_group(bg.index, &bg_res, &[]);
+                        }
+                        Some(veldmap_host_core::resources::Resource::Buffer(buf)) => {
+                             // Если это буфер, пытаемся забиндить его как Uniform в группу 1 (где iced ожидает разрешение)
+                             let device = resources.get_device();
+                             let uniform_bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                                 label: None,
+                                 entries: &[wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None }],
+                             });
+                             let bg_res = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                 label: Some("Proxy Fallback Uniform BG"),
+                                 layout: &uniform_bg_layout,
+                                 entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+                             });
+                             rp.set_bind_group(bg.index, &bg_res, &[]);
+                        }
+                        _ => log::warn!("Proxy: BindGroup/Resource {} not found", bg.bind_group_id),
                     }
                 }
             }
@@ -174,19 +174,45 @@ async fn main() -> anyhow::Result<()> {
         surface.configure(&device, &config);
     }
 
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Blit Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
-            wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
-        ],
-    });
-    
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor { address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, mag_filter: wgpu::FilterMode::Linear, min_filter: wgpu::FilterMode::Linear, ..Default::default() });
-
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(queue);
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(device_arc.clone(), queue_arc.clone(), surface_format));
+
+    // Инициализируем Blit Pipeline для вывода текстур плагинов
+    let blit_shader = device_arc.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
+    let blit_pipeline_layout = device_arc.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Blit Pipeline Layout"),
+        bind_group_layouts: &[&resources.get_ui_layout()],
+        push_constant_ranges: &[],
+    });
+    let blit_pipeline = device_arc.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Blit Pipeline"),
+        layout: Some(&blit_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &blit_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &blit_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: surface_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let bind_group_layout = resources.get_ui_layout();
+    let sampler = resources.get_ui_sampler();
 
     // Создаем темно-серую заглушку 1x1 для бинд-группы 1001
     let white_tex_id = resources.create_texture(1, 1, 0, 8);
@@ -207,7 +233,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app_texture_id: Option<u64> = None;
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
-    let mut recorded_commands: Option<veldmap_host_core::wgpu::CommandBuffer> = None;
     let mut last_size = (100u32, 100u32);
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut last_cursor_sent_time = std::time::Instant::now();
@@ -217,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone()))));
+    dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::gpu_service::GpuService::new(resources.clone()))));
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone(), resources.clone()))));
 
     plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir).await?;
@@ -264,24 +290,16 @@ async fn main() -> anyhow::Result<()> {
                                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
                                         ] 
                                     });
-                                                                                                    app_texture_id = Some(id);
-                                                                                                    app_bind_group = Some(bind_group.clone());
-                                                                                                    let bg_id = 1001;
-                                                                                                    resources.register_bind_group(bg_id, Arc::new(bind_group));
-                                                                                                    resources.register_named_resource("active_ui_bind_group", bg_id);
-                                                                                                    last_size = (w, h);
-                                                                                                        recorded_commands = None;
+                                    app_texture_id = Some(id);
+                                    app_bind_group = Some(bind_group.clone());
+                                    let bg_id = 1001;
+                                    resources.register_bind_group(bg_id, Arc::new(bind_group));
+                                    resources.register_named_resource("active_ui_bind_group", bg_id);
+                                    last_size = (w, h);
                                 }
                             }
                             window.request_redraw();
                         }
-                    }
-                    Some(AppCommand::Render { width, height, command_buffer }) => {
-                        recorded_commands = Some(command_buffer);
-                        last_size = (width, height);
-                        app_texture_id = None;
-                        app_bind_group = None;
-                        window.request_redraw();
                     }
                     None => {}
                 }
@@ -304,13 +322,12 @@ async fn main() -> anyhow::Result<()> {
                                     depth_stencil_attachment: None, ..Default::default() 
                                 });
 
-                                if let Some(cmds) = &recorded_commands {
-                                    if let Err(e) = execute_render_commands(&mut rp, cmds, &resources, &bind_group_layout, &sampler) {
-                                        log::error!("Render commands execution failed: {}", e);
-                                    }
+                                if let Some(bg) = &app_bind_group {
+                                    rp.set_pipeline(&blit_pipeline);
+                                    rp.set_bind_group(0, bg, &[]);
+                                    rp.draw(0..3, 0..1);
                                 }
                             }
-                            resources.get_device().poll(wgpu::Maintain::Wait);
                             queue_arc.submit(Some(encoder.finish()));
                             frame.present();
                         }
@@ -325,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
                     config.width = size.width; config.height = size.height;
                     surface.configure(&device_arc, &config);
                     window.request_redraw();
-                    let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Resize(veldmap_host_core::ui::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
+                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
                     let d_clone = dispatcher.clone();
                     tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 } else {
@@ -342,7 +359,7 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
                 let pressed = state == winit::event::ElementState::Pressed;
                 let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
-                let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Click(veldmap_host_core::ui::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed })) };
+                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed })) };
                 let d_clone = dispatcher.clone();
                 let busy_clone = ui_busy.clone();
                 tokio::spawn(async move { busy_clone.store(true, Ordering::SeqCst); let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });
@@ -350,7 +367,7 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
                 if !ui_busy.load(Ordering::SeqCst) && last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(50) {
-                    let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::CursorMoved(veldmap_host_core::ui::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) };
+                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) };
                     let d_clone = dispatcher.clone();
                     let busy_clone = ui_busy.clone();
                     busy_clone.store(true, Ordering::SeqCst);
@@ -363,7 +380,7 @@ async fn main() -> anyhow::Result<()> {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 20.0, y * 20.0),
                     winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
-                let ev = veldmap_host_core::ui::UiEvent { event: Some(veldmap_host_core::ui::ui_event::Event::Scroll(veldmap_host_core::ui::ScrollEvent { delta_x: dx, delta_y: dy })) };
+                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: dx, delta_y: dy })) };
                 let d_clone = dispatcher.clone();
                 let busy_clone = ui_busy.clone();
                 tokio::spawn(async move { busy_clone.store(true, Ordering::SeqCst); let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });

@@ -1,6 +1,6 @@
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use crate::services::{RpcRequest, RpcResponse};
+use crate::rpc::core::{RpcRequest, RpcResponse};
 use prost::Message;
 use std::sync::Arc;
 use tokio::sync::Mutex;

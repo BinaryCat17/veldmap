@@ -1,6 +1,5 @@
 mod view;
 mod common;
-mod utils;
 mod search;
 mod browse;
 mod downloaded;
@@ -25,7 +24,7 @@ pub struct LocalState {
     pub active_download_task: Option<String>,
     pub active_image_task: Option<String>,
     pub current_image: Option<Handle>,
-    pub current_gpu_image: Option<veldsdk::rpc::services::ResourceHandle>,
+    pub current_gpu_image: Option<veldsdk::rpc::core::ResourceHandle>,
     pub downloaded_state: downloaded::DownloadedState,
     pub token_stack: Vec<String>,
     pub next_token: Option<String>,

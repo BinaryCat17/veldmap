@@ -1,5 +1,5 @@
 #[cfg(feature = "pdk")]
-use crate::rpc::services::{RpcRequest, RpcResponse};
+use crate::rpc::core::{RpcRequest, RpcResponse};
 #[cfg(feature = "pdk")]
 use prost::Message;
 

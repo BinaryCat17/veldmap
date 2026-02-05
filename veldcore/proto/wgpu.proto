@@ -33,6 +33,17 @@ message CreateTexture {
     uint32 usage = 8;
 }
 
+message CreateTextureView {
+    uint64 texture_id = 1;
+    uint32 format = 2;
+    uint32 dimension = 3;
+    uint32 aspect = 4;
+    uint32 base_mip_level = 5;
+    uint32 mip_level_count = 6;
+    uint32 base_array_layer = 7;
+    uint32 array_layer_count = 8;
+}
+
 message CreateSampler {
     uint32 address_mode_u = 1;
     uint32 address_mode_v = 2;
@@ -40,6 +51,37 @@ message CreateSampler {
     uint32 mag_filter = 4;
     uint32 min_filter = 5;
     uint32 mipmap_filter = 6;
+}
+
+message BindGroupLayoutEntry {
+    uint32 binding = 1;
+    uint32 visibility = 2; // Bitmask: 1: Vertex, 2: Fragment, 4: Compute
+    oneof ty {
+        BufferBindingLayout buffer = 3;
+        SamplerBindingLayout sampler = 4;
+        TextureBindingLayout texture = 5;
+    }
+}
+
+message BufferBindingLayout {
+    uint32 type = 1; // 1: Uniform, 2: Storage, etc
+    bool has_dynamic_offset = 2;
+    uint64 min_binding_size = 3;
+}
+
+message SamplerBindingLayout {
+    uint32 type = 1; // 1: Filtering, 2: NonFiltering, 3: Comparison
+}
+
+message TextureBindingLayout {
+    uint32 sample_type = 1; // 1: Float, 2: UnfilterableFloat, etc
+    uint32 view_dimension = 2;
+    bool multisampled = 3;
+}
+
+message CreateBindGroupLayout {
+    repeated BindGroupLayoutEntry entries = 1;
+    string label = 2;
 }
 
 message BindGroupEntry {
@@ -53,7 +95,7 @@ message BindGroupEntry {
 }
 
 message CreateBindGroup {
-    uint32 layout_id = 1;
+    uint64 layout_id = 1;
     repeated BindGroupEntry entries = 2;
     string label = 3;
 }
@@ -87,6 +129,65 @@ message CreateRenderPipeline {
     uint32 target_format = 9;
     bool depth_enabled = 10;
     string label = 11;
+}
+
+import "core.proto";
+
+// GPU / RESOURCE SERVICE
+
+message GpuResourceRequest {
+  oneof command {
+    CreateBuffer create_buffer = 1;
+    CreateTexture create_texture = 2;
+    CreateSampler create_sampler = 3;
+    CreateBindGroup create_bind_group = 4;
+    CreateRenderPipeline create_pipeline = 5;
+    uint64 destroy_resource = 6;
+    uint64 map_resource = 7;
+    uint64 unmap_resource = 8;
+    CreateShaderModule create_shader = 9;
+    CreateBindGroupLayout create_bind_group_layout = 10;
+    CreateTextureView create_texture_view = 11;
+    Submit submit = 12;
+    FsReadToTexture fs_read_to_texture = 13;
+    FsReadToBuffer fs_read_to_buffer = 14;
+    ImageLoadToTexture image_load_to_texture = 15;
+  }
+}
+
+message FsReadToTexture {
+    string path = 1;
+    uint32 format = 2; // optional, 0 for auto
+    uint32 usage = 3;
+}
+
+message FsReadToBuffer {
+    string path = 1;
+    uint32 usage = 2;
+}
+
+message ImageLoadToTexture {
+    string path = 1;
+    uint32 usage = 2;
+    bool generate_mipmaps = 3;
+}
+
+message GpuColor {
+    float r = 1;
+    float g = 2;
+    float b = 3;
+    float a = 4;
+}
+
+message Submit {
+    uint64 target_texture_view_id = 1;
+    GpuColor clear_color = 2;
+    CommandBuffer command_buffer = 3;
+}
+
+message GpuResourceResponse {
+  veldmap.core.ResourceHandle handle = 1;
+  string error = 2;
 }
 
 // КОМАНДЫ (COMMAND BUFFER)

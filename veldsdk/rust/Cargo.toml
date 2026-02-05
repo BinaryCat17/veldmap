@@ -33,8 +33,11 @@ prost-build = "0.13"
 [features]
 default = ["pdk"]
 graphics = []
+wgpu = ["graphics"]
+app = ["graphics"]
 iced = [
-    "graphics",
+    "wgpu",
+    "app",
     "iced_core", 
     "iced_widget", 
     "iced_tiny_skia", 

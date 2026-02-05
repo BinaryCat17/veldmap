@@ -5,7 +5,6 @@ use veldmap_host_core::{
     system_service::SystemService,
 };
 use std::sync::Arc;
-use serde_json;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

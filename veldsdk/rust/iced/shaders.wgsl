@@ -38,17 +38,43 @@ var t_diffuse: texture_2d<f32>;
 var s_diffuse: sampler;
 
 @fragment
+
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Выборка из R8 текстуры (атласа)
+
+    // Выборка из RGBA текстуры (атласа)
+
     let tex_sample = textureSample(t_diffuse, s_diffuse, in.tex_coords);
+
     
+
     // Пиксель (0,0) зарезервирован для сплошного цвета (белый 255)
-    // Если UV очень близко к 0, используем просто цвет вершины.
+
     if (in.tex_coords.x < 0.001 && in.tex_coords.y < 0.001) {
+
         return in.color;
+
     }
+
     
-    // Для текста: цвет вершины * значение из красного канала (интенсивность буквы)
-    // Это позволяет рисовать сглаженный текст любого цвета.
-    return vec4<f32>(in.color.rgb, in.color.a * tex_sample.r);
+
+    // Если это обычный текст (белый глиф в атласе), применяем цвет вершины
+
+    // Если это цветной эмодзи, используем цвета из атласа, но учитываем альфу вершины
+
+    let is_color_glyph = abs(tex_sample.r - tex_sample.g) > 0.01 || abs(tex_sample.g - tex_sample.b) > 0.01;
+
+    
+
+    if (is_color_glyph) {
+
+        return vec4<f32>(tex_sample.rgb, tex_sample.a * in.color.a);
+
+    } else {
+
+        // Обычный текст: цвет вершины * интенсивность (из любого канала, так как они равны для маски)
+
+        return vec4<f32>(in.color.rgb, in.color.a * tex_sample.a);
+
+    }
+
 }
