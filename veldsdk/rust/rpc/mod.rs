@@ -16,35 +16,81 @@ pub mod host;
 pub mod client;
 
 #[cfg(feature = "pdk")]
+pub static MODULE_STATE: once_cell::sync::OnceCell<anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>> = once_cell::sync::OnceCell::new();
+
+/// Трейт для обобщенного декодирования RPC ответов.
+pub trait RpcDecode: Sized {
+    fn decode_rpc(bytes: &[u8]) -> anyhow::Result<Self>;
+}
+
+impl RpcDecode for () {
+    fn decode_rpc(_bytes: &[u8]) -> anyhow::Result<Self> {
+        Ok(())
+    }
+}
+
+/// Макрос для реализации RpcDecode для типов Protobuf.
 #[macro_export]
-macro_rules! rpc_call {
-    ($service:expr, $method:expr, $payload:expr, $resp_type:ty) => {
-        async move {
-            $crate::core::yield_now().await;
-            let res = $crate::rpc::host::call_service($service, $method, $payload);
-            res.and_then(|bytes| {
-                <$resp_type as $crate::prost::Message>::decode(&bytes[..])
-                    .map_err(|e| $crate::anyhow::anyhow!("Decode error: {}", e))
-            }).map_err(|e| e.to_string())
+macro_rules! impl_rpc_decode {
+    ($($t:ty),*) => {
+        $(
+            impl $crate::rpc::RpcDecode for $t {
+                fn decode_rpc(bytes: &[u8]) -> $crate::anyhow::Result<Self> {
+                    use $crate::prost::Message;
+                    Ok(<$t>::decode(bytes)?)
+                }
+            }
+        )*
+    };
+}
+
+// Базовые реализации для системных типов
+impl_rpc_decode!(
+    core::FsReadResponse,
+    core::FsListResponse,
+    core::FsDownloadResponse,
+    core::ImageInfoResponse,
+    core::ImageLoadResponse,
+    core::GetResourceResponse,
+    core::CreateDataResponse,
+    core::TaskStatusResponse,
+    wgpu::GpuResourceResponse
+);
+
+/// Макрос для генерации клиентских прокси-функций для RPC сервиса.
+#[macro_export]
+macro_rules! rpc_proxy {
+    (
+        service: $service:expr,
+        $( $method:ident : $req:ty => $res:ty ),* $(,)?
+    ) => {
+        pub mod raw {
+            use super::*;
+            $(
+                pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
+                    use $crate::prost::Message;
+                    let payload = req.encode_to_vec();
+                    let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
+                    $crate::rpc::RpcDecode::decode_rpc(&res_bytes[..])
+                }
+
+                #[cfg(feature = "pdk")]
+                $crate::paste::paste! {
+                    pub fn [<$method _cmd>]<M: 'static>(req: $req, f: impl Fn(Result<$res, String>) -> M + Send + Sync + 'static) -> $crate::core::Command<M> {
+                        $crate::core::Command::perform(
+                            async move {
+                                $method(&req).map_err(|e| e.to_string())
+                            },
+                            f
+                        )
+                    }
+                }
+            )*
         }
     };
 }
 
-#[cfg(feature = "pdk")]
-#[macro_export]
-macro_rules! rpc_command {
-    ($service:expr, $method:expr, $payload:expr, $resp_type:ty, $processor:expr) => {
-        $crate::core::Command::perform(
-            $crate::rpc_call!($service, $method, $payload, $resp_type),
-            $processor
-        )
-    };
-}
-
-#[cfg(feature = "pdk")]
-pub static MODULE_STATE: once_cell::sync::OnceCell<anyhow::Result<Box<dyn std::any::Any + Send + Sync>>> = once_cell::sync::OnceCell::new();
-
-#[cfg(feature = "pdk")]
+/// Улучшенный макрос для определения модуля (сервиса).
 #[macro_export]
 macro_rules! define_module {
     (
@@ -78,8 +124,8 @@ macro_rules! define_module {
             };
 
             let state_result = $init_func(config);
-            let boxed_state: $crate::anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
-                Ok(s) => Ok(Box::new(s)),
+            let boxed_state: $crate::anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>> = match state_result {
+                Ok(s) => Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(s)))),
                 Err(e) => Err(e),
             };
 
@@ -101,12 +147,13 @@ macro_rules! define_module {
             };
             
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let state_any = match $crate::rpc::MODULE_STATE.get() {
+                let state_arc = match $crate::rpc::MODULE_STATE.get() {
                     Some(Ok(s)) => s,
                     Some(Err(e)) => return (Vec::new(), format!("Module initialization failed: {}", e)),
                     None => return (Vec::new(), "Module not initialized (init not called)".to_string()),
                 };
-                let state = state_any.downcast_ref::<$state_type>()
+                let mut state_lock = state_arc.lock().unwrap();
+                let state = state_lock.downcast_mut::<$state_type>()
                     .expect("Failed to downcast state to expected type");
 
                 match request.method.as_str() {
@@ -137,63 +184,6 @@ macro_rules! define_module {
             let response = RpcResponse { payload, error, sync: None };
             $crate::rpc::host::store_output(response.encode_to_vec());
             0
-        }
-    };
-
-    (
-        config: $config_type:ty,
-        state: $state_type:ty,
-        init: $init_func:path,
-        custom_handler: $handler_func:path
-    ) => {
-        #[no_mangle]
-        pub extern "C" fn init() -> i32 {
-            let _ = $crate::core::init();
-            let input = $crate::rpc::host::load_input();
-            
-            let config_json = if input.is_empty() {
-                match $crate::rpc::host::get_config("config") {
-                    Some(c) => c,
-                    None => return 1,
-                }
-            } else {
-                match String::from_utf8(input) {
-                    Ok(s) => s,
-                    Err(_) => return 1,
-                }
-            };
-            
-            let config: $config_type = match $crate::serde_json::from_str(&config_json) {
-                Ok(c) => c,
-                Err(_) => return 2,
-            };
-
-            let state_result = $init_func(config);
-            let boxed_state: $crate::anyhow::Result<Box<dyn std::any::Any + Send + Sync>> = match state_result {
-                Ok(s) => Ok(Box::new(s)),
-                Err(e) => Err(e),
-            };
-
-            if $crate::rpc::MODULE_STATE.set(boxed_state).is_err() {
-                 return 3;
-            }
-            0
-        }
-
-        #[no_mangle]
-        pub extern "C" fn handle_rpc() -> i32 {
-            let state_any = match $crate::rpc::MODULE_STATE.get() {
-                Some(Ok(s)) => s,
-                Some(Err(e)) => return 1,
-                None => return 2,
-            };
-            let state = state_any.downcast_ref::<$state_type>().unwrap();
-            let input = $crate::rpc::host::load_input();
-
-            match $handler_func(state, input) {
-                Ok(output) => { $crate::rpc::host::store_output(output); 0 },
-                Err(_) => 3,
-            }
         }
     };
 }

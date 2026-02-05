@@ -1,16 +1,10 @@
-pub mod core;
 pub mod rpc;
+pub mod core;
+
 #[cfg(feature = "wgpu")]
 pub mod wgpu;
 #[cfg(feature = "app")]
 pub mod app;
-#[cfg(feature = "iced")]
-pub mod iced;
-
-#[cfg(feature = "iced")]
-pub use iced_core;
-#[cfg(feature = "iced")]
-pub use iced_widget;
 
 pub use core::yield_now;
 
@@ -18,16 +12,10 @@ pub use core::yield_now;
 pub use serde_json;
 pub use prost;
 pub use anyhow;
+pub use paste;
 
 pub mod prelude {
     pub use crate::rpc::core::*;
     #[cfg(feature = "pdk")]
-    pub use crate::core::*;
-    #[cfg(feature = "wgpu")]
-    pub use crate::wgpu::*;
-    #[cfg(feature = "app")]
-    pub use crate::app::*;
-    #[cfg(feature = "iced")]
-    pub use crate::iced::runtime::GpuRenderer;
+    pub use crate::core::{Command, BoxedFuture};
 }
-    

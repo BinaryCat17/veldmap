@@ -1,4 +1,6 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rustc-check-cfg=cfg(feature, values(\"pdk\", \"wgpu\", \"app\", \"client\"))");
+
     let proto_files = &[
         "../../veldcore/proto/core.proto",
         "../../veldcore/proto/app.proto",

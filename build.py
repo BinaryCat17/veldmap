@@ -10,14 +10,16 @@ PLUGINS_DIR = "veldgis/plugins"
 WASM_TARGET = "wasm32-wasip1"
 CORE_MANIFEST = "veldcore/Cargo.toml"
 GIS_MANIFEST = "veldgis/Cargo.toml"
+STD_MANIFEST = "veldstd/Cargo.toml"
 
 MODULES = [
-    "veldmap-data-provider",
-    "veldmap-local-storage",
-    "veldmap-tile-server",
-    "veldmap-render",
-    "veldmap-data-browser",
-    "veldmap-desktop-client"
+    ("veldmap-data-provider", GIS_MANIFEST, "veldgis/target"),
+    ("veldmap-local-storage", GIS_MANIFEST, "veldgis/target"),
+    ("veldmap-tile-server", GIS_MANIFEST, "veldgis/target"),
+    ("veldmap-render", GIS_MANIFEST, "veldgis/target"),
+    ("veldmap-data-browser", GIS_MANIFEST, "veldgis/target"),
+    ("veldmap-desktop-client", GIS_MANIFEST, "veldgis/target"),
+    ("veld-ui-service", STD_MANIFEST, "veldstd/target"),
 ]
 
 def run(cmd, cwd=None):
@@ -33,19 +35,19 @@ def build_all(debug=False):
     profile = "debug" if debug else "release"
     cargo_args = [] if debug else ["--release"]
     
-    # 1. Build WASM Modules (in GIS workspace)
+    # 1. Build WASM Modules
     print(f"\n[1/2] Building WASM Modules ({profile})...")
     if not os.path.exists(PLUGINS_DIR):
         os.makedirs(PLUGINS_DIR)
 
-    for module in MODULES:
+    for module, manifest, target_dir in MODULES:
         print(f"\n--- Module: {module} ---")
-        cmd = ["cargo", "build", "--manifest-path", GIS_MANIFEST, "-p", module, "--target", WASM_TARGET] + cargo_args
+        cmd = ["cargo", "build", "--manifest-path", manifest, "-p", module, "--target", WASM_TARGET] + cargo_args
         run(cmd)
         
         # Rust lib names use underscores instead of hyphens
         wasm_file_name = module.replace("-", "_") + ".wasm"
-        source_path = os.path.join("veldgis/target", WASM_TARGET, profile, wasm_file_name)
+        source_path = os.path.join(target_dir, WASM_TARGET, profile, wasm_file_name)
         dest_path = os.path.join(PLUGINS_DIR, wasm_file_name)
         
         print(f"Deploying {wasm_file_name} to {PLUGINS_DIR}/")

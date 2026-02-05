@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package veldmap.ui;
+
+import "core.proto";
+import "app.proto";
+
+message Layout {
+    Widget root = 1;
+    uint32 width = 2;
+    uint32 height = 3;
+}
+
+message Widget {
+    oneof type {
+        Column column = 1;
+        Row row = 2;
+        Text text = 3;
+        Button button = 4;
+        TextInput text_input = 5;
+        WgpuImage image = 6;
+        Space space = 7;
+        Container container = 8;
+    }
+}
+
+message Column {
+    repeated Widget children = 1;
+    float spacing = 2;
+    Padding padding = 3;
+    Alignment align_items = 4;
+    Length width = 5;
+    Length height = 6;
+}
+
+message Row {
+    repeated Widget children = 1;
+    float spacing = 2;
+    Padding padding = 3;
+    Alignment align_items = 4;
+    Length width = 5;
+    Length height = 6;
+}
+
+message Text {
+    string content = 1;
+    float size = 2;
+    Color color = 3;
+    bool bold = 4;
+}
+
+message Button {
+    string label = 1;
+    string on_press = 2; // Message tag
+    bool disabled = 3;
+    Length width = 4;
+    Length height = 5;
+}
+
+message TextInput {
+    string value = 1;
+    string placeholder = 2;
+    string on_input = 3; // Message tag
+    string on_submit = 4; // Message tag
+}
+
+message WgpuImage {
+    veldmap.core.ResourceHandle handle = 1;
+    Length width = 2;
+    Length height = 3;
+}
+
+message Space {
+    Length width = 1;
+    Length height = 2;
+}
+
+message Container {
+    Widget child = 1;
+    Padding padding = 2;
+    Length width = 3;
+    Length height = 4;
+    Alignment align_x = 5;
+    Alignment align_y = 6;
+    Color background = 7;
+}
+
+message Padding {
+    float top = 1;
+    float right = 2;
+    float bottom = 3;
+    float left = 4;
+}
+
+message Length {
+    oneof value {
+        float fixed = 1;
+        bool shrink = 2;
+        bool fill = 3;
+        float portion = 4;
+    }
+}
+
+enum Alignment {
+    START = 0;
+    CENTER = 1;
+    END = 2;
+}
+
+message Color {
+    float r = 1;
+    float g = 2;
+    float b = 3;
+    float a = 4;
+}
+
+// RPC messages for ui-service
+message SetViewRequest {
+    string plugin_id = 1;
+    Layout layout = 2;
+}
+
+message SetViewResponse {}
+
+message HandleUiEventRequest {
+    string plugin_id = 1;
+    veldmap.app.UIEvent event = 2;
+}
+
+message HandleUiEventResponse {}
+
+message RenderRequest {
+    string plugin_id = 1;
+}
+
+message RenderResponse {}
+
+message UiEventResponse {
+    string plugin_id = 1;
+    string message_tag = 2;
+    string value = 3; // For TextInput or similar
+}

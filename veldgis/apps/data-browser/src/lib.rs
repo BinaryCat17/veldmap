@@ -1,13 +1,11 @@
+mod handlers;
 mod view;
 mod common;
 mod search;
 mod browse;
 mod downloaded;
-mod preview;
-mod handlers;
 
-use veldsdk::define_iced_module;
-use veldsdk::iced_core::image::Handle;
+use veld_ui::define_remote_ui_module;
 use veldmap_gis_api::dataprovider::{DataProduct, SearchResponse, ListPathResponse};
 use crate::common::{BrowserItem, ViewMode};
 
@@ -23,7 +21,7 @@ pub struct LocalState {
     pub download_progress: Option<f32>,
     pub active_download_task: Option<String>,
     pub active_image_task: Option<String>,
-    pub current_image: Option<Handle>,
+    pub current_image: Option<u64>,
     pub current_gpu_image: Option<veldsdk::rpc::core::ResourceHandle>,
     pub downloaded_state: downloaded::DownloadedState,
     pub token_stack: Vec<String>,
@@ -35,8 +33,8 @@ pub struct LocalState {
     pub local_files: Vec<BrowserItem>,
 }
 
-#[derive(Debug, Clone)]
-pub enum Message {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum AppMessage {
     SwitchMode(ViewMode),
     SearchInputChanged(String),
     SearchFilterTypeChanged(search::SearchFilterType),
@@ -57,15 +55,15 @@ pub enum Message {
     CancelDownload,
     DeleteLocalFile(String),
     ViewFile(String),
-    PreviewLoaded(Result<Handle, String>),
+    PreviewLoaded(Result<u64, String>),
     ImageStatusUpdated,
     ClosePreview,
 }
 
-define_iced_module! {
+define_remote_ui_module! {
     config: LocalConfig,
     state: LocalState,
-    message: Message,
+    message: AppMessage,
     init: handlers::module_init,
     view: view::view,
     handlers: {
