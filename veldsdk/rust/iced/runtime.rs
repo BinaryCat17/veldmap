@@ -554,7 +554,7 @@ impl<S: 'static, M: Send + 'static> RawIcedRuntime for IcedRuntime<S, M> {
                 if self.ui_pipeline.borrow().is_none() {
                     let shader_source = include_str!("shaders.wgsl");
                     if let Ok(sh) = crate::wgpu::create_shader(shader_source, "GPU UI Shader") {
-                        if let Ok(pip) = crate::wgpu::create_pipeline(sh.id, "GPU UI Pipeline") {
+                        if let Ok(pip) = crate::wgpu::create_pipeline(sh.id, "GPU UI Pipeline", 0) {
                             *self.ui_pipeline.borrow_mut() = Some(pip.id);
                         }
                     }

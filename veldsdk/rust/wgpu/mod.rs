@@ -17,7 +17,7 @@ pub fn create_shader(source: impl Into<String>, label: impl Into<String>) -> any
     res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create shader: {}", res.error))
 }
 
-pub fn create_pipeline(shader_id: u64, label: impl Into<String>) -> anyhow::Result<ResourceHandle> {
+pub fn create_pipeline(shader_id: u64, label: impl Into<String>, target_format: u32) -> anyhow::Result<ResourceHandle> {
     let req = GpuResourceRequest {
         command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
             shader_id,
@@ -26,6 +26,7 @@ pub fn create_pipeline(shader_id: u64, label: impl Into<String>) -> anyhow::Resu
             fragment_entry: "fs_main".to_string(),
             vertex_layouts: Vec::new(),
             primitive_topology: 0, // TriangleList
+            target_format,
             ..Default::default()
         }))
     };

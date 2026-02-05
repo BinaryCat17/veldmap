@@ -4,7 +4,7 @@ use crate::rpc::core::{
     FsListRequest, FsListResponse, FsDeleteRequest, FsDownloadRequest, FsDownloadResponse,
     TaskStatusRequest, TaskStatusResponse, TaskCancelRequest,
     ImageInfoRequest, ImageInfoResponse, ImageLoadRequest, ImageLoadResponse,
-    GetResourceRequest, GetResourceResponse
+    GetResourceRequest, GetResourceResponse, ResourceHandle
 };
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use prost::Message;
@@ -139,25 +139,24 @@ pub fn fs_write_resource(path: impl Into<String>, handle: crate::rpc::core::Reso
 }
 
 pub fn fs_write(path: impl Into<String>, data: Vec<u8>) -> anyhow::Result<()> {
-    use crate::rpc::wgpu::{GpuResourceRequest, GpuResourceResponse};
+    // 1. Создаем Data-ресурс на хосте
+    let handle = create_data_resource(data)?;
     
-    // 1. Создаем GpuBuffer (или DataBuffer в будущем) для хранения данных
-    let req = GpuResourceRequest {
-        command: Some(crate::rpc::wgpu::gpu_resource_request::Command::CreateBuffer(crate::rpc::wgpu::CreateBuffer {
-            size: data.len() as u64,
-            usage: 0,
-            mapped_at_creation: false,
-        }))
-    };
-    let res_buf = call_service("wgpu", "create_resource", req.encode_to_vec())?;
-    let res = GpuResourceResponse::decode(&res_buf[..])?;
-    let handle = res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create resource for fs_write: {}", res.error))?;
-    
-    // 2. Пишем данные через ABI
-    crate::rpc::host::gpu_write_resource(handle.id, 0, &data)?;
-    
-    // 3. Сообщаем системе записать этот ресурс в файл
+    // 2. Сообщаем системе записать этот ресурс в файл
     fs_write_resource(path, handle)
+}
+
+pub fn create_data_resource(data: Vec<u8>) -> anyhow::Result<ResourceHandle> {
+    let req = crate::rpc::core::CreateDataRequest {
+        size: data.len() as u64,
+    };
+    let res_buf = call_service("system", "create_data", req.encode_to_vec())?;
+    let res = crate::rpc::core::CreateDataResponse::decode(&res_buf[..])?;
+    let handle = res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create data resource: {}", res.error))?;
+    
+    // Пишем данные через ABI (который теперь поддерживает Resource::Data)
+    crate::rpc::host::gpu_write_resource(handle.id, 0, &data)?;
+    Ok(handle)
 }
 
 pub fn fs_download(url: impl Into<String>, path: impl Into<String>, headers: std::collections::HashMap<String, String>) -> anyhow::Result<String> {

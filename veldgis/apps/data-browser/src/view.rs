@@ -1,7 +1,7 @@
-use iced_widget::{
+use veldsdk::iced_widget::{
     button, column, container, row, text, progress_bar, scrollable, Space
 };
-use iced_core::{Alignment, Element, Length, Color, Theme};
+use veldsdk::iced_core::{Alignment, Element, Length, Color, Theme};
 use veldsdk::prelude::GpuRenderer as Renderer;
 use crate::search;
 use crate::downloaded;

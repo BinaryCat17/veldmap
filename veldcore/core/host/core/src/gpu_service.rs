@@ -151,7 +151,7 @@ impl NativeService for GpuService {
                         handle.id = self.resources.create_shader(&s.source, Some(&s.label));
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::CreatePipeline(p)) => {
-                        handle.id = self.resources.create_pipeline(p.shader_id, Some(&p.label))?;
+                        handle.id = self.resources.create_pipeline(p.shader_id, Some(&p.label), p.target_format)?;
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::CreateSampler(s)) => {
                         handle.id = self.resources.create_sampler(s.mag_filter, s.min_filter);

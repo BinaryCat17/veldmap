@@ -3,7 +3,8 @@ use crate::common::ViewMode;
 use crate::common::BrowserItem;
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, SearchFilter, DataProduct};
 use prost::Message as ProstMessage;
-use iced_core::image::Handle;
+use veldsdk::iced_core::image::Handle;
+use veldsdk::iced_core::Font;
 use veldsdk::iced::IcedSettings;
 use veldsdk::core::Command;
 use veldsdk::rpc_command;
@@ -32,7 +33,7 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, IcedSetting
     };
     
     let settings = IcedSettings {
-        default_font: iced_core::Font::with_name("VeldMap"),
+        default_font: Font::with_name("VeldMap"),
         fonts: vec![
             ("DejaVuSans", common::DEJAVU_FONT_DATA),
             ("NotoColorEmoji", common::EMOJI_FONT_DATA),

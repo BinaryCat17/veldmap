@@ -26,18 +26,16 @@ pub struct ResourceManager {
     pub next_id: AtomicU64,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
-    surface_format: wgpu::TextureFormat,
 }
 
 impl ResourceManager {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, _surface_format: wgpu::TextureFormat) -> Self {
         Self {
             resources: DashMap::new(),
             named_resources: DashMap::new(),
             next_id: AtomicU64::new(1),
             device,
             queue,
-            surface_format,
         }
     }
 
@@ -322,7 +320,7 @@ impl ResourceManager {
         id
     }
 
-    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>) -> anyhow::Result<u64> {
+    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>, format_id: u32) -> anyhow::Result<u64> {
         let shader = match self.resources.get(&shader_id) {
             Some(r) => match r.value() {
                 Resource::ShaderModule(s) => s.clone(),
@@ -331,9 +329,20 @@ impl ResourceManager {
             None => return Err(anyhow::anyhow!("Shader not found")),
         };
 
+        let target_format = match format_id {
+            1 => wgpu::TextureFormat::R32Float,
+            2 => wgpu::TextureFormat::Rgba16Float,
+            3 => wgpu::TextureFormat::Rgba32Float,
+            9 => wgpu::TextureFormat::R8Unorm,
+            10 => wgpu::TextureFormat::Bgra8UnormSrgb,
+            _ => wgpu::TextureFormat::Rgba8Unorm,
+        };
+
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         
         let bind_group_layout = self.get_ui_layout();
+        
+        // ... (остальной код создания лейаута)
 
         // Бинд-группа 1: Глобальные Uniforms (Resolution)
         let uniform_bg_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -381,7 +390,7 @@ impl ResourceManager {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format,
+                    format: target_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

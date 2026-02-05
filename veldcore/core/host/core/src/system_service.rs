@@ -5,7 +5,7 @@ use crate::core::{
     FsDownloadRequest, LogRequest, TaskResponse, TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, ResourceHandle,
     ImageInfoRequest, ImageInfoResponse, ImageLoadRequest, ImageLoadResponse,
-    GetResourceRequest, GetResourceResponse
+    GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse
 };
 use prost::Message;
 use std::fs;
@@ -169,6 +169,16 @@ impl NativeService for SystemService {
                 } else {
                     Ok(GetResourceResponse { handle: None, error: format!("Resource '{}' not found", req.name) }.encode_to_vec())
                 }
+            }
+            "create_data" => {
+                let req = CreateDataRequest::decode(&payload[..])?;
+                let id = self.resources.create_data_resource(vec![0u8; req.size as usize]);
+                let handle = ResourceHandle {
+                    id,
+                    size: req.size,
+                    content_hash: Vec::new(),
+                };
+                Ok(CreateDataResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
             }
             "fs_read" => {
                 let req = FsReadRequest::decode(&payload[..])?;

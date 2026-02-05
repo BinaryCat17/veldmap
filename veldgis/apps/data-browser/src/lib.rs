@@ -7,7 +7,7 @@ mod preview;
 mod handlers;
 
 use veldsdk::define_iced_module;
-use iced_core::image::Handle;
+use veldsdk::iced_core::image::Handle;
 use veldmap_gis_api::dataprovider::{DataProduct, SearchResponse, ListPathResponse};
 use crate::common::{BrowserItem, ViewMode};
 

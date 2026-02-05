@@ -7,6 +7,11 @@ pub mod app;
 #[cfg(feature = "iced")]
 pub mod iced;
 
+#[cfg(feature = "iced")]
+pub use iced_core;
+#[cfg(feature = "iced")]
+pub use iced_widget;
+
 pub use core::yield_now;
 
 // Re-exports for macros
