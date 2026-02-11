@@ -22,9 +22,7 @@ async fn main() -> anyhow::Result<()> {
             if target == "wasm" {
                 writeln!(buf, "[{} {:5}] {}", ts, level, args)
             } else if target.starts_with("veldmap") {
-                let module = target.split("::").last().unwrap_or(target)
-                    .replace("veldmap_host_", "");
-                writeln!(buf, "[{} {:5}] [{}] {}", ts, level, module, args)
+                writeln!(buf, "[{} {:5}] [host] {}", ts, level, args)
             } else {
                 writeln!(buf, "[{} {:5}] <{}> {}", ts, level, target, args)
             }

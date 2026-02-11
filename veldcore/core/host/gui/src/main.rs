@@ -38,10 +38,8 @@ async fn main() -> anyhow::Result<()> {
                 // Логи из плагинов уже содержат [имя-плагина]
                 writeln!(buf, "[{} {:5}] {}", ts, level, args)
             } else if target.starts_with("veldmap") {
-                // Наши нативные модули: сокращаем путь
-                let module = target.split("::").last().unwrap_or(target)
-                    .replace("veldmap_host_", "");
-                writeln!(buf, "[{} {:5}] [{}] {}", ts, level, module, args)
+                // Все наши внутренние модули теперь просто [host]
+                writeln!(buf, "[{} {:5}] [host] {}", ts, level, args)
             } else {
                 // Внешние библиотеки
                 writeln!(buf, "[{} {:5}] <{}> {}", ts, level, target, args)
