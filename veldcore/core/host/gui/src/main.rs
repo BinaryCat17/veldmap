@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
     let sampler = resources.get_ui_sampler();
 
     // Создаем темно-серую заглушку 1x1 для бинд-группы 1001
-    let white_tex_id = resources.create_texture(1, 1, 0, 8);
+    let white_tex_id = resources.create_texture(1, 1, 0, 8, false);
     resources.write_resource(white_tex_id, 0, &[30, 30, 33, 255]).unwrap();
     if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(white_tex_id) {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

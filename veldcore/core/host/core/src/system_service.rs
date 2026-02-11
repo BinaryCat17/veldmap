@@ -122,7 +122,7 @@ impl NativeService for SystemService {
                     update_status(0.8, String::new(), None);
 
                     // Upload to GPU
-                    let tex_id = resources.create_texture(w, h, 0, 8); // 8 = TEXTURE_BINDING
+                    let tex_id = resources.create_texture(w, h, 0, 8, false); // 8 = TEXTURE_BINDING
                     if let Err(e) = resources.write_resource(tex_id, 0, &rgba) {
                         update_status(0.0, e.to_string(), None);
                         return;

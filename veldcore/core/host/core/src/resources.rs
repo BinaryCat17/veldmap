@@ -144,9 +144,14 @@ impl ResourceManager {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::from_bits_truncate(usage) 
-                   | wgpu::TextureUsages::TEXTURE_BINDING 
-                   | wgpu::TextureUsages::COPY_DST,
+            usage: {
+                let mut u = wgpu::TextureUsages::from_bits_truncate(usage) 
+                       | wgpu::TextureUsages::TEXTURE_BINDING;
+                if !readonly {
+                    u |= wgpu::TextureUsages::COPY_DST;
+                }
+                u
+            },
             view_formats: &[],
         });
         self.resources.insert(id, ResourceEntry { 
@@ -319,7 +324,11 @@ impl ResourceManager {
     pub fn create_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
-        final_usage |= wgpu::BufferUsages::COPY_DST;
+        
+        // Для readonly-буфера, заполняемого при создании, COPY_DST не нужен
+        if !readonly {
+            final_usage |= wgpu::BufferUsages::COPY_DST;
+        }
 
         let aligned_size = Self::align_to(data.len() as u64, 4);
 
