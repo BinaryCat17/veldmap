@@ -428,6 +428,22 @@ impl GpuRenderer {
     }
 
     fn prepare_glyphs(&mut self, buffer: &Buffer) {
+        // Сначала быстро проверяем, все ли глифы уже есть в кэше, чтобы не блокировать Mutex зря
+        let mut all_cached = true;
+        'check: for run in buffer.layout_runs() {
+            for glyph in run.glyphs {
+                let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
+                if !self.glyph_cache.contains_key(&physical_glyph.cache_key) {
+                    all_cached = false;
+                    break 'check;
+                }
+            }
+        }
+
+        if all_cached {
+            return;
+        }
+
         let mut font_system = FONT_SYSTEM.lock().unwrap();
         let mut atlas_modified = false;
 
@@ -449,19 +465,15 @@ impl GpuRenderer {
                         }
                         
                         if self.current_atlas_y + height + 2 > self.atlas_height {
-                            // Очистка атласа если места совсем нет
                             self.current_atlas_x = 2; 
                             self.current_atlas_y = 2; 
                             self.row_height = 0;
                             self.glyph_cache.clear();
-                            // В этом случае нужно пересобрать все глифы текущего буфера
-                            // Но для простоты пока просто продолжим
                         }
 
                         let x = self.current_atlas_x;
                         let y = self.current_atlas_y;
                         
-                        // Копирование данных в атлас
                         for r in 0..height {
                             for c in 0..width {
                                 let src_idx = (r * width + c) as usize;

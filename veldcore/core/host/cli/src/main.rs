@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info,veldmap_host_cli=info,veldmap_host_core=info,wgpu_core=warn,wgpu_hal=warn,naga=warn,iroh=warn,wasmtime_wasi=warn,cranelift_codegen=warn,tracing=warn");
+        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_cli=info,veldmap_host_core=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
     }
     env_logger::init();
 
@@ -21,11 +21,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    log::info!("VeldMap CLI Host starting (DEBUG MODE)...");
+    log::info!("VeldMap CLI Host starting...");
+
+    let flags = wgpu::InstanceFlags::default() 
+        | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER
+        | wgpu::InstanceFlags::DEBUG
+        | wgpu::InstanceFlags::VALIDATION;
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        flags: wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER,
+        flags,
         ..Default::default()
     });
     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { ..Default::default() }).await

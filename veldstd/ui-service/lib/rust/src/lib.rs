@@ -6,9 +6,7 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
 }
 
-use veldsdk::prost::Message;
 use serde::Serialize;
-use std::task::{Context, Poll};
 pub use futures_util::task::noop_waker_ref;
 
 // Генерируем транспорт для UI-сервиса. 

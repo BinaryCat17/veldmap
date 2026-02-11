@@ -1,4 +1,4 @@
-use crate::{LocalState, common, AppMessage as Message};
+use crate::{LocalState, AppMessage as Message};
 use crate::common::ViewMode;
 use crate::common::BrowserItem;
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, SearchFilter, DataProduct};

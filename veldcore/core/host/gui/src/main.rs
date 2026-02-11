@@ -21,9 +21,10 @@ mod app_service;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Включаем подробные логи для отладки
+    // Настраиваем логи: по умолчанию только предупреждения, для нашего проекта - INFO
+    // Отключаем шумные iroh, wasmtime, sctk и wgpu_core (до уровня error/warn)
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info,veldmap_host=trace,veldmap_host_gui=trace,veldmap_host_core=trace,wgpu_core=warn,wgpu_hal=warn");
+        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
     }
     env_logger::init();
 
@@ -35,13 +36,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    log::info!("VeldMap GUI Host starting (DEBUG MODE)...");
+    log::info!("VeldMap GUI Host starting...");
 
     let event_loop = EventLoopBuilder::<()>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     
     let window = Arc::new(WindowBuilder::new()
-        .with_title("VeldMap (Debug)")
+        .with_title("VeldMap")
         .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
         .build(&event_loop)?);
 
@@ -49,7 +50,11 @@ async fn main() -> anyhow::Result<()> {
     let is_visible = Arc::new(AtomicBool::new(true));
     let ui_busy = Arc::new(AtomicBool::new(false));
 
-    let flags = wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
+    let flags = wgpu::InstanceFlags::default() 
+        | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER
+        | wgpu::InstanceFlags::DEBUG
+        | wgpu::InstanceFlags::VALIDATION;
+    
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags,
