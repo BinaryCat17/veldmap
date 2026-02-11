@@ -133,7 +133,9 @@ message RenderRequest {
     string plugin_id = 1;
 }
 
-message RenderResponse {}
+message RenderResponse {
+    repeated UiEventResponse messages = 1;
+}
 
 message UiEventResponse {
     string plugin_id = 1;

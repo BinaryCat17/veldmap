@@ -19,44 +19,49 @@ pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::R
 }
 
 pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> anyhow::Result<HandleUiEventResponse> {
-    if let Some(plugin) = state.plugins.get_mut(&req.plugin_id) {
-        if let Some(event_proto) = req.event {
-            if let Some(ev) = event_proto.event {
-                match ev {
-                    app_proto::ui_event::Event::Resize(r) => {
-                        *plugin.canvas_size.borrow_mut() = (r.width, r.height);
-                        *plugin.scale_factor.borrow_mut() = r.scale_factor;
-                        *plugin.needs_redrawing.borrow_mut() = true;
-                    }
-                    app_proto::ui_event::Event::CursorMoved(c) => {
-                        let sf = *plugin.scale_factor.borrow();
-                        let pos = Point::new(c.x / sf, c.y / sf);
-                        *plugin.cursor_position.borrow_mut() = pos;
-                        plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
-                    }
-                    app_proto::ui_event::Event::Click(c) => {
-                        let sf = *plugin.scale_factor.borrow();
-                        let pos = Point::new(c.x / sf, c.y / sf);
-                        *plugin.cursor_position.borrow_mut() = pos;
-                        
-                        let button = match c.button {
-                            1 => iced_core::mouse::Button::Left,
-                            2 => iced_core::mouse::Button::Right,
-                            3 => iced_core::mouse::Button::Middle,
-                            _ => iced_core::mouse::Button::Left,
-                        };
-                        let mut events = plugin.pending_events.borrow_mut();
-                        // Важно: сначала обновляем позицию курсора, чтобы iced знал где произошел клик
-                        events.push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
-                        
-                        if c.pressed {
-                            events.push(Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)));
-                        } else {
-                            events.push(Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)));
-                        }
-                    }
-                    _ => {}
+    let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
+    if let Some(event_proto) = req.event {
+        if let Some(ev) = event_proto.event {
+            *plugin.needs_redrawing.borrow_mut() = true;
+            match ev {
+                app_proto::ui_event::Event::Resize(r) => {
+                    log::info!("[UI-SERVICE] Resize plugin '{}': {}x{} (sf={})", req.plugin_id, r.width, r.height, r.scale_factor);
+                    *plugin.canvas_size.borrow_mut() = (r.width, r.height);
+                    *plugin.scale_factor.borrow_mut() = r.scale_factor;
                 }
+                app_proto::ui_event::Event::CursorMoved(c) => {
+                    let sf = *plugin.scale_factor.borrow();
+                    let pos = Point::new(c.x / sf, c.y / sf);
+                    *plugin.cursor_position.borrow_mut() = pos;
+                    plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
+                }
+                app_proto::ui_event::Event::Click(c) => {
+                    let sf = *plugin.scale_factor.borrow();
+                    let pos = Point::new(c.x / sf, c.y / sf);
+                    log::info!("[UI-SERVICE] Click plugin '{}': raw={:?}, logical={:?}, button={}, pressed={}", req.plugin_id, (c.x, c.y), (pos.x, pos.y), c.button, c.pressed);
+                    *plugin.cursor_position.borrow_mut() = pos;
+                    
+                    let button = match c.button {
+                        1 => iced_core::mouse::Button::Left,
+                        2 => iced_core::mouse::Button::Right,
+                        3 => iced_core::mouse::Button::Middle,
+                        _ => iced_core::mouse::Button::Left,
+                    };
+                    let mut events = plugin.pending_events.borrow_mut();
+                    events.push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
+                    
+                    if c.pressed {
+                        events.push(Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)));
+                    } else {
+                        events.push(Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)));
+                    }
+                }
+                app_proto::ui_event::Event::Scroll(s) => {
+                    plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
+                        delta: iced_core::mouse::ScrollDelta::Pixels { x: s.delta_x, y: s.delta_y } 
+                    }));
+                }
+                _ => {}
             }
         }
     }
@@ -65,15 +70,16 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
 
 pub fn handle_render(state: &mut LocalState, req: RenderRequest) -> anyhow::Result<RenderResponse> {
     let renderer = &mut state.renderer;
+    let mut messages = Vec::new();
     if let Some(plugin) = state.plugins.get_mut(&req.plugin_id) {
-        render_plugin(plugin, renderer, &req.plugin_id)?;
+        messages = render_plugin(plugin, renderer, &req.plugin_id)?;
     }
-    Ok(RenderResponse {})
+    Ok(RenderResponse { messages })
 }
 
-fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str) -> anyhow::Result<()> {
+fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str) -> anyhow::Result<Vec<UiEventResponse>> {
     let (width, height) = *plugin.canvas_size.borrow();
-    if width == 0 || height == 0 { return Ok(()); }
+    if width == 0 || height == 0 { return Ok(Vec::new()); }
     
     let sf = *plugin.scale_factor.borrow();
     renderer.update_params(width, height, sf);
@@ -99,6 +105,10 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut clipboard = iced_core::clipboard::Null;
     let (ui_state, _) = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
     
+    if !captured_messages.is_empty() {
+        log::info!("[UI-SERVICE] Captured {} messages for plugin '{}'", captured_messages.len(), plugin_id);
+    }
+    
     let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
     let should_draw = *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated);
     
@@ -109,14 +119,14 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     
     plugin.interface_cache.replace(ui.into_cache());
     
+    let mut responses = Vec::new();
     for msg in captured_messages {
-        let event_res = UiEventResponse {
+        responses.push(UiEventResponse {
             plugin_id: plugin_id.to_string(),
             message_tag: msg.tag,
             value: msg.value,
-        };
-        let _ = call_service(plugin_id, "handle_ui_message", event_res.encode_to_vec());
+        });
     }
     
-    Ok(())
+    Ok(responses)
 }

@@ -11,7 +11,10 @@ pub struct UiMessage {
 
 pub fn convert_layout(layout: &proto::Layout) -> Element<'static, UiMessage, Theme, GpuRenderer> {
     if let Some(root) = &layout.root {
-        convert_widget(root)
+        container(convert_widget(root))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     } else {
         column([]).into()
     }

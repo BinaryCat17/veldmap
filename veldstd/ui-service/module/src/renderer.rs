@@ -53,6 +53,7 @@ pub struct GpuRenderer {
     font_map: HashMap<String, String>,
     pub current_sf: f32,
     scissor_stack: Vec<iced_core::Rectangle>,
+    transformation_stack: Vec<Transformation>,
     pub current_width: u32,
     pub current_height: u32,
 }
@@ -86,17 +87,23 @@ impl GpuRenderer {
             atlas_height: 2048,
             atlas_data: {
                 let mut data = vec![0; 2048 * 2048 * 4];
-                // Заполняем весь атлас белым с 0 альфой, а (0,0) - белым с 255 альфой
-                for i in 0..4 { data[i] = 255; }
+                // Заполняем область 4x4 белым цветом для сплошных заливок
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let idx = (y * 2048 + x) * 4;
+                        for i in 0..4 { data[idx + i] = 255; }
+                    }
+                }
                 data
             },
-            current_atlas_x: 2, 
-            current_atlas_y: 2,
+            current_atlas_x: 6, 
+            current_atlas_y: 6,
             row_height: 1,
             atlas_dirty: true,
             font_map,
             current_sf: 1.0,
             scissor_stack: Vec::new(),
+            transformation_stack: vec![Transformation::IDENTITY],
             current_width: 0,
             current_height: 0,
         }
@@ -106,6 +113,8 @@ impl GpuRenderer {
         self.vertices.clear();
         self.draw_commands.clear();
         self.scissor_stack.clear();
+        self.transformation_stack.clear();
+        self.transformation_stack.push(Transformation::IDENTITY);
     }
 
     pub fn update_params(&mut self, width: u32, height: u32, sf: f32) {
@@ -114,12 +123,20 @@ impl GpuRenderer {
         self.current_height = height;
     }
 
+    fn transform_rect(&self, rect: [f32; 4]) -> [f32; 4] {
+        if let Some(t) = self.transformation_stack.last() {
+            let p1 = Point::new(rect[0], rect[1]) * *t;
+            let p2 = Point::new(rect[0] + rect[2], rect[1] + rect[3]) * *t;
+            [p1.x, p1.y, p2.x - p1.x, p2.y - p1.y]
+        } else {
+            rect
+        }
+    }
+
     pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4]) {
+        let rect = self.transform_rect(rect);
         let x = rect[0]; let y = rect[1]; let w = rect[2]; let h = rect[3];
         let u1 = uv[0]; let v1 = uv[1]; let u2 = uv[2]; let v2 = uv[3];
-        
-        // ВАЖНО: Если мы используем Scissor, мы должны завершить текущую команду Quads 
-        // и начать новую, если Scissor изменился. Но Scissor у нас идет отдельной командой.
         
         self.vertices.push(Vertex { pos: [x, y], color, uv: [u1, v1] });
         self.vertices.push(Vertex { pos: [x + w, y], color, uv: [u2, v1] });
@@ -334,10 +351,33 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             iced_core::Background::Color(c) => [c.r, c.g, c.b, c.a],
             _ => [1.0, 1.0, 1.0, 1.0],
         };
-        // UV [0,0,0,0] указывает на первый зарезервированный белый пиксель
-        self.add_quad([quad.bounds.x, quad.bounds.y, quad.bounds.width, quad.bounds.height], color, [0.0, 0.0, 0.0, 0.0]);
+        
+        log::trace!("[UI-RENDERER] fill_quad: bounds={:?}, color={:?}", quad.bounds, color);
+        
+        // Используем UV, указывающий на центр нашей белой области 4x4 в начале атласа.
+        let white_uv = [2.0/2048.0, 2.0/2048.0, 2.0/2048.0, 2.0/2048.0];
+        
+        // Отрисовка основного прямоугольника
+        self.add_quad([quad.bounds.x, quad.bounds.y, quad.bounds.width, quad.bounds.height], color, white_uv);
+        
+        // Отрисовка границ (если есть)
+        if quad.border.width > 0.0 {
+            let bc = quad.border.color;
+            let border_color = [bc.r, bc.g, bc.b, bc.a];
+            let bw = quad.border.width;
+            
+            self.add_quad([quad.bounds.x, quad.bounds.y, quad.bounds.width, bw], border_color, white_uv);
+            self.add_quad([quad.bounds.x, quad.bounds.y + quad.bounds.height - bw, quad.bounds.width, bw], border_color, white_uv);
+            self.add_quad([quad.bounds.x, quad.bounds.y, bw, quad.bounds.height], border_color, white_uv);
+            self.add_quad([quad.bounds.x + quad.bounds.width - bw, quad.bounds.y, bw, quad.bounds.height], border_color, white_uv);
+        }
     }
-    fn clear(&mut self) { self.vertices.clear(); self.draw_commands.clear(); }
+    fn clear(&mut self) { 
+        self.vertices.clear(); 
+        self.draw_commands.clear(); 
+        self.transformation_stack.clear();
+        self.transformation_stack.push(Transformation::IDENTITY);
+    }
     fn start_layer(&mut self, bounds: iced_core::Rectangle) {
         self.scissor_stack.push(bounds);
         self.apply_scissor();
@@ -346,8 +386,13 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
         self.scissor_stack.pop();
         self.apply_scissor();
     }
-    fn start_transformation(&mut self, _transformation: Transformation) {}
-    fn end_transformation(&mut self) {}
+    fn start_transformation(&mut self, transformation: Transformation) {
+        let current = self.transformation_stack.last().cloned().unwrap_or(Transformation::IDENTITY);
+        self.transformation_stack.push(current * transformation);
+    }
+    fn end_transformation(&mut self) {
+        self.transformation_stack.pop();
+    }
 }
 
 impl GpuRenderer {
@@ -442,6 +487,7 @@ impl iced_core::text::Renderer for GpuRenderer {
     
     fn fill_text(&mut self, text: iced_core::Text, pos: Point, color: Color, _clip: iced_core::Rectangle) {
         if text.content.is_empty() { return; }
+        log::trace!("[UI-RENDERER] fill_text: content='{}', pos={:?}, size={:?}", text.content, pos, text.size);
         let mut font_system = FONT_SYSTEM.lock().unwrap();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
         let font_family = match &text.font.family {

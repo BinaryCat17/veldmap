@@ -382,7 +382,16 @@ macro_rules! define_remote_ui_module {
                         plugin_id: module.plugin_name.clone(),
                         layout: Some(layout),
                     });
-                    let _ = $crate::raw::render(&$crate::proto::RenderRequest { plugin_id: module.plugin_name.clone() });
+                    if let Ok(render_res) = $crate::raw::render(&$crate::proto::RenderRequest { plugin_id: module.plugin_name.clone() }) {
+                        for msg_res in render_res.messages {
+                            let message: $message_type = match veldsdk::serde_json::from_str(&msg_res.message_tag) {
+                                Ok(m) => m,
+                                Err(_) => continue,
+                            };
+                            let cmd = internal_update(&mut module.state, message);
+                            module.tasks.extend(cmd.0);
+                        }
+                    }
                     
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
                     veldsdk::rpc::host::store_output(response.encode_to_vec());
@@ -403,19 +412,6 @@ macro_rules! define_remote_ui_module {
                         plugin_id: module.plugin_name.clone(),
                         event: Some(event),
                     });
-                    0
-                }
-                "handle_ui_message" => {
-                    let msg_res = match $crate::proto::UiEventResponse::decode(&request.payload[..]) {
-                        Ok(m) => m,
-                        Err(_) => return 4,
-                    };
-                    let message: $message_type = match veldsdk::serde_json::from_str(&msg_res.message_tag) {
-                        Ok(m) => m,
-                        Err(_) => return 5,
-                    };
-                    let cmd = internal_update(&mut module.state, message);
-                    module.tasks.extend(cmd.0);
                     0
                 }
                 _ => 6,
