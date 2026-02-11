@@ -270,8 +270,6 @@ impl iced_core::text::Paragraph for RealParagraph {
         
         let mut width: f32 = 0.0;
         for run in buffer.layout_runs() { width = width.max(run.line_w); }
-        // let height = buffer.layout_runs().count() as f32 * buffer.metrics().line_height;
-        // log::info!("Paragraph::with_text('{}'): {}x{}", text.content, width, height);
 
         Self { 
             buffer: Some(buffer),
@@ -297,10 +295,8 @@ impl iced_core::text::Paragraph for RealParagraph {
             let mut width: f32 = 0.0;
             for run in buf.layout_runs() { width = width.max(run.line_w); }
             let height = buf.layout_runs().count() as f32 * buf.metrics().line_height;
-            log::info!("min_bounds: {}x{}", width, height);
             Size::new(width, height)
         } else {
-            log::info!("min_bounds: None (ZERO)");
             Size::ZERO 
         }
     }
@@ -344,7 +340,6 @@ impl iced_core::text::Renderer for GpuRenderer {
             let mut width: f32 = 0.0;
             for run in buffer.layout_runs() { width = width.max(run.line_w); }
             let height = buffer.layout_runs().count() as f32 * buffer.metrics().line_height;
-            // log::info!("fill_paragraph at {:?}: {}x{}", pos, width, height);
             
             let x_offset = match p.horizontal_alignment {
                 iced_core::alignment::Horizontal::Center => width / 2.0,
@@ -366,7 +361,6 @@ impl iced_core::text::Renderer for GpuRenderer {
     
     fn fill_text(&mut self, text: iced_core::Text, pos: Point, color: Color, _clip: iced_core::Rectangle) {
         if text.content.is_empty() { return; }
-        // log::info!("fill_text '{}' at {:?} (bounds: {:?})", text.content, pos, text.bounds);
         let mut font_system = FONT_SYSTEM.lock().unwrap();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
         
@@ -412,17 +406,6 @@ impl GpuRenderer {
     fn draw_buffer(&mut self, buffer: &Buffer, pos: Point, color: Color) {
         let text_color = [color.r, color.g, color.b, color.a];
         let mut font_system = FONT_SYSTEM.lock().unwrap();
-
-        // Calculate alignment offset based on the first line (assuming uniform alignment for now)
-        // or we could assume the pos is the anchor point based on text.horizontal_alignment passed earlier.
-        // Since we don't have the text object here, we rely on how we set up the buffer.
-        // Wait, fill_paragraph passes 'pos'. We need to know the alignment to adjust 'pos'.
-        // But draw_buffer is generic. 
-        // Actually, iced should handle this logic if we implemented `measure` correctly.
-        // But since we see pos=Center, we must manually adjust.
-        
-        // However, we don't have alignment in draw_buffer signature.
-        // Let's adjust pos in fill_text and fill_paragraph BEFORE calling draw_buffer.
         
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
@@ -473,8 +456,6 @@ impl GpuRenderer {
                 }
                 if let Some(info) = self.glyph_cache.get(&cache_key) {
                     let x = pos.x + glyph.x + (info.offset_x as f32 / self.current_sf);
-                    // Use a smaller factor for ascent to visually center text better (closer to cap-height centering)
-                    let visual_ascent = buffer.metrics().font_size * 0.4;
                     let y = pos.y + run.line_y - (info.offset_y as f32 / self.current_sf);
                     self.add_quad([x, y, info.width as f32 / self.current_sf, info.height as f32 / self.current_sf], text_color, info.uv);
                 }
