@@ -144,7 +144,7 @@ impl NativeService for GpuService {
                         handle.size = (t.width * t.height * 4) as u64; 
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::CreateBuffer(b)) => {
-                        handle.id = self.resources.create_buffer(b.size, b.usage);
+                        handle.id = self.resources.create_buffer_ext(b.size, b.usage, b.mapped_at_creation);
                         handle.size = b.size;
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::CreateShader(s)) => {

@@ -70,10 +70,12 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             Some(Extern::Memory(m)) => m,
             _ => return,
         };
-        let data = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
-        if let Some(data) = data {
+        
+        let memory_data = mem.data(&caller);
+        if let Some(data_slice) = memory_data.get(ptr as usize..(ptr + len) as usize) {
             let resources = caller.data().resources.clone();
-            let _ = resources.write_resource(id, offset, &data);
+            // Передаем срез напрямую, избегая .to_vec()
+            let _ = resources.write_resource(id, offset, data_slice);
         }
     })?;
 
@@ -105,6 +107,24 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             }
             Ok(())
         })
+    })?;
+
+    // 13. veld_gpu_create_buffer
+    linker.func_wrap("env", "veld_gpu_create_buffer", |mut caller: Caller<'_, HostState>, usage: u32, ptr: u64, len: u64| -> u64 {
+        let mem = match caller.get_export("memory") {
+            Some(Extern::Memory(m)) => m,
+            _ => return 0,
+        };
+        
+        let memory_data = mem.data(&caller);
+        if let Some(data_slice) = memory_data.get(ptr as usize..(ptr + len) as usize) {
+            let resources = caller.data().resources.clone();
+            let id = resources.create_buffer_with_data(data_slice, usage);
+            log::debug!(target: "wasm", "[{}] Created buffer {} with data (size={})", caller.data().plugin_name, id, len);
+            id
+        } else {
+            0
+        }
     })?;
 
     // 4. veld_get_info (ASYNC)

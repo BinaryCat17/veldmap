@@ -93,18 +93,10 @@ impl ResourceManager {
         (size + alignment - 1) & !(alignment - 1)
     }
 
-    pub fn create_buffer(&self, size: u64, usage: u32) -> u64 {
+    pub fn create_buffer_ext(&self, size: u64, usage: u32, mapped: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
-        
-        // Добавляем COPY_DST всегда, чтобы мы могли писать в буфер из WASM
         final_usage |= wgpu::BufferUsages::COPY_DST;
-
-        if final_usage.intersects(wgpu::BufferUsages::MAP_READ) {
-            // Оставляем как есть
-        } else if usage == 0 {
-            final_usage |= wgpu::BufferUsages::MAP_READ;
-        }
 
         let aligned_size = Self::align_to(size, 4);
 
@@ -112,10 +104,14 @@ impl ResourceManager {
             label: Some(&format!("Buffer-{}", id)),
             size: aligned_size,
             usage: final_usage,
-            mapped_at_creation: false,
+            mapped_at_creation: mapped,
         });
         self.resources.insert(id, Resource::Buffer(Arc::new(buffer)));
         id
+    }
+
+    pub fn create_buffer(&self, size: u64, usage: u32) -> u64 {
+        self.create_buffer_ext(size, usage, false)
     }
 
     pub fn create_texture(&self, width: u32, height: u32, format_id: u32, usage: u32) -> u64 {
@@ -292,10 +288,27 @@ impl ResourceManager {
     }
 
     pub fn create_buffer_with_data(&self, data: &[u8], usage: u32) -> u64 {
-        self.create_buffer_mapped(data.len() as u64, usage, |view| {
-            view.copy_from_slice(data);
-            Ok(())
-        }).unwrap()
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
+        final_usage |= wgpu::BufferUsages::COPY_DST;
+
+        let aligned_size = Self::align_to(data.len() as u64, 4);
+
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("Buffer-data-{}", id)),
+            size: aligned_size,
+            usage: final_usage,
+            mapped_at_creation: true,
+        });
+        
+        {
+            let mut view = buffer.slice(..).get_mapped_range_mut();
+            view[..data.len()].copy_from_slice(data);
+        }
+        buffer.unmap();
+        
+        self.resources.insert(id, Resource::Buffer(Arc::new(buffer)));
+        id
     }
 
     pub fn get_resource(&self, id: u64) -> Option<Resource> {
