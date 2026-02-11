@@ -32,5 +32,5 @@ pub fn view(state: &LocalState) -> Element<Message> {
         ViewMode::Downloaded => crate::downloaded::view(&state.downloaded_state, &state.local_files),
     };
 
-    column![title_bar, status_view, error_view, main_content].spacing(20.0).into()
+    column![title_bar, status_view, error_view, main_content].spacing(20.0).padding(20.0).into()
 }

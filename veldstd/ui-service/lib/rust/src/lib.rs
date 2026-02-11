@@ -53,6 +53,21 @@ impl<M> Column<M> {
         self.widget.align_items = align as i32;
         self
     }
+    pub fn padding(mut self, p: f32) -> Self {
+        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
+        self
+    }
+    pub fn max_width(mut self, w: f32) -> Self {
+        if let Some(width) = self.widget.width.as_mut() {
+             // Если ширина уже задана, мы не можем просто переопределить её на max_width в этой упрощенной схеме,
+             // но для протокола добавим поддержку в Widget напрямую если надо. 
+             // В данном случае просто обновим фиксированную ширину.
+             width.value = Some(proto::length::Value::Fixed(w));
+        } else {
+             self.widget.width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
+        }
+        self
+    }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
         self
@@ -92,6 +107,10 @@ impl<M> Row<M> {
     }
     pub fn align_items(mut self, align: Alignment) -> Self {
         self.widget.align_items = align as i32;
+        self
+    }
+    pub fn padding(mut self, p: f32) -> Self {
+        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
         self
     }
 }

@@ -76,6 +76,8 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     if width == 0 || height == 0 { return Ok(()); }
     
     let sf = *plugin.scale_factor.borrow();
+    renderer.update_params(width, height, sf);
+    
     let cursor_pos = *plugin.cursor_position.borrow();
     let cursor = iced_core::mouse::Cursor::Available(cursor_pos);
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());

@@ -108,6 +108,12 @@ impl GpuRenderer {
         self.scissor_stack.clear();
     }
 
+    pub fn update_params(&mut self, width: u32, height: u32, sf: f32) {
+        self.current_sf = sf;
+        self.current_width = width;
+        self.current_height = height;
+    }
+
     pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4]) {
         let x = rect[0]; let y = rect[1]; let w = rect[2]; let h = rect[3];
         let u1 = uv[0]; let v1 = uv[1]; let u2 = uv[2]; let v2 = uv[3];
@@ -134,9 +140,6 @@ impl GpuRenderer {
 
     pub fn render_to_texture(&mut self, plugin: &PluginUiState, ui: &mut UserInterface<'_, crate::converter::UiMessage, Theme, GpuRenderer>, width: u32, height: u32, sf: f32, cursor: iced_core::mouse::Cursor) -> anyhow::Result<()> {
         let mut recorder = WgpuRecorder::new(width, height);
-        self.current_sf = sf;
-        self.current_width = width;
-        self.current_height = height;
         
         let logical_w = width as f32 / sf;
         let logical_h = height as f32 / sf;
