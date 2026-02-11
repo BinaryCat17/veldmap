@@ -415,9 +415,20 @@ impl iced_core::image::Renderer for GpuRenderer {
     fn draw_image(&mut self, _handle: iced_core::Image, _at: iced_core::Rectangle) {}
 }
 
-#[derive(Default)]
 pub struct RealParagraph {
     pub buffer: Option<Buffer>,
+    pub horizontal_alignment: iced_core::alignment::Horizontal,
+    pub vertical_alignment: iced_core::alignment::Vertical,
+}
+
+impl Default for RealParagraph {
+    fn default() -> Self {
+        Self {
+            buffer: None,
+            horizontal_alignment: iced_core::alignment::Horizontal::Left,
+            vertical_alignment: iced_core::alignment::Vertical::Top,
+        }
+    }
 }
 
 impl iced_core::text::Paragraph for RealParagraph {
@@ -425,16 +436,24 @@ impl iced_core::text::Paragraph for RealParagraph {
     fn with_text(text: iced_core::Text<&str, Self::Font>) -> Self {
         let mut font_system = FONT_SYSTEM.lock().unwrap();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
-        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name("DejaVu Sans"));
+        let font_family = match &text.font.family {
+            iced_core::font::Family::Name(name) => name,
+            _ => "DejaVu Sans",
+        };
+        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
         buffer.set_text(&mut font_system, text.content, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut font_system, false);
-        Self { buffer: Some(buffer) } 
+        Self { 
+            buffer: Some(buffer),
+            horizontal_alignment: text.horizontal_alignment,
+            vertical_alignment: text.vertical_alignment,
+        } 
     }
     fn with_spans<Link>(_: iced_core::Text<&[iced_core::text::Span<'_, Link, Self::Font>], Self::Font>) -> Self { Self::default() }
     fn resize(&mut self, _: Size) {}
     fn compare(&self, _: iced_core::Text<(), Self::Font>) -> iced_core::text::Difference { iced_core::text::Difference::None }
-    fn horizontal_alignment(&self) -> iced_core::alignment::Horizontal { iced_core::alignment::Horizontal::Left }
-    fn vertical_alignment(&self) -> iced_core::alignment::Vertical { iced_core::alignment::Vertical::Top }
+    fn horizontal_alignment(&self) -> iced_core::alignment::Horizontal { self.horizontal_alignment }
+    fn vertical_alignment(&self) -> iced_core::alignment::Vertical { self.vertical_alignment }
     fn min_bounds(&self) -> Size { 
         if let Some(buf) = &self.buffer {
             let mut width: f32 = 0.0;
@@ -509,6 +528,16 @@ impl GpuRenderer {
         let text_color = [color.r, color.g, color.b, color.a];
         let mut font_system = FONT_SYSTEM.lock().unwrap();
 
+        // Попробуем другой подход: считаем, что iced передает pos.y как верхнюю границу блока текста.
+        // Iced ожидает, что текст будет отрисован внутри блока высотой line_height.
+        // Чтобы текст казался центрированным, нам нужно сместить базовую линию вниз.
+        let font_size = buffer.metrics().font_size;
+        let line_height = buffer.metrics().line_height;
+        
+        // Сдвигаем базовую линию так, чтобы она была на расстоянии font_size от верха.
+        // Это обычно дает хорошее визуальное центрирование для большинства шрифтов.
+        let internal_offset_y = line_height - font_size;
+
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
@@ -558,7 +587,7 @@ impl GpuRenderer {
                 }
                 if let Some(info) = self.glyph_cache.get(&cache_key) {
                     let x = pos.x + (physical_glyph.x as f32 + info.offset_x as f32) / self.current_sf;
-                    let y = pos.y + (run.line_y as f32 + physical_glyph.y as f32 - info.offset_y as f32) / self.current_sf;
+                    let y = pos.y + (run.line_y as f32 - internal_offset_y + physical_glyph.y as f32 - info.offset_y as f32) / self.current_sf;
                     self.add_quad([x, y, info.width as f32 / self.current_sf, info.height as f32 / self.current_sf], text_color, info.uv);
                 }
             }

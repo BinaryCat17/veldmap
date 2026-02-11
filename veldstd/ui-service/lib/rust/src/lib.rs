@@ -35,7 +35,14 @@ pub struct Column<M> {
 
 impl<M> Column<M> {
     pub fn new() -> Self {
-        Self { widget: proto::Column::default(), _marker: std::marker::PhantomData }
+        Self { 
+            widget: proto::Column {
+                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                ..Default::default()
+            }, 
+            _marker: std::marker::PhantomData 
+        }
     }
     pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
         self.widget.children.push(child.into().widget);
@@ -95,7 +102,14 @@ pub struct Row<M> {
 
 impl<M> Row<M> {
     pub fn new() -> Self {
-        Self { widget: proto::Row::default(), _marker: std::marker::PhantomData }
+        Self { 
+            widget: proto::Row {
+                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                ..Default::default()
+            }, 
+            _marker: std::marker::PhantomData 
+        }
     }
     pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
         self.widget.children.push(child.into().widget);
@@ -184,6 +198,14 @@ impl<M> Button<M> {
     }
     pub fn on_press(mut self, msg: M) -> Self where M: Serialize {
         self.widget.on_press = serde_json::to_string(&msg).unwrap_or_default();
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
         self
     }
 }

@@ -23,7 +23,7 @@ pub fn view(_state: &SearchState, results: &[DataProduct]) -> Element<Message> {
             button(text("Search")).on_press(Message::SearchPressed)
         ].spacing(10.0),
         column(results.iter().map(|p| {
-            button(text(&p.name)).on_press(Message::ProductSelected(p.clone())).into()
+            button(text(&p.name)).width(veld_ui::Length::Fill).on_press(Message::ProductSelected(p.clone())).into()
         }))
     ].spacing(15.0).into()
 }

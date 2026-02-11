@@ -20,7 +20,7 @@ pub fn view(state: &DownloadedState, files: &[BrowserItem]) -> Element<Message> 
         text("Local Files").size(20.0),
         text(format!("Search: {}", state.search_query)).size(14.0),
         column(files.iter().map(|f| {
-            button(text(&f.name)).on_press(Message::ViewFile(f.s3_key.clone())).into()
+            button(text(&f.name)).width(veld_ui::Length::Fill).on_press(Message::ViewFile(f.s3_key.clone())).into()
         }))
     ].spacing(15.0).into()
 }
