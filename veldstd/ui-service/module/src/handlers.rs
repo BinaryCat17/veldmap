@@ -161,7 +161,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
         if vertex_buffer.is_none() {
             let req = GpuResourceRequest {
                 command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-                    size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false // VERTEX | COPY_DST
+                    size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false, readonly: false
                 }))
             };
             *vertex_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
@@ -199,7 +199,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
     if ui_texture.is_none() {
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
-                width, height, format: 0, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1
+                width, height, format: 0, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
             }))
         };
         *ui_texture = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
@@ -244,7 +244,7 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
     if uniform_buffer.is_none() {
         let buf_req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-                size: 16, usage: 64, mapped_at_creation: false // UNIFORM | COPY_DST
+                size: 16, usage: 64, mapped_at_creation: false, readonly: false
             }))
         };
         let buf_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", buf_req.encode_to_vec())?[..])?;
@@ -292,7 +292,7 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
         let (w, h, _) = renderer.atlas_data();
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
-                width: w, height: h, format: 0, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1,
+                width: w, height: h, format: 0, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
             }))
         };
         if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {

@@ -18,12 +18,20 @@ pub fn create_shader(source: &str, label: &str) -> anyhow::Result<crate::rpc::co
     res.handle.ok_or_else(|| anyhow::anyhow!("WGPU Error: {}", res.error))
 }
 
-pub fn create_buffer(size: u64, usage: u32, _label: &str) -> anyhow::Result<crate::rpc::core::ResourceHandle> {
+pub fn create_buffer(size: u64, usage: u32, readonly: bool) -> anyhow::Result<crate::rpc::core::ResourceHandle> {
     let req = GpuResourceRequest {
         command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-            size, usage, mapped_at_creation: false,
+            size, usage, mapped_at_creation: false, readonly
         }))
     };
     let res = raw::create_resource(&req)?;
     res.handle.ok_or_else(|| anyhow::anyhow!("WGPU Error: {}", res.error))
+}
+
+pub fn freeze_resource(id: u64) -> anyhow::Result<()> {
+    let req = GpuResourceRequest {
+        command: Some(gpu_resource_request::Command::FreezeResource(id))
+    };
+    raw::create_resource(&req)?;
+    Ok(())
 }

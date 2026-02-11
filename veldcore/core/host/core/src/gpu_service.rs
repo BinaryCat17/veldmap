@@ -140,11 +140,11 @@ impl NativeService for GpuService {
                 let mut handle = ResourceHandle::default();
                 match req.command {
                     Some(crate::wgpu::gpu_resource_request::Command::CreateTexture(t)) => {
-                        handle.id = self.resources.create_texture(t.width, t.height, t.format, t.usage);
+                        handle.id = self.resources.create_texture(t.width, t.height, t.format, t.usage, t.readonly);
                         handle.size = (t.width * t.height * 4) as u64; 
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::CreateBuffer(b)) => {
-                        handle.id = self.resources.create_buffer_ext(b.size, b.usage, b.mapped_at_creation);
+                        handle.id = self.resources.create_buffer_ext(b.size, b.usage, b.mapped_at_creation, b.readonly);
                         handle.size = b.size;
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::CreateShader(s)) => {
@@ -222,7 +222,7 @@ impl NativeService for GpuService {
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::FsReadToBuffer(req)) => {
                         let data = std::fs::read(&req.path)?;
-                        handle.id = self.resources.create_buffer_with_data(&data, req.usage);
+                        handle.id = self.resources.create_buffer_with_data(&data, req.usage, true);
                         handle.size = data.len() as u64;
                     }
                     Some(crate::wgpu::gpu_resource_request::Command::FsReadToTexture(req)) => {
@@ -237,9 +237,15 @@ impl NativeService for GpuService {
                         let (w, h) = img.dimensions();
                         let rgba = img.to_rgba8();
                         
-                        handle.id = self.resources.create_texture(w, h, 0, req.usage);
+                        handle.id = self.resources.create_texture(w, h, 0, req.usage, true);
                         self.resources.write_resource(handle.id, 0, &rgba)?;
                         handle.size = (w * h * 4) as u64;
+                    }
+                    Some(crate::wgpu::gpu_resource_request::Command::FreezeResource(id)) => {
+                        if !self.resources.freeze_resource(id) {
+                            return Err(anyhow::anyhow!("Resource {} not found to freeze", id));
+                        }
+                        handle.id = id;
                     }
                     _ => return Err(anyhow::anyhow!("Unsupported resource command")),
                 }

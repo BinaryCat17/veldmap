@@ -10,7 +10,8 @@ extern "C" {
     fn veld_host_call(ptr: u64, len: u64) -> u64;
     fn veld_gpu_write(id: u64, offset: u64, ptr: u64, len: u64);
     fn veld_gpu_read(id: u64, offset: u64, ptr: u64, len: u64);
-    fn veld_gpu_create_buffer(usage: u32, ptr: u64, len: u64) -> u64;
+    fn veld_gpu_create_buffer(usage: u32, ptr: u64, len: u64, readonly: u32) -> u64;
+    fn veld_gpu_freeze_resource(id: u64) -> u32;
     fn veld_get_info(key_ptr: u64, key_len: u64) -> u64;
     fn veld_http_request(req_ptr: u64, req_len: u64, body_ptr: u64, body_len: u64, status_ptr: u64) -> u64;
     fn veld_load_u8(p: u64) -> u8;
@@ -79,9 +80,16 @@ pub fn gpu_read_resource(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<
 }
 
 #[cfg(feature = "pdk")]
-pub fn gpu_create_buffer(usage: u32, data: &[u8]) -> u64 {
+pub fn gpu_create_buffer(usage: u32, data: &[u8], readonly: bool) -> u64 {
     unsafe {
-        veld_gpu_create_buffer(usage, data.as_ptr() as u64, data.len() as u64)
+        veld_gpu_create_buffer(usage, data.as_ptr() as u64, data.len() as u64, if readonly { 1 } else { 0 })
+    }
+}
+
+#[cfg(feature = "pdk")]
+pub fn gpu_freeze_resource(id: u64) -> bool {
+    unsafe {
+        veld_gpu_freeze_resource(id) != 0
     }
 }
 

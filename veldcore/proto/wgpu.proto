@@ -20,6 +20,7 @@ message CreateBuffer {
     uint64 size = 1;
     uint32 usage = 2;
     bool mapped_at_creation = 3;
+    bool readonly = 4;
 }
 
 message CreateTexture {
@@ -31,6 +32,7 @@ message CreateTexture {
     uint32 dimension = 6; // 0: 1D, 1: 2D, 2: 3D
     uint32 format = 7;
     uint32 usage = 8;
+    bool readonly = 9;
 }
 
 message CreateTextureView {
@@ -152,6 +154,7 @@ message GpuResourceRequest {
     FsReadToTexture fs_read_to_texture = 13;
     FsReadToBuffer fs_read_to_buffer = 14;
     ImageLoadToTexture image_load_to_texture = 15;
+    uint64 freeze_resource = 16;
   }
 }
 

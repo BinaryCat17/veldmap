@@ -74,7 +74,15 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         let memory_data = mem.data(&caller);
         if let Some(data_slice) = memory_data.get(ptr as usize..(ptr + len) as usize) {
             let resources = caller.data().resources.clone();
-            // Передаем срез напрямую, избегая .to_vec()
+            
+            // Проверка ReadOnly
+            if let Some(entry) = resources.get_resource_entry(id) {
+                if entry.readonly {
+                    log::error!(target: "wasm", "[{}] FAILED gpu_write(id={}): resource is readonly", caller.data().plugin_name, id);
+                    return;
+                }
+            }
+
             let _ = resources.write_resource(id, offset, data_slice);
         }
     })?;
@@ -110,7 +118,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     })?;
 
     // 13. veld_gpu_create_buffer
-    linker.func_wrap("env", "veld_gpu_create_buffer", |mut caller: Caller<'_, HostState>, usage: u32, ptr: u64, len: u64| -> u64 {
+    linker.func_wrap("env", "veld_gpu_create_buffer", |mut caller: Caller<'_, HostState>, usage: u32, ptr: u64, len: u64, readonly: u32| -> u64 {
         let mem = match caller.get_export("memory") {
             Some(Extern::Memory(m)) => m,
             _ => return 0,
@@ -119,9 +127,22 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         let memory_data = mem.data(&caller);
         if let Some(data_slice) = memory_data.get(ptr as usize..(ptr + len) as usize) {
             let resources = caller.data().resources.clone();
-            let id = resources.create_buffer_with_data(data_slice, usage);
-            log::debug!(target: "wasm", "[{}] Created buffer {} with data (size={})", caller.data().plugin_name, id, len);
+            let is_readonly = readonly != 0;
+            let id = resources.create_buffer_with_data(data_slice, usage, is_readonly);
+            log::debug!(target: "wasm", "[{}] Created buffer {} with data (size={}, readonly={})", 
+                caller.data().plugin_name, id, len, is_readonly);
             id
+        } else {
+            0
+        }
+    })?;
+
+    // 14. veld_gpu_freeze_resource
+    linker.func_wrap("env", "veld_gpu_freeze_resource", |caller: Caller<'_, HostState>, id: u64| -> u32 {
+        let resources = caller.data().resources.clone();
+        if resources.freeze_resource(id) {
+            log::info!(target: "wasm", "[{}] Frozen resource {}", caller.data().plugin_name, id);
+            1
         } else {
             0
         }
