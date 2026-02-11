@@ -11,6 +11,9 @@ members = [
 ]
 resolver = "2"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("pdk"))'] }
+
 [profile.release]
 opt-level = 3
 panic = "abort"

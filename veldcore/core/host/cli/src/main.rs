@@ -11,7 +11,9 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_cli=info,veldmap_host_core=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
     }
-    env_logger::init();
+    env_logger::Builder::from_default_env()
+        .format_target(false)
+        .init();
 
     let mut config_dir = "config".to_string();
     let args: Vec<String> = std::env::args().collect();

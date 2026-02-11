@@ -92,9 +92,8 @@ pub async fn load_services(
                 let instance = linker.instantiate_async(&mut store, &module).await?;
 
                 // Call init if it exists
-                if let Ok(init_func) = instance.get_typed_func::<(), i32>(&mut store, "init") {
-                    log::info!("[PLUGIN_MODULE] Calling init for plugin '{}'...", name);
-                    
+                                if let Ok(init_func) = instance.get_typed_func::<(), i32>(&mut store, "init") {
+                                    log::debug!("[PLUGIN_MODULE] Calling init for plugin '{}'...", name);                    
                     let init_input = service_config_str.as_bytes().to_vec();
                     let ctx = CallContext::new(init_input);
                     store.data_mut().call_context = Some(ctx);
