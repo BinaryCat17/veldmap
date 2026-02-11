@@ -9,6 +9,13 @@ use prost::Message;
 use crate::state::PluginUiState;
 use veldsdk::wgpu::wgpu_proxy::WgpuRecorder;
 
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+
+lazy_static! {
+    static ref FONT_SYSTEM: Mutex<FontSystem> = Mutex::new(FontSystem::new());
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Vertex { pub pos: [f32; 2], pub color: [f32; 4], pub uv: [f32; 2] }
@@ -31,7 +38,6 @@ pub enum DrawCmd {
 pub struct GpuRenderer {
     pub vertices: Vec<Vertex>,
     pub draw_commands: Vec<DrawCmd>,
-    font_system: FontSystem,
     swash_cache: SwashCache,
     pub atlas_texture_id: Option<u64>,
     pub atlas_bind_group_id: Option<u64>,
@@ -53,15 +59,17 @@ pub struct GpuRenderer {
 
 impl GpuRenderer {
     pub fn new(_default_font_name: &str, fonts: Vec<(&str, &[u8])>) -> Self {
-        let mut font_system = FontSystem::new();
         let mut font_map = HashMap::new();
 
-        for (name, data) in fonts {
-            let source = cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(data.to_vec()));
-            let ids = font_system.db_mut().load_font_source(source);
-            if let Some(first_id) = ids.first() {
-                if let Some(info) = font_system.db().face(*first_id) {
-                     font_map.insert(name.to_string(), info.families[0].0.clone());
+        {
+            let mut font_system = FONT_SYSTEM.lock().unwrap();
+            for (name, data) in fonts {
+                let source = cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(data.to_vec()));
+                let ids = font_system.db_mut().load_font_source(source);
+                if let Some(first_id) = ids.first() {
+                    if let Some(info) = font_system.db().face(*first_id) {
+                         font_map.insert(name.to_string(), info.families[0].0.clone());
+                    }
                 }
             }
         }
@@ -69,7 +77,6 @@ impl GpuRenderer {
         Self { 
             vertices: Vec::with_capacity(8192),
             draw_commands: Vec::new(),
-            font_system,
             swash_cache: SwashCache::new(),
             atlas_texture_id: None,
             atlas_bind_group_id: None,
@@ -368,12 +375,12 @@ pub struct RealParagraph {
 impl iced_core::text::Paragraph for RealParagraph {
     type Font = Font;
     fn with_text(text: iced_core::Text<&str, Self::Font>) -> Self {
-        // Мы не можем создать Buffer здесь без FontSystem, 
-        // поэтому мы полагаемся на то, что Iced вызовет fill_text.
-        // Но для измерения мы используем грубое приближение или статический FontSystem.
-        let _width = text.content.len() as f32 * (text.size.0 * 0.5);
-        let _height = text.size.0 * 1.2;
-        Self { buffer: None } 
+        let mut font_system = FONT_SYSTEM.lock().unwrap();
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
+        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name("DejaVu Sans"));
+        buffer.set_text(&mut font_system, text.content, attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(&mut font_system, false);
+        Self { buffer: Some(buffer) } 
     }
     fn with_spans<Link>(_: iced_core::Text<&[iced_core::text::Span<'_, Link, Self::Font>], Self::Font>) -> Self { Self::default() }
     fn resize(&mut self, _: Size) {}
@@ -432,15 +439,18 @@ impl iced_core::text::Renderer for GpuRenderer {
     
     fn fill_text(&mut self, text: iced_core::Text, pos: Point, color: Color, _clip: iced_core::Rectangle) {
         if text.content.is_empty() { return; }
-        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
+        let mut font_system = FONT_SYSTEM.lock().unwrap();
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
         let font_family = match &text.font.family {
             iced_core::font::Family::Name(name) => self.font_map.get(*name).map(|s| s.as_str()).unwrap_or("DejaVu Sans"),
             _ => "DejaVu Sans",
         };
         let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
-        buffer.set_text(&mut self.font_system, &text.content, attrs, Shaping::Advanced);
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        buffer.set_text(&mut font_system, &text.content, attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(&mut font_system, false);
         
+        // Отпускаем лок перед отрисовкой, так как draw_buffer тоже будет его брать
+        drop(font_system);
         self.draw_buffer(&buffer, pos, color);
     }
 }
@@ -448,13 +458,14 @@ impl iced_core::text::Renderer for GpuRenderer {
 impl GpuRenderer {
     fn draw_buffer(&mut self, buffer: &Buffer, pos: Point, color: Color) {
         let text_color = [color.r, color.g, color.b, color.a];
+        let mut font_system = FONT_SYSTEM.lock().unwrap();
 
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
                 let cache_key = physical_glyph.cache_key;
                 if !self.glyph_cache.contains_key(&cache_key) {
-                    if let Some(image) = self.swash_cache.get_image(&mut self.font_system, cache_key) {
+                    if let Some(image) = self.swash_cache.get_image(&mut font_system, cache_key) {
                         let width = image.placement.width;
                         let height = image.placement.height;
                         if self.current_atlas_x + width + 2 > self.atlas_width {

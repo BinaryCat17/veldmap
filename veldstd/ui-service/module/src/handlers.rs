@@ -35,6 +35,10 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                         plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
                     }
                     app_proto::ui_event::Event::Click(c) => {
+                        let sf = *plugin.scale_factor.borrow();
+                        let pos = Point::new(c.x / sf, c.y / sf);
+                        *plugin.cursor_position.borrow_mut() = pos;
+                        
                         let button = match c.button {
                             1 => iced_core::mouse::Button::Left,
                             2 => iced_core::mouse::Button::Right,
@@ -42,6 +46,9 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                             _ => iced_core::mouse::Button::Left,
                         };
                         let mut events = plugin.pending_events.borrow_mut();
+                        // Важно: сначала обновляем позицию курсора, чтобы iced знал где произошел клик
+                        events.push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
+                        
                         if c.pressed {
                             events.push(Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)));
                         } else {
