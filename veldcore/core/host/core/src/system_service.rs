@@ -2,7 +2,7 @@ use crate::dispatcher::NativeService;
 use crate::resources::{ResourceManager, Resource};
 use crate::core::{
     FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, 
-    FsDownloadRequest, LogRequest, TaskResponse, TaskStatusRequest, TaskStatusResponse,
+    FsDownloadRequest, TaskResponse, TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, ResourceHandle,
     ImageInfoRequest, ImageInfoResponse, ImageLoadRequest, ImageLoadResponse,
     GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse

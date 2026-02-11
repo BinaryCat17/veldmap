@@ -67,7 +67,7 @@ pub async fn load_services(
                 config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
                 config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
                 
-                log::info!("[PLUGIN_MODULE] Loading service '{}'", name);
+                log::trace!("Loading service '{}'", name);
                 
                 let mut linker = Linker::new(&engine);
                 wasmtime_wasi::p1::add_to_linker_async(&mut linker, |s: &mut HostState| &mut s.wasi)?;
@@ -92,20 +92,21 @@ pub async fn load_services(
                 let instance = linker.instantiate_async(&mut store, &module).await?;
 
                 // Call init if it exists
-                                if let Ok(init_func) = instance.get_typed_func::<(), i32>(&mut store, "init") {
-                                    log::debug!("[PLUGIN_MODULE] Calling init for plugin '{}'...", name);                    
+                if let Ok(init_func) = instance.get_typed_func::<(), i32>(&mut store, "init") {
+                    log::trace!("Calling init for plugin '{}'...", name);
+                    
                     let init_input = service_config_str.as_bytes().to_vec();
                     let ctx = CallContext::new(init_input);
                     store.data_mut().call_context = Some(ctx);
 
                     match init_func.call_async(&mut store, ()).await {
-                        Ok(0) => log::info!("[PLUGIN_MODULE] Plugin '{}' initialized successfully.", name),
+                        Ok(0) => log::info!("Plugin '{}' initialized successfully.", name),
                         Ok(code) => {
-                            log::error!("[PLUGIN_MODULE] Plugin '{}' failed to initialize with code: {}", name, code);
+                            log::error!("Plugin '{}' failed to initialize with code: {}", name, code);
                             continue;
                         }
                         Err(e) => {
-                            log::error!("[PLUGIN_MODULE] Error while calling init for '{}': {}", name, e);
+                            log::error!("Error while calling init for '{}': {}", name, e);
                             continue;
                         }
                     }

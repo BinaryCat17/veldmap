@@ -9,10 +9,26 @@ use std::sync::Arc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_cli=info,veldmap_host_core=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
+        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_cli=info,veldmap_host_core=info,wasm=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
     }
     env_logger::Builder::from_default_env()
-        .format_target(false)
+        .format(|buf, record| {
+            use std::io::Write;
+            let ts = buf.timestamp();
+            let level = record.level();
+            let target = record.target();
+            let args = record.args();
+
+            if target == "wasm" {
+                writeln!(buf, "[{} {:5}] {}", ts, level, args)
+            } else if target.starts_with("veldmap") {
+                let module = target.split("::").last().unwrap_or(target)
+                    .replace("veldmap_host_", "");
+                writeln!(buf, "[{} {:5}] [{}] {}", ts, level, module, args)
+            } else {
+                writeln!(buf, "[{} {:5}] <{}> {}", ts, level, target, args)
+            }
+        })
         .init();
 
     let mut config_dir = "config".to_string();

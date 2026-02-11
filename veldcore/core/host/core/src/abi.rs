@@ -21,7 +21,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let request = match RpcRequest::decode(&req_buf[..]) {
                 Ok(r) => r,
                 Err(e) => {
-                    log::error!("[ABI] RpcRequest decode error: {}", e);
+                    log::error!(target: "wasm", "[{}] RpcRequest decode error: {}", caller.data().plugin_name, e);
                     return Ok(0u64);
                 }
             };
@@ -29,11 +29,11 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let plugin_name = caller.data().plugin_name.clone();
             let dispatcher = caller.data().dispatcher.clone();
             
-            log::debug!("[ABI] [{}] Call: {}.{}", plugin_name, request.service, request.method);
+            log::debug!(target: "wasm", "[{}] Call: {}.{}", plugin_name, request.service, request.method);
 
             let result = if request.service == "system" && request.method == "log" {
                 if let Ok(log_req) = crate::core::LogRequest::decode(&request.payload[..]) {
-                    log::info!("[{}] {}", plugin_name, log_req.message);
+                    log::info!(target: "wasm", "[{}] {}", plugin_name, log_req.message);
                     Ok(Vec::new())
                 } else {
                     dispatcher.call(&request.service, &request.method, request.payload).await
@@ -95,13 +95,13 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     target[..copy_len].copy_from_slice(&data[..copy_len]);
                     
                     if copy_len >= 4 {
-                        log::debug!("[ABI] gpu_read(id={}) read {} bytes. Head: {:02x?}", id, copy_len, &target[..4]);
+                        log::debug!(target: "wasm", "[{}] gpu_read(id={}) read {} bytes.", caller.data().plugin_name, id, copy_len);
                     }
                 } else {
-                    log::error!("[ABI] gpu_read(id={}) FAILED: WASM memory access denied at 0x{:x} (len={})", id, ptr, len);
+                    log::error!(target: "wasm", "[{}] gpu_read(id={}) FAILED: memory access denied at 0x{:x}", caller.data().plugin_name, id, ptr);
                 }
             } else if let Err(e) = data_res {
-                log::error!("[ABI] gpu_read(id={}) FAILED: {}", id, e);
+                log::error!(target: "wasm", "[{}] gpu_read(id={}) FAILED: {}", caller.data().plugin_name, id, e);
             }
             Ok(())
         })
@@ -230,7 +230,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             };
 
             let plugin_name = caller.data().plugin_name.clone();
-            log::info!("[{}] HTTP {} {}", plugin_name, req_data.method.as_deref().unwrap_or("GET"), req_data.url);
+            log::info!(target: "wasm", "[{}] HTTP {} {}", plugin_name, req_data.method.as_deref().unwrap_or("GET"), req_data.url);
 
             let client = reqwest::Client::new();
             let method = match req_data.method.as_deref().unwrap_or("GET") {
@@ -252,7 +252,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                     (s, b)
                 }
                 Err(e) => {
-                    log::error!("[ABI] HTTP Error: {}", e);
+                    log::error!(target: "wasm", "[{}] HTTP Error: {}", plugin_name, e);
                     (500, Vec::new())
                 }
             };
