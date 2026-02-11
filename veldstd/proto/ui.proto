@@ -47,6 +47,8 @@ message Text {
     float size = 2;
     Color color = 3;
     bool bold = 4;
+    Alignment horizontal_alignment = 5;
+    Alignment vertical_alignment = 6;
 }
 
 message Button {
@@ -55,6 +57,8 @@ message Button {
     bool disabled = 3;
     Length width = 4;
     Length height = 5;
+    optional Alignment align_x = 6;
+    optional Alignment align_y = 7;
 }
 
 message TextInput {

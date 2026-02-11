@@ -43,12 +43,36 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             text(t.content.clone())
                 .size(t.size)
                 .color(convert_color(&t.color))
+                .align_x(convert_horizontal_alignment(t.horizontal_alignment()))
+                .align_y(convert_vertical_alignment(t.vertical_alignment()))
                 .into()
         }
         Some(proto::widget::Type::Button(b)) => {
-            let mut btn = button(text(b.label.clone()))
-                .width(convert_length(&b.width))
-                .height(convert_length(&b.height));
+            let h_align = b.align_x
+                .map(|a| convert_horizontal_alignment(proto::Alignment::try_from(a).unwrap_or(proto::Alignment::Start)))
+                .unwrap_or(iced_core::alignment::Horizontal::Center);
+            
+            let v_align = b.align_y
+                .map(|a| convert_vertical_alignment(proto::Alignment::try_from(a).unwrap_or(proto::Alignment::Start)))
+                .unwrap_or(iced_core::alignment::Vertical::Center);
+
+            let btn_width = convert_length(&b.width);
+            let btn_height = convert_length(&b.height);
+
+            let mut label = text(b.label.clone())
+                .align_x(h_align)
+                .align_y(v_align);
+            
+            // if btn_width != Length::Shrink {
+            //    label = label.width(Length::Fill);
+            // }
+            // if btn_height != Length::Shrink {
+            //    label = label.height(Length::Fill);
+            // }
+
+            let mut btn = button(label)
+                .width(btn_width)
+                .height(btn_height);
             
             if !b.disabled {
                 let tag = b.on_press.clone();
@@ -100,6 +124,22 @@ fn convert_padding(p: &Option<proto::Padding>) -> iced_core::Padding {
             left: p.left,
         },
         None => iced_core::Padding::ZERO,
+    }
+}
+
+fn convert_horizontal_alignment(a: proto::Alignment) -> iced_core::alignment::Horizontal {
+    match a {
+        proto::Alignment::Start => iced_core::alignment::Horizontal::Left,
+        proto::Alignment::Center => iced_core::alignment::Horizontal::Center,
+        proto::Alignment::End => iced_core::alignment::Horizontal::Right,
+    }
+}
+
+fn convert_vertical_alignment(a: proto::Alignment) -> iced_core::alignment::Vertical {
+    match a {
+        proto::Alignment::Start => iced_core::alignment::Vertical::Top,
+        proto::Alignment::Center => iced_core::alignment::Vertical::Center,
+        proto::Alignment::End => iced_core::alignment::Vertical::Bottom,
     }
 }
 

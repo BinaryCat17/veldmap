@@ -1,13 +1,7 @@
-use veldsdk::rpc::wgpu::*;
-use veldsdk::rpc::host::{call_service, gpu_write_resource};
-use iced_core::{Transformation, Size, Theme, Point, Pixels, Font, Color};
+use iced_core::{Transformation, Size, Point, Pixels, Font, Color};
 use iced_core::text::{LineHeight, Highlighter, highlighter};
-use iced_runtime::user_interface::UserInterface;
 use cosmic_text::{FontSystem, SwashCache, Buffer, Metrics, Shaping};
 use std::collections::HashMap;
-use prost::Message;
-use crate::state::PluginUiState;
-use veldsdk::wgpu::wgpu_proxy::WgpuRecorder;
 
 use lazy_static::lazy_static;
 use std::sync::Mutex;
@@ -123,6 +117,18 @@ impl GpuRenderer {
         self.current_height = height;
     }
 
+    pub fn atlas_data(&self) -> (u32, u32, &[u8]) {
+        (self.atlas_width, self.atlas_height, &self.atlas_data)
+    }
+
+    pub fn is_atlas_dirty(&self) -> bool {
+        self.atlas_dirty
+    }
+
+    pub fn mark_atlas_clean(&mut self) {
+        self.atlas_dirty = false;
+    }
+
     fn transform_rect(&self, rect: [f32; 4]) -> [f32; 4] {
         if let Some(t) = self.transformation_stack.last() {
             let p1 = Point::new(rect[0], rect[1]) * *t;
@@ -153,195 +159,6 @@ impl GpuRenderer {
 
     pub fn draw_wgpu_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64) {
         self.draw_commands.push(DrawCmd::ExternalImage { bounds, texture_id });
-    }
-
-    pub fn render_to_texture(&mut self, plugin: &PluginUiState, ui: &mut UserInterface<'_, crate::converter::UiMessage, Theme, GpuRenderer>, width: u32, height: u32, sf: f32, cursor: iced_core::mouse::Cursor) -> anyhow::Result<()> {
-        let mut recorder = WgpuRecorder::new(width, height);
-        
-        let logical_w = width as f32 / sf;
-        let logical_h = height as f32 / sf;
-
-        let mut ui_pipeline = plugin.ui_pipeline.borrow_mut();
-        if ui_pipeline.is_none() {
-            let shader_source = include_str!("shaders.wgsl");
-            let sh_req = GpuResourceRequest {
-                command: Some(gpu_resource_request::Command::CreateShader(CreateShaderModule {
-                    source: shader_source.into(), label: "UI Shader".into()
-                }))
-            };
-            let sh_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", sh_req.encode_to_vec())?[..])?;
-            if let Some(sh) = sh_res.handle {
-                let pip_req = GpuResourceRequest {
-                    command: Some(gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
-                        shader_id: sh.id, label: "UI Pipeline".into(), 
-                        vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
-                        target_format: 0, // RGBA8
-                        ..Default::default()
-                    }))
-                };
-                let pip_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", pip_req.encode_to_vec())?[..])?;
-                *ui_pipeline = pip_res.handle.map(|h| h.id);
-            }
-        }
-
-        let mut uniform_buffer = plugin.uniform_buffer.borrow_mut();
-        let mut uniform_buffer_id = plugin.uniform_buffer_id.borrow_mut();
-        if uniform_buffer.is_none() {
-            let buf_req = GpuResourceRequest {
-                command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-                    size: 16, usage: 64, mapped_at_creation: false // UNIFORM | COPY_DST
-                }))
-            };
-            let buf_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", buf_req.encode_to_vec())?[..])?;
-            if let Some(bh) = buf_res.handle {
-                *uniform_buffer_id = Some(bh.id);
-                let bgl_req = GpuResourceRequest {
-                    command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
-                        label: "UI Uniform BGL".into(),
-                        entries: vec![BindGroupLayoutEntry {
-                            binding: 0, visibility: 3, ty: Some(bind_group_layout_entry::Ty::Buffer(BufferBindingLayout { r#type: 1, ..Default::default() }))
-                        }]
-                    }))
-                };
-                let bgl_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bgl_req.encode_to_vec())?[..])?;
-                if let Some(bgl) = bgl_res.handle {
-                    let bg_req = GpuResourceRequest {
-                        command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
-                            layout_id: bgl.id, entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(bh.id)) }], label: "UI Uniform BG".into()
-                        }))
-                    };
-                    *uniform_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bg_req.encode_to_vec())?[..])?.handle;
-                }
-            }
-        }
-
-        if let Some(u_id) = *uniform_buffer_id {
-            let res_data: [f32; 2] = [logical_w, logical_h];
-            let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
-            let _ = gpu_write_resource(u_id, 0, data);
-        }
-
-        // РИСУЕМ
-        ui.draw(self, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-        self.ensure_resources();
-
-        if !self.vertices.is_empty() || !self.draw_commands.is_empty() {
-            let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
-            if vertex_buffer.is_none() {
-                let req = GpuResourceRequest {
-                    command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-                        size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false // VERTEX | COPY_DST
-                    }))
-                };
-                *vertex_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
-            }
-
-            if let (Some(pipeline), Some(v_h), Some(u_h)) = (*ui_pipeline, &*vertex_buffer, &*uniform_buffer) {
-                let data = unsafe { std::slice::from_raw_parts(self.vertices.as_ptr() as *const u8, self.vertices.len() * 32) };
-                let _ = gpu_write_resource(v_h.id, 0, data);
-
-                recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
-
-                let mut current_vertex_offset = 0;
-                for cmd in &self.draw_commands {
-                    match cmd {
-                        DrawCmd::Quads { count } => {
-                            recorder.set_pipeline(pipeline);
-                            recorder.set_vertex_buffer(0, v_h.id, (current_vertex_offset * 32) as u64, (*count * 32) as u64);
-                            recorder.set_bind_group(1, u_h.id);
-                            if let Some(atlas_bg) = self.atlas_bind_group_id {
-                                recorder.set_bind_group(0, atlas_bg);
-                            }
-                            recorder.draw(0..*count, 0..1);
-                            current_vertex_offset += *count;
-                        }
-                        DrawCmd::Scissor { x, y, width, height } => {
-                            recorder.set_scissor_rect(*x, *y, *width, *height);
-                        }
-                        DrawCmd::ExternalImage { .. } => {
-                            // Пока пропустим, чтобы не усложнять
-                        }
-                    }
-                }
-            }
-
-            let mut ui_texture = plugin.ui_texture.borrow_mut();
-            if ui_texture.is_none() {
-                let req = GpuResourceRequest {
-                    command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
-                        width, height, format: 0, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1
-                    }))
-                };
-                *ui_texture = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
-            }
-
-            if let Some(ui_tex) = &*ui_texture {
-                let _ = recorder.submit(ui_tex.id, Some(veldsdk::rpc::wgpu::GpuColor { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }));
-                let _ = veldsdk::app::AppBridge::display_frame(ui_tex.clone(), width, height);
-            }
-        }
-        Ok(())
-    }
-
-    fn ensure_resources(&mut self) {
-        if self.bgl_id.is_none() {
-            let req = GpuResourceRequest {
-                command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
-                    label: "Iced Atlas BGL".into(),
-                    entries: vec![
-                        BindGroupLayoutEntry { binding: 0, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Texture(TextureBindingLayout { sample_type: 1, view_dimension: 2, multisampled: false })) },
-                        BindGroupLayoutEntry { binding: 1, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Sampler(SamplerBindingLayout { r#type: 1 })) },
-                    ],
-                }))
-            };
-            if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
-                if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
-                    self.bgl_id = res.handle.map(|h| h.id);
-                }
-            }
-        }
-
-        if self.atlas_texture_id.is_none() {
-            let req = GpuResourceRequest {
-                command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
-                    width: self.atlas_width, height: self.atlas_height, format: 0, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1,
-                }))
-            };
-            if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
-                if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
-                    self.atlas_texture_id = res.handle.map(|h| h.id);
-                    self.atlas_dirty = true;
-                }
-            }
-        }
-        
-        if self.atlas_bind_group_id.is_none() && self.atlas_texture_id.is_some() && self.bgl_id.is_some() {
-            let sampler_req = GpuResourceRequest {
-                command: Some(gpu_resource_request::Command::CreateSampler(CreateSampler { mag_filter: 1, min_filter: 1, ..Default::default() }))
-            };
-            let sampler_id = call_service("wgpu", "create_resource", sampler_req.encode_to_vec()).ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok()).and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
-            let req = GpuResourceRequest {
-                command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
-                    layout_id: self.bgl_id.unwrap(), entries: vec![
-                        BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::TextureViewId(self.atlas_texture_id.unwrap())) },
-                        BindGroupEntry { binding: 1, resource: Some(bind_group_entry::Resource::SamplerId(sampler_id)) },
-                    ],
-                    label: "Iced Atlas BG".into(),
-                }))
-            };
-            if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
-                if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
-                    self.atlas_bind_group_id = res.handle.map(|h| h.id);
-                }
-            }
-        }
-
-        if self.atlas_dirty {
-            if let Some(tid) = self.atlas_texture_id {
-                let _ = gpu_write_resource(tid, 0, &self.atlas_data);
-                self.atlas_dirty = false;
-            }
-        }
     }
 }
 
@@ -419,6 +236,7 @@ pub struct RealParagraph {
     pub buffer: Option<Buffer>,
     pub horizontal_alignment: iced_core::alignment::Horizontal,
     pub vertical_alignment: iced_core::alignment::Vertical,
+    pub bounds: Size,
 }
 
 impl Default for RealParagraph {
@@ -427,6 +245,7 @@ impl Default for RealParagraph {
             buffer: None,
             horizontal_alignment: iced_core::alignment::Horizontal::Left,
             vertical_alignment: iced_core::alignment::Vertical::Top,
+            bounds: Size::INFINITY,
         }
     }
 }
@@ -436,6 +255,11 @@ impl iced_core::text::Paragraph for RealParagraph {
     fn with_text(text: iced_core::Text<&str, Self::Font>) -> Self {
         let mut font_system = FONT_SYSTEM.lock().unwrap();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
+        
+        if text.bounds.width < f32::INFINITY {
+            buffer.set_size(&mut font_system, Some(text.bounds.width), None);
+        }
+
         let font_family = match &text.font.family {
             iced_core::font::Family::Name(name) => name,
             _ => "DejaVu Sans",
@@ -443,14 +267,28 @@ impl iced_core::text::Paragraph for RealParagraph {
         let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
         buffer.set_text(&mut font_system, text.content, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut font_system, false);
+        
+        let mut width: f32 = 0.0;
+        for run in buffer.layout_runs() { width = width.max(run.line_w); }
+        let height = buffer.layout_runs().count() as f32 * buffer.metrics().line_height;
+        log::info!("Paragraph::with_text('{}'): {}x{}", text.content, width, height);
+
         Self { 
             buffer: Some(buffer),
             horizontal_alignment: text.horizontal_alignment,
             vertical_alignment: text.vertical_alignment,
+            bounds: text.bounds,
         } 
     }
     fn with_spans<Link>(_: iced_core::Text<&[iced_core::text::Span<'_, Link, Self::Font>], Self::Font>) -> Self { Self::default() }
-    fn resize(&mut self, _: Size) {}
+    fn resize(&mut self, size: Size) {
+        self.bounds = size;
+        if let Some(buffer) = &mut self.buffer {
+            let mut font_system = FONT_SYSTEM.lock().unwrap();
+            buffer.set_size(&mut font_system, Some(size.width), Some(size.height));
+            buffer.shape_until_scroll(&mut font_system, false);
+        }
+    }
     fn compare(&self, _: iced_core::Text<(), Self::Font>) -> iced_core::text::Difference { iced_core::text::Difference::None }
     fn horizontal_alignment(&self) -> iced_core::alignment::Horizontal { self.horizontal_alignment }
     fn vertical_alignment(&self) -> iced_core::alignment::Vertical { self.vertical_alignment }
@@ -458,8 +296,11 @@ impl iced_core::text::Paragraph for RealParagraph {
         if let Some(buf) = &self.buffer {
             let mut width: f32 = 0.0;
             for run in buf.layout_runs() { width = width.max(run.line_w); }
-            Size::new(width, buf.layout_runs().count() as f32 * buf.metrics().line_height)
+            let height = buf.layout_runs().count() as f32 * buf.metrics().line_height;
+            log::info!("min_bounds: {}x{}", width, height);
+            Size::new(width, height)
         } else {
+            log::info!("min_bounds: None (ZERO)");
             Size::ZERO 
         }
     }
@@ -497,29 +338,73 @@ impl iced_core::text::Renderer for GpuRenderer {
 
     fn default_font(&self) -> Font { Font::DEFAULT }
     fn default_size(&self) -> Pixels { Pixels(16.0) }
+
     fn fill_paragraph(&mut self, p: &Self::Paragraph, pos: Point, color: Color, _clip: iced_core::Rectangle) {
         if let Some(buffer) = &p.buffer {
-            self.draw_buffer(buffer, pos, color);
+            let mut width: f32 = 0.0;
+            for run in buffer.layout_runs() { width = width.max(run.line_w); }
+            let height = buffer.layout_runs().count() as f32 * buffer.metrics().line_height;
+            log::info!("fill_paragraph at {:?}: {}x{}", pos, width, height);
+            
+            let x_offset = match p.horizontal_alignment {
+                iced_core::alignment::Horizontal::Center => width / 2.0,
+                iced_core::alignment::Horizontal::Right => width,
+                _ => 0.0,
+            };
+             let y_offset = match p.vertical_alignment {
+                iced_core::alignment::Vertical::Center => height / 2.0,
+                iced_core::alignment::Vertical::Bottom => height,
+                _ => 0.0,
+            };
+            
+            let adjusted_pos = Point::new(pos.x - x_offset, pos.y - y_offset);
+            self.draw_buffer(buffer, adjusted_pos, color);
         }
     }
+
     fn fill_editor(&mut self, _e: &Self::Editor, _pos: Point, _color: Color, _clip: iced_core::Rectangle) {}
     
     fn fill_text(&mut self, text: iced_core::Text, pos: Point, color: Color, _clip: iced_core::Rectangle) {
         if text.content.is_empty() { return; }
-        log::trace!("[UI-RENDERER] fill_text: content='{}', pos={:?}, size={:?}", text.content, pos, text.size);
+        log::info!("fill_text '{}' at {:?} (bounds: {:?})", text.content, pos, text.bounds);
         let mut font_system = FONT_SYSTEM.lock().unwrap();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
+        
+        if text.bounds.width.is_finite() {
+            buffer.set_size(&mut font_system, Some(text.bounds.width), None);
+        }
+
         let font_family = match &text.font.family {
             iced_core::font::Family::Name(name) => self.font_map.get(*name).map(|s| s.as_str()).unwrap_or("DejaVu Sans"),
             _ => "DejaVu Sans",
         };
         let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
-        buffer.set_text(&mut font_system, &text.content, attrs, Shaping::Advanced);
+        
+        let shaping_type = match text.shaping {
+            iced_core::text::Shaping::Basic => Shaping::Basic,
+            iced_core::text::Shaping::Advanced => Shaping::Advanced,
+        };
+
+        buffer.set_text(&mut font_system, &text.content, attrs, shaping_type);
         buffer.shape_until_scroll(&mut font_system, false);
         
-        // Отпускаем лок перед отрисовкой, так как draw_buffer тоже будет его брать
+        // Отпускаем лок перед отрисовкой
         drop(font_system);
-        self.draw_buffer(&buffer, pos, color);
+
+        let x_offset = match text.horizontal_alignment {
+            iced_core::alignment::Horizontal::Center => text.bounds.width / 2.0,
+            iced_core::alignment::Horizontal::Right => text.bounds.width,
+            _ => 0.0,
+        };
+        let y_offset = match text.vertical_alignment {
+            iced_core::alignment::Vertical::Center => text.bounds.height / 2.0,
+            iced_core::alignment::Vertical::Bottom => text.bounds.height,
+            _ => 0.0,
+        };
+        
+        let adjusted_pos = Point::new(pos.x - x_offset, pos.y - y_offset);
+        
+        self.draw_buffer(&buffer, adjusted_pos, color);
     }
 }
 
@@ -528,16 +413,17 @@ impl GpuRenderer {
         let text_color = [color.r, color.g, color.b, color.a];
         let mut font_system = FONT_SYSTEM.lock().unwrap();
 
-        // Попробуем другой подход: считаем, что iced передает pos.y как верхнюю границу блока текста.
-        // Iced ожидает, что текст будет отрисован внутри блока высотой line_height.
-        // Чтобы текст казался центрированным, нам нужно сместить базовую линию вниз.
-        let font_size = buffer.metrics().font_size;
-        let line_height = buffer.metrics().line_height;
+        // Calculate alignment offset based on the first line (assuming uniform alignment for now)
+        // or we could assume the pos is the anchor point based on text.horizontal_alignment passed earlier.
+        // Since we don't have the text object here, we rely on how we set up the buffer.
+        // Wait, fill_paragraph passes 'pos'. We need to know the alignment to adjust 'pos'.
+        // But draw_buffer is generic. 
+        // Actually, iced should handle this logic if we implemented `measure` correctly.
+        // But since we see pos=Center, we must manually adjust.
         
-        // Сдвигаем базовую линию так, чтобы она была на расстоянии font_size от верха.
-        // Это обычно дает хорошее визуальное центрирование для большинства шрифтов.
-        let internal_offset_y = line_height - font_size;
-
+        // However, we don't have alignment in draw_buffer signature.
+        // Let's adjust pos in fill_text and fill_paragraph BEFORE calling draw_buffer.
+        
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
@@ -586,8 +472,9 @@ impl GpuRenderer {
                     }
                 }
                 if let Some(info) = self.glyph_cache.get(&cache_key) {
-                    let x = pos.x + (physical_glyph.x as f32 + info.offset_x as f32) / self.current_sf;
-                    let y = pos.y + (run.line_y as f32 - internal_offset_y + physical_glyph.y as f32 - info.offset_y as f32) / self.current_sf;
+                    let x = pos.x + glyph.x + (info.offset_x as f32 / self.current_sf);
+                    let ascent = buffer.metrics().font_size * 0.75;
+                    let y = pos.y + run.line_y + ascent - (info.offset_y as f32 / self.current_sf);
                     self.add_quad([x, y, info.width as f32 / self.current_sf, info.height as f32 / self.current_sf], text_color, info.uv);
                 }
             }

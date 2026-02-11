@@ -1,13 +1,15 @@
 use veld_ui::proto::*;
 use crate::state::{PluginUiState, LocalState};
 use veldsdk::rpc::app as app_proto;
-use crate::renderer::GpuRenderer;
+use crate::renderer::{GpuRenderer, DrawCmd};
 use crate::converter;
-use iced_core::{Point, Event, Size};
+use iced_core::{Point, Event, Size, Theme};
 use iced_runtime::user_interface::UserInterface;
 use iced_graphics::Viewport;
+use veldsdk::rpc::wgpu::*;
+use veldsdk::rpc::host::{call_service, gpu_write_resource};
 use prost::Message;
-use veldsdk::rpc::host::call_service;
+use veldsdk::wgpu::wgpu_proxy::WgpuRecorder;
 
 pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::Result<SetViewResponse> {
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
@@ -105,15 +107,15 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut clipboard = iced_core::clipboard::Null;
     let (ui_state, _) = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
     
-    if !captured_messages.is_empty() {
-        log::info!("[UI-SERVICE] Captured {} messages for plugin '{}'", captured_messages.len(), plugin_id);
-    }
-    
     let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
     let should_draw = *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated);
     
     if should_draw {
-        renderer.render_to_texture(plugin, &mut ui, width, height, sf, cursor)?;
+        // Вызываем draw для наполнения рендерера командами
+        ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
+        
+        // Теперь исполняем накопленные команды
+        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id)?;
         *needs_redrawing = false;
     }
     
@@ -129,4 +131,197 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     }
     
     Ok(responses)
+}
+
+fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, width: u32, height: u32, sf: f32, _plugin_id: &str) -> anyhow::Result<()> {
+    ensure_gpu_resources(plugin, renderer)?;
+
+    let mut recorder = WgpuRecorder::new(width, height);
+    let logical_w = width as f32 / sf;
+    let logical_h = height as f32 / sf;
+
+    // Обновляем юниформы
+    if let Some(u_id) = *plugin.uniform_buffer_id.borrow() {
+        let res_data: [f32; 2] = [logical_w, logical_h];
+        let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
+        let _ = gpu_write_resource(u_id, 0, data);
+    }
+
+    // Обновляем атлас если нужно
+    if renderer.is_atlas_dirty() {
+        if let Some(tid) = renderer.atlas_texture_id {
+            let (_, _, data) = renderer.atlas_data();
+            let _ = gpu_write_resource(tid, 0, data);
+            renderer.mark_atlas_clean();
+        }
+    }
+
+    if !renderer.vertices.is_empty() {
+        let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
+        if vertex_buffer.is_none() {
+            let req = GpuResourceRequest {
+                command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
+                    size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false // VERTEX | COPY_DST
+                }))
+            };
+            *vertex_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
+        }
+
+        if let (Some(pipeline), Some(v_h), Some(u_h)) = (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*plugin.uniform_buffer.borrow()) {
+            let data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * 32) };
+            let _ = gpu_write_resource(v_h.id, 0, data);
+
+            recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+
+            let mut current_vertex_offset = 0;
+            for cmd in &renderer.draw_commands {
+                match cmd {
+                    DrawCmd::Quads { count } => {
+                        recorder.set_pipeline(pipeline);
+                        recorder.set_vertex_buffer(0, v_h.id, (current_vertex_offset * 32) as u64, (*count * 32) as u64);
+                        recorder.set_bind_group(1, u_h.id);
+                        if let Some(atlas_bg) = renderer.atlas_bind_group_id {
+                            recorder.set_bind_group(0, atlas_bg);
+                        }
+                        recorder.draw(0..*count, 0..1);
+                        current_vertex_offset += *count;
+                    }
+                    DrawCmd::Scissor { x, y, width, height } => {
+                        recorder.set_scissor_rect(*x, *y, *width, *height);
+                    }
+                    DrawCmd::ExternalImage { .. } => {}
+                }
+            }
+        }
+    }
+
+    let mut ui_texture = plugin.ui_texture.borrow_mut();
+    if ui_texture.is_none() {
+        let req = GpuResourceRequest {
+            command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
+                width, height, format: 0, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1
+            }))
+        };
+        *ui_texture = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
+    }
+
+    if let Some(ui_tex) = &*ui_texture {
+        let _ = recorder.submit(ui_tex.id, Some(veldsdk::rpc::wgpu::GpuColor { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }));
+        let _ = veldsdk::app::AppBridge::display_frame(ui_tex.clone(), width, height);
+    }
+
+    Ok(())
+}
+
+fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> anyhow::Result<()> {
+    // 1. Пайплайн
+    let mut ui_pipeline = plugin.ui_pipeline.borrow_mut();
+    if ui_pipeline.is_none() {
+        let shader_source = include_str!("shaders.wgsl");
+        let sh_req = GpuResourceRequest {
+            command: Some(gpu_resource_request::Command::CreateShader(CreateShaderModule {
+                source: shader_source.into(), label: "UI Shader".into()
+            }))
+        };
+        let sh_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", sh_req.encode_to_vec())?[..])?;
+        if let Some(sh) = sh_res.handle {
+            let pip_req = GpuResourceRequest {
+                command: Some(gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
+                    shader_id: sh.id, label: "UI Pipeline".into(), 
+                    vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
+                    target_format: 0, // RGBA8
+                    ..Default::default()
+                }))
+            };
+            let pip_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", pip_req.encode_to_vec())?[..])?;
+            *ui_pipeline = pip_res.handle.map(|h| h.id);
+        }
+    }
+
+    // 2. Юниформы
+    let mut uniform_buffer = plugin.uniform_buffer.borrow_mut();
+    let mut uniform_buffer_id = plugin.uniform_buffer_id.borrow_mut();
+    if uniform_buffer.is_none() {
+        let buf_req = GpuResourceRequest {
+            command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
+                size: 16, usage: 64, mapped_at_creation: false // UNIFORM | COPY_DST
+            }))
+        };
+        let buf_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", buf_req.encode_to_vec())?[..])?;
+        if let Some(bh) = buf_res.handle {
+            *uniform_buffer_id = Some(bh.id);
+            let bgl_req = GpuResourceRequest {
+                command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
+                    label: "UI Uniform BGL".into(),
+                    entries: vec![BindGroupLayoutEntry {
+                        binding: 0, visibility: 3, ty: Some(bind_group_layout_entry::Ty::Buffer(BufferBindingLayout { r#type: 1, ..Default::default() }))
+                    }]
+                }))
+            };
+            let bgl_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bgl_req.encode_to_vec())?[..])?;
+            if let Some(bgl) = bgl_res.handle {
+                let bg_req = GpuResourceRequest {
+                    command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
+                        layout_id: bgl.id, entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(bh.id)) }], label: "UI Uniform BG".into()
+                    }))
+                };
+                *uniform_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bg_req.encode_to_vec())?[..])?.handle;
+            }
+        }
+    }
+
+    // 3. Атлас (общие ресурсы рендерера)
+    if renderer.bgl_id.is_none() {
+        let req = GpuResourceRequest {
+            command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
+                label: "Iced Atlas BGL".into(),
+                entries: vec![
+                    BindGroupLayoutEntry { binding: 0, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Texture(TextureBindingLayout { sample_type: 1, view_dimension: 2, multisampled: false })) },
+                    BindGroupLayoutEntry { binding: 1, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Sampler(SamplerBindingLayout { r#type: 1 })) },
+                ],
+            }))
+        };
+        if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
+            if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                renderer.bgl_id = res.handle.map(|h| h.id);
+            }
+        }
+    }
+
+    if renderer.atlas_texture_id.is_none() {
+        let (w, h, _) = renderer.atlas_data();
+        let req = GpuResourceRequest {
+            command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
+                width: w, height: h, format: 0, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1,
+            }))
+        };
+        if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
+            if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                renderer.atlas_texture_id = res.handle.map(|h| h.id);
+            }
+        }
+    }
+    
+    if renderer.atlas_bind_group_id.is_none() && renderer.atlas_texture_id.is_some() && renderer.bgl_id.is_some() {
+        let sampler_req = GpuResourceRequest {
+            command: Some(gpu_resource_request::Command::CreateSampler(CreateSampler { mag_filter: 1, min_filter: 1, ..Default::default() }))
+        };
+        let sampler_id = call_service("wgpu", "create_resource", sampler_req.encode_to_vec()).ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok()).and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
+        let req = GpuResourceRequest {
+            command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
+                layout_id: renderer.bgl_id.unwrap(), entries: vec![
+                    BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::TextureViewId(renderer.atlas_texture_id.unwrap())) },
+                    BindGroupEntry { binding: 1, resource: Some(bind_group_entry::Resource::SamplerId(sampler_id)) },
+                ],
+                label: "Iced Atlas BG".into(),
+            }))
+        };
+        if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
+            if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                renderer.atlas_bind_group_id = res.handle.map(|h| h.id);
+            }
+        }
+    }
+
+    Ok(())
 }

@@ -153,6 +153,8 @@ impl<M> Text<M> {
             size: 16.0,
             color: Some(proto::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
             bold: false,
+            horizontal_alignment: 0,
+            vertical_alignment: 0,
         }, _marker: std::marker::PhantomData }
     }
     pub fn size(mut self, size: f32) -> Self {
@@ -161,6 +163,14 @@ impl<M> Text<M> {
     }
     pub fn color(mut self, color: Color) -> Self {
         self.widget.color = Some(color.to_proto());
+        self
+    }
+    pub fn horizontal_alignment(mut self, align: Alignment) -> Self {
+        self.widget.horizontal_alignment = align as i32;
+        self
+    }
+    pub fn vertical_alignment(mut self, align: Alignment) -> Self {
+        self.widget.vertical_alignment = align as i32;
         self
     }
 }
@@ -194,6 +204,7 @@ impl<M> Button<M> {
             on_press: String::new(),
             disabled: false,
             width: None, height: None,
+            align_x: None, align_y: None,
         }, _marker: std::marker::PhantomData }
     }
     pub fn on_press(mut self, msg: M) -> Self where M: Serialize {
@@ -206,6 +217,14 @@ impl<M> Button<M> {
     }
     pub fn height(mut self, h: Length) -> Self {
         self.widget.height = Some(h.to_proto());
+        self
+    }
+    pub fn align_x(mut self, align: Alignment) -> Self {
+        self.widget.align_x = Some(align as i32);
+        self
+    }
+    pub fn align_y(mut self, align: Alignment) -> Self {
+        self.widget.align_y = Some(align as i32);
         self
     }
 }
