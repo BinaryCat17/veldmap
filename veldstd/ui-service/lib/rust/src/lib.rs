@@ -273,6 +273,8 @@ pub struct ModuleState<S, M> {
     pub state: S,
     pub tasks: Vec<veldsdk::core::BoxedFuture<M>>,
     pub plugin_name: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[macro_export]
@@ -307,6 +309,8 @@ macro_rules! define_remote_ui_module {
                 state,
                 tasks: Vec::new(),
                 plugin_name,
+                width: 1024,
+                height: 768,
             };
             if veldsdk::rpc::MODULE_STATE.set(Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(module_state))))).is_err() { return 4; }
             0
@@ -353,7 +357,7 @@ macro_rules! define_remote_ui_module {
                     let element = $view_func(&module.state);
                     let layout = $crate::proto::Layout {
                         root: Some(element.widget),
-                        width: 1024, height: 768,
+                        width: module.width, height: module.height,
                     };
                     let _ = $crate::raw::set_view(&$crate::proto::SetViewRequest {
                         plugin_id: module.plugin_name.clone(),
@@ -370,6 +374,12 @@ macro_rules! define_remote_ui_module {
                         Ok(e) => e,
                         Err(_) => return 3,
                     };
+                    
+                    if let Some(veldsdk::rpc::app::ui_event::Event::Resize(r)) = event.event {
+                        module.width = r.width;
+                        module.height = r.height;
+                    }
+
                     let _ = $crate::raw::handle_ui_event(&$crate::proto::HandleUiEventRequest {
                         plugin_id: module.plugin_name.clone(),
                         event: Some(event),

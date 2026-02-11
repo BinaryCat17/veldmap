@@ -20,9 +20,8 @@ struct VertexOutput {
 @vertex
 fn vs_main(model: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    // Конвертация пикселей в NDC (-1..1). 
-    // Iced выдает координаты в логических пикселях. 
-    // globals.res должен быть тоже в логических пикселях (или мы должны учитывать scale factor).
+    // Iced выдает координаты в логических пикселях.
+    // globals.res также содержит логическое разрешение.
     let x = (model.position.x / globals.res.x) * 2.0 - 1.0;
     let y = 1.0 - (model.position.y / globals.res.y) * 2.0;
     
@@ -38,43 +37,19 @@ var t_diffuse: texture_2d<f32>;
 var s_diffuse: sampler;
 
 @fragment
-
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-
-    // Выборка из RGBA текстуры (атласа)
-
     let tex_sample = textureSample(t_diffuse, s_diffuse, in.tex_coords);
-
     
-
-    // Пиксель (0,0) зарезервирован для сплошного цвета (белый 255)
-
-    if (in.tex_coords.x < 0.001 && in.tex_coords.y < 0.001) {
-
-        return in.color;
-
-    }
-
-    
-
-    // Если это обычный текст (белый глиф в атласе), применяем цвет вершины
-
-    // Если это цветной эмодзи, используем цвета из атласа, но учитываем альфу вершины
-
+    // Проверка: является ли глиф цветным (например, эмодзи)
     let is_color_glyph = abs(tex_sample.r - tex_sample.g) > 0.01 || abs(tex_sample.g - tex_sample.b) > 0.01;
-
     
-
     if (is_color_glyph) {
-
+        // Для цветных глифов используем цвета из атласа
         return vec4<f32>(tex_sample.rgb, tex_sample.a * in.color.a);
-
     } else {
-
-        // Обычный текст: цвет вершины * интенсивность (из любого канала, так как они равны для маски)
-
+        // Для обычного текста и сплошных прямоугольников:
+        // Цвет вершины * Альфа из атласа (маска)
+        // Для прямоугольников UV указывает на белый пиксель (1,1,1,1), поэтому результат = in.color
         return vec4<f32>(in.color.rgb, in.color.a * tex_sample.a);
-
     }
-
 }

@@ -24,6 +24,7 @@ struct GlyphInfo {
 
 pub enum DrawCmd {
     Quads { count: u32 },
+    Scissor { x: u32, y: u32, width: u32, height: u32 },
     ExternalImage { bounds: iced_core::Rectangle, texture_id: u64 },
 }
 
@@ -44,6 +45,10 @@ pub struct GpuRenderer {
     row_height: u32,
     atlas_dirty: bool,
     font_map: HashMap<String, String>,
+    pub current_sf: f32,
+    scissor_stack: Vec<iced_core::Rectangle>,
+    pub current_width: u32,
+    pub current_height: u32,
 }
 
 impl GpuRenderer {
@@ -62,7 +67,7 @@ impl GpuRenderer {
         }
 
         Self { 
-            vertices: Vec::with_capacity(4096),
+            vertices: Vec::with_capacity(8192),
             draw_commands: Vec::new(),
             font_system,
             swash_cache: SwashCache::new(),
@@ -70,29 +75,39 @@ impl GpuRenderer {
             atlas_bind_group_id: None,
             bgl_id: None,
             glyph_cache: HashMap::new(),
-            atlas_width: 1024,
-            atlas_height: 1024,
+            atlas_width: 2048,
+            atlas_height: 2048,
             atlas_data: {
-                let mut data = vec![0; 1024 * 1024 * 4];
+                let mut data = vec![0; 2048 * 2048 * 4];
+                // Заполняем весь атлас белым с 0 альфой, а (0,0) - белым с 255 альфой
                 for i in 0..4 { data[i] = 255; }
                 data
             },
             current_atlas_x: 2, 
-            current_atlas_y: 0,
+            current_atlas_y: 2,
             row_height: 1,
             atlas_dirty: true,
             font_map,
+            current_sf: 1.0,
+            scissor_stack: Vec::new(),
+            current_width: 0,
+            current_height: 0,
         }
     }
 
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.draw_commands.clear();
+        self.scissor_stack.clear();
     }
 
     pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4]) {
         let x = rect[0]; let y = rect[1]; let w = rect[2]; let h = rect[3];
         let u1 = uv[0]; let v1 = uv[1]; let u2 = uv[2]; let v2 = uv[3];
+        
+        // ВАЖНО: Если мы используем Scissor, мы должны завершить текущую команду Quads 
+        // и начать новую, если Scissor изменился. Но Scissor у нас идет отдельной командой.
+        
         self.vertices.push(Vertex { pos: [x, y], color, uv: [u1, v1] });
         self.vertices.push(Vertex { pos: [x + w, y], color, uv: [u2, v1] });
         self.vertices.push(Vertex { pos: [x + w, y + h], color, uv: [u2, v2] });
@@ -112,7 +127,13 @@ impl GpuRenderer {
 
     pub fn render_to_texture(&mut self, plugin: &PluginUiState, ui: &mut UserInterface<'_, crate::converter::UiMessage, Theme, GpuRenderer>, width: u32, height: u32, sf: f32, cursor: iced_core::mouse::Cursor) -> anyhow::Result<()> {
         let mut recorder = WgpuRecorder::new(width, height);
+        self.current_sf = sf;
+        self.current_width = width;
+        self.current_height = height;
         
+        let logical_w = width as f32 / sf;
+        let logical_h = height as f32 / sf;
+
         let mut ui_pipeline = plugin.ui_pipeline.borrow_mut();
         if ui_pipeline.is_none() {
             let shader_source = include_str!("shaders.wgsl");
@@ -127,6 +148,7 @@ impl GpuRenderer {
                     command: Some(gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
                         shader_id: sh.id, label: "UI Pipeline".into(), 
                         vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
+                        target_format: 0, // RGBA8
                         ..Default::default()
                     }))
                 };
@@ -140,7 +162,7 @@ impl GpuRenderer {
         if uniform_buffer.is_none() {
             let buf_req = GpuResourceRequest {
                 command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-                    size: 16, usage: 64, mapped_at_creation: false
+                    size: 16, usage: 64, mapped_at_creation: false // UNIFORM | COPY_DST
                 }))
             };
             let buf_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", buf_req.encode_to_vec())?[..])?;
@@ -167,11 +189,12 @@ impl GpuRenderer {
         }
 
         if let Some(u_id) = *uniform_buffer_id {
-            let res_data: [f32; 2] = [width as f32 / sf, height as f32 / sf];
+            let res_data: [f32; 2] = [logical_w, logical_h];
             let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
             let _ = gpu_write_resource(u_id, 0, data);
         }
 
+        // РИСУЕМ
         ui.draw(self, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
         self.ensure_resources();
 
@@ -180,7 +203,7 @@ impl GpuRenderer {
             if vertex_buffer.is_none() {
                 let req = GpuResourceRequest {
                     command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
-                        size: 1024 * 1024 * 4, usage: 32, mapped_at_creation: false
+                        size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false // VERTEX | COPY_DST
                     }))
                 };
                 *vertex_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
@@ -205,7 +228,12 @@ impl GpuRenderer {
                             recorder.draw(0..*count, 0..1);
                             current_vertex_offset += *count;
                         }
-                        DrawCmd::ExternalImage { .. } => {}
+                        DrawCmd::Scissor { x, y, width, height } => {
+                            recorder.set_scissor_rect(*x, *y, *width, *height);
+                        }
+                        DrawCmd::ExternalImage { .. } => {
+                            // Пока пропустим, чтобы не усложнять
+                        }
                     }
                 }
             }
@@ -221,7 +249,7 @@ impl GpuRenderer {
             }
 
             if let Some(ui_tex) = &*ui_texture {
-                let _ = recorder.submit(ui_tex.id, Some(veldsdk::rpc::wgpu::GpuColor { r: 0.1, g: 0.1, b: 0.2, a: 1.0 }));
+                let _ = recorder.submit(ui_tex.id, Some(veldsdk::rpc::wgpu::GpuColor { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }));
                 let _ = veldsdk::app::AppBridge::display_frame(ui_tex.clone(), width, height);
             }
         }
@@ -296,13 +324,34 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             iced_core::Background::Color(c) => [c.r, c.g, c.b, c.a],
             _ => [1.0, 1.0, 1.0, 1.0],
         };
+        // UV [0,0,0,0] указывает на первый зарезервированный белый пиксель
         self.add_quad([quad.bounds.x, quad.bounds.y, quad.bounds.width, quad.bounds.height], color, [0.0, 0.0, 0.0, 0.0]);
     }
     fn clear(&mut self) { self.vertices.clear(); self.draw_commands.clear(); }
-    fn start_layer(&mut self, _bounds: iced_core::Rectangle) {}
-    fn end_layer(&mut self) {}
+    fn start_layer(&mut self, bounds: iced_core::Rectangle) {
+        self.scissor_stack.push(bounds);
+        self.apply_scissor();
+    }
+    fn end_layer(&mut self) {
+        self.scissor_stack.pop();
+        self.apply_scissor();
+    }
     fn start_transformation(&mut self, _transformation: Transformation) {}
     fn end_transformation(&mut self) {}
+}
+
+impl GpuRenderer {
+    fn apply_scissor(&mut self) {
+        if let Some(rect) = self.scissor_stack.last() {
+            let x = (rect.x * self.current_sf).max(0.0) as u32;
+            let y = (rect.y * self.current_sf).max(0.0) as u32;
+            let w = (rect.width * self.current_sf) as u32;
+            let h = (rect.height * self.current_sf) as u32;
+            self.draw_commands.push(DrawCmd::Scissor { x, y, width: w, height: h });
+        } else {
+            self.draw_commands.push(DrawCmd::Scissor { x: 0, y: 0, width: self.current_width, height: self.current_height });
+        }
+    }
 }
 
 impl iced_core::image::Renderer for GpuRenderer {
@@ -312,16 +361,34 @@ impl iced_core::image::Renderer for GpuRenderer {
 }
 
 #[derive(Default)]
-pub struct DummyParagraph;
-impl iced_core::text::Paragraph for DummyParagraph {
+pub struct RealParagraph {
+    pub buffer: Option<Buffer>,
+}
+
+impl iced_core::text::Paragraph for RealParagraph {
     type Font = Font;
-    fn with_text(_: iced_core::Text<&str, Self::Font>) -> Self { Self }
-    fn with_spans<Link>(_: iced_core::Text<&[iced_core::text::Span<'_, Link, Self::Font>], Self::Font>) -> Self { Self }
+    fn with_text(text: iced_core::Text<&str, Self::Font>) -> Self {
+        // Мы не можем создать Buffer здесь без FontSystem, 
+        // поэтому мы полагаемся на то, что Iced вызовет fill_text.
+        // Но для измерения мы используем грубое приближение или статический FontSystem.
+        let _width = text.content.len() as f32 * (text.size.0 * 0.5);
+        let _height = text.size.0 * 1.2;
+        Self { buffer: None } 
+    }
+    fn with_spans<Link>(_: iced_core::Text<&[iced_core::text::Span<'_, Link, Self::Font>], Self::Font>) -> Self { Self::default() }
     fn resize(&mut self, _: Size) {}
     fn compare(&self, _: iced_core::Text<(), Self::Font>) -> iced_core::text::Difference { iced_core::text::Difference::None }
     fn horizontal_alignment(&self) -> iced_core::alignment::Horizontal { iced_core::alignment::Horizontal::Left }
     fn vertical_alignment(&self) -> iced_core::alignment::Vertical { iced_core::alignment::Vertical::Top }
-    fn min_bounds(&self) -> Size { Size::ZERO }
+    fn min_bounds(&self) -> Size { 
+        if let Some(buf) = &self.buffer {
+            let mut width: f32 = 0.0;
+            for run in buf.layout_runs() { width = width.max(run.line_w); }
+            Size::new(width, buf.layout_runs().count() as f32 * buf.metrics().line_height)
+        } else {
+            Size::ZERO 
+        }
+    }
     fn hit_span(&self, _: Point) -> Option<usize> { None }
     fn span_bounds(&self, _: usize) -> Vec<iced_core::Rectangle> { Vec::new() }
     fn hit_test(&self, _: Point) -> Option<iced_core::text::Hit> { None }
@@ -348,7 +415,7 @@ impl iced_core::text::Editor for DummyEditor {
 
 impl iced_core::text::Renderer for GpuRenderer {
     type Font = Font;
-    type Paragraph = DummyParagraph;
+    type Paragraph = RealParagraph;
     type Editor = DummyEditor;
     const ICON_FONT: Font = Font::DEFAULT;
     const CHECKMARK_ICON: char = ' ';
@@ -356,10 +423,15 @@ impl iced_core::text::Renderer for GpuRenderer {
 
     fn default_font(&self) -> Font { Font::DEFAULT }
     fn default_size(&self) -> Pixels { Pixels(16.0) }
-    fn fill_paragraph(&mut self, _p: &Self::Paragraph, _pos: Point, _color: Color, _clip: iced_core::Rectangle) {}
+    fn fill_paragraph(&mut self, p: &Self::Paragraph, pos: Point, color: Color, _clip: iced_core::Rectangle) {
+        if let Some(buffer) = &p.buffer {
+            self.draw_buffer(buffer, pos, color);
+        }
+    }
     fn fill_editor(&mut self, _e: &Self::Editor, _pos: Point, _color: Color, _clip: iced_core::Rectangle) {}
     
     fn fill_text(&mut self, text: iced_core::Text, pos: Point, color: Color, _clip: iced_core::Rectangle) {
+        if text.content.is_empty() { return; }
         let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0));
         let font_family = match &text.font.family {
             iced_core::font::Family::Name(name) => self.font_map.get(*name).map(|s| s.as_str()).unwrap_or("DejaVu Sans"),
@@ -368,23 +440,30 @@ impl iced_core::text::Renderer for GpuRenderer {
         let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
         buffer.set_text(&mut self.font_system, &text.content, attrs, Shaping::Advanced);
         buffer.shape_until_scroll(&mut self.font_system, false);
+        
+        self.draw_buffer(&buffer, pos, color);
+    }
+}
+
+impl GpuRenderer {
+    fn draw_buffer(&mut self, buffer: &Buffer, pos: Point, color: Color) {
         let text_color = [color.r, color.g, color.b, color.a];
 
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
-                let physical_glyph = glyph.physical((0.0, 0.0), 1.0);
+                let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
                 let cache_key = physical_glyph.cache_key;
                 if !self.glyph_cache.contains_key(&cache_key) {
                     if let Some(image) = self.swash_cache.get_image(&mut self.font_system, cache_key) {
                         let width = image.placement.width;
                         let height = image.placement.height;
-                        if self.current_atlas_x + width > self.atlas_width {
+                        if self.current_atlas_x + width + 2 > self.atlas_width {
                             self.current_atlas_x = 2;
                             self.current_atlas_y += self.row_height + 2;
                             self.row_height = 0;
                         }
-                        if self.current_atlas_y + height > self.atlas_height {
-                            self.current_atlas_x = 2; self.current_atlas_y = 0; self.row_height = 0;
+                        if self.current_atlas_y + height + 2 > self.atlas_height {
+                            self.current_atlas_x = 2; self.current_atlas_y = 2; self.row_height = 0;
                             self.glyph_cache.clear();
                         }
                         let x = self.current_atlas_x; let y = self.current_atlas_y;
@@ -418,9 +497,9 @@ impl iced_core::text::Renderer for GpuRenderer {
                     }
                 }
                 if let Some(info) = self.glyph_cache.get(&cache_key) {
-                    let x = pos.x + physical_glyph.x as f32 + info.offset_x as f32;
-                    let y = pos.y + run.line_y as f32 + physical_glyph.y as f32 - info.offset_y as f32;
-                    self.add_quad([x, y, info.width as f32, info.height as f32], text_color, info.uv);
+                    let x = pos.x + (physical_glyph.x as f32 + info.offset_x as f32) / self.current_sf;
+                    let y = pos.y + (run.line_y as f32 + physical_glyph.y as f32 - info.offset_y as f32) / self.current_sf;
+                    self.add_quad([x, y, info.width as f32 / self.current_sf, info.height as f32 / self.current_sf], text_color, info.uv);
                 }
             }
         }
