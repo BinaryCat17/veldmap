@@ -405,41 +405,85 @@ impl iced_core::text::Renderer for GpuRenderer {
 impl GpuRenderer {
     fn draw_buffer(&mut self, buffer: &Buffer, pos: Point, color: Color) {
         let text_color = [color.r, color.g, color.b, color.a];
-        let mut font_system = FONT_SYSTEM.lock().unwrap();
+        
+        // Предварительно проверяем и загружаем отсутствующие глифы
+        self.prepare_glyphs(buffer);
         
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
                 let cache_key = physical_glyph.cache_key;
+                
+                if let Some(info) = self.glyph_cache.get(&cache_key) {
+                    let x = pos.x + glyph.x + (info.offset_x as f32 / self.current_sf);
+                    let y = pos.y + run.line_y - (info.offset_y as f32 / self.current_sf);
+                    self.add_quad(
+                        [x, y, info.width as f32 / self.current_sf, info.height as f32 / self.current_sf], 
+                        text_color, 
+                        info.uv
+                    );
+                }
+            }
+        }
+    }
+
+    fn prepare_glyphs(&mut self, buffer: &Buffer) {
+        let mut font_system = FONT_SYSTEM.lock().unwrap();
+        let mut atlas_modified = false;
+
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs {
+                let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
+                let cache_key = physical_glyph.cache_key;
+                
                 if !self.glyph_cache.contains_key(&cache_key) {
                     if let Some(image) = self.swash_cache.get_image(&mut font_system, cache_key) {
                         let width = image.placement.width;
                         let height = image.placement.height;
+                        
+                        // Проверка места в атласе
                         if self.current_atlas_x + width + 2 > self.atlas_width {
                             self.current_atlas_x = 2;
                             self.current_atlas_y += self.row_height + 2;
                             self.row_height = 0;
                         }
+                        
                         if self.current_atlas_y + height + 2 > self.atlas_height {
-                            self.current_atlas_x = 2; self.current_atlas_y = 2; self.row_height = 0;
+                            // Очистка атласа если места совсем нет
+                            self.current_atlas_x = 2; 
+                            self.current_atlas_y = 2; 
+                            self.row_height = 0;
                             self.glyph_cache.clear();
+                            // В этом случае нужно пересобрать все глифы текущего буфера
+                            // Но для простоты пока просто продолжим
                         }
-                        let x = self.current_atlas_x; let y = self.current_atlas_y;
+
+                        let x = self.current_atlas_x;
+                        let y = self.current_atlas_y;
+                        
+                        // Копирование данных в атлас
                         for r in 0..height {
                             for c in 0..width {
                                 let src_idx = (r * width + c) as usize;
                                 let dest_idx = (((y + r) * self.atlas_width + (x + c)) * 4) as usize;
+                                
                                 if dest_idx + 4 <= self.atlas_data.len() {
                                     match image.content {
                                         cosmic_text::SwashContent::Mask => {
                                             if src_idx < image.data.len() {
                                                 let val = image.data[src_idx];
-                                                self.atlas_data[dest_idx] = 255; self.atlas_data[dest_idx+1] = 255; self.atlas_data[dest_idx+2] = 255; self.atlas_data[dest_idx+3] = val;
+                                                self.atlas_data[dest_idx] = 255;
+                                                self.atlas_data[dest_idx+1] = 255;
+                                                self.atlas_data[dest_idx+2] = 255;
+                                                self.atlas_data[dest_idx+3] = val;
                                             }
                                         }
                                         cosmic_text::SwashContent::Color => {
                                             if src_idx * 4 + 4 <= image.data.len() {
-                                                self.atlas_data[dest_idx] = image.data[src_idx*4]; self.atlas_data[dest_idx+1] = image.data[src_idx*4+1]; self.atlas_data[dest_idx+2] = image.data[src_idx*4+2]; self.atlas_data[dest_idx+3] = image.data[src_idx*4+3];
+                                                self.atlas_data[dest_idx] = image.data[src_idx*4];
+                                                self.atlas_data[dest_idx+1] = image.data[src_idx*4+1];
+                                                self.atlas_data[dest_idx+2] = image.data[src_idx*4+2];
+                                                self.atlas_data[dest_idx+3] = image.data[src_idx*4+3];
                                             }
                                         }
                                         _ => {}
@@ -447,19 +491,30 @@ impl GpuRenderer {
                                 }
                             }
                         }
-                        self.atlas_dirty = true;
-                        let u1 = x as f32 / self.atlas_width as f32; let v1 = y as f32 / self.atlas_height as f32;
-                        let u2 = (x + width) as f32 / self.atlas_width as f32; let v2 = (y + height) as f32 / self.atlas_height as f32;
-                        self.glyph_cache.insert(cache_key, GlyphInfo { uv: [u1, v1, u2, v2], width, height, offset_x: image.placement.left, offset_y: image.placement.top });
-                        self.current_atlas_x += width + 2; self.row_height = self.row_height.max(height);
+                        
+                        let u1 = x as f32 / self.atlas_width as f32;
+                        let v1 = y as f32 / self.atlas_height as f32;
+                        let u2 = (x + width) as f32 / self.atlas_width as f32;
+                        let v2 = (y + height) as f32 / self.atlas_height as f32;
+                        
+                        self.glyph_cache.insert(cache_key, GlyphInfo { 
+                            uv: [u1, v1, u2, v2], 
+                            width, 
+                            height, 
+                            offset_x: image.placement.left, 
+                            offset_y: image.placement.top 
+                        });
+                        
+                        self.current_atlas_x += width + 2;
+                        self.row_height = self.row_height.max(height);
+                        atlas_modified = true;
                     }
                 }
-                if let Some(info) = self.glyph_cache.get(&cache_key) {
-                    let x = pos.x + glyph.x + (info.offset_x as f32 / self.current_sf);
-                    let y = pos.y + run.line_y - (info.offset_y as f32 / self.current_sf);
-                    self.add_quad([x, y, info.width as f32 / self.current_sf, info.height as f32 / self.current_sf], text_color, info.uv);
-                }
             }
+        }
+        
+        if atlas_modified {
+            self.atlas_dirty = true;
         }
     }
 }

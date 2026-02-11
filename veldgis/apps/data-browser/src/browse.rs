@@ -7,6 +7,6 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, _loading: bool, _ha
         text(status).size(14.0),
         column(items.iter().map(|item| {
             button(text(&item.name)).width(veld_ui::Length::Fill).on_press(Message::BrowsePath(item.s3_key.clone())).into()
-        }))
-    ].spacing(15.0).into()
+        })).spacing(5.0)
+    ].into()
 }

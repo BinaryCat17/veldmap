@@ -59,7 +59,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             let btn_width = convert_length(&b.width);
             let btn_height = convert_length(&b.height);
 
-            let mut label = text(b.label.clone())
+            let label = text(b.label.clone())
                 .align_x(h_align)
                 .align_y(v_align);
             
