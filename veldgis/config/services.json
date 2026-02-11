@@ -16,6 +16,10 @@
       "location": "local",
       "path": "plugins/veldmap_render.wasm"
     },
+    "ui-service": {
+      "location": "local",
+      "path": "plugins/veld_ui_service.wasm"
+    },
     "data-browser": {
       "location": "local",
       "path": "plugins/veldmap_data_browser.wasm"

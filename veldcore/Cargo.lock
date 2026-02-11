@@ -6442,6 +6442,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "veldsdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "log",
+ "once_cell",
+ "paste",
+ "prost",
+ "prost-build",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

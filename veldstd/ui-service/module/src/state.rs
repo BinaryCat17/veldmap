@@ -26,23 +26,18 @@ pub struct LocalState {
     pub renderer: GpuRenderer,
 }
 
-thread_local! {
-    pub static STATE: RefCell<Option<LocalState>> = RefCell::new(None);
-}
+unsafe impl Send for LocalState {}
+unsafe impl Sync for LocalState {}
 
-pub fn with_state<F, R>(f: F) -> R where F: FnOnce(&mut LocalState) -> R {
-    STATE.with(|state| {
-        let mut lock = state.borrow_mut();
-        if lock.is_none() {
-            *lock = Some(LocalState {
-                plugins: HashMap::new(),
-                renderer: GpuRenderer::new("DejaVu Sans", vec![
-                    ("DejaVu Sans", include_bytes!("../../../../veldgis/assets/DejaVuSans.ttf")),
-                ]),
-            });
+impl LocalState {
+    pub fn new() -> Self {
+        Self {
+            plugins: HashMap::new(),
+            renderer: GpuRenderer::new("DejaVu Sans", vec![
+                ("DejaVu Sans", include_bytes!("../../../../veldgis/assets/DejaVuSans.ttf")),
+            ]),
         }
-        f(lock.as_mut().unwrap())
-    })
+    }
 }
 
 impl PluginUiState {

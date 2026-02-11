@@ -190,6 +190,8 @@ impl GpuRenderer {
                 let data = unsafe { std::slice::from_raw_parts(self.vertices.as_ptr() as *const u8, self.vertices.len() * 32) };
                 let _ = gpu_write_resource(v_h.id, 0, data);
 
+                recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+
                 let mut current_vertex_offset = 0;
                 for cmd in &self.draw_commands {
                     match cmd {
@@ -200,7 +202,7 @@ impl GpuRenderer {
                             if let Some(atlas_bg) = self.atlas_bind_group_id {
                                 recorder.set_bind_group(0, atlas_bg);
                             }
-                            recorder.draw(current_vertex_offset..(current_vertex_offset + *count), 0..1);
+                            recorder.draw(0..*count, 0..1);
                             current_vertex_offset += *count;
                         }
                         DrawCmd::ExternalImage { .. } => {}
@@ -219,7 +221,7 @@ impl GpuRenderer {
             }
 
             if let Some(ui_tex) = &*ui_texture {
-                let _ = recorder.submit(ui_tex.id);
+                let _ = recorder.submit(ui_tex.id, Some(veldsdk::rpc::wgpu::GpuColor { r: 0.1, g: 0.1, b: 0.2, a: 1.0 }));
                 let _ = veldsdk::app::AppBridge::display_frame(ui_tex.clone(), width, height);
             }
         }

@@ -63,7 +63,7 @@ pub fn execute_render_commands<'a>(
                 rp.draw(d.first_vertex..(d.first_vertex + d.vertex_count), d.first_instance..(d.first_instance + d.instance_count));
             }
             Command::DrawIndexed(di) => {
-                rp.draw_indexed(di.first_index..(di.first_index + di.index_count), di.base_vertex, di.first_instance..(di.first_instance + di.index_count));
+                rp.draw_indexed(di.first_index..(di.first_index + di.index_count), di.base_vertex, di.first_instance..(di.first_instance + di.instance_count));
             }
             Command::SetViewport(v) => {
                 rp.set_viewport(v.x, v.y, v.width, v.height, v.min_depth, v.max_depth);

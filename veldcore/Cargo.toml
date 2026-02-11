@@ -3,6 +3,7 @@ members = [
     "core/host/core",
     "core/host/gui",
     "core/host/cli",
+    "sdk/rust",
 ]
 resolver = "2"
 

@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-veldsdk = { path = "../../../veldsdk/rust" }
+veldsdk = { path = "../../../veldcore/sdk/rust" }
 veldmap-gis-api = { path = "../../lib/rust/gis-api" }
 prost = "0.13"
 serde = { version = "1.0", features = ["derive"] }

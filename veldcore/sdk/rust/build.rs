@@ -3,9 +3,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(feature, values(\"pdk\", \"wgpu\", \"app\", \"client\"))");
 
     let proto_files = &[
-        "../../veldcore/proto/core.proto",
-        "../../veldcore/proto/app.proto",
-        "../../veldcore/proto/wgpu.proto"
+        "../../proto/core.proto",
+        "../../proto/app.proto",
+        "../../proto/wgpu.proto"
     ];
 
     for proto in proto_files {
@@ -13,6 +13,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut config = prost_build::Config::new();
-    config.compile_protos(proto_files, &["../../veldcore/proto/"])?;
+    config.compile_protos(proto_files, &["../../proto/"])?;
     Ok(())
 }

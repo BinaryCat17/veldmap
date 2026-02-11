@@ -76,33 +76,20 @@ impl WgpuRecorder {
         }));
     }
 
-        pub fn submit(self, target_view_id: u64) -> anyhow::Result<()> {
-
-            let cmd_buffer = CommandBuffer {
-
-                commands: self.commands,
-
-            };
-
-            
-
-            let submit_req = Submit {
-
-                target_texture_view_id: target_view_id,
-
-                clear_color: None,
-
-                command_buffer: Some(cmd_buffer),
-
-            };
-
-            
-
-            call_service("wgpu", "submit", submit_req.encode_to_vec())?;
-
-            Ok(())
-
-        }
+    pub fn submit(self, target_view_id: u64, clear_color: Option<crate::rpc::wgpu::GpuColor>) -> anyhow::Result<()> {
+        let cmd_buffer = CommandBuffer {
+            commands: self.commands,
+        };
+        
+        let submit_req = Submit {
+            target_texture_view_id: target_view_id,
+            clear_color,
+            command_buffer: Some(cmd_buffer),
+        };
+        
+        call_service("wgpu", "submit", submit_req.encode_to_vec())?;
+        Ok(())
+    }
 
     }
 
