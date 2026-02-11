@@ -26,8 +26,21 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 }
             };
 
+            let plugin_name = caller.data().plugin_name.clone();
             let dispatcher = caller.data().dispatcher.clone();
-            let result = dispatcher.call(&request.service, &request.method, request.payload).await;
+            
+            log::debug!("[ABI] [{}] Call: {}.{}", plugin_name, request.service, request.method);
+
+            let result = if request.service == "system" && request.method == "log" {
+                if let Ok(log_req) = crate::core::LogRequest::decode(&request.payload[..]) {
+                    log::info!("[{}] {}", plugin_name, log_req.message);
+                    Ok(Vec::new())
+                } else {
+                    dispatcher.call(&request.service, &request.method, request.payload).await
+                }
+            } else {
+                dispatcher.call(&request.service, &request.method, request.payload).await
+            };
 
             let (payload, error): (Vec<u8>, String) = match result {
                 Ok(p) => (p, String::new()),
@@ -216,7 +229,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 Err(_) => return Ok(0u64),
             };
 
-            log::info!("[ABI] HTTP {} {}", req_data.method.as_deref().unwrap_or("GET"), req_data.url);
+            let plugin_name = caller.data().plugin_name.clone();
+            log::info!("[{}] HTTP {} {}", plugin_name, req_data.method.as_deref().unwrap_or("GET"), req_data.url);
 
             let client = reqwest::Client::new();
             let method = match req_data.method.as_deref().unwrap_or("GET") {

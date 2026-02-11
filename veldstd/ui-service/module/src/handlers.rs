@@ -27,7 +27,7 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
             *plugin.needs_redrawing.borrow_mut() = true;
             match ev {
                 app_proto::ui_event::Event::Resize(r) => {
-                    log::info!("[UI-SERVICE] Resize plugin '{}': {}x{} (sf={})", req.plugin_id, r.width, r.height, r.scale_factor);
+                    log::info!("Resize plugin '{}': {}x{} (sf={})", req.plugin_id, r.width, r.height, r.scale_factor);
                     *plugin.canvas_size.borrow_mut() = (r.width, r.height);
                     *plugin.scale_factor.borrow_mut() = r.scale_factor;
                 }
@@ -40,7 +40,7 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                 app_proto::ui_event::Event::Click(c) => {
                     let sf = *plugin.scale_factor.borrow();
                     let pos = Point::new(c.x / sf, c.y / sf);
-                    log::info!("[UI-SERVICE] Click plugin '{}': raw={:?}, logical={:?}, button={}, pressed={}", req.plugin_id, (c.x, c.y), (pos.x, pos.y), c.button, c.pressed);
+                    log::info!("Click plugin '{}': raw={:?}, logical={:?}, button={}, pressed={}", req.plugin_id, (c.x, c.y), (pos.x, pos.y), c.button, c.pressed);
                     *plugin.cursor_position.borrow_mut() = pos;
                     
                     let button = match c.button {

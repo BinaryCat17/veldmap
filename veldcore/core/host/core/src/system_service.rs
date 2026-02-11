@@ -365,11 +365,6 @@ impl NativeService for SystemService {
                 }
                 Ok(FsListResponse { entries }.encode_to_vec())
             }
-            "log" => {
-                let req = LogRequest::decode(&payload[..])?;
-                log::info!("[WASM] {}", req.message);
-                Ok(Vec::new())
-            }
             _ => Err(anyhow::anyhow!("Unknown method")),
         }
     }
