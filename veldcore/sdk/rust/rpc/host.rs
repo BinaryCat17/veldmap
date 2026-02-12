@@ -19,14 +19,28 @@ extern "C" {
     fn veld_input_copy(p: u64, n: u64);
     fn veld_output_set(p: u64, n: u64);
     fn veld_free(p: u64, n: u64);
-    fn veld_generate_uuid(p: u64);
+    fn veld_task_create(id_ptr: u64);
+    fn veld_task_update(id_ptr: u64, id_len: u64, progress: f32, completed: i32, err_ptr: u64, err_len: u64, py_ptr: u64, py_len: u64);
 }
 
 #[cfg(feature = "pdk")]
-pub fn generate_uuid() -> String {
+pub fn task_create() -> String {
     let mut buf = [0u8; 36];
-    unsafe { veld_generate_uuid(buf.as_mut_ptr() as u64); }
+    unsafe { veld_task_create(buf.as_mut_ptr() as u64); }
     String::from_utf8_lossy(&buf).into_owned()
+}
+
+#[cfg(feature = "pdk")]
+pub fn task_update(id: &str, progress: f32, completed: bool, error: &str, payload: &[u8]) {
+    unsafe {
+        veld_task_update(
+            id.as_ptr() as u64, id.len() as u64,
+            progress,
+            if completed { 1 } else { 0 },
+            error.as_ptr() as u64, error.len() as u64,
+            payload.as_ptr() as u64, payload.len() as u64
+        );
+    }
 }
 
 #[no_mangle]

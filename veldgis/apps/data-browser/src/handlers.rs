@@ -63,10 +63,14 @@ pub fn handle_search_press(state: &mut LocalState) -> Command<Message> {
 pub fn handle_search_update(state: &mut LocalState, update: TaskUpdate<SearchResponse>) -> Command<Message> {
     state.search_task.handle(update);
     if let TaskStatus::Finished(res) = &state.search_task {
-        state.search_results = res.products.clone();
-        state.status_message = format!("Found {} results", state.search_results.len());
-    } else if let TaskStatus::Failed(e) = &state.search_task {
-        state.error_message = Some(e.clone());
+        if !res.error.is_empty() {
+            state.error_message = Some(format!("Search API Error: {}", res.error));
+        } else {
+            state.search_results = res.products.clone();
+            state.status_message = format!("Found {} results", state.search_results.len());
+        }
+    } else if let Some(err) = state.search_task.error() {
+        state.error_message = Some(format!("Search Task Failed: {}", err));
     }
     Command::none()
 }
@@ -83,17 +87,24 @@ pub fn handle_browse_path(state: &mut LocalState, path: String) -> Command<Messa
 
 pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<ListPathResponse>) -> Command<Message> {
     state.browse_task.handle(update);
-    state.download_progress = Some(state.browse_task.progress());
+    
     if let TaskStatus::Finished(response) = &state.browse_task {
-        let local_files = veldsdk::core::raw::fs_list(&FsListRequest { path: "data/dem/source".into() }).map(|r| r.entries).unwrap_or_default();
-        let new_items = response.items.iter().map(|s3_key| {
-            let is_folder = s3_key.ends_with('/');
-            let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
-            let exists_locally = !is_folder && local_files.contains(&name);
-            BrowserItem { s3_key: s3_key.clone(), name, is_folder, exists_locally }
-        });
-        state.browse_items.extend(new_items);
-        state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token.clone()) };
+        if !response.error.is_empty() {
+            state.error_message = Some(format!("S3 Error: {}", response.error));
+        } else {
+            let local_files = veldsdk::core::raw::fs_list(&FsListRequest { path: "data/dem/source".into() }).map(|r| r.entries).unwrap_or_default();
+            let new_items = response.items.iter().map(|s3_key| {
+                let is_folder = s3_key.ends_with('/');
+                let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
+                let exists_locally = !is_folder && local_files.contains(&name);
+                BrowserItem { s3_key: s3_key.clone(), name, is_folder, exists_locally }
+            });
+            state.browse_items.extend(new_items);
+            state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token.clone()) };
+            state.status_message = format!("Loaded {} items", state.browse_items.len());
+        }
+    } else if let Some(err) = state.browse_task.error() {
+        state.error_message = Some(format!("Browse Task Failed: {}", err));
     }
     Command::none()
 }
@@ -108,10 +119,16 @@ pub fn handle_download(_state: &mut LocalState, s3_key: String) -> Command<Messa
 
 pub fn handle_download_update(state: &mut LocalState, update: TaskUpdate<DownloadResponse>) -> Command<Message> {
     state.download_task.handle(update);
-    state.download_progress = Some(state.download_task.progress());
-    if let TaskStatus::Finished(_) = &state.download_task {
-        state.status_message = "Download complete".into();
-        refresh_local_files(state);
+    
+    if let TaskStatus::Finished(res) = &state.download_task {
+        if !res.error.is_empty() {
+            state.error_message = Some(format!("Download Error: {}", res.error));
+        } else {
+            state.status_message = "Download complete".into();
+            refresh_local_files(state);
+        }
+    } else if let Some(err) = state.download_task.error() {
+        state.error_message = Some(format!("Download Task Failed: {}", err));
     }
     Command::none()
 }

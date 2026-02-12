@@ -318,5 +318,63 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
+    // 15. veld_generate_uuid
+    linker.func_wrap("env", "veld_generate_uuid", |mut caller: Caller<'_, HostState>, ptr: u64| {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let mem = match caller.get_export("memory") {
+            Some(Extern::Memory(m)) => m,
+            _ => return,
+        };
+        
+        if let Some(target) = mem.data_mut(&mut caller).get_mut(ptr as usize..(ptr as usize + 36)) {
+            target.copy_from_slice(uuid.as_bytes());
+        }
+    })?;
+
+    // 15. veld_task_create
+    linker.func_wrap("env", "veld_task_create", |mut caller: Caller<'_, HostState>, ptr: u64| {
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let mem = match caller.get_export("memory") {
+            Some(Extern::Memory(m)) => m,
+            _ => return,
+        };
+        
+        if let Some(target) = mem.data_mut(&mut caller).get_mut(ptr as usize..(ptr as usize + 36)) {
+            target.copy_from_slice(task_id.as_bytes());
+        }
+
+        let dispatcher = caller.data().dispatcher.clone();
+        let mut tasks = dispatcher.tasks.lock().unwrap();
+        tasks.insert(task_id, crate::dispatcher::TaskState {
+            progress: 0.0,
+            completed: false,
+            error: String::new(),
+            abort_handle: None,
+            result_handle: None,
+            payload: Vec::new(),
+        });
+    })?;
+
+    // 16. veld_task_update
+    linker.func_wrap("env", "veld_task_update", |mut caller: Caller<'_, HostState>, id_ptr: u64, id_len: u64, progress: f32, completed: i32, err_ptr: u64, err_len: u64, py_ptr: u64, py_len: u64| {
+        let mem = match caller.get_export("memory") {
+            Some(Extern::Memory(m)) => m,
+            _ => return,
+        };
+        
+        let task_id = String::from_utf8_lossy(mem.data(&caller).get(id_ptr as usize..(id_ptr + id_len) as usize).unwrap_or_default()).to_string();
+        let error = String::from_utf8_lossy(mem.data(&caller).get(err_ptr as usize..(err_ptr + err_len) as usize).unwrap_or_default()).to_string();
+        let payload = mem.data(&caller).get(py_ptr as usize..(py_ptr + py_len) as usize).unwrap_or_default().to_vec();
+
+        let dispatcher = caller.data().dispatcher.clone();
+        let mut tasks = dispatcher.tasks.lock().unwrap();
+        if let Some(t) = tasks.get_mut(&task_id) {
+            t.progress = progress;
+            t.completed = completed != 0;
+            if !error.is_empty() { t.error = error; }
+            if !payload.is_empty() { t.payload = payload; }
+        }
+    })?;
+
     Ok(())
 }

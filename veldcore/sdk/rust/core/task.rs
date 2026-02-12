@@ -37,6 +37,10 @@ impl<T> TaskStatus<T> {
         if let TaskStatus::Failed(e) = self { Some(e) } else { None }
     }
 
+    pub fn is_failed(&self) -> bool {
+        matches!(self, TaskStatus::Failed(_))
+    }
+
     pub fn handle(&mut self, update: TaskUpdate<T>) {
         match update {
             TaskUpdate::Started(id) => {

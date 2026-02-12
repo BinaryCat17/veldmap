@@ -16,22 +16,27 @@ pub mod host;
 pub mod client;
 
 #[cfg(feature = "pdk")]
-pub static MODULE_STATE: once_cell::sync::OnceCell<anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>> = once_cell::sync::OnceCell::new();
+pub static MODULE_STATE: once_cell::sync::OnceCell<
+    anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>,
+> = once_cell::sync::OnceCell::new();
+
+pub struct ServiceState<S, M> {
+    pub state: S,
+    pub tasks: std::collections::HashMap<String, crate::core::BoxedStream<M>>,
+}
 
 /// Трейт-маркер для типизированного RPC ответа.
 pub trait RpcResponseDecoder {
-    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self> where Self: Sized;
+    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self>
+    where
+        Self: Sized;
 }
 
-// Реализация для всех сообщений
 impl<T: prost::Message + Default> RpcResponseDecoder for T {
     fn decode_from(bytes: &[u8]) -> anyhow::Result<Self> {
         Ok(T::decode(bytes)?)
     }
 }
-
-// А теперь хитрый ход: мы НЕ реализуем RpcResponseDecoder для ().
-// Вместо этого мы добавим в макрос rpc_proxy ветку, которая проверяет тип.
 
 /// Макрос для генерации клиентских прокси-функций для RPC сервиса.
 #[macro_export]
@@ -62,7 +67,10 @@ macro_rules! handle_proxy_method {
         }
 
         $crate::paste::paste! {
-            pub fn [<$method _cmd>]<M: 'static>(req: $req, f: impl Fn(Result<$res, String>) -> M + Send + Sync + 'static) -> $crate::core::Command<M> {
+            pub fn [<$method _cmd>]<M: 'static>(
+                req: $req, 
+                f: impl Fn(Result<$res, String>) -> M + Send + Sync + 'static
+            ) -> $crate::core::Command<M> {
                 $crate::core::Command::perform(
                     async move {
                         $method(&req).map_err(|e| e.to_string())
@@ -82,7 +90,10 @@ macro_rules! handle_proxy_method {
         }
 
         $crate::paste::paste! {
-            pub fn [<$method _task>]<M: 'static>(req: $req, f: impl Fn($crate::core::task::TaskUpdate<$res>) -> M + Send + Sync + 'static) -> $crate::core::Command<M> {
+            pub fn [<$method _task>]<M: 'static>(
+                req: $req, 
+                f: impl Fn($crate::core::task::TaskUpdate<$res>) -> M + Send + Sync + 'static
+            ) -> $crate::core::Command<M> {
                 use $crate::futures_util::stream::{once, StreamExt};
                 
                 let f = std::sync::Arc::new(f);
@@ -106,13 +117,24 @@ macro_rules! handle_proxy_method {
                         }
                         Err(e) => {
                             let f_err = std::sync::Arc::clone(&f_c);
-                            Box::pin(once(async move { f_err( $crate::core::task::TaskUpdate::Finished(Err(e)) ) })) as $crate::core::BoxedStream<M>
+                            Box::pin(once(async move { 
+                                f_err( $crate::core::task::TaskUpdate::Finished(Err(e)) ) 
+                            })) as $crate::core::BoxedStream<M>
                         }
                     }
                 });
                 $crate::core::Command::stream(s)
             }
         }
+    };
+}
+
+/// Внутренний макрос для декодирования, который умеет в ().
+#[macro_export]
+macro_rules! decode_rpc_final {
+    ((), $bytes:expr) => { Ok(()) };
+    ($t:ty, $bytes:expr) => {
+        <$t as $crate::rpc::RpcResponseDecoder>::decode_from(&$bytes[..])
     };
 }
 
@@ -132,20 +154,6 @@ macro_rules! decode_task_final {
             <$t>::decode(&p[..]).map_err(|e| e.to_string())
         }
     };
-}
-
-/// Внутренний макрос для декодирования, который умеет в ().
-#[macro_export]
-macro_rules! decode_rpc_final {
-    ((), $bytes:expr) => { Ok(()) };
-    ($t:ty, $bytes:expr) => {
-        <$t as $crate::rpc::RpcResponseDecoder>::decode_from(&$bytes[..])
-    };
-}
-
-pub struct ServiceState<S, M> {
-    pub state: S,
-    pub tasks: std::collections::HashMap<String, crate::core::BoxedStream<M>>,
 }
 
 /// Улучшенный макрос для определения модуля (сервиса).
@@ -226,57 +234,18 @@ macro_rules! define_module {
                             Ok(r) => r,
                             Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
                         };
-                        if let Some(task) = service.tasks.get_mut(&req.task_id) {
-                            let mut status = TaskStatusResponse::default();
-                            
-                            // Опрашиваем стрим задачи
-                            let waker = $crate::futures_util::task::noop_waker_ref();
-                            let mut cx = std::task::Context::from_waker(waker);
-                            
-                            use $crate::futures_util::stream::StreamExt;
-                            loop {
-                                match task.poll_next_unpin(&mut cx) {
-                                    std::task::Poll::Ready(Some(update)) => {
-                                        match update {
-                                            $crate::core::task::TaskUpdate::Started(_) => {
-                                                status.progress = 0.0;
-                                            }
-                                            $crate::core::task::TaskUpdate::Progress(p, _) => {
-                                                status.progress = p;
-                                            }
-                                            $crate::core::task::TaskUpdate::Finished(res) => {
-                                                status.completed = true;
-                                                status.progress = 1.0;
-                                                match res {
-                                                    Ok(payload) => status.payload = payload,
-                                                    Err(e) => status.error = e,
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    std::task::Poll::Ready(None) => {
-                                        status.completed = true;
-                                        break;
-                                    }
-                                    std::task::Poll::Pending => break,
-                                }
-                            }
-                            
-                            let res_bytes = status.encode_to_vec();
-                            if status.completed { service.tasks.remove(&req.task_id); }
-                            (res_bytes, String::new())
-                        } else {
-                            (Vec::new(), "Task not found".to_string())
-                        }
+                        
+                        // Если это системный запрос статуса, но у нас НЕТ такой задачи в локальном реестре,
+                        // это нормально — возможно, задача управляется хостом.
+                        // Но в этой реализации мы опрашиваем задачи через SystemService хоста.
+                        (Vec::new(), "Use system.task_status".to_string())
                     }
                     "task_cancel" => {
                         let req = match TaskCancelRequest::decode(&request.payload[..]) {
                             Ok(r) => r,
                             Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
                         };
-                        service.tasks.remove(&req.task_id);
-                        (Vec::new(), String::new())
+                        (Vec::new(), "Use system.task_cancel".to_string())
                     }
                     $(
                         $method => {
@@ -305,65 +274,54 @@ macro_rules! define_module {
 }
 
 #[macro_export]
-
 macro_rules! handle_method_logic {
-
     // Ветка для обычного метода
-
     ($service:ident, $func:path, $req:ident, ) => {
-
         {
-
             match $func(&mut $service.state, $req) {
-
                 Ok(res) => {
-
                     use $crate::prost::Message;
-
                     (res.encode_to_vec(), String::new())
-
                 },
-
                 Err(e) => (Vec::new(), e.to_string()),
-
+            }
+        }
+    };
+    // Ветка для задачи (@task)
+    ($service:ident, $func:path, $req:ident, @task) => {
+        {
+            let task_id = $crate::rpc::host::task_create();
+            let state_clone = $service.state.clone();
+            let cmd = $func(state_clone, $req);
+            
+            use $crate::futures_util::stream::StreamExt;
+            use $crate::futures_util::stream::select_all;
+            let mut combined_stream = select_all(cmd.0);
+            
+            let waker = $crate::futures_util::task::noop_waker_ref();
+            let mut cx = std::task::Context::from_waker(waker);
+            
+            while let std::task::Poll::Ready(Some(update)) = combined_stream.poll_next_unpin(&mut cx) {
+                match update {
+                    $crate::core::task::TaskUpdate::Started(_) => {
+                        $crate::rpc::host::task_update(&task_id, 0.0, false, "", &[]);
+                    }
+                    $crate::core::task::TaskUpdate::Progress(p, _) => {
+                        $crate::rpc::host::task_update(&task_id, p, false, "", &[]);
+                    }
+                    $crate::core::task::TaskUpdate::Finished(res) => {
+                        let (error, payload) = match res {
+                            Ok(p) => (String::new(), p),
+                            Err(e) => (e, Vec::new()),
+                        };
+                        $crate::rpc::host::task_update(&task_id, 1.0, true, &error, &payload);
+                    }
+                }
             }
 
-        }
-
-    };
-
-
-
-    // Ветка для задачи (@task)
-
-    ($service:ident, $func:path, $req:ident, @task) => {
-
-        {
-
-            let task_id = $crate::rpc::host::generate_uuid();
-
-            let state_clone = $service.state.clone();
-
-            let cmd = $func(state_clone, $req);
-
-            
-
-            use $crate::futures_util::stream::select_all;
-
-            let combined_stream = select_all(cmd.0);
-
-            $service.tasks.insert(task_id.clone(), Box::pin(combined_stream));
-
-            
-
             use $crate::prost::Message;
-
             use $crate::rpc::core::TaskResponse;
-
             (TaskResponse { task_id }.encode_to_vec(), String::new())
-
         }
-
     };
-
 }

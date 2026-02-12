@@ -26,9 +26,22 @@ pub fn view(state: &LocalState) -> Element<Message> {
 
     let status_view = text(&state.status_message).size(14.0).color(COLOR_TEXT_DIM);
 
-    let progress_view: Element<Message> = if let Some(progress) = state.download_progress {
+    // Умная логика прогресса
+    let (active_progress, task_name) = if state.download_task.is_running() {
+        (Some(state.download_task.progress()), "Downloading")
+    } else if state.browse_task.is_running() {
+        (Some(state.browse_task.progress()), "Loading files")
+    } else if state.search_task.is_running() {
+        (Some(state.search_task.progress()), "Searching")
+    } else if state.image_task.is_running() {
+        (Some(state.image_task.progress()), "Loading image")
+    } else {
+        (None, "")
+    };
+
+    let progress_view: Element<Message> = if let Some(progress) = active_progress {
         column![
-            text(format!("Progress: {:.1}%", progress * 100.0)).size(12.0),
+            text(format!("{}: {:.1}%", task_name, progress * 100.0)).size(12.0),
             veld_ui::progress_bar(0.0..=1.0, progress).height(veld_ui::Length::Fixed(8.0)),
             button(text("Cancel")).on_press(Message::CancelDownload)
         ].spacing(5.0).into()

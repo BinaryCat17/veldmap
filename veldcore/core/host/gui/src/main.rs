@@ -175,7 +175,7 @@ async fn main() -> anyhow::Result<()> {
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
-    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone()))));
+    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()))));
     dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::gpu_service::GpuService::new(resources.clone()))));
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone(), resources.clone()))));
 

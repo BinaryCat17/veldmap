@@ -14,27 +14,17 @@ use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use tokio::task::AbortHandle;
 use image::GenericImageView;
 
-struct TaskState {
-    progress: f32,
-    completed: bool,
-    error: String,
-    abort_handle: Option<AbortHandle>,
-    result_handle: Option<ResourceHandle>,
-    payload: Vec<u8>,
-}
-
 pub struct SystemService {
-    tasks: Arc<Mutex<HashMap<String, TaskState>>>,
+    tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>,
     resources: Arc<ResourceManager>,
 }
 
 impl SystemService {
-    pub fn new(resources: Arc<ResourceManager>) -> Self {
+    pub fn new(resources: Arc<ResourceManager>, tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>) -> Self {
         Self {
-            tasks: Arc::new(Mutex::new(HashMap::new())),
+            tasks,
             resources,
         }
     }
@@ -139,7 +129,7 @@ impl NativeService for SystemService {
 
                 {
                     let mut tasks = self.tasks.lock().unwrap();
-                    tasks.insert(task_id.clone(), TaskState { 
+                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
                         progress: 0.0, 
                         completed: false, 
                         error: String::new(),
@@ -305,7 +295,7 @@ impl NativeService for SystemService {
 
                 {
                     let mut tasks = self.tasks.lock().unwrap();
-                    tasks.insert(task_id.clone(), TaskState { 
+                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
                         progress: 0.0, 
                         completed: false, 
                         error: String::new(),

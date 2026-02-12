@@ -29,9 +29,20 @@ pub enum ServiceLocation {
     Native(Arc<dyn NativeService>),
 }
 
+#[derive(Clone)]
+pub struct TaskState {
+    pub progress: f32,
+    pub completed: bool,
+    pub error: String,
+    pub abort_handle: Option<tokio::task::AbortHandle>,
+    pub result_handle: Option<crate::core::ResourceHandle>,
+    pub payload: Vec<u8>,
+}
+
 pub struct Dispatcher {
     endpoint: Endpoint,
     services: Mutex<HashMap<String, ServiceLocation>>,
+    pub tasks: Arc<Mutex<HashMap<String, TaskState>>>,
 }
 
 impl Dispatcher {
@@ -39,6 +50,7 @@ impl Dispatcher {
         Self {
             endpoint,
             services: Mutex::new(HashMap::new()),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
