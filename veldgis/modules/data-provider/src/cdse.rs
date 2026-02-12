@@ -171,36 +171,22 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
     veldsdk::core::raw::http_task(req_task, |u| {
         use veldsdk::core::task::TaskUpdate::*;
         match u {
-            Started(id) => {
-                info!("HTTP Task Started: {:?}", id);
-                Started(id)
-            },
-            Progress(p, id) => {
-                // info!("HTTP Task Progress: {}", p); // Too noisy
-                Progress(p, id)
-            },
+            Started(id) => Started(id),
+            Progress(p, id) => Progress(p, id),
             Finished(Ok(res)) => {
-                info!("HTTP Task Finished. Status: {}, Body size: {}", res.status, res.body.len());
                 if res.status >= 200 && res.status < 300 {
                     if res.body.is_empty() {
-                         info!("HTTP Body is empty");
                          Finished(Err("Empty S3 response".to_string()))
                     } else {
-                         info!("Parsing XML...");
                          let parsed = parse_s3_xml(res.body);
-                         info!("XML Parsed. Items: {}", parsed.items.len());
+                         info!("S3 found {} items", parsed.items.len());
                          Finished(Ok(parsed.encode_to_vec()))
                     }
                 } else {
-                    let err_msg = format!("HTTP Error {}: {}", res.status, String::from_utf8_lossy(&res.body));
-                    info!("{}", err_msg);
-                    Finished(Err(err_msg))
+                    Finished(Err(format!("HTTP Error {}: {}", res.status, String::from_utf8_lossy(&res.body))))
                 }
             }
-            Finished(Err(e)) => {
-                info!("HTTP Task Finished with Error: {}", e);
-                Finished(Err(e))
-            },
+            Finished(Err(e)) => Finished(Err(e)),
         }
     })
 }

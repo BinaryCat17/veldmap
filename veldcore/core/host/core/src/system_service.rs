@@ -314,7 +314,7 @@ impl NativeService for SystemService {
                 let tasks_clone = self.tasks.clone();
                 let task_id_inner = task_id.clone();
                 
-                log::info!(target: "host", "Received HTTP request: {} {} (Task ID: {})", req.method, req.url, task_id);
+                log::debug!(target: "host", "Received HTTP request: {} {} (Task ID: {})", req.method, req.url, task_id);
 
                 {
                     let mut tasks = self.tasks.lock().unwrap();
@@ -329,7 +329,7 @@ impl NativeService for SystemService {
                 }
 
                 let join_handle = tokio::spawn(async move {
-                    log::info!(target: "host", "Executing HTTP Task {}...", task_id_inner);
+                    log::debug!(target: "host", "Executing HTTP Task {}...", task_id_inner);
                     let client = reqwest::Client::new();
                     let method = match req.method.to_uppercase().as_str() {
                         "POST" => reqwest::Method::POST,
@@ -355,14 +355,14 @@ impl NativeService for SystemService {
                     if let Some(t) = tasks.get_mut(&task_id_inner) {
                         match result {
                             Ok((status, body)) => {
-                                log::info!(target: "host", "HTTP Task {} finished with status {}", task_id_inner, status);
+                                log::debug!(target: "host", "HTTP Task {} finished with status {}", task_id_inner, status);
                                 let response = HttpTaskResponse { status, body };
                                 t.payload = response.encode_to_vec();
                                 t.progress = 1.0;
                                 t.completed = true;
                             }
                             Err(e) => {
-                                log::error!(target: "host", "HTTP Task {} failed: {}", task_id_inner, e);
+                                log::warn!(target: "host", "HTTP Task {} failed: {}", task_id_inner, e);
                                 t.error = e;
                                 t.completed = true;
                             }
