@@ -30,6 +30,30 @@ impl<M> Command<M> {
         for cmd in commands { streams.extend(cmd.0); }
         Self(streams)
     }
+
+    pub fn map_task<T, U>(self, f: impl Fn(T) -> U + Send + Sync + 'static) -> Command<crate::core::task::TaskUpdate<U>> 
+    where 
+        M: Into<crate::core::task::TaskUpdate<T>> + 'static,
+        T: Send + Sync + 'static,
+        U: Send + Sync + 'static
+    {
+        use futures_util::stream::StreamExt;
+        use crate::core::task::TaskUpdate;
+        let f = std::sync::Arc::new(f);
+        
+        let streams = self.0.into_iter().map(|stream| {
+            let f = std::sync::Arc::clone(&f);
+            Box::pin(stream.map(move |msg| {
+                let update: TaskUpdate<T> = msg.into();
+                match update {
+                    TaskUpdate::Started(id) => TaskUpdate::Started(id),
+                    TaskUpdate::Progress(p, id) => TaskUpdate::Progress(p, id),
+                    TaskUpdate::Finished(res) => TaskUpdate::Finished(res.map(|t| f(t))),
+                }
+            })) as BoxedStream<crate::core::task::TaskUpdate<U>>
+        }).collect();
+        Command(streams)
+    }
 }
 
 pub async fn yield_now() {

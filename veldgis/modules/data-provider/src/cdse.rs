@@ -165,20 +165,27 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
         headers,
         body: Vec::new(),
     };
+    
+    info!("Requesting S3 list: {}", req_task.url);
 
-    veldsdk::core::raw::http_task(req_task, |u| match u {
-        veldsdk::core::task::TaskUpdate::Started(_) => veldsdk::core::task::TaskUpdate::Started(None),
-        veldsdk::core::task::TaskUpdate::Progress(p, _) => veldsdk::core::task::TaskUpdate::Progress(p, None),
-        veldsdk::core::task::TaskUpdate::Finished(Ok(res)) => {
-            if res.status != 200 && res.status != 0 {
-                veldsdk::core::task::TaskUpdate::Finished(Err(format!("S3 status {}: {}", res.status, String::from_utf8_lossy(&res.body))))
-            } else if res.body.is_empty() {
-                veldsdk::core::task::TaskUpdate::Finished(Err("Empty response from S3".into()))
-            } else {
-                veldsdk::core::task::TaskUpdate::Finished(Ok(parse_s3_xml(res.body).encode_to_vec()))
+    veldsdk::core::raw::http_task(req_task, |u| {
+        use veldsdk::core::task::TaskUpdate::*;
+        match u {
+            Started(id) => Started(id),
+            Progress(p, id) => Progress(p, id),
+            Finished(Ok(res)) => {
+                if res.status >= 200 && res.status < 300 {
+                    if res.body.is_empty() {
+                         Finished(Err("Empty S3 response".to_string()))
+                    } else {
+                         Finished(Ok(parse_s3_xml(res.body).encode_to_vec()))
+                    }
+                } else {
+                    Finished(Err(format!("HTTP Error {}: {}", res.status, String::from_utf8_lossy(&res.body))))
+                }
             }
+            Finished(Err(e)) => Finished(Err(e)),
         }
-        veldsdk::core::task::TaskUpdate::Finished(Err(e)) => veldsdk::core::task::TaskUpdate::Finished(Err(e)),
     })
 }
 
