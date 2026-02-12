@@ -105,23 +105,6 @@ pub fn fs_download(url: String, path: String, headers: std::collections::HashMap
     Ok(res.task_id)
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct HttpRequest {
-    pub url: String,
-    pub method: Option<String>,
-    pub headers: std::collections::HashMap<String, String>,
-}
-
-impl HttpRequest {
-    pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), method: None, headers: std::collections::HashMap::new() }
-    }
-    pub fn with_header(mut self, key: String, value: String) -> Self {
-        self.headers.insert(key, value);
-        self
-    }
-}
-
 pub struct HostLogger;
 impl Log for HostLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool { true }

@@ -222,7 +222,7 @@ macro_rules! define_module {
                 .expect("Failed to downcast state to expected type");
 
             if !service.tasks.is_empty() {
-                 let _ = $crate::core::raw::log(&$crate::rpc::core::LogRequest { level: 2, message: format!("Polling {} tasks", service.tasks.len()) });
+                 // $crate::core::raw::log(&$crate::rpc::core::LogRequest { level: 2, message: format!("Polling {} tasks", service.tasks.len()) });
             }
 
             let mut finished_tasks = Vec::new();

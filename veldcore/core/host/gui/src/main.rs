@@ -189,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { let _ = node.run().await; });
         log::info!("Core ready. Heartbeat started...");
         
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
         loop {
             interval.tick().await;
             

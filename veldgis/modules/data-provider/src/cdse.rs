@@ -32,8 +32,6 @@ pub fn search(_state: LocalState, _request: SearchRequest) -> veldsdk::core::Com
     }, |u| u)
 }
 
-use std::pin::Pin;
-
 pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
     let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     let host = "eodata.dataspace.copernicus.eu";

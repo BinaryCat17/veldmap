@@ -55,7 +55,7 @@ impl Dispatcher {
     }
 
     pub fn register_service(&self, name: String, location: ServiceLocation) {
-        log::info!("[DISPATCHER] Registering service: {}", name);
+        log::trace!("[DISPATCHER] Registering service: {}", name);
         let mut services = self.services.lock().unwrap();
         services.insert(name, location);
     }
