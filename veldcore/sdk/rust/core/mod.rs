@@ -2,11 +2,14 @@ pub use crate::rpc::core::*;
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use std::future::Future;
 use std::pin::Pin;
+use futures_util::stream::Stream;
 
-pub type BoxedFuture<M> = Pin<Box<dyn Future<Output = Option<M>> + Send + Sync + 'static>>;
+pub mod task;
+
+pub type BoxedStream<M> = Pin<Box<dyn Stream<Item = M> + Send + Sync + 'static>>;
 
 /// A command that describes a side effect to be performed.
-pub struct Command<M>(pub Vec<BoxedFuture<M>>);
+pub struct Command<M>(pub Vec<BoxedStream<M>>);
 
 impl<M> Command<M> {
     pub fn none() -> Self { Self(Vec::new()) }
@@ -16,12 +19,16 @@ impl<M> Command<M> {
         G: FnOnce(T) -> M + Send + Sync + 'static,
         T: 'static, M: 'static 
     {
-        Self(vec![Box::pin(async move { Some(msg_wrap(future.await)) })])
+        use futures_util::stream::once;
+        Self(vec![Box::pin(once(async move { msg_wrap(future.await) }))])
+    }
+    pub fn stream(stream: impl Stream<Item = M> + Send + Sync + 'static) -> Self {
+        Self(vec![Box::pin(stream)])
     }
     pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
-        let mut futures = Vec::new();
-        for cmd in commands { futures.extend(cmd.0); }
-        Self(futures)
+        let mut streams = Vec::new();
+        for cmd in commands { streams.extend(cmd.0); }
+        Self(streams)
     }
 }
 

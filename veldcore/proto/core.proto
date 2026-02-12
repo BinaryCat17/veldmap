@@ -138,6 +138,7 @@ message TaskStatusResponse {
   bool completed = 2;
   string error = 3;
   ResourceHandle result_handle = 4;
+  bytes payload = 5;
 }
 
 message TaskCancelRequest {

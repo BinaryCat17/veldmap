@@ -77,6 +77,11 @@ macro_rules! decode_rpc_final {
     };
 }
 
+pub struct ServiceState<S, M> {
+    pub state: S,
+    pub tasks: std::collections::HashMap<String, $crate::core::BoxedStream<M>>,
+}
+
 /// Улучшенный макрос для определения модуля (сервиса).
 #[macro_export]
 macro_rules! define_module {
@@ -85,7 +90,7 @@ macro_rules! define_module {
         state: $state_type:ty,
         init: $init_func:path,
         handlers: {
-            $($method:expr => $func:path : $req_type:ty => $res_type:ty),* $(,)?
+            $( $(@ $task:ident)? $method:expr => $func:path : $req_type:ty => $res_type:ty),* $(,)?
         }
     ) => {
         #[no_mangle]
@@ -112,7 +117,13 @@ macro_rules! define_module {
 
             let state_result = $init_func(config);
             let boxed_state: $crate::anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>> = match state_result {
-                Ok(s) => Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(s)))),
+                Ok(s) => {
+                    let service_state = $crate::rpc::ServiceState::<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>> {
+                        state: s,
+                        tasks: std::collections::HashMap::new(),
+                    };
+                    Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(service_state))))
+                },
                 Err(e) => Err(e),
             };
 
@@ -125,7 +136,7 @@ macro_rules! define_module {
         #[no_mangle]
         pub extern "C" fn handle_rpc() -> i32 {
             use $crate::prost::Message;
-            use $crate::rpc::core::{RpcRequest, RpcResponse};
+            use $crate::rpc::core::{RpcRequest, RpcResponse, TaskStatusRequest, TaskStatusResponse, TaskCancelRequest};
 
             let input = $crate::rpc::host::load_input();
             let request = match RpcRequest::decode(&input[..]) {
@@ -140,23 +151,75 @@ macro_rules! define_module {
                     None => return (Vec::new(), "Module not initialized (init not called)".to_string()),
                 };
                 let mut state_lock = state_arc.lock().unwrap();
-                let state = state_lock.downcast_mut::<$state_type>()
+                let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>>>()
                     .expect("Failed to downcast state to expected type");
 
                 match request.method.as_str() {
+                    "task_status" => {
+                        let req = match TaskStatusRequest::decode(&request.payload[..]) {
+                            Ok(r) => r,
+                            Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
+                        };
+                        if let Some(task) = service.tasks.get_mut(&req.task_id) {
+                            let mut status = TaskStatusResponse::default();
+                            
+                            // Опрашиваем стрим задачи
+                            let waker = $crate::futures_util::task::noop_waker_ref();
+                            let mut cx = std::task::Context::from_waker(waker);
+                            
+                            use $crate::futures_util::stream::StreamExt;
+                            loop {
+                                match task.poll_next_unpin(&mut cx) {
+                                    std::task::Poll::Ready(Some(update)) => {
+                                        match update {
+                                            $crate::core::task::TaskUpdate::Started(_) => {
+                                                status.progress = 0.0;
+                                            }
+                                            $crate::core::task::TaskUpdate::Progress(p, _) => {
+                                                status.progress = p;
+                                            }
+                                            $crate::core::task::TaskUpdate::Finished(res) => {
+                                                status.completed = true;
+                                                status.progress = 1.0;
+                                                match res {
+                                                    Ok(payload) => status.payload = payload,
+                                                    Err(e) => status.error = e,
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    std::task::Poll::Ready(None) => {
+                                        status.completed = true;
+                                        break;
+                                    }
+                                    std::task::Poll::Pending => break,
+                                }
+                            }
+                            
+                            let res_bytes = status.encode_to_vec();
+                            if status.completed { service.tasks.remove(&req.task_id); }
+                            (res_bytes, String::new())
+                        } else {
+                            (Vec::new(), "Task not found".to_string())
+                        }
+                    }
+                    "task_cancel" => {
+                        let req = match TaskCancelRequest::decode(&request.payload[..]) {
+                            Ok(r) => r,
+                            Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
+                        };
+                        service.tasks.remove(&req.task_id);
+                        (Vec::new(), String::new())
+                    }
                     $(
                         $method => {
                             let req = match <$req_type>::decode(&request.payload[..]) {
                                 Ok(r) => r,
                                 Err(e) => return (Vec::new(), format!("Failed to decode request for {}: {}", $method, e)),
                             };
-                            match $func(state, req) {
-                                Ok(res) => {
-                                    let res: $res_type = res;
-                                    (res.encode_to_vec(), String::new())
-                                },
-                                Err(e) => (Vec::new(), e.to_string()),
-                            }
+                            
+                            $crate::handle_method_logic!(service, $func, req, $(@ $task)?)
                         }
                     )*
                     _ => (Vec::new(), format!("Method '{}' not found in plugin", request.method)),
@@ -172,5 +235,33 @@ macro_rules! define_module {
             $crate::rpc::host::store_output(response.encode_to_vec());
             0
         }
+    };
+}
+
+#[macro_export]
+macro_rules! handle_method_logic {
+    // Ветка для обычного метода
+    ($service:ident, $func:path, $req:ident, ) => {
+        match $func(&$service.state, $req) {
+            Ok(res) => {
+                use $crate::prost::Message;
+                (res.encode_to_vec(), String::new())
+            },
+            Err(e) => (Vec::new(), e.to_string()),
+        }
+    };
+    // Ветка для задачи (@task)
+    ($service:ident, $func:path, $req:ident, @task) => {
+        let task_id = $crate::rpc::host::generate_uuid(); // Нам нужен способ генерировать ID
+        let cmd = $func(&$service.state, $req);
+        
+        // Объединяем все стримы команды в один и сохраняем
+        use $crate::futures_util::stream::select_all;
+        let combined_stream = select_all(cmd.0);
+        $service.tasks.insert(task_id.clone(), Box::pin(combined_stream));
+        
+        use $crate::prost::Message;
+        use $crate::rpc::core::TaskResponse;
+        (TaskResponse { task_id }.encode_to_vec(), String::new())
     };
 }

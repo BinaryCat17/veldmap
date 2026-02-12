@@ -13,6 +13,7 @@ pub use serde_json;
 pub use prost;
 pub use anyhow;
 pub use paste;
+pub use futures_util;
 
 pub mod prelude {
     pub use crate::rpc::core::*;

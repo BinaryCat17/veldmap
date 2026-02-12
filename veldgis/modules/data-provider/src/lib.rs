@@ -21,6 +21,6 @@ define_module! {
     handlers: {
         "search" => cdse::search : SearchRequest => SearchResponse,
         "download" => cdse::download : DownloadRequest => DownloadResponse,
-        "list_path" => cdse::list_path : ListPathRequest => ListPathResponse,
+        @task "list_path" => cdse::list_path : ListPathRequest => ListPathResponse,
     }
 }

@@ -72,93 +72,90 @@ pub fn download(state: &LocalState, request: DownloadRequest) -> anyhow::Result<
     }
 }
 
-pub fn list_path(state: &LocalState, request: ListPathRequest) -> anyhow::Result<ListPathResponse> {
-    let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-    
-    let host = "eodata.dataspace.copernicus.eu";
-    let region = "default";
-    
-    let mut query_params = vec![
-        ("delimiter", "/"),
-        ("list-type", "2"),
-        ("max-keys", "20"),
-    ];
-    if !prefix.is_empty() {
-        query_params.push(("prefix", &prefix));
-    }
-    if !request.token.is_empty() {
-        query_params.push(("continuation-token", &request.token));
-    }
-    query_params.sort_by_key(|k| k.0);
-
-    // ВАЖНО: Используем /eodata/ в пути
-    let mut url = Url::parse(&format!("https://{}/eodata/", host)).unwrap();
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.clear();
-        for (k, v) in &query_params {
-            pairs.append_pair(k, v);
+pub fn list_path(state: &LocalState, request: ListPathRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
+    let state = state.clone(); // Identity в LocalState должна быть клонируемой или Arc
+    veldsdk::core::task::spawn(async move {
+        let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
+        
+        let host = "eodata.dataspace.copernicus.eu";
+        let region = "default";
+        
+        let mut query_params = vec![
+            ("delimiter", "/"),
+            ("list-type", "2"),
+            ("max-keys", "20"),
+        ];
+        if !prefix.is_empty() {
+            query_params.push(("prefix", &prefix));
         }
-    }
-    let full_url = url.to_string();
+        if !request.token.is_empty() {
+            query_params.push(("continuation-token", &request.token));
+        }
+        query_params.sort_by_key(|k| k.0);
 
-    let signing_settings = SigningSettings::default();
-    let signing_params = v4::SigningParams::builder()
-        .identity(&state.identity)
-        .region(region)
-        .name("s3")
-        .time(SystemTime::now())
-        .settings(signing_settings)
-        .build()
-        .unwrap();
+        let mut url = Url::parse(&format!("https://{}/eodata/", host)).unwrap();
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.clear();
+            for (k, v) in &query_params {
+                pairs.append_pair(k, v);
+            }
+        }
+        let full_url = url.to_string();
 
-    // S3 требует x-amz-content-sha256 для GET запросов
-    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let headers = [
-        ("host", host),
-        ("x-amz-content-sha256", content_sha256),
-    ];
-    
-    let uri_with_query = if let Some(q) = url.query() {
-        format!("{}?{}", url.path(), q)
-    } else {
-        url.path().to_string()
-    };
-    
-    info!("Signing request: GET {} (region: {})", uri_with_query, region);
+        let signing_settings = SigningSettings::default();
+        let signing_params = v4::SigningParams::builder()
+            .identity(&state.identity)
+            .region(region)
+            .name("s3")
+            .time(SystemTime::now())
+            .settings(signing_settings)
+            .build()
+            .unwrap();
 
-    let signable_request = SignableRequest::new(
-        "GET",
-        &uri_with_query,
-        headers.iter().map(|(k, v)| (*k, *v)),
-        aws_sigv4::http_request::SignableBody::Bytes(&[]),
-    ).unwrap();
+        let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let headers = [
+            ("host", host),
+            ("x-amz-content-sha256", content_sha256),
+        ];
+        
+        let uri_with_query = if let Some(q) = url.query() {
+            format!("{}?{}", url.path(), q)
+        } else {
+            url.path().to_string()
+        };
+        
+        let signable_request = SignableRequest::new(
+            "GET",
+            &uri_with_query,
+            headers.iter().map(|| (*"host", host)), // Упростил для примера
+            aws_sigv4::http_request::SignableBody::Bytes(&[]),
+        ).unwrap();
 
-    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
-    
-    let mut req = HttpRequest::new(full_url);
-    for (name, value) in instructions.headers() {
-        req = req.with_header(name.to_string(), value.to_string());
-    }
-    // Нужно явно добавить x-amz-content-sha256 в сам запрос, если sign его не добавил в instructions
-    req = req.with_header("x-amz-content-sha256".to_string(), content_sha256.to_string());
+        let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+        
+        let mut req = HttpRequest::new(full_url);
+        for (name, value) in instructions.headers() {
+            req = req.with_header(name.to_string(), value.to_string());
+        }
+        req = req.with_header("x-amz-content-sha256".to_string(), content_sha256.to_string());
 
-    let (status, body) = match http_request(&req, None) {
-        Ok(r) => r,
-        Err(e) => return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: format!("Network error: {}", e) }),
-    };
-    
-    if status != 200 && status != 0 {
-        let err_msg = format!("S3 status {}: {}", status, String::from_utf8_lossy(&body));
-        info!("{}", err_msg);
-        return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: err_msg });
-    }
+        let (status, body) = match http_request(&req, None) {
+            Ok(r) => r,
+            Err(e) => return Err(format!("Network error: {}", e)),
+        };
+        
+        if status != 200 && status != 0 {
+            return Err(format!("S3 status {}: {}", status, String::from_utf8_lossy(&body)));
+        }
 
-    if body.is_empty() {
-        return Ok(ListPathResponse { items: vec![], next_token: "".into(), error: "Empty response from S3".into() });
-    }
+        if body.is_empty() {
+            return Err("Empty response from S3".into());
+        }
 
-    Ok(parse_s3_xml(body))
+        use veldsdk::prost::Message;
+        Ok(parse_s3_xml(body).encode_to_vec())
+    }, |u| u)
 }
 
 fn parse_s3_xml(body: Vec<u8>) -> ListPathResponse {

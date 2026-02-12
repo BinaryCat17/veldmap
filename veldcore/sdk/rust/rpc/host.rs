@@ -19,6 +19,14 @@ extern "C" {
     fn veld_input_copy(p: u64, n: u64);
     fn veld_output_set(p: u64, n: u64);
     fn veld_free(p: u64, n: u64);
+    fn veld_generate_uuid(p: u64);
+}
+
+#[cfg(feature = "pdk")]
+pub fn generate_uuid() -> String {
+    let mut buf = [0u8; 36];
+    unsafe { veld_generate_uuid(buf.as_mut_ptr() as u64); }
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 #[no_mangle]
