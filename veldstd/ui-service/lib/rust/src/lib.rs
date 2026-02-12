@@ -436,7 +436,7 @@ macro_rules! row {
 
 pub struct ModuleState<S, M> {
     pub state: S,
-    pub tasks: Vec<veldsdk::core::BoxedFuture<M>>,
+    pub tasks: Vec<veldsdk::core::BoxedStream<M>>,
     pub plugin_name: String,
     pub width: u32,
     pub height: u32,
@@ -504,13 +504,18 @@ macro_rules! define_remote_ui_module {
                     let waker = $crate::reexports::noop_waker_ref();
                     let mut cx = $crate::reexports::Context::from_waker(waker);
                     let mut new_messages = Vec::new();
+                    
+                    use veldsdk::futures_util::stream::StreamExt;
+                    
                     module.tasks.retain_mut(|task| {
-                        match task.as_mut().poll(&mut cx) {
-                            $crate::reexports::Poll::Ready(maybe_msg) => {
-                                if let Some(msg) = maybe_msg { new_messages.push(msg); }
-                                false
-                            },
-                            $crate::reexports::Poll::Pending => true,
+                        loop {
+                            match task.poll_next_unpin(&mut cx) {
+                                $crate::reexports::Poll::Ready(Some(msg)) => {
+                                    new_messages.push(msg);
+                                },
+                                $crate::reexports::Poll::Ready(None) => return false,
+                                $crate::reexports::Poll::Pending => return true,
+                            }
                         }
                     });
 

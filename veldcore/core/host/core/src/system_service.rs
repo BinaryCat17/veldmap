@@ -328,6 +328,7 @@ impl NativeService for SystemService {
                         completed: task.completed, 
                         error: task.error.clone(),
                         result_handle: task.result_handle.clone(),
+                        payload: Vec::new(),
                     }.encode_to_vec();
                     
                     if task.completed {

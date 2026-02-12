@@ -10,6 +10,7 @@ pub(crate) struct LocalConfig {
     pub secret_key: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct LocalState {
     pub identity: Identity,
 }
@@ -19,8 +20,8 @@ define_module! {
     state: LocalState,
     init: cdse::module_init,
     handlers: {
-        "search" => cdse::search : SearchRequest => SearchResponse,
-        "download" => cdse::download : DownloadRequest => DownloadResponse,
+        @task "search" => cdse::search : SearchRequest => SearchResponse,
+        @task "download" => cdse::download : DownloadRequest => DownloadResponse,
         @task "list_path" => cdse::list_path : ListPathRequest => ListPathResponse,
     }
 }

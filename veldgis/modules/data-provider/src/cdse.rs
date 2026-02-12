@@ -23,57 +23,90 @@ pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
     })
 }
 
-pub fn search(_state: &LocalState, _request: SearchRequest) -> anyhow::Result<SearchResponse> {
-    Ok(SearchResponse { products: vec![], error: String::new() })
+pub fn search(_state: LocalState, _request: SearchRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
+    veldsdk::core::task::spawn(async move {
+        // Здесь будет логика поиска через OData/OpenSearch
+        // Пока возвращаем пустой результат для примера
+        use veldsdk::prost::Message;
+        Ok(SearchResponse { products: vec![], error: String::new() }.encode_to_vec())
+    }, |u| u)
 }
 
-pub fn download(state: &LocalState, request: DownloadRequest) -> anyhow::Result<DownloadResponse> {
-    let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-    let host = "eodata.dataspace.copernicus.eu";
-    let region = "default";
-    
-    let url = format!("https://{}/eodata/{}", host, s3_key);
-    let uri = format!("/eodata/{}", s3_key);
+use std::pin::Pin;
 
-    let signing_settings = SigningSettings::default();
-    let signing_params = v4::SigningParams::builder()
-        .identity(&state.identity)
-        .region(region)
-        .name("s3")
-        .time(SystemTime::now())
-        .settings(signing_settings)
-        .build()
-        .unwrap();
+pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
+    use veldsdk::core::task::{TaskUpdate, host_stream};
+    use std::sync::Arc;
+    use futures_util::stream::StreamExt;
 
-    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let headers = [
-        ("host", host),
-        ("x-amz-content-sha256", content_sha256),
-    ];
-    
-    let signable_request = SignableRequest::new(
-        "GET",
-        &uri,
-        headers.iter().map(|(k, v)| (*k, *v)),
-        aws_sigv4::http_request::SignableBody::Bytes(&[]),
-    ).unwrap();
+    let msg_wrap = Arc::new(|u: TaskUpdate<Vec<u8>>| u);
+    let on_complete = Arc::new(|_res: veldsdk::rpc::core::TaskStatusResponse| {
+        use veldsdk::prost::Message;
+        Ok(DownloadResponse { 
+            success: true, 
+            error: String::new(), 
+            download_url: String::new(), 
+        }.encode_to_vec())
+    });
 
-    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
-    
-    let mut download_headers = std::collections::HashMap::new();
-    for (name, value) in instructions.headers() {
-        download_headers.insert(name.to_string(), value.to_string());
-    }
-    download_headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
+    let s = futures_util::stream::once(async move {
+        let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
+        let host = "eodata.dataspace.copernicus.eu";
+        let region = "default";
+        
+        let url = format!("https://{}/eodata/{}", host, s3_key);
+        let uri = format!("/eodata/{}", s3_key);
 
-    match veldsdk::core::fs_download(url.clone(), request.destination, download_headers) {
-        Ok(task_id) => Ok(DownloadResponse { success: true, error: "".into(), download_url: url, task_id }),
-        Err(e) => Ok(DownloadResponse { success: false, error: format!("Host download failed: {}", e), download_url: "".into(), task_id: "".into() }),
-    }
+        let signing_settings = SigningSettings::default();
+        let signing_params = v4::SigningParams::builder()
+            .identity(&state.identity)
+            .region(region)
+            .name("s3")
+            .time(SystemTime::now())
+            .settings(signing_settings)
+            .build()
+            .unwrap();
+
+        let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let headers = [
+            ("host", host),
+            ("x-amz-content-sha256", content_sha256),
+        ];
+        
+        let signable_request = SignableRequest::new(
+            "GET",
+            &uri,
+            headers.iter().map(|(k, v)| (*k, *v)),
+            aws_sigv4::http_request::SignableBody::Bytes(&[]),
+        ).unwrap();
+
+        let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+        
+        let mut download_headers = std::collections::HashMap::new();
+        for (name, value) in instructions.headers() {
+            download_headers.insert(name.to_string(), value.to_string());
+        }
+        download_headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
+
+        match veldsdk::core::fs_download(url.clone(), request.destination, download_headers) {
+            Ok(task_id) => Ok(task_id),
+            Err(e) => Err(format!("Host download failed: {}", e)),
+        }
+    }).flat_map(move |res| {
+        match res {
+            Ok(task_id) => {
+                Box::pin(host_stream(task_id, Arc::clone(&msg_wrap), Arc::clone(&on_complete))) as Pin<Box<dyn futures_util::stream::Stream<Item = TaskUpdate<Vec<u8>>> + Send + Sync>>
+            }
+            Err(e) => {
+                Box::pin(futures_util::stream::once(async move { TaskUpdate::Finished(Err(e)) })) as Pin<Box<dyn futures_util::stream::Stream<Item = TaskUpdate<Vec<u8>>> + Send + Sync>>
+            }
+        }
+    });
+
+    veldsdk::core::Command::stream(s)
 }
 
-pub fn list_path(state: &LocalState, request: ListPathRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
-    let state = state.clone(); // Identity в LocalState должна быть клонируемой или Arc
+pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
     veldsdk::core::task::spawn(async move {
         let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
         
@@ -128,7 +161,7 @@ pub fn list_path(state: &LocalState, request: ListPathRequest) -> veldsdk::core:
         let signable_request = SignableRequest::new(
             "GET",
             &uri_with_query,
-            headers.iter().map(|| (*"host", host)), // Упростил для примера
+            headers.iter().map(|(k, v)| (*k, *v)),
             aws_sigv4::http_request::SignableBody::Bytes(&[]),
         ).unwrap();
 

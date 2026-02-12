@@ -79,7 +79,7 @@ macro_rules! decode_rpc_final {
 
 pub struct ServiceState<S, M> {
     pub state: S,
-    pub tasks: std::collections::HashMap<String, $crate::core::BoxedStream<M>>,
+    pub tasks: std::collections::HashMap<String, crate::core::BoxedStream<M>>,
 }
 
 /// Улучшенный макрос для определения модуля (сервиса).
@@ -239,29 +239,65 @@ macro_rules! define_module {
 }
 
 #[macro_export]
+
 macro_rules! handle_method_logic {
+
     // Ветка для обычного метода
+
     ($service:ident, $func:path, $req:ident, ) => {
-        match $func(&$service.state, $req) {
-            Ok(res) => {
-                use $crate::prost::Message;
-                (res.encode_to_vec(), String::new())
-            },
-            Err(e) => (Vec::new(), e.to_string()),
+
+        {
+
+            match $func(&mut $service.state, $req) {
+
+                Ok(res) => {
+
+                    use $crate::prost::Message;
+
+                    (res.encode_to_vec(), String::new())
+
+                },
+
+                Err(e) => (Vec::new(), e.to_string()),
+
+            }
+
         }
+
     };
+
+
+
     // Ветка для задачи (@task)
+
     ($service:ident, $func:path, $req:ident, @task) => {
-        let task_id = $crate::rpc::host::generate_uuid(); // Нам нужен способ генерировать ID
-        let cmd = $func(&$service.state, $req);
-        
-        // Объединяем все стримы команды в один и сохраняем
-        use $crate::futures_util::stream::select_all;
-        let combined_stream = select_all(cmd.0);
-        $service.tasks.insert(task_id.clone(), Box::pin(combined_stream));
-        
-        use $crate::prost::Message;
-        use $crate::rpc::core::TaskResponse;
-        (TaskResponse { task_id }.encode_to_vec(), String::new())
+
+        {
+
+            let task_id = $crate::rpc::host::generate_uuid();
+
+            let state_clone = $service.state.clone();
+
+            let cmd = $func(state_clone, $req);
+
+            
+
+            use $crate::futures_util::stream::select_all;
+
+            let combined_stream = select_all(cmd.0);
+
+            $service.tasks.insert(task_id.clone(), Box::pin(combined_stream));
+
+            
+
+            use $crate::prost::Message;
+
+            use $crate::rpc::core::TaskResponse;
+
+            (TaskResponse { task_id }.encode_to_vec(), String::new())
+
+        }
+
     };
+
 }

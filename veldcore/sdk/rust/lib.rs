@@ -18,5 +18,5 @@ pub use futures_util;
 pub mod prelude {
     pub use crate::rpc::core::*;
     #[cfg(feature = "pdk")]
-    pub use crate::core::{Command, BoxedFuture};
+    pub use crate::core::{Command, BoxedStream};
 }

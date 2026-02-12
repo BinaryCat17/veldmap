@@ -6,21 +6,28 @@ mod browse;
 mod downloaded;
 
 use veld_ui::define_remote_ui_module;
-use veldmap_gis_api::dataprovider::{DataProduct, SearchResponse, ListPathResponse};
+use veldmap_gis_api::dataprovider::{DataProduct, SearchResponse, ListPathResponse, DownloadResponse};
 use crate::common::{BrowserItem, ViewMode};
 
 #[derive(serde::Deserialize, Clone)]
 pub struct LocalConfig {}
+
+use veldsdk::core::task::TaskStatus;
 
 pub struct LocalState {
     pub view_mode: ViewMode,
     pub status_message: String,
     pub error_message: Option<String>,
     pub search_state: search::SearchState,
+    
+    // Новые типизированные задачи
+    pub search_task: TaskStatus<SearchResponse>,
+    pub browse_task: TaskStatus<(String, ListPathResponse)>,
+    pub download_task: TaskStatus<DownloadResponse>,
+    pub image_task: TaskStatus<veldsdk::rpc::core::ResourceHandle>,
+
     pub search_results: Vec<DataProduct>,
-    pub download_progress: Option<f32>,
-    pub active_download_task: Option<String>,
-    pub active_image_task: Option<String>,
+    pub download_progress: Option<f32>, // Оставим для совместимости с вьюхой пока
     pub current_image: Option<u64>,
     pub current_gpu_image: Option<veldsdk::rpc::core::ResourceHandle>,
     pub downloaded_state: downloaded::DownloadedState,
@@ -39,25 +46,23 @@ pub enum AppMessage {
     SearchInputChanged(String),
     SearchFilterTypeChanged(search::SearchFilterType),
     SearchPressed,
-    SearchResult(Result<SearchResponse, String>),
+    SearchUpdate(veldsdk::core::task::TaskUpdate<SearchResponse>),
     ClearError,
     ProductSelected(DataProduct),
     ProductFilesLoaded(Result<ListPathResponse, String>),
     BackToList,
     BrowsePath(String),
-    BrowsePathLoaded(Result<(String, ListPathResponse), String>),
+    BrowseUpdate(veldsdk::core::task::TaskUpdate<(String, ListPathResponse)>),
     LoadMore,
     BrowseUp,
     LocalSearchChanged(String),
     LocalFilterChanged(downloaded::FileFilter),
     DownloadFile(String),
-    DownloadStarted(Result<String, String>),
-    UpdateDownloadProgress,
+    DownloadUpdate(veldsdk::core::task::TaskUpdate<DownloadResponse>),
     CancelDownload,
     DeleteLocalFile(String),
     ViewFile(String),
-    PreviewLoaded(Result<u64, String>),
-    ImageStatusUpdated,
+    ImageUpdate(veldsdk::core::task::TaskUpdate<veldsdk::rpc::core::ResourceHandle>),
     ClosePreview,
 }
 
@@ -72,25 +77,23 @@ define_remote_ui_module! {
         SearchInputChanged(query) => handlers::handle_search_input;
         SearchFilterTypeChanged(filter) => handlers::handle_search_filter;
         SearchPressed => handlers::handle_search_press;
-        SearchResult(res) => handlers::handle_search_result;
+        SearchUpdate(u) => handlers::handle_search_update;
         ClearError => handlers::handle_clear_error;
         ProductSelected(product) => handlers::handle_product_selected;
         ProductFilesLoaded(res) => handlers::handle_product_files_loaded;
         BackToList => handlers::handle_back_to_list;
         BrowsePath(path) => handlers::handle_browse_path;
-        BrowsePathLoaded(res) => handlers::handle_browse_path_loaded;
+        BrowseUpdate(u) => handlers::handle_browse_update;
         LoadMore => handlers::handle_load_more;
         BrowseUp => handlers::handle_browse_up;
         LocalSearchChanged(query) => handlers::handle_local_search;
         LocalFilterChanged(filter) => handlers::handle_local_filter;
         DownloadFile(path) => handlers::handle_download;
-        DownloadStarted(res) => handlers::handle_download_started;
-        UpdateDownloadProgress => handlers::handle_update_progress;
+        DownloadUpdate(u) => handlers::handle_download_update;
         CancelDownload => handlers::handle_cancel_download;
         DeleteLocalFile(path) => handlers::handle_delete;
         ViewFile(path) => handlers::handle_view;
-        PreviewLoaded(res) => handlers::handle_preview_loaded;
-        ImageStatusUpdated => handlers::handle_image_status;
+        ImageUpdate(u) => handlers::handle_image_update;
         ClosePreview => handlers::handle_close_preview;
     }
 }

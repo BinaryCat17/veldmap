@@ -156,7 +156,13 @@ pub fn load_input() -> Vec<u8> {
 }
 
 pub fn store_output(data: Vec<u8>) {
+
     unsafe {
+
         veld_output_set(data.as_ptr() as u64, data.len() as u64);
+
     }
+
 }
+
+

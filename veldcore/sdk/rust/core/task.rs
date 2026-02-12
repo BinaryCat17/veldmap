@@ -1,7 +1,8 @@
 use std::fmt::Debug;
 use serde::{Serialize, Deserialize};
 use std::future::Future;
-use futures_util::stream::{Stream, StreamExt, once};
+use futures_util::stream::{StreamExt, once};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskUpdate<T> {
@@ -67,7 +68,10 @@ where
     T: Send + Sync + 'static,
     M: 'static,
 {
-    let s = once(async { msg_wrap(TaskUpdate::Started(None)) })
+    let msg_wrap = Arc::new(msg_wrap);
+    let msg_wrap_c = Arc::clone(&msg_wrap);
+    
+    let s = once(async move { msg_wrap_c(TaskUpdate::Started(None)) })
         .chain(once(async move {
             match future.await {
                 Ok(res) => msg_wrap(TaskUpdate::Finished(Ok(res))),
@@ -77,27 +81,27 @@ where
     crate::core::Command::stream(s)
 }
 
-/// Создает задачу, которая отслеживает прогресс хостовой операции по task_id.
-pub fn spawn_host<T, M>(
+/// Возвращает поток обновлений для хостовой операции.
+pub fn host_stream<T, M>(
     task_id: String,
-    msg_wrap: impl Fn(TaskUpdate<T>) -> M + Send + Sync + 'static,
-    on_complete: impl Fn(crate::rpc::core::TaskStatusResponse) -> Result<T, String> + Send + Sync + 'static
-) -> crate::core::Command<M>
+    msg_wrap: Arc<impl Fn(TaskUpdate<T>) -> M + Send + Sync + 'static>,
+    on_complete: Arc<impl Fn(crate::rpc::core::TaskStatusResponse) -> Result<T, String> + Send + Sync + 'static>
+) -> impl futures_util::stream::Stream<Item = M> + Send + Sync + 'static
 where
     T: Send + Sync + 'static,
     M: 'static,
 {
     let tid = task_id.clone();
-    let s = once(async move { msg_wrap(TaskUpdate::Started(Some(tid))) })
+    let msg_wrap_c = Arc::clone(&msg_wrap);
+    
+    once(async move { msg_wrap_c(TaskUpdate::Started(Some(tid))) })
         .chain(futures_util::stream::unfold(
             (task_id, false),
             move |(id, completed)| {
-                let msg_wrap = &msg_wrap;
-                let on_complete = &on_complete;
+                let msg_wrap = Arc::clone(&msg_wrap);
+                let on_complete = Arc::clone(&on_complete);
                 async move {
                     if completed { return None; }
-                    
-                    // Небольшая задержка перед опросом
                     crate::core::yield_now().await;
                     
                     match crate::core::raw::task_status(&crate::rpc::core::TaskStatusRequest { task_id: id.clone() }) {
@@ -115,6 +119,20 @@ where
                     }
                 }
             }
-        ));
-    crate::core::Command::stream(s)
+        ))
+}
+
+/// Создает задачу, которая отслеживает прогресс хостовой операции по task_id.
+pub fn spawn_host<T, M>(
+    task_id: String,
+    msg_wrap: impl Fn(TaskUpdate<T>) -> M + Send + Sync + 'static,
+    on_complete: impl Fn(crate::rpc::core::TaskStatusResponse) -> Result<T, String> + Send + Sync + 'static
+) -> crate::core::Command<M>
+where
+    T: Send + Sync + 'static,
+    M: 'static,
+{
+    let msg_wrap = Arc::new(msg_wrap);
+    let on_complete = Arc::new(on_complete);
+    crate::core::Command::stream(host_stream(task_id, msg_wrap, on_complete))
 }
