@@ -171,20 +171,36 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
     veldsdk::core::raw::http_task(req_task, |u| {
         use veldsdk::core::task::TaskUpdate::*;
         match u {
-            Started(id) => Started(id),
-            Progress(p, id) => Progress(p, id),
+            Started(id) => {
+                info!("HTTP Task Started: {:?}", id);
+                Started(id)
+            },
+            Progress(p, id) => {
+                // info!("HTTP Task Progress: {}", p); // Too noisy
+                Progress(p, id)
+            },
             Finished(Ok(res)) => {
+                info!("HTTP Task Finished. Status: {}, Body size: {}", res.status, res.body.len());
                 if res.status >= 200 && res.status < 300 {
                     if res.body.is_empty() {
+                         info!("HTTP Body is empty");
                          Finished(Err("Empty S3 response".to_string()))
                     } else {
-                         Finished(Ok(parse_s3_xml(res.body).encode_to_vec()))
+                         info!("Parsing XML...");
+                         let parsed = parse_s3_xml(res.body);
+                         info!("XML Parsed. Items: {}", parsed.items.len());
+                         Finished(Ok(parsed.encode_to_vec()))
                     }
                 } else {
-                    Finished(Err(format!("HTTP Error {}: {}", res.status, String::from_utf8_lossy(&res.body))))
+                    let err_msg = format!("HTTP Error {}: {}", res.status, String::from_utf8_lossy(&res.body));
+                    info!("{}", err_msg);
+                    Finished(Err(err_msg))
                 }
             }
-            Finished(Err(e)) => Finished(Err(e)),
+            Finished(Err(e)) => {
+                info!("HTTP Task Finished with Error: {}", e);
+                Finished(Err(e))
+            },
         }
     })
 }

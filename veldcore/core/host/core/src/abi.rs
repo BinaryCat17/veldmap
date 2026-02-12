@@ -29,7 +29,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let plugin_name = caller.data().plugin_name.clone();
             let dispatcher = caller.data().dispatcher.clone();
             
-            log::debug!(target: "wasm", "[{}] Call: {}.{}", plugin_name, request.service, request.method);
+            log::info!(target: "wasm", "[{}] Call: {}.{}", plugin_name, request.service, request.method);
 
             let result = if request.service == "system" && request.method == "log" {
                 if let Ok(log_req) = crate::core::LogRequest::decode(&request.payload[..]) {

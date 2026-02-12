@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     // Настраиваем логи: по умолчанию только предупреждения, для нашего проекта - INFO
     // Отключаем шумные iroh, wasmtime, sctk и wgpu_core (до уровня error/warn)
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
+        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
     }
     env_logger::Builder::from_default_env()
         .format(|buf, record| {

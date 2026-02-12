@@ -106,7 +106,9 @@ where
                 let on_complete = Arc::clone(&on_complete);
                 async move {
                     if completed { return None; }
+                    let _ = crate::core::raw::log(&crate::rpc::core::LogRequest { level: 1, message: format!("Polling task {}...", id) });
                     crate::core::yield_now().await;
+                    let _ = crate::core::raw::log(&crate::rpc::core::LogRequest { level: 1, message: format!("Resumed task {}...", id) });
                     
                     match crate::core::raw::task_status(&crate::rpc::core::TaskStatusRequest { task_id: id.clone() }) {
                         Ok(status) => {

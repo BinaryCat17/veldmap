@@ -221,6 +221,10 @@ macro_rules! define_module {
             let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>>>()
                 .expect("Failed to downcast state to expected type");
 
+            if !service.tasks.is_empty() {
+                 let _ = $crate::core::raw::log(&$crate::rpc::core::LogRequest { level: 2, message: format!("Polling {} tasks", service.tasks.len()) });
+            }
+
             let mut finished_tasks = Vec::new();
             for (task_id, stream) in service.tasks.iter_mut() {
                 let waker = $crate::futures_util::task::noop_waker_ref();
@@ -349,8 +353,7 @@ macro_rules! handle_method_logic {
             let cmd = $func(state_clone, $req);
             
             use $crate::futures_util::stream::StreamExt;
-            use $crate::futures_util::stream::select_all;
-            let mut combined_stream = select_all(cmd.0);
+            let mut combined_stream = $crate::futures_util::stream::iter(cmd.0).flatten();
             
             let waker = $crate::futures_util::task::noop_waker_ref();
             let mut cx = std::task::Context::from_waker(waker);
