@@ -36,7 +36,7 @@ pub fn handle_switch_mode(state: &mut LocalState, mode: ViewMode) -> Command<Mes
     state.download_progress = None;
     state.selected_product = None;
     if state.view_mode == ViewMode::Browse && state.browse_items.is_empty() {
-        return perform_browse_cmd(String::new());
+        return perform_browse_cmd(String::new(), String::new());
     } else if state.view_mode == ViewMode::Downloaded {
         refresh_local_files(state);
     }
@@ -119,20 +119,27 @@ pub fn handle_back_to_list(state: &mut LocalState) -> Command<Message> {
 
 pub fn handle_browse_path(state: &mut LocalState, path: String) -> Command<Message> {
     state.status_message = format!("Listing /{}...", path);
-    perform_browse_cmd(path)
+    state.browse_items.clear();
+    state.next_token = None;
+    perform_browse_cmd(path, String::new())
 }
 
 pub fn handle_browse_path_loaded(state: &mut LocalState, res: Result<(String, ListPathResponse), String>) -> Command<Message> {
     match res {
         Ok((path, response)) => {
             let local_files = veldsdk::core::raw::fs_list(&FsListRequest { path: "data/dem/source".into() }).map(|r| r.entries).unwrap_or_default();
-            state.browse_items = response.items.into_iter().map(|s3_key| {
-                let is_folder = s3_key.ends_with('/');
-                let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
-                let exists_locally = !is_folder && local_files.contains(&name);
-                BrowserItem { s3_key, name, is_folder, exists_locally }
-            }).collect();
+            let current_path = path.clone();
+            let new_items = response.items.into_iter()
+                .filter(|s3_key| s3_key != &current_path && s3_key != &format!("{}/", current_path.trim_end_matches('/')))
+                .map(|s3_key| {
+                    let is_folder = s3_key.ends_with('/');
+                    let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
+                    let exists_locally = !is_folder && local_files.contains(&name);
+                    BrowserItem { s3_key, name, is_folder, exists_locally }
+                });
+            state.browse_items.extend(new_items);
             state.current_browse_path = path;
+            state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token) };
             state.status_message = format!("Loaded {} items", state.browse_items.len());
         }
         Err(e) => { state.error_message = Some(e); }
@@ -140,15 +147,26 @@ pub fn handle_browse_path_loaded(state: &mut LocalState, res: Result<(String, Li
     Command::none()
 }
 
+pub fn handle_load_more(state: &mut LocalState) -> Command<Message> {
+    if let Some(token) = state.next_token.clone() {
+        state.status_message = "Loading more...".to_string();
+        return perform_browse_cmd(state.current_browse_path.clone(), token);
+    }
+    Command::none()
+}
+
 pub fn handle_browse_up(state: &mut LocalState) -> Command<Message> {
     let current = state.current_browse_path.trim_end_matches('/');
     let parent = if let Some(idx) = current.rfind('/') {
-        current[..=idx].to_string()
+        let p = &current[..idx];
+        if p.is_empty() { String::new() } else { format!("{}/", p) }
     } else {
         String::new()
     };
     state.status_message = format!("Listing /{}...", parent);
-    perform_browse_cmd(parent)
+    state.browse_items.clear();
+    state.next_token = None;
+    perform_browse_cmd(parent, String::new())
 }
 
 pub fn handle_download(state: &mut LocalState, s3_key: String) -> Command<Message> {
@@ -227,7 +245,7 @@ fn on_download_finished(state: &mut LocalState, res: Result<(), String>) -> Comm
         Ok(_) => {
             state.status_message = "Download complete".into();
             if let ViewMode::Browse = state.view_mode {
-                return perform_browse_cmd(state.current_browse_path.clone());
+                return perform_browse_cmd(state.current_browse_path.clone(), String::new());
             } else if state.selected_product.is_some() {
                 let local_files = veldsdk::core::raw::fs_list(&FsListRequest { path: "data/dem/source".into() }).map(|r| r.entries).unwrap_or_default();
                 for item in &mut state.product_files {
@@ -338,9 +356,9 @@ pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { state.
 
 // Helper functions
 
-fn perform_browse_cmd(path: String) -> Command<Message> {
+fn perform_browse_cmd(path: String, token: String) -> Command<Message> {
     let p = path.clone();
-    let req = ListPathRequest { path: path.clone(), token: String::new() };
+    let req = ListPathRequest { path: path.clone(), token };
     Command::perform(async move {
         let res_bytes = veldsdk::rpc::host::call_service("data-provider", "list_path", veldsdk::prost::Message::encode_to_vec(&req)).map_err(|e| e.to_string())?;
         let resp = <ListPathResponse as veldsdk::prost::Message>::decode(&res_bytes[..]).map_err(|e| e.to_string())?;

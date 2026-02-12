@@ -1,6 +1,6 @@
 use veld_ui::proto;
 use crate::renderer::GpuRenderer;
-use iced_widget::{column, row, text, button, container, Space};
+use iced_widget::{column, row, text, button, container, scrollable, progress_bar, Space};
 use iced_core::{Element, Theme, Length, Color, alignment, Size};
 
 #[derive(Clone, Debug)]
@@ -90,6 +90,19 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             if let Some(ay) = convert_alignment(c.align_y()) { cont = cont.align_y(ay); }
             
             cont.into()
+        }
+        Some(proto::widget::Type::Scrollable(s)) => {
+            let content = if let Some(child) = &s.content { convert_widget(child) } else { Space::with_width(0.0).into() };
+            scrollable(content)
+                .width(convert_length(&s.width))
+                .height(convert_length(&s.height))
+                .into()
+        }
+        Some(proto::widget::Type::ProgressBar(p)) => {
+            progress_bar(p.range_start..=p.range_end, p.value)
+                .width(convert_length(&p.width))
+                .height(convert_length(&p.height))
+                .into()
         }
         Some(proto::widget::Type::Image(img)) => {
             WgpuImageWidget {

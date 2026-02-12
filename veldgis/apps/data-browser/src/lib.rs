@@ -46,6 +46,7 @@ pub enum AppMessage {
     BackToList,
     BrowsePath(String),
     BrowsePathLoaded(Result<(String, ListPathResponse), String>),
+    LoadMore,
     BrowseUp,
     LocalSearchChanged(String),
     LocalFilterChanged(downloaded::FileFilter),
@@ -78,6 +79,7 @@ define_remote_ui_module! {
         BackToList => handlers::handle_back_to_list;
         BrowsePath(path) => handlers::handle_browse_path;
         BrowsePathLoaded(res) => handlers::handle_browse_path_loaded;
+        LoadMore => handlers::handle_load_more;
         BrowseUp => handlers::handle_browse_up;
         LocalSearchChanged(query) => handlers::handle_local_search;
         LocalFilterChanged(filter) => handlers::handle_local_filter;

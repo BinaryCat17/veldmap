@@ -276,6 +276,113 @@ pub fn container<M>(child: impl Into<Element<M>>) -> Container<M> {
     Container::new(child)
 }
 
+pub struct Scrollable<M> {
+    widget: proto::Scrollable,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Scrollable<M> {
+    pub fn new(content: impl Into<Element<M>>) -> Self {
+        Self {
+            widget: proto::Scrollable {
+                content: Some(Box::new(content.into().widget)),
+                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
+}
+
+impl<M> From<Scrollable<M>> for Element<M> {
+    fn from(s: Scrollable<M>) -> Self {
+        proto::Widget { r#type: Some(proto::widget::Type::Scrollable(Box::new(s.widget))) }.into()
+    }
+}
+
+pub fn scrollable<M>(content: impl Into<Element<M>>) -> Scrollable<M> {
+    Scrollable::new(content)
+}
+
+pub struct ProgressBar<M> {
+    widget: proto::ProgressBar,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> ProgressBar<M> {
+    pub fn new(range: std::ops::RangeInclusive<f32>, value: f32) -> Self {
+        Self {
+            widget: proto::ProgressBar {
+                range_start: *range.start(),
+                range_end: *range.end(),
+                value,
+                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Fixed(12.0)) }),
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
+}
+
+impl<M> From<ProgressBar<M>> for Element<M> {
+    fn from(p: ProgressBar<M>) -> Self {
+        proto::Widget { r#type: Some(proto::widget::Type::ProgressBar(p.widget)) }.into()
+    }
+}
+
+pub fn progress_bar<M>(range: std::ops::RangeInclusive<f32>, value: f32) -> ProgressBar<M> {
+    ProgressBar::new(range, value)
+}
+
+pub struct Space<M> {
+    widget: proto::Space,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Space<M> {
+    pub fn new(width: Length, height: Length) -> Self {
+        Self {
+            widget: proto::Space {
+                width: Some(width.to_proto()),
+                height: Some(height.to_proto()),
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub fn with_width(w: f32) -> Self {
+        Self::new(Length::Fixed(w), Length::Shrink)
+    }
+    pub fn with_height(h: f32) -> Self {
+        Self::new(Length::Shrink, Length::Fixed(h))
+    }
+}
+
+impl<M> From<Space<M>> for Element<M> {
+    fn from(s: Space<M>) -> Self {
+        proto::Widget { r#type: Some(proto::widget::Type::Space(s.widget)) }.into()
+    }
+}
+
+pub fn space<M>(width: Length, height: Length) -> Space<M> {
+    Space::new(width, height)
+}
+
 #[derive(Clone, Copy)]
 pub enum Length {
     Fill,

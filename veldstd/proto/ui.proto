@@ -21,7 +21,23 @@ message Widget {
         WgpuImage image = 6;
         Space space = 7;
         Container container = 8;
+        Scrollable scrollable = 9;
+        ProgressBar progress_bar = 10;
     }
+}
+
+message ProgressBar {
+    float range_start = 1;
+    float range_end = 2;
+    float value = 3;
+    Length width = 4;
+    Length height = 5;
+}
+
+message Scrollable {
+    Widget content = 1;
+    Length width = 2;
+    Length height = 3;
 }
 
 message Column {

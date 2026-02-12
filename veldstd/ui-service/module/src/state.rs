@@ -35,6 +35,7 @@ impl LocalState {
             plugins: HashMap::new(),
             renderer: GpuRenderer::new("DejaVu Sans", vec![
                 ("DejaVu Sans", include_bytes!("../../../../veldgis/assets/DejaVuSans.ttf")),
+                ("Noto Color Emoji", include_bytes!("../../../../veldgis/assets/NotoColorEmoji.ttf")),
             ]),
         }
     }
