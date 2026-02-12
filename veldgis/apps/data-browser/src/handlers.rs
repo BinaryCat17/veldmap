@@ -2,10 +2,11 @@ use crate::{LocalState, AppMessage as Message};
 use crate::common::ViewMode;
 use crate::common::BrowserItem;
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, ListPathRequest, ListPathResponse, DownloadRequest, DownloadResponse, SearchFilter, DataProduct};
+use veldmap_gis_api::raw as gis_rpc;
 use veldsdk::core::Command;
 use veld_ui::core::*;
 use crate::LocalConfig;
-use veldsdk::core::task::{TaskUpdate, TaskStatus, spawn_host};
+use veldsdk::core::task::{TaskUpdate, TaskStatus};
 
 pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, ())> {
     let state = LocalState {
@@ -56,13 +57,7 @@ pub fn handle_search_press(state: &mut LocalState) -> Command<Message> {
     let q = if state.search_state.filter_type == crate::search::SearchFilterType::General { state.search_state.query.clone() } else { String::new() };
     let req = SearchRequest { query: q, filters };
 
-    spawn_host(
-        veldsdk::rpc::host::call_service("data-provider", "search", veldsdk::prost::Message::encode_to_vec(&req)).unwrap().decode_task_id(),
-        Message::SearchUpdate,
-        |status| {
-            <SearchResponse as veldsdk::prost::Message>::decode(&status.payload[..]).map_err(|e| e.to_string())
-        }
-    )
+    gis_rpc::search_task(req, Message::SearchUpdate)
 }
 
 pub fn handle_search_update(state: &mut LocalState, update: TaskUpdate<SearchResponse>) -> Command<Message> {
@@ -81,17 +76,8 @@ pub fn handle_browse_path(state: &mut LocalState, path: String) -> Command<Messa
     state.browse_items.clear();
     state.next_token = None;
     
-    let path_clone = path.clone();
     let req = ListPathRequest { path, token: String::new() };
-    
-    spawn_host(
-        veldsdk::rpc::host::call_service("data-provider", "list_path", veldsdk::prost::Message::encode_to_vec(&req)).unwrap().decode_task_id(),
-        Message::BrowseUpdate,
-        move |status| {
-            let resp = <ListPathResponse as veldsdk::prost::Message>::decode(&status.payload[..]).map_err(|e| e.to_string())?;
-            Ok((path_clone.clone(), resp))
-        }
-    )
+    gis_rpc::list_path_task(req, Message::BrowseUpdate)
 }
 
 pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<(String, ListPathResponse)>) -> Command<Message> {
@@ -117,13 +103,7 @@ pub fn handle_download(state: &mut LocalState, s3_key: String) -> Command<Messag
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key, destination: dest };
     
-    spawn_host(
-        veldsdk::rpc::host::call_service("data-provider", "download", veldsdk::prost::Message::encode_to_vec(&req)).unwrap().decode_task_id(),
-        Message::DownloadUpdate,
-        |_status| {
-            <DownloadResponse as veldsdk::prost::Message>::decode(&_status.payload[..]).map_err(|e| e.to_string())
-        }
-    )
+    gis_rpc::download_task(req, Message::DownloadUpdate)
 }
 
 pub fn handle_download_update(state: &mut LocalState, update: TaskUpdate<DownloadResponse>) -> Command<Message> {
@@ -137,18 +117,9 @@ pub fn handle_download_update(state: &mut LocalState, update: TaskUpdate<Downloa
 }
 
 pub fn handle_view(_state: &mut LocalState, path: String) -> Command<Message> {
-    let res = veldsdk::core::raw::image_load(&ImageLoadRequest { 
+    veldsdk::core::raw::image_load_task(ImageLoadRequest { 
         path, target_width: 2048, target_height: 2048, preserve_aspect: true 
-    }).unwrap();
-    
-    let task = res.task.unwrap();
-    spawn_host(
-        task.task_id,
-        Message::ImageUpdate,
-        |status| {
-            status.result_handle.ok_or_else(|| "No handle in image task result".to_string())
-        }
-    )
+    }, Message::ImageUpdate)
 }
 
 pub fn handle_image_update(state: &mut LocalState, update: TaskUpdate<veldsdk::rpc::core::ResourceHandle>) -> Command<Message> {
@@ -184,17 +155,5 @@ fn refresh_local_files(state: &mut LocalState) {
         state.local_files = res.entries.into_iter().map(|name| {
             BrowserItem { s3_key: format!("{}/{}", path, name), name, is_folder: false, exists_locally: true }
         }).collect();
-    }
-}
-
-// Вспомогательный трейт для удобного извлечения task_id из бинарного ответа
-trait TaskIdExt {
-    fn decode_task_id(self) -> String;
-}
-
-impl TaskIdExt for Vec<u8> {
-    fn decode_task_id(self) -> String {
-        use veldsdk::prost::Message;
-        veldsdk::rpc::core::TaskResponse::decode(&self[..]).unwrap().task_id
     }
 }

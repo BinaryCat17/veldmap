@@ -16,3 +16,11 @@ pub mod render {
 pub mod tileserver {
     include!(concat!(env!("OUT_DIR"), "/veldmap.tileserver.rs"));
 }
+
+// Генерируем типизированный прокси для провайдера данных
+veldsdk::rpc_proxy! {
+    service: "data-provider",
+    @task search: dataprovider::SearchRequest => dataprovider::SearchResponse,
+    @task download: dataprovider::DownloadRequest => dataprovider::DownloadResponse,
+    @task list_path: dataprovider::ListPathRequest => dataprovider::ListPathResponse,
+}

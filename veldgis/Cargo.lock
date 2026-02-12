@@ -1995,6 +1995,7 @@ dependencies = [
  "prost",
  "prost-build",
  "serde",
+ "veldsdk",
 ]
 
 [[package]]

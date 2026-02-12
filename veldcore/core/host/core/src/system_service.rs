@@ -23,6 +23,7 @@ struct TaskState {
     error: String,
     abort_handle: Option<AbortHandle>,
     result_handle: Option<ResourceHandle>,
+    payload: Vec<u8>,
 }
 
 pub struct SystemService {
@@ -144,12 +145,11 @@ impl NativeService for SystemService {
                         error: String::new(),
                         abort_handle: Some(join_handle.abort_handle()),
                         result_handle: None,
+                        payload: Vec::new(),
                     });
                 }
 
-                Ok(ImageLoadResponse { 
-                    task: Some(TaskResponse { task_id }) 
-                }.encode_to_vec())
+                Ok(crate::core::TaskResponse { task_id }.encode_to_vec())
             }
             "get_resource" => {
                 let req = GetResourceRequest::decode(&payload[..])?;
@@ -311,13 +311,11 @@ impl NativeService for SystemService {
                         error: String::new(),
                         abort_handle: Some(join_handle.abort_handle()),
                         result_handle: None,
+                        payload: Vec::new(),
                     });
                 }
 
-                use crate::core::FsDownloadResponse;
-                Ok(FsDownloadResponse { 
-                    task: Some(TaskResponse { task_id }) 
-                }.encode_to_vec())
+                Ok(crate::core::TaskResponse { task_id }.encode_to_vec())
             }
             "task_status" => {
                 let req = TaskStatusRequest::decode(&payload[..])?;
@@ -328,7 +326,7 @@ impl NativeService for SystemService {
                         completed: task.completed, 
                         error: task.error.clone(),
                         result_handle: task.result_handle.clone(),
-                        payload: Vec::new(),
+                        payload: task.payload.clone(),
                     }.encode_to_vec();
                     
                     if task.completed {

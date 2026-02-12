@@ -51,9 +51,9 @@ crate::rpc_proxy! {
     fs_write: FsWriteRequest => (),
     fs_list: FsListRequest => FsListResponse,
     fs_delete: FsDeleteRequest => (),
-    fs_download: FsDownloadRequest => FsDownloadResponse,
+    @task fs_download: FsDownloadRequest => (),
     image_info: ImageInfoRequest => ImageInfoResponse,
-    image_load: ImageLoadRequest => ImageLoadResponse,
+    @task image_load: ImageLoadRequest => ResourceHandle,
     get_resource: GetResourceRequest => GetResourceResponse,
     create_data: CreateDataRequest => CreateDataResponse,
     task_status: TaskStatusRequest => TaskStatusResponse,
@@ -77,8 +77,7 @@ pub fn fs_write_bytes(path: impl Into<String>, data: &[u8]) -> anyhow::Result<()
 pub fn fs_download(url: String, path: String, headers: std::collections::HashMap<String, String>) -> anyhow::Result<String> {
     let req = FsDownloadRequest { url, path, headers };
     let res = raw::fs_download(&req)?;
-    let task = res.task.ok_or_else(|| anyhow::anyhow!("No task in response"))?;
-    Ok(task.task_id)
+    Ok(res.task_id)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]

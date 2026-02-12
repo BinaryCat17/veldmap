@@ -52,7 +52,7 @@ pub enum AppMessage {
     ProductFilesLoaded(Result<ListPathResponse, String>),
     BackToList,
     BrowsePath(String),
-    BrowseUpdate(veldsdk::core::task::TaskUpdate<(String, ListPathResponse)>),
+    BrowseUpdate(veldsdk::core::task::TaskUpdate<ListPathResponse>),
     LoadMore,
     BrowseUp,
     LocalSearchChanged(String),

@@ -38,32 +38,98 @@ impl<T: prost::Message + Default> RpcResponseDecoder for T {
 macro_rules! rpc_proxy {
     (
         service: $service:expr,
-        $( $method:ident : $req:ty => $res:ty ),* $(,)?
+        $( $(@ $task:ident)? $method:ident : $req:ty => $res:ty ),* $(,)?
     ) => {
         pub mod raw {
             use super::*;
             $(
-                pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
-                    use $crate::prost::Message;
-                    let payload = req.encode_to_vec();
-                    let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
-                    
-                    // Используем макрос-декодер для разрешения типа на этапе компиляции
-                    $crate::decode_rpc_final!($res, res_bytes)
-                }
-
-                #[cfg(feature = "pdk")]
-                $crate::paste::paste! {
-                    pub fn [<$method _cmd>]<M: 'static>(req: $req, f: impl Fn(Result<$res, String>) -> M + Send + Sync + 'static) -> $crate::core::Command<M> {
-                        $crate::core::Command::perform(
-                            async move {
-                                $method(&req).map_err(|e| e.to_string())
-                            },
-                            f
-                        )
-                    }
-                }
+                $crate::handle_proxy_method!($service, $method, $req, $res, $(@ $task)?);
             )*
+        }
+    };
+}
+
+/// Внутренний макрос для генерации конкретного метода прокси.
+#[macro_export]
+macro_rules! handle_proxy_method {
+    // Обычный метод
+    ($service:expr, $method:ident, $req:ty, $res:ty, ) => {
+        pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
+            use $crate::prost::Message;
+            let payload = req.encode_to_vec();
+            let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
+            $crate::decode_rpc_final!($res, res_bytes)
+        }
+
+        $crate::paste::paste! {
+            pub fn [<$method _cmd>]<M: 'static>(req: $req, f: impl Fn(Result<$res, String>) -> M + Send + Sync + 'static) -> $crate::core::Command<M> {
+                $crate::core::Command::perform(
+                    async move {
+                        $method(&req).map_err(|e| e.to_string())
+                    },
+                    f
+                )
+            }
+        }
+    };
+    // Задача (@task)
+    ($service:expr, $method:ident, $req:ty, $res:ty, @task) => {
+        pub fn $method(req: &$req) -> $crate::anyhow::Result<$crate::rpc::core::TaskResponse> {
+            use $crate::prost::Message;
+            let payload = req.encode_to_vec();
+            let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
+            Ok(<$crate::rpc::core::TaskResponse as Message>::decode(&res_bytes[..])?)
+        }
+
+        $crate::paste::paste! {
+            pub fn [<$method _task>]<M: 'static>(req: $req, f: impl Fn($crate::core::task::TaskUpdate<$res>) -> M + Send + Sync + 'static) -> $crate::core::Command<M> {
+                use $crate::futures_util::stream::{once, StreamExt};
+                
+                let f = std::sync::Arc::new(f);
+                let f_c = std::sync::Arc::clone(&f);
+
+                let s = once(async move {
+                    match $method(&req) {
+                        Ok(res) => Ok(res.task_id),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }).flat_map(move |res| {
+                    match res {
+                        Ok(task_id) => {
+                            Box::pin($crate::core::task::host_stream(
+                                task_id, 
+                                std::sync::Arc::clone(&f_c),
+                                std::sync::Arc::new(move |status: $crate::rpc::core::TaskStatusResponse| {
+                                    $crate::decode_task_final!($res, status.payload)
+                                })
+                            )) as $crate::core::BoxedStream<M>
+                        }
+                        Err(e) => {
+                            let f_err = std::sync::Arc::clone(&f_c);
+                            Box::pin(once(async move { f_err( $crate::core::task::TaskUpdate::Finished(Err(e)) ) })) as $crate::core::BoxedStream<M>
+                        }
+                    }
+                });
+                $crate::core::Command::stream(s)
+            }
+        }
+    };
+}
+
+/// Внутренний макрос для декодирования результата задачи.
+#[macro_export]
+macro_rules! decode_task_final {
+    ((), $payload:expr) => { 
+        {
+            let _ = $payload;
+            Ok(())
+        }
+    };
+    ($t:ty, $payload:expr) => {
+        {
+            use $crate::prost::Message;
+            let p: &Vec<u8> = &$payload;
+            <$t>::decode(&p[..]).map_err(|e| e.to_string())
         }
     };
 }
