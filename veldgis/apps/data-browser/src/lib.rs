@@ -22,7 +22,7 @@ pub struct LocalState {
     
     // Новые типизированные задачи
     pub search_task: TaskStatus<SearchResponse>,
-    pub browse_task: TaskStatus<(String, ListPathResponse)>,
+    pub browse_task: TaskStatus<ListPathResponse>,
     pub download_task: TaskStatus<DownloadResponse>,
     pub image_task: TaskStatus<veldsdk::rpc::core::ResourceHandle>,
 

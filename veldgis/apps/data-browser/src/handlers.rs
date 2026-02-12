@@ -75,15 +75,16 @@ pub fn handle_browse_path(state: &mut LocalState, path: String) -> Command<Messa
     state.status_message = format!("Listing /{}...", path);
     state.browse_items.clear();
     state.next_token = None;
+    state.current_browse_path = path.clone();
     
     let req = ListPathRequest { path, token: String::new() };
     gis_rpc::list_path_task(req, Message::BrowseUpdate)
 }
 
-pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<(String, ListPathResponse)>) -> Command<Message> {
+pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<ListPathResponse>) -> Command<Message> {
     state.browse_task.handle(update);
     state.download_progress = Some(state.browse_task.progress());
-    if let TaskStatus::Finished((path, response)) = &state.browse_task {
+    if let TaskStatus::Finished(response) = &state.browse_task {
         let local_files = veldsdk::core::raw::fs_list(&FsListRequest { path: "data/dem/source".into() }).map(|r| r.entries).unwrap_or_default();
         let new_items = response.items.iter().map(|s3_key| {
             let is_folder = s3_key.ends_with('/');
@@ -92,13 +93,12 @@ pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<(String, 
             BrowserItem { s3_key: s3_key.clone(), name, is_folder, exists_locally }
         });
         state.browse_items.extend(new_items);
-        state.current_browse_path = path.clone();
         state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token.clone()) };
     }
     Command::none()
 }
 
-pub fn handle_download(state: &mut LocalState, s3_key: String) -> Command<Message> {
+pub fn handle_download(_state: &mut LocalState, s3_key: String) -> Command<Message> {
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key, destination: dest };
@@ -117,9 +117,10 @@ pub fn handle_download_update(state: &mut LocalState, update: TaskUpdate<Downloa
 }
 
 pub fn handle_view(_state: &mut LocalState, path: String) -> Command<Message> {
-    veldsdk::core::raw::image_load_task(ImageLoadRequest { 
+    let req = ImageLoadRequest { 
         path, target_width: 2048, target_height: 2048, preserve_aspect: true 
-    }, Message::ImageUpdate)
+    };
+    veldsdk::core::raw::image_load_task(req, Message::ImageUpdate)
 }
 
 pub fn handle_image_update(state: &mut LocalState, update: TaskUpdate<veldsdk::rpc::core::ResourceHandle>) -> Command<Message> {
