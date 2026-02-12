@@ -125,6 +125,14 @@ impl<M> Row<M> {
         self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
         self
     }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
 }
 
 impl<M> From<Row<M>> for Element<M> {

@@ -24,6 +24,7 @@ pub struct LocalState {
     pub search_task: TaskStatus<SearchResponse>,
     pub browse_task: TaskStatus<ListPathResponse>,
     pub download_task: TaskStatus<DownloadResponse>,
+    pub downloading_key: Option<String>,
     pub image_task: TaskStatus<veldsdk::rpc::core::ResourceHandle>,
 
     pub search_results: Vec<DataProduct>,

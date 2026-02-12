@@ -59,16 +59,16 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             let btn_width = convert_length(&b.width);
             let btn_height = convert_length(&b.height);
 
-            let label = text(b.label.clone())
+            let mut label = text(b.label.clone())
                 .align_x(h_align)
                 .align_y(v_align);
             
-            // if btn_width != Length::Shrink {
-            //    label = label.width(Length::Fill);
-            // }
-            // if btn_height != Length::Shrink {
-            //    label = label.height(Length::Fill);
-            // }
+            if btn_width == Length::Fill {
+               label = label.width(Length::Fill);
+            }
+            if btn_height == Length::Fill {
+               label = label.height(Length::Fill);
+            }
 
             let mut btn = button(label)
                 .width(btn_width)

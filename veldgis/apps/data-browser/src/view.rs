@@ -33,9 +33,7 @@ pub fn view(state: &LocalState) -> Element<Message> {
         (None, "")
     };
 
-    let background_task = if state.browse_task.is_running() {
-        Some("Loading files...")
-    } else if state.search_task.is_running() {
+    let background_task = if state.search_task.is_running() {
         Some("Searching...")
     } else if state.image_task.is_running() {
         Some("Loading image...")
@@ -65,7 +63,8 @@ pub fn view(state: &LocalState) -> Element<Message> {
             &state.browse_items, 
             &state.status_message, 
             !state.token_stack.is_empty(), 
-            state.next_token.is_some()
+            state.next_token.is_some(),
+            state.downloading_key.as_deref()
         ),
         ViewMode::Downloaded => crate::downloaded::view(&state.downloaded_state, &state.local_files),
     };

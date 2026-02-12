@@ -17,6 +17,7 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, ())> {
         search_task: TaskStatus::Idle,
         browse_task: TaskStatus::Idle,
         download_task: TaskStatus::Idle,
+        downloading_key: None,
         image_task: TaskStatus::Idle,
         search_results: Vec::new(),
         download_progress: None,
@@ -113,6 +114,7 @@ pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<ListPathR
 }
 
 pub fn handle_download(state: &mut LocalState, s3_key: String) -> Command<Message> {
+    state.downloading_key = Some(s3_key.clone());
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key, destination: dest };
@@ -124,6 +126,7 @@ pub fn handle_download_update(state: &mut LocalState, update: TaskUpdate<Downloa
     state.download_task.handle(update);
     
     if let TaskStatus::Finished(res) = &state.download_task {
+        state.downloading_key = None;
         if !res.error.is_empty() {
             state.error_message = Some(format!("Download Error: {}", res.error));
         } else {
@@ -131,6 +134,7 @@ pub fn handle_download_update(state: &mut LocalState, update: TaskUpdate<Downloa
             refresh_local_files(state);
         }
     } else if let Some(err) = state.download_task.error() {
+        state.downloading_key = None;
         state.error_message = Some(format!("Download Task Failed: {}", err));
     }
     Command::none()
@@ -216,6 +220,7 @@ pub fn handle_cancel_download(state: &mut LocalState) -> Command<Message> {
         }
     }
     state.download_task = TaskStatus::Idle;
+    state.downloading_key = None;
     state.status_message = "Download cancelled".into();
     Command::none()
 }
