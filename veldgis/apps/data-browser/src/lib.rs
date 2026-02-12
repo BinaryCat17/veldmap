@@ -32,6 +32,7 @@ pub struct LocalState {
     pub current_gpu_image: Option<veldsdk::rpc::core::ResourceHandle>,
     pub downloaded_state: downloaded::DownloadedState,
     pub token_stack: Vec<String>,
+    pub current_page_token: String,
     pub next_token: Option<String>,
     pub current_browse_path: String,
     pub selected_product: Option<String>,
@@ -53,7 +54,8 @@ pub enum AppMessage {
     BackToList,
     BrowsePath(String),
     BrowseUpdate(veldsdk::core::task::TaskUpdate<ListPathResponse>),
-    LoadMore,
+    NextPage,
+    PrevPage,
     BrowseUp,
     LocalSearchChanged(String),
     LocalFilterChanged(downloaded::FileFilter),
@@ -84,7 +86,8 @@ define_remote_ui_module! {
         BackToList => handlers::handle_back_to_list;
         BrowsePath(path) => handlers::handle_browse_path;
         BrowseUpdate(u) => handlers::handle_browse_update;
-        LoadMore => handlers::handle_load_more;
+        NextPage => handlers::handle_next_page;
+        PrevPage => handlers::handle_prev_page;
         BrowseUp => handlers::handle_browse_up;
         LocalSearchChanged(query) => handlers::handle_local_search;
         LocalFilterChanged(filter) => handlers::handle_local_filter;

@@ -1,8 +1,8 @@
 use veld_ui::{column, row, text, button, scrollable, Element};
 use crate::{AppMessage as Message, common::BrowserItem};
 
-pub fn view(path: &str, items: &[BrowserItem], status: &str, _loading: bool, has_more: bool) -> Element<Message> {
-    let mut list = column(items.iter().map(|item| {
+pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has_next: bool) -> Element<Message> {
+    let list = column(items.iter().map(|item| {
         let icon = if item.is_folder { "📁 " } else { "📄 " };
         let msg = if item.is_folder {
             Message::BrowsePath(item.s3_key.clone())
@@ -15,8 +15,12 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, _loading: bool, has
             .into()
     })).spacing(5.0);
 
-    if has_more {
-        list = list.push(button(text("Load More")).width(veld_ui::Length::Fill).on_press(Message::LoadMore));
+    let mut pagination = row![].spacing(10.0);
+    if has_prev {
+        pagination = pagination.push(button(text(" ← Previous ")).on_press(Message::PrevPage));
+    }
+    if has_next {
+        pagination = pagination.push(button(text(" Next → ")).on_press(Message::NextPage));
     }
 
     let header = row![
@@ -27,6 +31,7 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, _loading: bool, has
     column![
         header,
         text(status).size(14.0),
+        pagination,
         scrollable(list).height(veld_ui::Length::Fill)
-    ].height(veld_ui::Length::Fill).into()
+    ].spacing(10.0).height(veld_ui::Length::Fill).into()
 }

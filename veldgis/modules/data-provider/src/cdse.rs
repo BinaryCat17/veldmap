@@ -10,6 +10,10 @@ use url::Url;
 use veldsdk::prost::Message;
 use crate::{LocalConfig, LocalState};
 
+const S3_HOST: &str = "eodata.dataspace.copernicus.eu";
+const S3_REGION: &str = "default";
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
     let credentials = aws_credential_types::Credentials::new(
         config.access_key, 
@@ -23,6 +27,39 @@ pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
     })
 }
 
+fn get_s3_headers(state: &LocalState, method: &str, uri: &str) -> std::collections::HashMap<String, String> {
+    let signing_settings = SigningSettings::default();
+    let signing_params = v4::SigningParams::builder()
+        .identity(&state.identity)
+        .region(S3_REGION)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(signing_settings)
+        .build()
+        .unwrap();
+
+    let headers = [
+        ("host", S3_HOST),
+        ("x-amz-content-sha256", EMPTY_SHA256),
+    ];
+    
+    let signable_request = SignableRequest::new(
+        method,
+        uri,
+        headers.iter().map(|(k, v)| (*k, *v)),
+        aws_sigv4::http_request::SignableBody::Bytes(&[]),
+    ).unwrap();
+
+    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+    
+    let mut signed_headers = std::collections::HashMap::new();
+    for (name, value) in instructions.headers() {
+        signed_headers.insert(name.to_string(), value.to_string());
+    }
+    signed_headers.insert("x-amz-content-sha256".to_string(), EMPTY_SHA256.to_string());
+    signed_headers
+}
+
 pub fn search(_state: LocalState, _request: SearchRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
     veldsdk::core::task::spawn(async move {
         // Здесь будет логика поиска через OData/OpenSearch
@@ -34,47 +71,15 @@ pub fn search(_state: LocalState, _request: SearchRequest) -> veldsdk::core::Com
 
 pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
     let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-    let host = "eodata.dataspace.copernicus.eu";
-    let region = "default";
-    
-    let url = format!("https://{}/eodata/{}", host, s3_key);
+    let url = format!("https://{}/eodata/{}", S3_HOST, s3_key);
     let uri = format!("/eodata/{}", s3_key);
 
-    let signing_settings = SigningSettings::default();
-    let signing_params = v4::SigningParams::builder()
-        .identity(&state.identity)
-        .region(region)
-        .name("s3")
-        .time(SystemTime::now())
-        .settings(signing_settings)
-        .build()
-        .unwrap();
-
-    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let headers = [
-        ("host", host),
-        ("x-amz-content-sha256", content_sha256),
-    ];
-    
-    let signable_request = SignableRequest::new(
-        "GET",
-        &uri,
-        headers.iter().map(|(k, v)| (*k, *v)),
-        aws_sigv4::http_request::SignableBody::Bytes(&[]),
-    ).unwrap();
-
-    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
-    
-    let mut download_headers = std::collections::HashMap::new();
-    for (name, value) in instructions.headers() {
-        download_headers.insert(name.to_string(), value.to_string());
-    }
-    download_headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
+    let headers = get_s3_headers(&state, "GET", &uri);
 
     let req_task = veldsdk::core::FsDownloadRequest {
         url,
         path: request.destination,
-        headers: download_headers,
+        headers,
     };
 
     veldsdk::core::raw::fs_download_task(req_task, |u| match u {
@@ -94,9 +99,6 @@ pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::C
 pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     
-    let host = "eodata.dataspace.copernicus.eu";
-    let region = "default";
-    
     let mut query_params = vec![
         ("delimiter", "/"),
         ("list-type", "2"),
@@ -110,7 +112,7 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
     }
     query_params.sort_by_key(|k| k.0);
 
-    let mut url = Url::parse(&format!("https://{}/eodata/", host)).unwrap();
+    let mut url = Url::parse(&format!("https://{}/eodata/", S3_HOST)).unwrap();
     {
         let mut pairs = url.query_pairs_mut();
         pairs.clear();
@@ -119,43 +121,15 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
         }
     }
     let full_url = url.to_string();
+    info!("Full S3 URL: {}", full_url);
 
-    let signing_settings = SigningSettings::default();
-    let signing_params = v4::SigningParams::builder()
-        .identity(&state.identity)
-        .region(region)
-        .name("s3")
-        .time(SystemTime::now())
-        .settings(signing_settings)
-        .build()
-        .unwrap();
-
-    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    let headers = [
-        ("host", host),
-        ("x-amz-content-sha256", content_sha256),
-    ];
-    
     let uri_with_query = if let Some(q) = url.query() {
         format!("{}?{}", url.path(), q)
     } else {
         url.path().to_string()
     };
     
-    let signable_request = SignableRequest::new(
-        "GET",
-        &uri_with_query,
-        headers.iter().map(|(k, v)| (*k, *v)),
-        aws_sigv4::http_request::SignableBody::Bytes(&[]),
-    ).unwrap();
-
-    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
-    
-    let mut headers = std::collections::HashMap::new();
-    for (name, value) in instructions.headers() {
-        headers.insert(name.to_string(), value.to_string());
-    }
-    headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
+    let headers = get_s3_headers(&state, "GET", &uri_with_query);
 
     let req_task = veldsdk::core::HttpTaskRequest {
         url: full_url,
@@ -166,7 +140,9 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
     
     info!("Requesting S3 list: {}", req_task.url);
 
-    veldsdk::core::raw::http_task(req_task, |u| {
+    let filter_path = format!("eodata/{}", request.path.trim_start_matches('/').trim_start_matches("eodata/").trim_start_matches('/'));
+
+    veldsdk::core::raw::http_task(req_task, move |u| {
         use veldsdk::core::task::TaskUpdate::*;
         match u {
             Started(id) => Started(id),
@@ -176,7 +152,7 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
                     if res.body.is_empty() {
                          Finished(Err("Empty S3 response".to_string()))
                     } else {
-                         let parsed = parse_s3_xml(res.body);
+                         let parsed = parse_s3_xml(res.body, Some(&filter_path));
                          info!("S3 found {} items", parsed.items.len());
                          Finished(Ok(parsed.encode_to_vec()))
                     }
@@ -189,7 +165,7 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
     })
 }
 
-fn parse_s3_xml(body: Vec<u8>) -> ListPathResponse {
+fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
     let mut reader = Reader::from_reader(body.as_slice());
     reader.config_mut().trim_text(true);
 
@@ -209,8 +185,18 @@ fn parse_s3_xml(body: Vec<u8>) -> ListPathResponse {
             Ok(Event::Text(e)) => {
                 let text = match e.unescape() { Ok(t) => t.into_owned(), Err(_) => String::new() };
                 match current_tag.as_str() {
-                    "Prefix" if in_common_prefixes => { items.push(format!("eodata/{}", text)); }
-                    "Key" => { items.push(format!("eodata/{}", text)); }
+                    "Prefix" if in_common_prefixes => { 
+                        let path = format!("eodata/{}", text);
+                        if Some(path.as_str()) != filter_path {
+                            items.push(path);
+                        }
+                    }
+                    "Key" => { 
+                        let path = format!("eodata/{}", text);
+                        if Some(path.as_str()) != filter_path {
+                            items.push(path);
+                        }
+                    }
                     "NextContinuationToken" => { next_token = text; }
                     _ => {}
                 }
@@ -230,3 +216,4 @@ fn parse_s3_xml(body: Vec<u8>) -> ListPathResponse {
     info!("S3 found {} items", items.len());
     ListPathResponse { items, next_token, error: String::new() }
 }
+

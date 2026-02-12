@@ -29,14 +29,18 @@ pub fn view(state: &LocalState) -> Element<Message> {
     // Умная логика прогресса
     let (active_progress, task_name) = if state.download_task.is_running() {
         (Some(state.download_task.progress()), "Downloading")
-    } else if state.browse_task.is_running() {
-        (Some(state.browse_task.progress()), "Loading files")
-    } else if state.search_task.is_running() {
-        (Some(state.search_task.progress()), "Searching")
-    } else if state.image_task.is_running() {
-        (Some(state.image_task.progress()), "Loading image")
     } else {
         (None, "")
+    };
+
+    let background_task = if state.browse_task.is_running() {
+        Some("Loading files...")
+    } else if state.search_task.is_running() {
+        Some("Searching...")
+    } else if state.image_task.is_running() {
+        Some("Loading image...")
+    } else {
+        None
     };
 
     let progress_view: Element<Message> = if let Some(progress) = active_progress {
@@ -45,13 +49,24 @@ pub fn view(state: &LocalState) -> Element<Message> {
             veld_ui::progress_bar(0.0..=1.0, progress).height(veld_ui::Length::Fixed(8.0)),
             button(text("Cancel")).on_press(Message::CancelDownload)
         ].spacing(5.0).into()
+    } else if let Some(task_info) = background_task {
+        row![
+            text(task_info).size(12.0).color(COLOR_TEXT_DIM),
+            // В будущем здесь может быть кружок-спиннер
+        ].into()
     } else {
         column![].into()
     };
 
     let main_content: Element<Message> = match state.view_mode {
         ViewMode::Search => crate::search::view(&state.search_state, &state.search_results),
-        ViewMode::Browse => crate::browse::view(&state.current_browse_path, &state.browse_items, &state.status_message, false, state.next_token.is_some()),
+        ViewMode::Browse => crate::browse::view(
+            &state.current_browse_path, 
+            &state.browse_items, 
+            &state.status_message, 
+            !state.token_stack.is_empty(), 
+            state.next_token.is_some()
+        ),
         ViewMode::Downloaded => crate::downloaded::view(&state.downloaded_state, &state.local_files),
     };
 

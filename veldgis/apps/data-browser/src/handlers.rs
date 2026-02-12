@@ -24,6 +24,7 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, ())> {
         current_gpu_image: None,
         downloaded_state: crate::downloaded::DownloadedState::default(),
         token_stack: Vec::new(),
+        current_page_token: String::new(),
         next_token: None,
         current_browse_path: String::new(),
         selected_product: None,
@@ -79,6 +80,8 @@ pub fn handle_browse_path(state: &mut LocalState, path: String) -> Command<Messa
     state.status_message = format!("Listing /{}...", path);
     state.browse_items.clear();
     state.next_token = None;
+    state.token_stack.clear();
+    state.current_page_token = String::new();
     state.current_browse_path = path.clone();
     
     let req = ListPathRequest { path, token: String::new() };
@@ -93,13 +96,13 @@ pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<ListPathR
             state.error_message = Some(format!("S3 Error: {}", response.error));
         } else {
             let local_files = veldsdk::core::raw::fs_list(&FsListRequest { path: "data/dem/source".into() }).map(|r| r.entries).unwrap_or_default();
-            let new_items = response.items.iter().map(|s3_key| {
+            state.browse_items = response.items.iter().map(|s3_key| {
                 let is_folder = s3_key.ends_with('/');
                 let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
                 let exists_locally = !is_folder && local_files.contains(&name);
                 BrowserItem { s3_key: s3_key.clone(), name, is_folder, exists_locally }
-            });
-            state.browse_items.extend(new_items);
+            }).collect();
+            
             state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token.clone()) };
             state.status_message = format!("Loaded {} items", state.browse_items.len());
         }
@@ -109,7 +112,7 @@ pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<ListPathR
     Command::none()
 }
 
-pub fn handle_download(_state: &mut LocalState, s3_key: String) -> Command<Message> {
+pub fn handle_download(state: &mut LocalState, s3_key: String) -> Command<Message> {
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key, destination: dest };
@@ -154,8 +157,48 @@ pub fn handle_search_filter(state: &mut LocalState, ft: crate::search::SearchFil
 pub fn handle_product_selected(state: &mut LocalState, prod: DataProduct) -> Command<Message> { state.selected_product = Some(prod.name); Command::none() }
 pub fn handle_product_files_loaded(_state: &mut LocalState, _res: Result<ListPathResponse, String>) -> Command<Message> { Command::none() }
 pub fn handle_back_to_list(state: &mut LocalState) -> Command<Message> { state.selected_product = None; Command::none() }
-pub fn handle_load_more(_state: &mut LocalState) -> Command<Message> { Command::none() }
-pub fn handle_browse_up(_state: &mut LocalState) -> Command<Message> { Command::none() }
+pub fn handle_next_page(state: &mut LocalState) -> Command<Message> {
+    if let Some(token) = state.next_token.clone() {
+        state.token_stack.push(state.current_page_token.clone());
+        state.current_page_token = token.clone();
+        
+        let req = ListPathRequest { 
+            path: state.current_browse_path.clone(), 
+            token 
+        };
+        gis_rpc::list_path_task(req, Message::BrowseUpdate)
+    } else {
+        Command::none()
+    }
+}
+
+pub fn handle_prev_page(state: &mut LocalState) -> Command<Message> {
+    if let Some(token) = state.token_stack.pop() {
+        state.current_page_token = token.clone();
+        let req = ListPathRequest { 
+            path: state.current_browse_path.clone(), 
+            token 
+        };
+        gis_rpc::list_path_task(req, Message::BrowseUpdate)
+    } else {
+        Command::none()
+    }
+}
+
+pub fn handle_browse_up(state: &mut LocalState) -> Command<Message> {
+    let current = state.current_browse_path.trim_end_matches('/');
+    if current.is_empty() {
+        return Command::none();
+    }
+    
+    let parent = if let Some(last_slash) = current.rfind('/') {
+        format!("{}/", &current[..last_slash])
+    } else {
+        String::new()
+    };
+
+    handle_browse_path(state, parent)
+}
 pub fn handle_delete(state: &mut LocalState, path: String) -> Command<Message> { 
     let _ = veldsdk::core::raw::fs_delete(&FsDeleteRequest { path });
     refresh_local_files(state);
@@ -165,7 +208,17 @@ pub fn handle_clear_error(state: &mut LocalState) -> Command<Message> { state.er
 pub fn handle_local_search(state: &mut LocalState, q: String) -> Command<Message> { state.downloaded_state.search_query = q; Command::none() }
 pub fn handle_local_filter(state: &mut LocalState, f: crate::downloaded::FileFilter) -> Command<Message> { state.downloaded_state.filter = f; Command::none() }
 pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { state.current_image = None; state.current_gpu_image = None; Command::none() }
-pub fn handle_cancel_download(_state: &mut LocalState) -> Command<Message> { Command::none() }
+pub fn handle_cancel_download(state: &mut LocalState) -> Command<Message> {
+    if let TaskStatus::Running { task_id: Some(id), .. } = &mut state.download_task {
+        let req = veldsdk::rpc::core::TaskCancelRequest { task_id: id.clone() };
+        if let Ok(_) = veldsdk::core::raw::task_cancel(&req) {
+            log::info!("Cancelled download task: {}", id);
+        }
+    }
+    state.download_task = TaskStatus::Idle;
+    state.status_message = "Download cancelled".into();
+    Command::none()
+}
 
 fn refresh_local_files(state: &mut LocalState) {
     let path = "data/dem/source";
