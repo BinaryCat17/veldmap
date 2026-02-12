@@ -482,6 +482,43 @@ macro_rules! define_remote_ui_module {
         }
 
         #[no_mangle]
+        pub extern "C" fn poll_tasks() -> i32 {
+            let state_arc = match veldsdk::rpc::MODULE_STATE.get() {
+                Some(Ok(s)) => s,
+                _ => return 0,
+            };
+            let mut state_lock = match state_arc.try_lock() {
+                Ok(l) => l,
+                Err(_) => return 0,
+            };
+            let module = state_lock.downcast_mut::<$crate::ModuleState<$state_type, $message_type>>().unwrap();
+
+            let waker = $crate::reexports::noop_waker_ref();
+            let mut cx = $crate::reexports::Context::from_waker(waker);
+            let mut new_messages = Vec::new();
+            
+            use veldsdk::futures_util::stream::StreamExt;
+            
+            module.tasks.retain_mut(|task| {
+                loop {
+                    match task.poll_next_unpin(&mut cx) {
+                        $crate::reexports::Poll::Ready(Some(msg)) => {
+                            new_messages.push(msg);
+                        },
+                        $crate::reexports::Poll::Ready(None) => return false,
+                        $crate::reexports::Poll::Pending => return true,
+                    }
+                }
+            });
+
+            for msg in new_messages {
+                let cmd = internal_update(&mut module.state, msg);
+                module.tasks.extend(cmd.0);
+            }
+            0
+        }
+
+        #[no_mangle]
         pub extern "C" fn handle_rpc() -> i32 {
             use veldsdk::prost::Message;
             use veldsdk::rpc::core::{RpcRequest, RpcResponse};

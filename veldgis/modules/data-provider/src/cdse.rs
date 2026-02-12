@@ -35,75 +35,62 @@ pub fn search(_state: LocalState, _request: SearchRequest) -> veldsdk::core::Com
 use std::pin::Pin;
 
 pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
-    use veldsdk::core::task::{TaskUpdate, host_stream};
-    use std::sync::Arc;
-    use futures_util::stream::StreamExt;
+    let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
+    let host = "eodata.dataspace.copernicus.eu";
+    let region = "default";
+    
+    let url = format!("https://{}/eodata/{}", host, s3_key);
+    let uri = format!("/eodata/{}", s3_key);
 
-    let msg_wrap = Arc::new(|u: TaskUpdate<Vec<u8>>| u);
-    let on_complete = Arc::new(|_res: veldsdk::rpc::core::TaskStatusResponse| {
-        use veldsdk::prost::Message;
-        Ok(DownloadResponse { 
-            success: true, 
-            error: String::new(), 
-            download_url: String::new(), 
-        }.encode_to_vec())
-    });
+    let signing_settings = SigningSettings::default();
+    let signing_params = v4::SigningParams::builder()
+        .identity(&state.identity)
+        .region(region)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(signing_settings)
+        .build()
+        .unwrap();
 
-    let s = futures_util::stream::once(async move {
-        let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-        let host = "eodata.dataspace.copernicus.eu";
-        let region = "default";
-        
-        let url = format!("https://{}/eodata/{}", host, s3_key);
-        let uri = format!("/eodata/{}", s3_key);
+    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let headers = [
+        ("host", host),
+        ("x-amz-content-sha256", content_sha256),
+    ];
+    
+    let signable_request = SignableRequest::new(
+        "GET",
+        &uri,
+        headers.iter().map(|(k, v)| (*k, *v)),
+        aws_sigv4::http_request::SignableBody::Bytes(&[]),
+    ).unwrap();
 
-        let signing_settings = SigningSettings::default();
-        let signing_params = v4::SigningParams::builder()
-            .identity(&state.identity)
-            .region(region)
-            .name("s3")
-            .time(SystemTime::now())
-            .settings(signing_settings)
-            .build()
-            .unwrap();
+    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+    
+    let mut download_headers = std::collections::HashMap::new();
+    for (name, value) in instructions.headers() {
+        download_headers.insert(name.to_string(), value.to_string());
+    }
+    download_headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
 
-        let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let headers = [
-            ("host", host),
-            ("x-amz-content-sha256", content_sha256),
-        ];
-        
-        let signable_request = SignableRequest::new(
-            "GET",
-            &uri,
-            headers.iter().map(|(k, v)| (*k, *v)),
-            aws_sigv4::http_request::SignableBody::Bytes(&[]),
-        ).unwrap();
+    let req_task = veldsdk::core::FsDownloadRequest {
+        url,
+        path: request.destination,
+        headers: download_headers,
+    };
 
-        let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
-        
-        let mut download_headers = std::collections::HashMap::new();
-        for (name, value) in instructions.headers() {
-            download_headers.insert(name.to_string(), value.to_string());
+    veldsdk::core::raw::fs_download_task(req_task, |u| match u {
+        veldsdk::core::task::TaskUpdate::Started(_) => veldsdk::core::task::TaskUpdate::Started(None),
+        veldsdk::core::task::TaskUpdate::Progress(p, _) => veldsdk::core::task::TaskUpdate::Progress(p, None),
+        veldsdk::core::task::TaskUpdate::Finished(Ok(_)) => {
+            veldsdk::core::task::TaskUpdate::Finished(Ok(DownloadResponse { 
+                success: true, 
+                error: String::new(), 
+                download_url: String::new(), 
+            }.encode_to_vec()))
         }
-        download_headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
-
-        match veldsdk::core::fs_download(url.clone(), request.destination, download_headers) {
-            Ok(task_id) => Ok(task_id),
-            Err(e) => Err(format!("Host download failed: {}", e)),
-        }
-    }).flat_map(move |res| {
-        match res {
-            Ok(task_id) => {
-                Box::pin(host_stream(task_id, Arc::clone(&msg_wrap), Arc::clone(&on_complete))) as Pin<Box<dyn futures_util::stream::Stream<Item = TaskUpdate<Vec<u8>>> + Send + Sync>>
-            }
-            Err(e) => {
-                Box::pin(futures_util::stream::once(async move { TaskUpdate::Finished(Err(e)) })) as Pin<Box<dyn futures_util::stream::Stream<Item = TaskUpdate<Vec<u8>>> + Send + Sync>>
-            }
-        }
-    });
-
-    veldsdk::core::Command::stream(s)
+        veldsdk::core::task::TaskUpdate::Finished(Err(e)) => veldsdk::core::task::TaskUpdate::Finished(Err(e)),
+    })
 }
 
 pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {

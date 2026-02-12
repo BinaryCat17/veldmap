@@ -13,7 +13,6 @@ extern "C" {
     fn veld_gpu_create_buffer(usage: u32, ptr: u64, len: u64, readonly: u32) -> u64;
     fn veld_gpu_freeze_resource(id: u64) -> u32;
     fn veld_get_info(key_ptr: u64, key_len: u64) -> u64;
-    fn veld_http_request(req_ptr: u64, req_len: u64, body_ptr: u64, body_len: u64, status_ptr: u64) -> u64;
     fn veld_load_u8(p: u64) -> u8;
     fn veld_input_len() -> u64;
     fn veld_input_copy(p: u64, n: u64);
@@ -129,32 +128,6 @@ pub fn get_config(key: &str) -> Option<String> {
         
         veld_free_wasm(ptr as u64, len as u64);
         Some(s)
-    }
-}
-
-#[cfg(feature = "pdk")]
-pub fn http_request(json_req: &str, body: Option<&[u8]>) -> anyhow::Result<(u32, Vec<u8>)> {
-    unsafe {
-        let mut status: u32 = 0;
-        let (b_ptr, b_len) = body.map(|b| (b.as_ptr() as u64, b.len() as u64)).unwrap_or((0, 0));
-        
-        let res_ptr = veld_http_request(
-            json_req.as_ptr() as u64, 
-            json_req.len() as u64, 
-            b_ptr, 
-            b_len, 
-            &mut status as *mut u32 as u64
-        );
-        
-        if res_ptr == 0 { return Err(anyhow::anyhow!("HTTP failed")); }
-        
-        let ptr = (res_ptr & 0xFFFFFFFF) as *mut u8;
-        let len = (res_ptr >> 32) as usize;
-        
-        let buf = std::slice::from_raw_parts(ptr, len).to_vec();
-        veld_free_wasm(ptr as u64, len as u64);
-        
-        Ok((status, buf))
     }
 }
 

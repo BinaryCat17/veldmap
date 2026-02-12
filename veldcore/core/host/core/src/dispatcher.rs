@@ -55,6 +55,7 @@ impl Dispatcher {
     }
 
     pub fn register_service(&self, name: String, location: ServiceLocation) {
+        log::info!("[DISPATCHER] Registering service: {}", name);
         let mut services = self.services.lock().unwrap();
         services.insert(name, location);
     }
@@ -70,6 +71,7 @@ impl Dispatcher {
                 let mut module = wasm_module.lock().await;
                 let instance = module.instance;
                 if let Ok(poll_tasks) = instance.get_typed_func::<(), i32>(&mut module.store, "poll_tasks") {
+                    log::info!("[DISPATCHER] Polling tasks for {}", name);
                     if let Err(e) = poll_tasks.call_async(&mut module.store, ()).await {
                         log::warn!("[DISPATCHER] poll_tasks failed for {}: {}", name, e);
                     }

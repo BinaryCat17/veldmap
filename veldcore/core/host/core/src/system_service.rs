@@ -313,6 +313,20 @@ impl NativeService for SystemService {
                 let task_id = uuid::Uuid::new_v4().to_string();
                 let tasks_clone = self.tasks.clone();
                 let task_id_inner = task_id.clone();
+                
+                log::info!(target: "host", "Starting HTTP Task {}: {} {}", task_id, req.method, req.url);
+
+                {
+                    let mut tasks = self.tasks.lock().unwrap();
+                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
+                        progress: 0.0, 
+                        completed: false, 
+                        error: String::new(),
+                        abort_handle: None,
+                        result_handle: None,
+                        payload: Vec::new(),
+                    });
+                }
 
                 let join_handle = tokio::spawn(async move {
                     let client = reqwest::Client::new();
@@ -340,12 +354,14 @@ impl NativeService for SystemService {
                     if let Some(t) = tasks.get_mut(&task_id_inner) {
                         match result {
                             Ok((status, body)) => {
+                                log::debug!(target: "host", "HTTP Task {} finished with status {}", task_id_inner, status);
                                 let response = HttpTaskResponse { status, body };
                                 t.payload = response.encode_to_vec();
                                 t.progress = 1.0;
                                 t.completed = true;
                             }
                             Err(e) => {
+                                log::error!(target: "host", "HTTP Task {} failed: {}", task_id_inner, e);
                                 t.error = e;
                                 t.completed = true;
                             }
@@ -353,17 +369,10 @@ impl NativeService for SystemService {
                     }
                 });
 
-                {
-                    let mut tasks = self.tasks.lock().unwrap();
-                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
-                        progress: 0.0, 
-                        completed: false, 
-                        error: String::new(),
-                        abort_handle: Some(join_handle.abort_handle()),
-                        result_handle: None,
-                        payload: Vec::new(),
-                    });
+                if let Some(t) = self.tasks.lock().unwrap().get_mut(&task_id) {
+                    t.abort_handle = Some(join_handle.abort_handle());
                 }
+
                 Ok(crate::core::TaskResponse { task_id }.encode_to_vec())
             }
             "task_status" => {
@@ -379,12 +388,13 @@ impl NativeService for SystemService {
                     }.encode_to_vec();
                     
                     if task.completed {
+                        log::debug!(target: "host", "Task {} completed and removed from host", req.task_id);
                         tasks.remove(&req.task_id);
                     }
                     
                     Ok(response)
                 } else {
-                    Err(anyhow::anyhow!("Task not found"))
+                    Err(anyhow::anyhow!("Task {} not found on host", req.task_id))
                 }
             }
             "task_cancel" => {
