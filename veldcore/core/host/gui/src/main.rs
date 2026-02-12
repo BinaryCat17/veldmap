@@ -265,7 +265,12 @@ async fn main() -> anyhow::Result<()> {
                             queue_arc.submit(Some(encoder.finish()));
                             frame.present();
                         }
-                        Err(wgpu::SurfaceError::Outdated) => {}
+                        Err(wgpu::SurfaceError::Outdated) => {
+                            surface.configure(&device_arc, &config);
+                        }
+                        Err(wgpu::SurfaceError::Lost) => {
+                            surface.configure(&device_arc, &config);
+                        }
                         Err(e) => log::error!("Surface error: {:?}", e),
                     }
                 }

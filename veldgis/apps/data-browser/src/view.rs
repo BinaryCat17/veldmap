@@ -1,5 +1,5 @@
 use veld_ui::{
-    column, row, text, button, Element, Color, Space
+    column, row, text, button, Element, Color
 };
 use crate::common::{COLOR_TEXT, COLOR_TEXT_DIM, ViewMode};
 use crate::{LocalState, AppMessage as Message};
