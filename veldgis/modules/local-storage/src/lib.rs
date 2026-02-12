@@ -1,7 +1,7 @@
 mod provider;
 
 use veldsdk::define_module;
-use veldmap_gis_api::storage::{GetTileRequest, GetTileResponse};
+use veldmap_gis_api::storage::GetTileRequest;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
