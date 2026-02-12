@@ -7,7 +7,7 @@ use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
-use veldsdk::core::{HttpRequest, http_request};
+use veldsdk::prost::Message;
 use crate::{LocalConfig, LocalState};
 
 pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
@@ -107,88 +107,92 @@ pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::C
 }
 
 pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
-    veldsdk::core::task::spawn(async move {
-        let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-        
-        let host = "eodata.dataspace.copernicus.eu";
-        let region = "default";
-        
-        let mut query_params = vec![
-            ("delimiter", "/"),
-            ("list-type", "2"),
-            ("max-keys", "20"),
-        ];
-        if !prefix.is_empty() {
-            query_params.push(("prefix", &prefix));
-        }
-        if !request.token.is_empty() {
-            query_params.push(("continuation-token", &request.token));
-        }
-        query_params.sort_by_key(|k| k.0);
+    let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
+    
+    let host = "eodata.dataspace.copernicus.eu";
+    let region = "default";
+    
+    let mut query_params = vec![
+        ("delimiter", "/"),
+        ("list-type", "2"),
+        ("max-keys", "20"),
+    ];
+    if !prefix.is_empty() {
+        query_params.push(("prefix", &prefix));
+    }
+    if !request.token.is_empty() {
+        query_params.push(("continuation-token", &request.token));
+    }
+    query_params.sort_by_key(|k| k.0);
 
-        let mut url = Url::parse(&format!("https://{}/eodata/", host)).unwrap();
-        {
-            let mut pairs = url.query_pairs_mut();
-            pairs.clear();
-            for (k, v) in &query_params {
-                pairs.append_pair(k, v);
+    let mut url = Url::parse(&format!("https://{}/eodata/", host)).unwrap();
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        for (k, v) in &query_params {
+            pairs.append_pair(k, v);
+        }
+    }
+    let full_url = url.to_string();
+
+    let signing_settings = SigningSettings::default();
+    let signing_params = v4::SigningParams::builder()
+        .identity(&state.identity)
+        .region(region)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(signing_settings)
+        .build()
+        .unwrap();
+
+    let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    let headers = [
+        ("host", host),
+        ("x-amz-content-sha256", content_sha256),
+    ];
+    
+    let uri_with_query = if let Some(q) = url.query() {
+        format!("{}?{}", url.path(), q)
+    } else {
+        url.path().to_string()
+    };
+    
+    let signable_request = SignableRequest::new(
+        "GET",
+        &uri_with_query,
+        headers.iter().map(|(k, v)| (*k, *v)),
+        aws_sigv4::http_request::SignableBody::Bytes(&[]),
+    ).unwrap();
+
+    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+    
+    let mut headers = std::collections::HashMap::new();
+    for (name, value) in instructions.headers() {
+        headers.insert(name.to_string(), value.to_string());
+    }
+    headers.insert("x-amz-content-sha256".to_string(), content_sha256.to_string());
+
+    let req_task = veldsdk::core::HttpTaskRequest {
+        url: full_url,
+        method: "GET".to_string(),
+        headers,
+        body: Vec::new(),
+    };
+
+    veldsdk::core::raw::http_task(req_task, |u| match u {
+        veldsdk::core::task::TaskUpdate::Started(_) => veldsdk::core::task::TaskUpdate::Started(None),
+        veldsdk::core::task::TaskUpdate::Progress(p, _) => veldsdk::core::task::TaskUpdate::Progress(p, None),
+        veldsdk::core::task::TaskUpdate::Finished(Ok(res)) => {
+            if res.status != 200 && res.status != 0 {
+                veldsdk::core::task::TaskUpdate::Finished(Err(format!("S3 status {}: {}", res.status, String::from_utf8_lossy(&res.body))))
+            } else if res.body.is_empty() {
+                veldsdk::core::task::TaskUpdate::Finished(Err("Empty response from S3".into()))
+            } else {
+                veldsdk::core::task::TaskUpdate::Finished(Ok(parse_s3_xml(res.body).encode_to_vec()))
             }
         }
-        let full_url = url.to_string();
-
-        let signing_settings = SigningSettings::default();
-        let signing_params = v4::SigningParams::builder()
-            .identity(&state.identity)
-            .region(region)
-            .name("s3")
-            .time(SystemTime::now())
-            .settings(signing_settings)
-            .build()
-            .unwrap();
-
-        let content_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let headers = [
-            ("host", host),
-            ("x-amz-content-sha256", content_sha256),
-        ];
-        
-        let uri_with_query = if let Some(q) = url.query() {
-            format!("{}?{}", url.path(), q)
-        } else {
-            url.path().to_string()
-        };
-        
-        let signable_request = SignableRequest::new(
-            "GET",
-            &uri_with_query,
-            headers.iter().map(|(k, v)| (*k, *v)),
-            aws_sigv4::http_request::SignableBody::Bytes(&[]),
-        ).unwrap();
-
-        let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
-        
-        let mut req = HttpRequest::new(full_url);
-        for (name, value) in instructions.headers() {
-            req = req.with_header(name.to_string(), value.to_string());
-        }
-        req = req.with_header("x-amz-content-sha256".to_string(), content_sha256.to_string());
-
-        let (status, body) = match http_request(&req, None) {
-            Ok(r) => r,
-            Err(e) => return Err(format!("Network error: {}", e)),
-        };
-        
-        if status != 200 && status != 0 {
-            return Err(format!("S3 status {}: {}", status, String::from_utf8_lossy(&body)));
-        }
-
-        if body.is_empty() {
-            return Err("Empty response from S3".into());
-        }
-
-        use veldsdk::prost::Message;
-        Ok(parse_s3_xml(body).encode_to_vec())
-    }, |u| u)
+        veldsdk::core::task::TaskUpdate::Finished(Err(e)) => veldsdk::core::task::TaskUpdate::Finished(Err(e)),
+    })
 }
 
 fn parse_s3_xml(body: Vec<u8>) -> ListPathResponse {

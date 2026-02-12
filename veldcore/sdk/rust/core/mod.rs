@@ -52,6 +52,7 @@ crate::rpc_proxy! {
     fs_list: FsListRequest => FsListResponse,
     fs_delete: FsDeleteRequest => (),
     @task fs_download: FsDownloadRequest => (),
+    @task http: HttpTaskRequest => HttpTaskResponse,
     image_info: ImageInfoRequest => ImageInfoResponse,
     @task image_load: ImageLoadRequest => ResourceHandle,
     get_resource: GetResourceRequest => GetResourceResponse,
@@ -95,11 +96,6 @@ impl HttpRequest {
         self.headers.insert(key, value);
         self
     }
-}
-
-pub fn http_request(req: &HttpRequest, body: Option<&[u8]>) -> anyhow::Result<(u32, Vec<u8>)> {
-    let json = serde_json::to_string(req)?;
-    crate::rpc::host::http_request(&json, body)
 }
 
 pub struct HostLogger;

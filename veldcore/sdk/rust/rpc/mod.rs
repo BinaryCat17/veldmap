@@ -208,6 +208,60 @@ macro_rules! define_module {
         }
 
         #[no_mangle]
+        pub extern "C" fn poll_tasks() -> i32 {
+            use $crate::futures_util::stream::StreamExt;
+            let state_arc = match $crate::rpc::MODULE_STATE.get() {
+                Some(Ok(s)) => s,
+                _ => return 0,
+            };
+            let mut state_lock = match state_arc.try_lock() {
+                Ok(l) => l,
+                Err(_) => return 0, // State is busy, poll later
+            };
+            let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>>>()
+                .expect("Failed to downcast state to expected type");
+
+            let mut finished_tasks = Vec::new();
+            for (task_id, stream) in service.tasks.iter_mut() {
+                let waker = $crate::futures_util::task::noop_waker_ref();
+                let mut cx = std::task::Context::from_waker(waker);
+
+                while let std::task::Poll::Ready(maybe_update) = stream.poll_next_unpin(&mut cx) {
+                    match maybe_update {
+                        Some(update) => {
+                            match update {
+                                $crate::core::task::TaskUpdate::Started(_) => {
+                                    $crate::rpc::host::task_update(&task_id, 0.0, false, "", &[]);
+                                }
+                                $crate::core::task::TaskUpdate::Progress(p, _) => {
+                                    $crate::rpc::host::task_update(&task_id, p, false, "", &[]);
+                                }
+                                $crate::core::task::TaskUpdate::Finished(res) => {
+                                    let (error, payload) = match res {
+                                        Ok(p) => (String::new(), p),
+                                        Err(e) => (e, Vec::new()),
+                                    };
+                                    $crate::rpc::host::task_update(&task_id, 1.0, true, &error, &payload);
+                                    finished_tasks.push(task_id.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        None => {
+                            finished_tasks.push(task_id.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            for task_id in finished_tasks {
+                service.tasks.remove(&task_id);
+            }
+            0
+        }
+
+        #[no_mangle]
         pub extern "C" fn handle_rpc() -> i32 {
             use $crate::prost::Message;
             use $crate::rpc::core::{RpcRequest, RpcResponse, TaskStatusRequest, TaskStatusResponse, TaskCancelRequest};
@@ -301,6 +355,10 @@ macro_rules! handle_method_logic {
             let waker = $crate::futures_util::task::noop_waker_ref();
             let mut cx = std::task::Context::from_waker(waker);
             
+            let mut finished_immediately = false;
+            let mut immediately_result = (Vec::new(), String::new());
+
+            // Выполняем первый опрос сразу, чтобы задача хотя бы перешла в Started
             while let std::task::Poll::Ready(Some(update)) = combined_stream.poll_next_unpin(&mut cx) {
                 match update {
                     $crate::core::task::TaskUpdate::Started(_) => {
@@ -315,13 +373,25 @@ macro_rules! handle_method_logic {
                             Err(e) => (e, Vec::new()),
                         };
                         $crate::rpc::host::task_update(&task_id, 1.0, true, &error, &payload);
+                        
+                        use $crate::prost::Message;
+                        use $crate::rpc::core::TaskResponse;
+                        immediately_result = (TaskResponse { task_id: task_id.clone() }.encode_to_vec(), String::new());
+                        finished_immediately = true;
                     }
                 }
             }
 
-            use $crate::prost::Message;
-            use $crate::rpc::core::TaskResponse;
-            (TaskResponse { task_id }.encode_to_vec(), String::new())
+            if finished_immediately {
+                immediately_result
+            } else {
+                // Если задача не завершилась сразу, сохраняем поток для последующих опросов
+                $service.tasks.insert(task_id.clone(), Box::pin(combined_stream));
+
+                use $crate::prost::Message;
+                use $crate::rpc::core::TaskResponse;
+                (TaskResponse { task_id }.encode_to_vec(), String::new())
+            }
         }
     };
 }

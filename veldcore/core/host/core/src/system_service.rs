@@ -5,7 +5,8 @@ use crate::core::{
     FsDownloadRequest, TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, ResourceHandle,
     ImageInfoRequest, ImageInfoResponse, ImageLoadRequest,
-    GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse
+    GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse,
+    HttpTaskRequest, HttpTaskResponse
 };
 use prost::Message;
 use std::fs;
@@ -305,6 +306,64 @@ impl NativeService for SystemService {
                     });
                 }
 
+                Ok(crate::core::TaskResponse { task_id }.encode_to_vec())
+            }
+            "http" => {
+                let req = HttpTaskRequest::decode(&payload[..])?;
+                let task_id = uuid::Uuid::new_v4().to_string();
+                let tasks_clone = self.tasks.clone();
+                let task_id_inner = task_id.clone();
+
+                let join_handle = tokio::spawn(async move {
+                    let client = reqwest::Client::new();
+                    let method = match req.method.to_uppercase().as_str() {
+                        "POST" => reqwest::Method::POST,
+                        "PUT" => reqwest::Method::PUT,
+                        "DELETE" => reqwest::Method::DELETE,
+                        _ => reqwest::Method::GET,
+                    };
+
+                    let mut builder = client.request(method, &req.url);
+                    for (k, v) in req.headers { builder = builder.header(k, v); }
+                    if !req.body.is_empty() { builder = builder.body(req.body); }
+
+                    let result = match builder.send().await {
+                        Ok(res) => {
+                            let status = res.status().as_u16() as u32;
+                            let body = res.bytes().await.unwrap_or_default().to_vec();
+                            Ok((status, body))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    };
+
+                    let mut tasks = tasks_clone.lock().unwrap();
+                    if let Some(t) = tasks.get_mut(&task_id_inner) {
+                        match result {
+                            Ok((status, body)) => {
+                                let response = HttpTaskResponse { status, body };
+                                t.payload = response.encode_to_vec();
+                                t.progress = 1.0;
+                                t.completed = true;
+                            }
+                            Err(e) => {
+                                t.error = e;
+                                t.completed = true;
+                            }
+                        }
+                    }
+                });
+
+                {
+                    let mut tasks = self.tasks.lock().unwrap();
+                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
+                        progress: 0.0, 
+                        completed: false, 
+                        error: String::new(),
+                        abort_handle: Some(join_handle.abort_handle()),
+                        result_handle: None,
+                        payload: Vec::new(),
+                    });
+                }
                 Ok(crate::core::TaskResponse { task_id }.encode_to_vec())
             }
             "task_status" => {

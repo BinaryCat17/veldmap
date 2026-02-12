@@ -59,6 +59,26 @@ impl Dispatcher {
         services.insert(name, location);
     }
 
+    pub async fn poll_all_tasks(&self) -> Result<()> {
+        let locations: Vec<(String, ServiceLocation)> = {
+            let services = self.services.lock().unwrap();
+            services.iter().map(|(n, l)| (n.clone(), l.clone())).collect()
+        };
+
+        for (name, location) in locations {
+            if let ServiceLocation::LocalWasm(wasm_module) = location {
+                let mut module = wasm_module.lock().await;
+                let instance = module.instance;
+                if let Ok(poll_tasks) = instance.get_typed_func::<(), i32>(&mut module.store, "poll_tasks") {
+                    if let Err(e) = poll_tasks.call_async(&mut module.store, ()).await {
+                        log::warn!("[DISPATCHER] poll_tasks failed for {}: {}", name, e);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn call(&self, service_name: &str, method: &str, payload: Vec<u8>) -> Result<Vec<u8>> {
         let location = {
             let services = self.services.lock().unwrap();

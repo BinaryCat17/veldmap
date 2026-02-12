@@ -192,6 +192,10 @@ async fn main() -> anyhow::Result<()> {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
         loop {
             interval.tick().await;
+            
+            // Poll all WASM tasks (Fibers)
+            let _ = d_clone.poll_all_tasks().await;
+
             if is_visible_clone.load(Ordering::Relaxed) {
                 if let Err(e) = d_clone.call("data-browser", "render", vec![]).await {
                     log::error!("Render call failed: {}", e);
