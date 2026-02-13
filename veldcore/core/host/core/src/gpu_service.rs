@@ -122,7 +122,7 @@ impl GpuService {
         }
 
         {
-            let mut q = queue.lock().unwrap();
+            let q = queue.lock().unwrap();
             q.submit(Some(encoder.finish()));
             device.poll(wgpu::Maintain::Wait);
         }

@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let proxy = event_loop.create_proxy();
     
     let window = Arc::new(WindowBuilder::new()
-        .with_title(window_title)
+        .with_title(window_title.clone())
         .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
         .build(&event_loop)?);
 
@@ -187,6 +187,10 @@ async fn main() -> anyhow::Result<()> {
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut last_cursor_sent_time = std::time::Instant::now();
 
+    // FPS calculation state
+    let mut frame_count = 0;
+    let mut last_fps_update = std::time::Instant::now();
+
     let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
@@ -283,10 +287,21 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             {
-                                let mut q = queue_arc.lock().unwrap();
+                                let q = queue_arc.lock().unwrap();
                                 q.submit(Some(encoder.finish()));
                             }
                             frame.present();
+
+                            // Update FPS
+                            frame_count += 1;
+                            let now = std::time::Instant::now();
+                            let elapsed = now.duration_since(last_fps_update);
+                            if elapsed >= std::time::Duration::from_secs(1) {
+                                let fps = frame_count as f64 / elapsed.as_secs_f64();
+                                window.set_title(&format!("{} - {:.1} FPS", window_title, fps));
+                                frame_count = 0;
+                                last_fps_update = now;
+                            }
                         }
                         Err(wgpu::SurfaceError::Outdated) => {
                             surface.configure(&device_arc, &config);

@@ -498,7 +498,7 @@ impl ResourceManager {
                 vec[offset as usize..end].copy_from_slice(data);
             },
             Resource::Buffer(ref buffer) => {
-                let mut q = self.queue.lock().unwrap();
+                let q = self.queue.lock().unwrap();
                 q.write_buffer(buffer, offset, data);
                 self.device.poll(wgpu::Maintain::Poll);
             },
@@ -510,7 +510,7 @@ impl ResourceManager {
                     _ => 4,
                 };
 
-                let mut q = self.queue.lock().unwrap();
+                let q = self.queue.lock().unwrap();
                 q.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
@@ -547,7 +547,7 @@ impl ResourceManager {
             Resource::Buffer(buffer) => {
                 let buffer = buffer.clone();
                 {
-                    let mut q = self.queue.lock().unwrap();
+                    let q = self.queue.lock().unwrap();
                     q.submit([]);
                     self.device.poll(wgpu::Maintain::Wait);
                 }
@@ -575,7 +575,7 @@ impl ResourceManager {
                     let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                     encoder.copy_buffer_to_buffer(&buffer, offset, &staging, 0, size);
                     {
-                        let mut q = self.queue.lock().unwrap();
+                        let q = self.queue.lock().unwrap();
                         q.submit(Some(encoder.finish()));
                         self.device.poll(wgpu::Maintain::Wait);
                     }
