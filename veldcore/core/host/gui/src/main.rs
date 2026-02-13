@@ -220,18 +220,24 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { let _ = node.run().await; });
         log::info!("Core ready. Render loop started (VSync: {}, FPS Limit: {})...", vsync, fps_limit);
         
+        let mut last_frame_time = std::time::Instant::now();
         loop {
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last_frame_time).as_secs_f32();
+            last_frame_time = now;
+
             // Pacing logic
             if vsync {
-                // In vsync mode, we try to render as fast as the monitor allows.
-                // We wait a tiny bit if a frame is already being processed to avoid CPU hogging.
                 if frame_pending_clone.load(Ordering::Acquire) {
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     continue;
                 }
             } else {
-                // Fixed FPS mode
-                tokio::time::sleep(std::time::Duration::from_millis(1000 / fps_limit.max(1) as u64)).await;
+                let target_dt = 1.0 / fps_limit.max(1) as f32;
+                if dt < target_dt {
+                    tokio::time::sleep(std::time::Duration::from_secs_f32(target_dt - dt)).await;
+                    continue;
+                }
             }
 
             // Poll all WASM tasks (Fibers)
@@ -239,8 +245,17 @@ async fn main() -> anyhow::Result<()> {
 
             if is_visible_clone.load(Ordering::Relaxed) {
                 frame_pending_clone.store(true, Ordering::Release);
-                if let Err(e) = d_clone.call("data-browser", "render", vec![]).await {
-                    log::error!("Render call failed: {}", e);
+                
+                // Construct FrameEvent
+                let ev = veldmap_host_core::app::UiEvent { 
+                    event: Some(veldmap_host_core::app::ui_event::Event::Frame(
+                        veldmap_host_core::app::FrameEvent { dt }
+                    )) 
+                };
+                
+                // Notify plugins that a new frame has started
+                if let Err(e) = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await {
+                    log::error!("Frame event failed: {}", e);
                     frame_pending_clone.store(false, Ordering::Release);
                 }
             }
@@ -367,7 +382,6 @@ async fn main() -> anyhow::Result<()> {
                 tokio::spawn(async move { 
                     busy_clone.store(true, Ordering::SeqCst); 
                     let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                    let _ = d_clone.call("data-browser", "render", vec![]).await;
                     busy_clone.store(false, Ordering::SeqCst); 
                 });
             }
@@ -380,7 +394,6 @@ async fn main() -> anyhow::Result<()> {
                     busy_clone.store(true, Ordering::SeqCst);
                     tokio::spawn(async move { 
                         let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                        let _ = d_clone.call("data-browser", "render", vec![]).await;
                         busy_clone.store(false, Ordering::SeqCst); 
                     });
                     last_cursor_sent_time = std::time::Instant::now();
@@ -388,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 let (dx, dy) = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 20.0, y * 20.0),
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 300.0, y * 300.0),
                     winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
                 let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: dx, delta_y: dy })) };
@@ -397,7 +410,6 @@ async fn main() -> anyhow::Result<()> {
                 tokio::spawn(async move { 
                     busy_clone.store(true, Ordering::SeqCst); 
                     let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                    let _ = d_clone.call("data-browser", "render", vec![]).await;
                     busy_clone.store(false, Ordering::SeqCst); 
                 });
             }

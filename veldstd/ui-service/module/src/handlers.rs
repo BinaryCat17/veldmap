@@ -22,6 +22,7 @@ pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::R
 
 pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> anyhow::Result<HandleUiEventResponse> {
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
+    let mut messages = Vec::new();
     if let Some(event_proto) = req.event {
         if let Some(ev) = event_proto.event {
             *plugin.needs_redrawing.borrow_mut() = true;
@@ -61,24 +62,42 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                     }
                 }
                 app_proto::ui_event::Event::Scroll(s) => {
-                    plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
-                        delta: iced_core::mouse::ScrollDelta::Pixels { x: s.delta_x, y: s.delta_y } 
-                    }));
+                    let mut vel = plugin.scroll_velocity.borrow_mut();
+                    vel.x += s.delta_x;
+                    vel.y += s.delta_y;
+                }
+                app_proto::ui_event::Event::Frame(f) => {
+                    // 1. Применяем инерцию
+                    let mut vel = plugin.scroll_velocity.borrow_mut();
+                    if vel.x.abs() > 0.1 || vel.y.abs() > 0.1 {
+                        // Вычисляем сколько прокрутить в ЭТОМ кадре.
+                        // f.dt в секундах (например 0.016). 
+                        // Множитель 10.0 поможет привести скорость к комфортному движению.
+                        let scroll_amount_x = vel.x * f.dt * 10.0;
+                        let scroll_amount_y = vel.y * f.dt * 10.0;
+
+                        plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
+                            delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
+                        }));
+                        
+                        // Затухание скорости
+                        let friction = 0.95f32;
+                        let factor = friction.powf(f.dt * 60.0);
+                        vel.x *= factor;
+                        vel.y *= factor;
+                    } else {
+                        vel.x = 0.0;
+                        vel.y = 0.0;
+                    }
+
+                    // 2. Вызываем рендер
+                    messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id)?;
                 }
                 _ => {}
             }
         }
     }
-    Ok(HandleUiEventResponse {})
-}
-
-pub fn handle_render(state: &mut LocalState, req: RenderRequest) -> anyhow::Result<RenderResponse> {
-    let renderer = &mut state.renderer;
-    let mut messages = Vec::new();
-    if let Some(plugin) = state.plugins.get_mut(&req.plugin_id) {
-        messages = render_plugin(plugin, renderer, &req.plugin_id)?;
-    }
-    Ok(RenderResponse { messages })
+    Ok(HandleUiEventResponse { messages })
 }
 
 fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str) -> anyhow::Result<Vec<UiEventResponse>> {

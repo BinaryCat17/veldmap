@@ -10,7 +10,12 @@ message UIEvent {
         InitEvent init = 4;
         ScrollEvent scroll = 5;
         CursorMovedEvent cursor_moved = 6;
+        FrameEvent frame = 7;
     }
+}
+
+message FrameEvent {
+    float dt = 1;
 }
 
 message ClickEvent {

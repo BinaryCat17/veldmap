@@ -22,6 +22,5 @@ define_module! {
     handlers: {
         "set_view" => handle_set_view : SetViewRequest => SetViewResponse,
         "handle_ui_event" => handle_ui_event : HandleUiEventRequest => HandleUiEventResponse,
-        "render" => handle_render : RenderRequest => RenderResponse,
     }
 }

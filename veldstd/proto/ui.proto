@@ -147,13 +147,7 @@ message HandleUiEventRequest {
     veldmap.app.UIEvent event = 2;
 }
 
-message HandleUiEventResponse {}
-
-message RenderRequest {
-    string plugin_id = 1;
-}
-
-message RenderResponse {
+message HandleUiEventResponse {
     repeated UiEventResponse messages = 1;
 }
 

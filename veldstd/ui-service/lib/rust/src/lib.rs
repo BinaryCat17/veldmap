@@ -13,7 +13,6 @@ pub use futures_util::task::noop_waker_ref;
 veldsdk::rpc_proxy! {
     service: "ui-service",
     set_view: proto::SetViewRequest => proto::SetViewResponse,
-    render: proto::RenderRequest => proto::RenderResponse,
     handle_ui_event: proto::HandleUiEventRequest => proto::HandleUiEventResponse,
 }
 
@@ -545,41 +544,61 @@ macro_rules! define_remote_ui_module {
             let module = state_lock.downcast_mut::<$crate::ModuleState<$state_type, $message_type>>().unwrap();
 
             match request.method.as_str() {
-                "render" => {
-                    let waker = $crate::reexports::noop_waker_ref();
-                    let mut cx = $crate::reexports::Context::from_waker(waker);
-                    let mut new_messages = Vec::new();
+                "handle_ui_event" => {
+                    let event = match veldsdk::rpc::app::UiEvent::decode(&request.payload[..]) {
+                        Ok(e) => e,
+                        Err(_) => return 3,
+                    };
                     
-                    use veldsdk::futures_util::stream::StreamExt;
-                    
-                    module.tasks.retain_mut(|task| {
-                        loop {
-                            match task.poll_next_unpin(&mut cx) {
-                                $crate::reexports::Poll::Ready(Some(msg)) => {
-                                    new_messages.push(msg);
-                                },
-                                $crate::reexports::Poll::Ready(None) => return false,
-                                $crate::reexports::Poll::Pending => return true,
+                    if let Some(ref ev_type) = event.event {
+                        match ev_type {
+                            veldsdk::rpc::app::ui_event::Event::Resize(r) => {
+                                module.width = r.width;
+                                module.height = r.height;
                             }
-                        }
-                    });
+                            veldsdk::rpc::app::ui_event::Event::Frame(_f) => {
+                                let waker = $crate::reexports::noop_waker_ref();
+                                let mut cx = $crate::reexports::Context::from_waker(waker);
+                                let mut new_messages = Vec::new();
+                                
+                                use veldsdk::futures_util::stream::StreamExt;
+                                
+                                module.tasks.retain_mut(|task| {
+                                    loop {
+                                        match task.poll_next_unpin(&mut cx) {
+                                            $crate::reexports::Poll::Ready(Some(msg)) => {
+                                                new_messages.push(msg);
+                                            },
+                                            $crate::reexports::Poll::Ready(None) => return false,
+                                            $crate::reexports::Poll::Pending => return true,
+                                        }
+                                    }
+                                });
 
-                    for msg in new_messages {
-                        let cmd = internal_update(&mut module.state, msg);
-                        module.tasks.extend(cmd.0);
+                                for msg in new_messages {
+                                    let cmd = internal_update(&mut module.state, msg);
+                                    module.tasks.extend(cmd.0);
+                                }
+
+                                let element = $view_func(&module.state);
+                                let layout = $crate::proto::Layout {
+                                    root: Some(element.widget),
+                                    width: module.width, height: module.height,
+                                };
+                                let _ = $crate::raw::set_view(&$crate::proto::SetViewRequest {
+                                    plugin_id: module.plugin_name.clone(),
+                                    layout: Some(layout),
+                                });
+                            }
+                            _ => {}
+                        }
                     }
 
-                    let element = $view_func(&module.state);
-                    let layout = $crate::proto::Layout {
-                        root: Some(element.widget),
-                        width: module.width, height: module.height,
-                    };
-                    let _ = $crate::raw::set_view(&$crate::proto::SetViewRequest {
+                    if let Ok(ui_res) = $crate::raw::handle_ui_event(&$crate::proto::HandleUiEventRequest {
                         plugin_id: module.plugin_name.clone(),
-                        layout: Some(layout),
-                    });
-                    if let Ok(render_res) = $crate::raw::render(&$crate::proto::RenderRequest { plugin_id: module.plugin_name.clone() }) {
-                        for msg_res in render_res.messages {
+                        event: Some(event),
+                    }) {
+                        for msg_res in ui_res.messages {
                             let message: $message_type = match veldsdk::serde_json::from_str(&msg_res.message_tag) {
                                 Ok(m) => m,
                                 Err(_) => continue,
@@ -591,23 +610,6 @@ macro_rules! define_remote_ui_module {
                     
                     let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
                     veldsdk::rpc::host::store_output(response.encode_to_vec());
-                    0
-                }
-                "handle_ui_event" => {
-                    let event = match veldsdk::rpc::app::UiEvent::decode(&request.payload[..]) {
-                        Ok(e) => e,
-                        Err(_) => return 3,
-                    };
-                    
-                    if let Some(veldsdk::rpc::app::ui_event::Event::Resize(r)) = event.event {
-                        module.width = r.width;
-                        module.height = r.height;
-                    }
-
-                    let _ = $crate::raw::handle_ui_event(&$crate::proto::HandleUiEventRequest {
-                        plugin_id: module.plugin_name.clone(),
-                        event: Some(event),
-                    });
                     0
                 }
                 _ => 6,
