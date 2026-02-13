@@ -65,26 +65,26 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                     let mut vel = plugin.scroll_velocity.borrow_mut();
                     vel.x += s.delta_x;
                     vel.y += s.delta_y;
+                    *plugin.needs_redrawing.borrow_mut() = true;
                 }
                 app_proto::ui_event::Event::Frame(f) => {
                     // 1. Применяем инерцию
                     let mut vel = plugin.scroll_velocity.borrow_mut();
-                    if vel.x.abs() > 0.1 || vel.y.abs() > 0.1 {
+                    if vel.x.abs() > 0.01 || vel.y.abs() > 0.01 {
                         // Вычисляем сколько прокрутить в ЭТОМ кадре.
-                        // f.dt в секундах (например 0.016). 
-                        // Множитель 10.0 поможет привести скорость к комфортному движению.
-                        let scroll_amount_x = vel.x * f.dt * 10.0;
-                        let scroll_amount_y = vel.y * f.dt * 10.0;
+                        let scroll_amount_x = vel.x * f.dt * 15.0;
+                        let scroll_amount_y = vel.y * f.dt * 15.0;
 
                         plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
                             delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
                         }));
                         
                         // Затухание скорости
-                        let friction = 0.95f32;
+                        let friction = 0.85f32;
                         let factor = friction.powf(f.dt * 60.0);
                         vel.x *= factor;
                         vel.y *= factor;
+                        *plugin.needs_redrawing.borrow_mut() = true;
                     } else {
                         vel.x = 0.0;
                         vel.y = 0.0;

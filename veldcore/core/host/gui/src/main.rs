@@ -401,16 +401,13 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 let (dx, dy) = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 300.0, y * 300.0),
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0),
                     winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
                 };
                 let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: dx, delta_y: dy })) };
                 let d_clone = dispatcher.clone();
-                let busy_clone = ui_busy.clone();
                 tokio::spawn(async move { 
-                    busy_clone.store(true, Ordering::SeqCst); 
                     let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                    busy_clone.store(false, Ordering::SeqCst); 
                 });
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
