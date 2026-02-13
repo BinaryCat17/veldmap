@@ -160,6 +160,7 @@ impl<M> Text<M> {
             bold: false,
             horizontal_alignment: 0,
             vertical_alignment: 0,
+            style: String::new(),
         }, _marker: std::marker::PhantomData }
     }
     pub fn size(mut self, size: f32) -> Self {
@@ -168,6 +169,10 @@ impl<M> Text<M> {
     }
     pub fn color(mut self, color: Color) -> Self {
         self.widget.color = Some(color.to_proto());
+        self
+    }
+    pub fn style(mut self, style: impl Into<String>) -> Self {
+        self.widget.style = style.into();
         self
     }
     pub fn horizontal_alignment(mut self, align: Alignment) -> Self {
@@ -197,19 +202,14 @@ pub struct Button<M> {
 
 impl<M> Button<M> {
     pub fn new(content: impl Into<Element<M>>) -> Self {
-        let element = content.into();
-        let label = if let Some(proto::widget::Type::Text(t)) = element.widget.r#type {
-            t.content
-        } else {
-            "Button".to_string()
-        };
-
         Self { widget: proto::Button {
-            label,
+            child: Some(Box::new(content.into().widget)),
             on_press: String::new(),
             disabled: false,
             width: None, height: None,
             align_x: None, align_y: None,
+            style: String::new(),
+            padding: None,
         }, _marker: std::marker::PhantomData }
     }
     pub fn on_press(mut self, msg: M) -> Self where M: Serialize {
@@ -224,6 +224,14 @@ impl<M> Button<M> {
         self.widget.height = Some(h.to_proto());
         self
     }
+    pub fn style(mut self, style: impl Into<String>) -> Self {
+        self.widget.style = style.into();
+        self
+    }
+    pub fn padding(mut self, p: f32) -> Self {
+        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
+        self
+    }
     pub fn align_x(mut self, align: Alignment) -> Self {
         self.widget.align_x = Some(align as i32);
         self
@@ -236,12 +244,65 @@ impl<M> Button<M> {
 
 impl<M> From<Button<M>> for Element<M> {
     fn from(b: Button<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Button(b.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Button(Box::new(b.widget))) }.into()
     }
 }
 
 pub fn button<M>(content: impl Into<Element<M>>) -> Button<M> {
     Button::new(content)
+}
+
+pub struct TextInput<M> {
+    widget: proto::TextInput,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> TextInput<M> {
+    pub fn new(placeholder: &str, value: &str) -> Self {
+        Self {
+            widget: proto::TextInput {
+                placeholder: placeholder.to_string(),
+                value: value.to_string(),
+                ..Default::default()
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub fn on_input(mut self, f: impl Fn(String) -> M) -> Self where M: Serialize {
+        let msg = f(String::new());
+        self.widget.on_input = serde_json::to_string(&msg).unwrap_or_default();
+        self
+    }
+    pub fn on_submit(mut self, msg: M) -> Self where M: Serialize {
+        self.widget.on_submit = serde_json::to_string(&msg).unwrap_or_default();
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn padding(mut self, p: f32) -> Self {
+        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
+        self
+    }
+    pub fn size(mut self, size: f32) -> Self {
+        self.widget.size = size;
+        self
+    }
+    pub fn style(mut self, style: impl Into<String>) -> Self {
+        self.widget.style = style.into();
+        self
+    }
+}
+
+impl<M> From<TextInput<M>> for Element<M> {
+    fn from(t: TextInput<M>) -> Self {
+        proto::Widget { r#type: Some(proto::widget::Type::TextInput(t.widget)) }.into()
+    }
+}
+
+pub fn text_input<M>(placeholder: &str, value: &str) -> TextInput<M> {
+    TextInput::new(placeholder, value)
 }
 
 pub struct Container<M> {

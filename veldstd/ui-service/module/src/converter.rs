@@ -40,45 +40,62 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             rw.width(convert_length(&r.width)).height(convert_length(&r.height)).into()
         }
         Some(proto::widget::Type::Text(t)) => {
-            text(t.content.clone())
+            let mut txt = text(t.content.clone())
                 .size(t.size)
                 .color(convert_color(&t.color))
                 .align_x(convert_horizontal_alignment(t.horizontal_alignment()))
-                .align_y(convert_vertical_alignment(t.vertical_alignment()))
-                .into()
+                .align_y(convert_vertical_alignment(t.vertical_alignment()));
+            
+            // Здесь можно добавить маппинг стилей текста если нужно
+            
+            txt.into()
         }
         Some(proto::widget::Type::Button(b)) => {
-            let h_align = b.align_x
-                .map(|a| convert_horizontal_alignment(proto::Alignment::try_from(a).unwrap_or(proto::Alignment::Start)))
-                .unwrap_or(iced_core::alignment::Horizontal::Center);
-            
-            let v_align = b.align_y
-                .map(|a| convert_vertical_alignment(proto::Alignment::try_from(a).unwrap_or(proto::Alignment::Start)))
-                .unwrap_or(iced_core::alignment::Vertical::Center);
+            let content = if let Some(child) = &b.child {
+                convert_widget(child)
+            } else {
+                iced_widget::Space::with_width(0.0).into()
+            };
 
-            let btn_width = convert_length(&b.width);
-            let btn_height = convert_length(&b.height);
-
-            let mut label = text(b.label.clone())
-                .align_x(h_align)
-                .align_y(v_align);
-            
-            if btn_width == Length::Fill {
-               label = label.width(Length::Fill);
-            }
-            if btn_height == Length::Fill {
-               label = label.height(Length::Fill);
-            }
-
-            let mut btn = button(label)
-                .width(btn_width)
-                .height(btn_height);
+            let mut btn = button(content)
+                .width(convert_length(&b.width))
+                .height(convert_length(&b.height))
+                .padding(convert_padding(&b.padding));
             
             if !b.disabled {
                 let tag = b.on_press.clone();
                 btn = btn.on_press(UiMessage { tag, value: String::new() });
             }
+
+            // Маппинг стилей
+            match b.style.as_str() {
+                "text" => { btn = btn.style(iced_widget::button::text); }
+                "primary" => { btn = btn.style(iced_widget::button::primary); }
+                "secondary" => { btn = btn.style(iced_widget::button::secondary); }
+                "success" => { btn = btn.style(iced_widget::button::success); }
+                "danger" => { btn = btn.style(iced_widget::button::danger); }
+                _ => {}
+            }
+
             btn.into()
+        }
+        Some(proto::widget::Type::TextInput(t)) => {
+            let mut input = iced_widget::text_input(&t.placeholder, &t.value)
+                .width(convert_length(&t.width))
+                .padding(convert_padding(&t.padding))
+                .size(t.size);
+            
+            if !t.on_input.is_empty() {
+                let tag = t.on_input.clone();
+                input = input.on_input(move |v| UiMessage { tag: tag.clone(), value: v });
+            }
+            
+            if !t.on_submit.is_empty() {
+                let tag = t.on_submit.clone();
+                input = input.on_submit(UiMessage { tag, value: String::new() });
+            }
+
+            input.into()
         }
         Some(proto::widget::Type::Container(c)) => {
             let mut cont = container(if let Some(child) = &c.child { convert_widget(child) } else { Space::with_width(0.0).into() })

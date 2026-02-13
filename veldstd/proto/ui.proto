@@ -65,16 +65,19 @@ message Text {
     bool bold = 4;
     Alignment horizontal_alignment = 5;
     Alignment vertical_alignment = 6;
+    string style = 7;
 }
 
 message Button {
-    string label = 1;
+    Widget child = 1;
     string on_press = 2; // Message tag
     bool disabled = 3;
     Length width = 4;
     Length height = 5;
     optional Alignment align_x = 6;
     optional Alignment align_y = 7;
+    string style = 8;
+    Padding padding = 9;
 }
 
 message TextInput {
@@ -82,6 +85,10 @@ message TextInput {
     string placeholder = 2;
     string on_input = 3; // Message tag
     string on_submit = 4; // Message tag
+    string style = 5;
+    Length width = 6;
+    Padding padding = 7;
+    float size = 8;
 }
 
 message WgpuImage {

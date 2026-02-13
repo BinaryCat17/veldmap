@@ -15,9 +15,11 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
             None
         };
 
-        let mut main_btn = button(text(format!("{}{}", icon, item.name)))
-            .width(veld_ui::Length::Fill)
-            .align_x(veld_ui::Alignment::Start);
+        let mut main_btn = button(
+            text(format!("{}{}", icon, item.name))
+                .horizontal_alignment(veld_ui::Alignment::Start)
+        )
+        .width(veld_ui::Length::Fill);
         
         if let Some(msg) = main_msg {
             main_btn = main_btn.on_press(msg);
@@ -29,7 +31,9 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
         } else if item.exists_locally {
             row![
                 text(" ✅").color(veld_ui::Color::from_rgb(0.3, 0.8, 0.3)),
-                button(text(" 🔄")).on_press(Message::DownloadFile(item.s3_key.clone()))
+                button(text(" 🔄"))
+                    .style("text")
+                    .on_press(Message::DownloadFile(item.s3_key.clone()))
             ].width(veld_ui::Length::Shrink).spacing(5.0).align_items(veld_ui::Alignment::Center).into()
         } else {
             column![].width(veld_ui::Length::Shrink).into()
