@@ -121,7 +121,6 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
         }
     }
     let full_url = url.to_string();
-    info!("Full S3 URL: {}", full_url);
 
     let uri_with_query = if let Some(q) = url.query() {
         format!("{}?{}", url.path(), q)

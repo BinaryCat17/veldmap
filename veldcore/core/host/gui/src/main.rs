@@ -57,12 +57,26 @@ async fn main() -> anyhow::Result<()> {
 
     log::info!("VeldMap GUI Host starting...");
 
+    let mut window_width = 1024.0;
+    let mut window_height = 768.0;
+    let mut window_title = "VeldMap".to_string();
+
+    // Read core.json for window settings
+    let core_config_path = std::path::Path::new(&config_dir).join("core.json");
+    if let Ok(config_str) = std::fs::read_to_string(core_config_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&config_str) {
+            if let Some(w) = v["window"]["width"].as_f64() { window_width = w; }
+            if let Some(h) = v["window"]["height"].as_f64() { window_height = h; }
+            if let Some(t) = v["window"]["title"].as_str() { window_title = t.to_string(); }
+        }
+    }
+
     let event_loop = EventLoopBuilder::<()>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     
     let window = Arc::new(WindowBuilder::new()
-        .with_title("VeldMap")
-        .with_inner_size(winit::dpi::LogicalSize::new(1024.0, 768.0))
+        .with_title(window_title)
+        .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
         .build(&event_loop)?);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
@@ -109,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let device_arc = Arc::new(device);
-    let queue_arc = Arc::new(queue);
+    let queue_arc = Arc::new(std::sync::Mutex::new(queue));
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(device_arc.clone(), queue_arc.clone(), surface_format));
 
     // Инициализируем Blit Pipeline для вывода текстур плагинов
@@ -266,7 +280,7 @@ async fn main() -> anyhow::Result<()> {
                                     rp.draw(0..3, 0..1);
                                 }
                             }
-                            queue_arc.submit(Some(encoder.finish()));
+                            queue_arc.lock().unwrap().submit(Some(encoder.finish()));
                             frame.present();
                         }
                         Err(wgpu::SurfaceError::Outdated) => {
@@ -280,6 +294,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
+                let scale_factor = window.scale_factor();
+                log::info!("Window resized to: {}x{} (scale_factor={})", size.width, size.height, scale_factor);
                 if size.width > 0 && size.height > 0 {
                     is_visible.store(true, Ordering::SeqCst);
                     config.width = size.width; config.height = size.height;

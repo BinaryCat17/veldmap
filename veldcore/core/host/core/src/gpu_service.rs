@@ -121,7 +121,7 @@ impl GpuService {
             }
         }
 
-        queue.submit(Some(encoder.finish()));
+        queue.lock().unwrap().submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
         Ok(())
     }

@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(
         Arc::new(device), 
-        Arc::new(queue),
+        Arc::new(std::sync::Mutex::new(queue)),
         wgpu::TextureFormat::Rgba8Unorm
     ));
 

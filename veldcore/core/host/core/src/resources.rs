@@ -31,11 +31,11 @@ pub struct ResourceManager {
     named_resources: DashMap<String, u64>,
     pub next_id: AtomicU64,
     device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
+    queue: Arc<std::sync::Mutex<wgpu::Queue>>,
 }
 
 impl ResourceManager {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, _surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>, _surface_format: wgpu::TextureFormat) -> Self {
         Self {
             resources: DashMap::new(),
             named_resources: DashMap::new(),
@@ -57,7 +57,7 @@ impl ResourceManager {
         self.device.clone()
     }
 
-    pub fn get_queue(&self) -> Arc<wgpu::Queue> {
+    pub fn get_queue(&self) -> Arc<std::sync::Mutex<wgpu::Queue>> {
         self.queue.clone()
     }
 
@@ -495,7 +495,7 @@ impl ResourceManager {
                 vec[offset as usize..end].copy_from_slice(data);
             },
             Resource::Buffer(ref buffer) => {
-                self.queue.write_buffer(buffer, offset, data);
+                self.queue.lock().unwrap().write_buffer(buffer, offset, data);
                 self.device.poll(wgpu::Maintain::Poll);
             },
             Resource::Texture { ref texture, width, height, format } => {
@@ -506,7 +506,7 @@ impl ResourceManager {
                     _ => 4,
                 };
 
-                self.queue.write_texture(
+                self.queue.lock().unwrap().write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
                         mip_level: 0,
@@ -541,7 +541,7 @@ impl ResourceManager {
             },
             Resource::Buffer(buffer) => {
                 let buffer = buffer.clone();
-                self.queue.submit([]);
+                self.queue.lock().unwrap().submit([]);
                 self.device.poll(wgpu::Maintain::Wait);
 
                 let aligned_map_size = Self::align_to(size, 4);
@@ -563,7 +563,7 @@ impl ResourceManager {
                     });
                     let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                     encoder.copy_buffer_to_buffer(&buffer, offset, &staging, 0, size);
-                    self.queue.submit(Some(encoder.finish()));
+                    self.queue.lock().unwrap().submit(Some(encoder.finish()));
                     self.device.poll(wgpu::Maintain::Wait);
                     let slice = staging.slice(..aligned_map_size);
                     let (tx, rx) = std::sync::mpsc::channel();

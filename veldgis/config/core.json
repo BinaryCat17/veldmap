@@ -1,1 +1,7 @@
-{}
+{
+    "window": {
+        "title": "VeldMap GIS",
+        "width": 2048,
+        "height": 1536
+    }
+}

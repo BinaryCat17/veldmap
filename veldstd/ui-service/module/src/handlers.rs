@@ -30,6 +30,8 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                     log::trace!("Resize plugin '{}': {}x{} (sf={})", req.plugin_id, r.width, r.height, r.scale_factor);
                     *plugin.canvas_size.borrow_mut() = (r.width, r.height);
                     *plugin.scale_factor.borrow_mut() = r.scale_factor;
+                    // Инвалидируем текстуру, чтобы она пересоздалась с новым размером
+                    *plugin.ui_texture.borrow_mut() = None;
                 }
                 app_proto::ui_event::Event::CursorMoved(c) => {
                     let sf = *plugin.scale_factor.borrow();
@@ -197,6 +199,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
 
     let mut ui_texture = plugin.ui_texture.borrow_mut();
     if ui_texture.is_none() {
+        log::info!("Creating UI Texture for plugin '{}': {}x{}", _plugin_id, width, height);
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
                 width, height, format: 0, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
