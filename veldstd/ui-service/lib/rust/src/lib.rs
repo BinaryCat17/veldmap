@@ -30,6 +30,25 @@ pub struct Column<M> {
     _marker: std::marker::PhantomData<M>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct Padding {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl Padding {
+    pub const ZERO: Padding = Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 0.0 };
+    pub fn new(p: f32) -> Self { Self { top: p, right: p, bottom: p, left: p } }
+    pub fn from_proto(p: proto::Padding) -> Self { Self { top: p.top, right: p.right, bottom: p.bottom, left: p.left } }
+    pub fn to_proto(self) -> proto::Padding { proto::Padding { top: self.top, right: self.right, bottom: self.bottom, left: self.left } }
+}
+
+impl From<f32> for Padding {
+    fn from(p: f32) -> Self { Padding::new(p) }
+}
+
 impl<M> Column<M> {
     pub fn new() -> Self {
         Self { 
@@ -57,8 +76,8 @@ impl<M> Column<M> {
         self.widget.align_items = align as i32;
         self
     }
-    pub fn padding(mut self, p: f32) -> Self {
-        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
         self
     }
     pub fn max_width(mut self, w: f32) -> Self {
@@ -120,8 +139,8 @@ impl<M> Row<M> {
         self.widget.align_items = align as i32;
         self
     }
-    pub fn padding(mut self, p: f32) -> Self {
-        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
         self
     }
     pub fn width(mut self, w: Length) -> Self {
@@ -228,8 +247,8 @@ impl<M> Button<M> {
         self.widget.style = style.into();
         self
     }
-    pub fn padding(mut self, p: f32) -> Self {
-        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
         self
     }
     pub fn align_x(mut self, align: Alignment) -> Self {
@@ -281,8 +300,8 @@ impl<M> TextInput<M> {
         self.widget.width = Some(w.to_proto());
         self
     }
-    pub fn padding(mut self, p: f32) -> Self {
-        self.widget.padding = Some(proto::Padding { top: p, right: p, bottom: p, left: p });
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
         self
     }
     pub fn size(mut self, size: f32) -> Self {
@@ -328,8 +347,20 @@ impl<M> Container<M> {
         self.widget.height = Some(h.to_proto());
         self
     }
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
+        self
+    }
     pub fn background(mut self, color: Color) -> Self {
         self.widget.background = Some(color.to_proto());
+        self
+    }
+    pub fn align_x(mut self, align: Alignment) -> Self {
+        self.widget.align_x = align as i32;
+        self
+    }
+    pub fn align_y(mut self, align: Alignment) -> Self {
+        self.widget.align_y = align as i32;
         self
     }
 }

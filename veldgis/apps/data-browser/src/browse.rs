@@ -1,4 +1,4 @@
-use veld_ui::{column, row, text, button, scrollable, Element};
+use veld_ui::{column, row, text, button, scrollable, container, Element, Padding};
 use crate::{AppMessage as Message, common::BrowserItem};
 
 pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has_next: bool, downloading_key: Option<&str>) -> Element<Message> {
@@ -27,23 +27,34 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
 
         // Status / Refresh Action
         let status_element: Element<Message> = if is_downloading {
-            text(" ⏳").color(crate::common::COLOR_TEXT_DIM).into()
+            container(text(" ⏳").color(crate::common::COLOR_TEXT_DIM))
+                .width(veld_ui::Length::Fixed(50.0))
+                .align_x(veld_ui::Alignment::Center)
+                .into()
         } else if item.exists_locally {
-            row![
+            container(row![
                 text(" ✅").color(veld_ui::Color::from_rgb(0.3, 0.8, 0.3)),
                 button(text(" 🔄"))
                     .style("text")
                     .on_press(Message::DownloadFile(item.s3_key.clone()))
-            ].width(veld_ui::Length::Shrink).spacing(5.0).align_items(veld_ui::Alignment::Center).into()
+            ].spacing(5.0).align_items(veld_ui::Alignment::Center))
+            .width(veld_ui::Length::Fixed(50.0))
+            .align_x(veld_ui::Alignment::End)
+            .into()
         } else {
-            column![].width(veld_ui::Length::Shrink).into()
+            // Placeholder space for folders or non-local files to keep width consistent
+            container(veld_ui::Space::with_width(50.0))
+                .width(veld_ui::Length::Fixed(50.0))
+                .into()
         };
 
         row![
             main_btn,
             status_element
         ].width(veld_ui::Length::Fill).spacing(10.0).align_items(veld_ui::Alignment::Center).into()
-    })).spacing(5.0);
+    }))
+    .spacing(5.0)
+    .padding(Padding { right: 15.0, ..Default::default() });
 
     let mut pagination = row![].spacing(10.0);
     if has_prev {
