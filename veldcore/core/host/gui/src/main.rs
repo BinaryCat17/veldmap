@@ -61,6 +61,8 @@ async fn main() -> anyhow::Result<()> {
     let mut window_height = 768.0;
     let mut window_title = "VeldMap".to_string();
     let mut ui_scale = 1.0;
+    let mut vsync = true;
+    let mut fps_limit = 60;
 
     // Read core.json for window settings
     let core_config_path = std::path::Path::new(&config_dir).join("core.json");
@@ -70,6 +72,13 @@ async fn main() -> anyhow::Result<()> {
             if let Some(h) = v["window"]["height"].as_f64() { window_height = h; }
             if let Some(t) = v["window"]["title"].as_str() { window_title = t.to_string(); }
             if let Some(s) = v["window"]["ui_scale"].as_f64() { ui_scale = s; }
+            
+            if let Some(fps_val) = v["window"]["fps"].as_str() {
+                if fps_val == "vsync" { vsync = true; }
+            } else if let Some(fps_num) = v["window"]["fps"].as_i64() {
+                vsync = false;
+                fps_limit = fps_num as i32;
+            }
         }
     }
 
@@ -84,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
     let is_visible = Arc::new(AtomicBool::new(true));
     let ui_busy = Arc::new(AtomicBool::new(false));
+    let frame_pending = Arc::new(AtomicBool::new(false)); // New pacing flag
 
     let flags = wgpu::InstanceFlags::default() 
         | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER
@@ -115,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
         format: surface_format,
         width: size.width.max(1),
         height: size.height.max(1),
-        present_mode: wgpu::PresentMode::Fifo,
+        present_mode: if vsync { wgpu::PresentMode::Fifo } else { wgpu::PresentMode::Immediate },
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
@@ -203,22 +213,35 @@ async fn main() -> anyhow::Result<()> {
 
     let d_clone = dispatcher.clone();
     let is_visible_clone = is_visible.clone();
+    let frame_pending_clone = frame_pending.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
         tokio::spawn(async move { let _ = node.run().await; });
-        log::info!("Core ready. Heartbeat started...");
+        log::info!("Core ready. Render loop started (VSync: {}, FPS Limit: {})...", vsync, fps_limit);
         
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
         loop {
-            interval.tick().await;
-            
+            // Pacing logic
+            if vsync {
+                // In vsync mode, we try to render as fast as the monitor allows.
+                // We wait a tiny bit if a frame is already being processed to avoid CPU hogging.
+                if frame_pending_clone.load(Ordering::Acquire) {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    continue;
+                }
+            } else {
+                // Fixed FPS mode
+                tokio::time::sleep(std::time::Duration::from_millis(1000 / fps_limit.max(1) as u64)).await;
+            }
+
             // Poll all WASM tasks (Fibers)
             let _ = d_clone.poll_all_tasks().await;
 
             if is_visible_clone.load(Ordering::Relaxed) {
+                frame_pending_clone.store(true, Ordering::Release);
                 if let Err(e) = d_clone.call("data-browser", "render", vec![]).await {
                     log::error!("Render call failed: {}", e);
+                    frame_pending_clone.store(false, Ordering::Release);
                 }
             }
         }
@@ -291,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
                                 q.submit(Some(encoder.finish()));
                             }
                             frame.present();
+                            frame_pending.store(false, Ordering::Release);
 
                             // Update FPS
                             frame_count += 1;
@@ -340,7 +364,12 @@ async fn main() -> anyhow::Result<()> {
                 let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed })) };
                 let d_clone = dispatcher.clone();
                 let busy_clone = ui_busy.clone();
-                tokio::spawn(async move { busy_clone.store(true, Ordering::SeqCst); let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });
+                tokio::spawn(async move { 
+                    busy_clone.store(true, Ordering::SeqCst); 
+                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
+                    let _ = d_clone.call("data-browser", "render", vec![]).await;
+                    busy_clone.store(false, Ordering::SeqCst); 
+                });
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
@@ -349,7 +378,11 @@ async fn main() -> anyhow::Result<()> {
                     let d_clone = dispatcher.clone();
                     let busy_clone = ui_busy.clone();
                     busy_clone.store(true, Ordering::SeqCst);
-                    tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });
+                    tokio::spawn(async move { 
+                        let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
+                        let _ = d_clone.call("data-browser", "render", vec![]).await;
+                        busy_clone.store(false, Ordering::SeqCst); 
+                    });
                     last_cursor_sent_time = std::time::Instant::now();
                 }
             }
@@ -361,7 +394,12 @@ async fn main() -> anyhow::Result<()> {
                 let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: dx, delta_y: dy })) };
                 let d_clone = dispatcher.clone();
                 let busy_clone = ui_busy.clone();
-                tokio::spawn(async move { busy_clone.store(true, Ordering::SeqCst); let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; busy_clone.store(false, Ordering::SeqCst); });
+                tokio::spawn(async move { 
+                    busy_clone.store(true, Ordering::SeqCst); 
+                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
+                    let _ = d_clone.call("data-browser", "render", vec![]).await;
+                    busy_clone.store(false, Ordering::SeqCst); 
+                });
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             _ => (),
