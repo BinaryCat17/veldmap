@@ -312,7 +312,10 @@ impl ResourceManager {
         }
         buffer.unmap();
         
-        self.device.poll(wgpu::Maintain::Wait);
+        {
+            let _q = self.queue.lock().unwrap();
+            self.device.poll(wgpu::Maintain::Wait);
+        }
 
         self.resources.insert(id, ResourceEntry { 
             resource: Resource::Buffer(Arc::new(buffer)),
@@ -495,7 +498,8 @@ impl ResourceManager {
                 vec[offset as usize..end].copy_from_slice(data);
             },
             Resource::Buffer(ref buffer) => {
-                self.queue.lock().unwrap().write_buffer(buffer, offset, data);
+                let mut q = self.queue.lock().unwrap();
+                q.write_buffer(buffer, offset, data);
                 self.device.poll(wgpu::Maintain::Poll);
             },
             Resource::Texture { ref texture, width, height, format } => {
@@ -506,7 +510,8 @@ impl ResourceManager {
                     _ => 4,
                 };
 
-                self.queue.lock().unwrap().write_texture(
+                let mut q = self.queue.lock().unwrap();
+                q.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
                         mip_level: 0,
@@ -541,15 +546,21 @@ impl ResourceManager {
             },
             Resource::Buffer(buffer) => {
                 let buffer = buffer.clone();
-                self.queue.lock().unwrap().submit([]);
-                self.device.poll(wgpu::Maintain::Wait);
+                {
+                    let mut q = self.queue.lock().unwrap();
+                    q.submit([]);
+                    self.device.poll(wgpu::Maintain::Wait);
+                }
 
                 let aligned_map_size = Self::align_to(size, 4);
                 if buffer.usage().contains(wgpu::BufferUsages::MAP_READ) && offset + aligned_map_size <= buffer.size() {
                     let slice = buffer.slice(offset..(offset + aligned_map_size));
                     let (tx, rx) = std::sync::mpsc::channel();
                     slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
-                    self.device.poll(wgpu::Maintain::Wait);
+                    {
+                        let _q = self.queue.lock().unwrap();
+                        self.device.poll(wgpu::Maintain::Wait);
+                    }
                     rx.recv()??;
                     let data = slice.get_mapped_range()[..size as usize].to_vec();
                     buffer.unmap();
@@ -563,12 +574,18 @@ impl ResourceManager {
                     });
                     let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                     encoder.copy_buffer_to_buffer(&buffer, offset, &staging, 0, size);
-                    self.queue.lock().unwrap().submit(Some(encoder.finish()));
-                    self.device.poll(wgpu::Maintain::Wait);
+                    {
+                        let mut q = self.queue.lock().unwrap();
+                        q.submit(Some(encoder.finish()));
+                        self.device.poll(wgpu::Maintain::Wait);
+                    }
                     let slice = staging.slice(..aligned_map_size);
                     let (tx, rx) = std::sync::mpsc::channel();
                     slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
-                    self.device.poll(wgpu::Maintain::Wait);
+                    {
+                        let _q = self.queue.lock().unwrap();
+                        self.device.poll(wgpu::Maintain::Wait);
+                    }
                     rx.recv()??;
                     let data = slice.get_mapped_range()[..size as usize].to_vec();
                     staging.unmap();

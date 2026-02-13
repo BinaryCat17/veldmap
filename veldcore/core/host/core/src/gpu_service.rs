@@ -121,8 +121,11 @@ impl GpuService {
             }
         }
 
-        queue.lock().unwrap().submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        {
+            let mut q = queue.lock().unwrap();
+            q.submit(Some(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
+        }
         Ok(())
     }
 }

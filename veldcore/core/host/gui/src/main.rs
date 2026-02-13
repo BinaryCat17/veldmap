@@ -282,7 +282,10 @@ async fn main() -> anyhow::Result<()> {
                                     rp.draw(0..3, 0..1);
                                 }
                             }
-                            queue_arc.lock().unwrap().submit(Some(encoder.finish()));
+                            {
+                                let mut q = queue_arc.lock().unwrap();
+                                q.submit(Some(encoder.finish()));
+                            }
                             frame.present();
                         }
                         Err(wgpu::SurfaceError::Outdated) => {
@@ -297,7 +300,6 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 let scale_factor = window.scale_factor() * ui_scale;
-                log::info!("Window resized to: {}x{} (scale_factor={}, system_scale={})", size.width, size.height, scale_factor, window.scale_factor());
                 if size.width > 0 && size.height > 0 {
                     is_visible.store(true, Ordering::SeqCst);
                     config.width = size.width; config.height = size.height;

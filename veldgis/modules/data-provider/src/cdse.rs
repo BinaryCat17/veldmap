@@ -212,7 +212,6 @@ fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
         buf.clear();
     }
     
-    info!("S3 found {} items", items.len());
     ListPathResponse { items, next_token, error: String::new() }
 }
 
