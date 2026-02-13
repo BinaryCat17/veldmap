@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         | wgpu::InstanceFlags::VALIDATION;
 
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
+        backends: wgpu::Backends::GL,
         flags,
         ..Default::default()
     });

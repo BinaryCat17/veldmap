@@ -63,15 +63,28 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                 }
                 app_proto::ui_event::Event::Scroll(s) => {
                     let mut vel = plugin.scroll_velocity.borrow_mut();
+
+                    // If direction changed, reset velocity for instant response
+                    if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
+                        vel.y = 0.0;
+                    }
+                    if (s.delta_x > 0.0 && vel.x < 0.0) || (s.delta_x < 0.0 && vel.x > 0.0) {
+                        vel.x = 0.0;
+                    }
+
                     vel.x += s.delta_x;
                     vel.y += s.delta_y;
+                    
+                    // Clamp velocity to a tighter range
+                    vel.x = vel.x.clamp(-1500.0, 1500.0);
+                    vel.y = vel.y.clamp(-1500.0, 1500.0);
+
                     *plugin.needs_redrawing.borrow_mut() = true;
                 }
                 app_proto::ui_event::Event::Frame(f) => {
                     // 1. Применяем инерцию
                     let mut vel = plugin.scroll_velocity.borrow_mut();
-                    if vel.x.abs() > 0.01 || vel.y.abs() > 0.01 {
-                        // Вычисляем сколько прокрутить в ЭТОМ кадре.
+                    if vel.x.abs() > 0.1 || vel.y.abs() > 0.1 {
                         let scroll_amount_x = vel.x * f.dt * 15.0;
                         let scroll_amount_y = vel.y * f.dt * 15.0;
 
@@ -79,8 +92,7 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                             delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
                         }));
                         
-                        // Затухание скорости
-                        let friction = 0.85f32;
+                        let friction = 0.90f32; 
                         let factor = friction.powf(f.dt * 60.0);
                         vel.x *= factor;
                         vel.y *= factor;
@@ -90,7 +102,7 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                         vel.y = 0.0;
                     }
 
-                    // 2. Вызываем рендер
+                    // 2. ВЫЗЫВАЕМ РЕНДЕР ТОЛЬКО ЗДЕСЬ
                     messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id)?;
                 }
                 _ => {}

@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     // Настраиваем логи: по умолчанию только предупреждения, для нашего проекта - INFO
     // Отключаем шумные iroh, wasmtime, sctk и wgpu_core (до уровня error/warn)
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error");
+        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error,egl=error,gles=error");
     }
     env_logger::Builder::from_default_env()
         .format(|buf, record| {
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
         | wgpu::InstanceFlags::VALIDATION;
     
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
+        backends: wgpu::Backends::GL,
         flags,
         ..Default::default()
     });
@@ -401,10 +401,20 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 let (dx, dy) = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0),
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32),
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32 / 120.0, pos.y as f32 / 120.0),
                 };
-                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: dx, delta_y: dy })) };
+                
+                // Пересчитываем в пиксели для плагина
+                let pdx = dx * 120.0;
+                let pdy = dy * 120.0;
+                
+                let ev = veldmap_host_core::app::UiEvent { 
+                    event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { 
+                        delta_x: pdx, delta_y: pdy 
+                    })) 
+                };
+                
                 let d_clone = dispatcher.clone();
                 tokio::spawn(async move { 
                     let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 

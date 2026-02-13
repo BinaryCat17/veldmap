@@ -19,6 +19,13 @@ def main():
     # 1. Запускаем Native Host из воркспейса veldcore
     print(f"-> Launching VeldMap Host ({profile_name})...")
     
+    env = os.environ.copy()
+    env["WGPU_BACKEND"] = "gl"
+    env["GALLIUM_DRIVER"] = "d3d12"
+    env["EGL_LOG_LEVEL"] = "fatal"
+    env["MESA_DEBUG"] = "silent"
+    env["LIBGL_DEBUG"] = "quiet"
+    
     cmd = [
         "cargo", "run", 
         "--manifest-path", "veldcore/Cargo.toml", 
@@ -28,7 +35,7 @@ def main():
     ]
     
     try:
-        subprocess.run(cmd)
+        subprocess.run(cmd, env=env)
     except KeyboardInterrupt:
         print("\nShutting down.")
 

@@ -1,0 +1,16 @@
+[build]
+rustflags = ["-Zthreads=16"]
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Zthreads=16"]
+
+[profile.release]
+opt-level = 3
+lto = false         # Отключаем для скорости линковки
+codegen-units = 256 # Максимальный параллелизм для LLVM
+panic = "abort"
+debug = false
+
+[profile.release.package.veldmap-host-gui]
+opt-level = 2 # Собираем Хост чуть быстрее

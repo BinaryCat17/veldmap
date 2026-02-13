@@ -1,0 +1,4 @@
+[toolchain]
+channel = "nightly"
+components = ["rustc-codegen-cranelift-preview", "rust-src"]
+targets = ["wasm32-wasip1", "x86_64-unknown-linux-gnu"]
