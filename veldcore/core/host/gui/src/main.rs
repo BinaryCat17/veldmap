@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let mut window_width = 1024.0;
     let mut window_height = 768.0;
     let mut window_title = "VeldMap".to_string();
+    let mut ui_scale = 1.0;
 
     // Read core.json for window settings
     let core_config_path = std::path::Path::new(&config_dir).join("core.json");
@@ -68,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(w) = v["window"]["width"].as_f64() { window_width = w; }
             if let Some(h) = v["window"]["height"].as_f64() { window_height = h; }
             if let Some(t) = v["window"]["title"].as_str() { window_title = t.to_string(); }
+            if let Some(s) = v["window"]["ui_scale"].as_f64() { ui_scale = s; }
         }
     }
 
@@ -294,14 +296,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
-                let scale_factor = window.scale_factor();
-                log::info!("Window resized to: {}x{} (scale_factor={})", size.width, size.height, scale_factor);
+                let scale_factor = window.scale_factor() * ui_scale;
+                log::info!("Window resized to: {}x{} (scale_factor={}, system_scale={})", size.width, size.height, scale_factor, window.scale_factor());
                 if size.width > 0 && size.height > 0 {
                     is_visible.store(true, Ordering::SeqCst);
                     config.width = size.width; config.height = size.height;
                     surface.configure(&device_arc, &config);
                     window.request_redraw();
-                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { width: size.width, height: size.height, scale_factor: window.scale_factor() as f32 })) };
+                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { width: size.width, height: size.height, scale_factor: scale_factor as f32 })) };
                     let d_clone = dispatcher.clone();
                     tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 } else {
