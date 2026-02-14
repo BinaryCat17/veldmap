@@ -11,6 +11,8 @@ class RustDocParser(HTMLParser):
         self.current_tag = None
         self.content = []
         self.skip_tags = {'script', 'style', 'nav', 'details'}
+        self.in_rust_code = False
+        self.code_buffer = []
 
     def handle_starttag(self, tag, attrs):
         attrs_dict = dict(attrs)
@@ -20,34 +22,37 @@ class RustDocParser(HTMLParser):
         if tag == 'main' or attrs_dict.get('id') == 'main-content' or 'main-content' in attrs_dict.get('class', ''):
             self.in_main = True
             
-        if self.in_main and tag == 'pre' and 'rust' in attrs_dict.get('class', ''):
-            self.content.append('\n```rust\n')
-            
-        if self.in_main and tag in ['h3', 'h4']:
-            id_val = attrs_dict.get('id', '')
-            if id_val.startswith('variant.') or id_val.startswith('method.') or id_val.startswith('associatedtype.') or id_val.startswith('associatedconstant.'):
-                self.content.append('\n#### ')
+        class_val = attrs_dict.get('class', '')
+        if self.in_main:
+            if tag == 'pre' and 'rust' in class_val:
+                self.content.append('\n```rust\n')
+                self.in_rust_code = True
+            elif tag in ['h3', 'h4'] and 'code-header' in class_val:
+                self.content.append('\n```rust\n')
+                self.in_rust_code = True
 
     def handle_endtag(self, tag):
         if tag in self.skip_tags: self.in_skip = False
-        if tag == 'pre' and self.content and self.content[-1].startswith('\n```rust'):
-            self.content.append('```\n')
+        if self.in_rust_code:
+            if tag == 'pre' or tag in ['h3', 'h4']:
+                self.content.append('```\n')
+                self.in_rust_code = False
         if tag == 'main': self.in_main = False
 
     def handle_data(self, data):
         if self.in_main and not self.in_skip:
-            # Очистка мусора
-            clean_data = data.strip()
-            if not clean_data or clean_data == '§' or clean_data == 'Source' or clean_data == 'Skip to main content':
+            if data.strip() == '§' or data.strip() == 'Source' or data.strip() == 'Skip to main content':
                 return
-                
-            if self.current_tag in ['h1', 'h2', 'h3', 'h4']:
-                if self.content and self.content[-1].endswith('#### '):
-                    self.content.append(clean_data + '\n')
-                else:
-                    self.content.append(f'\n### {clean_data}\n')
-            else:
+            
+            if self.in_rust_code:
+                # Внутри кода сохраняем всё, включая параметры
                 self.content.append(data)
+            elif self.current_tag in ['h1', 'h2', 'h3', 'h4']:
+                self.content.append(f'\n### {data.strip()}\n')
+            else:
+                clean = data.strip()
+                if clean:
+                    self.content.append(clean + ' ')
 
 def parse_file(file_path):
     if not os.path.exists(file_path):
@@ -57,24 +62,23 @@ def parse_file(file_path):
         html = f.read()
     parser = RustDocParser()
     parser.feed(html)
+    
     text = "".join(parser.content)
-    text = re.sub(r' +', ' ', text)
+    # Чистим пустые блоки кода
+    text = re.sub(r'```rust\s*```', '', text)
     text = re.sub(r'\n\s*\n', '\n\n', text)
     
     lines = text.split('\n')
-    filtered_lines = []
-    skip_block = False
+    filtered = []
+    skip = False
     for line in lines:
         if 'Blanket Implementations' in line or 'Auto Trait Implementations' in line:
-            skip_block = True
-        if skip_block and line.startswith('### ') and 'Implementations' not in line:
-            skip_block = False
-        if not skip_block: filtered_lines.append(line)
+            skip = True
+        if skip and line.startswith('### ') and 'Implementations' not in line:
+            skip = False
+        if not skip: filtered.append(line)
     
-    # Убираем странные склейки в начале
-    result = '\n'.join(filtered_lines).strip()
-    result = re.sub(r'^.*?(?=(###|```rust))', '', result, flags=re.DOTALL)
-    print(result)
+    print('\n'.join(filtered).strip())
 
 def print_tree(startpath, prefix=''):
     if not os.path.isdir(startpath):
@@ -112,10 +116,7 @@ def find_symbol(root_path, symbol):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage:")
-        print("  python doc.py <path_to_html>")
-        print("  python doc.py --tree <dir>")
-        print("  python doc.py --find <dir> <symbol>")
+        print("Usage: python doc.py <path> | --tree <dir> | --find <dir> <symbol>")
     elif sys.argv[1] == '--tree':
         print_tree(sys.argv[2] if len(sys.argv) > 2 else '.')
     elif sys.argv[1] == '--find':
