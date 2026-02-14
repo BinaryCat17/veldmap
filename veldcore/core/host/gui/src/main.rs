@@ -22,7 +22,7 @@ mod app_service;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error,egl=error,gles=error");
+        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=info,wgpu_hal=info,sctk=error,egl=info,gles=info");
     }
     env_logger::Builder::from_default_env()
         .format(|buf, record| {
@@ -104,6 +104,9 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default() 
     }).await.ok_or_else(|| anyhow::anyhow!("Compatible GPU adapter not found."))?;
     
+    let info = adapter.get_info();
+    log::info!("Selected GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(std::sync::Mutex::new(queue));
