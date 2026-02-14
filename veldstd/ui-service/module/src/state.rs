@@ -1,5 +1,5 @@
 use veld_ui::proto;
-use veldsdk::rpc::core as core_proto;
+use veldsdk::OwnedResource;
 use std::collections::HashMap;
 use std::cell::RefCell;
 use iced_core::{Point, Event};
@@ -15,9 +15,9 @@ pub struct PluginUiState {
     pub cursor_position: RefCell<Point>,
     pub scroll_velocity: RefCell<Point>,
     pub pending_events: RefCell<Vec<Event>>,
-    pub ui_texture: RefCell<Option<core_proto::ResourceHandle>>,
-    pub vertex_buffer: RefCell<Option<core_proto::ResourceHandle>>,
-    pub uniform_buffer: RefCell<Option<core_proto::ResourceHandle>>,
+    pub ui_texture: RefCell<Option<OwnedResource>>,
+    pub vertex_buffer: RefCell<Option<OwnedResource>>,
+    pub uniform_buffer: RefCell<Option<OwnedResource>>,
     pub uniform_buffer_id: RefCell<Option<u64>>,
     pub ui_pipeline: RefCell<Option<u64>>,
 }

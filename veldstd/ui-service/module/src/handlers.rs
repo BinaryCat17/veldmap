@@ -10,6 +10,7 @@ use veldsdk::rpc::wgpu::*;
 use veldsdk::rpc::host::{call_service, gpu_write_resource};
 use prost::Message;
 use veldsdk::wgpu::wgpu_proxy::WgpuRecorder;
+use veldsdk::OwnedResource;
 
 pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::Result<SetViewResponse> {
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
@@ -69,9 +70,6 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                         vel.y = 0.0;
                     }
 
-                    // Балансировка через x^0.4. 
-                    // notch (1.0) -> 24 pixels (was 120). 
-                    // precision (0.075) -> ~8 pixels (was 42).
                     let dy = s.delta_y.signum() * (s.delta_y.abs().powf(0.4) * 24.0);
                     let dx = s.delta_x.signum() * (s.delta_x.abs().powf(0.4) * 24.0);
 
@@ -86,7 +84,6 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                 app_proto::ui_event::Event::Frame(f) => {
                     let mut vel = plugin.scroll_velocity.borrow_mut();
                     if vel.x.abs() > 0.5 || vel.y.abs() > 0.5 {
-                        // Коэффициент 0.85 дает плавное затухание на несколько кадров
                         let friction = 0.85f32; 
                         let factor = 1.0 - friction.powf(f.dt * 60.0);
                         
@@ -106,7 +103,6 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                         vel.y = 0.0;
                     }
 
-                    // ВЫЗЫВАЕМ РЕНДЕР ТОЛЬКО ЗДЕСЬ
                     messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id)?;
                 }
                 _ => {}
@@ -141,8 +137,6 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let element = converter::convert_layout(&plugin.layout);
     
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
-    
-    // Используем ScopeGuard для проброса FontSystem и SwashCache в thread_local для Paragraph::with_text
     let _guard = crate::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
 
     let mut ui = UserInterface::build(
@@ -158,10 +152,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let should_draw = *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated);
     
     if should_draw {
-        // Вызываем draw для наполнения рендерера командами
         ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-        
-        // Теперь исполняем накопленные команды
         execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id)?;
         *needs_redrawing = false;
     }
@@ -187,14 +178,12 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
     let logical_w = width as f32 / sf;
     let logical_h = height as f32 / sf;
 
-    // Обновляем юниформы
     if let Some(u_id) = *plugin.uniform_buffer_id.borrow() {
         let res_data: [f32; 2] = [logical_w, logical_h];
         let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
         let _ = gpu_write_resource(u_id, 0, data);
     }
 
-    // Обновляем атлас если нужно
     if renderer.is_atlas_dirty() {
         if let Some(tid) = renderer.atlas_texture_id {
             let (_, _, data) = renderer.atlas_data();
@@ -211,13 +200,14 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
                     size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false, readonly: false
                 }))
             };
-            *vertex_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
+            let res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?;
+            *vertex_buffer = res.handle.map(OwnedResource::new);
         }
 
         if let (Some(pipeline), Some(v_h), Some(u_h)) = (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*plugin.uniform_buffer.borrow()) {
             let vertex_size = std::mem::size_of::<crate::renderer::Vertex>();
             let data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
-            let _ = gpu_write_resource(v_h.id, 0, data);
+            let _ = gpu_write_resource(v_h.id(), 0, data);
 
             recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
 
@@ -226,8 +216,8 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
                 match cmd {
                     DrawCmd::Quads { count } => {
                         recorder.set_pipeline(pipeline);
-                        recorder.set_vertex_buffer(0, v_h.id, (current_vertex_offset as usize * vertex_size) as u64, (*count as usize * vertex_size) as u64);
-                        recorder.set_bind_group(1, u_h.id);
+                        recorder.set_vertex_buffer(0, v_h.id(), (current_vertex_offset as usize * vertex_size) as u64, (*count as usize * vertex_size) as u64);
+                        recorder.set_bind_group(1, u_h.id());
                         if let Some(atlas_bg) = renderer.atlas_bind_group_id {
                             recorder.set_bind_group(0, atlas_bg);
                         }
@@ -245,25 +235,24 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
 
     let mut ui_texture = plugin.ui_texture.borrow_mut();
     if ui_texture.is_none() {
-        log::info!("Creating UI Texture for plugin '{}': {}x{}", _plugin_id, width, height);
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
-                width, height, format: 0, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
+                width, height, format: TextureFormat::TexRgba8Unorm as i32, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
             }))
         };
-        *ui_texture = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?.handle;
+        let res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?;
+        *ui_texture = res.handle.map(OwnedResource::new);
     }
 
     if let Some(ui_tex) = &*ui_texture {
-        let _ = recorder.submit(ui_tex.id, Some(veldsdk::rpc::wgpu::GpuColor { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }));
-        let _ = veldsdk::app::AppBridge::display_frame(ui_tex.clone(), width, height);
+        let _ = recorder.submit(ui_tex.id(), Some(veldsdk::rpc::wgpu::GpuColor { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }));
+        let _ = veldsdk::app::AppBridge::display_frame(ui_tex.handle(), width, height);
     }
 
     Ok(())
 }
 
 fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> anyhow::Result<()> {
-    // 1. Пайплайн
     let mut ui_pipeline = plugin.ui_pipeline.borrow_mut();
     if ui_pipeline.is_none() {
         let shader_source = include_str!("shaders.wgsl");
@@ -300,7 +289,6 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
         }
     }
 
-    // 2. Юниформы
     let mut uniform_buffer = plugin.uniform_buffer.borrow_mut();
     let mut uniform_buffer_id = plugin.uniform_buffer_id.borrow_mut();
     if uniform_buffer.is_none() {
@@ -327,12 +315,12 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
                         layout_id: bgl.id, entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(bh.id)) }], label: "UI Uniform BG".into()
                     }))
                 };
-                *uniform_buffer = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bg_req.encode_to_vec())?[..])?.handle;
+                let bg_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bg_req.encode_to_vec())?[..])?;
+                *uniform_buffer = bg_res.handle.map(OwnedResource::new);
             }
         }
     }
 
-    // 3. Атлас (общие ресурсы рендерера)
     if renderer.bgl_id.is_none() {
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
@@ -354,7 +342,7 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
         let (w, h, _) = renderer.atlas_data();
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
-                width: w, height: h, format: 0, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
+                width: w, height: h, format: TextureFormat::TexRgba8Unorm as i32, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
             }))
         };
         if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
@@ -366,7 +354,7 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
     
     if renderer.atlas_bind_group_id.is_none() && renderer.atlas_texture_id.is_some() && renderer.bgl_id.is_some() {
         let sampler_req = GpuResourceRequest {
-            command: Some(gpu_resource_request::Command::CreateSampler(CreateSampler { mag_filter: 1, min_filter: 1, ..Default::default() }))
+            command: Some(gpu_resource_request::Command::CreateSampler(CreateSampler { mag_filter: FilterMode::FiltLinear as i32, min_filter: FilterMode::FiltLinear as i32, ..Default::default() }))
         };
         let sampler_id = call_service("wgpu", "create_resource", sampler_req.encode_to_vec()).ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok()).and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
         let req = GpuResourceRequest {

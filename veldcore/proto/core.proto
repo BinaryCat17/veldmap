@@ -44,6 +44,26 @@ message LogRequest {
   string message = 2;
 }
 
+// --- RESOURCE LIFECYCLE ---
+
+message AcquireResourceRequest {
+  uint64 id = 1;
+}
+
+message ReleaseResourceRequest {
+  uint64 id = 1;
+}
+
+message FreezeResourceRequest {
+  uint64 id = 1;
+}
+
+message DestroyResourceRequest {
+  uint64 id = 1;
+}
+
+// --- FILESYSTEM API ---
+
 message FsReadRequest {
   string path = 1;
 }
@@ -79,7 +99,7 @@ message FsDownloadResponse {
   TaskResponse task = 1;
 }
 
-// HTTP API
+// --- HTTP API ---
 
 message HttpTaskRequest {
   string url = 1;
@@ -93,7 +113,7 @@ message HttpTaskResponse {
   bytes body = 2;
 }
 
-// IMAGE API
+// --- IMAGE API ---
 
 message ImageInfoRequest {
   string path = 1;
@@ -117,7 +137,7 @@ message ImageLoadResponse {
   TaskResponse task = 1;
 }
 
-// DYNAMIC RESOURCE DISCOVERY
+// --- DYNAMIC RESOURCE DISCOVERY ---
 
 message GetResourceRequest {
   string name = 1;
@@ -137,7 +157,7 @@ message CreateDataResponse {
   string error = 2;
 }
 
-// ASYNC TASKS
+// --- ASYNC TASKS ---
 
 message TaskResponse {
   string task_id = 1;

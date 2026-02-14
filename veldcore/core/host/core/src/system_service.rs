@@ -424,6 +424,36 @@ impl NativeService for SystemService {
                 }
                 Ok(FsListResponse { entries }.encode_to_vec())
             }
+            "acquire_resource" => {
+                use crate::core::AcquireResourceRequest;
+                let req = AcquireResourceRequest::decode(&payload[..])?;
+                if self.resources.acquire_resource(req.id) {
+                    Ok(Vec::new())
+                } else {
+                    Err(anyhow::anyhow!("Resource {} not found", req.id))
+                }
+            }
+            "release_resource" => {
+                use crate::core::ReleaseResourceRequest;
+                let req = ReleaseResourceRequest::decode(&payload[..])?;
+                self.resources.release_resource(req.id);
+                Ok(Vec::new())
+            }
+            "freeze_resource" => {
+                use crate::core::FreezeResourceRequest;
+                let req = FreezeResourceRequest::decode(&payload[..])?;
+                if self.resources.freeze_resource(req.id) {
+                    Ok(Vec::new())
+                } else {
+                    Err(anyhow::anyhow!("Resource {} not found to freeze", req.id))
+                }
+            }
+            "destroy_resource" => {
+                use crate::core::DestroyResourceRequest;
+                let req = DestroyResourceRequest::decode(&payload[..])?;
+                self.resources.destroy_resource(req.id);
+                Ok(Vec::new())
+            }
             _ => Err(anyhow::anyhow!("Unknown method")),
         }
     }

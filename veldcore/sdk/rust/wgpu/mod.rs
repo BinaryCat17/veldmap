@@ -1,5 +1,6 @@
 pub mod wgpu_proxy;
 pub use crate::rpc::wgpu::*;
+use crate::prost::Message;
 
 crate::rpc_proxy! {
     service: "wgpu",
@@ -29,9 +30,7 @@ pub fn create_buffer(size: u64, usage: u32, readonly: bool) -> anyhow::Result<cr
 }
 
 pub fn freeze_resource(id: u64) -> anyhow::Result<()> {
-    let req = GpuResourceRequest {
-        command: Some(gpu_resource_request::Command::FreezeResource(id))
-    };
-    raw::create_resource(&req)?;
+    let req = crate::rpc::core::FreezeResourceRequest { id };
+    crate::rpc::host::call_service("system", "freeze_resource", req.encode_to_vec())?;
     Ok(())
 }

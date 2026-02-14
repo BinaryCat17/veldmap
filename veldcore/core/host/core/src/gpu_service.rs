@@ -244,12 +244,6 @@ impl NativeService for GpuService {
                         self.resources.write_resource(handle.id, 0, &rgba)?;
                         handle.size = (w * h * 4) as u64;
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::FreezeResource(id)) => {
-                        if !self.resources.freeze_resource(id) {
-                            return Err(anyhow::anyhow!("Resource {} not found to freeze", id));
-                        }
-                        handle.id = id;
-                    }
                     _ => return Err(anyhow::anyhow!("Unsupported resource command")),
                 }
                 Ok(GpuResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())

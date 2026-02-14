@@ -185,9 +185,6 @@ message GpuResourceRequest {
     CreateSampler create_sampler = 3;
     CreateBindGroup create_bind_group = 4;
     CreateRenderPipeline create_pipeline = 5;
-    uint64 destroy_resource = 6;
-    uint64 map_resource = 7;
-    uint64 unmap_resource = 8;
     CreateShaderModule create_shader = 9;
     CreateBindGroupLayout create_bind_group_layout = 10;
     CreateTextureView create_texture_view = 11;
@@ -195,7 +192,6 @@ message GpuResourceRequest {
     FsReadToTexture fs_read_to_texture = 13;
     FsReadToBuffer fs_read_to_buffer = 14;
     ImageLoadToTexture image_load_to_texture = 15;
-    uint64 freeze_resource = 16;
   }
 }
 

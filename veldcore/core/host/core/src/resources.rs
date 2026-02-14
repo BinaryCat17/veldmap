@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicI32, Ordering};
 use crate::wgpu::{TextureFormat, VertexFormat, StepMode, FilterMode};
 
 #[derive(Clone, Debug)]
@@ -21,10 +21,21 @@ pub enum Resource {
     ShaderModule(Arc<wgpu::ShaderModule>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ResourceEntry {
     pub resource: Resource,
     pub readonly: bool,
+    pub ref_count: AtomicI32,
+}
+
+impl Clone for ResourceEntry {
+    fn clone(&self) -> Self {
+        Self {
+            resource: self.resource.clone(),
+            readonly: self.readonly,
+            ref_count: AtomicI32::new(self.ref_count.load(Ordering::SeqCst)),
+        }
+    }
 }
 
 pub struct ResourceManager {
@@ -100,26 +111,53 @@ impl ResourceManager {
         (size + alignment - 1) & !(alignment - 1)
     }
 
+    fn insert_resource(&self, id: u64, resource: Resource, readonly: bool) {
+        self.resources.insert(id, ResourceEntry {
+            resource,
+            readonly,
+            ref_count: AtomicI32::new(1),
+        });
+    }
+
+    pub fn acquire_resource(&self, id: u64) -> bool {
+        if let Some(entry) = self.resources.get(&id) {
+            entry.ref_count.fetch_add(1, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn release_resource(&self, id: u64) {
+        let mut should_remove = false;
+        if let Some(entry) = self.resources.get(&id) {
+            let prev = entry.ref_count.fetch_sub(1, Ordering::SeqCst);
+            if prev <= 1 {
+                should_remove = true;
+            }
+        }
+        if should_remove {
+            log::debug!(target: "host", "Resource {} ref_count dropped to 0, removing.", id);
+            self.resources.remove(&id);
+        }
+    }
+
+    pub fn destroy_resource(&self, id: u64) {
+        self.resources.remove(&id);
+    }
+
     pub fn create_buffer_ext(&self, size: u64, usage: u32, mapped: bool, readonly: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
-        
-        if !readonly || !mapped {
-            final_usage |= wgpu::BufferUsages::COPY_DST;
-        }
-
+        if !readonly || !mapped { final_usage |= wgpu::BufferUsages::COPY_DST; }
         let aligned_size = Self::align_to(size, 4);
-
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("Buffer-{}", id)),
             size: aligned_size,
             usage: final_usage,
             mapped_at_creation: mapped,
         });
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::Buffer(Arc::new(buffer)),
-            readonly 
-        });
+        self.insert_resource(id, Resource::Buffer(Arc::new(buffer)), readonly);
         id
     }
 
@@ -144,25 +182,10 @@ impl ResourceManager {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: {
-                let mut u = wgpu::TextureUsages::from_bits_truncate(usage) 
-                       | wgpu::TextureUsages::TEXTURE_BINDING;
-                if !readonly {
-                    u |= wgpu::TextureUsages::COPY_DST;
-                }
-                u
-            },
+            usage: wgpu::TextureUsages::from_bits_truncate(usage) | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::Texture { 
-                texture: Arc::new(texture),
-                width,
-                height,
-                format: format_proto,
-            },
-            readonly
-        });
+        self.insert_resource(id, Resource::Texture { texture: Arc::new(texture), width, height, format: format_proto }, readonly);
         id
     }
 
@@ -173,10 +196,7 @@ impl ResourceManager {
             _ => return Err(anyhow::anyhow!("Resource is not a texture")),
         };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::TextureView(Arc::new(view)),
-            readonly: entry.readonly
-        });
+        self.insert_resource(id, Resource::TextureView(Arc::new(view)), entry.readonly);
         Ok(id)
     }
 
@@ -195,10 +215,7 @@ impl ResourceManager {
             min_filter: min,
             ..Default::default()
         });
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::Sampler(Arc::new(sampler)),
-            readonly: true 
-        });
+        self.insert_resource(id, Resource::Sampler(Arc::new(sampler)), true);
         id
     }
 
@@ -208,10 +225,7 @@ impl ResourceManager {
             label: Some(&format!("BGL-{}", id)),
             entries,
         });
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::BindGroupLayout(Arc::new(layout)),
-            readonly: true 
-        });
+        self.insert_resource(id, Resource::BindGroupLayout(Arc::new(layout)), true);
         id
     }
 
@@ -288,40 +302,27 @@ impl ResourceManager {
             layout: &layout,
             entries: &entries,
         });
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::BindGroup(Arc::new(bg)),
-            readonly: true 
-        });
+        self.insert_resource(id, Resource::BindGroup(Arc::new(bg)), true);
         Ok(id)
     }
 
     pub fn create_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
-        
-        if !readonly {
-            final_usage |= wgpu::BufferUsages::COPY_DST;
-        }
-
+        if !readonly { final_usage |= wgpu::BufferUsages::COPY_DST; }
         let aligned_size = Self::align_to(data.len() as u64, 4);
-
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&format!("Buffer-data-{}", id)),
             size: aligned_size,
             usage: final_usage,
             mapped_at_creation: true,
         });
-        
         {
             let mut view = buffer.slice(..).get_mapped_range_mut();
             view[..data.len()].copy_from_slice(data);
         }
         buffer.unmap();
-        
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::Buffer(Arc::new(buffer)),
-            readonly 
-        });
+        self.insert_resource(id, Resource::Buffer(Arc::new(buffer)), readonly);
         id
     }
 
@@ -343,17 +344,11 @@ impl ResourceManager {
     }
 
     pub fn register_pipeline(&self, id: u64, pipeline: Arc<wgpu::RenderPipeline>) {
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::RenderPipeline(pipeline),
-            readonly: true 
-        });
+        self.insert_resource(id, Resource::RenderPipeline(pipeline), true);
     }
 
     pub fn register_bind_group(&self, id: u64, bind_group: Arc<wgpu::BindGroup>) {
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::BindGroup(bind_group),
-            readonly: true 
-        });
+        self.insert_resource(id, Resource::BindGroup(bind_group), true);
     }
 
     pub fn create_shader(&self, source: &str, label: Option<&str>) -> u64 {
@@ -362,10 +357,7 @@ impl ResourceManager {
             label,
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::ShaderModule(Arc::new(shader)),
-            readonly: true 
-        });
+        self.insert_resource(id, Resource::ShaderModule(Arc::new(shader)), true);
         id
     }
 
@@ -483,10 +475,7 @@ impl ResourceManager {
             cache: None,
         });
 
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::RenderPipeline(Arc::new(pipeline)),
-            readonly: true 
-        });
+        self.insert_resource(id, Resource::RenderPipeline(Arc::new(pipeline)), true);
         Ok(id)
     }
 
@@ -604,10 +593,7 @@ impl ResourceManager {
 
     pub fn create_data_resource(&self, data: Vec<u8>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::Data(data),
-            readonly: false 
-        });
+        self.insert_resource(id, Resource::Data(data), false);
         id
     }
 
