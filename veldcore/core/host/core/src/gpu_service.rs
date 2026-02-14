@@ -76,56 +76,21 @@ pub fn execute_render_commands<'a>(
     Ok(())
 }
 
+use std::sync::Mutex;
+
 pub struct GpuService {
     resources: Arc<ResourceManager>,
+    render_queue: Arc<Mutex<Vec<crate::wgpu::Submit>>>,
 }
 
 impl GpuService {
-    pub fn new(resources: Arc<ResourceManager>) -> Self {
-        Self { resources }
+    pub fn new(resources: Arc<ResourceManager>, render_queue: Arc<Mutex<Vec<crate::wgpu::Submit>>>) -> Self {
+        Self { resources, render_queue }
     }
 
     fn submit(&self, req: crate::wgpu::Submit) -> anyhow::Result<()> {
-        let view = if req.target_texture_view_id == 0 {
-            return Err(anyhow::anyhow!("Submit to ID 0 (Surface) not supported in headless mode or without explicit context"));
-        } else {
-            match self.resources.get_resource(req.target_texture_view_id) {
-                Some(crate::resources::Resource::TextureView(v)) => v,
-                Some(crate::resources::Resource::Texture { texture, .. }) => Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default())),
-                _ => return Err(anyhow::anyhow!("Target texture view not found")),
-            }
-        };
-
-        let device = self.resources.get_device();
-        let queue = self.resources.get_queue();
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Wasm-Submit-Encoder") });
-        
-        {
-            let clear = req.clear_color.unwrap_or_default();
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Wasm-Submit-RP"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: clear.r as f64, g: clear.g as f64, b: clear.b as f64, a: clear.a as f64 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                ..Default::default()
-            });
-
-            if let Some(cb) = &req.command_buffer {
-                execute_render_commands(&mut rp, cb, &self.resources)?;
-            }
-        }
-
-        {
-            let q = queue.lock().unwrap();
-            q.submit(Some(encoder.finish()));
-            device.poll(wgpu::Maintain::Wait);
-        }
+        let mut queue = self.render_queue.lock().unwrap();
+        queue.push(req);
         Ok(())
     }
 }

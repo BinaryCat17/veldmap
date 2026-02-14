@@ -89,9 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let frame_pending = Arc::new(AtomicBool::new(false));
 
     let flags = wgpu::InstanceFlags::default() 
-        | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER
-        | wgpu::InstanceFlags::DEBUG
-        | wgpu::InstanceFlags::VALIDATION;
+        | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
     
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::GL,
@@ -106,6 +104,10 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default() 
     }).await.ok_or_else(|| anyhow::anyhow!("Compatible GPU adapter not found."))?;
     
+    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
+    let device_arc = Arc::new(device);
+    let queue_arc = Arc::new(std::sync::Mutex::new(queue));
+
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats[0];
     
@@ -132,11 +134,9 @@ async fn main() -> anyhow::Result<()> {
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
-    surface.configure(&adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?.0, &config);
+    
+    surface.configure(&device_arc, &config);
 
-    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
-    let device_arc = Arc::new(device);
-    let queue_arc = Arc::new(std::sync::Mutex::new(queue));
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(device_arc.clone(), queue_arc.clone(), surface_format));
 
     let blit_shader = device_arc.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
@@ -165,6 +165,8 @@ async fn main() -> anyhow::Result<()> {
     let bind_group_layout = resources.get_ui_layout();
     let sampler = resources.get_ui_sampler();
 
+    let render_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::wgpu::Submit>::new()));
+
     let mut app_texture_id: Option<u64> = None;
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut last_size = (100u32, 100u32);
@@ -179,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()))));
-    dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::gpu_service::GpuService::new(resources.clone()))));
+    dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::gpu_service::GpuService::new(resources.clone(), render_queue.clone()))));
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone(), resources.clone()))));
 
     plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir).await?;
@@ -198,6 +200,8 @@ async fn main() -> anyhow::Result<()> {
             let now = std::time::Instant::now();
             let dt = now.duration_since(last_frame_time).as_secs_f32();
             
+            let _ = d_clone.poll_all_tasks().await;
+
             // Если предыдущий кадр еще не отрисован - ждем
             if frame_pending_clone.load(Ordering::Acquire) {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
@@ -212,8 +216,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             last_frame_time = now;
-
-            let _ = d_clone.poll_all_tasks().await;
 
             if is_visible_clone.load(Ordering::Relaxed) {
                 frame_pending_clone.store(true, Ordering::Release);
@@ -264,6 +266,46 @@ async fn main() -> anyhow::Result<()> {
                         Ok(frame) => {
                             let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                             let mut encoder = resources.get_device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                            
+                            // Process deferred render commands from plugins
+                            let deferred_commands: Vec<_> = {
+                                let mut q = render_queue.lock().unwrap();
+                                std::mem::take(&mut *q)
+                            };
+
+                            for req in deferred_commands {
+                                let target_view_arc: Arc<wgpu::TextureView>;
+                                let target_view: &wgpu::TextureView = if req.target_texture_view_id == 0 {
+                                    &view
+                                } else {
+                                    target_view_arc = match resources.get_resource(req.target_texture_view_id) {
+                                        Some(veldmap_host_core::resources::Resource::TextureView(v)) => v,
+                                        Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) => Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default())),
+                                        _ => continue,
+                                    };
+                                    &target_view_arc
+                                };
+
+                                let clear = req.clear_color.unwrap_or_default();
+                                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("Deferred-Wasm-RP"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &target_view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(wgpu::Color { r: clear.r as f64, g: clear.g as f64, b: clear.b as f64, a: clear.a as f64 }),
+                                            store: wgpu::StoreOp::Store,
+                                        },
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    ..Default::default()
+                                });
+
+                                if let Some(cb) = &req.command_buffer {
+                                    let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources);
+                                }
+                            }
+
                             {
                                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
                                     label: None, 

@@ -137,8 +137,8 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
 
     if renderer.is_atlas_dirty() {
         if let Some(tid) = renderer.atlas_texture_id {
-            let (_, _, data) = renderer.atlas_data();
-            let _ = gpu_write_resource(tid, 0, data);
+            let (offset, data) = renderer.atlas_dirty_range();
+            let _ = gpu_write_resource(tid, offset, data);
             renderer.mark_atlas_clean();
         }
     }
@@ -155,25 +155,41 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
             *vertex_buffer = res.handle.map(OwnedResource::new);
         }
 
-        if let (Some(pipeline), Some(ref v_h), Some(ref u_h)) = (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*plugin.uniform_buffer.borrow()) {
+        let mut index_buffer = plugin.index_buffer.borrow_mut();
+        if index_buffer.is_none() {
+            let req = GpuResourceRequest {
+                command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
+                    size: 1024 * 1024 * 2, usage: 16, mapped_at_creation: false, readonly: false
+                }))
+            };
+            let res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?;
+            *index_buffer = res.handle.map(OwnedResource::new);
+        }
+
+        if let (Some(pipeline), Some(ref v_h), Some(ref i_h), Some(ref u_h)) = (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*index_buffer, &*plugin.uniform_buffer.borrow()) {
             let vertex_size = std::mem::size_of::<crate::renderer::Vertex>();
-            let data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
-            let _ = gpu_write_resource(v_h.id(), 0, data);
+            let v_data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
+            let _ = gpu_write_resource(v_h.id(), 0, v_data);
+
+            let i_data = unsafe { std::slice::from_raw_parts(renderer.indices.as_ptr() as *const u8, renderer.indices.len() * 2) };
+            let _ = gpu_write_resource(i_h.id(), 0, i_data);
 
             recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
 
+            let mut current_index_offset = 0;
             let mut current_vertex_offset = 0;
             for cmd in &renderer.draw_commands {
                 match cmd {
                     DrawCmd::Quads { count } => {
                         recorder.set_pipeline(pipeline);
-                        recorder.set_vertex_buffer(0, v_h.id(), (current_vertex_offset as usize * vertex_size) as u64, (*count as usize * vertex_size) as u64);
+                        recorder.set_vertex_buffer(0, v_h.id(), 0, (renderer.vertices.len() * vertex_size) as u64);
+                        recorder.set_index_buffer(i_h.id(), IndexFormat::IdxUint16 as u32, 0, (renderer.indices.len() * 2) as u64);
                         recorder.set_bind_group(1, u_h.id());
                         if let Some(atlas_bg) = renderer.atlas_bind_group_id {
                             recorder.set_bind_group(0, atlas_bg);
                         }
-                        recorder.draw(0..*count, 0..1);
-                        current_vertex_offset += *count;
+                        recorder.draw_indexed(current_index_offset..(*count + current_index_offset), 0, 0..1);
+                        current_index_offset += *count;
                     }
                     DrawCmd::Scissor { x, y, width, height } => {
                         recorder.set_scissor_rect(*x, *y, *width, *height);
@@ -292,7 +308,8 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
     }
 
     if renderer.atlas_texture_id.is_none() {
-        let (w, h, _) = renderer.atlas_data();
+        let w = 2048;
+        let h = 2048;
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
                 width: w, height: h, format: TextureFormat::TexRgba8Unorm as i32, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false

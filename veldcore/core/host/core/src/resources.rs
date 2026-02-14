@@ -497,7 +497,7 @@ impl ResourceManager {
                 self.device.poll(wgpu::Maintain::Poll);
             },
             Resource::Texture { ref texture, width, height, format } => {
-                let real_block_size = match TextureFormat::try_from(format).unwrap_or(TextureFormat::TexRgba8Unorm) {
+                let bytes_per_pixel = match TextureFormat::try_from(format).unwrap_or(TextureFormat::TexRgba8Unorm) {
                     TextureFormat::TexR8Unorm => 1,
                     TextureFormat::TexR32Float => 4,
                     TextureFormat::TexRgba16Float => 8,
@@ -505,21 +505,26 @@ impl ResourceManager {
                     _ => 4,
                 };
 
+                let bytes_per_row = bytes_per_pixel * width;
+                let y_origin = (offset / bytes_per_row as u64) as u32;
+                let rows_to_write = (data.len() as u32 + bytes_per_row - 1) / bytes_per_row;
+                let height_to_write = rows_to_write.min(height - y_origin);
+
                 let q = self.queue.lock().unwrap();
                 q.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
                         mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
+                        origin: wgpu::Origin3d { x: 0, y: y_origin, z: 0 },
                         aspect: wgpu::TextureAspect::All,
                     },
                     data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(real_block_size * width),
-                        rows_per_image: Some(height),
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(height_to_write),
                     },
-                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 }
+                    wgpu::Extent3d { width, height: height_to_write, depth_or_array_layers: 1 }
                 );
                 self.device.poll(wgpu::Maintain::Poll);
             },

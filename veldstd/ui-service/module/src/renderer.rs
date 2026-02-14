@@ -67,6 +67,7 @@ pub enum DrawCmd {
 
 pub struct GpuRenderer {
     pub vertices: Vec<Vertex>,
+    pub indices: Vec<u16>,
     pub draw_commands: Vec<DrawCmd>,
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
@@ -81,7 +82,10 @@ pub struct GpuRenderer {
     current_atlas_y: u32,
     row_height: u32,
     atlas_dirty: bool,
+    atlas_dirty_y_min: u32,
+    atlas_dirty_y_max: u32,
     font_map: HashMap<String, String>,
+    text_cache: HashMap<String, Buffer>,
     pub current_sf: f32,
     scissor_stack: Vec<iced_core::Rectangle>,
     transformation_stack: Vec<Transformation>,
@@ -106,6 +110,7 @@ impl GpuRenderer {
 
         Self {
             vertices: Vec::with_capacity(8192),
+            indices: Vec::with_capacity(12288),
             draw_commands: Vec::new(),
             font_system,
             swash_cache: SwashCache::new(),
@@ -131,7 +136,10 @@ impl GpuRenderer {
             current_atlas_y: 6,
             row_height: 1,
             atlas_dirty: true,
+            atlas_dirty_y_min: 0,
+            atlas_dirty_y_max: 2048,
             font_map,
+            text_cache: HashMap::new(),
             current_sf: 1.0,
             scissor_stack: Vec::new(),
             transformation_stack: vec![Transformation::IDENTITY],
@@ -142,6 +150,7 @@ impl GpuRenderer {
 
     pub fn clear(&mut self) {
         self.vertices.clear();
+        self.indices.clear();
         self.draw_commands.clear();
         self.scissor_stack.clear();
         self.transformation_stack.clear();
@@ -154,16 +163,25 @@ impl GpuRenderer {
         self.current_height = height;
     }
 
-    pub fn atlas_data(&self) -> (u32, u32, &[u8]) {
-        (self.atlas_width, self.atlas_height, &self.atlas_data)
+    pub fn atlas_dirty_range(&self) -> (u64, &[u8]) {
+        let y_min = self.atlas_dirty_y_min;
+        let y_max = self.atlas_dirty_y_max.min(self.atlas_height);
+        if y_min >= y_max { return (0, &[]); }
+
+        let bytes_per_row = (self.atlas_width * 4) as u64;
+        let start = (y_min as u64 * bytes_per_row) as usize;
+        let end = (y_max as u64 * bytes_per_row) as usize;
+        (start as u64, &self.atlas_data[start..end])
     }
 
     pub fn is_atlas_dirty(&self) -> bool {
-        self.atlas_dirty
+        self.atlas_dirty_y_min < self.atlas_dirty_y_max
     }
 
     pub fn mark_atlas_clean(&mut self) {
         self.atlas_dirty = false;
+        self.atlas_dirty_y_min = self.atlas_height;
+        self.atlas_dirty_y_max = 0;
     }
 
     fn transform_rect(&self, rect: [f32; 4]) -> [f32; 4] {
@@ -202,12 +220,18 @@ impl GpuRenderer {
             border_color,
         };
 
+        let base = self.vertices.len() as u16;
         self.vertices.push(v(x, y, u1, v1, 0.0, 0.0));
         self.vertices.push(v(x + w, y, u2, v1, rw, 0.0));
         self.vertices.push(v(x + w, y + h, u2, v2, rw, rh));
-        self.vertices.push(v(x, y, u1, v1, 0.0, 0.0));
-        self.vertices.push(v(x + w, y + h, u2, v2, rw, rh));
         self.vertices.push(v(x, y + h, u1, v2, 0.0, rh));
+
+        self.indices.push(base);
+        self.indices.push(base + 1);
+        self.indices.push(base + 2);
+        self.indices.push(base);
+        self.indices.push(base + 2);
+        self.indices.push(base + 3);
 
         match self.draw_commands.last_mut() {
             Some(DrawCmd::Quads { count }) => *count += 6,
@@ -257,6 +281,7 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
     }
     fn clear(&mut self) {
         self.vertices.clear();
+        self.indices.clear();
         self.draw_commands.clear();
         self.transformation_stack.clear();
         self.transformation_stack.push(Transformation::IDENTITY);
@@ -535,6 +560,7 @@ impl iced_core::text::Renderer for GpuRenderer {
             };
 
             let adjusted_pos = Point::new(pos.x - p.min_x, pos.y - y_offset);
+            self.prepare_glyphs(buffer);
             self.draw_buffer(buffer, adjusted_pos, color);
         }
     }
@@ -552,15 +578,6 @@ impl iced_core::text::Renderer for GpuRenderer {
             return;
         }
 
-        let mut buffer = Buffer::new(
-            &mut self.font_system,
-            Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0),
-        );
-
-        if text.bounds.width.is_finite() {
-            buffer.set_size(&mut self.font_system, Some(text.bounds.width), None);
-        }
-
         let font_family = match &text.font.family {
             iced_core::font::Family::Name(name) => self
                 .font_map
@@ -569,29 +586,49 @@ impl iced_core::text::Renderer for GpuRenderer {
                 .unwrap_or("JetBrains Mono"),
             _ => "JetBrains Mono",
         };
-        let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
 
-        let shaping_type = match text.shaping {
-            iced_core::text::Shaping::Basic => Shaping::Basic,
-            iced_core::text::Shaping::Advanced => Shaping::Advanced,
-        };
+        let cache_key = format!(
+            "{}_{}_{:?}_{:?}_{}",
+            text.content, text.size.0, font_family, text.shaping, text.bounds.width
+        );
 
-        buffer.set_text(&mut self.font_system, &text.content, attrs, shaping_type);
-        buffer.shape_until_scroll(&mut self.font_system, false);
+        if !self.text_cache.contains_key(&cache_key) {
+            if self.text_cache.len() > 1000 {
+                self.text_cache.clear();
+            }
+
+            let mut buffer = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0),
+            );
+
+            if text.bounds.width.is_finite() {
+                buffer.set_size(&mut self.font_system, Some(text.bounds.width), None);
+            }
+
+            let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
+
+            let shaping_type = match text.shaping {
+                iced_core::text::Shaping::Basic => Shaping::Basic,
+                iced_core::text::Shaping::Advanced => Shaping::Advanced,
+            };
+
+            buffer.set_text(&mut self.font_system, &text.content, attrs, shaping_type);
+            buffer.shape_until_scroll(&mut self.font_system, false);
+            self.text_cache.insert(cache_key.clone(), buffer);
+        }
+
+        let mut buffer = self.text_cache.remove(&cache_key).unwrap();
 
         let mut min_x = f32::INFINITY;
-        let mut max_x = f32::NEG_INFINITY;
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let physical = glyph.physical((0.0, 0.0), 1.0);
                 if let Some(image) = self.swash_cache.get_image(&mut self.font_system, physical.cache_key) {
                     let left = glyph.x + image.placement.left as f32;
-                    let right = left + image.placement.width as f32;
                     min_x = min_x.min(left);
-                    max_x = max_x.max(right);
                 } else {
                     min_x = min_x.min(glyph.x);
-                    max_x = max_x.max(glyph.x + glyph.w);
                 }
             }
         }
@@ -608,15 +645,16 @@ impl iced_core::text::Renderer for GpuRenderer {
 
         let adjusted_pos = Point::new(pos.x - min_x, pos.y - y_offset);
 
+        self.prepare_glyphs(&buffer);
         self.draw_buffer(&buffer, adjusted_pos, color);
+        
+        self.text_cache.insert(cache_key, buffer);
     }
 }
 
 impl GpuRenderer {
     fn draw_buffer(&mut self, buffer: &Buffer, pos: Point, color: Color) {
         let text_color = [color.r, color.g, color.b, color.a];
-
-        self.prepare_glyphs(buffer);
 
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
@@ -724,6 +762,8 @@ impl GpuRenderer {
 
                         self.current_atlas_x += width + 2;
                         self.row_height = self.row_height.max(height);
+                        self.atlas_dirty_y_min = self.atlas_dirty_y_min.min(y);
+                        self.atlas_dirty_y_max = self.atlas_dirty_y_max.max(y + height);
                         atlas_modified = true;
                     }
                 }
