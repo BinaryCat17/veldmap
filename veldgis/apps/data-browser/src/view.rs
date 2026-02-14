@@ -69,5 +69,10 @@ pub fn view(state: &LocalState) -> Element<Message> {
         ViewMode::Downloaded => crate::downloaded::view(&state.downloaded_state, &state.local_files),
     };
 
-    column![title_bar, status_view, progress_view, error_view, main_content].spacing(20.0).padding(20.0).height(veld_ui::Length::Fill).into()
+    column![title_bar, status_view, progress_view, error_view, main_content]
+        .spacing(20.0)
+        .padding(20.0)
+        .width(veld_ui::Length::Fill)
+        .height(veld_ui::Length::Fill)
+        .into()
 }

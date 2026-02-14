@@ -66,6 +66,35 @@ message Text {
     Alignment horizontal_alignment = 5;
     Alignment vertical_alignment = 6;
     string style = 7;
+    Length width = 8;
+    Length height = 9;
+}
+
+message Border {
+    Color color = 1;
+    float width = 2;
+    float radius = 3;
+}
+
+message Shadow {
+    Color color = 1;
+    float offset_x = 2;
+    float offset_y = 3;
+    float blur_radius = 4;
+}
+
+message Appearance {
+    optional Color background = 1;
+    optional Color text_color = 2;
+    optional Border border = 3;
+    optional Shadow shadow = 4;
+}
+
+message ButtonStyle {
+    Appearance active = 1;
+    Appearance hovered = 2;
+    Appearance pressed = 3;
+    Appearance disabled = 4;
 }
 
 message Button {
@@ -76,7 +105,10 @@ message Button {
     Length height = 5;
     optional Alignment align_x = 6;
     optional Alignment align_y = 7;
-    string style = 8;
+    oneof style_variant {
+        string style_class = 8;
+        ButtonStyle style_custom = 10;
+    }
     Padding padding = 9;
 }
 
@@ -110,6 +142,7 @@ message Container {
     Alignment align_x = 5;
     Alignment align_y = 6;
     Color background = 7;
+    string style = 8;
 }
 
 message Padding {

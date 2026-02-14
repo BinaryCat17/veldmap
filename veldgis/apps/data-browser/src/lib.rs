@@ -1,6 +1,7 @@
 mod handlers;
 mod view;
 mod common;
+pub mod styles;
 mod search;
 mod browse;
 mod downloaded;

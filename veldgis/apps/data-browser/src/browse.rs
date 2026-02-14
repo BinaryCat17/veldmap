@@ -19,6 +19,8 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
             text(format!("{}{}", icon, item.name))
                 .horizontal_alignment(veld_ui::Alignment::Start)
         )
+        .style(crate::styles::file_button())
+        .padding(5.0)
         .width(veld_ui::Length::Fill);
         
         if let Some(msg) = main_msg {
@@ -28,31 +30,32 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
         // Status / Refresh Action
         let status_element: Element<Message> = if is_downloading {
             container(text(" ⏳").color(crate::common::COLOR_TEXT_DIM))
-                .width(veld_ui::Length::Fixed(50.0))
+                .width(veld_ui::Length::Fixed(40.0))
                 .align_x(veld_ui::Alignment::Center)
                 .into()
         } else if item.exists_locally {
             container(row![
                 text(" ✅").color(veld_ui::Color::from_rgb(0.3, 0.8, 0.3)),
                 button(text(" 🔄"))
-                    .style("text")
+                    .style(crate::styles::sync_button())
                     .on_press(Message::DownloadFile(item.s3_key.clone()))
-            ].spacing(5.0).align_items(veld_ui::Alignment::Center))
-            .width(veld_ui::Length::Fixed(50.0))
+            ].spacing(2.0).align_items(veld_ui::Alignment::Center))
+            .width(veld_ui::Length::Fixed(40.0))
             .align_x(veld_ui::Alignment::End)
             .into()
         } else {
             // Placeholder space for folders or non-local files to keep width consistent
-            container(veld_ui::Space::with_width(50.0))
-                .width(veld_ui::Length::Fixed(50.0))
+            container(veld_ui::Space::with_width(40.0))
+                .width(veld_ui::Length::Fixed(40.0))
                 .into()
         };
 
         row![
             main_btn,
             status_element
-        ].width(veld_ui::Length::Fill).spacing(10.0).align_items(veld_ui::Alignment::Center).into()
+        ].width(veld_ui::Length::Fill).spacing(5.0).align_items(veld_ui::Alignment::Center).into()
     }))
+    .width(veld_ui::Length::Fill)
     .spacing(5.0)
     .padding(Padding { right: 15.0, ..Default::default() });
 
@@ -69,10 +72,17 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
         text(format!("Browsing /{}", path)).size(20.0),
     ].spacing(10.0).align_items(veld_ui::Alignment::Center);
 
-    column![
-        header,
-        text(status).size(14.0),
-        pagination,
-        scrollable(list).height(veld_ui::Length::Fill)
-    ].spacing(10.0).height(veld_ui::Length::Fill).into()
+    container(
+        column![
+            header,
+            text(status).size(14.0),
+            pagination,
+            scrollable(list)
+                .width(veld_ui::Length::Fill)
+                .height(veld_ui::Length::Fill)
+        ].width(veld_ui::Length::Fill).height(veld_ui::Length::Fill).spacing(10.0)
+    )
+    .width(veld_ui::Length::Fill)
+    .height(veld_ui::Length::Fill)
+    .into()
 }

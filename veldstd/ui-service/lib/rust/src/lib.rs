@@ -53,7 +53,7 @@ impl<M> Column<M> {
     pub fn new() -> Self {
         Self { 
             widget: proto::Column {
-                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
                 ..Default::default()
             }, 
@@ -80,23 +80,20 @@ impl<M> Column<M> {
         self.widget.padding = Some(p.into().to_proto());
         self
     }
-    pub fn max_width(mut self, w: f32) -> Self {
-        if let Some(width) = self.widget.width.as_mut() {
-             // Если ширина уже задана, мы не можем просто переопределить её на max_width в этой упрощенной схеме,
-             // но для протокола добавим поддержку в Widget напрямую если надо. 
-             // В данном случае просто обновим фиксированную ширину.
-             width.value = Some(proto::length::Value::Fixed(w));
-        } else {
-             self.widget.width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
-        }
-        self
-    }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
         self
     }
     pub fn height(mut self, h: Length) -> Self {
         self.widget.height = Some(h.to_proto());
+        self
+    }
+    pub fn max_width(mut self, w: f32) -> Self {
+        if let Some(width) = self.widget.width.as_mut() {
+             width.value = Some(proto::length::Value::Fixed(w));
+        } else {
+             self.widget.width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
+        }
         self
     }
 }
@@ -120,7 +117,7 @@ impl<M> Row<M> {
     pub fn new() -> Self {
         Self { 
             widget: proto::Row {
-                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
                 ..Default::default()
             }, 
@@ -180,6 +177,8 @@ impl<M> Text<M> {
             horizontal_alignment: 0,
             vertical_alignment: 0,
             style: String::new(),
+            width: None,
+            height: None,
         }, _marker: std::marker::PhantomData }
     }
     pub fn size(mut self, size: f32) -> Self {
@@ -192,6 +191,14 @@ impl<M> Text<M> {
     }
     pub fn style(mut self, style: impl Into<String>) -> Self {
         self.widget.style = style.into();
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
         self
     }
     pub fn horizontal_alignment(mut self, align: Alignment) -> Self {
@@ -219,6 +226,99 @@ pub struct Button<M> {
     _marker: std::marker::PhantomData<M>,
 }
 
+// --- Style Definitions ---
+
+#[derive(Clone, Default)]
+pub struct Appearance {
+    pub background: Option<Color>,
+    pub text_color: Option<Color>,
+    pub border: Border,
+    pub shadow: Shadow,
+}
+
+impl Appearance {
+    fn to_proto(self) -> proto::Appearance {
+        proto::Appearance {
+            background: self.background.map(|c| c.to_proto()),
+            text_color: self.text_color.map(|c| c.to_proto()),
+            border: Some(self.border.to_proto()),
+            shadow: Some(self.shadow.to_proto()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Border {
+    pub color: Color,
+    pub width: f32,
+    pub radius: f32,
+}
+
+impl Border {
+    fn to_proto(self) -> proto::Border {
+        proto::Border {
+            color: Some(self.color.to_proto()),
+            width: self.width,
+            radius: self.radius,
+        }
+    }
+    pub fn with_radius(radius: f32) -> Self {
+        Self { radius, ..Default::default() }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Shadow {
+    pub color: Color,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub blur_radius: f32,
+}
+
+impl Shadow {
+    fn to_proto(self) -> proto::Shadow {
+        proto::Shadow {
+            color: Some(self.color.to_proto()),
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            blur_radius: self.blur_radius,
+        }
+    }
+}
+
+pub struct ButtonStyle {
+    pub active: Appearance,
+    pub hovered: Appearance,
+    pub pressed: Appearance,
+    pub disabled: Appearance,
+}
+
+impl Default for ButtonStyle {
+    fn default() -> Self {
+        Self {
+            active: Appearance::default(),
+            hovered: Appearance::default(),
+            pressed: Appearance::default(),
+            disabled: Appearance::default(),
+        }
+    }
+}
+
+pub enum Style {
+    Class(String),
+    Custom(Box<ButtonStyle>),
+}
+
+impl From<&str> for Style {
+    fn from(s: &str) -> Self { Style::Class(s.to_string()) }
+}
+
+impl From<ButtonStyle> for Style {
+    fn from(s: ButtonStyle) -> Self { Style::Custom(Box::new(s)) }
+}
+
+// --- End Style Definitions ---
+
 impl<M> Button<M> {
     pub fn new(content: impl Into<Element<M>>) -> Self {
         Self { widget: proto::Button {
@@ -227,7 +327,7 @@ impl<M> Button<M> {
             disabled: false,
             width: None, height: None,
             align_x: None, align_y: None,
-            style: String::new(),
+            style_variant: Some(proto::button::StyleVariant::StyleClass(String::new())),
             padding: None,
         }, _marker: std::marker::PhantomData }
     }
@@ -243,8 +343,18 @@ impl<M> Button<M> {
         self.widget.height = Some(h.to_proto());
         self
     }
-    pub fn style(mut self, style: impl Into<String>) -> Self {
-        self.widget.style = style.into();
+    pub fn style(mut self, style: impl Into<Style>) -> Self {
+        match style.into() {
+            Style::Class(s) => self.widget.style_variant = Some(proto::button::StyleVariant::StyleClass(s)),
+            Style::Custom(c) => {
+                self.widget.style_variant = Some(proto::button::StyleVariant::StyleCustom(proto::ButtonStyle {
+                    active: Some(c.active.to_proto()),
+                    hovered: Some(c.hovered.to_proto()),
+                    pressed: Some(c.pressed.to_proto()),
+                    disabled: Some(c.disabled.to_proto()),
+                }));
+            }
+        }
         self
     }
     pub fn padding(mut self, p: impl Into<Padding>) -> Self {
@@ -349,6 +459,10 @@ impl<M> Container<M> {
     }
     pub fn padding(mut self, p: impl Into<Padding>) -> Self {
         self.widget.padding = Some(p.into().to_proto());
+        self
+    }
+    pub fn style(mut self, style: impl Into<String>) -> Self {
+        self.widget.style = style.into();
         self
     }
     pub fn background(mut self, color: Color) -> Self {
@@ -506,7 +620,7 @@ pub enum Alignment {
     End = 2,
 }
 
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, Default)]
 pub struct Color {
     pub r: f32, pub g: f32, pub b: f32, pub a: f32,
 }

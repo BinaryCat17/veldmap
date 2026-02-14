@@ -20,6 +20,7 @@ pub fn convert_layout(layout: &proto::Layout) -> Element<'static, UiMessage, The
 fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, GpuRenderer> {
     match &widget.r#type {
         Some(proto::widget::Type::Column(c)) => {
+            // log::info!("Converting Column: {} children, width: {:?}", c.children.len(), c.width);
             let mut col = column(c.children.iter().map(convert_widget))
                 .spacing(c.spacing)
                 .padding(convert_padding(&c.padding));
@@ -30,6 +31,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             col.width(convert_length(&c.width)).height(convert_length(&c.height)).into()
         }
         Some(proto::widget::Type::Row(r)) => {
+             // log::info!("Converting Row: {} children", r.children.len());
             let mut rw = row(r.children.iter().map(convert_widget))
                 .spacing(r.spacing)
                 .padding(convert_padding(&r.padding));
@@ -40,9 +42,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             rw.width(convert_length(&r.width)).height(convert_length(&r.height)).into()
         }
         Some(proto::widget::Type::Text(t)) => {
-            let mut txt = text(t.content.clone())
+            let txt = text(t.content.clone())
                 .size(t.size)
                 .color(convert_color(&t.color))
+                .width(convert_length(&t.width))
+                .height(convert_length(&t.height))
                 .align_x(convert_horizontal_alignment(t.horizontal_alignment()))
                 .align_y(convert_vertical_alignment(t.vertical_alignment()));
             
@@ -59,8 +63,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
 
             let mut btn = button(content)
                 .width(convert_length(&b.width))
-                .height(convert_length(&b.height))
-                .padding(convert_padding(&b.padding));
+                .height(convert_length(&b.height));
             
             if !b.disabled {
                 let tag = b.on_press.clone();
@@ -68,13 +71,45 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             }
 
             // Маппинг стилей
-            match b.style.as_str() {
-                "text" => { btn = btn.style(iced_widget::button::text); }
-                "primary" => { btn = btn.style(iced_widget::button::primary); }
-                "secondary" => { btn = btn.style(iced_widget::button::secondary); }
-                "success" => { btn = btn.style(iced_widget::button::success); }
-                "danger" => { btn = btn.style(iced_widget::button::danger); }
-                _ => {}
+            match &b.style_variant {
+                Some(proto::button::StyleVariant::StyleClass(name)) => {
+                    match name.as_str() {
+                        "text" | "sync_button" => { 
+                            btn = btn.style(iced_widget::button::text); 
+                        }
+                        "primary" => { btn = btn.style(iced_widget::button::primary); }
+                        "secondary" => { btn = btn.style(iced_widget::button::secondary); }
+                        "success" => { btn = btn.style(iced_widget::button::success); }
+                        "danger" => { btn = btn.style(iced_widget::button::danger); }
+                        _ => {
+                            btn = btn.style(iced_widget::button::primary);
+                        }
+                    }
+                }
+                Some(proto::button::StyleVariant::StyleCustom(custom)) => {
+                    // Клонируем данные, чтобы переместить их в замыкание
+                    let active = convert_appearance(&custom.active);
+                    let hovered = convert_appearance(&custom.hovered);
+                    let pressed = convert_appearance(&custom.pressed);
+                    let disabled = convert_appearance(&custom.disabled);
+
+                    btn = btn.style(move |_theme: &Theme, status| {
+                         match status {
+                             iced_widget::button::Status::Active => active,
+                             iced_widget::button::Status::Hovered => hovered,
+                             iced_widget::button::Status::Pressed => pressed,
+                             iced_widget::button::Status::Disabled => disabled,
+                         }
+                    });
+                }
+                None => {
+                    btn = btn.style(iced_widget::button::primary);
+                }
+            }
+            
+            // Если паддинг задан явно, он переопределяет паддинг стиля
+            if b.padding.is_some() {
+                 btn = btn.padding(convert_padding(&b.padding));
             }
 
             btn.into()
@@ -98,13 +133,18 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             input.into()
         }
         Some(proto::widget::Type::Container(c)) => {
-            let mut cont = container(if let Some(child) = &c.child { convert_widget(child) } else { Space::with_width(0.0).into() })
+            let mut cont = container(if let Some(child) = &c.child { convert_widget(child) } else { iced_widget::Space::with_width(0.0).into() })
                 .padding(convert_padding(&c.padding))
                 .width(convert_length(&c.width))
                 .height(convert_length(&c.height));
             
             if let Some(ax) = convert_alignment(c.align_x()) { cont = cont.align_x(ax); }
             if let Some(ay) = convert_alignment(c.align_y()) { cont = cont.align_y(ay); }
+
+            // Стилизация контейнера
+            if !c.style.is_empty() {
+                // Здесь можно добавить маппинг стилей контейнера
+            }
             
             cont.into()
         }
@@ -185,6 +225,43 @@ fn convert_color(c: &Option<proto::Color>) -> Color {
     match c {
         Some(c) => Color::from_rgba(c.r, c.g, c.b, c.a),
         None => Color::BLACK,
+    }
+}
+
+fn convert_appearance(app: &Option<proto::Appearance>) -> iced_widget::button::Style {
+    if let Some(a) = app {
+        iced_widget::button::Style {
+            background: a.background.as_ref().map(|c| iced_core::Background::Color(convert_color(&Some(c.clone())))),
+            text_color: convert_color(&a.text_color),
+            border: convert_border(&a.border),
+            shadow: convert_shadow(&a.shadow),
+        }
+    } else {
+        iced_widget::button::Style::default()
+    }
+}
+
+fn convert_border(b: &Option<proto::Border>) -> iced_core::Border {
+    if let Some(b) = b {
+        iced_core::Border {
+            color: convert_color(&b.color),
+            width: b.width,
+            radius: b.radius.into(),
+        }
+    } else {
+        iced_core::Border::default()
+    }
+}
+
+fn convert_shadow(s: &Option<proto::Shadow>) -> iced_core::Shadow {
+    if let Some(s) = s {
+        iced_core::Shadow {
+            color: convert_color(&s.color),
+            offset: iced_core::Vector::new(s.offset_x, s.offset_y),
+            blur_radius: s.blur_radius,
+        }
+    } else {
+        iced_core::Shadow::default()
     }
 }
 
