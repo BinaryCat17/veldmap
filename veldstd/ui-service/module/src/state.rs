@@ -27,6 +27,7 @@ pub struct PluginUiState {
 pub struct LocalState {
     pub plugins: HashMap<String, PluginUiState>,
     pub renderer: GpuRenderer,
+    pub surface_format: i32,
 }
 
 unsafe impl Send for LocalState {}
@@ -34,11 +35,16 @@ unsafe impl Sync for LocalState {}
 
 impl LocalState {
     pub fn new() -> Self {
+        let sf = veldsdk::rpc::host::get_config("surface_format")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(0);
+
         Self {
             plugins: HashMap::new(),
             renderer: GpuRenderer::new("JetBrains Mono", vec![
                 ("JetBrains Mono", include_bytes!("../../../../veldgis/assets/JetBrainsMono.ttf")),
             ]),
+            surface_format: sf,
         }
     }
 }

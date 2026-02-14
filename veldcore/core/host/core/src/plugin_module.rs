@@ -66,6 +66,7 @@ pub async fn load_services(
                 let mut config_map: HashMap<String, serde_json::Value> = serde_json::from_str(&service_config_str)?;
                 config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
                 config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
+                config_map.insert("surface_format".to_string(), serde_json::Value::Number(resources.get_surface_format_proto().into()));
                 
                 log::trace!("Loading service '{}'", name);
                 

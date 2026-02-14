@@ -84,7 +84,10 @@ pub struct GpuService {
 }
 
 impl GpuService {
-    pub fn new(resources: Arc<ResourceManager>, render_queue: Arc<Mutex<Vec<crate::wgpu::Submit>>>) -> Self {
+    pub fn new(
+        resources: Arc<ResourceManager>, 
+        render_queue: Arc<Mutex<Vec<crate::wgpu::Submit>>>,
+    ) -> Self {
         Self { resources, render_queue }
     }
 

@@ -35,7 +35,7 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                     *plugin.needs_redrawing.borrow_mut() = true;
                 }
                 app_proto::ui_event::Event::Frame(_f) => {
-                    messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id)?;
+                    messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format)?;
                 }
                 _ => {
                     plugin.pending_events.borrow_mut().push(convert_event(ev, *plugin.scale_factor.borrow()));
@@ -61,7 +61,7 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
     }
 }
 
-fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str) -> anyhow::Result<Vec<UiEventResponse>> {
+fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32) -> anyhow::Result<Vec<UiEventResponse>> {
     let (width, height) = *plugin.canvas_size.borrow();
     if width == 0 || height == 0 { return Ok(Vec::new()); }
     
@@ -100,7 +100,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     
     if *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated) {
         ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id)?;
+        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format)?;
         *needs_redrawing = false;
     } else {
         if let Some(tex) = &*plugin.ui_texture.borrow() {
@@ -122,8 +122,8 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     Ok(responses)
 }
 
-fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, width: u32, height: u32, sf: f32, _plugin_id: &str) -> anyhow::Result<()> {
-    ensure_gpu_resources(plugin, renderer)?;
+fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, width: u32, height: u32, sf: f32, _plugin_id: &str, surface_format: i32) -> anyhow::Result<()> {
+    ensure_gpu_resources(plugin, renderer, surface_format)?;
 
     let mut recorder = WgpuRecorder::new(width, height);
     let logical_w = width as f32 / sf;
@@ -200,26 +200,15 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
         }
     }
 
-    let mut ui_texture = plugin.ui_texture.borrow_mut();
-    if ui_texture.is_none() {
-        let req = GpuResourceRequest {
-            command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
-                width, height, format: TextureFormat::TexRgba8Unorm as i32, usage: 16 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
-            }))
-        };
-        let res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", req.encode_to_vec())?[..])?;
-        *ui_texture = res.handle.map(OwnedResource::new);
-    }
-
-    if let Some(ui_tex) = &*ui_texture {
-        let _ = recorder.submit(ui_tex.id(), Some(veldsdk::rpc::wgpu::GpuColor { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }));
-        let _ = veldsdk::app::AppBridge::display_frame(ui_tex.handle(), width, height);
-    }
+    // Direct to surface (ID 0)
+    // We don't clear here, host will clear the surface if needed
+    let _ = recorder.submit(0, None);
+    let _ = veldsdk::app::AppBridge::display_frame(veldsdk::rpc::core::ResourceHandle { id: 0, ..Default::default() }, width, height);
 
     Ok(())
 }
 
-fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> anyhow::Result<()> {
+fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
     let mut ui_pipeline = plugin.ui_pipeline.borrow_mut();
     if ui_pipeline.is_none() {
         let shader_source = include_str!("shaders.wgsl");
@@ -234,7 +223,7 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
                 command: Some(gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
                     shader_id: sh.id, label: "UI Pipeline".into(), 
                     vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
-                    target_format: TextureFormat::TexRgba8Unorm as i32,
+                    target_format: surface_format,
                     vertex_layouts: vec![VertexBufferLayout {
                         array_stride: std::mem::size_of::<crate::renderer::Vertex>() as u64,
                         step_mode: StepMode::StepVertex as i32,

@@ -242,7 +242,11 @@ async fn main() -> anyhow::Result<()> {
                 while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
                 if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
                     if is_visible.load(Ordering::SeqCst) && w > 0 && h > 0 {
-                        if Some(id) != app_texture_id || (w, h) != last_size {
+                        if id == 0 {
+                            // Direct surface rendering
+                            app_texture_id = Some(0);
+                            app_bind_group = None;
+                        } else if Some(id) != app_texture_id || (w, h) != last_size {
                             if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let bind_group = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor { 
@@ -270,7 +274,31 @@ async fn main() -> anyhow::Result<()> {
                             let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                             let mut encoder = resources.get_device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                             
-                            // Process deferred render commands from plugins
+                            // 1. Host-level pass: Clear background and blit legacy UI
+                            {
+                                // We use a default background color. 
+                                // This could be made configurable in core.json later.
+                                let bg_color = wgpu::Color { r: 0.05, g: 0.05, b: 0.07, a: 1.0 };
+                                
+                                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
+                                    label: Some("Host-Background-Pass"), 
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
+                                        view: &view, resolve_target: None, 
+                                        ops: wgpu::Operations { 
+                                            load: wgpu::LoadOp::Clear(bg_color), 
+                                            store: wgpu::StoreOp::Store 
+                                        } 
+                                    })], 
+                                    depth_stencil_attachment: None, ..Default::default() 
+                                });
+                                if let Some(bg) = &app_bind_group {
+                                    rp.set_pipeline(&blit_pipeline);
+                                    rp.set_bind_group(0, bg, &[]);
+                                    rp.draw(0..3, 0..1);
+                                }
+                            }
+
+                            // 2. Process deferred render commands from plugins (Direct Surface Rendering)
                             let deferred_commands: Vec<_> = {
                                 let mut q = render_queue.lock().unwrap();
                                 std::mem::take(&mut *q)
@@ -278,7 +306,8 @@ async fn main() -> anyhow::Result<()> {
 
                             for req in deferred_commands {
                                 let target_view_arc: Arc<wgpu::TextureView>;
-                                let target_view: &wgpu::TextureView = if req.target_texture_view_id == 0 {
+                                let is_surface = req.target_texture_view_id == 0;
+                                let target_view: &wgpu::TextureView = if is_surface {
                                     &view
                                 } else {
                                     target_view_arc = match resources.get_resource(req.target_texture_view_id) {
@@ -289,16 +318,24 @@ async fn main() -> anyhow::Result<()> {
                                     &target_view_arc
                                 };
 
-                                let clear = req.clear_color.unwrap_or_default();
+                                // For surface, we always LOAD because we already cleared it in Step 1.
+                                // For other textures, we respect the plugin's clear request.
+                                let load_op = if let Some(clear) = &req.clear_color {
+                                    if is_surface {
+                                        wgpu::LoadOp::Load // Don't re-clear the screen
+                                    } else {
+                                        wgpu::LoadOp::Clear(wgpu::Color { r: clear.r as f64, g: clear.g as f64, b: clear.b as f64, a: clear.a as f64 })
+                                    }
+                                } else {
+                                    wgpu::LoadOp::Load
+                                };
+
                                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("Deferred-Wasm-RP"),
+                                    label: Some("Deferred-Plugin-Pass"),
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                        view: &target_view,
+                                        view: target_view,
                                         resolve_target: None,
-                                        ops: wgpu::Operations {
-                                            load: wgpu::LoadOp::Clear(wgpu::Color { r: clear.r as f64, g: clear.g as f64, b: clear.b as f64, a: clear.a as f64 }),
-                                            store: wgpu::StoreOp::Store,
-                                        },
+                                        ops: wgpu::Operations { load: load_op, store: wgpu::StoreOp::Store },
                                     })],
                                     depth_stencil_attachment: None,
                                     ..Default::default()
@@ -306,22 +343,6 @@ async fn main() -> anyhow::Result<()> {
 
                                 if let Some(cb) = &req.command_buffer {
                                     let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources);
-                                }
-                            }
-
-                            {
-                                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
-                                    label: None, 
-                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
-                                        view: &view, resolve_target: None, 
-                                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }), store: wgpu::StoreOp::Store } 
-                                    })], 
-                                    depth_stencil_attachment: None, ..Default::default() 
-                                });
-                                if let Some(bg) = &app_bind_group {
-                                    rp.set_pipeline(&blit_pipeline);
-                                    rp.set_bind_group(0, bg, &[]);
-                                    rp.draw(0..3, 0..1);
                                 }
                             }
                             queue_arc.lock().unwrap().submit(Some(encoder.finish()));

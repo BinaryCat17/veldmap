@@ -44,16 +44,30 @@ pub struct ResourceManager {
     pub next_id: AtomicU64,
     device: Arc<wgpu::Device>,
     queue: Arc<std::sync::Mutex<wgpu::Queue>>,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl ResourceManager {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>, _surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>, surface_format: wgpu::TextureFormat) -> Self {
         Self {
             resources: DashMap::new(),
             named_resources: DashMap::new(),
             next_id: AtomicU64::new(1),
             device,
             queue,
+            surface_format,
+        }
+    }
+
+    pub fn get_surface_format_proto(&self) -> i32 {
+        match self.surface_format {
+            wgpu::TextureFormat::R32Float => TextureFormat::TexR32Float as i32,
+            wgpu::TextureFormat::Rgba16Float => TextureFormat::TexRgba16Float as i32,
+            wgpu::TextureFormat::Rgba32Float => TextureFormat::TexRgba32Float as i32,
+            wgpu::TextureFormat::R8Unorm => TextureFormat::TexR8Unorm as i32,
+            wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::TexBgra8UnormSrgb as i32,
+            wgpu::TextureFormat::Rgba8UnormSrgb => 11, // Special case for SRGB
+            _ => TextureFormat::TexRgba8Unorm as i32,
         }
     }
 
@@ -367,12 +381,13 @@ impl ResourceManager {
             _ => return Err(anyhow::anyhow!("Resource is not a shader")),
         };
 
-        let target_format = match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
-            TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
-            TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
-            TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
-            TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
-            TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+        let target_format = match format_proto {
+            1 => wgpu::TextureFormat::R32Float,
+            2 => wgpu::TextureFormat::Rgba16Float,
+            3 => wgpu::TextureFormat::Rgba32Float,
+            9 => wgpu::TextureFormat::R8Unorm,
+            10 => wgpu::TextureFormat::Bgra8UnormSrgb,
+            11 => wgpu::TextureFormat::Rgba8UnormSrgb,
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
 
