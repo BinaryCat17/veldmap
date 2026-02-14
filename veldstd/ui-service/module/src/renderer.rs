@@ -32,6 +32,10 @@ pub struct Vertex {
     pub pos: [f32; 2],
     pub color: [f32; 4],
     pub uv: [f32; 2],
+    pub local_pos: [f32; 2], // Координаты относительно левого верхнего угла самого прямоугольника
+    pub rect_size: [f32; 2],
+    pub radius: f32,
+    pub mode: f32, // 0 - Atlas, 1 - SDF Rectangle
 }
 
 #[derive(Clone, Copy)]
@@ -171,47 +175,36 @@ impl GpuRenderer {
         }
     }
 
-    pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4]) {
-        let rect = self.transform_rect(rect);
-        let x = rect[0];
-        let y = rect[1];
-        let w = rect[2];
-        let h = rect[3];
+    pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32) {
+        let transformed = self.transform_rect(rect);
+        let x = transformed[0];
+        let y = transformed[1];
+        let w = transformed[2];
+        let h = transformed[3];
         let u1 = uv[0];
         let v1 = uv[1];
         let u2 = uv[2];
         let v2 = uv[3];
 
-        self.vertices.push(Vertex {
-            pos: [x, y],
+        let rw = rect[2];
+        let rh = rect[3];
+
+        let v = |px: f32, py: f32, u: f32, v: f32, lx: f32, ly: f32| Vertex {
+            pos: [px, py],
             color,
-            uv: [u1, v1],
-        });
-        self.vertices.push(Vertex {
-            pos: [x + w, y],
-            color,
-            uv: [u2, v1],
-        });
-        self.vertices.push(Vertex {
-            pos: [x + w, y + h],
-            color,
-            uv: [u2, v2],
-        });
-        self.vertices.push(Vertex {
-            pos: [x, y],
-            color,
-            uv: [u1, v1],
-        });
-        self.vertices.push(Vertex {
-            pos: [x + w, y + h],
-            color,
-            uv: [u2, v2],
-        });
-        self.vertices.push(Vertex {
-            pos: [x, y + h],
-            color,
-            uv: [u1, v2],
-        });
+            uv: [u, v],
+            local_pos: [lx, ly],
+            rect_size: [rw, rh],
+            radius,
+            mode,
+        };
+
+        self.vertices.push(v(x, y, u1, v1, 0.0, 0.0));
+        self.vertices.push(v(x + w, y, u2, v1, rw, 0.0));
+        self.vertices.push(v(x + w, y + h, u2, v2, rw, rh));
+        self.vertices.push(v(x, y, u1, v1, 0.0, 0.0));
+        self.vertices.push(v(x + w, y + h, u2, v2, rw, rh));
+        self.vertices.push(v(x, y + h, u1, v2, 0.0, rh));
 
         match self.draw_commands.last_mut() {
             Some(DrawCmd::Quads { count }) => *count += 6,
@@ -236,14 +229,10 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             _ => [1.0, 1.0, 1.0, 1.0],
         };
 
-        log::trace!(
-            "[UI-RENDERER] fill_quad: bounds={:?}, color={:?}",
-            quad.bounds,
-            color
-        );
-
         // Используем UV, указывающий на центр нашей белой области 4x4 в начале атласа.
         let white_uv = [2.0 / 2048.0, 2.0 / 2048.0, 2.0 / 2048.0, 2.0 / 2048.0];
+        
+        let radius = quad.border.radius.top_left; // Для простоты берем один радиус
 
         // Отрисовка основного прямоугольника
         self.add_quad(
@@ -255,6 +244,8 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             ],
             color,
             white_uv,
+            radius,
+            1.0, // SDF Mode
         );
 
         // Отрисовка границ (если есть)
@@ -263,36 +254,20 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             let border_color = [bc.r, bc.g, bc.b, bc.a];
             let bw = quad.border.width;
 
-            self.add_quad(
-                [quad.bounds.x, quad.bounds.y, quad.bounds.width, bw],
-                border_color,
-                white_uv,
-            );
-            self.add_quad(
-                [
-                    quad.bounds.x,
-                    quad.bounds.y + quad.bounds.height - bw,
-                    quad.bounds.width,
-                    bw,
-                ],
-                border_color,
-                white_uv,
-            );
-            self.add_quad(
-                [quad.bounds.x, quad.bounds.y, bw, quad.bounds.height],
-                border_color,
-                white_uv,
-            );
-            self.add_quad(
-                [
-                    quad.bounds.x + quad.bounds.width - bw,
-                    quad.bounds.y,
-                    bw,
-                    quad.bounds.height,
-                ],
-                border_color,
-                white_uv,
-            );
+            // Теперь границы тоже рисуются со скруглением!
+            // Рисуем рамку как еще один SDF прямоугольник, но с нулевым радиусом внутри? 
+            // Пока просто используем тот же метод SDF для каждой из 4 сторон, 
+            // но правильнее было бы сделать один проход.
+            // Для скорости оставим 4 стороны, но включим им SDF и тот же радиус.
+            
+            // Верхняя
+            self.add_quad([quad.bounds.x, quad.bounds.y, quad.bounds.width, bw], border_color, white_uv, radius, 1.0);
+            // Нижняя
+            self.add_quad([quad.bounds.x, quad.bounds.y + quad.bounds.height - bw, quad.bounds.width, bw], border_color, white_uv, radius, 1.0);
+            // Левая
+            self.add_quad([quad.bounds.x, quad.bounds.y, bw, quad.bounds.height], border_color, white_uv, radius, 1.0);
+            // Правая
+            self.add_quad([quad.bounds.x + quad.bounds.width - bw, quad.bounds.y, bw, quad.bounds.height], border_color, white_uv, radius, 1.0);
         }
     }
     fn clear(&mut self) {
@@ -677,6 +652,7 @@ impl GpuRenderer {
                         ],
                         text_color,
                         info.uv,
+                        0.0, 0.0, // Text has no rounding
                     );
                 }
             }

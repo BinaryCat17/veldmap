@@ -215,7 +215,8 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
         }
 
         if let (Some(pipeline), Some(v_h), Some(u_h)) = (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*plugin.uniform_buffer.borrow()) {
-            let data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * 32) };
+            let vertex_size = std::mem::size_of::<crate::renderer::Vertex>();
+            let data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
             let _ = gpu_write_resource(v_h.id, 0, data);
 
             recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
@@ -225,7 +226,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
                 match cmd {
                     DrawCmd::Quads { count } => {
                         recorder.set_pipeline(pipeline);
-                        recorder.set_vertex_buffer(0, v_h.id, (current_vertex_offset * 32) as u64, (*count * 32) as u64);
+                        recorder.set_vertex_buffer(0, v_h.id, (current_vertex_offset as usize * vertex_size) as u64, (*count as usize * vertex_size) as u64);
                         recorder.set_bind_group(1, u_h.id);
                         if let Some(atlas_bg) = renderer.atlas_bind_group_id {
                             recorder.set_bind_group(0, atlas_bg);
@@ -278,6 +279,19 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
                     shader_id: sh.id, label: "UI Pipeline".into(), 
                     vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
                     target_format: 0, // RGBA8
+                    vertex_layouts: vec![VertexBufferLayout {
+                        array_stride: std::mem::size_of::<crate::renderer::Vertex>() as u64,
+                        step_mode: 0, // Vertex
+                        attributes: vec![
+                            VertexAttribute { format: 30, offset: 0, shader_location: 0 },  // Float32x2 (pos)
+                            VertexAttribute { format: 32, offset: 8, shader_location: 1 },  // Float32x4 (color)
+                            VertexAttribute { format: 30, offset: 24, shader_location: 2 }, // Float32x2 (uv)
+                            VertexAttribute { format: 30, offset: 32, shader_location: 3 }, // Float32x2 (rect_pos)
+                            VertexAttribute { format: 30, offset: 40, shader_location: 4 }, // Float32x2 (rect_size)
+                            VertexAttribute { format: 29, offset: 48, shader_location: 5 }, // Float32 (radius)
+                            VertexAttribute { format: 29, offset: 52, shader_location: 6 }, // Float32 (mode)
+                        ],
+                    }],
                     ..Default::default()
                 }))
             };

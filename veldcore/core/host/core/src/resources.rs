@@ -399,7 +399,7 @@ impl ResourceManager {
         id
     }
 
-    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>, format_id: u32) -> anyhow::Result<u64> {
+    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>, format_id: u32, vertex_layouts: Vec<crate::wgpu::VertexBufferLayout>) -> anyhow::Result<u64> {
         let shader = match self.get_resource(shader_id) {
             Some(Resource::ShaderModule(s)) => s,
             _ => return Err(anyhow::anyhow!("Resource is not a shader")),
@@ -439,23 +439,56 @@ impl ResourceManager {
             push_constant_ranges: &[],
         });
 
+        // Convert Proto VertexBufferLayout to wgpu
+        let mut wgpu_vertex_layouts = Vec::new();
+        let mut keep_alive_attributes = Vec::new();
+
+        if vertex_layouts.is_empty() {
+            // Default UI layout
+            wgpu_vertex_layouts.push(wgpu::VertexBufferLayout {
+                array_stride: 32,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
+                    wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32x4 },
+                    wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
+                ],
+            });
+        } else {
+            for vl in &vertex_layouts {
+                let mut attrs = Vec::new();
+                for attr in &vl.attributes {
+                    attrs.push(wgpu::VertexAttribute {
+                        offset: attr.offset,
+                        shader_location: attr.shader_location,
+                        format: match attr.format {
+                            29 => wgpu::VertexFormat::Float32,
+                            30 => wgpu::VertexFormat::Float32x2,
+                            31 => wgpu::VertexFormat::Float32x3,
+                            32 => wgpu::VertexFormat::Float32x4,
+                            _ => wgpu::VertexFormat::Float32x2,
+                        },
+                    });
+                }
+                keep_alive_attributes.push(attrs);
+            }
+            
+            for i in 0..vertex_layouts.len() {
+                wgpu_vertex_layouts.push(wgpu::VertexBufferLayout {
+                    array_stride: vertex_layouts[i].array_stride,
+                    step_mode: if vertex_layouts[i].step_mode == 1 { wgpu::VertexStepMode::Instance } else { wgpu::VertexStepMode::Vertex },
+                    attributes: &keep_alive_attributes[i],
+                });
+            }
+        }
+
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label,
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: 32,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
-                            wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32x4 },
-                            wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
-                        ],
-                    }
-                ],
+                buffers: &wgpu_vertex_layouts,
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
