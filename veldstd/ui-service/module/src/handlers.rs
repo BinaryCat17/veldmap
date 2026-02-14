@@ -42,7 +42,11 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                     messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format)?;
                 }
                 _ => {
-                    plugin.pending_events.borrow_mut().push(convert_event(ev, *plugin.scale_factor.borrow()));
+                    let iced_ev = convert_event(ev, *plugin.scale_factor.borrow());
+                    if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = iced_ev {
+                        *plugin.cursor_position.borrow_mut() = position;
+                    }
+                    plugin.pending_events.borrow_mut().push(iced_ev);
                     *plugin.needs_redrawing.borrow_mut() = true;
                 }
             }
@@ -55,7 +59,6 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
     match ev {
         app_proto::ui_event::Event::CursorMoved(c) => Event::Mouse(iced_core::mouse::Event::CursorMoved { position: Point::new(c.x / sf, c.y / sf) }),
         app_proto::ui_event::Event::Click(c) => {
-            let pos = Point::new(c.x / sf, c.y / sf);
             let button = match c.button { 1 => iced_core::mouse::Button::Left, 2 => iced_core::mouse::Button::Right, 3 => iced_core::mouse::Button::Middle, _ => iced_core::mouse::Button::Left };
             if c.pressed { Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)) }
             else { Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)) }

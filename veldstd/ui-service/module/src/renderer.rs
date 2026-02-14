@@ -622,7 +622,7 @@ impl iced_core::text::Renderer for GpuRenderer {
             self.text_cache.insert(cache_key.clone(), buffer);
         }
 
-        let mut buffer = self.text_cache.remove(&cache_key).unwrap();
+        let buffer = self.text_cache.remove(&cache_key).unwrap();
 
         let mut min_x = f32::INFINITY;
         for run in buffer.layout_runs() {
