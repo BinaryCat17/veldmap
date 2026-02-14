@@ -23,15 +23,14 @@ def main():
     
     env = os.environ.copy()
     
-    if args.vulkan:
+    if args.vulkan or args.backend is None:
         env["WGPU_BACKEND"] = "vulkan"
     elif args.backend:
         env["WGPU_BACKEND"] = args.backend
     
-    # Common Mesa/WSL optimizations
+    # Common optimizations
     env["EGL_LOG_LEVEL"] = "fatal"
     env["MESA_DEBUG"] = "silent"
-    env["LIBGL_DEBUG"] = "quiet"
     
     cmd = [
         "cargo", "run", 
