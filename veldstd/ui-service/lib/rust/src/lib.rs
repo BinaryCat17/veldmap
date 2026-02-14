@@ -596,6 +596,97 @@ pub fn space<M>(width: Length, height: Length) -> Space<M> {
     Space::new(width, height)
 }
 
+pub struct Stack<M> {
+    widget: proto::Stack,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Stack<M> {
+    pub fn new() -> Self {
+        Self {
+            widget: proto::Stack {
+                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                ..Default::default()
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
+        self.widget.children.push(child.into().widget);
+        self
+    }
+    pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
+        for child in children { self.widget.children.push(child.widget); }
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
+}
+
+impl<M> From<Stack<M>> for Element<M> {
+    fn from(s: Stack<M>) -> Self {
+        proto::Widget { r#type: Some(proto::widget::Type::Stack(s.widget)) }.into()
+    }
+}
+
+pub fn stack<M>(children: impl IntoIterator<Item = Element<M>>) -> Stack<M> {
+    Stack::new().extend(children)
+}
+
+pub struct Tooltip<M> {
+    widget: proto::Tooltip,
+    _marker: std::marker::PhantomData<M>,
+}
+
+#[derive(Clone, Copy)]
+pub enum TooltipPosition {
+    Top = 1,
+    Bottom = 2,
+    Left = 3,
+    Right = 4,
+}
+
+impl<M> Tooltip<M> {
+    pub fn new(content: impl Into<Element<M>>, label: impl Into<String>, position: TooltipPosition) -> Self {
+        Self {
+            widget: proto::Tooltip {
+                content: Some(Box::new(content.into().widget)),
+                tooltip: label.into(),
+                position: position as u32,
+                gap: 5.0,
+                padding: Some(Padding::new(5.0).to_proto()),
+                ..Default::default()
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.widget.gap = gap;
+        self
+    }
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
+        self
+    }
+}
+
+impl<M> From<Tooltip<M>> for Element<M> {
+    fn from(t: Tooltip<M>) -> Self {
+        proto::Widget { r#type: Some(proto::widget::Type::Tooltip(Box::new(t.widget))) }.into()
+    }
+}
+
+pub fn tooltip<M>(content: impl Into<Element<M>>, label: impl Into<String>, position: TooltipPosition) -> Tooltip<M> {
+    Tooltip::new(content, label, position)
+}
+
 #[derive(Clone, Copy)]
 pub enum Length {
     Fill,
@@ -644,6 +735,13 @@ macro_rules! column {
 macro_rules! row {
     ($($x:expr),* $(,)?) => {
         $crate::Row::new()$(.push($x))*
+    };
+}
+
+#[macro_export]
+macro_rules! stack {
+    ($($x:expr),* $(,)?) => {
+        $crate::Stack::new()$(.push($x))*
     };
 }
 

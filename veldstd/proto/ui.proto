@@ -23,7 +23,24 @@ message Widget {
         Container container = 8;
         Scrollable scrollable = 9;
         ProgressBar progress_bar = 10;
+        Stack stack = 11;
+        Tooltip tooltip = 12;
     }
+}
+
+message Stack {
+    repeated Widget children = 1;
+    Length width = 2;
+    Length height = 3;
+}
+
+message Tooltip {
+    Widget content = 1;
+    string tooltip = 2;
+    uint32 position = 3; // Enum Position
+    float gap = 4;
+    Padding padding = 5;
+    string style = 6;
 }
 
 message ProgressBar {

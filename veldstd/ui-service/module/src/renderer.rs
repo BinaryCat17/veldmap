@@ -293,9 +293,14 @@ impl iced_core::text::Paragraph for RealParagraph {
     fn min_bounds(&self) -> Size { 
         if let Some(buf) = &self.buffer {
             let mut width: f32 = 0.0;
-            for run in buf.layout_runs() { width = width.max(run.line_w); }
+            for run in buf.layout_runs() { 
+                width = width.max(run.line_w); 
+            }
+            // Добавляем небольшой запас (safety margin), так как Nerd Font иконки
+            // часто выходят за пределы своей логической ширины (advance width).
+            // Это гораздо быстрее, чем итерировать по всем глифам каждый кадр.
             let height = buf.layout_runs().count() as f32 * buf.metrics().line_height;
-            Size::new(width, height)
+            Size::new(width + 5.0, height)
         } else {
             Size::ZERO 
         }
