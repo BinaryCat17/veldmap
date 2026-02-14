@@ -38,7 +38,36 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                     *plugin.ui_texture.borrow_mut() = None;
                     *plugin.needs_redrawing.borrow_mut() = true;
                 }
-                app_proto::ui_event::Event::Frame(_f) => {
+                app_proto::ui_event::Event::Scroll(s) => {
+                    let mut vel = plugin.scroll_velocity.borrow_mut();
+                    if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
+                        vel.y = 0.0;
+                    }
+                    let dy = s.delta_y.signum() * (s.delta_y.abs().powf(0.4) * 24.0);
+                    let dx = s.delta_x.signum() * (s.delta_x.abs().powf(0.4) * 24.0);
+                    vel.x += dx;
+                    vel.y += dy;
+                    vel.x = vel.x.clamp(-3000.0, 3000.0);
+                    vel.y = vel.y.clamp(-3000.0, 3000.0);
+                    *plugin.needs_redrawing.borrow_mut() = true;
+                }
+                app_proto::ui_event::Event::Frame(f) => {
+                    let mut vel = plugin.scroll_velocity.borrow_mut();
+                    if vel.x.abs() > 0.5 || vel.y.abs() > 0.5 {
+                        let friction = 0.85f32; 
+                        let factor = 1.0 - friction.powf(f.dt * 60.0);
+                        let scroll_amount_x = vel.x * factor;
+                        let scroll_amount_y = vel.y * factor;
+                        plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
+                            delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
+                        }));
+                        vel.x -= scroll_amount_x;
+                        vel.y -= scroll_amount_y;
+                        *plugin.needs_redrawing.borrow_mut() = true;
+                    } else {
+                        vel.x = 0.0;
+                        vel.y = 0.0;
+                    }
                     messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format)?;
                 }
                 _ => {
@@ -63,7 +92,6 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
             if c.pressed { Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)) }
             else { Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)) }
         }
-        app_proto::ui_event::Event::Scroll(s) => Event::Mouse(iced_core::mouse::Event::WheelScrolled { delta: iced_core::mouse::ScrollDelta::Pixels { x: s.delta_x, y: s.delta_y } }),
         _ => Event::Window(iced_core::window::Event::RedrawRequested(std::time::Instant::now())),
     }
 }
@@ -184,7 +212,6 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
             recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
 
             let mut current_index_offset = 0;
-            let mut current_vertex_offset = 0;
             for cmd in &renderer.draw_commands {
                 match cmd {
                     DrawCmd::Quads { count } => {
