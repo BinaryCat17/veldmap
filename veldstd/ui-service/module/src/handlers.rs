@@ -141,6 +141,10 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let element = converter::convert_layout(&plugin.layout);
     
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
+    
+    // Используем ScopeGuard для проброса FontSystem и SwashCache в thread_local для Paragraph::with_text
+    let _guard = crate::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
+
     let mut ui = UserInterface::build(
         element,
         viewport.logical_size(),
