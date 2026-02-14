@@ -41,7 +41,7 @@ impl WgpuRecorder {
 
     pub fn set_index_buffer(&mut self, buffer_id: u64, format: u32, offset: u64, size: u64) {
         self.push_cmd(Command::SetIndexBuffer(SetIndexBuffer { 
-            buffer_id, index_format: format, offset, size 
+            buffer_id, index_format: format as i32, offset, size 
         }));
     }
 

@@ -2,7 +2,48 @@ syntax = "proto3";
 
 package veldmap.wgpu;
 
-// Аналог wgpu::BufferAddress и т.д.
+// --- Enums for Type Safety ---
+
+enum TextureFormat {
+    TEX_RGBA8_UNORM = 0;
+    TEX_R32_FLOAT = 1;
+    TEX_RGBA16_FLOAT = 2;
+    TEX_RGBA32_FLOAT = 3;
+    TEX_R8_UNORM = 9;
+    TEX_BGRA8_UNORM_SRGB = 10;
+}
+
+enum VertexFormat {
+    VTX_FLOAT32 = 0;
+    VTX_FLOAT32x2 = 1;
+    VTX_FLOAT32x3 = 2;
+    VTX_FLOAT32x4 = 3;
+    VTX_UINT32 = 4;
+}
+
+enum IndexFormat {
+    IDX_UINT16 = 0;
+    IDX_UINT32 = 1;
+}
+
+enum AddressMode {
+    ADDR_CLAMP_TO_EDGE = 0;
+    ADDR_REPEAT = 1;
+    ADDR_MIRROR_REPEAT = 2;
+}
+
+enum FilterMode {
+    FILT_NEAREST = 0;
+    FILT_LINEAR = 1;
+}
+
+enum StepMode {
+    STEP_VERTEX = 0;
+    STEP_INSTANCE = 1;
+}
+
+// --- Common Structures ---
+
 message GpuBufferBinding {
     uint64 buffer_id = 1;
     uint64 offset = 2;
@@ -14,7 +55,7 @@ message GpuTextureBinding {
     uint32 view_dimension = 2; // 0: 2D, 1: 2DArray, etc
 }
 
-// РЕСУРСЫ
+// --- Resource Creation ---
 
 message CreateBuffer {
     uint64 size = 1;
@@ -30,14 +71,14 @@ message CreateTexture {
     uint32 mip_level_count = 4;
     uint32 sample_count = 5;
     uint32 dimension = 6; // 0: 1D, 1: 2D, 2: 3D
-    uint32 format = 7;
+    TextureFormat format = 7;
     uint32 usage = 8;
     bool readonly = 9;
 }
 
 message CreateTextureView {
     uint64 texture_id = 1;
-    uint32 format = 2;
+    TextureFormat format = 2;
     uint32 dimension = 3;
     uint32 aspect = 4;
     uint32 base_mip_level = 5;
@@ -47,12 +88,12 @@ message CreateTextureView {
 }
 
 message CreateSampler {
-    uint32 address_mode_u = 1;
-    uint32 address_mode_v = 2;
-    uint32 address_mode_w = 3;
-    uint32 mag_filter = 4;
-    uint32 min_filter = 5;
-    uint32 mipmap_filter = 6;
+    AddressMode address_mode_u = 1;
+    AddressMode address_mode_v = 2;
+    AddressMode address_mode_w = 3;
+    FilterMode mag_filter = 4;
+    FilterMode min_filter = 5;
+    FilterMode mipmap_filter = 6;
 }
 
 message BindGroupLayoutEntry {
@@ -103,14 +144,14 @@ message CreateBindGroup {
 }
 
 message VertexAttribute {
-    uint32 format = 1;
+    VertexFormat format = 1;
     uint64 offset = 2;
     uint32 shader_location = 3;
 }
 
 message VertexBufferLayout {
     uint64 array_stride = 1;
-    uint32 step_mode = 2; // 0: Vertex, 1: Instance
+    StepMode step_mode = 2;
     repeated VertexAttribute attributes = 3;
 }
 
@@ -128,14 +169,14 @@ message CreateRenderPipeline {
     uint32 strip_index_format = 6;
     uint32 front_face = 7;
     uint32 cull_mode = 8;
-    uint32 target_format = 9;
+    TextureFormat target_format = 9;
     bool depth_enabled = 10;
     string label = 11;
 }
 
 import "core.proto";
 
-// GPU / RESOURCE SERVICE
+// --- GPU / RESOURCE SERVICE ---
 
 message GpuResourceRequest {
   oneof command {
@@ -160,7 +201,7 @@ message GpuResourceRequest {
 
 message FsReadToTexture {
     string path = 1;
-    uint32 format = 2; // optional, 0 for auto
+    TextureFormat format = 2; 
     uint32 usage = 3;
 }
 
@@ -193,7 +234,7 @@ message GpuResourceResponse {
   string error = 2;
 }
 
-// КОМАНДЫ (COMMAND BUFFER)
+// --- COMMAND BUFFER ---
 
 message WgpuCommand {
     oneof command {
@@ -227,7 +268,7 @@ message SetVertexBuffer {
 
 message SetIndexBuffer {
     uint64 buffer_id = 1;
-    uint32 index_format = 2; // 0: Uint16, 1: Uint32
+    IndexFormat index_format = 2;
     uint64 offset = 3;
     uint64 size = 4;
 }

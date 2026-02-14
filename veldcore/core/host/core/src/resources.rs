@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use crate::wgpu::{TextureFormat, VertexFormat, StepMode, FilterMode};
 
 #[derive(Clone, Debug)]
 pub enum Resource {
@@ -10,7 +11,7 @@ pub enum Resource {
         texture: Arc<wgpu::Texture>,
         width: u32,
         height: u32,
-        format: u32,
+        format: i32,
     },
     TextureView(Arc<wgpu::TextureView>),
     Sampler(Arc<wgpu::Sampler>),
@@ -103,8 +104,6 @@ impl ResourceManager {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         
-        // COPY_DST нужен только если мы планируем писать в буфер ПОСЛЕ создания.
-        // Если он readonly и заполняется при создании (mapped), то COPY_DST не нужен.
         if !readonly || !mapped {
             final_usage |= wgpu::BufferUsages::COPY_DST;
         }
@@ -128,13 +127,14 @@ impl ResourceManager {
         self.create_buffer_ext(size, usage, false, false)
     }
 
-    pub fn create_texture(&self, width: u32, height: u32, format_id: u32, usage: u32, readonly: bool) -> u64 {
+    pub fn create_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let format = match format_id {
-            1 => wgpu::TextureFormat::R32Float,
-            2 => wgpu::TextureFormat::Rgba16Float,
-            3 => wgpu::TextureFormat::Rgba32Float,
-            9 => wgpu::TextureFormat::R8Unorm,
+        let format = match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
+            TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
+            TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
+            TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
+            TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
+            TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -159,7 +159,7 @@ impl ResourceManager {
                 texture: Arc::new(texture),
                 width,
                 height,
-                format: format_id,
+                format: format_proto,
             },
             readonly
         });
@@ -180,11 +180,19 @@ impl ResourceManager {
         Ok(id)
     }
 
-    pub fn create_sampler(&self, mag: u32, min: u32) -> u64 {
+    pub fn create_sampler(&self, mag_proto: i32, min_proto: i32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mag = match FilterMode::try_from(mag_proto).unwrap_or(FilterMode::FiltLinear) {
+            FilterMode::FiltNearest => wgpu::FilterMode::Nearest,
+            FilterMode::FiltLinear => wgpu::FilterMode::Linear,
+        };
+        let min = match FilterMode::try_from(min_proto).unwrap_or(FilterMode::FiltLinear) {
+            FilterMode::FiltNearest => wgpu::FilterMode::Nearest,
+            FilterMode::FiltLinear => wgpu::FilterMode::Linear,
+        };
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: if mag == 1 { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
-            min_filter: if min == 1 { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+            mag_filter: mag,
+            min_filter: min,
             ..Default::default()
         });
         self.resources.insert(id, ResourceEntry { 
@@ -287,48 +295,10 @@ impl ResourceManager {
         Ok(id)
     }
 
-    pub fn create_buffer_mapped<F>(&self, size: u64, usage: u32, readonly: bool, fill_cb: F) -> anyhow::Result<u64> 
-    where F: FnOnce(&mut [u8]) -> anyhow::Result<()> 
-    {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
-        
-        if final_usage.is_empty() {
-            final_usage = wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST;
-        }
-
-        let aligned_size = Self::align_to(size, 4);
-
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("Buffer-mapped-{}", id)),
-            size: aligned_size,
-            usage: final_usage,
-            mapped_at_creation: true,
-        });
-        
-        {
-            let mut view = buffer.slice(..).get_mapped_range_mut();
-            fill_cb(&mut view[..size as usize])?;
-        }
-        buffer.unmap();
-        
-        {
-            let _q = self.queue.lock().unwrap();
-            self.device.poll(wgpu::Maintain::Wait);
-        }
-
-        self.resources.insert(id, ResourceEntry { 
-            resource: Resource::Buffer(Arc::new(buffer)),
-            readonly 
-        });
-        Ok(id)
-    }
-
     pub fn create_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         
-        // Для readonly-буфера, заполняемого при создании, COPY_DST не нужен
         if !readonly {
             final_usage |= wgpu::BufferUsages::COPY_DST;
         }
@@ -399,18 +369,18 @@ impl ResourceManager {
         id
     }
 
-    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>, format_id: u32, vertex_layouts: Vec<crate::wgpu::VertexBufferLayout>) -> anyhow::Result<u64> {
+    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>, format_proto: i32, vertex_layouts: Vec<crate::wgpu::VertexBufferLayout>) -> anyhow::Result<u64> {
         let shader = match self.get_resource(shader_id) {
             Some(Resource::ShaderModule(s)) => s,
             _ => return Err(anyhow::anyhow!("Resource is not a shader")),
         };
 
-        let target_format = match format_id {
-            1 => wgpu::TextureFormat::R32Float,
-            2 => wgpu::TextureFormat::Rgba16Float,
-            3 => wgpu::TextureFormat::Rgba32Float,
-            9 => wgpu::TextureFormat::R8Unorm,
-            10 => wgpu::TextureFormat::Bgra8UnormSrgb,
+        let target_format = match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
+            TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
+            TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
+            TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
+            TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
+            TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
 
@@ -439,12 +409,10 @@ impl ResourceManager {
             push_constant_ranges: &[],
         });
 
-        // Convert Proto VertexBufferLayout to wgpu
         let mut wgpu_vertex_layouts = Vec::new();
         let mut keep_alive_attributes = Vec::new();
 
         if vertex_layouts.is_empty() {
-            // Default UI layout
             wgpu_vertex_layouts.push(wgpu::VertexBufferLayout {
                 array_stride: 32,
                 step_mode: wgpu::VertexStepMode::Vertex,
@@ -461,12 +429,12 @@ impl ResourceManager {
                     attrs.push(wgpu::VertexAttribute {
                         offset: attr.offset,
                         shader_location: attr.shader_location,
-                        format: match attr.format {
-                            29 => wgpu::VertexFormat::Float32,
-                            30 => wgpu::VertexFormat::Float32x2,
-                            31 => wgpu::VertexFormat::Float32x3,
-                            32 => wgpu::VertexFormat::Float32x4,
-                            _ => wgpu::VertexFormat::Float32x2,
+                        format: match VertexFormat::try_from(attr.format).unwrap_or(VertexFormat::VtxFloat32x2) {
+                            VertexFormat::VtxFloat32 => wgpu::VertexFormat::Float32,
+                            VertexFormat::VtxFloat32x2 => wgpu::VertexFormat::Float32x2,
+                            VertexFormat::VtxFloat32x3 => wgpu::VertexFormat::Float32x3,
+                            VertexFormat::VtxFloat32x4 => wgpu::VertexFormat::Float32x4,
+                            VertexFormat::VtxUint32 => wgpu::VertexFormat::Uint32,
                         },
                     });
                 }
@@ -476,7 +444,11 @@ impl ResourceManager {
             for i in 0..vertex_layouts.len() {
                 wgpu_vertex_layouts.push(wgpu::VertexBufferLayout {
                     array_stride: vertex_layouts[i].array_stride,
-                    step_mode: if vertex_layouts[i].step_mode == 1 { wgpu::VertexStepMode::Instance } else { wgpu::VertexStepMode::Vertex },
+                    step_mode: if StepMode::try_from(vertex_layouts[i].step_mode).unwrap_or(StepMode::StepVertex) == StepMode::StepInstance { 
+                        wgpu::VertexStepMode::Instance 
+                    } else { 
+                        wgpu::VertexStepMode::Vertex 
+                    },
                     attributes: &keep_alive_attributes[i],
                 });
             }
@@ -536,10 +508,11 @@ impl ResourceManager {
                 self.device.poll(wgpu::Maintain::Poll);
             },
             Resource::Texture { ref texture, width, height, format } => {
-                let real_block_size = match format {
-                    9 => 1,
-                    2 => 8,
-                    3 => 16,
+                let real_block_size = match TextureFormat::try_from(format).unwrap_or(TextureFormat::TexRgba8Unorm) {
+                    TextureFormat::TexR8Unorm => 1,
+                    TextureFormat::TexR32Float => 4,
+                    TextureFormat::TexRgba16Float => 8,
+                    TextureFormat::TexRgba32Float => 16,
                     _ => 4,
                 };
 

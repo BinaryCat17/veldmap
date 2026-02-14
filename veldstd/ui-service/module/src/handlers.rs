@@ -278,18 +278,18 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
                 command: Some(gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
                     shader_id: sh.id, label: "UI Pipeline".into(), 
                     vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
-                    target_format: 0, // RGBA8
+                    target_format: TextureFormat::TexRgba8Unorm as i32,
                     vertex_layouts: vec![VertexBufferLayout {
                         array_stride: std::mem::size_of::<crate::renderer::Vertex>() as u64,
-                        step_mode: 0, // Vertex
+                        step_mode: StepMode::StepVertex as i32,
                         attributes: vec![
-                            VertexAttribute { format: 30, offset: 0, shader_location: 0 },  // Float32x2 (pos)
-                            VertexAttribute { format: 32, offset: 8, shader_location: 1 },  // Float32x4 (color)
-                            VertexAttribute { format: 30, offset: 24, shader_location: 2 }, // Float32x2 (uv)
-                            VertexAttribute { format: 30, offset: 32, shader_location: 3 }, // Float32x2 (rect_pos)
-                            VertexAttribute { format: 30, offset: 40, shader_location: 4 }, // Float32x2 (rect_size)
-                            VertexAttribute { format: 29, offset: 48, shader_location: 5 }, // Float32 (radius)
-                            VertexAttribute { format: 29, offset: 52, shader_location: 6 }, // Float32 (mode)
+                            VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 0, shader_location: 0 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32x4 as i32, offset: 8, shader_location: 1 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 24, shader_location: 2 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 32, shader_location: 3 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 40, shader_location: 4 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 48, shader_location: 5 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 52, shader_location: 6 },
                         ],
                     }],
                     ..Default::default()
