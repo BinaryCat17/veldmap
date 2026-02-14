@@ -59,35 +59,43 @@ fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Mode 1.0 = SDF Quad, Mode 0.0 = Text/Texture
     if (in.mode > 0.5) {
+        // Fast path for simple rectangles with no radius and no border
+        if (in.radius < 0.05 && in.border_width < 0.05) {
+            return in.color;
+        }
+
         let dist = sd_rounded_box(in.local_pos, in.rect_size, in.radius);
         let smoothing = fwidth(dist);
         
-        // Маска основного тела
-        let alpha = 1.0 - smoothstep(-0.5 * smoothing, 0.5 * smoothing, dist);
+        // Linear smoothing instead of smoothstep for performance
+        let alpha = clamp(0.5 - dist / smoothing, 0.0, 1.0);
         
-        // Маска рамки (если задана)
-        if (in.border_width > 0.0) {
-            // Расстояние до внутренней границы рамки
+        var res_color = in.color.rgb;
+        var res_alpha = in.color.a * alpha;
+        
+        if (in.border_width > 0.01) {
             let interior_dist = dist + in.border_width;
-            let border_mask = smoothstep(-0.5 * smoothing, 0.5 * smoothing, dist) - 
-                              smoothstep(-0.5 * smoothing, 0.5 * smoothing, interior_dist);
+            let border_mask = clamp(0.5 - dist / smoothing, 0.0, 1.0) - 
+                              clamp(0.5 - interior_dist / smoothing, 0.0, 1.0);
             
-            // Смешиваем цвет фона и цвет рамки
-            let res_color = mix(in.color.rgb, in.border_color.rgb, border_mask);
-            let res_alpha = max(alpha, border_mask) * in.color.a;
-            return vec4<f32>(res_color, res_alpha);
+            res_color = mix(res_color, in.border_color.rgb, border_mask);
+            res_alpha = max(res_alpha, border_mask * in.border_color.a);
         }
         
-        return vec4<f32>(in.color.rgb, in.color.a * alpha);
+        return vec4<f32>(res_color, res_alpha);
     }
 
+    // Text/Texture mode
     let tex_sample = textureSample(t_diffuse, s_diffuse, in.tex_coords);
-    let is_color_glyph = abs(tex_sample.r - tex_sample.g) > 0.01 || abs(tex_sample.g - tex_sample.b) > 0.01;
     
-    if (is_color_glyph) {
-        return vec4<f32>(tex_sample.rgb, tex_sample.a * in.color.a);
-    } else {
+    // Check if grayscale or color (e.g. emoji)
+    let is_grayscale = abs(tex_sample.r - tex_sample.g) < 0.01 && abs(tex_sample.g - tex_sample.b) < 0.01;
+    
+    if (is_grayscale) {
         return vec4<f32>(in.color.rgb, in.color.a * tex_sample.a);
+    } else {
+        return vec4<f32>(tex_sample.rgb, in.color.a * tex_sample.a);
     }
 }

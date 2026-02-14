@@ -10,6 +10,8 @@ pub fn execute_render_commands<'a>(
     rp: &mut wgpu::RenderPass<'a>,
     command_buffer: &'a crate::wgpu::CommandBuffer,
     resources: &'a crate::resources::ResourceManager,
+    target_width: u32,
+    target_height: u32,
 ) -> anyhow::Result<()> {
     use crate::wgpu::wgpu_command::Command;
 
@@ -66,10 +68,20 @@ pub fn execute_render_commands<'a>(
                 rp.draw_indexed(di.first_index..(di.first_index + di.index_count), di.base_vertex, di.first_instance..(di.first_instance + di.instance_count));
             }
             Command::SetViewport(v) => {
-                rp.set_viewport(v.x, v.y, v.width, v.height, v.min_depth, v.max_depth);
+                let x = v.x.clamp(0.0, target_width as f32);
+                let y = v.y.clamp(0.0, target_height as f32);
+                let w = v.width.min(target_width as f32 - x);
+                let h = v.height.min(target_height as f32 - y);
+                if w > 0.0 && h > 0.0 {
+                    rp.set_viewport(x, y, w, h, v.min_depth, v.max_depth);
+                }
             }
             Command::SetScissorRect(s) => {
-                rp.set_scissor_rect(s.x, s.y, s.width, s.height);
+                let x = s.x.min(target_width.saturating_sub(1));
+                let y = s.y.min(target_height.saturating_sub(1));
+                let w = s.width.min(target_width - x).max(1);
+                let h = s.height.min(target_height - y).max(1);
+                rp.set_scissor_rect(x, y, w, h);
             }
         }
     }

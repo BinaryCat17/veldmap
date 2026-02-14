@@ -509,7 +509,6 @@ impl ResourceManager {
             Resource::Buffer(ref buffer) => {
                 let q = self.queue.lock().unwrap();
                 q.write_buffer(buffer, offset, data);
-                self.device.poll(wgpu::Maintain::Poll);
             },
             Resource::Texture { ref texture, width, height, format } => {
                 let bytes_per_pixel = match TextureFormat::try_from(format).unwrap_or(TextureFormat::TexRgba8Unorm) {
@@ -541,7 +540,6 @@ impl ResourceManager {
                     },
                     wgpu::Extent3d { width, height: height_to_write, depth_or_array_layers: 1 }
                 );
-                self.device.poll(wgpu::Maintain::Poll);
             },
             _ => return Err(anyhow::anyhow!("Writing to this resource type is not supported")),
         }
