@@ -34,9 +34,8 @@ impl LocalState {
     pub fn new() -> Self {
         Self {
             plugins: HashMap::new(),
-            renderer: GpuRenderer::new("DejaVu Sans", vec![
-                ("DejaVu Sans", include_bytes!("../../../../veldgis/assets/DejaVuSans.ttf")),
-                ("Noto Color Emoji", include_bytes!("../../../../veldgis/assets/NotoColorEmoji.ttf")),
+            renderer: GpuRenderer::new("JetBrains Mono", vec![
+                ("JetBrains Mono", include_bytes!("../../../../veldgis/assets/JetBrainsMono.ttf")),
             ]),
         }
     }
