@@ -292,15 +292,38 @@ impl iced_core::text::Paragraph for RealParagraph {
     fn vertical_alignment(&self) -> iced_core::alignment::Vertical { self.vertical_alignment }
     fn min_bounds(&self) -> Size { 
         if let Some(buf) = &self.buffer {
-            let mut width: f32 = 0.0;
-            for run in buf.layout_runs() { 
-                width = width.max(run.line_w); 
+            let mut min_x = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut height = 0.0;
+            
+            let runs = buf.layout_runs();
+            let mut count = 0;
+            
+            for run in runs { 
+                count += 1;
+                // Базовая ширина строки (advance)
+                max_x = max_x.max(run.line_w);
+                min_x = min_x.min(0.0);
+
+                for glyph in run.glyphs {
+                    let left = glyph.x;
+                    let right = glyph.x + glyph.w;
+                    
+                    if left < min_x { min_x = left; }
+                    if right > max_x { max_x = right; }
+                }
             }
-            // Добавляем небольшой запас (safety margin), так как Nerd Font иконки
-            // часто выходят за пределы своей логической ширины (advance width).
-            // Это гораздо быстрее, чем итерировать по всем глифам каждый кадр.
-            let height = buf.layout_runs().count() as f32 * buf.metrics().line_height;
-            Size::new(width + 5.0, height)
+            
+            if count == 0 { return Size::ZERO; }
+            
+            height = count as f32 * buf.metrics().line_height;
+            let width = if min_x.is_finite() && max_x.is_finite() {
+                max_x - min_x
+            } else {
+                0.0
+            };
+
+            Size::new(width, height)
         } else {
             Size::ZERO 
         }
@@ -342,13 +365,23 @@ impl iced_core::text::Renderer for GpuRenderer {
 
     fn fill_paragraph(&mut self, p: &Self::Paragraph, pos: Point, color: Color, _clip: iced_core::Rectangle) {
         if let Some(buffer) = &p.buffer {
-            let mut width: f32 = 0.0;
-            for run in buffer.layout_runs() { width = width.max(run.line_w); }
-            let height = buffer.layout_runs().count() as f32 * buffer.metrics().line_height;
+            let mut min_x = 0.0f32;
+            let mut max_x = 0.0f32;
+            let mut height = 0.0f32;
+            
+            for run in buffer.layout_runs() {
+                max_x = max_x.max(run.line_w);
+                for glyph in run.glyphs {
+                    max_x = max_x.max(glyph.x + glyph.w);
+                    min_x = min_x.min(glyph.x);
+                }
+                height += buffer.metrics().line_height;
+            }
+            let visual_width = max_x - min_x;
             
             let x_offset = match p.horizontal_alignment {
-                iced_core::alignment::Horizontal::Center => width / 2.0,
-                iced_core::alignment::Horizontal::Right => width,
+                iced_core::alignment::Horizontal::Center => visual_width / 2.0,
+                iced_core::alignment::Horizontal::Right => visual_width,
                 _ => 0.0,
             };
              let y_offset = match p.vertical_alignment {
@@ -357,7 +390,7 @@ impl iced_core::text::Renderer for GpuRenderer {
                 _ => 0.0,
             };
             
-            let adjusted_pos = Point::new(pos.x - x_offset, pos.y - y_offset);
+            let adjusted_pos = Point::new(pos.x - x_offset - min_x, pos.y - y_offset);
             self.draw_buffer(buffer, adjusted_pos, color);
         }
     }
@@ -387,12 +420,24 @@ impl iced_core::text::Renderer for GpuRenderer {
         buffer.set_text(&mut font_system, &text.content, attrs, shaping_type);
         buffer.shape_until_scroll(&mut font_system, false);
         
+        // Вычисляем визуальную ширину для корректного выравнивания
+        let mut min_x = 0.0f32;
+        let mut max_x = 0.0f32;
+        for run in buffer.layout_runs() {
+            max_x = max_x.max(run.line_w);
+            for glyph in run.glyphs {
+                max_x = max_x.max(glyph.x + glyph.w);
+                min_x = min_x.min(glyph.x);
+            }
+        }
+        let visual_width = max_x - min_x;
+        
         // Отпускаем лок перед отрисовкой
         drop(font_system);
 
         let x_offset = match text.horizontal_alignment {
-            iced_core::alignment::Horizontal::Center => text.bounds.width / 2.0,
-            iced_core::alignment::Horizontal::Right => text.bounds.width,
+            iced_core::alignment::Horizontal::Center => visual_width / 2.0,
+            iced_core::alignment::Horizontal::Right => visual_width,
             _ => 0.0,
         };
         let y_offset = match text.vertical_alignment {
@@ -401,7 +446,7 @@ impl iced_core::text::Renderer for GpuRenderer {
             _ => 0.0,
         };
         
-        let adjusted_pos = Point::new(pos.x - x_offset, pos.y - y_offset);
+        let adjusted_pos = Point::new(pos.x - x_offset - min_x, pos.y - y_offset);
         
         self.draw_buffer(&buffer, adjusted_pos, color);
     }

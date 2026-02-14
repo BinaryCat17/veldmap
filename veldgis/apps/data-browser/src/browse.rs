@@ -41,8 +41,7 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
                 text("\u{f00c}").color(veld_ui::Color::from_rgb(0.3, 0.8, 0.3)),
                 button(text("\u{f021}"))
                     .style(crate::styles::sync_button())
-                    .padding(5.0)
-                    .align_x(veld_ui::Alignment::Center)
+                    .padding(6.0)
                     .on_press(Message::DownloadFile(item.s3_key.clone()))
             ].spacing(10.0).align_items(veld_ui::Alignment::Center))
             .width(veld_ui::Length::Fixed(80.0))
@@ -53,8 +52,7 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
             container(
                 button(text("\u{f019}"))
                     .style(crate::styles::download_button())
-                    .padding(5.0)
-                    .align_x(veld_ui::Alignment::Center)
+                    .padding(6.0)
                     .on_press(Message::DownloadFile(item.s3_key.clone()))
             )
             .width(veld_ui::Length::Fixed(80.0))

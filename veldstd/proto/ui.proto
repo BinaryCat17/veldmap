@@ -64,6 +64,8 @@ message Column {
     Alignment align_items = 4;
     Length width = 5;
     Length height = 6;
+    Length max_width = 7;
+    Length max_height = 8;
 }
 
 message Row {
@@ -73,6 +75,8 @@ message Row {
     Alignment align_items = 4;
     Length width = 5;
     Length height = 6;
+    Length max_width = 7;
+    Length max_height = 8;
 }
 
 message Text {
@@ -85,12 +89,21 @@ message Text {
     string style = 7;
     Length width = 8;
     Length height = 9;
+    uint32 shaping = 10;
+    string font_family = 11;
+}
+
+message Radius {
+    float top_left = 1;
+    float top_right = 2;
+    float bottom_right = 3;
+    float bottom_left = 4;
 }
 
 message Border {
     Color color = 1;
     float width = 2;
-    float radius = 3;
+    Radius radius = 3;
 }
 
 message Shadow {
@@ -100,18 +113,25 @@ message Shadow {
     float blur_radius = 4;
 }
 
-message Appearance {
-    optional Color background = 1;
+message Background {
+    oneof type {
+        Color color = 1;
+        // Gradient gradient = 2; // Future
+    }
+}
+
+message WidgetStyle {
+    optional Background background = 1;
     optional Color text_color = 2;
     optional Border border = 3;
     optional Shadow shadow = 4;
 }
 
 message ButtonStyle {
-    Appearance active = 1;
-    Appearance hovered = 2;
-    Appearance pressed = 3;
-    Appearance disabled = 4;
+    WidgetStyle active = 1;
+    WidgetStyle hovered = 2;
+    WidgetStyle pressed = 3;
+    WidgetStyle disabled = 4;
 }
 
 message Button {
@@ -120,8 +140,6 @@ message Button {
     bool disabled = 3;
     Length width = 4;
     Length height = 5;
-    optional Alignment align_x = 6;
-    optional Alignment align_y = 7;
     oneof style_variant {
         string style_class = 8;
         ButtonStyle style_custom = 10;
@@ -156,9 +174,11 @@ message Container {
     Padding padding = 2;
     Length width = 3;
     Length height = 4;
+    Length max_width = 9;
+    Length max_height = 10;
     Alignment align_x = 5;
     Alignment align_y = 6;
-    Color background = 7;
+    Background background = 7;
     string style = 8;
 }
 

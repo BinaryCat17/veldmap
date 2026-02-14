@@ -89,11 +89,11 @@ impl<M> Column<M> {
         self
     }
     pub fn max_width(mut self, w: f32) -> Self {
-        if let Some(width) = self.widget.width.as_mut() {
-             width.value = Some(proto::length::Value::Fixed(w));
-        } else {
-             self.widget.width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
-        }
+        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
+        self
+    }
+    pub fn max_height(mut self, h: f32) -> Self {
+        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
         self
     }
 }
@@ -148,6 +148,14 @@ impl<M> Row<M> {
         self.widget.height = Some(h.to_proto());
         self
     }
+    pub fn max_width(mut self, w: f32) -> Self {
+        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
+        self
+    }
+    pub fn max_height(mut self, h: f32) -> Self {
+        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
+        self
+    }
 }
 
 impl<M> From<Row<M>> for Element<M> {
@@ -179,6 +187,8 @@ impl<M> Text<M> {
             style: String::new(),
             width: None,
             height: None,
+            shaping: 0,
+            font_family: String::new(),
         }, _marker: std::marker::PhantomData }
     }
     pub fn size(mut self, size: f32) -> Self {
@@ -209,6 +219,10 @@ impl<M> Text<M> {
         self.widget.vertical_alignment = align as i32;
         self
     }
+    pub fn shaping(mut self, advanced: bool) -> Self {
+        self.widget.shaping = if advanced { 1 } else { 0 };
+        self
+    }
 }
 
 impl<M> From<Text<M>> for Element<M> {
@@ -228,30 +242,35 @@ pub struct Button<M> {
 
 // --- Style Definitions ---
 
-#[derive(Clone, Default)]
-pub struct Appearance {
-    pub background: Option<Color>,
-    pub text_color: Option<Color>,
-    pub border: Border,
-    pub shadow: Shadow,
+#[derive(Clone, Copy, Default)]
+pub struct Radius {
+    pub top_left: f32,
+    pub top_right: f32,
+    pub bottom_right: f32,
+    pub bottom_left: f32,
 }
 
-impl Appearance {
-    fn to_proto(self) -> proto::Appearance {
-        proto::Appearance {
-            background: self.background.map(|c| c.to_proto()),
-            text_color: self.text_color.map(|c| c.to_proto()),
-            border: Some(self.border.to_proto()),
-            shadow: Some(self.shadow.to_proto()),
+impl Radius {
+    pub fn new(r: f32) -> Self { Self { top_left: r, top_right: r, bottom_right: r, bottom_left: r } }
+    fn to_proto(self) -> proto::Radius {
+        proto::Radius {
+            top_left: self.top_left,
+            top_right: self.top_right,
+            bottom_right: self.bottom_right,
+            bottom_left: self.bottom_left,
         }
     }
+}
+
+impl From<f32> for Radius {
+    fn from(r: f32) -> Self { Radius::new(r) }
 }
 
 #[derive(Clone, Copy, Default)]
 pub struct Border {
     pub color: Color,
     pub width: f32,
-    pub radius: f32,
+    pub radius: Radius,
 }
 
 impl Border {
@@ -259,11 +278,11 @@ impl Border {
         proto::Border {
             color: Some(self.color.to_proto()),
             width: self.width,
-            radius: self.radius,
+            radius: Some(self.radius.to_proto()),
         }
     }
-    pub fn with_radius(radius: f32) -> Self {
-        Self { radius, ..Default::default() }
+    pub fn with_radius(radius: impl Into<Radius>) -> Self {
+        Self { radius: radius.into(), ..Default::default() }
     }
 }
 
@@ -286,20 +305,58 @@ impl Shadow {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum Background {
+    Color(Color),
+}
+
+impl Background {
+    fn to_proto(self) -> proto::Background {
+        match self {
+            Background::Color(c) => proto::Background {
+                r#type: Some(proto::background::Type::Color(c.to_proto())),
+            }
+        }
+    }
+}
+
+impl From<Color> for Background {
+    fn from(c: Color) -> Self { Background::Color(c) }
+}
+
+#[derive(Clone, Default)]
+pub struct WidgetStyle {
+    pub background: Option<Background>,
+    pub text_color: Option<Color>,
+    pub border: Border,
+    pub shadow: Shadow,
+}
+
+impl WidgetStyle {
+    fn to_proto(self) -> proto::WidgetStyle {
+        proto::WidgetStyle {
+            background: self.background.map(|b| b.to_proto()),
+            text_color: self.text_color.map(|c| c.to_proto()),
+            border: Some(self.border.to_proto()),
+            shadow: Some(self.shadow.to_proto()),
+        }
+    }
+}
+
 pub struct ButtonStyle {
-    pub active: Appearance,
-    pub hovered: Appearance,
-    pub pressed: Appearance,
-    pub disabled: Appearance,
+    pub active: WidgetStyle,
+    pub hovered: WidgetStyle,
+    pub pressed: WidgetStyle,
+    pub disabled: WidgetStyle,
 }
 
 impl Default for ButtonStyle {
     fn default() -> Self {
         Self {
-            active: Appearance::default(),
-            hovered: Appearance::default(),
-            pressed: Appearance::default(),
-            disabled: Appearance::default(),
+            active: WidgetStyle::default(),
+            hovered: WidgetStyle::default(),
+            pressed: WidgetStyle::default(),
+            disabled: WidgetStyle::default(),
         }
     }
 }
@@ -326,7 +383,6 @@ impl<M> Button<M> {
             on_press: String::new(),
             disabled: false,
             width: None, height: None,
-            align_x: None, align_y: None,
             style_variant: Some(proto::button::StyleVariant::StyleClass(String::new())),
             padding: None,
         }, _marker: std::marker::PhantomData }
@@ -359,14 +415,6 @@ impl<M> Button<M> {
     }
     pub fn padding(mut self, p: impl Into<Padding>) -> Self {
         self.widget.padding = Some(p.into().to_proto());
-        self
-    }
-    pub fn align_x(mut self, align: Alignment) -> Self {
-        self.widget.align_x = Some(align as i32);
-        self
-    }
-    pub fn align_y(mut self, align: Alignment) -> Self {
-        self.widget.align_y = Some(align as i32);
         self
     }
 }
@@ -457,6 +505,14 @@ impl<M> Container<M> {
         self.widget.height = Some(h.to_proto());
         self
     }
+    pub fn max_width(mut self, w: f32) -> Self {
+        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
+        self
+    }
+    pub fn max_height(mut self, h: f32) -> Self {
+        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
+        self
+    }
     pub fn padding(mut self, p: impl Into<Padding>) -> Self {
         self.widget.padding = Some(p.into().to_proto());
         self
@@ -465,8 +521,8 @@ impl<M> Container<M> {
         self.widget.style = style.into();
         self
     }
-    pub fn background(mut self, color: Color) -> Self {
-        self.widget.background = Some(color.to_proto());
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.widget.background = Some(background.into().to_proto());
         self
     }
     pub fn align_x(mut self, align: Alignment) -> Self {
@@ -475,6 +531,14 @@ impl<M> Container<M> {
     }
     pub fn align_y(mut self, align: Alignment) -> Self {
         self.widget.align_y = align as i32;
+        self
+    }
+    pub fn center_x(mut self) -> Self {
+        self.widget.align_x = Alignment::Center as i32;
+        self
+    }
+    pub fn center_y(mut self) -> Self {
+        self.widget.align_y = Alignment::Center as i32;
         self
     }
 }
@@ -692,6 +756,7 @@ pub enum Length {
     Fill,
     Shrink,
     Fixed(f32),
+    FillPortion(u16),
 }
 
 impl Length {
@@ -700,6 +765,7 @@ impl Length {
             Length::Fill => proto::Length { value: Some(proto::length::Value::Fill(true)) },
             Length::Shrink => proto::Length { value: Some(proto::length::Value::Shrink(true)) },
             Length::Fixed(f) => proto::Length { value: Some(proto::length::Value::Fixed(f)) },
+            Length::FillPortion(p) => proto::Length { value: Some(proto::length::Value::Portion(p as f32)) },
         }
     }
 }

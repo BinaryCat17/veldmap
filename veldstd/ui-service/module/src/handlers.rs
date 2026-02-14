@@ -130,6 +130,13 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let viewport = Viewport::with_physical_size(Size::new(width, height), sf.into());
     let mut captured_messages = Vec::new();
     
+    let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
+    let should_update = *needs_redrawing || !events.is_empty();
+
+    if !should_update {
+        return Ok(Vec::new());
+    }
+
     renderer.clear();
     let element = converter::convert_layout(&plugin.layout);
     
@@ -144,7 +151,6 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut clipboard = iced_core::clipboard::Null;
     let (ui_state, _) = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
     
-    let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
     let should_draw = *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated);
     
     if should_draw {
