@@ -8,6 +8,8 @@ def main():
     parser = argparse.ArgumentParser(description="VeldMap Run Script")
     parser.add_argument("--debug", action="store_true", help="Run debug build")
     parser.add_argument("--config", default="veldgis/config", help="Path to config directory")
+    parser.add_argument("--vulkan", action="store_true", help="Force Vulkan backend")
+    parser.add_argument("--backend", default=None, help="Force specific WGPU backend (vulkan, gl, dx12, etc.)")
     
     args = parser.parse_args()
     
@@ -20,8 +22,13 @@ def main():
     print(f"-> Launching VeldMap Host ({profile_name})...")
     
     env = os.environ.copy()
-    env["WGPU_BACKEND"] = "gl"
-    env["GALLIUM_DRIVER"] = "d3d12"
+    
+    if args.vulkan:
+        env["WGPU_BACKEND"] = "vulkan"
+    elif args.backend:
+        env["WGPU_BACKEND"] = args.backend
+    
+    # Common Mesa/WSL optimizations
     env["EGL_LOG_LEVEL"] = "fatal"
     env["MESA_DEBUG"] = "silent"
     env["LIBGL_DEBUG"] = "quiet"

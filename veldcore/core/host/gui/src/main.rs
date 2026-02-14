@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
     
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::GL,
+        backends: wgpu::Backends::all(),
         flags,
         ..Default::default()
     });
