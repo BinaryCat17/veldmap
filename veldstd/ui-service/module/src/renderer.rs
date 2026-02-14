@@ -32,10 +32,12 @@ pub struct Vertex {
     pub pos: [f32; 2],
     pub color: [f32; 4],
     pub uv: [f32; 2],
-    pub local_pos: [f32; 2], // Координаты относительно левого верхнего угла самого прямоугольника
+    pub local_pos: [f32; 2],
     pub rect_size: [f32; 2],
     pub radius: f32,
-    pub mode: f32, // 0 - Atlas, 1 - SDF Rectangle
+    pub mode: f32, 
+    pub border_width: f32,
+    pub border_color: [f32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -115,7 +117,6 @@ impl GpuRenderer {
             atlas_height: 2048,
             atlas_data: {
                 let mut data = vec![0; 2048 * 2048 * 4];
-                // Заполняем область 4x4 белым цветом для сплошных заливок
                 for y in 0..4 {
                     for x in 0..4 {
                         let idx = (y * 2048 + x) * 4;
@@ -175,7 +176,7 @@ impl GpuRenderer {
         }
     }
 
-    pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32) {
+    pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32, border_width: f32, border_color: [f32; 4]) {
         let transformed = self.transform_rect(rect);
         let x = transformed[0];
         let y = transformed[1];
@@ -197,6 +198,8 @@ impl GpuRenderer {
             rect_size: [rw, rh],
             radius,
             mode,
+            border_width,
+            border_color,
         };
 
         self.vertices.push(v(x, y, u1, v1, 0.0, 0.0));
@@ -229,12 +232,14 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             _ => [1.0, 1.0, 1.0, 1.0],
         };
 
-        // Используем UV, указывающий на центр нашей белой области 4x4 в начале атласа.
         let white_uv = [2.0 / 2048.0, 2.0 / 2048.0, 2.0 / 2048.0, 2.0 / 2048.0];
+        let radius = quad.border.radius.top_left;
         
-        let radius = quad.border.radius.top_left; // Для простоты берем один радиус
+        let bw = quad.border.width;
+        let bc = quad.border.color;
+        let border_color = [bc.r, bc.g, bc.b, bc.a];
 
-        // Отрисовка основного прямоугольника
+        // РИСУЕМ ВСЁ ЗА ОДИН ПРОХОД (Фон + Рамка)
         self.add_quad(
             [
                 quad.bounds.x,
@@ -246,29 +251,9 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             white_uv,
             radius,
             1.0, // SDF Mode
+            bw,
+            border_color,
         );
-
-        // Отрисовка границ (если есть)
-        if quad.border.width > 0.0 {
-            let bc = quad.border.color;
-            let border_color = [bc.r, bc.g, bc.b, bc.a];
-            let bw = quad.border.width;
-
-            // Теперь границы тоже рисуются со скруглением!
-            // Рисуем рамку как еще один SDF прямоугольник, но с нулевым радиусом внутри? 
-            // Пока просто используем тот же метод SDF для каждой из 4 сторон, 
-            // но правильнее было бы сделать один проход.
-            // Для скорости оставим 4 стороны, но включим им SDF и тот же радиус.
-            
-            // Верхняя
-            self.add_quad([quad.bounds.x, quad.bounds.y, quad.bounds.width, bw], border_color, white_uv, radius, 1.0);
-            // Нижняя
-            self.add_quad([quad.bounds.x, quad.bounds.y + quad.bounds.height - bw, quad.bounds.width, bw], border_color, white_uv, radius, 1.0);
-            // Левая
-            self.add_quad([quad.bounds.x, quad.bounds.y, bw, quad.bounds.height], border_color, white_uv, radius, 1.0);
-            // Правая
-            self.add_quad([quad.bounds.x + quad.bounds.width - bw, quad.bounds.y, bw, quad.bounds.height], border_color, white_uv, radius, 1.0);
-        }
     }
     fn clear(&mut self) {
         self.vertices.clear();
@@ -391,7 +376,6 @@ impl iced_core::text::Paragraph for RealParagraph {
                                     min_x = min_x.min(left);
                                     max_x = max_x.max(right);
                                 } else {
-                                    // Если нет изображения (пробел), используем логические границы
                                     min_x = min_x.min(glyph.x);
                                     max_x = max_x.max(glyph.x + glyph.w);
                                 }
@@ -632,7 +616,6 @@ impl GpuRenderer {
     fn draw_buffer(&mut self, buffer: &Buffer, pos: Point, color: Color) {
         let text_color = [color.r, color.g, color.b, color.a];
 
-        // Предварительно проверяем и загружаем отсутствующие глифы
         self.prepare_glyphs(buffer);
 
         for run in buffer.layout_runs() {
@@ -652,7 +635,7 @@ impl GpuRenderer {
                         ],
                         text_color,
                         info.uv,
-                        0.0, 0.0, // Text has no rounding
+                        0.0, 0.0, 0.0, [0.0, 0.0, 0.0, 0.0],
                     );
                 }
             }
@@ -673,7 +656,6 @@ impl GpuRenderer {
                         let width = image.placement.width;
                         let height = image.placement.height;
 
-                        // Проверка места в атласе
                         if self.current_atlas_x + width + 2 > self.atlas_width {
                             self.current_atlas_x = 2;
                             self.current_atlas_y += self.row_height + 2;

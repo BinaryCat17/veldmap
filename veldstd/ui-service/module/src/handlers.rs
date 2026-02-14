@@ -4,7 +4,7 @@ use veldsdk::rpc::app as app_proto;
 use crate::renderer::{GpuRenderer, DrawCmd};
 use crate::converter;
 use iced_core::{Point, Event, Size, Theme};
-use iced_runtime::user_interface::UserInterface;
+use iced_runtime::UserInterface;
 use iced_graphics::Viewport;
 use veldsdk::rpc::wgpu::*;
 use veldsdk::rpc::host::{call_service, gpu_write_resource};
@@ -16,6 +16,7 @@ pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::R
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     if let Some(l) = req.layout {
         plugin.layout = l;
+        plugin.is_layout_dirty = true;
         *plugin.needs_redrawing.borrow_mut() = true;
     }
     Ok(SetViewResponse {})
@@ -26,112 +27,60 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
     let mut messages = Vec::new();
     if let Some(event_proto) = req.event {
         if let Some(ev) = event_proto.event {
-            *plugin.needs_redrawing.borrow_mut() = true;
             match ev {
                 app_proto::ui_event::Event::Resize(r) => {
-                    log::trace!("Resize plugin '{}': {}x{} (sf={})", req.plugin_id, r.width, r.height, r.scale_factor);
                     *plugin.canvas_size.borrow_mut() = (r.width, r.height);
                     *plugin.scale_factor.borrow_mut() = r.scale_factor;
-                    // Инвалидируем текстуру, чтобы она пересоздалась с новым размером
                     *plugin.ui_texture.borrow_mut() = None;
-                }
-                app_proto::ui_event::Event::CursorMoved(c) => {
-                    let sf = *plugin.scale_factor.borrow();
-                    let pos = Point::new(c.x / sf, c.y / sf);
-                    *plugin.cursor_position.borrow_mut() = pos;
-                    plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
-                }
-                app_proto::ui_event::Event::Click(c) => {
-                    let sf = *plugin.scale_factor.borrow();
-                    let pos = Point::new(c.x / sf, c.y / sf);
-                    log::trace!("Click plugin '{}': raw={:?}, logical={:?}, button={}, pressed={}", req.plugin_id, (c.x, c.y), (pos.x, pos.y), c.button, c.pressed);
-                    *plugin.cursor_position.borrow_mut() = pos;
-                    
-                    let button = match c.button {
-                        1 => iced_core::mouse::Button::Left,
-                        2 => iced_core::mouse::Button::Right,
-                        3 => iced_core::mouse::Button::Middle,
-                        _ => iced_core::mouse::Button::Left,
-                    };
-                    let mut events = plugin.pending_events.borrow_mut();
-                    events.push(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: pos }));
-                    
-                    if c.pressed {
-                        events.push(Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)));
-                    } else {
-                        events.push(Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)));
-                    }
-                }
-                app_proto::ui_event::Event::Scroll(s) => {
-                    let mut vel = plugin.scroll_velocity.borrow_mut();
-
-                    // Сброс инерции при смене направления
-                    if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
-                        vel.y = 0.0;
-                    }
-
-                    let dy = s.delta_y.signum() * (s.delta_y.abs().powf(0.4) * 24.0);
-                    let dx = s.delta_x.signum() * (s.delta_x.abs().powf(0.4) * 24.0);
-
-                    vel.x += dx;
-                    vel.y += dy;
-                    
-                    vel.x = vel.x.clamp(-3000.0, 3000.0);
-                    vel.y = vel.y.clamp(-3000.0, 3000.0);
-
                     *plugin.needs_redrawing.borrow_mut() = true;
                 }
-                app_proto::ui_event::Event::Frame(f) => {
-                    let mut vel = plugin.scroll_velocity.borrow_mut();
-                    if vel.x.abs() > 0.5 || vel.y.abs() > 0.5 {
-                        let friction = 0.85f32; 
-                        let factor = 1.0 - friction.powf(f.dt * 60.0);
-                        
-                        let scroll_amount_x = vel.x * factor;
-                        let scroll_amount_y = vel.y * factor;
-
-                        plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
-                            delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
-                        }));
-                        
-                        vel.x -= scroll_amount_x;
-                        vel.y -= scroll_amount_y;
-                        
-                        *plugin.needs_redrawing.borrow_mut() = true;
-                    } else {
-                        vel.x = 0.0;
-                        vel.y = 0.0;
-                    }
-
+                app_proto::ui_event::Event::Frame(_f) => {
                     messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id)?;
                 }
-                _ => {}
+                _ => {
+                    plugin.pending_events.borrow_mut().push(convert_event(ev, *plugin.scale_factor.borrow()));
+                    *plugin.needs_redrawing.borrow_mut() = true;
+                }
             }
         }
     }
     Ok(HandleUiEventResponse { messages })
 }
 
+fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
+    match ev {
+        app_proto::ui_event::Event::CursorMoved(c) => Event::Mouse(iced_core::mouse::Event::CursorMoved { position: Point::new(c.x / sf, c.y / sf) }),
+        app_proto::ui_event::Event::Click(c) => {
+            let pos = Point::new(c.x / sf, c.y / sf);
+            let button = match c.button { 1 => iced_core::mouse::Button::Left, 2 => iced_core::mouse::Button::Right, 3 => iced_core::mouse::Button::Middle, _ => iced_core::mouse::Button::Left };
+            if c.pressed { Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)) }
+            else { Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)) }
+        }
+        app_proto::ui_event::Event::Scroll(s) => Event::Mouse(iced_core::mouse::Event::WheelScrolled { delta: iced_core::mouse::ScrollDelta::Pixels { x: s.delta_x, y: s.delta_y } }),
+        _ => Event::Window(iced_core::window::Event::RedrawRequested(std::time::Instant::now())),
+    }
+}
+
 fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str) -> anyhow::Result<Vec<UiEventResponse>> {
     let (width, height) = *plugin.canvas_size.borrow();
     if width == 0 || height == 0 { return Ok(Vec::new()); }
     
-    let sf = *plugin.scale_factor.borrow();
-    renderer.update_params(width, height, sf);
-    
-    let cursor_pos = *plugin.cursor_position.borrow();
-    let cursor = iced_core::mouse::Cursor::Available(cursor_pos);
+    let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
     
+    if !*needs_redrawing && events.is_empty() {
+        if let Some(tex) = &*plugin.ui_texture.borrow() {
+            let _ = veldsdk::app::AppBridge::display_frame(tex.handle(), width, height);
+            return Ok(Vec::new());
+        }
+    }
+
+    let sf = *plugin.scale_factor.borrow();
+    renderer.update_params(width, height, sf);
+    let cursor_pos = *plugin.cursor_position.borrow();
+    let cursor = iced_core::mouse::Cursor::Available(cursor_pos);
     let viewport = Viewport::with_physical_size(Size::new(width, height), sf.into());
     let mut captured_messages = Vec::new();
-    
-    let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
-    let should_update = *needs_redrawing || !events.is_empty();
-
-    if !should_update {
-        return Ok(Vec::new());
-    }
 
     renderer.clear();
     let element = converter::convert_layout(&plugin.layout);
@@ -149,12 +98,14 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut clipboard = iced_core::clipboard::Null;
     let (ui_state, _) = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
     
-    let should_draw = *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated);
-    
-    if should_draw {
+    if *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated) {
         ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
         execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id)?;
         *needs_redrawing = false;
+    } else {
+        if let Some(tex) = &*plugin.ui_texture.borrow() {
+            let _ = veldsdk::app::AppBridge::display_frame(tex.handle(), width, height);
+        }
     }
     
     plugin.interface_cache.replace(ui.into_cache());
@@ -204,7 +155,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
             *vertex_buffer = res.handle.map(OwnedResource::new);
         }
 
-        if let (Some(pipeline), Some(v_h), Some(u_h)) = (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*plugin.uniform_buffer.borrow()) {
+        if let (Some(pipeline), Some(ref v_h), Some(ref u_h)) = (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*plugin.uniform_buffer.borrow()) {
             let vertex_size = std::mem::size_of::<crate::renderer::Vertex>();
             let data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
             let _ = gpu_write_resource(v_h.id(), 0, data);
@@ -279,6 +230,8 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer) -> a
                             VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 40, shader_location: 4 },
                             VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 48, shader_location: 5 },
                             VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 52, shader_location: 6 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 56, shader_location: 7 },
+                            VertexAttribute { format: VertexFormat::VtxFloat32x4 as i32, offset: 60, shader_location: 8 },
                         ],
                     }],
                     ..Default::default()

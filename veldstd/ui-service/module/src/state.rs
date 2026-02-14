@@ -8,6 +8,7 @@ use crate::renderer::GpuRenderer;
 
 pub struct PluginUiState {
     pub layout: proto::Layout,
+    pub is_layout_dirty: bool,
     pub interface_cache: RefCell<user_interface::Cache>,
     pub needs_redrawing: RefCell<bool>,
     pub canvas_size: RefCell<(u32, u32)>,
@@ -45,6 +46,7 @@ impl PluginUiState {
     pub fn new() -> Self {
         Self {
             layout: proto::Layout::default(),
+            is_layout_dirty: true,
             interface_cache: RefCell::new(user_interface::Cache::default()),
             needs_redrawing: RefCell::new(true),
             canvas_size: RefCell::new((1024, 768)),

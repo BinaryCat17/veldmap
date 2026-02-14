@@ -13,6 +13,8 @@ struct VertexInput {
     @location(4) rect_size: vec2<f32>,
     @location(5) radius: f32,
     @location(6) mode: f32,
+    @location(7) border_width: f32,
+    @location(8) border_color: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -23,6 +25,8 @@ struct VertexOutput {
     @location(3) rect_size: vec2<f32>,
     @location(4) radius: f32,
     @location(5) mode: f32,
+    @location(6) border_width: f32,
+    @location(7) border_color: vec4<f32>,
 };
 
 @vertex
@@ -38,6 +42,8 @@ fn vs_main(model: VertexInput) -> VertexOutput {
     out.rect_size = model.rect_size;
     out.radius = model.radius;
     out.mode = model.mode;
+    out.border_width = model.border_width;
+    out.border_color = model.border_color;
     return out;
 }
 
@@ -54,18 +60,28 @@ fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (in.mode > 0.5) {
-        // SDF Mode for Rectangles
         let dist = sd_rounded_box(in.local_pos, in.rect_size, in.radius);
-        
-        // Anti-aliasing using fwidth
         let smoothing = fwidth(dist);
-        let alpha = 1.0 - smoothstep(-smoothing, smoothing, dist);
         
-        if (alpha <= 0.0) { discard; }
+        // Маска основного тела
+        let alpha = 1.0 - smoothstep(-0.5 * smoothing, 0.5 * smoothing, dist);
+        
+        // Маска рамки (если задана)
+        if (in.border_width > 0.0) {
+            // Расстояние до внутренней границы рамки
+            let interior_dist = dist + in.border_width;
+            let border_mask = smoothstep(-0.5 * smoothing, 0.5 * smoothing, dist) - 
+                              smoothstep(-0.5 * smoothing, 0.5 * smoothing, interior_dist);
+            
+            // Смешиваем цвет фона и цвет рамки
+            let res_color = mix(in.color.rgb, in.border_color.rgb, border_mask);
+            let res_alpha = max(alpha, border_mask) * in.color.a;
+            return vec4<f32>(res_color, res_alpha);
+        }
+        
         return vec4<f32>(in.color.rgb, in.color.a * alpha);
     }
 
-    // Atlas Mode for Text/Images
     let tex_sample = textureSample(t_diffuse, s_diffuse, in.tex_coords);
     let is_color_glyph = abs(tex_sample.r - tex_sample.g) > 0.01 || abs(tex_sample.g - tex_sample.b) > 0.01;
     

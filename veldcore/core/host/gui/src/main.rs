@@ -21,8 +21,6 @@ mod app_service;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Настраиваем логи: по умолчанию только предупреждения, для нашего проекта - INFO
-    // Отключаем шумные iroh, wasmtime, sctk и wgpu_core (до уровня error/warn)
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=error,wgpu_hal=error,sctk=error,egl=error,gles=error");
     }
@@ -35,13 +33,10 @@ async fn main() -> anyhow::Result<()> {
             let args = record.args();
 
             if target == "wasm" {
-                // Логи из плагинов уже содержат [имя-плагина]
                 writeln!(buf, "[{} {:5}] {}", ts, level, args)
             } else if target.starts_with("veldmap") {
-                // Все наши внутренние модули теперь просто [host]
                 writeln!(buf, "[{} {:5}] [host] {}", ts, level, args)
             } else {
-                // Внешние библиотеки
                 writeln!(buf, "[{} {:5}] <{}> {}", ts, level, target, args)
             }
         })
@@ -64,7 +59,6 @@ async fn main() -> anyhow::Result<()> {
     let mut vsync = true;
     let mut fps_limit = 60;
 
-    // Read core.json for window settings
     let core_config_path = std::path::Path::new(&config_dir).join("core.json");
     if let Ok(config_str) = std::fs::read_to_string(core_config_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&config_str) {
@@ -92,8 +86,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
     let is_visible = Arc::new(AtomicBool::new(true));
-    let ui_busy = Arc::new(AtomicBool::new(false));
-    let frame_pending = Arc::new(AtomicBool::new(false)); // New pacing flag
+    let frame_pending = Arc::new(AtomicBool::new(false));
 
     let flags = wgpu::InstanceFlags::default() 
         | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER
@@ -113,32 +106,39 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default() 
     }).await.ok_or_else(|| anyhow::anyhow!("Compatible GPU adapter not found."))?;
     
-    let info = adapter.get_info();
-    log::info!("Using GPU adapter: {} ({:?}, driver: {}, backend: {:?})", info.name, info.device_type, info.driver, info.backend);
-
-    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats[0];
+    
+    let present_mode = if vsync {
+        wgpu::PresentMode::Fifo
+    } else {
+        if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::Fifo
+        }
+    };
+
     let size = window.inner_size();
     let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
         width: size.width.max(1),
         height: size.height.max(1),
-        present_mode: if vsync { wgpu::PresentMode::Fifo } else { wgpu::PresentMode::Immediate },
+        present_mode,
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
-    if size.width > 0 && size.height > 0 {
-        surface.configure(&device, &config);
-    }
+    surface.configure(&adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?.0, &config);
 
+    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(std::sync::Mutex::new(queue));
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(device_arc.clone(), queue_arc.clone(), surface_format));
 
-    // Инициализируем Blit Pipeline для вывода текстур плагинов
     let blit_shader = device_arc.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
     let blit_pipeline_layout = device_arc.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Blit Pipeline Layout"),
@@ -149,47 +149,21 @@ async fn main() -> anyhow::Result<()> {
         label: Some("Blit Pipeline"),
         layout: Some(&blit_pipeline_layout),
         vertex: wgpu::VertexState {
-            module: &blit_shader,
-            entry_point: Some("vs_main"),
-            buffers: &[],
-            compilation_options: Default::default(),
+            module: &blit_shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &blit_shader,
-            entry_point: Some("fs_main"),
+            module: &blit_shader, entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
+                format: surface_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
+        depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
     });
 
     let bind_group_layout = resources.get_ui_layout();
     let sampler = resources.get_ui_sampler();
-
-    // Создаем темно-серую заглушку 1x1 для бинд-группы 1001
-    let white_tex_id = resources.create_texture(1, 1, 0, 8, false);
-    resources.write_resource(white_tex_id, 0, &[30, 30, 33, 255]).unwrap();
-    if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(white_tex_id) {
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bg = device_arc.create_bind_group(&wgpu::BindGroupDescriptor { 
-            label: Some("Default White BG"), 
-            layout: &bind_group_layout, 
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
-            ] 
-        });
-        resources.register_bind_group(1001, Arc::new(bg));
-        resources.register_named_resource("active_ui_bind_group", 1001);
-    }
 
     let mut app_texture_id: Option<u64> = None;
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
@@ -197,7 +171,6 @@ async fn main() -> anyhow::Result<()> {
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut last_cursor_sent_time = std::time::Instant::now();
 
-    // FPS calculation state
     let mut frame_count = 0;
     let mut last_fps_update = std::time::Instant::now();
 
@@ -224,40 +197,33 @@ async fn main() -> anyhow::Result<()> {
         loop {
             let now = std::time::Instant::now();
             let dt = now.duration_since(last_frame_time).as_secs_f32();
-            last_frame_time = now;
+            
+            // Если предыдущий кадр еще не отрисован - ждем
+            if frame_pending_clone.load(Ordering::Acquire) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                continue;
+            }
 
-            // Pacing logic
-            if vsync {
-                if frame_pending_clone.load(Ordering::Acquire) {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                    continue;
-                }
-            } else {
+            if !vsync {
                 let target_dt = 1.0 / fps_limit.max(1) as f32;
                 if dt < target_dt {
                     tokio::time::sleep(std::time::Duration::from_secs_f32(target_dt - dt)).await;
                     continue;
                 }
             }
+            last_frame_time = now;
 
-            // Poll all WASM tasks (Fibers)
             let _ = d_clone.poll_all_tasks().await;
 
             if is_visible_clone.load(Ordering::Relaxed) {
                 frame_pending_clone.store(true, Ordering::Release);
-                
-                // Construct FrameEvent
-                let ev = veldmap_host_core::app::UiEvent { 
-                    event: Some(veldmap_host_core::app::ui_event::Event::Frame(
-                        veldmap_host_core::app::FrameEvent { dt }
-                    )) 
-                };
-                
-                // Notify plugins that a new frame has started
+                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { dt })) };
                 if let Err(e) = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await {
                     log::error!("Frame event failed: {}", e);
                     frame_pending_clone.store(false, Ordering::Release);
                 }
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     });
@@ -269,35 +235,26 @@ async fn main() -> anyhow::Result<()> {
             Event::UserEvent(()) => {
                 let mut last_draw_cmd = None;
                 while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
-
-                match last_draw_cmd {
-                    Some(AppCommand::Draw(id, w, h)) => {
-                        let size = window.inner_size();
-                        if is_visible.load(Ordering::SeqCst) && size.width > 0 && size.height > 0 && w > 0 && h > 0 {
-                            if Some(id) != app_texture_id || (w, h) != last_size || app_bind_group.is_none() {
-                                if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id) {
-                                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                                    let device = resources.get_device();
-                                    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor { 
-                                        label: None, 
-                                        layout: &bind_group_layout, 
-                                        entries: &[
-                                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
-                                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
-                                        ] 
-                                    });
-                                    app_texture_id = Some(id);
-                                    app_bind_group = Some(bind_group.clone());
-                                    let bg_id = 1001;
-                                    resources.register_bind_group(bg_id, Arc::new(bind_group));
-                                    resources.register_named_resource("active_ui_bind_group", bg_id);
-                                    last_size = (w, h);
-                                }
+                if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
+                    if is_visible.load(Ordering::SeqCst) && w > 0 && h > 0 {
+                        if Some(id) != app_texture_id || (w, h) != last_size {
+                            if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id) {
+                                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                                let bind_group = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor { 
+                                    label: None, layout: &bind_group_layout, entries: &[
+                                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
+                                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
+                                    ] 
+                                });
+                                app_texture_id = Some(id);
+                                app_bind_group = Some(bind_group.clone());
+                                resources.register_bind_group(1001, Arc::new(bind_group));
+                                resources.register_named_resource("active_ui_bind_group", 1001);
+                                last_size = (w, h);
                             }
-                            window.request_redraw();
                         }
+                        window.request_redraw();
                     }
-                    None => {}
                 }
             }
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
@@ -311,119 +268,71 @@ async fn main() -> anyhow::Result<()> {
                                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { 
                                     label: None, 
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
-                                        view: &view, 
-                                        resolve_target: None, 
+                                        view: &view, resolve_target: None, 
                                         ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.07, a: 1.0 }), store: wgpu::StoreOp::Store } 
                                     })], 
                                     depth_stencil_attachment: None, ..Default::default() 
                                 });
-
                                 if let Some(bg) = &app_bind_group {
                                     rp.set_pipeline(&blit_pipeline);
                                     rp.set_bind_group(0, bg, &[]);
                                     rp.draw(0..3, 0..1);
                                 }
                             }
-                            {
-                                let q = queue_arc.lock().unwrap();
-                                q.submit(Some(encoder.finish()));
-                            }
+                            queue_arc.lock().unwrap().submit(Some(encoder.finish()));
                             frame.present();
                             frame_pending.store(false, Ordering::Release);
 
-                            // Update FPS
                             frame_count += 1;
                             let now = std::time::Instant::now();
                             let elapsed = now.duration_since(last_fps_update);
                             if elapsed >= std::time::Duration::from_secs(1) {
-                                let fps = frame_count as f64 / elapsed.as_secs_f64();
-                                window.set_title(&format!("{} - {:.1} FPS", window_title, fps));
+                                window.set_title(&format!("{} - {:.1} FPS", window_title, frame_count as f64 / elapsed.as_secs_f64()));
                                 frame_count = 0;
                                 last_fps_update = now;
                             }
                         }
-                        Err(wgpu::SurfaceError::Outdated) => {
+                        Err(e) => {
+                            log::error!("Surface error: {:?}", e);
                             surface.configure(&device_arc, &config);
+                            frame_pending.store(false, Ordering::Release);
                         }
-                        Err(wgpu::SurfaceError::Lost) => {
-                            surface.configure(&device_arc, &config);
-                        }
-                        Err(e) => log::error!("Surface error: {:?}", e),
                     }
                 }
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
-                let scale_factor = window.scale_factor() * ui_scale;
                 if size.width > 0 && size.height > 0 {
-                    is_visible.store(true, Ordering::SeqCst);
                     config.width = size.width; config.height = size.height;
                     surface.configure(&device_arc, &config);
-                    window.request_redraw();
-                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { width: size.width, height: size.height, scale_factor: scale_factor as f32 })) };
-                    let d_clone = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
-                } else {
-                    is_visible.store(false, Ordering::SeqCst);
+                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { width: size.width, height: size.height, scale_factor: (window.scale_factor() * ui_scale) as f32 })) };
+                    let d = dispatcher.clone();
+                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 }
             }
-            Event::WindowEvent { event: WindowEvent::Occluded(occluded), .. } => {
-                is_visible.store(!occluded, Ordering::SeqCst);
-                if !occluded { window.request_redraw(); }
-            }
-            Event::WindowEvent { event: WindowEvent::Focused(focused), .. } => {
-                if focused && is_visible.load(Ordering::SeqCst) { window.request_redraw(); }
-            }
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
-                let pressed = state == winit::event::ElementState::Pressed;
                 let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
-                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed })) };
-                let d_clone = dispatcher.clone();
-                let busy_clone = ui_busy.clone();
-                tokio::spawn(async move { 
-                    busy_clone.store(true, Ordering::SeqCst); 
-                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                    busy_clone.store(false, Ordering::SeqCst); 
-                });
+                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed: state == winit::event::ElementState::Pressed })) };
+                let d = dispatcher.clone();
+                tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
-                if !ui_busy.load(Ordering::SeqCst) && last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(50) {
+                if last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(16) {
                     let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) };
-                    let d_clone = dispatcher.clone();
-                    let busy_clone = ui_busy.clone();
-                    busy_clone.store(true, Ordering::SeqCst);
-                    tokio::spawn(async move { 
-                        let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                        busy_clone.store(false, Ordering::SeqCst); 
-                    });
+                    let d = dispatcher.clone();
+                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                     last_cursor_sent_time = std::time::Instant::now();
                 }
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
-                let (dx, dy) = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x, y),
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32 / 120.0, pos.y as f32 / 120.0),
-                };
-                
-                // Пересчитываем в пиксели для плагина
-                let pdx = dx * 120.0;
-                let pdy = dy * 120.0;
-                
-                let ev = veldmap_host_core::app::UiEvent { 
-                    event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { 
-                        delta_x: pdx, delta_y: pdy 
-                    })) 
-                };
-                
-                let d_clone = dispatcher.clone();
-                tokio::spawn(async move { 
-                    let _ = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; 
-                });
+                let (pdx, pdy) = match delta { winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0), winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32) };
+                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })) };
+                let d = dispatcher.clone();
+                tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
             }
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             _ => (),
         }
     })?;
-
     Ok(())
 }
