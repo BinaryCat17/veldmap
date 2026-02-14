@@ -7,14 +7,12 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
         
         // Item Main Part (Folder is button, File is panel)
         let main_part: Element<Message> = if item.is_folder {
-            button(
+            crate::styles::apply_file(button(
                 row![
                     text("\u{f07b}").color(veld_ui::Color::from_rgb(0.4, 0.6, 1.0)),
                     text(&item.name)
                 ].spacing(10.0).align_items(veld_ui::Alignment::Center)
-            )
-            .style(crate::styles::file_button())
-            .padding(5.0)
+            ))
             .width(veld_ui::Length::Fill)
             .on_press(Message::BrowsePath(item.s3_key.clone()))
             .into()
@@ -39,9 +37,7 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
         } else if item.exists_locally {
             container(row![
                 text("\u{f00c}").color(veld_ui::Color::from_rgb(0.3, 0.8, 0.3)),
-                button(text("\u{f021}"))
-                    .style(crate::styles::sync_button())
-                    .padding(6.0)
+                crate::styles::apply_icon(button(text("\u{f021}")), veld_ui::Color::from_rgb(0.5, 0.5, 0.7))
                     .on_press(Message::DownloadFile(item.s3_key.clone()))
             ].spacing(10.0).align_items(veld_ui::Alignment::Center))
             .width(veld_ui::Length::Fixed(80.0))
@@ -50,9 +46,7 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
         } else if !item.is_folder {
             // File exists only on S3
             container(
-                button(text("\u{f019}"))
-                    .style(crate::styles::download_button())
-                    .padding(6.0)
+                crate::styles::apply_icon(button(text("\u{f019}")), veld_ui::Color::from_rgb(0.3, 0.8, 0.3))
                     .on_press(Message::DownloadFile(item.s3_key.clone()))
             )
             .width(veld_ui::Length::Fixed(80.0))
@@ -75,14 +69,14 @@ pub fn view(path: &str, items: &[BrowserItem], status: &str, has_prev: bool, has
 
     let mut pagination = row![].spacing(10.0);
     if has_prev {
-        pagination = pagination.push(button(text("\u{f060} Previous ")).on_press(Message::PrevPage));
+        pagination = pagination.push(crate::styles::apply_primary(button(text("\u{f060} Previous"))).on_press(Message::PrevPage));
     }
     if has_next {
-        pagination = pagination.push(button(text(" Next \u{f061} ")).on_press(Message::NextPage));
+        pagination = pagination.push(crate::styles::apply_primary(button(text("Next \u{f061}"))).on_press(Message::NextPage));
     }
 
     let header = row![
-        button(text("\u{f062}")).on_press(Message::BrowseUp),
+        crate::styles::apply_primary(button(text("\u{f062}"))).on_press(Message::BrowseUp),
         text(format!("Browsing /{}", path)).size(20.0),
     ].spacing(10.0).align_items(veld_ui::Alignment::Center);
 

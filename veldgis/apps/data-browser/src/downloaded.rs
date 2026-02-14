@@ -17,7 +17,7 @@ pub struct DownloadedState {
 
 pub fn view(state: &DownloadedState, files: &[BrowserItem]) -> Element<Message> {
     let file_list = column(files.iter().map(|f| {
-        button(text(&f.name)).width(veld_ui::Length::Fill).on_press(Message::ViewFile(f.s3_key.clone())).into()
+        crate::styles::apply_file(button(text(&f.name))).width(veld_ui::Length::Fill).on_press(Message::ViewFile(f.s3_key.clone())).into()
     })).spacing(5.0);
 
     column![

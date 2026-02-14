@@ -1,15 +1,25 @@
-use veld_ui::{Style, ButtonStyle, WidgetStyle, Color, Border, Background};
+use veld_ui::{Style, ButtonStyle, WidgetStyle, Color, Border, Background, Button, Padding};
 
-pub fn file_button() -> Style {
+// --- Colors ---
+pub const COLOR_BG_LIGHT: Color = Color { r: 0.2, g: 0.2, b: 0.25, a: 1.0 };
+pub const COLOR_BG_HOVER: Color = Color { r: 0.25, g: 0.25, b: 0.35, a: 1.0 };
+pub const COLOR_PRIMARY: Color = Color { r: 0.1, g: 0.4, b: 0.7, a: 1.0 };
+pub const COLOR_PRIMARY_HOVER: Color = Color { r: 0.15, g: 0.5, b: 0.8, a: 1.0 };
+pub const COLOR_SUCCESS: Color = Color { r: 0.1, g: 0.3, b: 0.1, a: 1.0 };
+pub const COLOR_SUCCESS_HOVER: Color = Color { r: 0.15, g: 0.4, b: 0.15, a: 1.0 };
+
+// --- Button Styles (Colors Only) ---
+
+pub fn nav_style() -> Style {
     let base = WidgetStyle {
-        background: Some(Background::Color(Color::from_rgb(0.2, 0.2, 0.25))),
-        text_color: Some(Color::WHITE),
+        background: Some(Background::Color(Color::from_rgb(0.15, 0.15, 0.18))),
+        text_color: Some(Color::from_rgb(0.7, 0.7, 0.7)),
         border: Border::with_radius(4.0),
         ..Default::default()
     };
     
     let hovered = WidgetStyle {
-        background: Some(Background::Color(Color::from_rgb(0.25, 0.25, 0.35))),
+        background: Some(Background::Color(Color::from_rgb(0.25, 0.25, 0.3))),
         text_color: Some(Color::WHITE),
         border: Border::with_radius(4.0),
         ..Default::default()
@@ -23,26 +33,18 @@ pub fn file_button() -> Style {
     }.into()
 }
 
-pub fn sync_button() -> Style {
+pub fn primary_style() -> Style {
     let base = WidgetStyle {
-        background: Some(Background::Color(Color::from_rgb(0.15, 0.15, 0.2))),
-        text_color: Some(Color::from_rgb(0.8, 0.8, 0.8)),
-        border: Border {
-            color: Color::from_rgb(0.3, 0.3, 0.4),
-            width: 1.0,
-            radius: 4.0.into(),
-        },
+        background: Some(Background::Color(COLOR_PRIMARY)),
+        text_color: Some(Color::WHITE),
+        border: Border::with_radius(4.0),
         ..Default::default()
     };
     
     let hovered = WidgetStyle {
-        background: Some(Background::Color(Color::from_rgb(0.2, 0.2, 0.3))),
+        background: Some(Background::Color(COLOR_PRIMARY_HOVER)),
         text_color: Some(Color::WHITE),
-        border: Border {
-            color: Color::from_rgb(0.5, 0.5, 0.7),
-            width: 1.0,
-            radius: 4.0.into(),
-        },
+        border: Border::with_radius(4.0),
         ..Default::default()
     };
 
@@ -54,26 +56,18 @@ pub fn sync_button() -> Style {
     }.into()
 }
 
-pub fn download_button() -> Style {
+pub fn file_button_style() -> Style {
     let base = WidgetStyle {
-        background: Some(Background::Color(Color::from_rgb(0.1, 0.3, 0.1))),
+        background: Some(Background::Color(COLOR_BG_LIGHT)),
         text_color: Some(Color::WHITE),
-        border: Border {
-            color: Color::from_rgb(0.2, 0.5, 0.2),
-            width: 1.0,
-            radius: 4.0.into(),
-        },
+        border: Border::with_radius(4.0),
         ..Default::default()
     };
     
     let hovered = WidgetStyle {
-        background: Some(Background::Color(Color::from_rgb(0.15, 0.4, 0.15))),
+        background: Some(Background::Color(COLOR_BG_HOVER)),
         text_color: Some(Color::WHITE),
-        border: Border {
-            color: Color::from_rgb(0.3, 0.7, 0.3),
-            width: 1.0,
-            radius: 4.0.into(),
-        },
+        border: Border::with_radius(4.0),
         ..Default::default()
     };
 
@@ -83,4 +77,39 @@ pub fn download_button() -> Style {
         pressed: base,
         disabled: WidgetStyle::default(),
     }.into()
+}
+
+// --- Button Factory (Style + Padding) ---
+
+pub fn apply_nav<M>(btn: Button<M>) -> Button<M> {
+    btn.style(nav_style()).padding(Padding { top: 8.0, bottom: 8.0, left: 15.0, right: 15.0 })
+}
+
+pub fn apply_primary<M>(btn: Button<M>) -> Button<M> {
+    btn.style(primary_style()).padding(Padding { top: 6.0, bottom: 6.0, left: 12.0, right: 12.0 })
+}
+
+pub fn apply_file<M>(btn: Button<M>) -> Button<M> {
+    btn.style(file_button_style()).padding(5.0)
+}
+
+pub fn apply_icon<M>(btn: Button<M>, color: Color) -> Button<M> {
+    let base = WidgetStyle {
+        background: Some(Background::Color(Color::from_rgba(color.r, color.g, color.b, 0.1))),
+        text_color: Some(color),
+        border: Border::with_radius(4.0),
+        ..Default::default()
+    };
+    let hovered = WidgetStyle {
+        background: Some(Background::Color(Color::from_rgba(color.r, color.g, color.b, 0.2))),
+        text_color: Some(color),
+        border: Border::with_radius(4.0),
+        ..Default::default()
+    };
+    btn.style(ButtonStyle {
+        active: base.clone(),
+        hovered,
+        pressed: base,
+        disabled: WidgetStyle::default(),
+    }).padding(6.0)
 }

@@ -8,11 +8,11 @@ pub fn view(state: &LocalState) -> Element<Message> {
     let title_bar = column![
         text("VeldMap Tools").size(32.0).color(COLOR_TEXT),
         row![
-            button(text("Search"))
+            crate::styles::apply_nav(button(text("Search")))
                 .on_press(Message::SwitchMode(ViewMode::Search)),
-            button(text("Browse"))
+            crate::styles::apply_nav(button(text("Browse")))
                 .on_press(Message::SwitchMode(ViewMode::Browse)),
-            button(text("Downloaded"))
+            crate::styles::apply_nav(button(text("Downloaded")))
                 .on_press(Message::SwitchMode(ViewMode::Downloaded)),
         ].spacing(15.0),
     ].spacing(20.0);
@@ -20,8 +20,8 @@ pub fn view(state: &LocalState) -> Element<Message> {
     let error_view: Element<Message> = if let Some(err) = &state.error_message {
         column![
             text(err).size(14.0).color(Color::from_rgb(1.0, 0.4, 0.4)),
-            button(text("Clear")).on_press(Message::ClearError)
-        ].into()
+            crate::styles::apply_primary(button(text("Clear"))).on_press(Message::ClearError)
+        ].spacing(10.0).into()
     } else { column![].into() };
 
     let status_view = text(&state.status_message).size(14.0).color(COLOR_TEXT_DIM);
