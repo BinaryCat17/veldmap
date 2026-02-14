@@ -163,6 +163,10 @@ impl GpuRenderer {
         self.current_height = height;
     }
 
+    pub fn atlas_dimensions(&self) -> (u32, u32) {
+        (self.atlas_width, self.atlas_height)
+    }
+
     pub fn atlas_dirty_range(&self) -> (u64, &[u8]) {
         let y_min = self.atlas_dirty_y_min;
         let y_max = self.atlas_dirty_y_max.min(self.atlas_height);

@@ -222,7 +222,15 @@ async fn main() -> anyhow::Result<()> {
 
             if is_visible_clone.load(Ordering::Relaxed) {
                 frame_pending_clone.store(true, Ordering::Release);
-                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { dt })) };
+                let ev = veldmap_host_core::app::UiEvent { 
+                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
+                        id: veldmap_host_core::SURFACE_ID, 
+                        ..Default::default() 
+                    }),
+                    event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { 
+                        dt,
+                    })) 
+                };
                 if let Err(e) = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await {
                     log::error!("Frame event failed: {}", e);
                     frame_pending_clone.store(false, Ordering::Release);
@@ -242,9 +250,9 @@ async fn main() -> anyhow::Result<()> {
                 while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
                 if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
                     if is_visible.load(Ordering::SeqCst) && w > 0 && h > 0 {
-                        if id == 0 {
+                        if id == veldmap_host_core::SURFACE_ID {
                             // Direct surface rendering
-                            app_texture_id = Some(0);
+                            app_texture_id = Some(veldmap_host_core::SURFACE_ID);
                             app_bind_group = None;
                         } else if Some(id) != app_texture_id || (w, h) != last_size {
                             if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id) {
@@ -306,7 +314,7 @@ async fn main() -> anyhow::Result<()> {
 
                             for req in deferred_commands {
                                 let target_view_arc: Arc<wgpu::TextureView>;
-                                let is_surface = req.target_texture_view_id == 0;
+                                let is_surface = req.target_texture_view_id == veldmap_host_core::SURFACE_ID;
                                 let target_view: &wgpu::TextureView = if is_surface {
                                     &view
                                 } else {
@@ -370,7 +378,17 @@ async fn main() -> anyhow::Result<()> {
                 if size.width > 0 && size.height > 0 {
                     config.width = size.width; config.height = size.height;
                     surface.configure(&device_arc, &config);
-                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { width: size.width, height: size.height, scale_factor: (window.scale_factor() * ui_scale) as f32 })) };
+                    let ev = veldmap_host_core::app::UiEvent { 
+                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
+                            id: veldmap_host_core::SURFACE_ID, 
+                            ..Default::default() 
+                        }),
+                        event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { 
+                            width: size.width, 
+                            height: size.height, 
+                            scale_factor: (window.scale_factor() * ui_scale) as f32,
+                        })) 
+                    };
                     let d = dispatcher.clone();
                     tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                 }
@@ -378,14 +396,20 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
                 let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
-                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed: state == winit::event::ElementState::Pressed })) };
+                let ev = veldmap_host_core::app::UiEvent { 
+                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
+                    event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed: state == winit::event::ElementState::Pressed })) 
+                };
                 let d = dispatcher.clone();
                 tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
                 if last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(16) {
-                    let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) };
+                    let ev = veldmap_host_core::app::UiEvent { 
+                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
+                        event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) 
+                    };
                     let d = dispatcher.clone();
                     tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
                     last_cursor_sent_time = std::time::Instant::now();
@@ -393,7 +417,10 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 let (pdx, pdy) = match delta { winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0), winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32) };
-                let ev = veldmap_host_core::app::UiEvent { event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })) };
+                let ev = veldmap_host_core::app::UiEvent { 
+                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
+                    event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })) 
+                };
                 let d = dispatcher.clone();
                 tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
             }

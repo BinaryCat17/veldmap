@@ -19,6 +19,8 @@ pub use rpc::core::ResourceHandle;
 use rpc::host::call_service;
 use prost::Message;
 
+pub const SURFACE_ID: u64 = 0;
+
 pub struct OwnedResource {
     handle: ResourceHandle,
 }

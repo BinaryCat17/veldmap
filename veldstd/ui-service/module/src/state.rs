@@ -22,6 +22,7 @@ pub struct PluginUiState {
     pub uniform_buffer: RefCell<Option<OwnedResource>>,
     pub uniform_buffer_id: RefCell<Option<u64>>,
     pub ui_pipeline: RefCell<Option<u64>>,
+    pub active_surface_id: RefCell<u64>,
 }
 
 pub struct LocalState {
@@ -67,6 +68,7 @@ impl PluginUiState {
             uniform_buffer: RefCell::new(None),
             uniform_buffer_id: RefCell::new(None),
             ui_pipeline: RefCell::new(None),
+            active_surface_id: RefCell::new(veldsdk::SURFACE_ID),
         }
     }
 }

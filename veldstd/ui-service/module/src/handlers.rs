@@ -26,6 +26,10 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     let mut messages = Vec::new();
     if let Some(event_proto) = req.event {
+        if let Some(h) = event_proto.surface_handle {
+            *plugin.active_surface_id.borrow_mut() = h.id;
+        }
+
         if let Some(ev) = event_proto.event {
             match ev {
                 app_proto::ui_event::Event::Resize(r) => {
@@ -200,10 +204,11 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
         }
     }
 
-    // Direct to surface (ID 0)
+    // Direct to surface
     // We don't clear here, host will clear the surface if needed
-    let _ = recorder.submit(0, None);
-    let _ = veldsdk::app::AppBridge::display_frame(veldsdk::rpc::core::ResourceHandle { id: 0, ..Default::default() }, width, height);
+    let surface_id = *plugin.active_surface_id.borrow();
+    let _ = recorder.submit(surface_id, None);
+    let _ = veldsdk::app::AppBridge::display_frame(veldsdk::rpc::core::ResourceHandle { id: surface_id, ..Default::default() }, width, height);
 
     Ok(())
 }
@@ -297,8 +302,7 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surf
     }
 
     if renderer.atlas_texture_id.is_none() {
-        let w = 2048;
-        let h = 2048;
+        let (w, h) = renderer.atlas_dimensions();
         let req = GpuResourceRequest {
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
                 width: w, height: h, format: TextureFormat::TexRgba8Unorm as i32, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
