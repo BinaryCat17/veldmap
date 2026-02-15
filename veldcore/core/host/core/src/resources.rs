@@ -230,9 +230,8 @@ impl ResourceManager {
 
     pub fn create_texture_view(&self, texture_id: u64, owner_id: u32) -> anyhow::Result<u64> {
         let entry = self.resources.get(&texture_id).ok_or_else(|| anyhow::anyhow!("Texture not found"))?;
-        if entry.owner_id != 0 && entry.owner_id != owner_id {
-            return Err(anyhow::anyhow!("Unauthorized access to texture {}", texture_id));
-        }
+        // View creation is allowed for sharing
+        
         let view = match &entry.resource {
             Resource::Texture { texture, .. } => texture.create_view(&wgpu::TextureViewDescriptor::default()),
             _ => return Err(anyhow::anyhow!("Resource is not a texture")),
@@ -380,24 +379,12 @@ impl ResourceManager {
         }
     }
 
-    pub fn get_resource(&self, id: u64, requestor_id: u32) -> Option<Resource> {
-        self.resources.get(&id).and_then(|r| {
-            if requestor_id == 0 || r.owner_id == 0 || r.owner_id == requestor_id {
-                Some(r.value().resource.clone())
-            } else {
-                None
-            }
-        })
+    pub fn get_resource(&self, id: u64, _requestor_id: u32) -> Option<Resource> {
+        self.resources.get(&id).map(|r| r.value().resource.clone())
     }
 
-    pub fn get_resource_entry(&self, id: u64, requestor_id: u32) -> Option<ResourceEntry> {
-        self.resources.get(&id).and_then(|r| {
-            if requestor_id == 0 || r.owner_id == 0 || r.owner_id == requestor_id {
-                Some(r.value().clone())
-            } else {
-                None
-            }
-        })
+    pub fn get_resource_entry(&self, id: u64, _requestor_id: u32) -> Option<ResourceEntry> {
+        self.resources.get(&id).map(|r| r.value().clone())
     }
 
     pub fn register_pipeline(&self, id: u64, pipeline: Arc<wgpu::RenderPipeline>, owner_id: u32) {
@@ -633,14 +620,12 @@ impl ResourceManager {
         Ok(())
     }
 
-    pub fn read_resource(&self, id: u64, offset: u64, size: u64, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+    pub fn read_resource(&self, id: u64, offset: u64, size: u64, _requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         if size == 0 { return Ok(Vec::new()); }
         
         let entry = self.resources.get(&id).ok_or_else(|| anyhow::anyhow!("Resource not found"))?;
-        if requestor_id != 0 && entry.owner_id != 0 && entry.owner_id != requestor_id {
-            return Err(anyhow::anyhow!("Unauthorized read access to resource {}", id));
-        }
-
+        // Read access is allowed for everyone who has the ID
+        
         match &entry.resource {
             Resource::Data(vec) => {
                 let start = offset as usize;
