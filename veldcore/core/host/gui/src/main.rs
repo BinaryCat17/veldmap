@@ -123,12 +123,12 @@ async fn main() -> anyhow::Result<()> {
         compatible_surface: Some(&surface), 
         power_preference: wgpu::PowerPreference::HighPerformance,
         ..Default::default() 
-    }).await.ok_or_else(|| anyhow::anyhow!("Compatible GPU adapter not found."))?;
+    }).await.expect("Compatible GPU adapter not found.");
     
     let info = adapter.get_info();
     log::info!("Selected GPU: {} ({:?}, {:?})", info.name, info.device_type, info.backend);
 
-    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
+    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await?;
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(std::sync::Mutex::new(queue));
 
@@ -173,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
     let blit_pipeline_layout = device_arc.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Blit Pipeline Layout"),
         bind_group_layouts: &[&resources.get_ui_layout()],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
     let blit_pipeline = device_arc.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Blit Pipeline"),
@@ -189,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None, cache: None,
+        depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview_mask: None, cache: None,
     });
 
     let bind_group_layout = resources.get_ui_layout();
@@ -207,7 +207,7 @@ async fn main() -> anyhow::Result<()> {
     let mut last_fps_update = std::time::Instant::now();
 
     // IROH 0.96 Initialization
-    let secret_key = iroh::SecretKey::generate();
+    let secret_key = iroh::SecretKey::generate(&mut rand::rng());
     let endpoint = iroh::Endpoint::builder()
         .secret_key(secret_key)
         .alpns(vec![b"veldmap/rpc/1".to_vec()])
@@ -261,20 +261,6 @@ async fn main() -> anyhow::Result<()> {
         );
 
         let sleeper = spin_sleep::SpinSleeper::default();
-        
-        // Поиск путей к датчикам GPU на Linux
-        let mut gpu_paths = Vec::new();
-        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with("card") && !name.contains('-') {
-                    let busy_path = entry.path().join("device/gpu_busy_percent");
-                    if busy_path.exists() {
-                        gpu_paths.push(busy_path);
-                    }
-                }
-            }
-        }
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
@@ -297,20 +283,12 @@ async fn main() -> anyhow::Result<()> {
                 let avg_fps = internal_frame_count as f32 / elapsed;
                 let cpu_usage = sys.global_cpu_usage();
                 
-                // Чтение загрузки GPU из sysfs
-                let mut total_gpu_util = 0.0;
-                let mut gpu_count = 0;
-                for path in &gpu_paths {
-                    if let Ok(content) = std::fs::read_to_string(path) {
-                        if let Ok(val) = content.trim().parse::<f32>() {
-                            total_gpu_util += val;
-                            gpu_count += 1;
-                        }
-                    }
-                }
-                
-                let gpu_str = if gpu_count > 0 {
-                    format!("{:.1}%", total_gpu_util / gpu_count as f32)
+                // Использование sysinfo_utils для мониторинга GPU
+                let gpu = sysinfo_utils::gpu_info::get();
+                let gpu_str = if gpu.active().unwrap_or(false) {
+                    let util = gpu.utilization().unwrap_or(0.0);
+                    let temp = gpu.temperature().unwrap_or(0.0);
+                    format!("{:.1}% ({:.0}°C)", util, temp)
                 } else {
                     "N/A".to_string()
                 };
@@ -464,6 +442,7 @@ async fn main() -> anyhow::Result<()> {
                                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                             view: &target_view_arc,
                                             resolve_target: None,
+                                            depth_slice: None,
                                             ops: wgpu::Operations {
                                                 load: wgpu::LoadOp::Clear(wgpu::Color { r: clear.r as f64, g: clear.g as f64, b: clear.b as f64, a: clear.a as f64 }),
                                                 store: wgpu::StoreOp::Store,
@@ -485,6 +464,7 @@ async fn main() -> anyhow::Result<()> {
                                     label: Some("Main-Surface-Pass"), 
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment { 
                                         view: &view, resolve_target: None, 
+                                        depth_slice: None,
                                         ops: wgpu::Operations { load: wgpu::LoadOp::Clear(bg_color), store: wgpu::StoreOp::Store } 
                                     })], 
                                     depth_stencil_attachment: None, ..Default::default() 

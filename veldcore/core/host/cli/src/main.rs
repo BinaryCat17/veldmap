@@ -50,19 +50,24 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     });
     let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { ..Default::default() }).await
-        .ok_or_else(|| anyhow::anyhow!("No WGPU adapter found"))?;
+        .expect("No WGPU adapter found");
     
     let info = adapter.get_info();
-    log::info!("Using headless GPU adapter: {} ({:?}, driver: {})", info.name, info.backend, info.driver);
+    log::info!("Using headless GPU adapter: {} ({:?})", info.name, info.backend);
 
-    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
+    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default()).await?;
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(
         Arc::new(device), 
         Arc::new(std::sync::Mutex::new(queue)),
         wgpu::TextureFormat::Rgba8Unorm
     ));
 
-    let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
+    let secret_key = iroh::SecretKey::generate(&mut rand::rng());
+    let endpoint = iroh::Endpoint::builder()
+        .secret_key(secret_key)
+        .alpns(vec![b"veldmap/rpc/1".to_vec()])
+        .bind()
+        .await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));

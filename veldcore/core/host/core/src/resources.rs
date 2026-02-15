@@ -435,7 +435,7 @@ impl ResourceManager {
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Proxy Pipeline Layout"),
             bind_group_layouts: &bgl_refs,
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let mut wgpu_vertex_layouts = Vec::new();
@@ -557,7 +557,7 @@ impl ResourceManager {
             },
             depth_stencil: None, // TODO: Support depth stencil
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -638,7 +638,7 @@ impl ResourceManager {
                 {
                     let q = self.queue.lock().unwrap();
                     q.submit([]);
-                    self.device.poll(wgpu::Maintain::Wait);
+                    let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                 }
 
                 let aligned_map_size = Self::align_to(size, 4);
@@ -648,7 +648,7 @@ impl ResourceManager {
                     slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
                     {
                         let _q = self.queue.lock().unwrap();
-                        self.device.poll(wgpu::Maintain::Wait);
+                        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
                     rx.recv()??;
                     let data = slice.get_mapped_range()[..size as usize].to_vec();
@@ -666,14 +666,14 @@ impl ResourceManager {
                     {
                         let q = self.queue.lock().unwrap();
                         q.submit(Some(encoder.finish()));
-                        self.device.poll(wgpu::Maintain::Wait);
+                        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
                     let slice = staging.slice(..aligned_map_size);
                     let (tx, rx) = std::sync::mpsc::channel();
                     slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
                     {
                         let _q = self.queue.lock().unwrap();
-                        self.device.poll(wgpu::Maintain::Wait);
+                        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
                     rx.recv()??;
                     let data = slice.get_mapped_range()[..size as usize].to_vec();

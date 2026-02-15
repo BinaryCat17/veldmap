@@ -126,7 +126,7 @@ pub async fn load_services(
             }
             "remote" => {
                 let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
-                let node_id: iroh::NodeId = node_id_str.parse()?;
+                let node_id: iroh::EndpointId = node_id_str.parse()?;
                 dispatcher.register_service(name.clone(), ServiceLocation::RemoteIroh(node_id));
             }
             _ => {}

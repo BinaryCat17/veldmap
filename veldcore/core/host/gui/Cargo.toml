@@ -19,3 +19,5 @@ prost = "0.14"
 iroh = "0.96"
 sysinfo = { version = "0.38", features = ["component"] }
 spin_sleep = "1.2"
+rand = "0.9"
+sysinfo_utils = { git = "https://github.com/vremyavnikuda/sysinfo_utils" }
