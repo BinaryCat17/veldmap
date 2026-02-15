@@ -11,7 +11,8 @@ def main():
     parser.add_argument("--vulkan", action="store_true", help="Force Vulkan backend")
     parser.add_argument("--backend", default=None, help="Force specific WGPU backend (vulkan, gl, dx12, etc.)")
     
-    args = parser.parse_args()
+    # Собираем известные аргументы и все остальные для проброса
+    args, extra_args = parser.parse_known_args()
     
     profile_flag = [] if args.debug else ["--release"]
     profile_name = "debug" if args.debug else "release"
@@ -38,7 +39,7 @@ def main():
         "-p", "veldmap-host-gui"
     ] + profile_flag + [
         "--", "--config", args.config
-    ]
+    ] + extra_args
     
     try:
         subprocess.run(cmd, env=env)

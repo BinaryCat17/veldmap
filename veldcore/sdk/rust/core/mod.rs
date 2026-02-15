@@ -105,6 +105,58 @@ pub fn fs_download(url: String, path: String, headers: std::collections::HashMap
     Ok(res.task_id)
 }
 
+pub const FLAG_PERF: u32 = 1 << 0;
+
+#[macro_export]
+macro_rules! vinfo {
+    ($flags:expr, $($arg:tt)+) => {
+        log::log!(target: &format!("veldmap_vlog:{}", $flags), log::Level::Info, $($arg)+);
+    };
+    ($($arg:tt)+) => {
+        log::log!(log::Level::Info, $($arg)+);
+    };
+}
+
+#[macro_export]
+macro_rules! vwarn {
+    ($flags:expr, $($arg:tt)+) => {
+        log::log!(target: &format!("veldmap_vlog:{}", $flags), log::Level::Warn, $($arg)+);
+    };
+    ($($arg:tt)+) => {
+        log::log!(log::Level::Warn, $($arg)+);
+    };
+}
+
+#[macro_export]
+macro_rules! verror {
+    ($flags:expr, $($arg:tt)+) => {
+        log::log!(target: &format!("veldmap_vlog:{}", $flags), log::Level::Error, $($arg)+);
+    };
+    ($($arg:tt)+) => {
+        log::log!(log::Level::Error, $($arg)+);
+    };
+}
+
+#[macro_export]
+macro_rules! vdebug {
+    ($flags:expr, $($arg:tt)+) => {
+        log::log!(target: &format!("veldmap_vlog:{}", $flags), log::Level::Debug, $($arg)+);
+    };
+    ($($arg:tt)+) => {
+        log::log!(log::Level::Debug, $($arg)+);
+    };
+}
+
+#[macro_export]
+macro_rules! vtrace {
+    ($flags:expr, $($arg:tt)+) => {
+        log::log!(target: &format!("veldmap_vlog:{}", $flags), log::Level::Trace, $($arg)+);
+    };
+    ($($arg:tt)+) => {
+        log::log!(log::Level::Trace, $($arg)+);
+    };
+}
+
 pub struct HostLogger;
 impl Log for HostLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool { true }
@@ -116,7 +168,25 @@ impl Log for HostLogger {
             log::Level::Debug => LogLevel::Debug,
             log::Level::Trace => LogLevel::Trace,
         };
-        let _ = raw::log(&LogRequest { level: level as i32, message: format!("{}", record.args()) });
+        
+        let mut flags = 0;
+        let target = record.target();
+        if target.starts_with("veldmap_vlog:") {
+            if let Some(flags_str) = target.split(':').nth(1) {
+                if let Ok(f) = flags_str.parse::<u32>() {
+                    flags = f;
+                }
+            }
+        } else if target == "veldmap_perf" {
+            // Для совместимости, если кто-то еще использует старый таргет
+            flags |= FLAG_PERF;
+        }
+
+        let _ = raw::log(&LogRequest { 
+            level: level as i32, 
+            message: format!("{}", record.args()),
+            flags,
+        });
     }
     fn flush(&self) {}
 }

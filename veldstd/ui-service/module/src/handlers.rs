@@ -144,7 +144,9 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
                     *plugin.cursor_position.borrow_mut() = position;
                 }
                 plugin.pending_events.borrow_mut().push(iced_ev);
-                *plugin.needs_redrawing.borrow_mut() = true;
+                // Мы не ставим needs_redrawing = true здесь. 
+                // iced сам изменит вертексы, если событие на что-то повлияло (например, hover),
+                // и тогда сработает diffing команд отрисовки.
             }
         }
     }
@@ -257,7 +259,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
                  let avg_draw = *plugin.perf_draw.borrow() as f64 / 1000.0 / *count as f64;
                  let avg_gpu = *plugin.perf_gpu.borrow() as f64 / 1000.0 / *count as f64;
                  
-                 log::info!(target: "veldmap_perf", "UI Render (5s avg) {}: count={}, total={:.2}ms, conv={:.2}ms, build={:.2}ms, update={:.2}ms, draw={:.2}ms, gpu={:.2}ms | Host: {}Hz, {:.1}FPS", 
+                 veldsdk::vinfo!(veldsdk::FLAG_PERF, "UI Render (5s avg) {}: count={}, total={:.2}ms, conv={:.2}ms, build={:.2}ms, update={:.2}ms, draw={:.2}ms, gpu={:.2}ms | Host: {}Hz, {:.1}FPS", 
                      plugin_id, *count, avg_total, avg_conv, avg_build, avg_update, avg_draw, avg_gpu,
                      *plugin.monitor_fps.borrow(), *plugin.actual_fps.borrow());
              }

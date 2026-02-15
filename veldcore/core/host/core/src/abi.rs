@@ -34,7 +34,16 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
             let result = if request.service == "system" && request.method == "log" {
                 if let Ok(log_req) = crate::core::LogRequest::decode(&request.payload[..]) {
-                    log::info!(target: "wasm", "[{}] {}", plugin_name, log_req.message);
+                    use crate::logging::*;
+                    let level = match log_req.level() {
+                        crate::core::LogLevel::Trace => log::Level::Trace,
+                        crate::core::LogLevel::Debug => log::Level::Debug,
+                        crate::core::LogLevel::Info => log::Level::Info,
+                        crate::core::LogLevel::Warn => log::Level::Warn,
+                        crate::core::LogLevel::Error => log::Level::Error,
+                    };
+                    
+                    veld_log(level, log_req.flags | FLAG_WASM, Some(&plugin_name), &log_req.message);
                     Ok(Vec::new())
                 } else {
                     dispatcher.call(&request.service, &request.method, request.payload, instance_id).await

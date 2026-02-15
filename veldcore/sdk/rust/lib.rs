@@ -6,7 +6,7 @@ pub mod wgpu;
 #[cfg(feature = "app")]
 pub mod app;
 
-pub use core::yield_now;
+pub use core::{yield_now, FLAG_PERF};
 
 // Re-exports for macros
 pub use serde_json;

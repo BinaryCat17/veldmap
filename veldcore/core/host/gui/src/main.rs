@@ -22,16 +22,17 @@ mod app_service;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut config_dir = "config".to_string();
-    let mut enable_perf_logs = false;
+    let mut log_flags = 0;
     let args: Vec<String> = std::env::args().collect();
     for i in 0..args.len() {
         if args[i] == "--config" && i + 1 < args.len() {
             config_dir = args[i + 1].clone();
         }
         if args[i] == "--perf" {
-            enable_perf_logs = true;
+            log_flags |= veldmap_host_core::logging::FLAG_PERF;
         }
     }
+    veldmap_host_core::logging::init_logging(log_flags);
 
     // Load .env file if it exists
     if let Ok(content) = std::fs::read_to_string(".env") {
@@ -50,14 +51,8 @@ async fn main() -> anyhow::Result<()> {
     std::env::set_var("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1");
 
     if std::env::var("RUST_LOG").is_err() {
-        // Устанавливаем строгие фильтры для всех шумных библиотек
-        let mut filters = "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,quinn=error,hickory_proto=error,hickory_resolver=error,tracing=error,wasmtime_wasi=warn,wgpu_core=error,wgpu_hal=error,gpu_info=error".to_string();
-        if enable_perf_logs {
-            filters.push_str(",veldmap_perf=info");
-        } else {
-            filters.push_str(",veldmap_perf=off");
-        }
-        std::env::set_var("RUST_LOG", filters);
+        // Устанавливаем строгие фильтры для всех шумных библиотек по умолчанию
+        std::env::set_var("RUST_LOG", "warn,veldmap=info,wasm=info,host=info,iroh=error,iroh_gossip=error,quinn=error,hickory_proto=error,hickory_resolver=error,tracing=error,wasmtime_wasi=warn,wgpu_core=error,wgpu_hal=error,gpu_info=error");
     }
 
     let log_file = std::fs::File::create("veldmap-host.log").ok();
@@ -75,18 +70,18 @@ async fn main() -> anyhow::Result<()> {
         }));
     }
 
-    env_logger::Builder::from_default_env()
-        .format(move |buf, record| {
+    let mut builder = env_logger::Builder::from_default_env();
+    
+    builder.format(move |buf, record| {
             use std::io::Write;
             let ts = buf.timestamp();
             let level = record.level();
             let target = record.target();
             let args = record.args();
 
-            let log_line = if target == "wasm" || target == "veldmap_perf" {
+            // Наши системные логи теперь идут под таргетом "veldmap" (хост и WASM)
+            let log_line = if target == "veldmap" || target == "wasm" {
                 format!("[{} {:5}] {}\n", ts, level, args)
-            } else if target.starts_with("veldmap") {
-                format!("[{} {:5}] [host] {}\n", ts, level, args)
             } else {
                 format!("[{} {:5}] <{}> {}\n", ts, level, target, args)
             };
@@ -373,11 +368,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 
-                log::info!(
-                    target: "veldmap_perf",
-                    "Monitor: {}Hz | Avg FPS: {:.1} | CPU: {:.1}%", 
-                    monitor_fps, avg_fps, cpu_usage
-                );
+                veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_PERF, "Monitor: {}Hz | Avg FPS: {:.1} | CPU: {:.1}%", monitor_fps, avg_fps, cpu_usage);
                 
                 last_fps_log_time = std::time::Instant::now();
             }
@@ -448,7 +439,7 @@ async fn main() -> anyhow::Result<()> {
                     if logic_last_log.elapsed() >= std::time::Duration::from_secs(5) {
                         if logic_acc_count > 0 {
                             let avg = logic_acc_ui_call.as_secs_f64() * 1000.0 / logic_acc_count as f64;
-                            log::info!(target: "veldmap_perf", "Logic Loop (5s avg): UI Call = {:.2} ms ({} calls)", avg, logic_acc_count);
+                            veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_PERF, "Logic Loop (5s avg): UI Call = {:.2} ms ({} calls)", avg, logic_acc_count);
                         }
                         logic_acc_ui_call = std::time::Duration::ZERO;
                         logic_acc_count = 0;
@@ -620,7 +611,7 @@ async fn main() -> anyhow::Result<()> {
                                     let avg_tot = acc_total_redraw.as_secs_f64() * 1000.0 / perf_frame_count as f64;
                                     let avg_int = acc_interval.as_secs_f64() * 1000.0 / perf_frame_count as f64;
                                     
-                                    log::info!(target: "veldmap_perf", "Render Loop (5s avg): FPS={:.1} | DrawCmds={:.1}/s | Interval={:.2}ms | Total={:.2}ms | GetTex={:.2}ms | Submit={:.2}ms | Present={:.2}ms", 
+                                    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_PERF, "Render Loop (5s avg): FPS={:.1} | DrawCmds={:.1}/s | Interval={:.2}ms | Total={:.2}ms | GetTex={:.2}ms | Submit={:.2}ms | Present={:.2}ms", 
                                         perf_frame_count as f64 / 5.0, draw_cmd_count as f64 / 5.0, avg_int, avg_tot, avg_get, avg_sub, avg_pres);
                                 }
                                 acc_get_tex = std::time::Duration::ZERO;

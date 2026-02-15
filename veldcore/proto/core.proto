@@ -43,6 +43,7 @@ enum LogLevel {
 message LogRequest {
   LogLevel level = 1;
   string message = 2;
+  uint32 flags = 3;
 }
 
 // --- RESOURCE LIFECYCLE ---
