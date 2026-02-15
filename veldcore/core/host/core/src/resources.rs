@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, AtomicI32, Ordering};
-use crate::wgpu::{TextureFormat, VertexFormat, StepMode, FilterMode};
+use crate::wgpu::{
+    TextureFormat, VertexFormat, StepMode, FilterMode, 
+    PrimitiveTopology, BlendFactor, BlendOperation, FrontFace, CullMode, IndexFormat
+};
 
 #[derive(Clone, Debug)]
 pub enum Resource {
@@ -26,6 +29,7 @@ pub struct ResourceEntry {
     pub resource: Resource,
     pub readonly: bool,
     pub ref_count: AtomicI32,
+    pub owner_id: u32, // 0 for system resources
 }
 
 impl Clone for ResourceEntry {
@@ -34,6 +38,7 @@ impl Clone for ResourceEntry {
             resource: self.resource.clone(),
             readonly: self.readonly,
             ref_count: AtomicI32::new(self.ref_count.load(Ordering::SeqCst)),
+            owner_id: self.owner_id,
         }
     }
 }
@@ -125,16 +130,21 @@ impl ResourceManager {
         (size + alignment - 1) & !(alignment - 1)
     }
 
-    fn insert_resource(&self, id: u64, resource: Resource, readonly: bool) {
+    fn insert_resource(&self, id: u64, resource: Resource, readonly: bool, owner_id: u32) {
         self.resources.insert(id, ResourceEntry {
             resource,
             readonly,
             ref_count: AtomicI32::new(1),
+            owner_id,
         });
     }
 
-    pub fn acquire_resource(&self, id: u64) -> bool {
+    pub fn acquire_resource(&self, id: u64, requestor_id: u32) -> bool {
         if let Some(entry) = self.resources.get(&id) {
+            // Allow access if owner or system resource
+            if entry.owner_id != 0 && entry.owner_id != requestor_id {
+                return false;
+            }
             entry.ref_count.fetch_add(1, Ordering::SeqCst);
             true
         } else {
@@ -142,9 +152,13 @@ impl ResourceManager {
         }
     }
 
-    pub fn release_resource(&self, id: u64) {
+    pub fn release_resource(&self, id: u64, requestor_id: u32) {
         let mut should_remove = false;
         if let Some(entry) = self.resources.get(&id) {
+            if entry.owner_id != 0 && entry.owner_id != requestor_id {
+                log::warn!(target: "host", "Unauthorized release attempt for resource {} by instance {}", id, requestor_id);
+                return;
+            }
             let prev = entry.ref_count.fetch_sub(1, Ordering::SeqCst);
             if prev <= 1 {
                 should_remove = true;
@@ -156,11 +170,22 @@ impl ResourceManager {
         }
     }
 
-    pub fn destroy_resource(&self, id: u64) {
+    pub fn cleanup_resources(&self, owner_id: u32) {
+        if owner_id == 0 { return; }
+        log::info!(target: "host", "Cleaning up resources for instance {}", owner_id);
+        self.resources.retain(|_, entry| entry.owner_id != owner_id);
+    }
+
+    pub fn destroy_resource(&self, id: u64, requestor_id: u32) {
+        if let Some(entry) = self.resources.get(&id) {
+            if entry.owner_id != 0 && entry.owner_id != requestor_id {
+                return;
+            }
+        }
         self.resources.remove(&id);
     }
 
-    pub fn create_buffer_ext(&self, size: u64, usage: u32, mapped: bool, readonly: bool) -> u64 {
+    pub fn create_buffer_ext(&self, size: u64, usage: u32, mapped: bool, readonly: bool, owner_id: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !readonly || !mapped { final_usage |= wgpu::BufferUsages::COPY_DST; }
@@ -171,15 +196,15 @@ impl ResourceManager {
             usage: final_usage,
             mapped_at_creation: mapped,
         });
-        self.insert_resource(id, Resource::Buffer(Arc::new(buffer)), readonly);
+        self.insert_resource(id, Resource::Buffer(Arc::new(buffer)), readonly, owner_id);
         id
     }
 
-    pub fn create_buffer(&self, size: u64, usage: u32) -> u64 {
-        self.create_buffer_ext(size, usage, false, false)
+    pub fn create_buffer(&self, size: u64, usage: u32, owner_id: u32) -> u64 {
+        self.create_buffer_ext(size, usage, false, false, owner_id)
     }
 
-    pub fn create_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool) -> u64 {
+    pub fn create_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool, owner_id: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let format = match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
             TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
@@ -199,22 +224,25 @@ impl ResourceManager {
             usage: wgpu::TextureUsages::from_bits_truncate(usage) | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        self.insert_resource(id, Resource::Texture { texture: Arc::new(texture), width, height, format: format_proto }, readonly);
+        self.insert_resource(id, Resource::Texture { texture: Arc::new(texture), width, height, format: format_proto }, readonly, owner_id);
         id
     }
 
-    pub fn create_texture_view(&self, texture_id: u64) -> anyhow::Result<u64> {
+    pub fn create_texture_view(&self, texture_id: u64, owner_id: u32) -> anyhow::Result<u64> {
         let entry = self.resources.get(&texture_id).ok_or_else(|| anyhow::anyhow!("Texture not found"))?;
+        if entry.owner_id != 0 && entry.owner_id != owner_id {
+            return Err(anyhow::anyhow!("Unauthorized access to texture {}", texture_id));
+        }
         let view = match &entry.resource {
             Resource::Texture { texture, .. } => texture.create_view(&wgpu::TextureViewDescriptor::default()),
             _ => return Err(anyhow::anyhow!("Resource is not a texture")),
         };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.insert_resource(id, Resource::TextureView(Arc::new(view)), entry.readonly);
+        self.insert_resource(id, Resource::TextureView(Arc::new(view)), entry.readonly, owner_id);
         Ok(id)
     }
 
-    pub fn create_sampler(&self, mag_proto: i32, min_proto: i32) -> u64 {
+    pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, owner_id: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mag = match FilterMode::try_from(mag_proto).unwrap_or(FilterMode::FiltLinear) {
             FilterMode::FiltNearest => wgpu::FilterMode::Nearest,
@@ -229,22 +257,22 @@ impl ResourceManager {
             min_filter: min,
             ..Default::default()
         });
-        self.insert_resource(id, Resource::Sampler(Arc::new(sampler)), true);
+        self.insert_resource(id, Resource::Sampler(Arc::new(sampler)), true, owner_id);
         id
     }
 
-    pub fn create_bind_group_layout(&self, entries: &[wgpu::BindGroupLayoutEntry]) -> u64 {
+    pub fn create_bind_group_layout(&self, entries: &[wgpu::BindGroupLayoutEntry], owner_id: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(&format!("BGL-{}", id)),
             entries,
         });
-        self.insert_resource(id, Resource::BindGroupLayout(Arc::new(layout)), true);
+        self.insert_resource(id, Resource::BindGroupLayout(Arc::new(layout)), true, owner_id);
         id
     }
 
-    pub fn create_bind_group(&self, layout_id: u64, entries_proto: &[crate::wgpu::BindGroupEntry]) -> anyhow::Result<u64> {
-        let layout_res = self.get_resource(layout_id).ok_or_else(|| anyhow::anyhow!("BGL not found"))? ;
+    pub fn create_bind_group(&self, layout_id: u64, entries_proto: &[crate::wgpu::BindGroupEntry], owner_id: u32) -> anyhow::Result<u64> {
+        let layout_res = self.get_resource(layout_id, owner_id).ok_or_else(|| anyhow::anyhow!("BGL not found"))? ;
         let layout = match layout_res {
             Resource::BindGroupLayout(l) => l,
             _ => return Err(anyhow::anyhow!("Resource is not a BindGroupLayout")),
@@ -257,23 +285,23 @@ impl ResourceManager {
         for e in entries_proto {
             match &e.resource {
                 Some(crate::wgpu::bind_group_entry::Resource::BufferId(bid)) => {
-                    if let Some(Resource::Buffer(b)) = self.get_resource(*bid) { keep_alive_buffers.push((e.binding, b)); }
-                    else { return Err(anyhow::anyhow!("Buffer {} not found", bid)); }
+                    if let Some(Resource::Buffer(b)) = self.get_resource(*bid, owner_id) { keep_alive_buffers.push((e.binding, b)); }
+                    else { return Err(anyhow::anyhow!("Buffer {} not found or unauthorized", bid)); }
                 }
                 Some(crate::wgpu::bind_group_entry::Resource::BufferBinding(bb)) => {
-                    if let Some(Resource::Buffer(b)) = self.get_resource(bb.buffer_id) { keep_alive_buffers.push((e.binding, b)); }
-                    else { return Err(anyhow::anyhow!("Buffer {} not found", bb.buffer_id)); }
+                    if let Some(Resource::Buffer(b)) = self.get_resource(bb.buffer_id, owner_id) { keep_alive_buffers.push((e.binding, b)); }
+                    else { return Err(anyhow::anyhow!("Buffer {} not found or unauthorized", bb.buffer_id)); }
                 }
                 Some(crate::wgpu::bind_group_entry::Resource::TextureViewId(tvid)) => {
-                    if let Some(Resource::TextureView(tv)) = self.get_resource(*tvid) { keep_alive_views.push((e.binding, tv)); }
-                    else if let Some(Resource::Texture { texture, .. }) = self.get_resource(*tvid) {
+                    if let Some(Resource::TextureView(tv)) = self.get_resource(*tvid, owner_id) { keep_alive_views.push((e.binding, tv)); }
+                    else if let Some(Resource::Texture { texture, .. }) = self.get_resource(*tvid, owner_id) {
                          keep_alive_views.push((e.binding, Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()))));
                     }
-                    else { return Err(anyhow::anyhow!("TextureView/Texture {} not found", tvid)); }
+                    else { return Err(anyhow::anyhow!("TextureView/Texture {} not found or unauthorized", tvid)); }
                 }
                 Some(crate::wgpu::bind_group_entry::Resource::SamplerId(sid)) => {
-                    if let Some(Resource::Sampler(s)) = self.get_resource(*sid) { keep_alive_samplers.push((e.binding, s)); }
-                    else { return Err(anyhow::anyhow!("Sampler {} not found", sid)); }
+                    if let Some(Resource::Sampler(s)) = self.get_resource(*sid, owner_id) { keep_alive_samplers.push((e.binding, s)); }
+                    else { return Err(anyhow::anyhow!("Sampler {} not found or unauthorized", sid)); }
                 }
                 None => {}
             }
@@ -316,11 +344,11 @@ impl ResourceManager {
             layout: &layout,
             entries: &entries,
         });
-        self.insert_resource(id, Resource::BindGroup(Arc::new(bg)), true);
+        self.insert_resource(id, Resource::BindGroup(Arc::new(bg)), true, owner_id);
         Ok(id)
     }
 
-    pub fn create_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool) -> u64 {
+    pub fn create_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool, owner_id: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !readonly { final_usage |= wgpu::BufferUsages::COPY_DST; }
@@ -336,12 +364,15 @@ impl ResourceManager {
             view[..data.len()].copy_from_slice(data);
         }
         buffer.unmap();
-        self.insert_resource(id, Resource::Buffer(Arc::new(buffer)), readonly);
+        self.insert_resource(id, Resource::Buffer(Arc::new(buffer)), readonly, owner_id);
         id
     }
 
-    pub fn freeze_resource(&self, id: u64) -> bool {
+    pub fn freeze_resource(&self, id: u64, requestor_id: u32) -> bool {
         if let Some(mut entry) = self.resources.get_mut(&id) {
+            if entry.owner_id != 0 && entry.owner_id != requestor_id {
+                return false;
+            }
             entry.readonly = true;
             true
         } else {
@@ -349,153 +380,209 @@ impl ResourceManager {
         }
     }
 
-    pub fn get_resource(&self, id: u64) -> Option<Resource> {
-        self.resources.get(&id).map(|r| r.value().resource.clone())
+    pub fn get_resource(&self, id: u64, requestor_id: u32) -> Option<Resource> {
+        self.resources.get(&id).and_then(|r| {
+            if requestor_id == 0 || r.owner_id == 0 || r.owner_id == requestor_id {
+                Some(r.value().resource.clone())
+            } else {
+                None
+            }
+        })
     }
 
-    pub fn get_resource_entry(&self, id: u64) -> Option<ResourceEntry> {
-        self.resources.get(&id).map(|r| r.value().clone())
+    pub fn get_resource_entry(&self, id: u64, requestor_id: u32) -> Option<ResourceEntry> {
+        self.resources.get(&id).and_then(|r| {
+            if requestor_id == 0 || r.owner_id == 0 || r.owner_id == requestor_id {
+                Some(r.value().clone())
+            } else {
+                None
+            }
+        })
     }
 
-    pub fn register_pipeline(&self, id: u64, pipeline: Arc<wgpu::RenderPipeline>) {
-        self.insert_resource(id, Resource::RenderPipeline(pipeline), true);
+    pub fn register_pipeline(&self, id: u64, pipeline: Arc<wgpu::RenderPipeline>, owner_id: u32) {
+        self.insert_resource(id, Resource::RenderPipeline(pipeline), true, owner_id);
     }
 
-    pub fn register_bind_group(&self, id: u64, bind_group: Arc<wgpu::BindGroup>) {
-        self.insert_resource(id, Resource::BindGroup(bind_group), true);
+    pub fn register_bind_group(&self, id: u64, bind_group: Arc<wgpu::BindGroup>, owner_id: u32) {
+        self.insert_resource(id, Resource::BindGroup(bind_group), true, owner_id);
     }
 
-    pub fn create_shader(&self, source: &str, label: Option<&str>) -> u64 {
+    pub fn create_shader(&self, source: &str, label: Option<&str>, owner_id: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label,
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        self.insert_resource(id, Resource::ShaderModule(Arc::new(shader)), true);
+        self.insert_resource(id, Resource::ShaderModule(Arc::new(shader)), true, owner_id);
         id
     }
 
-    pub fn create_pipeline(&self, shader_id: u64, label: Option<&str>, format_proto: i32, vertex_layouts: Vec<crate::wgpu::VertexBufferLayout>) -> anyhow::Result<u64> {
-        let shader = match self.get_resource(shader_id) {
+    pub fn create_pipeline(&self, req: &crate::wgpu::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<u64> {
+        let shader = match self.get_resource(req.shader_id, owner_id) {
             Some(Resource::ShaderModule(s)) => s,
-            _ => return Err(anyhow::anyhow!("Resource is not a shader")),
+            _ => return Err(anyhow::anyhow!("Resource is not a shader or unauthorized")),
         };
 
-        let target_format = match format_proto {
-            1 => wgpu::TextureFormat::R32Float,
-            2 => wgpu::TextureFormat::Rgba16Float,
-            3 => wgpu::TextureFormat::Rgba32Float,
-            9 => wgpu::TextureFormat::R8Unorm,
-            10 => wgpu::TextureFormat::Bgra8UnormSrgb,
-            11 => wgpu::TextureFormat::Rgba8UnormSrgb,
+        let target_format = match TextureFormat::try_from(req.target_format).unwrap_or(TextureFormat::TexRgba8Unorm) {
+            TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
+            TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
+            TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
+            TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
+            TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
 
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let bind_group_layout = self.get_ui_layout();
-        
-        let uniform_bg_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Proxy Uniform BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+        let mut bgls = Vec::new();
+        let mut bgl_refs = Vec::new();
+        for &id in &req.bind_group_layout_ids {
+            match self.get_resource(id, owner_id) {
+                Some(Resource::BindGroupLayout(l)) => {
+                    bgls.push(l);
+                }
+                _ => return Err(anyhow::anyhow!("BindGroupLayout {} not found or unauthorized", id)),
+            }
+        }
+        for l in &bgls { bgl_refs.push(l.as_ref()); }
 
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Proxy Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout, &uniform_bg_layout],
+            bind_group_layouts: &bgl_refs,
             push_constant_ranges: &[],
         });
 
         let mut wgpu_vertex_layouts = Vec::new();
         let mut keep_alive_attributes = Vec::new();
 
-        if vertex_layouts.is_empty() {
-            wgpu_vertex_layouts.push(wgpu::VertexBufferLayout {
-                array_stride: 32,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[
-                    wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
-                    wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32x4 },
-                    wgpu::VertexAttribute { offset: 24, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
-                ],
-            });
-        } else {
-            for vl in &vertex_layouts {
-                let mut attrs = Vec::new();
-                for attr in &vl.attributes {
-                    attrs.push(wgpu::VertexAttribute {
-                        offset: attr.offset,
-                        shader_location: attr.shader_location,
-                        format: match VertexFormat::try_from(attr.format).unwrap_or(VertexFormat::VtxFloat32x2) {
-                            VertexFormat::VtxFloat32 => wgpu::VertexFormat::Float32,
-                            VertexFormat::VtxFloat32x2 => wgpu::VertexFormat::Float32x2,
-                            VertexFormat::VtxFloat32x3 => wgpu::VertexFormat::Float32x3,
-                            VertexFormat::VtxFloat32x4 => wgpu::VertexFormat::Float32x4,
-                            VertexFormat::VtxUint32 => wgpu::VertexFormat::Uint32,
-                        },
-                    });
-                }
-                keep_alive_attributes.push(attrs);
-            }
-            
-            for i in 0..vertex_layouts.len() {
-                wgpu_vertex_layouts.push(wgpu::VertexBufferLayout {
-                    array_stride: vertex_layouts[i].array_stride,
-                    step_mode: if StepMode::try_from(vertex_layouts[i].step_mode).unwrap_or(StepMode::StepVertex) == StepMode::StepInstance { 
-                        wgpu::VertexStepMode::Instance 
-                    } else { 
-                        wgpu::VertexStepMode::Vertex 
+        for vl in &req.vertex_layouts {
+            let mut attrs = Vec::new();
+            for attr in &vl.attributes {
+                attrs.push(wgpu::VertexAttribute {
+                    offset: attr.offset,
+                    shader_location: attr.shader_location,
+                    format: match VertexFormat::try_from(attr.format).unwrap_or(VertexFormat::VtxFloat32x2) {
+                        VertexFormat::VtxFloat32 => wgpu::VertexFormat::Float32,
+                        VertexFormat::VtxFloat32x2 => wgpu::VertexFormat::Float32x2,
+                        VertexFormat::VtxFloat32x3 => wgpu::VertexFormat::Float32x3,
+                        VertexFormat::VtxFloat32x4 => wgpu::VertexFormat::Float32x4,
+                        VertexFormat::VtxUint32 => wgpu::VertexFormat::Uint32,
                     },
-                    attributes: &keep_alive_attributes[i],
                 });
             }
+            keep_alive_attributes.push(attrs);
+        }
+        
+        for i in 0..req.vertex_layouts.len() {
+            wgpu_vertex_layouts.push(wgpu::VertexBufferLayout {
+                array_stride: req.vertex_layouts[i].array_stride,
+                step_mode: if StepMode::try_from(req.vertex_layouts[i].step_mode).unwrap_or(StepMode::StepVertex) == StepMode::StepInstance { 
+                    wgpu::VertexStepMode::Instance 
+                } else { 
+                    wgpu::VertexStepMode::Vertex 
+                },
+                attributes: &keep_alive_attributes[i],
+            });
         }
 
+        let map_blend_factor = |f: i32| match BlendFactor::try_from(f).unwrap_or(BlendFactor::One) {
+            BlendFactor::Zero => wgpu::BlendFactor::Zero,
+            BlendFactor::One => wgpu::BlendFactor::One,
+            BlendFactor::Src => wgpu::BlendFactor::Src,
+            BlendFactor::OneMinusSrc => wgpu::BlendFactor::OneMinusSrc,
+            BlendFactor::SrcAlpha => wgpu::BlendFactor::SrcAlpha,
+            BlendFactor::OneMinusSrcAlpha => wgpu::BlendFactor::OneMinusSrcAlpha,
+            BlendFactor::Dst => wgpu::BlendFactor::Dst,
+            BlendFactor::OneMinusDst => wgpu::BlendFactor::OneMinusDst,
+            BlendFactor::DstAlpha => wgpu::BlendFactor::DstAlpha,
+            BlendFactor::OneMinusDstAlpha => wgpu::BlendFactor::OneMinusDstAlpha,
+        };
+
+        let map_blend_op = |o: i32| match BlendOperation::try_from(o).unwrap_or(BlendOperation::Add) {
+            BlendOperation::Add => wgpu::BlendOperation::Add,
+            BlendOperation::Subtract => wgpu::BlendOperation::Subtract,
+            BlendOperation::ReverseSubtract => wgpu::BlendOperation::ReverseSubtract,
+            BlendOperation::Min => wgpu::BlendOperation::Min,
+            BlendOperation::Max => wgpu::BlendOperation::Max,
+        };
+
+        let blend = req.blend.as_ref().map(|b| wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: b.color.as_ref().map(|c| map_blend_factor(c.src_factor)).unwrap_or(wgpu::BlendFactor::One),
+                dst_factor: b.color.as_ref().map(|c| map_blend_factor(c.dst_factor)).unwrap_or(wgpu::BlendFactor::Zero),
+                operation: b.color.as_ref().map(|c| map_blend_op(c.operation)).unwrap_or(wgpu::BlendOperation::Add),
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: b.alpha.as_ref().map(|c| map_blend_factor(c.src_factor)).unwrap_or(wgpu::BlendFactor::One),
+                dst_factor: b.alpha.as_ref().map(|c| map_blend_factor(c.dst_factor)).unwrap_or(wgpu::BlendFactor::Zero),
+                operation: b.alpha.as_ref().map(|c| map_blend_op(c.operation)).unwrap_or(wgpu::BlendOperation::Add),
+            },
+        }).or(Some(wgpu::BlendState::ALPHA_BLENDING));
+
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label,
+            label: Some(&req.label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"),
+                entry_point: Some(&req.vertex_entry),
                 buffers: &wgpu_vertex_layouts,
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(&req.fragment_entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
+                topology: match PrimitiveTopology::try_from(req.primitive_topology).unwrap_or(PrimitiveTopology::TopologyTriangleList) {
+                    PrimitiveTopology::TopologyTriangleList => wgpu::PrimitiveTopology::TriangleList,
+                    PrimitiveTopology::TopologyTriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+                    PrimitiveTopology::TopologyPointList => wgpu::PrimitiveTopology::PointList,
+                    PrimitiveTopology::TopologyLineList => wgpu::PrimitiveTopology::LineList,
+                    PrimitiveTopology::TopologyLineStrip => wgpu::PrimitiveTopology::LineStrip,
+                },
+                strip_index_format: if req.primitive_topology == PrimitiveTopology::TopologyTriangleStrip as i32 
+                                   || req.primitive_topology == PrimitiveTopology::TopologyLineStrip as i32 {
+                    match IndexFormat::try_from(req.strip_index_format).unwrap_or(IndexFormat::IdxUint16) {
+                        IndexFormat::IdxUint16 => Some(wgpu::IndexFormat::Uint16),
+                        IndexFormat::IdxUint32 => Some(wgpu::IndexFormat::Uint32),
+                    }
+                } else {
+                    None
+                },
+                front_face: match FrontFace::try_from(req.front_face).unwrap_or(FrontFace::Ccw) {
+                    FrontFace::Ccw => wgpu::FrontFace::Ccw,
+                    FrontFace::Cw => wgpu::FrontFace::Cw,
+                },
+                cull_mode: match CullMode::try_from(req.cull_mode).unwrap_or(CullMode::None) {
+                    CullMode::None => None,
+                    CullMode::Front => Some(wgpu::Face::Front),
+                    CullMode::Back => Some(wgpu::Face::Back),
+                },
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: None, // TODO: Support depth stencil
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
         });
 
-        self.insert_resource(id, Resource::RenderPipeline(Arc::new(pipeline)), true);
+        self.insert_resource(id, Resource::RenderPipeline(Arc::new(pipeline)), true, owner_id);
         Ok(id)
     }
 
-    pub fn write_resource(&self, id: u64, offset: u64, data: &[u8]) -> anyhow::Result<()> {
+    pub fn write_resource(&self, id: u64, offset: u64, data: &[u8], requestor_id: u32) -> anyhow::Result<()> {
         let mut resource_entry = self.resources.get_mut(&id).ok_or_else(|| anyhow::anyhow!("Resource not found"))?;
+        if requestor_id != 0 && resource_entry.owner_id != 0 && resource_entry.owner_id != requestor_id {
+            return Err(anyhow::anyhow!("Unauthorized write access to resource {}", id));
+        }
         if resource_entry.readonly {
             return Err(anyhow::anyhow!("Resource {} is readonly", id));
         }
@@ -546,10 +633,14 @@ impl ResourceManager {
         Ok(())
     }
 
-    pub fn read_resource(&self, id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
+    pub fn read_resource(&self, id: u64, offset: u64, size: u64, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         if size == 0 { return Ok(Vec::new()); }
         
         let entry = self.resources.get(&id).ok_or_else(|| anyhow::anyhow!("Resource not found"))?;
+        if requestor_id != 0 && entry.owner_id != 0 && entry.owner_id != requestor_id {
+            return Err(anyhow::anyhow!("Unauthorized read access to resource {}", id));
+        }
+
         match &entry.resource {
             Resource::Data(vec) => {
                 let start = offset as usize;
@@ -609,19 +700,22 @@ impl ResourceManager {
         }
     }
 
-    pub fn create_data_resource(&self, data: Vec<u8>) -> u64 {
+    pub fn create_data_resource(&self, data: Vec<u8>, owner_id: u32) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        self.insert_resource(id, Resource::Data(data), false);
+        self.insert_resource(id, Resource::Data(data), false, owner_id);
         id
     }
 
-    pub fn compute_hash(&self, id: u64) -> Option<Vec<u8>> {
+    pub fn compute_hash(&self, id: u64, requestor_id: u32) -> Option<Vec<u8>> {
         let entry = self.resources.get(&id)?;
+        if entry.owner_id != 0 && entry.owner_id != requestor_id {
+            return None;
+        }
         match &entry.resource {
             Resource::Data(vec) => Some(blake3::hash(vec).as_bytes().to_vec()),
             Resource::Buffer(b) => {
                 let size = b.size();
-                if let Ok(data) = self.read_resource(id, 0, size) {
+                if let Ok(data) = self.read_resource(id, 0, size, requestor_id) {
                     return Some(blake3::hash(&data).as_bytes().to_vec());
                 }
                 None

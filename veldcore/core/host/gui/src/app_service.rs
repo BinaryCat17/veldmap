@@ -24,7 +24,7 @@ impl AppService {
 }
 
 impl NativeService for AppService {
-    fn call(&self, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    fn call(&self, method: &str, payload: Vec<u8>, _requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
             "display" => {
                 let cmd = AppDisplayCommand::decode(&payload[..])?;

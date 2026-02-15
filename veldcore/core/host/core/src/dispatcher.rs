@@ -8,13 +8,13 @@ use crate::core::{RpcRequest, RpcResponse};
 use prost::Message;
 
 pub trait NativeService: Send + Sync {
-    fn call(&self, method: &str, payload: Vec<u8>) -> Result<Vec<u8>>;
+    fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>>;
 }
 
 pub struct CoreService;
 
 impl NativeService for CoreService {
-    fn call(&self, method: &str, _payload: Vec<u8>) -> Result<Vec<u8>> {
+    fn call(&self, method: &str, _payload: Vec<u8>, _requestor_id: u32) -> Result<Vec<u8>> {
         match method {
             "status" => Ok(Vec::new()),
             _ => Err(anyhow::anyhow!("Method {} not found in core", method)),
@@ -81,7 +81,7 @@ impl Dispatcher {
         Ok(())
     }
 
-    pub async fn call(&self, service_name: &str, method: &str, payload: Vec<u8>) -> Result<Vec<u8>> {
+    pub async fn call(&self, service_name: &str, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>> {
         let location = {
             let services = self.services.lock().unwrap();
             services.get(service_name)
@@ -91,7 +91,7 @@ impl Dispatcher {
 
         match location {
             ServiceLocation::Native(service) => {
-                service.call(method, payload)
+                service.call(method, payload, requestor_id)
             }
             ServiceLocation::LocalWasm(wasm_module) => {
                 let request = RpcRequest {
@@ -99,6 +99,7 @@ impl Dispatcher {
                     method: method.to_string(),
                     payload,
                     sync: None,
+                    instance_id: requestor_id,
                 };
                 let req_buf = request.encode_to_vec();
 
@@ -131,12 +132,12 @@ impl Dispatcher {
                 Ok(response.payload)
             }
             ServiceLocation::RemoteIroh(node_id) => {
-                self.call_remote(node_id, service_name, method, payload).await
+                self.call_remote(node_id, service_name, method, payload, requestor_id).await
             }
         }
     }
 
-    async fn call_remote(&self, node_id: iroh::NodeId, service: &str, method: &str, payload: Vec<u8>) -> Result<Vec<u8>> {
+    async fn call_remote(&self, node_id: iroh::NodeId, service: &str, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>> {
         let conn = self.endpoint.connect(node_id, b"veldmap/rpc/1").await?;
         let (mut send, mut recv) = conn.open_bi().await?;
 
@@ -145,6 +146,7 @@ impl Dispatcher {
             method: method.to_string(),
             payload,
             sync: None,
+            instance_id: requestor_id,
         };
 
         let mut buf = Vec::new();

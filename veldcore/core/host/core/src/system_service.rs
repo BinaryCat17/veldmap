@@ -41,7 +41,7 @@ impl SystemService {
 }
 
 impl NativeService for SystemService {
-    fn call(&self, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
             "image_info" => {
                 let req = ImageInfoRequest::decode(&payload[..])?;
@@ -114,8 +114,8 @@ impl NativeService for SystemService {
                     update_status(0.8, String::new(), None);
 
                     // Upload to GPU
-                    let tex_id = resources.create_texture(w, h, 0, 8, false); // 8 = TEXTURE_BINDING
-                    if let Err(e) = resources.write_resource(tex_id, 0, &rgba) {
+                    let tex_id = resources.create_texture(w, h, 0, 8, false, requestor_id); // 8 = TEXTURE_BINDING
+                    if let Err(e) = resources.write_resource(tex_id, 0, &rgba, requestor_id) {
                         update_status(0.0, e.to_string(), None);
                         return;
                     }
@@ -123,7 +123,7 @@ impl NativeService for SystemService {
                     let handle = ResourceHandle {
                         id: tex_id,
                         size: (w * h * 4) as u64,
-                        content_hash: resources.compute_hash(tex_id).unwrap_or_default(),
+                        content_hash: resources.compute_hash(tex_id, requestor_id).unwrap_or_default(),
                     };
                     update_status(1.0, String::new(), Some(handle));
                 });
@@ -145,7 +145,7 @@ impl NativeService for SystemService {
             "get_resource" => {
                 let req = GetResourceRequest::decode(&payload[..])?;
                 if let Some(id) = self.resources.get_named_resource(&req.name) {
-                    if let Some(res) = self.resources.get_resource(id) {
+                    if let Some(res) = self.resources.get_resource(id, requestor_id) {
                         let mut handle = ResourceHandle { id, ..Default::default() };
                         match res {
                             Resource::Data(v) => { handle.size = v.len() as u64; }
@@ -155,7 +155,7 @@ impl NativeService for SystemService {
                         }
                         Ok(GetResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
                     } else {
-                        Ok(GetResourceResponse { handle: None, error: "Resource found in registry but not in storage".into() }.encode_to_vec())
+                        Ok(GetResourceResponse { handle: None, error: "Resource found in registry but not in storage or unauthorized".into() }.encode_to_vec())
                     }
                 } else {
                     Ok(GetResourceResponse { handle: None, error: format!("Resource '{}' not found", req.name) }.encode_to_vec())
@@ -163,7 +163,7 @@ impl NativeService for SystemService {
             }
             "create_data" => {
                 let req = CreateDataRequest::decode(&payload[..])?;
-                let id = self.resources.create_data_resource(vec![0u8; req.size as usize]);
+                let id = self.resources.create_data_resource(vec![0u8; req.size as usize], requestor_id);
                 let handle = ResourceHandle {
                     id,
                     size: req.size,
@@ -177,12 +177,12 @@ impl NativeService for SystemService {
                 
                 let data = fs::read(&req.path)?;
                 let size = data.len() as u64;
-                let id = self.resources.create_data_resource(data);
+                let id = self.resources.create_data_resource(data, requestor_id);
                 
                 let handle = ResourceHandle {
                     id,
                     size,
-                    content_hash: self.resources.compute_hash(id).unwrap_or_default(),
+                    content_hash: self.resources.compute_hash(id, requestor_id).unwrap_or_default(),
                 };
                 Ok(FsReadResponse { handle: Some(handle) }.encode_to_vec())
             }
@@ -192,12 +192,9 @@ impl NativeService for SystemService {
                 let handle = req.handle.ok_or_else(|| anyhow::anyhow!("Missing handle"))?;
                 
                 let data = if handle.id == 0 {
-                    // Если ID 0, значит данные должны быть где-то еще? 
-                    // В текущем proto FsWriteRequest нет поля data.
-                    // Давай добавим его или всегда требовать ResourceHandle.
                     return Err(anyhow::anyhow!("Handle ID 0 not supported for fs_write yet"));
                 } else {
-                    self.resources.read_resource(handle.id, 0, handle.size)?
+                    self.resources.read_resource(handle.id, 0, handle.size, requestor_id)?
                 };
 
                 if let Some(parent) = Path::new(&req.path).parent() { fs::create_dir_all(parent)?; }
@@ -427,31 +424,31 @@ impl NativeService for SystemService {
             "acquire_resource" => {
                 use crate::core::AcquireResourceRequest;
                 let req = AcquireResourceRequest::decode(&payload[..])?;
-                if self.resources.acquire_resource(req.id) {
+                if self.resources.acquire_resource(req.id, requestor_id) {
                     Ok(Vec::new())
                 } else {
-                    Err(anyhow::anyhow!("Resource {} not found", req.id))
+                    Err(anyhow::anyhow!("Resource {} not found or unauthorized", req.id))
                 }
             }
             "release_resource" => {
                 use crate::core::ReleaseResourceRequest;
                 let req = ReleaseResourceRequest::decode(&payload[..])?;
-                self.resources.release_resource(req.id);
+                self.resources.release_resource(req.id, requestor_id);
                 Ok(Vec::new())
             }
             "freeze_resource" => {
                 use crate::core::FreezeResourceRequest;
                 let req = FreezeResourceRequest::decode(&payload[..])?;
-                if self.resources.freeze_resource(req.id) {
+                if self.resources.freeze_resource(req.id, requestor_id) {
                     Ok(Vec::new())
                 } else {
-                    Err(anyhow::anyhow!("Resource {} not found to freeze", req.id))
+                    Err(anyhow::anyhow!("Resource {} not found to freeze or unauthorized", req.id))
                 }
             }
             "destroy_resource" => {
                 use crate::core::DestroyResourceRequest;
                 let req = DestroyResourceRequest::decode(&payload[..])?;
-                self.resources.destroy_resource(req.id);
+                self.resources.destroy_resource(req.id, requestor_id);
                 Ok(Vec::new())
             }
             _ => Err(anyhow::anyhow!("Unknown method")),

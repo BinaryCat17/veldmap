@@ -82,6 +82,7 @@ impl WgpuRecorder {
         };
         
         let submit_req = Submit {
+            instance_id: 0,
             target_texture_view_id: target_view_id,
             clear_color,
             command_buffer: Some(cmd_buffer),

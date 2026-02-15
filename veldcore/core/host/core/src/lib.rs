@@ -42,6 +42,7 @@ pub struct HostState {
     pub dispatcher: Arc<Dispatcher>,
     pub resources: Arc<crate::resources::ResourceManager>,
     pub plugin_name: String,
+    pub instance_id: u32,
     pub config: std::collections::HashMap<String, serde_json::Value>,
     pub call_context: Option<CallContext>,
     pub wasi: wasmtime_wasi::p1::WasiP1Ctx,

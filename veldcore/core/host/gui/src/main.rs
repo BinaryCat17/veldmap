@@ -115,12 +115,16 @@ async fn main() -> anyhow::Result<()> {
     let surface_format = caps.formats[0];
     
     let present_mode = if vsync {
-        wgpu::PresentMode::Fifo
-    } else {
         if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Mailbox // Better VSync: no tearing, high performance
+        } else {
+            wgpu::PresentMode::Fifo
+        }
+    } else {
+        if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
             wgpu::PresentMode::Immediate
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
         }
@@ -233,7 +237,7 @@ async fn main() -> anyhow::Result<()> {
                         dt,
                     })) 
                 };
-                if let Err(e) = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await {
+                if let Err(e) = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await {
                     log::error!("Frame event failed: {}", e);
                     frame_pending_clone.store(false, Ordering::Release);
                 }
@@ -257,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
                             app_texture_id = Some(veldmap_host_core::SURFACE_ID);
                             app_bind_group = None;
                         } else if Some(id) != app_texture_id || (w, h) != last_size {
-                            if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id) {
+                            if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id, 0) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let bind_group = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor { 
                                     label: None, layout: &bind_group_layout, entries: &[
@@ -267,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
                                 });
                                 app_texture_id = Some(id);
                                 app_bind_group = Some(bind_group.clone());
-                                resources.register_bind_group(1001, Arc::new(bind_group));
+                                resources.register_bind_group(1001, Arc::new(bind_group), 0);
                                 resources.register_named_resource("active_ui_bind_group", 1001);
                                 last_size = (w, h);
                             }
@@ -305,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
 
                             // 1. Process texture-targeted commands first (off-screen)
                             for req in &texture_cmds {
-                                let target_view_arc: Arc<wgpu::TextureView> = match resources.get_resource(req.target_texture_view_id) {
+                                let target_view_arc: Arc<wgpu::TextureView> = match resources.get_resource(req.target_texture_view_id, req.instance_id) {
                                     Some(veldmap_host_core::resources::Resource::TextureView(v)) => v,
                                     Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) => {
                                         Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()))
@@ -329,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
                                     });
 
                                     if let Some(cb) = &req.command_buffer {
-                                        let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources, 2048, 2048);
+                                        let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources, 2048, 2048, req.instance_id);
                                     }
                                 }
                             }
@@ -349,7 +353,7 @@ async fn main() -> anyhow::Result<()> {
                                 // Draw Direct Surface Commands from plugins
                                 for req in &surface_cmds {
                                     if let Some(cb) = &req.command_buffer {
-                                        let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources, target_w, target_height);
+                                        let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources, target_w, target_height, req.instance_id);
                                     }
                                 }
 
@@ -397,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
                         })) 
                     };
                     let d = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
+                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
@@ -408,7 +412,8 @@ async fn main() -> anyhow::Result<()> {
                     event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed: state == winit::event::ElementState::Pressed })) 
                 };
                 let d = dispatcher.clone();
-                tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
+                                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
+                
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
@@ -418,7 +423,7 @@ async fn main() -> anyhow::Result<()> {
                         event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) 
                     };
                     let d = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
+                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
                     last_cursor_sent_time = std::time::Instant::now();
                 }
             }
@@ -429,7 +434,7 @@ async fn main() -> anyhow::Result<()> {
                     event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })) 
                 };
                 let d = dispatcher.clone();
-                tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec()).await; });
+                tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
             }
             _ => (),
         }

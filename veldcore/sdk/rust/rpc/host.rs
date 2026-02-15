@@ -62,6 +62,7 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         method: method.to_string(),
         payload,
         sync: None,
+        instance_id: 0,
     };
     
     let req_buf = request.encode_to_vec();

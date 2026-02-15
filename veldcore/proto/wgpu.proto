@@ -42,6 +42,46 @@ enum StepMode {
     STEP_INSTANCE = 1;
 }
 
+enum PrimitiveTopology {
+    TOPOLOGY_TRIANGLE_LIST = 0;
+    TOPOLOGY_TRIANGLE_STRIP = 1;
+    TOPOLOGY_POINT_LIST = 2;
+    TOPOLOGY_LINE_LIST = 3;
+    TOPOLOGY_LINE_STRIP = 4;
+}
+
+enum BlendFactor {
+    ZERO = 0;
+    ONE = 1;
+    SRC = 2;
+    ONE_MINUS_SRC = 3;
+    SRC_ALPHA = 4;
+    ONE_MINUS_SRC_ALPHA = 5;
+    DST = 6;
+    ONE_MINUS_DST = 7;
+    DST_ALPHA = 8;
+    ONE_MINUS_DST_ALPHA = 9;
+}
+
+enum BlendOperation {
+    ADD = 0;
+    SUBTRACT = 1;
+    REVERSE_SUBTRACT = 2;
+    MIN = 3;
+    MAX = 4;
+}
+
+enum FrontFace {
+    CCW = 0;
+    CW = 1;
+}
+
+enum CullMode {
+    NONE = 0;
+    FRONT = 1;
+    BACK = 2;
+}
+
 // --- Common Structures ---
 
 message GpuBufferBinding {
@@ -155,6 +195,17 @@ message VertexBufferLayout {
     repeated VertexAttribute attributes = 3;
 }
 
+message BlendComponent {
+    BlendFactor src_factor = 1;
+    BlendFactor dst_factor = 2;
+    BlendOperation operation = 3;
+}
+
+message BlendState {
+    BlendComponent color = 1;
+    BlendComponent alpha = 2;
+}
+
 message CreateShaderModule {
     string source = 1;
     string label = 2;
@@ -165,13 +216,15 @@ message CreateRenderPipeline {
     string vertex_entry = 2;
     string fragment_entry = 3;
     repeated VertexBufferLayout vertex_layouts = 4;
-    uint32 primitive_topology = 5;
-    uint32 strip_index_format = 6;
-    uint32 front_face = 7;
-    uint32 cull_mode = 8;
-    TextureFormat target_format = 9;
-    bool depth_enabled = 10;
-    string label = 11;
+    repeated uint64 bind_group_layout_ids = 5;
+    PrimitiveTopology primitive_topology = 6;
+    IndexFormat strip_index_format = 7;
+    FrontFace front_face = 8;
+    CullMode cull_mode = 9;
+    TextureFormat target_format = 10;
+    BlendState blend = 11;
+    bool depth_enabled = 12;
+    string label = 13;
 }
 
 import "core.proto";
@@ -179,6 +232,7 @@ import "core.proto";
 // --- GPU / RESOURCE SERVICE ---
 
 message GpuResourceRequest {
+  uint32 instance_id = 16; // Added for resource isolation
   oneof command {
     CreateBuffer create_buffer = 1;
     CreateTexture create_texture = 2;
@@ -220,6 +274,7 @@ message GpuColor {
 }
 
 message Submit {
+    uint32 instance_id = 4; // Added for resource isolation
     uint64 target_texture_view_id = 1;
     GpuColor clear_color = 2;
     CommandBuffer command_buffer = 3;

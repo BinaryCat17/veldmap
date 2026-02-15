@@ -28,18 +28,19 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
             let plugin_name = caller.data().plugin_name.clone();
             let dispatcher = caller.data().dispatcher.clone();
+            let instance_id = caller.data().instance_id;
             
-            log::debug!(target: "wasm", "[{}] Call: {}.{}", plugin_name, request.service, request.method);
+            log::debug!(target: "wasm", "[{}] Call: {}.{} (ID: {})", plugin_name, request.service, request.method, instance_id);
 
             let result = if request.service == "system" && request.method == "log" {
                 if let Ok(log_req) = crate::core::LogRequest::decode(&request.payload[..]) {
                     log::info!(target: "wasm", "[{}] {}", plugin_name, log_req.message);
                     Ok(Vec::new())
                 } else {
-                    dispatcher.call(&request.service, &request.method, request.payload).await
+                    dispatcher.call(&request.service, &request.method, request.payload, instance_id).await
                 }
             } else {
-                dispatcher.call(&request.service, &request.method, request.payload).await
+                dispatcher.call(&request.service, &request.method, request.payload, instance_id).await
             };
 
             let (payload, error): (Vec<u8>, String) = match result {
@@ -71,19 +72,20 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             _ => return,
         };
         
+        let instance_id = caller.data().instance_id;
         let memory_data = mem.data(&caller);
         if let Some(data_slice) = memory_data.get(ptr as usize..(ptr + len) as usize) {
             let resources = caller.data().resources.clone();
             
-            // Проверка ReadOnly
-            if let Some(entry) = resources.get_resource_entry(id) {
+            // Проверка ReadOnly и Ownership
+            if let Some(entry) = resources.get_resource_entry(id, instance_id) {
                 if entry.readonly {
                     log::error!(target: "wasm", "[{}] FAILED gpu_write(id={}): resource is readonly", caller.data().plugin_name, id);
                     return;
                 }
             }
 
-            let _ = resources.write_resource(id, offset, data_slice);
+            let _ = resources.write_resource(id, offset, data_slice, instance_id);
         }
     })?;
 
@@ -91,7 +93,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap_async("env", "veld_gpu_read", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
         Box::new(async move {
             let resources = caller.data().resources.clone();
-            let data_res = tokio::task::block_in_place(|| resources.read_resource(id, offset, len));
+            let instance_id = caller.data().instance_id;
+            let data_res = tokio::task::block_in_place(|| resources.read_resource(id, offset, len, instance_id));
             
             if let Ok(data) = data_res {
                 let mem = match caller.get_export("memory") {
@@ -124,11 +127,12 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             _ => return 0,
         };
         
+        let instance_id = caller.data().instance_id;
         let memory_data = mem.data(&caller);
         if let Some(data_slice) = memory_data.get(ptr as usize..(ptr + len) as usize) {
             let resources = caller.data().resources.clone();
             let is_readonly = readonly != 0;
-            let id = resources.create_buffer_with_data(data_slice, usage, is_readonly);
+            let id = resources.create_buffer_with_data(data_slice, usage, is_readonly, instance_id);
             log::debug!(target: "wasm", "[{}] Created buffer {} with data (size={}, readonly={})", 
                 caller.data().plugin_name, id, len, is_readonly);
             id
@@ -140,7 +144,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // 14. veld_gpu_freeze_resource
     linker.func_wrap("env", "veld_gpu_freeze_resource", |caller: Caller<'_, HostState>, id: u64| -> u32 {
         let resources = caller.data().resources.clone();
-        if resources.freeze_resource(id) {
+        let instance_id = caller.data().instance_id;
+        if resources.freeze_resource(id, instance_id) {
             log::info!(target: "wasm", "[{}] Frozen resource {}", caller.data().plugin_name, id);
             1
         } else {

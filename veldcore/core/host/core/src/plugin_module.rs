@@ -21,6 +21,10 @@ struct ServicesManifest {
     services: HashMap<String, ServiceEntry>,
 }
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(100); // Local plugins start from 100
+
 pub async fn load_services(
     dispatcher: Arc<Dispatcher>,
     resources: Arc<ResourceManager>,
@@ -68,7 +72,8 @@ pub async fn load_services(
                 config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
                 config_map.insert("surface_format".to_string(), serde_json::Value::Number(resources.get_surface_format_proto().into()));
                 
-                log::trace!("Loading service '{}'", name);
+                let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::SeqCst);
+                log::trace!("Loading service '{}' with instance_id {}", name, instance_id);
                 
                 let mut linker = Linker::new(&engine);
                 wasmtime_wasi::p1::add_to_linker_async(&mut linker, |s: &mut HostState| &mut s.wasi)?;
@@ -83,6 +88,7 @@ pub async fn load_services(
                     dispatcher: dispatcher.clone(),
                     resources: resources.clone(),
                     plugin_name: name.clone(),
+                    instance_id,
                     config: config_map,
                     call_context: None,
                     wasi,

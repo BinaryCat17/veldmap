@@ -21,6 +21,7 @@ message RpcRequest {
   string method = 2;
   bytes payload = 3;
   SyncMetadata sync = 4;
+  uint32 instance_id = 5; // Added for resource isolation and ownership
 }
 
 message RpcResponse {

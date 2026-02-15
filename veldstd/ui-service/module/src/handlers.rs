@@ -182,6 +182,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
         let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
         if vertex_buffer.is_none() {
             let req = GpuResourceRequest {
+                instance_id: 0,
                 command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
                     size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false, readonly: false
                 }))
@@ -193,6 +194,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
         let mut index_buffer = plugin.index_buffer.borrow_mut();
         if index_buffer.is_none() {
             let req = GpuResourceRequest {
+                instance_id: 0,
                 command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
                     size: 1024 * 1024 * 2, usage: 16, mapped_at_creation: false, readonly: false
                 }))
@@ -244,17 +246,59 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
 }
 
 fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
+    // 1. Atlas Layout (Group 0)
+    if renderer.bgl_id.is_none() {
+        let req = GpuResourceRequest {
+            instance_id: 0,
+            command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
+                label: "Iced Atlas BGL".into(),
+                entries: vec![
+                    BindGroupLayoutEntry { binding: 0, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Texture(TextureBindingLayout { sample_type: 1, view_dimension: 2, multisampled: false })) },
+                    BindGroupLayoutEntry { binding: 1, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Sampler(SamplerBindingLayout { r#type: 1 })) },
+                ],
+            }))
+        };
+        if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
+            if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
+                renderer.bgl_id = res.handle.map(|h| h.id);
+            }
+        }
+    }
+
+    // 2. Uniform Layout (Group 1)
+    let mut uniform_layout_id = plugin.uniform_layout_id.borrow_mut();
+    if uniform_layout_id.is_none() {
+        let bgl_req = GpuResourceRequest {
+            instance_id: 0,
+            command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
+                label: "UI Uniform BGL".into(),
+                entries: vec![BindGroupLayoutEntry {
+                    binding: 0, visibility: 3, ty: Some(bind_group_layout_entry::Ty::Buffer(BufferBindingLayout { r#type: 1, ..Default::default() }))
+                }]
+            }))
+        };
+        let bgl_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bgl_req.encode_to_vec())?[..])?;
+        *uniform_layout_id = bgl_res.handle.map(|h| h.id);
+    }
+
+    // 3. Pipeline (depends on layouts)
     let mut ui_pipeline = plugin.ui_pipeline.borrow_mut();
     if ui_pipeline.is_none() {
         let shader_source = include_str!("shaders.wgsl");
         let sh_req = GpuResourceRequest {
+            instance_id: 0,
             command: Some(gpu_resource_request::Command::CreateShader(CreateShaderModule {
                 source: shader_source.into(), label: "UI Shader".into()
             }))
         };
         let sh_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", sh_req.encode_to_vec())?[..])?;
         if let Some(sh) = sh_res.handle {
+            let mut bgl_ids = Vec::new();
+            if let Some(id) = renderer.bgl_id { bgl_ids.push(id); }
+            if let Some(id) = *uniform_layout_id { bgl_ids.push(id); }
+
             let pip_req = GpuResourceRequest {
+                instance_id: 0,
                 command: Some(gpu_resource_request::Command::CreatePipeline(CreateRenderPipeline {
                     shader_id: sh.id, label: "UI Pipeline".into(), 
                     vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
@@ -274,6 +318,10 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surf
                             VertexAttribute { format: VertexFormat::VtxFloat32x4 as i32, offset: 60, shader_location: 8 },
                         ],
                     }],
+                    bind_group_layout_ids: bgl_ids,
+                    primitive_topology: PrimitiveTopology::TopologyTriangleList as i32,
+                    front_face: FrontFace::Ccw as i32,
+                    cull_mode: CullMode::None as i32,
                     ..Default::default()
                 }))
             };
@@ -282,10 +330,12 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surf
         }
     }
 
+    // 4. Buffers and Groups
     let mut uniform_buffer = plugin.uniform_buffer.borrow_mut();
     let mut uniform_buffer_id = plugin.uniform_buffer_id.borrow_mut();
-    if uniform_buffer.is_none() {
+    if uniform_buffer.is_none() && uniform_layout_id.is_some() {
         let buf_req = GpuResourceRequest {
+            instance_id: 0,
             command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
                 size: 16, usage: 64, mapped_at_creation: false, readonly: false
             }))
@@ -293,47 +343,21 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surf
         let buf_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", buf_req.encode_to_vec())?[..])?;
         if let Some(bh) = buf_res.handle {
             *uniform_buffer_id = Some(bh.id);
-            let bgl_req = GpuResourceRequest {
-                command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
-                    label: "UI Uniform BGL".into(),
-                    entries: vec![BindGroupLayoutEntry {
-                        binding: 0, visibility: 3, ty: Some(bind_group_layout_entry::Ty::Buffer(BufferBindingLayout { r#type: 1, ..Default::default() }))
-                    }]
+            let bg_req = GpuResourceRequest {
+                instance_id: 0,
+                command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
+                    layout_id: uniform_layout_id.unwrap(), entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(bh.id)) }], label: "UI Uniform BG".into()
                 }))
             };
-            let bgl_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bgl_req.encode_to_vec())?[..])?;
-            if let Some(bgl) = bgl_res.handle {
-                let bg_req = GpuResourceRequest {
-                    command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
-                        layout_id: bgl.id, entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(bh.id)) }], label: "UI Uniform BG".into()
-                    }))
-                };
-                let bg_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bg_req.encode_to_vec())?[..])?;
-                *uniform_buffer = bg_res.handle.map(OwnedResource::new);
-            }
-        }
-    }
-
-    if renderer.bgl_id.is_none() {
-        let req = GpuResourceRequest {
-            command: Some(gpu_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
-                label: "Iced Atlas BGL".into(),
-                entries: vec![
-                    BindGroupLayoutEntry { binding: 0, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Texture(TextureBindingLayout { sample_type: 1, view_dimension: 2, multisampled: false })) },
-                    BindGroupLayoutEntry { binding: 1, visibility: 2, ty: Some(bind_group_layout_entry::Ty::Sampler(SamplerBindingLayout { r#type: 1 })) },
-                ],
-            }))
-        };
-        if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
-            if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
-                renderer.bgl_id = res.handle.map(|h| h.id);
-            }
+            let bg_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bg_req.encode_to_vec())?[..])?;
+            *uniform_buffer = bg_res.handle.map(OwnedResource::new);
         }
     }
 
     if renderer.atlas_texture_id.is_none() {
         let (w, h) = renderer.atlas_dimensions();
         let req = GpuResourceRequest {
+            instance_id: 0,
             command: Some(gpu_resource_request::Command::CreateTexture(CreateTexture {
                 width: w, height: h, format: TextureFormat::TexRgba8Unorm as i32, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
             }))
@@ -341,16 +365,19 @@ fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surf
         if let Ok(res_bytes) = call_service("wgpu", "create_resource", req.encode_to_vec()) {
             if let Ok(res) = GpuResourceResponse::decode(&res_bytes[..]) {
                 renderer.atlas_texture_id = res.handle.map(|h| h.id);
+                renderer.mark_atlas_dirty(); // Force upload of atlas data
             }
         }
     }
     
     if renderer.atlas_bind_group_id.is_none() && renderer.atlas_texture_id.is_some() && renderer.bgl_id.is_some() {
         let sampler_req = GpuResourceRequest {
+            instance_id: 0,
             command: Some(gpu_resource_request::Command::CreateSampler(CreateSampler { mag_filter: FilterMode::FiltLinear as i32, min_filter: FilterMode::FiltLinear as i32, ..Default::default() }))
         };
         let sampler_id = call_service("wgpu", "create_resource", sampler_req.encode_to_vec()).ok().and_then(|b| GpuResourceResponse::decode(&b[..]).ok()).and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
         let req = GpuResourceRequest {
+            instance_id: 0,
             command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
                 layout_id: renderer.bgl_id.unwrap(), entries: vec![
                     BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::TextureViewId(renderer.atlas_texture_id.unwrap())) },

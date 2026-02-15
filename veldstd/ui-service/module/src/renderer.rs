@@ -188,6 +188,12 @@ impl GpuRenderer {
         self.atlas_dirty_y_max = 0;
     }
 
+    pub fn mark_atlas_dirty(&mut self) {
+        self.atlas_dirty = true;
+        self.atlas_dirty_y_min = 0;
+        self.atlas_dirty_y_max = self.atlas_height;
+    }
+
     fn transform_rect(&self, rect: [f32; 4]) -> [f32; 4] {
         if let Some(t) = self.transformation_stack.last() {
             let p1 = Point::new(rect[0], rect[1]) * *t;

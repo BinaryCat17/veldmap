@@ -10,6 +10,7 @@ crate::rpc_proxy! {
 
 pub fn create_shader(source: &str, label: &str) -> anyhow::Result<crate::rpc::core::ResourceHandle> {
     let req = GpuResourceRequest {
+        instance_id: 0,
         command: Some(gpu_resource_request::Command::CreateShader(CreateShaderModule {
             source: source.to_string(),
             label: label.to_string(),
@@ -21,6 +22,7 @@ pub fn create_shader(source: &str, label: &str) -> anyhow::Result<crate::rpc::co
 
 pub fn create_buffer(size: u64, usage: u32, readonly: bool) -> anyhow::Result<crate::rpc::core::ResourceHandle> {
     let req = GpuResourceRequest {
+        instance_id: 0,
         command: Some(gpu_resource_request::Command::CreateBuffer(CreateBuffer {
             size, usage, mapped_at_creation: false, readonly
         }))

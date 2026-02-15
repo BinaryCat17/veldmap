@@ -68,7 +68,7 @@ async fn handle_connection(incoming: iroh::endpoint::Incoming, dispatcher: Arc<D
                         Err(_) => return,
                     };
 
-                    let (payload, error) = match dispatcher.call(&request.service, &request.method, request.payload).await {
+                    let (payload, error) = match dispatcher.call(&request.service, &request.method, request.payload, request.instance_id).await {
                         Ok(p) => (p, String::new()),
                         Err(e) => (Vec::new(), e.to_string()),
                     };
