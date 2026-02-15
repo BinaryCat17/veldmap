@@ -67,10 +67,21 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
     Ok(HandleUiEventResponse { messages })
 }
 
-fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<Vec<UiEventResponse>> {
-    let plugin = state.plugins.entry(plugin_id.to_string()).or_insert_with(PluginUiState::new);
+fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_event: app_proto::UiEvent) -> anyhow::Result<Vec<UiEventResponse>> {
     let mut messages = Vec::new();
 
+    // 1. Сначала обрабатываем вложенные события (скролл, клики), чтобы 
+    // Frame (если он есть) увидел уже обновленное состояние скорости.
+    // Забираем sub_events, чтобы не держать заимствование req_event.
+    let sub_events = std::mem::take(&mut req_event.sub_events);
+    for sub_event in sub_events {
+        let mut msgs = process_ui_event_recursive(state, plugin_id, sub_event)?;
+        messages.append(&mut msgs);
+    }
+
+    let plugin = state.plugins.entry(plugin_id.to_string()).or_insert_with(PluginUiState::new);
+
+    // 2. Обрабатываем основное событие
     if let Some(ev) = req_event.event {
         match ev {
             app_proto::ui_event::Event::Resize(r) => {
@@ -83,8 +94,14 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, req_event
                 if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
                     vel.y = 0.0;
                 }
-                let dy = s.delta_y.signum() * (s.delta_y.abs().powf(0.4) * 24.0);
-                let dx = s.delta_x.signum() * (s.delta_x.abs().powf(0.4) * 24.0);
+                
+                // Используем корень 6-й степени для экстремального сглаживания разницы между 9 и 120.
+                // При 9: 9^(1/6) * 24 = ~35. При 120: 120^(1/6) * 24 = ~53.
+                // Разница между микро-шагом и полным шагом теперь минимальна (~1.5 раза).
+                let factor = 24.0;
+                let dy = s.delta_y.signum() * s.delta_y.abs().powf(1.0 / 6.0) * factor;
+                let dx = s.delta_x.signum() * s.delta_x.abs().powf(1.0 / 6.0) * factor;
+                
                 vel.x += dx;
                 vel.y += dy;
                 vel.x = vel.x.clamp(-3000.0, 3000.0);
@@ -94,14 +111,19 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, req_event
             app_proto::ui_event::Event::Frame(f) => {
                 {
                     let mut vel = plugin.scroll_velocity.borrow_mut();
-                    if vel.x.abs() > 0.5 || vel.y.abs() > 0.5 {
-                        let friction = 0.85f32; 
-                        let factor = 1.0 - friction.powf(f.dt * 60.0);
+                    if vel.x.abs() > 0.1 || vel.y.abs() > 0.1 {
+                        let monitor_fps = *plugin.monitor_fps.borrow() as f32;
+                        let friction = 0.92f32; // Более вязкая и плавная инерция
+                        
+                        // Используем monitor_fps для стабильной нормализации трения
+                        let factor = 1.0 - friction.powf(f.dt * monitor_fps.max(60.0));
                         let scroll_amount_x = vel.x * factor;
                         let scroll_amount_y = vel.y * factor;
+                        
                         plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
                             delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
                         }));
+                        
                         vel.x -= scroll_amount_x;
                         vel.y -= scroll_amount_y;
                         *plugin.needs_redrawing.borrow_mut() = true;
@@ -125,11 +147,6 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, req_event
                 *plugin.needs_redrawing.borrow_mut() = true;
             }
         }
-    }
-
-    for sub_event in req_event.sub_events {
-        let mut msgs = process_ui_event_recursive(state, plugin_id, sub_event)?;
-        messages.append(&mut msgs);
     }
 
     Ok(messages)
@@ -240,7 +257,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
                  let avg_draw = *plugin.perf_draw.borrow() as f64 / 1000.0 / *count as f64;
                  let avg_gpu = *plugin.perf_gpu.borrow() as f64 / 1000.0 / *count as f64;
                  
-                 log::info!("[PERF] UI Render (5s avg) {}: count={}, total={:.2}ms, conv={:.2}ms, build={:.2}ms, update={:.2}ms, draw={:.2}ms, gpu={:.2}ms | Host: {}Hz, {:.1}FPS", 
+                 log::info!(target: "veldmap_perf", "UI Render (5s avg) {}: count={}, total={:.2}ms, conv={:.2}ms, build={:.2}ms, update={:.2}ms, draw={:.2}ms, gpu={:.2}ms | Host: {}Hz, {:.1}FPS", 
                      plugin_id, *count, avg_total, avg_conv, avg_build, avg_update, avg_draw, avg_gpu,
                      *plugin.monitor_fps.borrow(), *plugin.actual_fps.borrow());
              }

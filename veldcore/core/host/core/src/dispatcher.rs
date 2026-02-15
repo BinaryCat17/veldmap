@@ -155,7 +155,7 @@ impl Dispatcher {
                              let avg_wasm = entry.2 as f64 / 1000.0 / entry.0 as f64;
                              let avg_ser = entry.3 as f64 / 1000.0 / entry.0 as f64;
                              let avg_deser = entry.4 as f64 / 1000.0 / entry.0 as f64;
-                             log::info!("[PERF] Dispatcher (5s avg) {}: count={}, total={:.2}ms, wasm={:.2}ms, ser={:.2}ms, deser={:.2}ms", 
+                             log::info!(target: "veldmap_perf", "Dispatcher (5s avg) {}: count={}, total={:.2}ms, wasm={:.2}ms, ser={:.2}ms, deser={:.2}ms", 
                                  key, entry.0, avg_tot, avg_wasm, avg_ser, avg_deser);
                          }
                          *entry = (0, 0, 0, 0, 0, std::time::Instant::now());
