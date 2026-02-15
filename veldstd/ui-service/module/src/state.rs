@@ -16,14 +16,13 @@ pub struct PluginUiState {
     pub cursor_position: RefCell<Point>,
     pub scroll_velocity: RefCell<Point>,
     pub pending_events: RefCell<Vec<Event>>,
-    pub ui_texture: RefCell<Option<OwnedResource>>,
     pub vertex_buffer: RefCell<Option<OwnedResource>>,
     pub index_buffer: RefCell<Option<OwnedResource>>,
     pub uniform_buffer: RefCell<Option<OwnedResource>>,
     pub uniform_buffer_id: RefCell<Option<u64>>,
     pub uniform_layout_id: RefCell<Option<u64>>,
     pub ui_pipeline: RefCell<Option<u64>>,
-    pub active_surface_id: RefCell<u64>,
+    pub active_surface_id: u64,
 }
 
 pub struct LocalState {
@@ -63,14 +62,13 @@ impl PluginUiState {
             cursor_position: RefCell::new(Point::ORIGIN),
             scroll_velocity: RefCell::new(Point::ORIGIN),
             pending_events: RefCell::new(Vec::new()),
-            ui_texture: RefCell::new(None),
             vertex_buffer: RefCell::new(None),
             index_buffer: RefCell::new(None),
             uniform_buffer: RefCell::new(None),
             uniform_buffer_id: RefCell::new(None),
             uniform_layout_id: RefCell::new(None),
             ui_pipeline: RefCell::new(None),
-            active_surface_id: RefCell::new(veldsdk::SURFACE_ID),
+            active_surface_id: veldsdk::SURFACE_ID,
         }
     }
 }

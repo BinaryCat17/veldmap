@@ -26,16 +26,13 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     let mut messages = Vec::new();
     if let Some(event_proto) = req.event {
-        if let Some(h) = event_proto.surface_handle {
-            *plugin.active_surface_id.borrow_mut() = h.id;
-        }
-
+        // active_surface_id is now constant for single-window mode
+        
         if let Some(ev) = event_proto.event {
             match ev {
                 app_proto::ui_event::Event::Resize(r) => {
                     *plugin.canvas_size.borrow_mut() = (r.width, r.height);
                     *plugin.scale_factor.borrow_mut() = r.scale_factor;
-                    *plugin.ui_texture.borrow_mut() = None;
                     *plugin.needs_redrawing.borrow_mut() = true;
                 }
                 app_proto::ui_event::Event::Scroll(s) => {
@@ -103,13 +100,6 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
     
-    if !*needs_redrawing && events.is_empty() {
-        if let Some(tex) = &*plugin.ui_texture.borrow() {
-            let _ = veldsdk::app::AppBridge::display_frame(tex.handle(), width, height);
-            return Ok(Vec::new());
-        }
-    }
-
     let sf = *plugin.scale_factor.borrow();
     renderer.update_params(width, height, sf);
     let cursor_pos = *plugin.cursor_position.borrow();
@@ -133,15 +123,9 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut clipboard = iced_core::clipboard::Null;
     let (ui_state, _) = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
     
-    if *needs_redrawing || !events.is_empty() || matches!(ui_state, iced_runtime::user_interface::State::Outdated) {
-        ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format)?;
-        *needs_redrawing = false;
-    } else {
-        if let Some(tex) = &*plugin.ui_texture.borrow() {
-            let _ = veldsdk::app::AppBridge::display_frame(tex.handle(), width, height);
-        }
-    }
+    ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
+    execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format)?;
+    *needs_redrawing = false;
     
     plugin.interface_cache.replace(ui.into_cache());
     
@@ -238,7 +222,7 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
 
     // Direct to surface
     // We don't clear here, host will clear the surface if needed
-    let surface_id = *plugin.active_surface_id.borrow();
+    let surface_id = plugin.active_surface_id;
     let _ = recorder.submit(surface_id, None);
     let _ = veldsdk::app::AppBridge::display_frame(veldsdk::rpc::core::ResourceHandle { id: surface_id, ..Default::default() }, width, height);
 
