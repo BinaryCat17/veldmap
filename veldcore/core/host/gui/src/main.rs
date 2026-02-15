@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let mut ui_scale = 1.0;
     let mut vsync = true;
     let mut fps_limit = 60;
+    let mut auto_fps = false;
 
     let core_config_path = std::path::Path::new(&config_dir).join("core.json");
     if let Ok(config_str) = std::fs::read_to_string(core_config_path) {
@@ -68,9 +69,16 @@ async fn main() -> anyhow::Result<()> {
             if let Some(s) = v["window"]["ui_scale"].as_f64() { ui_scale = s; }
             
             if let Some(fps_val) = v["window"]["fps"].as_str() {
-                if fps_val == "vsync" { vsync = true; }
+                if fps_val == "vsync" { 
+                    vsync = true; 
+                    auto_fps = false;
+                } else if fps_val == "auto" {
+                    vsync = true;
+                    auto_fps = true;
+                }
             } else if let Some(fps_num) = v["window"]["fps"].as_i64() {
                 vsync = false;
+                auto_fps = false;
                 fps_limit = fps_num as i32;
             }
         }
@@ -193,16 +201,22 @@ async fn main() -> anyhow::Result<()> {
     dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::gpu_service::GpuService::new(resources.clone(), render_queue.clone()))));
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone(), resources.clone()))));
 
+    let last_interaction_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+
     plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir).await?;
 
     let d_clone = dispatcher.clone();
     let is_visible_clone = is_visible.clone();
     let frame_pending_clone = frame_pending.clone();
+    let last_int_clone = last_interaction_time.clone();
+    let last_rend_clone = last_render_time.clone();
+
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
         tokio::spawn(async move { let _ = node.run().await; });
-        log::info!("Core ready. Render loop started (VSync: {}, FPS Limit: {})...", vsync, fps_limit);
+        log::info!("Core ready. Render loop started (VSync: {}, FPS Limit: {}, Auto: {})...", vsync, fps_limit, auto_fps);
         
         let mut last_frame_time = std::time::Instant::now();
         loop {
@@ -217,7 +231,22 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
 
-            if !vsync {
+            // АДАПТИВНЫЙ FPS
+            if auto_fps {
+                let last_int = *last_int_clone.lock().unwrap();
+                let last_rend = *last_rend_clone.lock().unwrap();
+                let idle_time = now.duration_since(last_int).as_secs_f32();
+                let render_idle_time = now.duration_since(last_rend).as_secs_f32();
+
+                // Если нет ввода > 2 сек и нет отрисовок > 1 сек - снижаем до 5 FPS
+                if idle_time > 2.0 && render_idle_time > 1.0 {
+                    let target_dt = 1.0 / 5.0; // 5 FPS
+                    if dt < target_dt {
+                        tokio::time::sleep(std::time::Duration::from_secs_f32(target_dt - dt)).await;
+                        continue;
+                    }
+                }
+            } else if !vsync {
                 let target_dt = 1.0 / fps_limit.max(1) as f32;
                 if dt < target_dt {
                     tokio::time::sleep(std::time::Duration::from_secs_f32(target_dt - dt)).await;
@@ -255,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut last_draw_cmd = None;
                 while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
                 if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
+                    *last_render_time.lock().unwrap() = std::time::Instant::now();
                     if is_visible.load(Ordering::SeqCst) && w > 0 && h > 0 {
                         if id == veldmap_host_core::SURFACE_ID {
                             // Direct surface rendering
@@ -406,6 +436,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
+                *last_interaction_time.lock().unwrap() = std::time::Instant::now();
                 let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
                 let ev = veldmap_host_core::app::UiEvent { 
                     surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
@@ -416,6 +447,7 @@ async fn main() -> anyhow::Result<()> {
                 
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+                *last_interaction_time.lock().unwrap() = std::time::Instant::now();
                 cursor_pos = (position.x as f32, position.y as f32);
                 if last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(16) {
                     let ev = veldmap_host_core::app::UiEvent { 
@@ -428,6 +460,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
+                *last_interaction_time.lock().unwrap() = std::time::Instant::now();
                 let (pdx, pdy) = match delta { winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0), winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32) };
                 let ev = veldmap_host_core::app::UiEvent { 
                     surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
