@@ -60,66 +60,77 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
 }
 
 pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> anyhow::Result<HandleUiEventResponse> {
-    let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     let mut messages = Vec::new();
     if let Some(event_proto) = req.event {
-        // active_surface_id is now constant for single-window mode
-        
-        if let Some(ev) = event_proto.event {
-            match ev {
-                app_proto::ui_event::Event::Resize(r) => {
-                    *plugin.canvas_size.borrow_mut() = (r.width, r.height);
-                    *plugin.scale_factor.borrow_mut() = r.scale_factor;
-                    *plugin.needs_redrawing.borrow_mut() = true;
-                }
-                app_proto::ui_event::Event::Scroll(s) => {
-                    let mut vel = plugin.scroll_velocity.borrow_mut();
-                    if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
-                        vel.y = 0.0;
-                    }
-                    let dy = s.delta_y.signum() * (s.delta_y.abs().powf(0.4) * 24.0);
-                    let dx = s.delta_x.signum() * (s.delta_x.abs().powf(0.4) * 24.0);
-                    vel.x += dx;
-                    vel.y += dy;
-                    vel.x = vel.x.clamp(-3000.0, 3000.0);
-                    vel.y = vel.y.clamp(-3000.0, 3000.0);
-                    *plugin.needs_redrawing.borrow_mut() = true;
-                }
-                app_proto::ui_event::Event::Frame(f) => {
-                    let mut vel = plugin.scroll_velocity.borrow_mut();
-                    if vel.x.abs() > 0.5 || vel.y.abs() > 0.5 {
-                        let friction = 0.85f32; 
-                        let factor = 1.0 - friction.powf(f.dt * 60.0);
-                        let scroll_amount_x = vel.x * factor;
-                        let scroll_amount_y = vel.y * factor;
-                        plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
-                            delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
-                        }));
-                        vel.x -= scroll_amount_x;
-                        vel.y -= scroll_amount_y;
-                        *plugin.needs_redrawing.borrow_mut() = true;
-                    } else {
-                        vel.x = 0.0;
-                        vel.y = 0.0;
-                    }
+        messages = process_ui_event_recursive(state, &req.plugin_id, event_proto)?;
+    }
+    Ok(HandleUiEventResponse { messages })
+}
 
-                    // ОПТИМИЗАЦИЯ: вызываем рендер только если есть события или флаг перерисовки
-                    if !plugin.pending_events.borrow().is_empty() || *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow() {
-                        messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format)?;
-                    }
+fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<Vec<UiEventResponse>> {
+    let plugin = state.plugins.entry(plugin_id.to_string()).or_insert_with(PluginUiState::new);
+    let mut messages = Vec::new();
+
+    if let Some(ev) = req_event.event {
+        match ev {
+            app_proto::ui_event::Event::Resize(r) => {
+                *plugin.canvas_size.borrow_mut() = (r.width, r.height);
+                *plugin.scale_factor.borrow_mut() = r.scale_factor;
+                *plugin.needs_redrawing.borrow_mut() = true;
+            }
+            app_proto::ui_event::Event::Scroll(s) => {
+                let mut vel = plugin.scroll_velocity.borrow_mut();
+                if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
+                    vel.y = 0.0;
                 }
-                _ => {
-                    let iced_ev = convert_event(ev, *plugin.scale_factor.borrow());
-                    if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = iced_ev {
-                        *plugin.cursor_position.borrow_mut() = position;
-                    }
-                    plugin.pending_events.borrow_mut().push(iced_ev);
+                let dy = s.delta_y.signum() * (s.delta_y.abs().powf(0.4) * 24.0);
+                let dx = s.delta_x.signum() * (s.delta_x.abs().powf(0.4) * 24.0);
+                vel.x += dx;
+                vel.y += dy;
+                vel.x = vel.x.clamp(-3000.0, 3000.0);
+                vel.y = vel.y.clamp(-3000.0, 3000.0);
+                *plugin.needs_redrawing.borrow_mut() = true;
+            }
+            app_proto::ui_event::Event::Frame(f) => {
+                let mut vel = plugin.scroll_velocity.borrow_mut();
+                if vel.x.abs() > 0.5 || vel.y.abs() > 0.5 {
+                    let friction = 0.85f32; 
+                    let factor = 1.0 - friction.powf(f.dt * 60.0);
+                    let scroll_amount_x = vel.x * factor;
+                    let scroll_amount_y = vel.y * factor;
+                    plugin.pending_events.borrow_mut().push(Event::Mouse(iced_core::mouse::Event::WheelScrolled { 
+                        delta: iced_core::mouse::ScrollDelta::Pixels { x: scroll_amount_x, y: scroll_amount_y } 
+                    }));
+                    vel.x -= scroll_amount_x;
+                    vel.y -= scroll_amount_y;
                     *plugin.needs_redrawing.borrow_mut() = true;
+                } else {
+                    vel.x = 0.0;
+                    vel.y = 0.0;
                 }
+
+                if !plugin.pending_events.borrow().is_empty() || *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow() {
+                    let mut msgs = render_plugin(plugin, &mut state.renderer, plugin_id, state.surface_format)?;
+                    messages.append(&mut msgs);
+                }
+            }
+            _ => {
+                let iced_ev = convert_event(ev, *plugin.scale_factor.borrow());
+                if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = iced_ev {
+                    *plugin.cursor_position.borrow_mut() = position;
+                }
+                plugin.pending_events.borrow_mut().push(iced_ev);
+                *plugin.needs_redrawing.borrow_mut() = true;
             }
         }
     }
-    Ok(HandleUiEventResponse { messages })
+
+    for sub_event in req_event.sub_events {
+        let mut msgs = process_ui_event_recursive(state, plugin_id, sub_event)?;
+        messages.append(&mut msgs);
+    }
+
+    Ok(messages)
 }
 
 fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {

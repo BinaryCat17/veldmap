@@ -177,17 +177,15 @@ async fn main() -> anyhow::Result<()> {
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats[0];
     
-    let present_mode = if vsync {
-        if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox // Better VSync: no tearing, high performance
-        } else {
-            wgpu::PresentMode::Fifo
-        }
+    log::info!("Available Present Modes: {:?}", caps.present_modes);
+
+    let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox // Лучший вариант: VSync без блокировок
+    } else if vsync {
+        wgpu::PresentMode::Fifo
     } else {
         if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
             wgpu::PresentMode::Immediate
-        } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
         }
@@ -204,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
         present_mode,
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
-        desired_maximum_frame_latency: 2,
+        desired_maximum_frame_latency: 1, // Уменьшаем задержку для лучшего отклика на 4K
     };
     
     surface.configure(&device_arc, &config);
@@ -264,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
 
     let last_interaction_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let event_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::app::UiEvent>::new()));
 
     plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir).await?;
 
@@ -273,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
     let last_int_clone = last_interaction_time.clone();
     let last_rend_clone = last_render_time.clone();
     let frame_wake_clone = frame_wake.clone();
+    let event_queue_clone = event_queue.clone();
 
     // 1. ЦИКЛ ОБРАБОТКИ ЗАДАЧ (POLLING) - Максимальная отзывчивость
     let d_tasks = dispatcher.clone();
@@ -378,6 +378,12 @@ async fn main() -> anyhow::Result<()> {
             if !frame_pending_clone.load(Ordering::Acquire) {
                 if is_visible_clone.load(Ordering::Relaxed) {
                     frame_pending_clone.store(true, Ordering::Release);
+                    
+                    let sub_events = {
+                        let mut q = event_queue_clone.lock().unwrap();
+                        std::mem::take(&mut *q)
+                    };
+
                     let ev = veldmap_host_core::app::UiEvent { 
                         surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
                             id: veldmap_host_core::SURFACE_ID, 
@@ -385,7 +391,8 @@ async fn main() -> anyhow::Result<()> {
                         }),
                         event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { 
                             dt: final_dt,
-                        })) 
+                        })),
+                        sub_events,
                     };
                     
                     let call_result = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await;
@@ -556,10 +563,11 @@ async fn main() -> anyhow::Result<()> {
                             width: size.width, 
                             height: size.height, 
                             scale_factor: window.scale_factor().max(ui_scale) as f32,
-                        })) 
+                        })),
+                        ..Default::default()
                     };
-                    let d = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
+                    event_queue.lock().unwrap().push(ev);
+                    frame_wake.notify_one();
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
@@ -569,11 +577,10 @@ async fn main() -> anyhow::Result<()> {
                 let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
                 let ev = veldmap_host_core::app::UiEvent { 
                     surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
-                    event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed: state == winit::event::ElementState::Pressed })) 
+                    event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed: state == winit::event::ElementState::Pressed })),
+                    ..Default::default()
                 };
-                let d = dispatcher.clone();
-                                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
-                
+                event_queue.lock().unwrap().push(ev);
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 *last_interaction_time.lock().unwrap() = std::time::Instant::now();
@@ -582,10 +589,10 @@ async fn main() -> anyhow::Result<()> {
                 if last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(16) {
                     let ev = veldmap_host_core::app::UiEvent { 
                         surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
-                        event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })) 
+                        event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })),
+                        ..Default::default()
                     };
-                    let d = dispatcher.clone();
-                    tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
+                    event_queue.lock().unwrap().push(ev);
                     last_cursor_sent_time = std::time::Instant::now();
                 }
             }
@@ -595,10 +602,10 @@ async fn main() -> anyhow::Result<()> {
                 let (pdx, pdy) = match delta { winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0), winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32) };
                 let ev = veldmap_host_core::app::UiEvent { 
                     surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
-                    event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })) 
+                    event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })),
+                    ..Default::default()
                 };
-                let d = dispatcher.clone();
-                tokio::spawn(async move { let _ = d.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await; });
+                event_queue.lock().unwrap().push(ev);
             }
             _ => (),
         }

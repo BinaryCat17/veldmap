@@ -13,6 +13,7 @@ message UIEvent {
         CursorMovedEvent cursor_moved = 7;
         FrameEvent frame = 8;
     }
+    repeated UIEvent sub_events = 9;
 }
 
 message FrameEvent {
