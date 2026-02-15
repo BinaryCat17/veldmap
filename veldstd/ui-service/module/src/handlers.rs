@@ -146,6 +146,7 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
 }
 
 fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32) -> anyhow::Result<Vec<UiEventResponse>> {
+    let render_start = std::time::Instant::now();
     let (width, height) = *plugin.canvas_size.borrow();
     if width == 0 || height == 0 { return Ok(Vec::new()); }
     
@@ -159,22 +160,30 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut captured_messages = Vec::new();
 
     renderer.clear();
+    let conv_start = std::time::Instant::now();
     let element = converter::convert_layout(&plugin.layout);
+    let conv_time = conv_start.elapsed();
     
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
     let _guard = crate::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
 
+    let ui_build_start = std::time::Instant::now();
     let mut ui = UserInterface::build(
         element,
         viewport.logical_size(),
         cache,
         renderer,
     );
+    let ui_build_time = ui_build_start.elapsed();
     
     let mut clipboard = iced_core::clipboard::Null;
+    let ui_update_start = std::time::Instant::now();
     let _ = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
+    let ui_update_time = ui_update_start.elapsed();
     
+    let ui_draw_start = std::time::Instant::now();
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
+    let ui_draw_time = ui_draw_start.elapsed();
 
     // COMMAND DIFFING: Проверяем, изменилось ли что-то в командах отрисовки или атласе
     let mut last_cmds = plugin.last_draw_commands.borrow_mut();
@@ -185,6 +194,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
                            *last_verts != renderer.vertices ||
                            renderer.is_atlas_dirty();
 
+    let gpu_exec_start = std::time::Instant::now();
     if commands_changed || *is_layout_dirty {
         execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format)?;
         
@@ -192,6 +202,45 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();
         *is_layout_dirty = false;
+    }
+    let gpu_exec_time = gpu_exec_start.elapsed();
+
+    let total_time = render_start.elapsed();
+    
+    // Accumulate Stats
+    {
+        let mut count = plugin.perf_count.borrow_mut();
+        *count += 1;
+        *plugin.perf_total.borrow_mut() += total_time.as_micros();
+        *plugin.perf_conv.borrow_mut() += conv_time.as_micros();
+        *plugin.perf_build.borrow_mut() += ui_build_time.as_micros();
+        *plugin.perf_update.borrow_mut() += ui_update_time.as_micros();
+        *plugin.perf_draw.borrow_mut() += ui_draw_time.as_micros();
+        *plugin.perf_gpu.borrow_mut() += gpu_exec_time.as_micros();
+
+        let mut last_log = plugin.perf_last_log.borrow_mut();
+        if last_log.map(|t| t.elapsed().as_secs() >= 5).unwrap_or(true) {
+             if *count > 0 {
+                 let avg_total = *plugin.perf_total.borrow() as f64 / 1000.0 / *count as f64;
+                 let avg_conv = *plugin.perf_conv.borrow() as f64 / 1000.0 / *count as f64;
+                 let avg_build = *plugin.perf_build.borrow() as f64 / 1000.0 / *count as f64;
+                 let avg_update = *plugin.perf_update.borrow() as f64 / 1000.0 / *count as f64;
+                 let avg_draw = *plugin.perf_draw.borrow() as f64 / 1000.0 / *count as f64;
+                 let avg_gpu = *plugin.perf_gpu.borrow() as f64 / 1000.0 / *count as f64;
+                 
+                 log::info!("[PERF] UI Render (5s avg) {}: count={}, total={:.2}ms, conv={:.2}ms, build={:.2}ms, update={:.2}ms, draw={:.2}ms, gpu={:.2}ms", 
+                     plugin_id, *count, avg_total, avg_conv, avg_build, avg_update, avg_draw, avg_gpu);
+             }
+             
+             *count = 0;
+             *plugin.perf_total.borrow_mut() = 0;
+             *plugin.perf_conv.borrow_mut() = 0;
+             *plugin.perf_build.borrow_mut() = 0;
+             *plugin.perf_update.borrow_mut() = 0;
+             *plugin.perf_draw.borrow_mut() = 0;
+             *plugin.perf_gpu.borrow_mut() = 0;
+             *last_log = Some(std::time::Instant::now());
+        }
     }
 
     *plugin.needs_redrawing.borrow_mut() = false;

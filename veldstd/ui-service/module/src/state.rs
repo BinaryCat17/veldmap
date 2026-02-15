@@ -25,6 +25,16 @@ pub struct PluginUiState {
     pub active_surface_id: u64,
     pub last_vertices: RefCell<Vec<crate::renderer::Vertex>>,
     pub last_draw_commands: RefCell<Vec<crate::renderer::DrawCmd>>,
+
+    // Performance Stats
+    pub perf_count: RefCell<u64>,
+    pub perf_total: RefCell<u128>,
+    pub perf_conv: RefCell<u128>,
+    pub perf_build: RefCell<u128>,
+    pub perf_update: RefCell<u128>,
+    pub perf_draw: RefCell<u128>,
+    pub perf_gpu: RefCell<u128>,
+    pub perf_last_log: RefCell<Option<std::time::Instant>>,
 }
 
 pub struct LocalState {
@@ -73,6 +83,15 @@ impl PluginUiState {
             active_surface_id: veldsdk::SURFACE_ID,
             last_vertices: RefCell::new(Vec::new()),
             last_draw_commands: RefCell::new(Vec::new()),
+            
+            perf_count: RefCell::new(0),
+            perf_total: RefCell::new(0),
+            perf_conv: RefCell::new(0),
+            perf_build: RefCell::new(0),
+            perf_update: RefCell::new(0),
+            perf_draw: RefCell::new(0),
+            perf_gpu: RefCell::new(0),
+            perf_last_log: RefCell::new(Some(std::time::Instant::now())),
         }
     }
 }

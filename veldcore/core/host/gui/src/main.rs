@@ -202,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
         present_mode,
         alpha_mode: caps.alpha_modes[0],
         view_formats: vec![],
-        desired_maximum_frame_latency: 1, // Уменьшаем задержку для лучшего отклика на 4K
+        desired_maximum_frame_latency: 2, // Разрешаем двойную буферизацию для устранения задержек на 4K
     };
     
     surface.configure(&device_arc, &config);
@@ -245,6 +245,16 @@ async fn main() -> anyhow::Result<()> {
 
     let mut frame_count = 0;
     let mut last_fps_update = std::time::Instant::now();
+    
+    // Performance accumulators
+    let mut acc_get_tex = std::time::Duration::ZERO;
+    let mut acc_submit = std::time::Duration::ZERO;
+    let mut acc_present = std::time::Duration::ZERO;
+    let mut acc_total_redraw = std::time::Duration::ZERO;
+    let mut acc_interval = std::time::Duration::ZERO;
+    let mut last_render_finish = std::time::Instant::now();
+    let mut perf_frame_count = 0;
+    let mut last_perf_log = std::time::Instant::now();
 
     // IROH 0.96 Initialization
     let secret_key = iroh::SecretKey::generate(&mut rand::rng());
@@ -305,6 +315,11 @@ async fn main() -> anyhow::Result<()> {
         let pid = sysinfo::get_current_pid().ok();
 
         let sleeper = spin_sleep::SpinSleeper::default();
+
+        // Logic loop accumulators
+        let mut logic_acc_ui_call = std::time::Duration::ZERO;
+        let mut logic_acc_count = 0;
+        let mut logic_last_log = std::time::Instant::now();
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
@@ -395,8 +410,23 @@ async fn main() -> anyhow::Result<()> {
                         sub_events,
                     };
                     
+                    let call_start = std::time::Instant::now();
                     let call_result = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await;
+                    let call_time = call_start.elapsed();
                     frame_pending_clone.store(false, Ordering::Release);
+                    
+                    logic_acc_ui_call += call_time;
+                    logic_acc_count += 1;
+
+                    if logic_last_log.elapsed() >= std::time::Duration::from_secs(5) {
+                        if logic_acc_count > 0 {
+                            let avg = logic_acc_ui_call.as_secs_f64() * 1000.0 / logic_acc_count as f64;
+                            log::info!("[PERF] Logic Loop (5s avg): UI Call = {:.2} ms ({} calls)", avg, logic_acc_count);
+                        }
+                        logic_acc_ui_call = std::time::Duration::ZERO;
+                        logic_acc_count = 0;
+                        logic_last_log = std::time::Instant::now();
+                    }
                     
                     if let Err(e) = call_result {
                         log::error!("Frame event failed: {}", e);
@@ -419,7 +449,6 @@ async fn main() -> anyhow::Result<()> {
                     *last_render_time.lock().unwrap() = std::time::Instant::now();
                     if is_visible.load(Ordering::SeqCst) && w > 0 && h > 0 {
                         if id == veldmap_host_core::SURFACE_ID {
-                            // Direct surface rendering
                             app_texture_id = Some(veldmap_host_core::SURFACE_ID);
                             app_bind_group = None;
                         } else if Some(id) != app_texture_id || (w, h) != last_size {
@@ -445,7 +474,14 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
                 let size = window.inner_size();
                 if is_visible.load(Ordering::SeqCst) && size.width > 0 && size.height > 0 && config.width > 0 && config.height > 0 {
-                    match surface.get_current_texture() {
+                    let start_redraw = std::time::Instant::now();
+                    acc_interval += start_redraw.duration_since(last_render_finish);
+
+                    let get_tex_start = std::time::Instant::now();
+                    let surface_texture = surface.get_current_texture();
+                    let get_tex_time = get_tex_start.elapsed();
+
+                    match surface_texture {
                         Ok(frame) => {
                             let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                             let mut encoder = resources.get_device().create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -528,14 +564,49 @@ async fn main() -> anyhow::Result<()> {
                                     rp.draw(0..3, 0..1);
                                 }
                             }
+                            
+                            let submit_start = std::time::Instant::now();
                             queue_arc.lock().unwrap().submit(Some(encoder.finish()));
+                            let submit_time = submit_start.elapsed();
+                            
+                            let present_start = std::time::Instant::now();
                             frame.present();
+                            let present_time = present_start.elapsed();
+                            let total_time = start_redraw.elapsed();
+                            last_render_finish = std::time::Instant::now();
+
+                            acc_get_tex += get_tex_time;
+                            acc_submit += submit_time;
+                            acc_present += present_time;
+                            acc_total_redraw += total_time;
+                            perf_frame_count += 1;
+
+                            if last_perf_log.elapsed() >= std::time::Duration::from_secs(5) {
+                                if perf_frame_count > 0 {
+                                    let avg_get = acc_get_tex.as_secs_f64() * 1000.0 / perf_frame_count as f64;
+                                    let avg_sub = acc_submit.as_secs_f64() * 1000.0 / perf_frame_count as f64;
+                                    let avg_pres = acc_present.as_secs_f64() * 1000.0 / perf_frame_count as f64;
+                                    let avg_tot = acc_total_redraw.as_secs_f64() * 1000.0 / perf_frame_count as f64;
+                                    let avg_int = acc_interval.as_secs_f64() * 1000.0 / perf_frame_count as f64;
+                                    
+                                    log::info!("[PERF] Render Loop (5s avg): FPS={:.1} | Interval={:.2}ms | Total={:.2}ms | GetTex={:.2}ms | Submit={:.2}ms | Present={:.2}ms", 
+                                        perf_frame_count as f64 / 5.0, avg_int, avg_tot, avg_get, avg_sub, avg_pres);
+                                }
+                                acc_get_tex = std::time::Duration::ZERO;
+                                acc_submit = std::time::Duration::ZERO;
+                                acc_present = std::time::Duration::ZERO;
+                                acc_total_redraw = std::time::Duration::ZERO;
+                                acc_interval = std::time::Duration::ZERO;
+                                perf_frame_count = 0;
+                                last_perf_log = std::time::Instant::now();
+                            }
 
                             shared_frame_count.fetch_add(1, Ordering::SeqCst);
                             
                             frame_count += 1;
                             let now = std::time::Instant::now();
                             let elapsed = now.duration_since(last_fps_update);
+
                             if elapsed >= std::time::Duration::from_secs(1) {
                                 window.set_title(&format!("{} - {:.1} FPS", window_title, frame_count as f64 / elapsed.as_secs_f64()));
                                 frame_count = 0;

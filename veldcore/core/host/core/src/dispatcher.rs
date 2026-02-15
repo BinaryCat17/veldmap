@@ -43,6 +43,7 @@ pub struct Dispatcher {
     endpoint: Endpoint,
     services: Mutex<HashMap<String, ServiceLocation>>,
     pub tasks: Arc<Mutex<HashMap<String, TaskState>>>,
+    stats: Arc<Mutex<HashMap<String, (u64, u128, u128, u128, u128, std::time::Instant)>>>,
 }
 
 impl Dispatcher {
@@ -51,6 +52,7 @@ impl Dispatcher {
             endpoint,
             services: Mutex::new(HashMap::new()),
             tasks: Arc::new(Mutex::new(HashMap::new())),
+            stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -94,6 +96,7 @@ impl Dispatcher {
                 service.call(method, payload, requestor_id)
             }
             ServiceLocation::LocalWasm(wasm_module) => {
+                let start_total = std::time::Instant::now();
                 let request = RpcRequest {
                     service: service_name.to_string(),
                     method: method.to_string(),
@@ -101,7 +104,9 @@ impl Dispatcher {
                     sync: None,
                     instance_id: requestor_id,
                 };
+                let ser_start = std::time::Instant::now();
                 let req_buf = request.encode_to_vec();
+                let ser_time = ser_start.elapsed();
 
                 let mut module = wasm_module.lock().await;
                 
@@ -111,7 +116,10 @@ impl Dispatcher {
 
                 let instance = module.instance;
                 let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
+                
+                let wasm_start = std::time::Instant::now();
                 let _ = handle_rpc.call_async(&mut module.store, ()).await?;
+                let wasm_time = wasm_start.elapsed();
                 
                 // Extract output from shared context
                 let res_buf = {
@@ -119,6 +127,7 @@ impl Dispatcher {
                     inner.output.clone()
                 };
                 
+                let deser_start = std::time::Instant::now();
                 let response = match RpcResponse::decode(&res_buf[..]) {
                     Ok(r) => r,
                     Err(e) => {
@@ -126,6 +135,33 @@ impl Dispatcher {
                         return Err(anyhow::anyhow!("Decode error: {}", e));
                     }
                 };
+                let deser_time = deser_start.elapsed();
+
+                let total_time = start_total.elapsed();
+                
+                let key = format!("{}::{}", service_name, method);
+                {
+                    let mut s = self.stats.lock().unwrap();
+                    let entry = s.entry(key.clone()).or_insert((0, 0, 0, 0, 0, std::time::Instant::now()));
+                    entry.0 += 1;
+                    entry.1 += total_time.as_micros();
+                    entry.2 += wasm_time.as_micros();
+                    entry.3 += ser_time.as_micros();
+                    entry.4 += deser_time.as_micros();
+                    
+                    if entry.5.elapsed() >= std::time::Duration::from_secs(5) {
+                         if entry.0 > 0 {
+                             let avg_tot = entry.1 as f64 / 1000.0 / entry.0 as f64;
+                             let avg_wasm = entry.2 as f64 / 1000.0 / entry.0 as f64;
+                             let avg_ser = entry.3 as f64 / 1000.0 / entry.0 as f64;
+                             let avg_deser = entry.4 as f64 / 1000.0 / entry.0 as f64;
+                             log::info!("[PERF] Dispatcher (5s avg) {}: count={}, total={:.2}ms, wasm={:.2}ms, ser={:.2}ms, deser={:.2}ms", 
+                                 key, entry.0, avg_tot, avg_wasm, avg_ser, avg_deser);
+                         }
+                         *entry = (0, 0, 0, 0, 0, std::time::Instant::now());
+                    }
+                }
+
                 if !response.error.is_empty() {
                     return Err(anyhow::anyhow!(response.error));
                 }
