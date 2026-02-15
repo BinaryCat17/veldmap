@@ -254,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
     let mut acc_interval = std::time::Duration::ZERO;
     let mut last_render_finish = std::time::Instant::now();
     let mut perf_frame_count = 0;
+    let mut draw_cmd_count = 0;
     let mut last_perf_log = std::time::Instant::now();
 
     // IROH 0.96 Initialization
@@ -444,7 +445,12 @@ async fn main() -> anyhow::Result<()> {
         match event {
             Event::UserEvent(()) => {
                 let mut last_draw_cmd = None;
-                while let Ok(cmd) = rx.try_recv() { last_draw_cmd = Some(cmd); }
+                while let Ok(cmd) = rx.try_recv() { 
+                    if let AppCommand::Draw(..) = cmd {
+                        draw_cmd_count += 1;
+                    }
+                    last_draw_cmd = Some(cmd); 
+                }
                 if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
                     *last_render_time.lock().unwrap() = std::time::Instant::now();
                     if is_visible.load(Ordering::SeqCst) && w > 0 && h > 0 {
@@ -589,8 +595,8 @@ async fn main() -> anyhow::Result<()> {
                                     let avg_tot = acc_total_redraw.as_secs_f64() * 1000.0 / perf_frame_count as f64;
                                     let avg_int = acc_interval.as_secs_f64() * 1000.0 / perf_frame_count as f64;
                                     
-                                    log::info!("[PERF] Render Loop (5s avg): FPS={:.1} | Interval={:.2}ms | Total={:.2}ms | GetTex={:.2}ms | Submit={:.2}ms | Present={:.2}ms", 
-                                        perf_frame_count as f64 / 5.0, avg_int, avg_tot, avg_get, avg_sub, avg_pres);
+                                    log::info!("[PERF] Render Loop (5s avg): FPS={:.1} | Cmds={:.1} | Interval={:.2}ms | Total={:.2}ms | GetTex={:.2}ms | Submit={:.2}ms | Present={:.2}ms", 
+                                        perf_frame_count as f64 / 5.0, draw_cmd_count as f64 / 5.0, avg_int, avg_tot, avg_get, avg_sub, avg_pres);
                                 }
                                 acc_get_tex = std::time::Duration::ZERO;
                                 acc_submit = std::time::Duration::ZERO;
@@ -598,6 +604,7 @@ async fn main() -> anyhow::Result<()> {
                                 acc_total_redraw = std::time::Duration::ZERO;
                                 acc_interval = std::time::Duration::ZERO;
                                 perf_frame_count = 0;
+                                draw_cmd_count = 0;
                                 last_perf_log = std::time::Instant::now();
                             }
 
