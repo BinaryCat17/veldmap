@@ -248,77 +248,102 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING) - Энергоэффективность
     tokio::spawn(async move {
+        use sysinfo::{System, CpuRefreshKind, RefreshKind};
+        let mut sys = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::everything())
+        );
+
+        let sleeper = spin_sleep::SpinSleeper::default();
+
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
         tokio::spawn(async move { let _ = node.run().await; });
         log::info!("Core ready. Render loop started (VSync: {}, FPS Limit: {}, Auto: {})...", vsync, fps_limit, auto_fps);
         
         let mut last_frame_time = std::time::Instant::now();
+        let mut internal_frame_count = 0;
+        let mut last_fps_log_time = std::time::Instant::now();
+
         loop {
             let now = std::time::Instant::now();
             let dt = now.duration_since(last_frame_time).as_secs_f32();
             
-            // Если предыдущий кадр еще не обработан WASM-модулем - ждем
-            if frame_pending_clone.load(Ordering::Acquire) {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                continue;
+            // Логирование среднего FPS и ресурсов каждые 5 секунд
+            if last_fps_log_time.elapsed() >= std::time::Duration::from_secs(5) {
+                sys.refresh_cpu_all();
+                
+                let elapsed = last_fps_log_time.elapsed().as_secs_f32();
+                let avg_fps = internal_frame_count as f32 / elapsed;
+                let cpu_usage = sys.global_cpu_usage();
+                
+                log::info!(
+                    "[PERF] Monitor: {}Hz | Avg FPS: {:.1} | CPU: {:.1}%", 
+                    monitor_fps, avg_fps, cpu_usage
+                );
+                
+                internal_frame_count = 0;
+                last_fps_log_time = std::time::Instant::now();
             }
 
-            // АДАПТИВНЫЙ FPS
+            // 1. ОПРЕДЕЛЯЕМ ТЕКУЩИЙ ЛИМИТ
             let mut current_fps_limit = fps_limit;
+            let mut is_idle = false;
             if auto_fps {
                 let last_int = *last_int_clone.lock().unwrap();
                 let last_rend = *last_rend_clone.lock().unwrap();
                 let idle_time = now.duration_since(last_int).as_secs_f32();
                 let render_idle_time = now.duration_since(last_rend).as_secs_f32();
 
-                // Если нет ввода > 0.5 сек и нет отрисовок > 0.3 сек - снижаем до 5 FPS
                 if idle_time > 0.5 && render_idle_time > 0.3 {
                     current_fps_limit = 5;
-                } else {
-                    current_fps_limit = fps_limit; // Используем частоту монитора или лимит из конфига
+                    is_idle = true;
                 }
             }
 
-            // Ограничиваем FPS, если мы не в режиме чистого VSync без лимита
-            // Или если текущий лимит (например, 5 FPS) ниже частоты монитора
-            // Всегда соблюдаем лимит FPS, чтобы не нагружать CPU лишними кадрами,
-            // которые монитор всё равно не успеет показать.
+            // 2. СТРОГИЙ ТАЙМИНГ С ВЫСОКОТОЧНЫМ ТАЙМЕРОМ
             let target_dt = 1.0 / current_fps_limit.max(1) as f32;
             if dt < target_dt {
-                // Ждем либо следующего тика, либо уведомления о вводе пользователя
                 let sleep_duration = std::time::Duration::from_secs_f32(target_dt - dt);
-                tokio::select! {
-                    _ = tokio::time::sleep(sleep_duration) => {},
-                    _ = frame_wake_clone.notified() => {
-                        // Проснулись по вводу - сбрасываем таймер кадра, чтобы выдать его немедленно
+                if is_idle {
+                    // В idle режиме используем экономный системный sleep
+                    tokio::select! {
+                        _ = tokio::time::sleep(sleep_duration) => {},
+                        _ = frame_wake_clone.notified() => {}
                     }
+                } else {
+                    // В активном режиме используем высокоточный spin_sleep
+                    sleeper.sleep(sleep_duration);
                 }
             }
             
-            last_frame_time = std::time::Instant::now();
+            let final_now = std::time::Instant::now();
+            let final_dt = final_now.duration_since(last_frame_time).as_secs_f32();
+            last_frame_time = final_now;
 
-            if is_visible_clone.load(Ordering::Relaxed) {
-                frame_pending_clone.store(true, Ordering::Release);
-                let ev = veldmap_host_core::app::UiEvent { 
-                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
-                        id: veldmap_host_core::SURFACE_ID, 
-                        ..Default::default() 
-                    }),
-                    event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { 
-                        dt,
-                    })) 
-                };
-                
-                // Вызываем RPC и СРАЗУ сбрасываем флаг ожидания после возврата
-                let call_result = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await;
-                frame_pending_clone.store(false, Ordering::Release);
-                
-                if let Err(e) = call_result {
-                    log::error!("Frame event failed: {}", e);
+            if !frame_pending_clone.load(Ordering::Acquire) {
+                if is_visible_clone.load(Ordering::Relaxed) {
+                    internal_frame_count += 1;
+                    frame_pending_clone.store(true, Ordering::Release);
+                    let ev = veldmap_host_core::app::UiEvent { 
+                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
+                            id: veldmap_host_core::SURFACE_ID, 
+                            ..Default::default() 
+                        }),
+                        event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { 
+                            dt: final_dt,
+                        })) 
+                    };
+                    
+                    let call_result = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await;
+                    frame_pending_clone.store(false, Ordering::Release);
+                    
+                    if let Err(e) = call_result {
+                        log::error!("Frame event failed: {}", e);
+                    }
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     });
