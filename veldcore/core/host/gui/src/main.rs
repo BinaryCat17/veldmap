@@ -266,13 +266,24 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
+    let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
+    let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()))));
     dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::gpu_service::GpuService::new(resources.clone(), render_queue.clone()))));
-    dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(tx, proxy, is_visible.clone(), resources.clone()))));
+    dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(
+        tx, 
+        proxy, 
+        is_visible.clone(), 
+        resources.clone(),
+        monitor_fps as u32,
+        actual_fps.clone(),
+        last_render_time.clone(),
+        frame_wake.clone(),
+    ))));
 
     let last_interaction_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-    let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let event_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::app::UiEvent>::new()));
 
     plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir).await?;
@@ -340,6 +351,10 @@ async fn main() -> anyhow::Result<()> {
                 let frames = shared_frames_perf.swap(0, Ordering::SeqCst);
                 let avg_fps = frames as f32 / elapsed;
                 
+                if let Ok(mut fps) = actual_fps.lock() {
+                    *fps = avg_fps;
+                }
+
                 let mut cpu_usage = 0.0;
                 if let Some(id) = pid {
                     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[id]), true);
@@ -446,9 +461,8 @@ async fn main() -> anyhow::Result<()> {
             Event::UserEvent(()) => {
                 let mut last_draw_cmd = None;
                 while let Ok(cmd) = rx.try_recv() { 
-                    if let AppCommand::Draw(..) = cmd {
-                        draw_cmd_count += 1;
-                    }
+                    let AppCommand::Draw(..) = cmd;
+                    draw_cmd_count += 1;
                     last_draw_cmd = Some(cmd); 
                 }
                 if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
@@ -595,7 +609,7 @@ async fn main() -> anyhow::Result<()> {
                                     let avg_tot = acc_total_redraw.as_secs_f64() * 1000.0 / perf_frame_count as f64;
                                     let avg_int = acc_interval.as_secs_f64() * 1000.0 / perf_frame_count as f64;
                                     
-                                    log::info!("[PERF] Render Loop (5s avg): FPS={:.1} | Cmds={:.1} | Interval={:.2}ms | Total={:.2}ms | GetTex={:.2}ms | Submit={:.2}ms | Present={:.2}ms", 
+                                    log::info!("[PERF] Render Loop (5s avg): FPS={:.1} | DrawCmds={:.1}/s | Interval={:.2}ms | Total={:.2}ms | GetTex={:.2}ms | Submit={:.2}ms | Present={:.2}ms", 
                                         perf_frame_count as f64 / 5.0, draw_cmd_count as f64 / 5.0, avg_int, avg_tot, avg_get, avg_sub, avg_pres);
                                 }
                                 acc_get_tex = std::time::Duration::ZERO;

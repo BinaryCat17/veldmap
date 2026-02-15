@@ -35,6 +35,9 @@ pub struct PluginUiState {
     pub perf_draw: RefCell<u128>,
     pub perf_gpu: RefCell<u128>,
     pub perf_last_log: RefCell<Option<std::time::Instant>>,
+
+    pub monitor_fps: RefCell<u32>,
+    pub actual_fps: RefCell<f32>,
 }
 
 pub struct LocalState {
@@ -92,6 +95,9 @@ impl PluginUiState {
             perf_draw: RefCell::new(0),
             perf_gpu: RefCell::new(0),
             perf_last_log: RefCell::new(Some(std::time::Instant::now())),
+            
+            monitor_fps: RefCell::new(60),
+            actual_fps: RefCell::new(60.0),
         }
     }
 }

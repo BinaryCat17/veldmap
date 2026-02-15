@@ -63,4 +63,10 @@ message DrawFrame {
     veldmap.core.ResourceHandle handle = 1;
     uint32 width = 2;
     uint32 height = 3;
+    bool request_next_frame = 4;
+}
+
+message AppDisplayResponse {
+    uint32 monitor_fps = 1;
+    float actual_fps = 2;
 }
