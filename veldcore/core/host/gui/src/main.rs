@@ -95,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
     let is_visible = Arc::new(AtomicBool::new(true));
     let frame_pending = Arc::new(AtomicBool::new(false));
+    let frame_wake = Arc::new(tokio::sync::Notify::new());
 
     let flags = wgpu::InstanceFlags::default() 
         | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
@@ -211,7 +212,29 @@ async fn main() -> anyhow::Result<()> {
     let frame_pending_clone = frame_pending.clone();
     let last_int_clone = last_interaction_time.clone();
     let last_rend_clone = last_render_time.clone();
+    let frame_wake_clone = frame_wake.clone();
 
+    // 1. ЦИКЛ ОБРАБОТКИ ЗАДАЧ (POLLING) - Максимальная отзывчивость
+    let d_tasks = dispatcher.clone();
+    tokio::spawn(async move {
+        loop {
+            let _ = d_tasks.poll_all_tasks().await;
+            
+            // Адаптивная частота поллинга: 1мс если есть задачи, 10мс если нет
+            let has_tasks = {
+                let tasks = d_tasks.tasks.lock().unwrap();
+                !tasks.is_empty()
+            };
+            
+            if has_tasks {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    });
+
+    // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING) - Энергоэффективность
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
@@ -223,15 +246,14 @@ async fn main() -> anyhow::Result<()> {
             let now = std::time::Instant::now();
             let dt = now.duration_since(last_frame_time).as_secs_f32();
             
-            let _ = d_clone.poll_all_tasks().await;
-
-            // Если предыдущий кадр еще не отрисован - ждем
+            // Если предыдущий кадр еще не обработан WASM-модулем - ждем
             if frame_pending_clone.load(Ordering::Acquire) {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 continue;
             }
 
             // АДАПТИВНЫЙ FPS
+            let mut current_fps_limit = fps_limit;
             if auto_fps {
                 let last_int = *last_int_clone.lock().unwrap();
                 let last_rend = *last_rend_clone.lock().unwrap();
@@ -240,20 +262,25 @@ async fn main() -> anyhow::Result<()> {
 
                 // Если нет ввода > 2 сек и нет отрисовок > 1 сек - снижаем до 5 FPS
                 if idle_time > 2.0 && render_idle_time > 1.0 {
-                    let target_dt = 1.0 / 5.0; // 5 FPS
-                    if dt < target_dt {
-                        tokio::time::sleep(std::time::Duration::from_secs_f32(target_dt - dt)).await;
-                        continue;
-                    }
-                }
-            } else if !vsync {
-                let target_dt = 1.0 / fps_limit.max(1) as f32;
-                if dt < target_dt {
-                    tokio::time::sleep(std::time::Duration::from_secs_f32(target_dt - dt)).await;
-                    continue;
+                    current_fps_limit = 5;
                 }
             }
-            last_frame_time = now;
+
+            if !vsync || current_fps_limit < 60 {
+                let target_dt = 1.0 / current_fps_limit.max(1) as f32;
+                if dt < target_dt {
+                    // Ждем либо следующего тика, либо уведомления о вводе пользователя
+                    let sleep_duration = std::time::Duration::from_secs_f32(target_dt - dt);
+                    tokio::select! {
+                        _ = tokio::time::sleep(sleep_duration) => {},
+                        _ = frame_wake_clone.notified() => {
+                            // Проснулись по вводу - сбрасываем таймер кадра, чтобы выдать его немедленно
+                        }
+                    }
+                }
+            }
+            
+            last_frame_time = std::time::Instant::now();
 
             if is_visible_clone.load(Ordering::Relaxed) {
                 frame_pending_clone.store(true, Ordering::Release);
@@ -266,9 +293,13 @@ async fn main() -> anyhow::Result<()> {
                         dt,
                     })) 
                 };
-                if let Err(e) = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await {
+                
+                // Вызываем RPC и СРАЗУ сбрасываем флаг ожидания после возврата
+                let call_result = d_clone.call("data-browser", "handle_ui_event", ev.encode_to_vec(), 0).await;
+                frame_pending_clone.store(false, Ordering::Release);
+                
+                if let Err(e) = call_result {
                     log::error!("Frame event failed: {}", e);
-                    frame_pending_clone.store(false, Ordering::Release);
                 }
             } else {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -396,7 +427,6 @@ async fn main() -> anyhow::Result<()> {
                             }
                             queue_arc.lock().unwrap().submit(Some(encoder.finish()));
                             frame.present();
-                            frame_pending.store(false, Ordering::Release);
 
                             frame_count += 1;
                             let now = std::time::Instant::now();
@@ -437,6 +467,7 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { window_target.exit(); }
             Event::WindowEvent { event: WindowEvent::MouseInput { state, button, .. }, .. } => {
                 *last_interaction_time.lock().unwrap() = std::time::Instant::now();
+                frame_wake.notify_one();
                 let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
                 let ev = veldmap_host_core::app::UiEvent { 
                     surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
@@ -448,6 +479,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 *last_interaction_time.lock().unwrap() = std::time::Instant::now();
+                frame_wake.notify_one();
                 cursor_pos = (position.x as f32, position.y as f32);
                 if last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(16) {
                     let ev = veldmap_host_core::app::UiEvent { 
@@ -461,6 +493,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
                 *last_interaction_time.lock().unwrap() = std::time::Instant::now();
+                frame_wake.notify_one();
                 let (pdx, pdy) = match delta { winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0), winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32) };
                 let ev = veldmap_host_core::app::UiEvent { 
                     surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),

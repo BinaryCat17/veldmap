@@ -817,72 +817,157 @@ pub mod diffing {
     use std::hash::{Hash, Hasher};
     use veldsdk::prost::Message;
 
-    pub fn hash_widget(widget: &mut proto::Widget) -> u64 {
+    pub fn assign_ids_and_hash(widget: &mut proto::Widget, index: &mut u64) -> u64 {
         let mut hasher = DefaultHasher::new();
         
-        // Обнуляем ID перед хешированием, чтобы он не влиял на результат, 
-        // если он там уже был (хотя он должен быть 0).
-        widget.id = 0;
+        // Присваиваем стабильный позиционный ID
+        widget.id = *index;
+        *index += 1;
         
-        // Хешируем содержимое через бинарное представление Prost.
-        // Это самый надежный способ учесть все поля без ручного перечисления.
-        let bytes = widget.encode_to_vec();
+        // Хешируем тип виджета
+        let type_tag = match &widget.r#type {
+            Some(proto::widget::Type::Column(_)) => 1,
+            Some(proto::widget::Type::Row(_)) => 2,
+            Some(proto::widget::Type::Text(_)) => 3,
+            Some(proto::widget::Type::Button(_)) => 4,
+            Some(proto::widget::Type::TextInput(_)) => 5,
+            Some(proto::widget::Type::Container(_)) => 6,
+            Some(proto::widget::Type::Scrollable(_)) => 7,
+            Some(proto::widget::Type::Stack(_)) => 8,
+            _ => 0,
+        };
+        type_tag.hash(&mut hasher);
+
+        // Рекурсивно хешируем детей и содержимое
+        // Для простоты используем бинарный дамп, но БЕЗ ID, чтобы хеш зависел только от контента
+        let mut widget_copy = widget.clone();
+        widget_copy.id = 0;
+        
+        // ОЧИЩАЕМ ID У ВСЕХ ДЕТЕЙ В КОПИИ ДЛЯ ЧЕСТНОГО ХЕША КОНТЕНТА
+        clear_ids(&mut widget_copy);
+        
+        let bytes = widget_copy.encode_to_vec();
         bytes.hash(&mut hasher);
-        
-        // Если у виджета есть дети, их хеши тоже должны влиять.
-        // (Хотя encode_to_vec уже включает детей, но для надежности диффинга 
-        // лучше иметь явный ID у каждого узла).
-        let h = hasher.finish();
-        widget.id = h;
-        h
+
+        hasher.finish()
     }
 
-    pub fn collect_widgets(widget: &proto::Widget, map: &mut std::collections::HashMap<u64, proto::Widget>) {
-        map.insert(widget.id, widget.clone());
-        match &widget.r#type {
-            Some(proto::widget::Type::Column(c)) => { for child in &c.children { collect_widgets(child, map); } }
-            Some(proto::widget::Type::Row(r)) => { for child in &r.children { collect_widgets(child, map); } }
-            Some(proto::widget::Type::Stack(s)) => { for child in &s.children { collect_widgets(child, map); } }
-            Some(proto::widget::Type::Container(c)) => { if let Some(child) = &c.child { collect_widgets(child, map); } }
-            Some(proto::widget::Type::Scrollable(s)) => { if let Some(child) = &s.content { collect_widgets(child, map); } }
-            Some(proto::widget::Type::Tooltip(t)) => { if let Some(child) = &t.content { collect_widgets(child, map); } }
-            Some(proto::widget::Type::Button(b)) => { if let Some(child) = &b.child { collect_widgets(child, map); } }
+    fn clear_ids(widget: &mut proto::Widget) {
+        widget.id = 0;
+        match &mut widget.r#type {
+            Some(proto::widget::Type::Column(c)) => { for child in &mut c.children { clear_ids(child); } }
+            Some(proto::widget::Type::Row(r)) => { for child in &mut r.children { clear_ids(child); } }
+            Some(proto::widget::Type::Stack(s)) => { for child in &mut s.children { clear_ids(child); } }
+            Some(proto::widget::Type::Container(c)) => { if let Some(child) = &mut c.child { clear_ids(child); } }
+            Some(proto::widget::Type::Scrollable(s)) => { if let Some(child) = &mut s.content { clear_ids(child); } }
+            Some(proto::widget::Type::Tooltip(t)) => { if let Some(child) = &mut t.content { clear_ids(child); } }
+            Some(proto::widget::Type::Button(b)) => { if let Some(child) = &mut b.child { clear_ids(child); } }
             _ => {}
         }
     }
 
     pub fn diff_layouts(old: &proto::Layout, new: &proto::Layout) -> Option<proto::LayoutPatch> {
-        if old.hash == new.hash && old.width == new.width && old.height == new.height {
-            return None;
-        }
-
-        let mut old_widgets = std::collections::HashMap::new();
-        if let Some(root) = &old.root { collect_widgets(root, &mut old_widgets); }
-
-        let mut new_widgets = std::collections::HashMap::new();
-        if let Some(root) = &new.root { collect_widgets(root, &mut new_widgets); }
-
-        let mut updates = Vec::new();
-        
-        // Находим все новые или измененные виджеты
-        for (id, widget) in &new_widgets {
-            if let Some(old_w) = old_widgets.get(id) {
-                if old_w != widget {
-                    updates.push(proto::WidgetUpdate { widget_id: *id, new_widget: Some(widget.clone()) });
-                }
-            } else {
-                updates.push(proto::WidgetUpdate { widget_id: *id, new_widget: Some(widget.clone()) });
+        // Если хеши корней совпали - изменений точно нет
+        if let (Some(o), Some(n)) = (&old.root, &new.root) {
+            if o.id == n.id && old.hash == new.hash && old.width == new.width && old.height == new.height {
+                return None;
             }
         }
 
-        // Если изменений слишком много (например, больше 50% дерева), 
-        // проще прислать все дерево. Но мы пока всегда шлем патч для теста.
+        let mut updates = Vec::new();
+        if let (Some(o), Some(n)) = (&old.root, &new.root) {
+            find_updates(o, n, &mut updates);
+        } else if let Some(n) = &new.root {
+            // Если старого корня не было - шлем полный корень как обновление ID 0
+            updates.push(proto::WidgetUpdate { widget_id: 0, new_widget: Some(n.clone()) });
+        }
+
+        if updates.is_empty() && old.width == new.width && old.height == new.height {
+            return None;
+        }
+
         Some(proto::LayoutPatch {
             updates,
             width: new.width,
             height: new.height,
             new_hash: new.hash,
         })
+    }
+
+    fn find_updates(old: &proto::Widget, new: &proto::Widget, updates: &mut Vec<proto::WidgetUpdate>) {
+        // Если это один и тот же виджет (по контенту), ничего не делаем
+        // Мы не можем сравнивать o.id == n.id напрямую для контента, 
+        // так как ID позиционный и всегда совпадает при одинаковой структуре.
+        // Поэтому сравниваем их полные дампы (без ID).
+        let mut o_copy = old.clone(); o_copy.id = 0;
+        let mut n_copy = new.clone(); n_copy.id = 0;
+        
+        if o_copy.encode_to_vec() == n_copy.encode_to_vec() {
+            return;
+        }
+
+        // Если типы разные или структура детей несовместима - заменяем весь узел
+        let mut structural_change = false;
+        match (&old.r#type, &new.r#type) {
+            (Some(proto::widget::Type::Column(oc)), Some(proto::widget::Type::Column(nc))) => {
+                if oc.children.len() == nc.children.len() {
+                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) {
+                        find_updates(oc_child, nc_child, updates);
+                    }
+                } else { structural_change = true; }
+            }
+            (Some(proto::widget::Type::Row(oc)), Some(proto::widget::Type::Row(nc))) => {
+                if oc.children.len() == nc.children.len() {
+                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) {
+                        find_updates(oc_child, nc_child, updates);
+                    }
+                } else { structural_change = true; }
+            }
+            (Some(proto::widget::Type::Stack(oc)), Some(proto::widget::Type::Stack(nc))) => {
+                if oc.children.len() == nc.children.len() {
+                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) {
+                        find_updates(oc_child, nc_child, updates);
+                    }
+                } else { structural_change = true; }
+            }
+            (Some(proto::widget::Type::Scrollable(oc)), Some(proto::widget::Type::Scrollable(nc))) => {
+                match (&oc.content, &nc.content) {
+                    (Some(oc_c), Some(nc_c)) => find_updates(oc_c, nc_c, updates),
+                    (None, None) => {},
+                    _ => structural_change = true,
+                }
+            }
+            (Some(proto::widget::Type::Tooltip(oc)), Some(proto::widget::Type::Tooltip(nc))) => {
+                match (&oc.content, &nc.content) {
+                    (Some(oc_c), Some(nc_c)) => find_updates(oc_c, nc_c, updates),
+                    (None, None) => {},
+                    _ => structural_change = true,
+                }
+            }
+            (Some(proto::widget::Type::Button(oc)), Some(proto::widget::Type::Button(nc))) => {
+                match (&oc.child, &nc.child) {
+                    (Some(oc_c), Some(nc_c)) => find_updates(oc_c, nc_c, updates),
+                    (None, None) => {},
+                    _ => structural_change = true,
+                }
+            }
+            // ... другие типы можно добавить аналогично, но для Column/Row это самое важное
+            _ => { structural_change = true; }
+        }
+
+        if structural_change {
+            updates.push(proto::WidgetUpdate { widget_id: old.id, new_widget: Some(new.clone()) });
+        } else {
+            // Если структура та же, но контент изменился (и мы не зашли в рекурсию выше для детей),
+            // значит изменились свойства самого виджета (текст, цвет и т.д.)
+            // В этом случае мы тоже шлем этот узел. 
+            // Но чтобы не слать лишнего, проверяем, не добавили ли мы уже обновления для детей.
+            // Для простоты: если мы здесь, и это не структурное изменение, мы просто шлем этот узел,
+            // если он не является контейнером, который мы уже обработали.
+            if !matches!(new.r#type, Some(proto::widget::Type::Column(_)) | Some(proto::widget::Type::Row(_))) {
+                updates.push(proto::WidgetUpdate { widget_id: old.id, new_widget: Some(new.clone()) });
+            }
+        }
     }
 }
 
@@ -1030,8 +1115,9 @@ macro_rules! define_remote_ui_module {
                                 let element = $view_func(&module.state);
                                 let mut root_widget = element.widget;
                                 
-                                // ВЫЧИСЛЯЕМ ХЕШИ И ID ДЛЯ ДИФФИНГА
-                                let hash = $crate::diffing::hash_widget(&mut root_widget);
+                                // ВЫЧИСЛЯЕМ ХЕШИ И ID ДЛЯ ДИФФИНГА (Позиционные)
+                                let mut index = 0;
+                                let hash = $crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
                                 
                                 let new_layout = $crate::proto::Layout {
                                     root: Some(root_widget),
@@ -1041,24 +1127,26 @@ macro_rules! define_remote_ui_module {
 
                                 let request = if let Some(ref old_layout) = module.last_layout {
                                     if let Some(patch) = $crate::diffing::diff_layouts(old_layout, &new_layout) {
-                                        $crate::proto::SetViewRequest {
+                                        Some($crate::proto::SetViewRequest {
                                             plugin_id: module.plugin_name.clone(),
                                             update: Some($crate::proto::set_view_request::Update::Patch(patch)),
-                                        }
+                                        })
                                     } else {
-                                        // Ничего не изменилось
-                                        module.last_layout = Some(new_layout);
-                                        return 0; 
+                                        // Визуально в структуре ничего не изменилось, но мы всё равно 
+                                        // должны продолжить, чтобы ui-service получил событие Frame.
+                                        None
                                     }
                                 } else {
-                                    $crate::proto::SetViewRequest {
+                                    Some($crate::proto::SetViewRequest {
                                         plugin_id: module.plugin_name.clone(),
                                         update: Some($crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
-                                    }
+                                    })
                                 };
 
                                 module.last_layout = Some(new_layout);
-                                let _ = $crate::raw::set_view(&request);
+                                if let Some(req) = request {
+                                    let _ = $crate::raw::set_view(&req);
+                                }
                             }
                             _ => {}
                         }
