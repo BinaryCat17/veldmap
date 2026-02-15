@@ -96,8 +96,6 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
                 }
                 
                 // Используем корень 6-й степени для экстремального сглаживания разницы между 9 и 120.
-                // При 9: 9^(1/6) * 24 = ~35. При 120: 120^(1/6) * 24 = ~53.
-                // Разница между микро-шагом и полным шагом теперь минимальна (~1.5 раза).
                 let factor = 24.0;
                 let dy = s.delta_y.signum() * s.delta_y.abs().powf(1.0 / 6.0) * factor;
                 let dx = s.delta_x.signum() * s.delta_x.abs().powf(1.0 / 6.0) * factor;
@@ -106,16 +104,19 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
                 vel.y += dy;
                 vel.x = vel.x.clamp(-3000.0, 3000.0);
                 vel.y = vel.y.clamp(-3000.0, 3000.0);
-                *plugin.needs_redrawing.borrow_mut() = true;
+                // Мы не ставим needs_redrawing = true. Frame увидит наличие скорости и добавит событие.
             }
             app_proto::ui_event::Event::Frame(f) => {
                 {
+                    // Обновляем статистику из события Frame (всегда актуально)
+                    *plugin.monitor_fps.borrow_mut() = f.monitor_fps;
+                    *plugin.actual_fps.borrow_mut() = f.actual_fps;
+
                     let mut vel = plugin.scroll_velocity.borrow_mut();
                     if vel.x.abs() > 0.1 || vel.y.abs() > 0.1 {
                         let monitor_fps = *plugin.monitor_fps.borrow() as f32;
-                        let friction = 0.92f32; // Более вязкая и плавная инерция
+                        let friction = 0.92f32; 
                         
-                        // Используем monitor_fps для стабильной нормализации трения
                         let factor = 1.0 - friction.powf(f.dt * monitor_fps.max(60.0));
                         let scroll_amount_x = vel.x * factor;
                         let scroll_amount_y = vel.y * factor;
@@ -126,16 +127,18 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
                         
                         vel.x -= scroll_amount_x;
                         vel.y -= scroll_amount_y;
-                        *plugin.needs_redrawing.borrow_mut() = true;
+                        // Мы не ставим needs_redrawing = true. render_plugin будет вызван, так как pending_events не пуст.
                     } else {
                         vel.x = 0.0;
                         vel.y = 0.0;
                     }
                 }
 
-                if !plugin.pending_events.borrow().is_empty() || *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow() {
-                    let mut msgs = render_plugin(plugin, &mut state.renderer, plugin_id, state.surface_format)?;
-                    messages.append(&mut msgs);
+                if !plugin.pending_events.borrow().is_empty() || *plugin.is_layout_dirty.borrow() {
+                    if let Some(handle) = f.surface_handle {
+                        let mut msgs = render_plugin(plugin, &mut state.renderer, plugin_id, state.surface_format, handle)?;
+                        messages.append(&mut msgs);
+                    }
                 }
             }
             _ => {
@@ -166,7 +169,7 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
     }
 }
 
-fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32) -> anyhow::Result<Vec<UiEventResponse>> {
+fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, surface_handle: veldsdk::rpc::core::ResourceHandle) -> anyhow::Result<Vec<UiEventResponse>> {
     let render_start = std::time::Instant::now();
     let (width, height) = *plugin.canvas_size.borrow();
     if width == 0 || height == 0 { return Ok(Vec::new()); }
@@ -210,29 +213,19 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut last_cmds = plugin.last_draw_commands.borrow_mut();
     let mut last_verts = plugin.last_vertices.borrow_mut();
     let mut is_layout_dirty = plugin.is_layout_dirty.borrow_mut();
-    let needs_redrawing = *plugin.needs_redrawing.borrow();
 
     let commands_changed = *last_cmds != renderer.draw_commands || 
                            *last_verts != renderer.vertices ||
                            renderer.is_atlas_dirty();
 
     let gpu_exec_start = std::time::Instant::now();
-    if commands_changed || *is_layout_dirty || needs_redrawing {
-        let mut request_next = false;
-        if plugin.scroll_velocity.borrow().x.abs() > 0.5 || plugin.scroll_velocity.borrow().y.abs() > 0.5 {
-            request_next = true;
-        }
-
-        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format, request_next)?;
+    if commands_changed || *is_layout_dirty {
+        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format, surface_handle)?;
         
         // Обновляем кэш только если была реальная отправка
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();
         *is_layout_dirty = false;
-    } else {
-        // Если мы решили не рисовать, но нам пришел Frame, мы всё равно должны 
-        // сообщить хосту параметры монитора, если это был первый кадр или что-то изменилось.
-        // Но обычно здесь просто ничего не происходит.
     }
     let gpu_exec_time = gpu_exec_start.elapsed();
 
@@ -259,7 +252,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
                  let avg_draw = *plugin.perf_draw.borrow() as f64 / 1000.0 / *count as f64;
                  let avg_gpu = *plugin.perf_gpu.borrow() as f64 / 1000.0 / *count as f64;
                  
-                 veldsdk::vinfo!(veldsdk::FLAG_PERF, "UI Render (5s avg) {}: count={}, total={:.2}ms, conv={:.2}ms, build={:.2}ms, update={:.2}ms, draw={:.2}ms, gpu={:.2}ms | Host: {}Hz, {:.1}FPS", 
+                 veldsdk::vinfo!(veldsdk::FLAG_PERF, "UI Stats {}: calls={} | Logic={:.2}ms (conv={:.2}, build={:.2}, upd={:.2}, draw={:.2}) | GPU={:.2}ms | Host: {}Hz, {:.1}FPS", 
                      plugin_id, *count, avg_total, avg_conv, avg_build, avg_update, avg_draw, avg_gpu,
                      *plugin.monitor_fps.borrow(), *plugin.actual_fps.borrow());
              }
@@ -290,7 +283,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     Ok(responses)
 }
 
-fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, width: u32, height: u32, sf: f32, _plugin_id: &str, surface_format: i32, request_next_frame: bool) -> anyhow::Result<()> {
+fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, width: u32, height: u32, sf: f32, _plugin_id: &str, surface_format: i32, surface_handle: veldsdk::rpc::core::ResourceHandle) -> anyhow::Result<()> {
     ensure_gpu_resources(plugin, renderer, surface_format)?;
 
     let mut recorder = WgpuRecorder::new(width, height);
@@ -371,17 +364,9 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
 
     // Direct to surface
     // We don't clear here, host will clear the surface if needed
-    let surface_id = plugin.active_surface_id;
-    let _ = recorder.submit(surface_id, None);
+    let _ = recorder.submit(surface_handle.id, None);
     
-    if let Ok(res) = veldsdk::app::AppBridge::display_frame(
-        veldsdk::rpc::core::ResourceHandle { id: surface_id, ..Default::default() }, 
-        width, height, 
-        request_next_frame
-    ) {
-        *plugin.monitor_fps.borrow_mut() = res.monitor_fps;
-        *plugin.actual_fps.borrow_mut() = res.actual_fps;
-    }
+    let _ = veldsdk::app::AppBridge::display_frame();
 
     Ok(())
 }

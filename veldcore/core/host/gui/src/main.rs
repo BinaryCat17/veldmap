@@ -244,7 +244,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app_texture_id: Option<u64> = None;
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
-    let mut last_size = (100u32, 100u32);
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut last_cursor_sent_time = std::time::Instant::now();
 
@@ -282,8 +281,6 @@ async fn main() -> anyhow::Result<()> {
         proxy, 
         is_visible.clone(), 
         resources.clone(),
-        monitor_fps as u32,
-        actual_fps.clone(),
         last_render_time.clone(),
         frame_wake.clone(),
     ))));
@@ -350,8 +347,8 @@ async fn main() -> anyhow::Result<()> {
             let now = std::time::Instant::now();
             let dt = now.duration_since(last_frame_time).as_secs_f32();
             
-            // Логирование среднего FPS и ресурсов каждые 5 секунд
-            if last_fps_log_time.elapsed() >= std::time::Duration::from_secs(5) {
+            // Логирование среднего FPS и ресурсов каждую секунду для большей реактивности
+            if last_fps_log_time.elapsed() >= std::time::Duration::from_secs(1) {
                 let elapsed = last_fps_log_time.elapsed().as_secs_f32();
                 let frames = shared_frames_perf.swap(0, Ordering::SeqCst);
                 let avg_fps = frames as f32 / elapsed;
@@ -418,12 +415,14 @@ async fn main() -> anyhow::Result<()> {
                     };
 
                     let ev = veldmap_host_core::app::UiEvent { 
-                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
-                            id: veldmap_host_core::SURFACE_ID, 
-                            ..Default::default() 
-                        }),
                         event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { 
                             dt: final_dt,
+                            monitor_fps: monitor_fps as u32,
+                            actual_fps: *actual_fps.lock().unwrap(),
+                            surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
+                                id: veldmap_host_core::SURFACE_ID, 
+                                ..Default::default() 
+                            }),
                         })),
                         sub_events,
                     };
@@ -467,13 +466,13 @@ async fn main() -> anyhow::Result<()> {
                     draw_cmd_count += 1;
                     last_draw_cmd = Some(cmd); 
                 }
-                if let Some(AppCommand::Draw(id, w, h)) = last_draw_cmd {
+                if let Some(AppCommand::Draw(id)) = last_draw_cmd {
                     *last_render_time.lock().unwrap() = std::time::Instant::now();
-                    if is_visible.load(Ordering::SeqCst) && w > 0 && h > 0 {
+                    if is_visible.load(Ordering::SeqCst) {
                         if id == veldmap_host_core::SURFACE_ID {
                             app_texture_id = Some(veldmap_host_core::SURFACE_ID);
                             app_bind_group = None;
-                        } else if Some(id) != app_texture_id || (w, h) != last_size {
+                        } else if Some(id) != app_texture_id {
                             if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id, 0) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let bind_group = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor { 
@@ -486,7 +485,6 @@ async fn main() -> anyhow::Result<()> {
                                 app_bind_group = Some(bind_group.clone());
                                 resources.register_bind_group(1001, Arc::new(bind_group), 0);
                                 resources.register_named_resource("active_ui_bind_group", 1001);
-                                last_size = (w, h);
                             }
                         }
                         window.request_redraw();
@@ -649,14 +647,14 @@ async fn main() -> anyhow::Result<()> {
                     config.width = size.width; config.height = size.height;
                     surface.configure(&device_arc, &config);
                     let ev = veldmap_host_core::app::UiEvent { 
-                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
-                            id: veldmap_host_core::SURFACE_ID, 
-                            ..Default::default() 
-                        }),
                         event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { 
                             width: size.width, 
                             height: size.height, 
                             scale_factor: window.scale_factor().max(ui_scale) as f32,
+                            surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
+                                id: veldmap_host_core::SURFACE_ID, 
+                                ..Default::default() 
+                            }),
                         })),
                         ..Default::default()
                     };
@@ -670,7 +668,6 @@ async fn main() -> anyhow::Result<()> {
                 frame_wake.notify_one();
                 let btn = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
                 let ev = veldmap_host_core::app::UiEvent { 
-                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
                     event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { x: cursor_pos.0, y: cursor_pos.1, button: btn, pressed: state == winit::event::ElementState::Pressed })),
                     ..Default::default()
                 };
@@ -682,7 +679,6 @@ async fn main() -> anyhow::Result<()> {
                 cursor_pos = (position.x as f32, position.y as f32);
                 if last_cursor_sent_time.elapsed() >= std::time::Duration::from_millis(16) {
                     let ev = veldmap_host_core::app::UiEvent { 
-                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
                         event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })),
                         ..Default::default()
                     };
@@ -695,7 +691,6 @@ async fn main() -> anyhow::Result<()> {
                 frame_wake.notify_one();
                 let (pdx, pdy) = match delta { winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0), winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32) };
                 let ev = veldmap_host_core::app::UiEvent { 
-                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: veldmap_host_core::SURFACE_ID, ..Default::default() }),
                     event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })),
                     ..Default::default()
                 };

@@ -22,7 +22,6 @@ pub struct PluginUiState {
     pub uniform_buffer_id: RefCell<Option<u64>>,
     pub uniform_layout_id: RefCell<Option<u64>>,
     pub ui_pipeline: RefCell<Option<u64>>,
-    pub active_surface_id: u64,
     pub last_vertices: RefCell<Vec<crate::renderer::Vertex>>,
     pub last_draw_commands: RefCell<Vec<crate::renderer::DrawCmd>>,
 
@@ -83,7 +82,6 @@ impl PluginUiState {
             uniform_buffer_id: RefCell::new(None),
             uniform_layout_id: RefCell::new(None),
             ui_pipeline: RefCell::new(None),
-            active_surface_id: veldsdk::SURFACE_ID,
             last_vertices: RefCell::new(Vec::new()),
             last_draw_commands: RefCell::new(Vec::new()),
             

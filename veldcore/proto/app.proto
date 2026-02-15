@@ -3,7 +3,6 @@ syntax = "proto3";
 package veldmap.app;
 
 message UIEvent {
-    veldmap.core.ResourceHandle surface_handle = 1;
     oneof event {
         ClickEvent click = 2;
         KeyEvent key = 3;
@@ -18,6 +17,9 @@ message UIEvent {
 
 message FrameEvent {
     float dt = 1;
+    uint32 monitor_fps = 2;
+    float actual_fps = 3;
+    veldmap.core.ResourceHandle surface_handle = 4;
 }
 
 message ClickEvent {
@@ -46,6 +48,7 @@ message ResizeEvent {
     uint32 width = 1;
     uint32 height = 2;
     float scale_factor = 3;
+    veldmap.core.ResourceHandle surface_handle = 4;
 }
 
 message InitEvent {}
@@ -59,14 +62,6 @@ message AppDisplayCommand {
     }
 }
 
-message DrawFrame {
-    veldmap.core.ResourceHandle handle = 1;
-    uint32 width = 2;
-    uint32 height = 3;
-    bool request_next_frame = 4;
-}
+message DrawFrame {}
 
-message AppDisplayResponse {
-    uint32 monitor_fps = 1;
-    float actual_fps = 2;
-}
+message AppDisplayResponse {}
