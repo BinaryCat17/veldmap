@@ -92,6 +92,18 @@ async fn main() -> anyhow::Result<()> {
         .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
         .build(&event_loop)?);
 
+    // ОПРЕДЕЛЯЕМ ЧАСТОТУ МОНИТОРА
+    let monitor_fps = window.current_monitor()
+        .and_then(|m| m.refresh_rate_millihertz())
+        .map(|mhz| (mhz as f32 / 1000.0).round() as i32)
+        .unwrap_or(60);
+    
+    log::info!("Detected Monitor Refresh Rate: {} Hz", monitor_fps);
+    
+    if fps_limit == 60 { // Если в конфиге не задано иное, используем частоту монитора
+        fps_limit = monitor_fps;
+    }
+
     let (tx, mut rx) = mpsc::unbounded_channel::<AppCommand>();
     let is_visible = Arc::new(AtomicBool::new(true));
     let frame_pending = Arc::new(AtomicBool::new(false));
@@ -260,22 +272,26 @@ async fn main() -> anyhow::Result<()> {
                 let idle_time = now.duration_since(last_int).as_secs_f32();
                 let render_idle_time = now.duration_since(last_rend).as_secs_f32();
 
-                // Если нет ввода > 2 сек и нет отрисовок > 1 сек - снижаем до 5 FPS
-                if idle_time > 2.0 && render_idle_time > 1.0 {
+                // Если нет ввода > 0.5 сек и нет отрисовок > 0.3 сек - снижаем до 5 FPS
+                if idle_time > 0.5 && render_idle_time > 0.3 {
                     current_fps_limit = 5;
+                } else {
+                    current_fps_limit = fps_limit; // Используем частоту монитора или лимит из конфига
                 }
             }
 
-            if !vsync || current_fps_limit < 60 {
-                let target_dt = 1.0 / current_fps_limit.max(1) as f32;
-                if dt < target_dt {
-                    // Ждем либо следующего тика, либо уведомления о вводе пользователя
-                    let sleep_duration = std::time::Duration::from_secs_f32(target_dt - dt);
-                    tokio::select! {
-                        _ = tokio::time::sleep(sleep_duration) => {},
-                        _ = frame_wake_clone.notified() => {
-                            // Проснулись по вводу - сбрасываем таймер кадра, чтобы выдать его немедленно
-                        }
+            // Ограничиваем FPS, если мы не в режиме чистого VSync без лимита
+            // Или если текущий лимит (например, 5 FPS) ниже частоты монитора
+            // Всегда соблюдаем лимит FPS, чтобы не нагружать CPU лишними кадрами,
+            // которые монитор всё равно не успеет показать.
+            let target_dt = 1.0 / current_fps_limit.max(1) as f32;
+            if dt < target_dt {
+                // Ждем либо следующего тика, либо уведомления о вводе пользователя
+                let sleep_duration = std::time::Duration::from_secs_f32(target_dt - dt);
+                tokio::select! {
+                    _ = tokio::time::sleep(sleep_duration) => {},
+                    _ = frame_wake_clone.notified() => {
+                        // Проснулись по вводу - сбрасываем таймер кадра, чтобы выдать его немедленно
                     }
                 }
             }
