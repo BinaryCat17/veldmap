@@ -14,12 +14,49 @@ use veldsdk::OwnedResource;
 
 pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::Result<SetViewResponse> {
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
-    if let Some(l) = req.layout {
-        plugin.layout = l;
-        *plugin.is_layout_dirty.borrow_mut() = true;
-        *plugin.needs_redrawing.borrow_mut() = true;
+    
+    match req.update {
+        Some(set_view_request::Update::FullLayout(l)) => {
+            plugin.layout = l;
+            *plugin.is_layout_dirty.borrow_mut() = true;
+            *plugin.needs_redrawing.borrow_mut() = true;
+        }
+        Some(set_view_request::Update::Patch(patch)) => {
+            if let Some(ref mut root) = plugin.layout.root {
+                for update in patch.updates {
+                    if let Some(new_widget) = update.new_widget {
+                        apply_widget_update(root, update.widget_id, new_widget);
+                    }
+                }
+                plugin.layout.width = patch.width;
+                plugin.layout.height = patch.height;
+                plugin.layout.hash = patch.new_hash;
+                *plugin.is_layout_dirty.borrow_mut() = true;
+                *plugin.needs_redrawing.borrow_mut() = true;
+            }
+        }
+        None => {}
     }
     Ok(SetViewResponse {})
+}
+
+fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
+    if current.id == id {
+        *current = new_w;
+        return true;
+    }
+
+    match &mut current.r#type {
+        Some(widget::Type::Column(c)) => { for child in &mut c.children { if apply_widget_update(child, id, new_w.clone()) { return true; } } }
+        Some(widget::Type::Row(r)) => { for child in &mut r.children { if apply_widget_update(child, id, new_w.clone()) { return true; } } }
+        Some(widget::Type::Stack(s)) => { for child in &mut s.children { if apply_widget_update(child, id, new_w.clone()) { return true; } } }
+        Some(widget::Type::Container(c)) => { if let Some(child) = &mut c.child { return apply_widget_update(child, id, new_w); } }
+        Some(widget::Type::Scrollable(s)) => { if let Some(child) = &mut s.content { return apply_widget_update(child, id, new_w); } }
+        Some(widget::Type::Tooltip(t)) => { if let Some(child) = &mut t.content { return apply_widget_update(child, id, new_w); } }
+        Some(widget::Type::Button(b)) => { if let Some(child) = &mut b.child { return apply_widget_update(child, id, new_w); } }
+        _ => {}
+    }
+    false
 }
 
 pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> anyhow::Result<HandleUiEventResponse> {

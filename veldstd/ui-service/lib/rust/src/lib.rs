@@ -100,7 +100,7 @@ impl<M> Column<M> {
 
 impl<M> From<Column<M>> for Element<M> {
     fn from(c: Column<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Column(c.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Column(c.widget)), ..Default::default() }.into()
     }
 }
 
@@ -160,7 +160,7 @@ impl<M> Row<M> {
 
 impl<M> From<Row<M>> for Element<M> {
     fn from(r: Row<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Row(r.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Row(r.widget)), ..Default::default() }.into()
     }
 }
 
@@ -227,7 +227,7 @@ impl<M> Text<M> {
 
 impl<M> From<Text<M>> for Element<M> {
     fn from(t: Text<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Text(t.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Text(t.widget)), ..Default::default() }.into()
     }
 }
 
@@ -421,7 +421,7 @@ impl<M> Button<M> {
 
 impl<M> From<Button<M>> for Element<M> {
     fn from(b: Button<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Button(Box::new(b.widget))) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Button(Box::new(b.widget))), ..Default::default() }.into()
     }
 }
 
@@ -474,7 +474,7 @@ impl<M> TextInput<M> {
 
 impl<M> From<TextInput<M>> for Element<M> {
     fn from(t: TextInput<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::TextInput(t.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::TextInput(t.widget)), ..Default::default() }.into()
     }
 }
 
@@ -545,7 +545,7 @@ impl<M> Container<M> {
 
 impl<M> From<Container<M>> for Element<M> {
     fn from(c: Container<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Container(Box::new(c.widget))) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Container(Box::new(c.widget))), ..Default::default() }.into()
     }
 }
 
@@ -581,7 +581,7 @@ impl<M> Scrollable<M> {
 
 impl<M> From<Scrollable<M>> for Element<M> {
     fn from(s: Scrollable<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Scrollable(Box::new(s.widget))) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Scrollable(Box::new(s.widget))), ..Default::default() }.into()
     }
 }
 
@@ -619,7 +619,7 @@ impl<M> ProgressBar<M> {
 
 impl<M> From<ProgressBar<M>> for Element<M> {
     fn from(p: ProgressBar<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::ProgressBar(p.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::ProgressBar(p.widget)), ..Default::default() }.into()
     }
 }
 
@@ -652,7 +652,7 @@ impl<M> Space<M> {
 
 impl<M> From<Space<M>> for Element<M> {
     fn from(s: Space<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Space(s.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Space(s.widget)), ..Default::default() }.into()
     }
 }
 
@@ -696,7 +696,7 @@ impl<M> Stack<M> {
 
 impl<M> From<Stack<M>> for Element<M> {
     fn from(s: Stack<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Stack(s.widget)) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Stack(s.widget)), ..Default::default() }.into()
     }
 }
 
@@ -743,7 +743,7 @@ impl<M> Tooltip<M> {
 
 impl<M> From<Tooltip<M>> for Element<M> {
     fn from(t: Tooltip<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Tooltip(Box::new(t.widget))) }.into()
+        proto::Widget { r#type: Some(proto::widget::Type::Tooltip(Box::new(t.widget))), ..Default::default() }.into()
     }
 }
 
@@ -811,12 +811,88 @@ macro_rules! stack {
     };
 }
 
+pub mod diffing {
+    use super::proto;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use veldsdk::prost::Message;
+
+    pub fn hash_widget(widget: &mut proto::Widget) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        
+        // Обнуляем ID перед хешированием, чтобы он не влиял на результат, 
+        // если он там уже был (хотя он должен быть 0).
+        widget.id = 0;
+        
+        // Хешируем содержимое через бинарное представление Prost.
+        // Это самый надежный способ учесть все поля без ручного перечисления.
+        let bytes = widget.encode_to_vec();
+        bytes.hash(&mut hasher);
+        
+        // Если у виджета есть дети, их хеши тоже должны влиять.
+        // (Хотя encode_to_vec уже включает детей, но для надежности диффинга 
+        // лучше иметь явный ID у каждого узла).
+        let h = hasher.finish();
+        widget.id = h;
+        h
+    }
+
+    pub fn collect_widgets(widget: &proto::Widget, map: &mut std::collections::HashMap<u64, proto::Widget>) {
+        map.insert(widget.id, widget.clone());
+        match &widget.r#type {
+            Some(proto::widget::Type::Column(c)) => { for child in &c.children { collect_widgets(child, map); } }
+            Some(proto::widget::Type::Row(r)) => { for child in &r.children { collect_widgets(child, map); } }
+            Some(proto::widget::Type::Stack(s)) => { for child in &s.children { collect_widgets(child, map); } }
+            Some(proto::widget::Type::Container(c)) => { if let Some(child) = &c.child { collect_widgets(child, map); } }
+            Some(proto::widget::Type::Scrollable(s)) => { if let Some(child) = &s.content { collect_widgets(child, map); } }
+            Some(proto::widget::Type::Tooltip(t)) => { if let Some(child) = &t.content { collect_widgets(child, map); } }
+            Some(proto::widget::Type::Button(b)) => { if let Some(child) = &b.child { collect_widgets(child, map); } }
+            _ => {}
+        }
+    }
+
+    pub fn diff_layouts(old: &proto::Layout, new: &proto::Layout) -> Option<proto::LayoutPatch> {
+        if old.hash == new.hash && old.width == new.width && old.height == new.height {
+            return None;
+        }
+
+        let mut old_widgets = std::collections::HashMap::new();
+        if let Some(root) = &old.root { collect_widgets(root, &mut old_widgets); }
+
+        let mut new_widgets = std::collections::HashMap::new();
+        if let Some(root) = &new.root { collect_widgets(root, &mut new_widgets); }
+
+        let mut updates = Vec::new();
+        
+        // Находим все новые или измененные виджеты
+        for (id, widget) in &new_widgets {
+            if let Some(old_w) = old_widgets.get(id) {
+                if old_w != widget {
+                    updates.push(proto::WidgetUpdate { widget_id: *id, new_widget: Some(widget.clone()) });
+                }
+            } else {
+                updates.push(proto::WidgetUpdate { widget_id: *id, new_widget: Some(widget.clone()) });
+            }
+        }
+
+        // Если изменений слишком много (например, больше 50% дерева), 
+        // проще прислать все дерево. Но мы пока всегда шлем патч для теста.
+        Some(proto::LayoutPatch {
+            updates,
+            width: new.width,
+            height: new.height,
+            new_hash: new.hash,
+        })
+    }
+}
+
 pub struct ModuleState<S, M> {
     pub state: S,
     pub tasks: Vec<veldsdk::core::BoxedStream<M>>,
     pub plugin_name: String,
     pub width: u32,
     pub height: u32,
+    pub last_layout: Option<proto::Layout>,
 }
 
 #[macro_export]
@@ -853,6 +929,7 @@ macro_rules! define_remote_ui_module {
                 plugin_name,
                 width: 1024,
                 height: 768,
+                last_layout: None,
             };
             if veldsdk::rpc::MODULE_STATE.set(Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(module_state))))).is_err() { return 4; }
             0
@@ -951,14 +1028,37 @@ macro_rules! define_remote_ui_module {
                                 }
 
                                 let element = $view_func(&module.state);
-                                let layout = $crate::proto::Layout {
-                                    root: Some(element.widget),
+                                let mut root_widget = element.widget;
+                                
+                                // ВЫЧИСЛЯЕМ ХЕШИ И ID ДЛЯ ДИФФИНГА
+                                let hash = $crate::diffing::hash_widget(&mut root_widget);
+                                
+                                let new_layout = $crate::proto::Layout {
+                                    root: Some(root_widget),
                                     width: module.width, height: module.height,
+                                    hash,
                                 };
-                                let _ = $crate::raw::set_view(&$crate::proto::SetViewRequest {
-                                    plugin_id: module.plugin_name.clone(),
-                                    layout: Some(layout),
-                                });
+
+                                let request = if let Some(ref old_layout) = module.last_layout {
+                                    if let Some(patch) = $crate::diffing::diff_layouts(old_layout, &new_layout) {
+                                        $crate::proto::SetViewRequest {
+                                            plugin_id: module.plugin_name.clone(),
+                                            update: Some($crate::proto::set_view_request::Update::Patch(patch)),
+                                        }
+                                    } else {
+                                        // Ничего не изменилось
+                                        module.last_layout = Some(new_layout);
+                                        return 0; 
+                                    }
+                                } else {
+                                    $crate::proto::SetViewRequest {
+                                        plugin_id: module.plugin_name.clone(),
+                                        update: Some($crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
+                                    }
+                                };
+
+                                module.last_layout = Some(new_layout);
+                                let _ = $crate::raw::set_view(&request);
                             }
                             _ => {}
                         }

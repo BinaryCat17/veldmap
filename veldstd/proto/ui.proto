@@ -9,9 +9,11 @@ message Layout {
     Widget root = 1;
     uint32 width = 2;
     uint32 height = 3;
+    uint64 hash = 4;
 }
 
 message Widget {
+    uint64 id = 100; // Уникальный (хеш) идентификатор виджета для диффинга
     oneof type {
         Column column = 1;
         Row row = 2;
@@ -214,7 +216,22 @@ message Color {
 // RPC messages for ui-service
 message SetViewRequest {
     string plugin_id = 1;
-    Layout layout = 2;
+    oneof update {
+        Layout full_layout = 2;
+        LayoutPatch patch = 3;
+    }
+}
+
+message LayoutPatch {
+    repeated WidgetUpdate updates = 1;
+    uint32 width = 2;
+    uint32 height = 3;
+    uint64 new_hash = 4;
+}
+
+message WidgetUpdate {
+    uint64 widget_id = 1;
+    Widget new_widget = 2;
 }
 
 message SetViewResponse {}
