@@ -71,7 +71,7 @@ impl ResourceManager {
             wgpu::TextureFormat::Rgba32Float => TextureFormat::TexRgba32Float as i32,
             wgpu::TextureFormat::R8Unorm => TextureFormat::TexR8Unorm as i32,
             wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::TexBgra8UnormSrgb as i32,
-            wgpu::TextureFormat::Rgba8UnormSrgb => 11, // Special case for SRGB
+            wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::TexRgba8UnormSrgb as i32,
             _ => TextureFormat::TexRgba8Unorm as i32,
         }
     }
@@ -212,6 +212,7 @@ impl ResourceManager {
             TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
             TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
             TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+            TextureFormat::TexRgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -417,6 +418,7 @@ impl ResourceManager {
             TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
             TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
             TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+            TextureFormat::TexRgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
             _ => wgpu::TextureFormat::Rgba8Unorm,
         };
 

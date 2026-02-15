@@ -28,21 +28,45 @@ async fn main() -> anyhow::Result<()> {
         // Устанавливаем строгие фильтры для всех шумных библиотек
         std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,quinn=error,hickory_proto=error,hickory_resolver=error,tracing=error,wasmtime_wasi=warn,wgpu_core=error,wgpu_hal=error,gpu_info=error");
     }
+
+    let log_file = std::fs::File::create("veldmap-host.log").ok();
+    let log_file = log_file.map(|f| std::sync::Arc::new(std::sync::Mutex::new(f)));
+
+    if let Some(ref file) = log_file {
+        let file_clone = file.clone();
+        std::panic::set_hook(Box::new(move |info| {
+            let msg = format!("PANIC occurred: {}\n", info);
+            if let Ok(mut f) = file_clone.lock() {
+                let _ = std::io::Write::write_all(&mut *f, msg.as_bytes());
+                let _ = std::io::Write::flush(&mut *f);
+            }
+            eprintln!("{}", msg);
+        }));
+    }
+
     env_logger::Builder::from_default_env()
-        .format(|buf, record| {
+        .format(move |buf, record| {
             use std::io::Write;
             let ts = buf.timestamp();
             let level = record.level();
             let target = record.target();
             let args = record.args();
 
-            if target == "wasm" {
-                writeln!(buf, "[{} {:5}] {}", ts, level, args)
+            let log_line = if target == "wasm" {
+                format!("[{} {:5}] {}\n", ts, level, args)
             } else if target.starts_with("veldmap") {
-                writeln!(buf, "[{} {:5}] [host] {}", ts, level, args)
+                format!("[{} {:5}] [host] {}\n", ts, level, args)
             } else {
-                writeln!(buf, "[{} {:5}] <{}> {}", ts, level, target, args)
+                format!("[{} {:5}] <{}> {}\n", ts, level, target, args)
+            };
+
+            if let Some(ref file) = log_file {
+                if let Ok(mut f) = file.lock() {
+                    let _ = f.write_all(log_line.as_bytes());
+                }
             }
+
+            write!(buf, "{}", log_line)
         })
         .init();
 
@@ -93,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
     
     let window = Arc::new(WindowBuilder::new()
         .with_title(window_title.clone())
-        .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
+        .with_inner_size(winit::dpi::PhysicalSize::new(window_width as u32, window_height as u32))
         .build(&event_loop)?);
 
     // ОПРЕДЕЛЯЕМ ЧАСТОТУ МОНИТОРА

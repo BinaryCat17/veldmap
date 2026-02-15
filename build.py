@@ -7,6 +7,8 @@ import argparse
 
 # Project configuration
 PLUGINS_DIR = "veldgis/plugins"
+CONFIG_DIR = "veldgis/config"
+WINDOWS_DIST_DIR = "/mnt/c/Users/smirn/Documents/veldmap/build"
 WASM_TARGET = "wasm32-wasip1"
 CORE_MANIFEST = "veldcore/Cargo.toml"
 GIS_MANIFEST = "veldgis/Cargo.toml"
@@ -30,7 +32,7 @@ def run(cmd, cwd=None):
         print(f"\nFATAL: Command failed with exit code {res.returncode}")
         sys.exit(1)
 
-def build_all(debug=False):
+def build_all(debug=False, windows=False):
     """Build WASM modules and Host."""
     profile = "debug" if debug else "release"
     cargo_args = [] if debug else ["--release"]
@@ -54,9 +56,40 @@ def build_all(debug=False):
         shutil.copy(source_path, dest_path)
 
     # 2. Build Native Hosts (in Core workspace)
-    print(f"\n[2/2] Building Native Hosts ({profile})...")
-    run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-host-gui"] + cargo_args)
-    run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-host-cli"] + cargo_args)
+    print(f"\n[2/2] Building Native Host (GUI) ({profile})...")
+    host_args = list(cargo_args)
+    if windows:
+        host_args += ["--target", "x86_64-pc-windows-gnu"]
+    
+    run(["cargo", "build", "--manifest-path", CORE_MANIFEST, "-p", "veldmap-host-gui"] + host_args)
+
+    if windows:
+        gui_exe = os.path.join("veldcore/target", "x86_64-pc-windows-gnu", profile, "veldmap-host-gui.exe")
+        
+        print(f"\n[Deploy] Deploying to {WINDOWS_DIST_DIR}...")
+        
+        # Create directory structure
+        dist_plugins = os.path.join(WINDOWS_DIST_DIR, "plugins")
+        dist_config = os.path.join(WINDOWS_DIST_DIR, "config")
+        
+        for d in [WINDOWS_DIST_DIR, dist_plugins, dist_config]:
+            if not os.path.exists(d):
+                os.makedirs(d)
+        
+        # Copy Executable
+        shutil.copy(gui_exe, os.path.join(WINDOWS_DIST_DIR, "veldmap-host-gui.exe"))
+        
+        # Copy Plugins
+        for wasm_file in os.listdir(PLUGINS_DIR):
+            if wasm_file.endswith(".wasm"):
+                shutil.copy(os.path.join(PLUGINS_DIR, wasm_file), os.path.join(dist_plugins, wasm_file))
+        
+        # Copy Config
+        for config_file in os.listdir(CONFIG_DIR):
+            if config_file.endswith(".json"):
+                shutil.copy(os.path.join(CONFIG_DIR, config_file), os.path.join(dist_config, config_file))
+        
+        print(f"Windows x64 build deployed successfully to: {WINDOWS_DIST_DIR}")
 
 def clean():
     """Remove build artifacts."""
@@ -72,16 +105,18 @@ def main():
     parser = argparse.ArgumentParser(description="VeldMap Build Script")
     parser.add_argument("command", choices=["build", "clean"], nargs="?", default="build")
     parser.add_argument("--debug", action="store_true", help="Build in debug mode")
+    parser.add_argument("--windows", action="store_true", help="Cross-compile for Windows (x86_64)")
     
     args = parser.parse_args()
 
     if args.command == "clean":
         clean()
     else:
-        build_all(debug=args.debug)
+        build_all(debug=args.debug, windows=args.windows)
         print("\n===============================")
         mode_str = "DEBUG" if args.debug else "RELEASE"
-        print(f"{mode_str} Build complete and successful!")
+        target_str = " (Windows x64)" if args.windows else ""
+        print(f"{mode_str}{target_str} Build complete and successful!")
         print("================================\n")
 
 if __name__ == "__main__":
