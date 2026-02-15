@@ -138,6 +138,7 @@ impl Dispatcher {
     }
 
     async fn call_remote(&self, node_id: iroh::NodeId, service: &str, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>> {
+        // В Iroh 0.96 connect возвращает Connection напрямую (или через эндпоинт)
         let conn = self.endpoint.connect(node_id, b"veldmap/rpc/1").await?;
         let (mut send, mut recv) = conn.open_bi().await?;
 
@@ -152,9 +153,11 @@ impl Dispatcher {
         let mut buf = Vec::new();
         request.encode(&mut buf)?;
 
+        use tokio::io::{AsyncWriteExt, AsyncReadExt};
         send.write_all(&(buf.len() as u32).to_be_bytes()).await?;
         send.write_all(&buf).await?;
-        send.finish()?;
+        // В новых версиях Iroh/Quinn finish() может называться по-другому или не требоваться явно для закрытия записи
+        let _ = send.close().await; 
 
         let mut len_buf = [0u8; 4];
         recv.read_exact(&mut len_buf).await?;

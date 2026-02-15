@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::core::{RpcRequest, RpcResponse};
 use prost::Message;
 use crate::dispatcher::Dispatcher;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub struct VeldmapNode {
     endpoint: Endpoint,
@@ -28,7 +29,7 @@ impl VeldmapNode {
     pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         log::info!("Veldmap Iroh Node listening. Node ID: {}", self.endpoint.node_id());
         
-        while let Some(incoming) = self.endpoint.accept().await {
+        while let Ok(incoming) = self.endpoint.accept().await {
             let dispatcher = self.dispatcher.clone();
             tokio::spawn(async move {
                 if let Err(e) = handle_connection(incoming, dispatcher).await {
@@ -48,7 +49,7 @@ impl VeldmapNode {
 }
 
 async fn handle_connection(incoming: iroh::endpoint::Incoming, dispatcher: Arc<Dispatcher>) -> anyhow::Result<()> {
-    let connection = incoming.accept()?.await?;
+    let connection = incoming.await?;
     // log::info!("New connection from {}", connection.remote_node_id());
 
     loop {
@@ -84,7 +85,7 @@ async fn handle_connection(incoming: iroh::endpoint::Incoming, dispatcher: Arc<D
                         let _ = send.write_all(&(out_buf.len() as u32).to_be_bytes()).await;
                         let _ = send.write_all(&out_buf).await;
                     }
-                    let _ = send.finish();
+                    let _ = send.close().await;
                 });
             }
             Err(e) => {

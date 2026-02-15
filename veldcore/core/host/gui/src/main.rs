@@ -206,7 +206,13 @@ async fn main() -> anyhow::Result<()> {
     let mut frame_count = 0;
     let mut last_fps_update = std::time::Instant::now();
 
-    let endpoint = iroh::Endpoint::builder().alpns(vec![b"veldmap/rpc/1".to_vec()]).bind().await?;
+    // IROH 0.96 Initialization
+    let secret_key = iroh::SecretKey::generate();
+    let endpoint = iroh::Endpoint::builder()
+        .secret_key(secret_key)
+        .alpns(vec![b"veldmap/rpc/1".to_vec()])
+        .bind()
+        .await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
     
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
@@ -255,6 +261,20 @@ async fn main() -> anyhow::Result<()> {
         );
 
         let sleeper = spin_sleep::SpinSleeper::default();
+        
+        // Поиск путей к датчикам GPU на Linux
+        let mut gpu_paths = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("card") && !name.contains('-') {
+                    let busy_path = entry.path().join("device/gpu_busy_percent");
+                    if busy_path.exists() {
+                        gpu_paths.push(busy_path);
+                    }
+                }
+            }
+        }
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let node = Arc::new(VeldmapNode::new(endpoint, d_clone.clone()).await.unwrap());
@@ -277,9 +297,27 @@ async fn main() -> anyhow::Result<()> {
                 let avg_fps = internal_frame_count as f32 / elapsed;
                 let cpu_usage = sys.global_cpu_usage();
                 
+                // Чтение загрузки GPU из sysfs
+                let mut total_gpu_util = 0.0;
+                let mut gpu_count = 0;
+                for path in &gpu_paths {
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        if let Ok(val) = content.trim().parse::<f32>() {
+                            total_gpu_util += val;
+                            gpu_count += 1;
+                        }
+                    }
+                }
+                
+                let gpu_str = if gpu_count > 0 {
+                    format!("{:.1}%", total_gpu_util / gpu_count as f32)
+                } else {
+                    "N/A".to_string()
+                };
+                
                 log::info!(
-                    "[PERF] Monitor: {}Hz | Avg FPS: {:.1} | CPU: {:.1}%", 
-                    monitor_fps, avg_fps, cpu_usage
+                    "[PERF] Monitor: {}Hz | Avg FPS: {:.1} | CPU: {:.1}% | GPU: {}", 
+                    monitor_fps, avg_fps, cpu_usage, gpu_str
                 );
                 
                 internal_frame_count = 0;
