@@ -820,11 +820,11 @@ pub mod diffing {
     pub fn assign_ids_and_hash(widget: &mut proto::Widget, index: &mut u64) -> u64 {
         let mut hasher = DefaultHasher::new();
         
-        // Присваиваем стабильный позиционный ID
+        // 1. Присваиваем стабильный позиционный ID
         widget.id = *index;
         *index += 1;
         
-        // Хешируем тип виджета
+        // 2. Хешируем тип виджета для быстрого сравнения
         let type_tag = match &widget.r#type {
             Some(proto::widget::Type::Column(_)) => 1,
             Some(proto::widget::Type::Row(_)) => 2,
@@ -834,18 +834,30 @@ pub mod diffing {
             Some(proto::widget::Type::Container(_)) => 6,
             Some(proto::widget::Type::Scrollable(_)) => 7,
             Some(proto::widget::Type::Stack(_)) => 8,
+            Some(proto::widget::Type::Space(_)) => 9,
+            Some(proto::widget::Type::ProgressBar(_)) => 10,
+            Some(proto::widget::Type::Tooltip(_)) => 11,
+            Some(proto::widget::Type::Image(_)) => 12,
             _ => 0,
         };
         type_tag.hash(&mut hasher);
 
-        // Рекурсивно хешируем детей и содержимое
-        // Для простоты используем бинарный дамп, но БЕЗ ID, чтобы хеш зависел только от контента
+        // 3. Рекурсивно обрабатываем детей ПЕРЕД хешированием контента, 
+        // чтобы структура влияла на хеш, но ID (которые меняются) - нет.
+        match &mut widget.r#type {
+            Some(proto::widget::Type::Column(c)) => { for child in &mut c.children { assign_ids_and_hash(child, index).hash(&mut hasher); } }
+            Some(proto::widget::Type::Row(r)) => { for child in &mut r.children { assign_ids_and_hash(child, index).hash(&mut hasher); } }
+            Some(proto::widget::Type::Stack(s)) => { for child in &mut s.children { assign_ids_and_hash(child, index).hash(&mut hasher); } }
+            Some(proto::widget::Type::Container(c)) => { if let Some(child) = &mut c.child { assign_ids_and_hash(child, index).hash(&mut hasher); } }
+            Some(proto::widget::Type::Scrollable(s)) => { if let Some(child) = &mut s.content { assign_ids_and_hash(child, index).hash(&mut hasher); } }
+            Some(proto::widget::Type::Tooltip(t)) => { if let Some(child) = &mut t.content { assign_ids_and_hash(child, index).hash(&mut hasher); } }
+            Some(proto::widget::Type::Button(b)) => { if let Some(child) = &mut b.child { assign_ids_and_hash(child, index).hash(&mut hasher); } }
+            _ => {}
+        }
+
+        // 4. Хешируем контент самого виджета (без ID)
         let mut widget_copy = widget.clone();
-        widget_copy.id = 0;
-        
-        // ОЧИЩАЕМ ID У ВСЕХ ДЕТЕЙ В КОПИИ ДЛЯ ЧЕСТНОГО ХЕША КОНТЕНТА
         clear_ids(&mut widget_copy);
-        
         let bytes = widget_copy.encode_to_vec();
         bytes.hash(&mut hasher);
 
