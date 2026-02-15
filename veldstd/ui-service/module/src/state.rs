@@ -8,7 +8,7 @@ use crate::renderer::GpuRenderer;
 
 pub struct PluginUiState {
     pub layout: proto::Layout,
-    pub is_layout_dirty: bool,
+    pub is_layout_dirty: RefCell<bool>,
     pub interface_cache: RefCell<user_interface::Cache>,
     pub needs_redrawing: RefCell<bool>,
     pub canvas_size: RefCell<(u32, u32)>,
@@ -23,6 +23,8 @@ pub struct PluginUiState {
     pub uniform_layout_id: RefCell<Option<u64>>,
     pub ui_pipeline: RefCell<Option<u64>>,
     pub active_surface_id: u64,
+    pub last_vertices: RefCell<Vec<crate::renderer::Vertex>>,
+    pub last_draw_commands: RefCell<Vec<crate::renderer::DrawCmd>>,
 }
 
 pub struct LocalState {
@@ -54,7 +56,7 @@ impl PluginUiState {
     pub fn new() -> Self {
         Self {
             layout: proto::Layout::default(),
-            is_layout_dirty: true,
+            is_layout_dirty: RefCell::new(true),
             interface_cache: RefCell::new(user_interface::Cache::default()),
             needs_redrawing: RefCell::new(true),
             canvas_size: RefCell::new((1024, 768)),
@@ -69,6 +71,8 @@ impl PluginUiState {
             uniform_layout_id: RefCell::new(None),
             ui_pipeline: RefCell::new(None),
             active_surface_id: veldsdk::SURFACE_ID,
+            last_vertices: RefCell::new(Vec::new()),
+            last_draw_commands: RefCell::new(Vec::new()),
         }
     }
 }

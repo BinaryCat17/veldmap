@@ -27,7 +27,7 @@ impl Drop for ScopeGuard {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
     pub pos: [f32; 2],
     pub color: [f32; 4],
@@ -40,7 +40,7 @@ pub struct Vertex {
     pub border_color: [f32; 4],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct GlyphInfo {
     uv: [f32; 4],
     width: u32,
@@ -49,6 +49,7 @@ struct GlyphInfo {
     offset_y: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DrawCmd {
     Quads {
         count: u32,

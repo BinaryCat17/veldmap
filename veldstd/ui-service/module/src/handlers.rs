@@ -16,7 +16,7 @@ pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::R
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     if let Some(l) = req.layout {
         plugin.layout = l;
-        plugin.is_layout_dirty = true;
+        *plugin.is_layout_dirty.borrow_mut() = true;
         *plugin.needs_redrawing.borrow_mut() = true;
     }
     Ok(SetViewResponse {})
@@ -65,7 +65,11 @@ pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> any
                         vel.x = 0.0;
                         vel.y = 0.0;
                     }
-                    messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format)?;
+
+                    // ОПТИМИЗАЦИЯ: вызываем рендер только если есть события или флаг перерисовки
+                    if !plugin.pending_events.borrow().is_empty() || *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow() {
+                        messages = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format)?;
+                    }
                 }
                 _ => {
                     let iced_ev = convert_event(ev, *plugin.scale_factor.borrow());
@@ -97,7 +101,6 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let (width, height) = *plugin.canvas_size.borrow();
     if width == 0 || height == 0 { return Ok(Vec::new()); }
     
-    let mut needs_redrawing = plugin.needs_redrawing.borrow_mut();
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
     
     let sf = *plugin.scale_factor.borrow();
@@ -121,12 +124,29 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     );
     
     let mut clipboard = iced_core::clipboard::Null;
-    let (ui_state, _) = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
+    let _ = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
     
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
-    execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format)?;
-    *needs_redrawing = false;
-    
+
+    // COMMAND DIFFING: Проверяем, изменилось ли что-то в командах отрисовки или атласе
+    let mut last_cmds = plugin.last_draw_commands.borrow_mut();
+    let mut last_verts = plugin.last_vertices.borrow_mut();
+    let mut is_layout_dirty = plugin.is_layout_dirty.borrow_mut();
+
+    let commands_changed = *last_cmds != renderer.draw_commands || 
+                           *last_verts != renderer.vertices ||
+                           renderer.is_atlas_dirty();
+
+    if commands_changed || *is_layout_dirty {
+        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format)?;
+        
+        // Обновляем кэш только если была реальная отправка
+        *last_cmds = renderer.draw_commands.clone();
+        *last_verts = renderer.vertices.clone();
+        *is_layout_dirty = false;
+    }
+
+    *plugin.needs_redrawing.borrow_mut() = false;
     plugin.interface_cache.replace(ui.into_cache());
     
     let mut responses = Vec::new();
