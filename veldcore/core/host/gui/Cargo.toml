@@ -20,8 +20,7 @@ iroh = "0.96"
 sysinfo = { version = "0.38", features = ["component"] }
 spin_sleep = "1.2"
 rand = "0.9"
-sysinfo_utils = { git = "https://github.com/vremyavnikuda/sysinfo_utils" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-winit = { version = "0.29", features = ["wayland"] }
+winit = { version = "0.29", default-features = false, features = ["wayland"] }
 

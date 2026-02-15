@@ -21,6 +21,19 @@ mod app_service;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env file if it exists
+    if let Ok(content) = std::fs::read_to_string(".env") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') { continue; }
+            if let Some((key, value)) = line.split_once('=') {
+                let key = key.trim();
+                let value = value.trim().trim_matches('"').trim_matches('\'');
+                std::env::set_var(key, value);
+            }
+        }
+    }
+
     // Убираем ворнинг драйвера dzn в WSL2
     std::env::set_var("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1");
 
@@ -136,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
     let is_visible = Arc::new(AtomicBool::new(true));
     let frame_pending = Arc::new(AtomicBool::new(false));
     let frame_wake = Arc::new(tokio::sync::Notify::new());
+    let shared_frame_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
     let flags = wgpu::InstanceFlags::default() 
         | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER;
@@ -281,12 +295,14 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING) - Энергоэффективность
+    let shared_frames_perf = shared_frame_count.clone();
     tokio::spawn(async move {
-        use sysinfo::{System, CpuRefreshKind, RefreshKind};
+        use sysinfo::{System, ProcessRefreshKind};
         let mut sys = System::new_with_specifics(
-            RefreshKind::nothing()
-                .with_cpu(CpuRefreshKind::everything())
+            sysinfo::RefreshKind::nothing()
+                .with_processes(ProcessRefreshKind::everything())
         );
+        let pid = sysinfo::get_current_pid().ok();
 
         let sleeper = spin_sleep::SpinSleeper::default();
 
@@ -296,7 +312,6 @@ async fn main() -> anyhow::Result<()> {
         log::info!("Core ready. Render loop started (VSync: {}, FPS Limit: {}, Auto: {})...", vsync, fps_limit, auto_fps);
         
         let mut last_frame_time = std::time::Instant::now();
-        let mut internal_frame_count = 0;
         let mut last_fps_log_time = std::time::Instant::now();
 
         loop {
@@ -305,33 +320,23 @@ async fn main() -> anyhow::Result<()> {
             
             // Логирование среднего FPS и ресурсов каждые 5 секунд
             if last_fps_log_time.elapsed() >= std::time::Duration::from_secs(5) {
-                sys.refresh_cpu_all();
-                
                 let elapsed = last_fps_log_time.elapsed().as_secs_f32();
-                let avg_fps = internal_frame_count as f32 / elapsed;
-                let cpu_usage = sys.global_cpu_usage();
+                let frames = shared_frames_perf.swap(0, Ordering::SeqCst);
+                let avg_fps = frames as f32 / elapsed;
                 
-                // Использование sysinfo_utils для мониторинга GPU
-                // Глушим ворнинги библиотеки, если вендор не определен (актуально для WSL)
-                let gpu_str = {
-                    let gpu = sysinfo_utils::gpu_info::get();
-                    if gpu.active().unwrap_or(false) && gpu.utilization().is_some() {
-                        let util = gpu.utilization().unwrap_or(0.0);
-                        let temp = gpu.temperature().unwrap_or(0.0);
-                        format!("{:.1}% ({:.0}°C)", util, temp)
-                    } else if info.driver.contains("Microsoft") || info.name.contains("Microsoft") {
-                        "WSL/D3D12".to_string()
-                    } else {
-                        "N/A".to_string()
+                let mut cpu_usage = 0.0;
+                if let Some(id) = pid {
+                    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[id]), true);
+                    if let Some(p) = sys.process(id) {
+                        cpu_usage = p.cpu_usage() / sys.cpus().len() as f32;
                     }
-                };
+                }
                 
                 log::info!(
-                    "[PERF] Monitor: {}Hz | Avg FPS: {:.1} | CPU: {:.1}% | GPU: {}", 
-                    monitor_fps, avg_fps, cpu_usage, gpu_str
+                    "[PERF] Monitor: {}Hz | Avg FPS: {:.1} | CPU: {:.1}%", 
+                    monitor_fps, avg_fps, cpu_usage
                 );
                 
-                internal_frame_count = 0;
                 last_fps_log_time = std::time::Instant::now();
             }
 
@@ -372,7 +377,6 @@ async fn main() -> anyhow::Result<()> {
 
             if !frame_pending_clone.load(Ordering::Acquire) {
                 if is_visible_clone.load(Ordering::Relaxed) {
-                    internal_frame_count += 1;
                     frame_pending_clone.store(true, Ordering::Release);
                     let ev = veldmap_host_core::app::UiEvent { 
                         surface_handle: Some(veldmap_host_core::core::ResourceHandle { 
@@ -520,6 +524,8 @@ async fn main() -> anyhow::Result<()> {
                             queue_arc.lock().unwrap().submit(Some(encoder.finish()));
                             frame.present();
 
+                            shared_frame_count.fetch_add(1, Ordering::SeqCst);
+                            
                             frame_count += 1;
                             let now = std::time::Instant::now();
                             let elapsed = now.duration_since(last_fps_update);
@@ -549,7 +555,7 @@ async fn main() -> anyhow::Result<()> {
                         event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent { 
                             width: size.width, 
                             height: size.height, 
-                            scale_factor: (window.scale_factor() * ui_scale) as f32,
+                            scale_factor: window.scale_factor().max(ui_scale) as f32,
                         })) 
                     };
                     let d = dispatcher.clone();

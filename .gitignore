@@ -12,6 +12,7 @@ cache/
 
 # Temporary and log files
 *.log
+.env
 .DS_Store
 
 # IDEs

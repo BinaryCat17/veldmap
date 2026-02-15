@@ -89,6 +89,11 @@ def build_all(debug=False, windows=False):
             if config_file.endswith(".json"):
                 shutil.copy(os.path.join(CONFIG_DIR, config_file), os.path.join(dist_config, config_file))
         
+        # Copy .env if exists
+        if os.path.exists(".env"):
+            print("Deploying .env to build directory...")
+            shutil.copy(".env", os.path.join(WINDOWS_DIST_DIR, ".env"))
+        
         print(f"Windows x64 build deployed successfully to: {WINDOWS_DIST_DIR}")
 
 def clean():
@@ -103,7 +108,7 @@ def clean():
 
 def main():
     parser = argparse.ArgumentParser(description="VeldMap Build Script")
-    parser.add_argument("command", choices=["build", "clean"], nargs="?", default="build")
+    parser.add_argument("command", choices=["build", "clean"], nargs="?", default="build", help="Command to run (default: build)")
     parser.add_argument("--debug", action="store_true", help="Build in debug mode")
     parser.add_argument("--windows", action="store_true", help="Cross-compile for Windows (x86_64)")
     
@@ -112,6 +117,7 @@ def main():
     if args.command == "clean":
         clean()
     else:
+        # 'build' is the default if no command is specified
         build_all(debug=args.debug, windows=args.windows)
         print("\n===============================")
         mode_str = "DEBUG" if args.debug else "RELEASE"
