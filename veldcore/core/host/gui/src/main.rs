@@ -21,8 +21,12 @@ mod app_service;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Убираем ворнинг драйвера dzn в WSL2
+    std::env::set_var("MESA_VK_IGNORE_CONFORMANCE_WARNING", "1");
+
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,wasmtime_wasi=error,wgpu_core=info,wgpu_hal=info,sctk=error,egl=info,gles=info");
+        // Устанавливаем строгие фильтры для всех шумных библиотек
+        std::env::set_var("RUST_LOG", "warn,veldmap_host=info,veldmap_host_gui=info,veldmap_host_core=info,wasm=info,host=info,iroh=error,iroh_gossip=error,quinn=error,hickory_proto=error,hickory_resolver=error,tracing=error,wasmtime_wasi=warn,wgpu_core=error,wgpu_hal=error,gpu_info=error");
     }
     env_logger::Builder::from_default_env()
         .format(|buf, record| {
@@ -284,13 +288,18 @@ async fn main() -> anyhow::Result<()> {
                 let cpu_usage = sys.global_cpu_usage();
                 
                 // Использование sysinfo_utils для мониторинга GPU
-                let gpu = sysinfo_utils::gpu_info::get();
-                let gpu_str = if gpu.active().unwrap_or(false) {
-                    let util = gpu.utilization().unwrap_or(0.0);
-                    let temp = gpu.temperature().unwrap_or(0.0);
-                    format!("{:.1}% ({:.0}°C)", util, temp)
-                } else {
-                    "N/A".to_string()
+                // Глушим ворнинги библиотеки, если вендор не определен (актуально для WSL)
+                let gpu_str = {
+                    let gpu = sysinfo_utils::gpu_info::get();
+                    if gpu.active().unwrap_or(false) && gpu.utilization().is_some() {
+                        let util = gpu.utilization().unwrap_or(0.0);
+                        let temp = gpu.temperature().unwrap_or(0.0);
+                        format!("{:.1}% ({:.0}°C)", util, temp)
+                    } else if info.driver.contains("Microsoft") || info.name.contains("Microsoft") {
+                        "WSL/D3D12".to_string()
+                    } else {
+                        "N/A".to_string()
+                    }
                 };
                 
                 log::info!(
