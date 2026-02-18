@@ -24,6 +24,7 @@ pub struct PluginUiState {
     pub ui_pipeline: RefCell<Option<u64>>,
     pub last_vertices: RefCell<Vec<crate::renderer::Vertex>>,
     pub last_draw_commands: RefCell<Vec<crate::renderer::DrawCmd>>,
+    pub external_bind_groups: RefCell<HashMap<u64, u64>>,
 
     // Performance Stats
     pub perf_count: RefCell<u64>,
@@ -84,6 +85,7 @@ impl PluginUiState {
             ui_pipeline: RefCell::new(None),
             last_vertices: RefCell::new(Vec::new()),
             last_draw_commands: RefCell::new(Vec::new()),
+            external_bind_groups: RefCell::new(HashMap::new()),
             
             perf_count: RefCell::new(0),
             perf_total: RefCell::new(0),

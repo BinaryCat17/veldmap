@@ -356,7 +356,21 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
                     DrawCmd::Scissor { x, y, width, height } => {
                         recorder.set_scissor_rect(*x, *y, *width, *height);
                     }
-                    DrawCmd::ExternalImage { .. } => {}
+                    DrawCmd::ExternalImage { texture_id, index_count, .. } => {
+                        if let Ok(bg_id) = get_external_bind_group(plugin, renderer, *texture_id) {
+                            recorder.set_bind_group(0, bg_id);
+                            recorder.draw_indexed(current_index_offset..(current_index_offset + *index_count), 0, 0..1);
+                            current_index_offset += *index_count;
+                            
+                            // Возвращаем атлас обратно в слот 0
+                            if let Some(atlas_bg) = renderer.atlas_bind_group_id {
+                                recorder.set_bind_group(0, atlas_bg);
+                            }
+                        } else {
+                            // Если не удалось создать BindGroup, просто пропускаем индексы
+                            current_index_offset += *index_count;
+                        }
+                    }
                 }
             }
         }
@@ -369,6 +383,53 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
     let _ = veldsdk::app::AppBridge::display_frame();
 
     Ok(())
+}
+
+fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, texture_id: u64) -> anyhow::Result<u64> {
+    let mut cache = plugin.external_bind_groups.borrow_mut();
+    if let Some(&bg_id) = cache.get(&texture_id) {
+        return Ok(bg_id);
+    }
+
+    // 1. Texture View
+    let view_req = GpuResourceRequest {
+        instance_id: 0,
+        command: Some(gpu_resource_request::Command::CreateTextureView(CreateTextureView {
+            texture_id, format: TextureFormat::TexRgba8Unorm as i32, dimension: 0, aspect: 1, ..Default::default()
+        }))
+    };
+    let view_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", view_req.encode_to_vec())?[..])?;
+    let view_id = view_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create texture view"))?.id;
+
+    // 2. Sampler (Linear)
+    let sampler_req = GpuResourceRequest {
+        instance_id: 0,
+        command: Some(gpu_resource_request::Command::CreateSampler(CreateSampler { 
+            mag_filter: FilterMode::FiltLinear as i32, 
+            min_filter: FilterMode::FiltLinear as i32, 
+            ..Default::default() 
+        }))
+    };
+    let sampler_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", sampler_req.encode_to_vec())?[..])?;
+    let sampler_id = sampler_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create sampler"))?.id;
+
+    // 3. Bind Group
+    let bg_req = GpuResourceRequest {
+        instance_id: 0,
+        command: Some(gpu_resource_request::Command::CreateBindGroup(CreateBindGroup {
+            layout_id: renderer.bgl_id.ok_or_else(|| anyhow::anyhow!("No BGL"))?,
+            entries: vec![
+                BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::TextureViewId(view_id)) },
+                BindGroupEntry { binding: 1, resource: Some(bind_group_entry::Resource::SamplerId(sampler_id)) },
+            ],
+            label: format!("External Image BG {}", texture_id),
+        }))
+    };
+    let bg_res = GpuResourceResponse::decode(&call_service("wgpu", "create_resource", bg_req.encode_to_vec())?[..])?;
+    let bg_id = bg_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create bind group"))?.id;
+
+    cache.insert(texture_id, bg_id);
+    Ok(bg_id)
 }
 
 fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {

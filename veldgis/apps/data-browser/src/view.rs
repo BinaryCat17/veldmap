@@ -1,5 +1,5 @@
 use veld_ui::{
-    column, row, text, button, Element, Color
+    column, row, text, button, container, image, Element, Color, Length, Alignment, Padding
 };
 use crate::common::ViewMode;
 use crate::styles::{COLOR_TEXT, COLOR_TEXT_DIM};
@@ -15,6 +15,8 @@ pub fn view(state: &LocalState) -> Element<Message> {
                 .on_press(Message::SwitchMode(ViewMode::Browse)),
             crate::styles::apply_nav(button(text("Downloaded")))
                 .on_press(Message::SwitchMode(ViewMode::Downloaded)),
+            crate::styles::apply_nav(button(text("View")))
+                .on_press(Message::SwitchMode(ViewMode::View)),
         ].spacing(15.0),
     ].spacing(20.0);
 
@@ -79,6 +81,33 @@ pub fn view(state: &LocalState) -> Element<Message> {
             &state.local_files, 
             state.downloading_key.as_deref()
         ).key(300),
+
+        ViewMode::View => {
+            if let Some(handle) = &state.current_gpu_image {
+                column![
+                    row![
+                        crate::styles::apply_primary(button(text("Back")))
+                            .on_press(Message::ClosePreview),
+                        text("File Preview").size(20.0).color(COLOR_TEXT),
+                    ].spacing(20.0).align_items(Alignment::Center),
+                    container(
+                        image(handle.clone())
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .background(Color::from_rgb(0.05, 0.05, 0.05))
+                    .padding(10.0)
+                ].spacing(15.0).width(Length::Fill).height(Length::Fill).into()
+            } else {
+                column![
+                    text("No file selected for viewing").color(COLOR_TEXT_DIM),
+                    crate::styles::apply_primary(button(text("Go to Downloaded")))
+                        .on_press(Message::SwitchMode(ViewMode::Downloaded)),
+                ].spacing(20.0).align_items(Alignment::Center).into()
+            }
+        }
     };
 
     column![title_bar, status_view, progress_view, error_view, main_content]

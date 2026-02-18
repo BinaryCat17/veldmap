@@ -6,6 +6,7 @@ pub enum ViewMode {
     Search,
     Browse,
     Downloaded,
+    View,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -55,19 +56,21 @@ pub fn render_item(item: &BrowserItem) -> Element<Message> {
         }
     };
 
-    // Кнопки действий (Скачать/Обновить/Индикатор загрузки)
+    // Кнопки действий (Скачать/Обновить/Индикатор загрузки/Просмотр)
     let status_element: Element<Message> = if item.is_downloading {
         container(text("\u{f017}").color(styles::COLOR_WARNING))
-            .width(Length::Fixed(80.0))
+            .width(Length::Fixed(120.0))
             .align_x(Alignment::Center)
             .into()
     } else if item.exists_locally {
         container(row![
             text("\u{f00c}").color(styles::COLOR_SUCCESS),
+            styles::apply_icon(button(text("\u{f06e}")), styles::COLOR_TEXT) // Иконка глаза для просмотра
+                .on_press(Message::ViewFile(item.s3_key.clone())),
             styles::apply_icon(button(text("\u{f021}")), styles::COLOR_RELOAD)
                 .on_press(Message::DownloadFile(item.s3_key.clone()))
         ].spacing(10.0).align_items(Alignment::Center))
-        .width(Length::Fixed(80.0))
+        .width(Length::Fixed(120.0))
         .align_x(Alignment::End)
         .into()
     } else if !item.is_folder {

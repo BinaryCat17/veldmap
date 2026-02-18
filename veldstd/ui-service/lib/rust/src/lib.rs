@@ -916,6 +916,52 @@ pub fn tooltip<M>(content: impl Into<Element<M>>, label: impl Into<String>, posi
     Tooltip::new(content, label, position)
 }
 
+pub struct Image<M> {
+    widget: proto::WgpuImage,
+    key: u64,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Image<M> {
+    pub fn new(handle: core::ResourceHandle) -> Self {
+        Self {
+            widget: proto::WgpuImage {
+                handle: Some(handle),
+                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+            },
+            key: 0,
+            _marker: std::marker::PhantomData,
+        }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
+}
+
+impl<M> From<Image<M>> for Element<M> {
+    fn from(i: Image<M>) -> Self {
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Image(i.widget)), 
+            key: i.key,
+            ..Default::default() 
+        }.into()
+    }
+}
+
+pub fn image<M>(handle: core::ResourceHandle) -> Image<M> {
+    Image::new(handle)
+}
+
 // --- Diffing ---
 
 pub mod diffing {

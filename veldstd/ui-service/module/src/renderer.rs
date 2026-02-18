@@ -63,6 +63,7 @@ pub enum DrawCmd {
     ExternalImage {
         bounds: iced_core::Rectangle,
         texture_id: u64,
+        index_count: u32,
     },
 }
 
@@ -206,6 +207,15 @@ impl GpuRenderer {
     }
 
     pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32, border_width: f32, border_color: [f32; 4]) {
+        self.push_quad_data(rect, color, uv, radius, mode, border_width, border_color);
+
+        match self.draw_commands.last_mut() {
+            Some(DrawCmd::Quads { count }) => *count += 6,
+            _ => self.draw_commands.push(DrawCmd::Quads { count: 6 }),
+        }
+    }
+
+    fn push_quad_data(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32, border_width: f32, border_color: [f32; 4]) {
         let transformed = self.transform_rect(rect);
         let x = transformed[0];
         let y = transformed[1];
@@ -243,16 +253,24 @@ impl GpuRenderer {
         self.indices.push(base);
         self.indices.push(base + 2);
         self.indices.push(base + 3);
-
-        match self.draw_commands.last_mut() {
-            Some(DrawCmd::Quads { count }) => *count += 6,
-            _ => self.draw_commands.push(DrawCmd::Quads { count: 6 }),
-        }
     }
 
     pub fn draw_wgpu_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64) {
+        // Mode 0.0 = Texture mode in shaders.wgsl
+        // UV [0,0, 1,1] = Full texture
+        self.push_quad_data(
+            [bounds.x, bounds.y, bounds.width, bounds.height],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            0.0, 0.0, 0.0, [0.0, 0.0, 0.0, 0.0]
+        );
+
         self.draw_commands
-            .push(DrawCmd::ExternalImage { bounds, texture_id });
+            .push(DrawCmd::ExternalImage { 
+                bounds, 
+                texture_id,
+                index_count: 6 
+            });
     }
 }
 

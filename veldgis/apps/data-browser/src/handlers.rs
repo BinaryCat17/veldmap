@@ -140,7 +140,9 @@ pub fn handle_download_update(state: &mut LocalState, update: TaskUpdate<Downloa
     Command::none()
 }
 
-pub fn handle_view(_state: &mut LocalState, path: String) -> Command<Message> {
+pub fn handle_view(state: &mut LocalState, path: String) -> Command<Message> {
+    state.view_mode = ViewMode::View;
+    state.status_message = format!("Loading {}...", path);
     let req = ImageLoadRequest { 
         path, target_width: 2048, target_height: 2048, preserve_aspect: true 
     };
@@ -151,6 +153,10 @@ pub fn handle_image_update(state: &mut LocalState, update: TaskUpdate<veldsdk::r
     state.image_task.handle(update);
     if let TaskStatus::Finished(handle) = &state.image_task {
         state.current_gpu_image = Some(handle.clone());
+        state.status_message = "Image loaded successfully".into();
+    } else if let Some(err) = state.image_task.error() {
+        state.error_message = Some(format!("Image load failed: {}", err));
+        state.view_mode = ViewMode::Downloaded; // Возвращаемся назад при ошибке
     }
     Command::none()
 }
@@ -211,7 +217,11 @@ pub fn handle_delete(state: &mut LocalState, path: String) -> Command<Message> {
 pub fn handle_clear_error(state: &mut LocalState) -> Command<Message> { state.error_message = None; Command::none() }
 pub fn handle_local_search(state: &mut LocalState, q: String) -> Command<Message> { state.downloaded_state.search_query = q; Command::none() }
 pub fn handle_local_filter(state: &mut LocalState, f: crate::downloaded::FileFilter) -> Command<Message> { state.downloaded_state.filter = f; Command::none() }
-pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { state.current_gpu_image = None; Command::none() }
+pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { 
+    state.current_gpu_image = None; 
+    state.view_mode = ViewMode::Downloaded;
+    Command::none() 
+}
 pub fn handle_cancel_download(state: &mut LocalState) -> Command<Message> {
     if let TaskStatus::Running { task_id: Some(id), .. } = &mut state.download_task {
         let req = veldsdk::rpc::core::TaskCancelRequest { task_id: id.clone() };
