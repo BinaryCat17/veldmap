@@ -1981,21 +1981,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "veldmap-desktop-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "once_cell",
- "prost",
- "serde",
- "serde_json",
- "veld-ui",
- "veldmap-gis-api",
- "veldsdk",
-]
-
-[[package]]
 name = "veldmap-geo-math"
 version = "0.1.0"
 dependencies = [

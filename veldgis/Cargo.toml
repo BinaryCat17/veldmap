@@ -7,7 +7,6 @@ members = [
     "modules/local-storage",
     "modules/tile-server",
     "apps/data-browser",
-    "apps/desktop-client",
 ]
 resolver = "2"
 

@@ -20,16 +20,12 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, ())> {
         downloading_key: None,
         image_task: TaskStatus::Idle,
         search_results: Vec::new(),
-        download_progress: None,
-        current_image: None,
         current_gpu_image: None,
         downloaded_state: crate::downloaded::DownloadedState::default(),
         token_stack: Vec::new(),
         current_page_token: String::new(),
         next_token: None,
         current_browse_path: String::new(),
-        selected_product: None,
-        product_files: Vec::new(),
         browse_items: Vec::new(),
         local_files: Vec::new(),
     };
@@ -38,9 +34,6 @@ pub fn module_init(_cfg: LocalConfig) -> anyhow::Result<(LocalState, ())> {
 
 pub fn handle_switch_mode(state: &mut LocalState, mode: ViewMode) -> Command<Message> {
     state.view_mode = mode;
-    state.current_image = None;
-    state.download_progress = None;
-    state.selected_product = None;
     if state.view_mode == ViewMode::Browse && state.browse_items.is_empty() {
         return handle_browse_path(state, String::new());
     } else if state.view_mode == ViewMode::Downloaded {
@@ -101,7 +94,14 @@ pub fn handle_browse_update(state: &mut LocalState, update: TaskUpdate<ListPathR
                 let is_folder = s3_key.ends_with('/');
                 let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(&s3_key).to_string();
                 let exists_locally = !is_folder && local_files.contains(&name);
-                BrowserItem { s3_key: s3_key.clone(), name, is_folder, exists_locally }
+                BrowserItem { 
+                    s3_key: s3_key.clone(), 
+                    name, 
+                    is_folder, 
+                    exists_locally,
+                    description: None,
+                    is_downloading: false,
+                }
             }).collect();
             
             state.next_token = if response.next_token.is_empty() { None } else { Some(response.next_token.clone()) };
@@ -158,9 +158,9 @@ pub fn handle_image_update(state: &mut LocalState, update: TaskUpdate<veldsdk::r
 // Stubs for other handlers
 pub fn handle_search_input(state: &mut LocalState, q: String) -> Command<Message> { state.search_state.query = q; Command::none() }
 pub fn handle_search_filter(state: &mut LocalState, ft: crate::search::SearchFilterType) -> Command<Message> { state.search_state.filter_type = ft; Command::none() }
-pub fn handle_product_selected(state: &mut LocalState, prod: DataProduct) -> Command<Message> { state.selected_product = Some(prod.name); Command::none() }
+pub fn handle_product_selected(_state: &mut LocalState, _prod: DataProduct) -> Command<Message> { Command::none() }
 pub fn handle_product_files_loaded(_state: &mut LocalState, _res: Result<ListPathResponse, String>) -> Command<Message> { Command::none() }
-pub fn handle_back_to_list(state: &mut LocalState) -> Command<Message> { state.selected_product = None; Command::none() }
+pub fn handle_back_to_list(_state: &mut LocalState) -> Command<Message> { Command::none() }
 pub fn handle_next_page(state: &mut LocalState) -> Command<Message> {
     if let Some(token) = state.next_token.clone() {
         state.token_stack.push(state.current_page_token.clone());
@@ -211,7 +211,7 @@ pub fn handle_delete(state: &mut LocalState, path: String) -> Command<Message> {
 pub fn handle_clear_error(state: &mut LocalState) -> Command<Message> { state.error_message = None; Command::none() }
 pub fn handle_local_search(state: &mut LocalState, q: String) -> Command<Message> { state.downloaded_state.search_query = q; Command::none() }
 pub fn handle_local_filter(state: &mut LocalState, f: crate::downloaded::FileFilter) -> Command<Message> { state.downloaded_state.filter = f; Command::none() }
-pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { state.current_image = None; state.current_gpu_image = None; Command::none() }
+pub fn handle_close_preview(state: &mut LocalState) -> Command<Message> { state.current_gpu_image = None; Command::none() }
 pub fn handle_cancel_download(state: &mut LocalState) -> Command<Message> {
     if let TaskStatus::Running { task_id: Some(id), .. } = &mut state.download_task {
         let req = veldsdk::rpc::core::TaskCancelRequest { task_id: id.clone() };
@@ -229,7 +229,14 @@ fn refresh_local_files(state: &mut LocalState) {
     let path = "data/dem/source";
     if let Ok(res) = veldsdk::core::raw::fs_list(&FsListRequest { path: path.into() }) {
         state.local_files = res.entries.into_iter().map(|name| {
-            BrowserItem { s3_key: format!("{}/{}", path, name), name, is_folder: false, exists_locally: true }
+            BrowserItem { 
+                s3_key: format!("{}/{}", path, name), 
+                name, 
+                is_folder: false, 
+                exists_locally: true,
+                description: None,
+                is_downloading: false,
+            }
         }).collect();
     }
 }

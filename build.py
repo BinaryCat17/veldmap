@@ -20,7 +20,6 @@ MODULES = [
     ("veldmap-tile-server", GIS_MANIFEST, "veldgis/target"),
     ("veldmap-render", GIS_MANIFEST, "veldgis/target"),
     ("veldmap-data-browser", GIS_MANIFEST, "veldgis/target"),
-    ("veldmap-desktop-client", GIS_MANIFEST, "veldgis/target"),
     ("veld-ui-service", STD_MANIFEST, "veldstd/target"),
 ]
 

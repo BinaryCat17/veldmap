@@ -1,12 +1,17 @@
 use veld_ui::{Style, ButtonStyle, WidgetStyle, Color, Border, Background, Button, Padding};
 
 // --- Colors ---
+pub const COLOR_TEXT: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+pub const COLOR_TEXT_DIM: Color = Color { r: 0.6, g: 0.6, b: 0.7, a: 1.0 };
 pub const COLOR_BG_LIGHT: Color = Color { r: 0.2, g: 0.2, b: 0.25, a: 1.0 };
 pub const COLOR_BG_HOVER: Color = Color { r: 0.25, g: 0.25, b: 0.35, a: 1.0 };
 pub const COLOR_PRIMARY: Color = Color { r: 0.1, g: 0.4, b: 0.7, a: 1.0 };
 pub const COLOR_PRIMARY_HOVER: Color = Color { r: 0.15, g: 0.5, b: 0.8, a: 1.0 };
-pub const COLOR_SUCCESS: Color = Color { r: 0.1, g: 0.3, b: 0.1, a: 1.0 };
-pub const COLOR_SUCCESS_HOVER: Color = Color { r: 0.15, g: 0.4, b: 0.15, a: 1.0 };
+pub const COLOR_SUCCESS: Color = Color { r: 0.3, g: 0.8, b: 0.3, a: 1.0 };
+pub const COLOR_WARNING: Color = Color { r: 1.0, g: 0.7, b: 0.3, a: 1.0 };
+pub const COLOR_FOLDER: Color = Color { r: 0.4, g: 0.6, b: 1.0, a: 1.0 };
+pub const COLOR_FILE: Color = Color { r: 0.7, g: 0.7, b: 0.7, a: 1.0 };
+pub const COLOR_RELOAD: Color = Color { r: 0.5, g: 0.5, b: 0.7, a: 1.0 };
 
 // --- Button Styles (Colors Only) ---
 

@@ -1,4 +1,4 @@
-use veld_ui::{column, text, button, scrollable, Element};
+use veld_ui::{column, text, scrollable, Element};
 use crate::{AppMessage as Message, common::BrowserItem};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
@@ -15,14 +15,25 @@ pub struct DownloadedState {
     pub filter: FileFilter,
 }
 
-pub fn view(state: &DownloadedState, files: &[BrowserItem]) -> Element<Message> {
-    let file_list = column(files.iter().map(|f| {
-        crate::styles::apply_file(button(text(&f.name))).width(veld_ui::Length::Fill).on_press(Message::ViewFile(f.s3_key.clone())).into()
-    })).spacing(5.0);
+pub fn view(state: &DownloadedState, files: &[BrowserItem], downloading_key: Option<&str>) -> Element<Message> {
+    let mut display_items = files.to_vec();
+    for item in &mut display_items {
+        if downloading_key == Some(&item.s3_key) {
+            item.is_downloading = true;
+        }
+    }
+
+    let file_list = crate::common::render_list(&display_items);
 
     column![
         text("Local Files").size(20.0),
         text(format!("Search: {}", state.search_query)).size(14.0),
-        scrollable(file_list).height(veld_ui::Length::Fill)
-    ].spacing(15.0).height(veld_ui::Length::Fill).into()
+        scrollable(file_list)
+            .width(veld_ui::Length::Fill)
+            .height(veld_ui::Length::Fill)
+    ]
+    .spacing(15.0)
+    .width(veld_ui::Length::Fill)
+    .height(veld_ui::Length::Fill)
+    .into()
 }

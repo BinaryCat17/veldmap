@@ -29,16 +29,12 @@ pub struct LocalState {
     pub image_task: TaskStatus<veldsdk::rpc::core::ResourceHandle>,
 
     pub search_results: Vec<DataProduct>,
-    pub download_progress: Option<f32>, // Оставим для совместимости с вьюхой пока
-    pub current_image: Option<u64>,
     pub current_gpu_image: Option<veldsdk::rpc::core::ResourceHandle>,
     pub downloaded_state: downloaded::DownloadedState,
     pub token_stack: Vec<String>,
     pub current_page_token: String,
     pub next_token: Option<String>,
     pub current_browse_path: String,
-    pub selected_product: Option<String>,
-    pub product_files: Vec<BrowserItem>,
     pub browse_items: Vec<BrowserItem>,
     pub local_files: Vec<BrowserItem>,
 }

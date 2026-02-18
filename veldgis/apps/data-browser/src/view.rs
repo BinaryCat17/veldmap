@@ -1,7 +1,8 @@
 use veld_ui::{
     column, row, text, button, Element, Color
 };
-use crate::common::{COLOR_TEXT, COLOR_TEXT_DIM, ViewMode};
+use crate::common::ViewMode;
+use crate::styles::{COLOR_TEXT, COLOR_TEXT_DIM};
 use crate::{LocalState, AppMessage as Message};
 
 pub fn view(state: &LocalState) -> Element<Message> {
@@ -57,7 +58,12 @@ pub fn view(state: &LocalState) -> Element<Message> {
     };
 
     let main_content: Element<Message> = match state.view_mode {
-        ViewMode::Search => crate::search::view(&state.search_state, &state.search_results),
+        ViewMode::Search => crate::search::view(
+            &state.search_state, 
+            &state.search_results, 
+            &state.local_files, 
+            state.downloading_key.as_deref()
+        ),
         ViewMode::Browse => crate::browse::view(
             &state.current_browse_path, 
             &state.browse_items, 
@@ -66,7 +72,11 @@ pub fn view(state: &LocalState) -> Element<Message> {
             state.next_token.is_some(),
             state.downloading_key.as_deref()
         ),
-        ViewMode::Downloaded => crate::downloaded::view(&state.downloaded_state, &state.local_files),
+        ViewMode::Downloaded => crate::downloaded::view(
+            &state.downloaded_state, 
+            &state.local_files, 
+            state.downloading_key.as_deref()
+        ),
     };
 
     column![title_bar, status_view, progress_view, error_view, main_content]

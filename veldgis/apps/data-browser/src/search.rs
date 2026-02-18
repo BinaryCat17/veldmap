@@ -1,6 +1,6 @@
-use veld_ui::{column, row, text, button, scrollable, Element};
+use veld_ui::{column, row, text, button, scrollable, text_input, Element};
 use veldmap_gis_api::dataprovider::DataProduct;
-use crate::{AppMessage as Message};
+use crate::{AppMessage as Message, common::BrowserItem};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
 pub enum SearchFilterType {
@@ -16,28 +16,38 @@ pub struct SearchState {
     pub filter_type: SearchFilterType,
 }
 
-pub fn view(_state: &SearchState, results: &[DataProduct]) -> Element<Message> {
+pub fn view(state: &SearchState, results: &[DataProduct], local_files: &[BrowserItem], downloading_key: Option<&str>) -> Element<Message> {
+    let display_items: Vec<BrowserItem> = results.iter().map(|p| {
+        let exists_locally = local_files.iter().any(|f| f.name == p.name);
+        let is_downloading = downloading_key == Some(&p.path);
+        
+        BrowserItem {
+            s3_key: p.path.clone(),
+            name: p.name.clone(),
+            description: Some(format!("{} | {}", p.timestamp, p.grid_id)),
+            is_folder: false,
+            exists_locally,
+            is_downloading,
+        }
+    }).collect();
 
-    let results_list = column(results.iter().map(|p| {
-
-        crate::styles::apply_file(button(text(&p.name))).width(veld_ui::Length::Fill).on_press(Message::ProductSelected(p.clone())).into()
-
-    })).spacing(5.0);
-
-
+    let results_list = crate::common::render_list(&display_items);
 
     column![
-
         text("Search Copernicus Data Space").size(20.0),
-
         row![
-
+            text_input("Search query...", &state.query)
+                .on_input(Message::SearchInputChanged)
+                .on_submit(Message::SearchPressed)
+                .padding(10.0),
             crate::styles::apply_primary(button(text("Search"))).on_press(Message::SearchPressed)
-
         ].spacing(10.0),
-
-        scrollable(results_list).height(veld_ui::Length::Fill)
-
-    ].spacing(15.0).height(veld_ui::Length::Fill).into()
-
+        scrollable(results_list)
+            .width(veld_ui::Length::Fill)
+            .height(veld_ui::Length::Fill)
+    ]
+    .spacing(15.0)
+    .width(veld_ui::Length::Fill)
+    .height(veld_ui::Length::Fill)
+    .into()
 }
