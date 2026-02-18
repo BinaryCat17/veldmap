@@ -376,9 +376,21 @@ impl iced_core::text::Paragraph for RealParagraph {
         FONT_SYSTEM.with(|fs_cell| {
             if let Some(mut fs_ptr) = *fs_cell.borrow_mut() {
                 let font_system = unsafe { fs_ptr.as_mut() };
+                let mut size = text.size.0;
+                let mut line_height = text.line_height.to_absolute(text.size).0;
+
+                if size <= 0.0 {
+                    log::error!("Cosmic-text: invalid font size: {}. Resetting to 16.0", size);
+                    size = 16.0;
+                }
+                if line_height <= 0.0 {
+                    log::error!("Cosmic-text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
+                    line_height = size * 1.2;
+                }
+
                 let mut buffer = Buffer::new(
                     font_system,
-                    Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0),
+                    Metrics::new(size, line_height),
                 );
 
                 if text.bounds.width < f32::INFINITY {
@@ -608,9 +620,21 @@ impl iced_core::text::Renderer for GpuRenderer {
                 self.text_cache.clear();
             }
 
+            let mut size = text.size.0;
+            let mut line_height = text.line_height.to_absolute(text.size).0;
+
+            if size <= 0.0 {
+                log::error!("Cosmic-text fill_text: invalid font size: {}. Resetting to 16.0", size);
+                size = 16.0;
+            }
+            if line_height <= 0.0 {
+                log::error!("Cosmic-text fill_text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
+                line_height = size * 1.2;
+            }
+
             let mut buffer = Buffer::new(
                 &mut self.font_system,
-                Metrics::new(text.size.0, text.line_height.to_absolute(text.size).0),
+                Metrics::new(size, line_height),
             );
 
             if text.bounds.width.is_finite() {

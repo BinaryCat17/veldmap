@@ -44,8 +44,13 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
               .into()
         }
         Some(proto::widget::Type::Text(t)) => {
+            let mut size = t.size;
+            if size <= 0.0 {
+                log::error!("Text widget has invalid size: {}. Resetting to 100.0", size);
+                size = 100.0;
+            }
             let txt = text(t.content.clone())
-                .size(t.size)
+                .size(size)
                 .color(convert_color(&t.color))
                 .width(convert_length(&t.width))
                 .height(convert_length(&t.height))
@@ -115,10 +120,15 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             btn.into()
         }
         Some(proto::widget::Type::TextInput(t)) => {
+            let mut size = t.size;
+            if size <= 0.0 {
+                log::error!("TextInput widget has invalid size: {}. Resetting to 100.0", size);
+                size = 100.0;
+            }
             let mut input = iced_widget::text_input(&t.placeholder, &t.value)
                 .width(convert_length(&t.width))
                 .padding(convert_padding(&t.padding))
-                .size(t.size);
+                .size(size);
             
             if !t.on_input.is_empty() {
                 let tag = t.on_input.clone();

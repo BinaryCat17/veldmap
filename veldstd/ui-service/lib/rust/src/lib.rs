@@ -440,7 +440,8 @@ impl<M> TextInput<M> {
             widget: proto::TextInput {
                 placeholder: placeholder.to_string(),
                 value: value.to_string(),
-                size: 16.0,
+                size: 24.0,
+                padding: Some(proto::Padding { top: 8.0, bottom: 8.0, left: 12.0, right: 12.0 }),
                 ..Default::default()
             },
             _marker: std::marker::PhantomData,

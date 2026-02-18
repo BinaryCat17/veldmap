@@ -1,4 +1,4 @@
-use veld_ui::{column, row, text, button, scrollable, text_input, Element};
+use veld_ui::{column, row, text, button, scrollable, text_input, container, Element};
 use veldmap_gis_api::dataprovider::DataProduct;
 use crate::{AppMessage as Message, common::BrowserItem};
 
@@ -39,9 +39,10 @@ pub fn view(state: &SearchState, results: &[DataProduct], local_files: &[Browser
             text_input("Search query...", &state.query)
                 .on_input(Message::SearchInputChanged)
                 .on_submit(Message::SearchPressed)
+                .width(veld_ui::Length::Fill)
                 .padding(10.0),
             crate::styles::apply_primary(button(text("Search"))).on_press(Message::SearchPressed)
-        ].spacing(10.0),
+        ].spacing(10.0).width(veld_ui::Length::Fill).align_items(veld_ui::Alignment::Center),
         scrollable(results_list)
             .width(veld_ui::Length::Fill)
             .height(veld_ui::Length::Fill)
