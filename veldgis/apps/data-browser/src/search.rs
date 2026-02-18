@@ -36,11 +36,11 @@ pub fn view(state: &SearchState, results: &[DataProduct], local_files: &[Browser
     column![
         text("Search Copernicus Data Space").size(20.0),
         row![
-            text_input("Search query...", &state.query)
-                .on_input(Message::SearchInputChanged)
-                .on_submit(Message::SearchPressed)
-                .width(veld_ui::Length::Fill)
-                .padding(10.0),
+            crate::styles::apply_search_input(
+                text_input("Search query...", &state.query)
+                    .on_input(Message::SearchInputChanged)
+                    .on_submit(Message::SearchPressed)
+            ).width(veld_ui::Length::Fill),
             crate::styles::apply_primary(button(text("Search"))).on_press(Message::SearchPressed)
         ].spacing(10.0).width(veld_ui::Length::Fill).align_items(veld_ui::Alignment::Center),
         scrollable(results_list)

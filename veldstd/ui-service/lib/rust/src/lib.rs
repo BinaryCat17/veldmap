@@ -533,8 +533,8 @@ impl<M> TextInput<M> {
             widget: proto::TextInput {
                 placeholder: placeholder.to_string(),
                 value: value.to_string(),
-                size: 24.0,
-                padding: Some(proto::Padding { top: 8.0, bottom: 8.0, left: 12.0, right: 12.0 }),
+                size: 16.0,
+                padding: Some(proto::Padding { top: 5.0, bottom: 5.0, left: 10.0, right: 10.0 }),
                 ..Default::default()
             },
             key: 0,

@@ -46,8 +46,8 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         Some(proto::widget::Type::Text(t)) => {
             let mut size = t.size;
             if size <= 0.0 {
-                log::error!("Text widget has invalid size: {}. Resetting to 100.0", size);
-                size = 100.0;
+                log::error!("Text widget has invalid size: {}. Resetting to 16.0", size);
+                size = 16.0;
             }
             let txt = text(t.content.clone())
                 .size(size)
@@ -122,8 +122,8 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         Some(proto::widget::Type::TextInput(t)) => {
             let mut size = t.size;
             if size <= 0.0 {
-                log::error!("TextInput widget has invalid size: {}. Resetting to 100.0", size);
-                size = 100.0;
+                log::error!("TextInput widget has invalid size: {}. Resetting to 16.0", size);
+                size = 16.0;
             }
             let mut input = iced_widget::text_input(&t.placeholder, &t.value)
                 .width(convert_length(&t.width))

@@ -98,6 +98,10 @@ pub fn apply_file<M>(btn: Button<M>) -> Button<M> {
     btn.style(file_button_style()).padding(5.0)
 }
 
+pub fn apply_search_input<M>(input: veld_ui::TextInput<M>) -> veld_ui::TextInput<M> {
+    input.padding(10.0).size(16.0)
+}
+
 pub fn apply_icon<M>(btn: Button<M>, color: Color) -> Button<M> {
     let base = WidgetStyle {
         background: Some(Background::Color(Color::from_rgba(color.r, color.g, color.b, 0.1))),
