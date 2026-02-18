@@ -28,6 +28,7 @@ message Widget {
         Stack stack = 11;
         Tooltip tooltip = 12;
     }
+    uint64 key = 15;
 }
 
 message Stack {

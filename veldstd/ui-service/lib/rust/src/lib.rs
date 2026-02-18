@@ -21,13 +21,15 @@ pub struct Element<M> {
     pub _marker: std::marker::PhantomData<M>,
 }
 
-impl<M> From<proto::Widget> for Element<M> {
-    fn from(widget: proto::Widget) -> Self { Self { widget, _marker: std::marker::PhantomData } }
+impl<M> Element<M> {
+    pub fn key(mut self, k: u64) -> Self {
+        self.widget.key = k;
+        self
+    }
 }
 
-pub struct Column<M> {
-    widget: proto::Column,
-    _marker: std::marker::PhantomData<M>,
+impl<M> From<proto::Widget> for Element<M> {
+    fn from(widget: proto::Widget) -> Self { Self { widget, _marker: std::marker::PhantomData } }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -49,195 +51,43 @@ impl From<f32> for Padding {
     fn from(p: f32) -> Self { Padding::new(p) }
 }
 
-impl<M> Column<M> {
-    pub fn new() -> Self {
-        Self { 
-            widget: proto::Column {
-                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
-                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
-                ..Default::default()
-            }, 
-            _marker: std::marker::PhantomData 
+#[derive(Clone, Copy)]
+pub enum Length {
+    Fill,
+    Shrink,
+    Fixed(f32),
+    FillPortion(u16),
+}
+
+impl Length {
+    fn to_proto(self) -> proto::Length {
+        match self {
+            Length::Fill => proto::Length { value: Some(proto::length::Value::Fill(true)) },
+            Length::Shrink => proto::Length { value: Some(proto::length::Value::Shrink(true)) },
+            Length::Fixed(f) => proto::Length { value: Some(proto::length::Value::Fixed(f)) },
+            Length::FillPortion(p) => proto::Length { value: Some(proto::length::Value::Portion(p as f32)) },
         }
     }
-    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
-        self.widget.children.push(child.into().widget);
-        self
-    }
-    pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
-        for child in children { self.widget.children.push(child.widget); }
-        self
-    }
-    pub fn spacing(mut self, s: f32) -> Self {
-        self.widget.spacing = s;
-        self
-    }
-    pub fn align_items(mut self, align: Alignment) -> Self {
-        self.widget.align_items = align as i32;
-        self
-    }
-    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
-        self.widget.padding = Some(p.into().to_proto());
-        self
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
-    pub fn max_width(mut self, w: f32) -> Self {
-        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
-        self
-    }
-    pub fn max_height(mut self, h: f32) -> Self {
-        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
-        self
-    }
 }
 
-impl<M> From<Column<M>> for Element<M> {
-    fn from(c: Column<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Column(c.widget)), ..Default::default() }.into()
-    }
+#[derive(Clone, Copy)]
+pub enum Alignment {
+    Start = 0,
+    Center = 1,
+    End = 2,
 }
 
-pub fn column<M>(children: impl IntoIterator<Item = Element<M>>) -> Column<M> {
-    Column::new().extend(children)
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, Default)]
+pub struct Color {
+    pub r: f32, pub g: f32, pub b: f32, pub a: f32,
 }
 
-pub struct Row<M> {
-    widget: proto::Row,
-    _marker: std::marker::PhantomData<M>,
-}
-
-impl<M> Row<M> {
-    pub fn new() -> Self {
-        Self { 
-            widget: proto::Row {
-                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
-                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
-                ..Default::default()
-            }, 
-            _marker: std::marker::PhantomData 
-        }
-    }
-    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
-        self.widget.children.push(child.into().widget);
-        self
-    }
-    pub fn spacing(mut self, s: f32) -> Self {
-        self.widget.spacing = s;
-        self
-    }
-    pub fn align_items(mut self, align: Alignment) -> Self {
-        self.widget.align_items = align as i32;
-        self
-    }
-    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
-        self.widget.padding = Some(p.into().to_proto());
-        self
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
-    pub fn max_width(mut self, w: f32) -> Self {
-        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
-        self
-    }
-    pub fn max_height(mut self, h: f32) -> Self {
-        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
-        self
-    }
-}
-
-impl<M> From<Row<M>> for Element<M> {
-    fn from(r: Row<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Row(r.widget)), ..Default::default() }.into()
-    }
-}
-
-pub fn row<M>(children: impl IntoIterator<Item = Element<M>>) -> Row<M> {
-    let mut r = Row::new();
-    for child in children { r.widget.children.push(child.widget); }
-    r
-}
-
-pub struct Text<M> {
-    widget: proto::Text,
-    _marker: std::marker::PhantomData<M>,
-}
-
-impl<M> Text<M> {
-    pub fn new(content: impl Into<String>) -> Self {
-        Self { widget: proto::Text {
-            content: content.into(),
-            size: 16.0,
-            color: Some(proto::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
-            bold: false,
-            horizontal_alignment: 0,
-            vertical_alignment: 0,
-            style: String::new(),
-            width: None,
-            height: None,
-            shaping: 0,
-            font_family: String::new(),
-        }, _marker: std::marker::PhantomData }
-    }
-    pub fn size(mut self, size: f32) -> Self {
-        self.widget.size = size;
-        self
-    }
-    pub fn color(mut self, color: Color) -> Self {
-        self.widget.color = Some(color.to_proto());
-        self
-    }
-    pub fn style(mut self, style: impl Into<String>) -> Self {
-        self.widget.style = style.into();
-        self
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
-    pub fn horizontal_alignment(mut self, align: Alignment) -> Self {
-        self.widget.horizontal_alignment = align as i32;
-        self
-    }
-    pub fn vertical_alignment(mut self, align: Alignment) -> Self {
-        self.widget.vertical_alignment = align as i32;
-        self
-    }
-    pub fn shaping(mut self, advanced: bool) -> Self {
-        self.widget.shaping = if advanced { 1 } else { 0 };
-        self
-    }
-}
-
-impl<M> From<Text<M>> for Element<M> {
-    fn from(t: Text<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Text(t.widget)), ..Default::default() }.into()
-    }
-}
-
-pub fn text<M>(content: impl Into<String>) -> Text<M> {
-    Text::new(content)
-}
-
-pub struct Button<M> {
-    widget: proto::Button,
-    _marker: std::marker::PhantomData<M>,
+impl Color {
+    pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    pub const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub fn from_rgb(r: f32, g: f32, b: f32) -> Self { Self { r, g, b, a: 1.0 } }
+    pub fn from_rgba(r: f32, g: f32, b: f32, a: f32) -> Self { Self { r, g, b, a } }
+    fn to_proto(self) -> proto::Color { proto::Color { r: self.r, g: self.g, b: self.b, a: self.a } }
 }
 
 // --- Style Definitions ---
@@ -374,7 +224,241 @@ impl From<ButtonStyle> for Style {
     fn from(s: ButtonStyle) -> Self { Style::Custom(Box::new(s)) }
 }
 
-// --- End Style Definitions ---
+// --- Builder Structs ---
+
+pub struct Column<M> {
+    widget: proto::Column,
+    key: u64,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Column<M> {
+    pub fn new() -> Self {
+        Self { 
+            widget: proto::Column {
+                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                ..Default::default()
+            }, 
+            key: 0,
+            _marker: std::marker::PhantomData 
+        }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
+    }
+    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
+        let e: Element<M> = child.into();
+        self.widget.children.push(e.widget);
+        self
+    }
+    pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
+        for child in children { self.widget.children.push(child.widget); }
+        self
+    }
+    pub fn spacing(mut self, s: f32) -> Self {
+        self.widget.spacing = s;
+        self
+    }
+    pub fn align_items(mut self, align: Alignment) -> Self {
+        self.widget.align_items = align as i32;
+        self
+    }
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
+    pub fn max_width(mut self, w: f32) -> Self {
+        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
+        self
+    }
+    pub fn max_height(mut self, h: f32) -> Self {
+        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
+        self
+    }
+}
+
+impl<M> From<Column<M>> for Element<M> {
+    fn from(c: Column<M>) -> Self {
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Column(c.widget)), 
+            key: c.key,
+            ..Default::default() 
+        }.into()
+    }
+}
+
+pub fn column<M>(children: impl IntoIterator<Item = Element<M>>) -> Column<M> {
+    Column::new().extend(children)
+}
+
+pub struct Row<M> {
+    widget: proto::Row,
+    key: u64,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Row<M> {
+    pub fn new() -> Self {
+        Self { 
+            widget: proto::Row {
+                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
+                ..Default::default()
+            }, 
+            key: 0,
+            _marker: std::marker::PhantomData 
+        }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
+    }
+    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
+        let e: Element<M> = child.into();
+        self.widget.children.push(e.widget);
+        self
+    }
+    pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
+        for child in children { self.widget.children.push(child.widget); }
+        self
+    }
+    pub fn spacing(mut self, s: f32) -> Self {
+        self.widget.spacing = s;
+        self
+    }
+    pub fn align_items(mut self, align: Alignment) -> Self {
+        self.widget.align_items = align as i32;
+        self
+    }
+    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+        self.widget.padding = Some(p.into().to_proto());
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
+    pub fn max_width(mut self, w: f32) -> Self {
+        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
+        self
+    }
+    pub fn max_height(mut self, h: f32) -> Self {
+        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
+        self
+    }
+}
+
+impl<M> From<Row<M>> for Element<M> {
+    fn from(r: Row<M>) -> Self {
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Row(r.widget)), 
+            key: r.key,
+            ..Default::default() 
+        }.into()
+    }
+}
+
+pub fn row<M>(children: impl IntoIterator<Item = Element<M>>) -> Row<M> {
+    Row::new().extend(children)
+}
+
+pub struct Text<M> {
+    widget: proto::Text,
+    key: u64,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Text<M> {
+    pub fn new(content: impl Into<String>) -> Self {
+        Self { 
+            widget: proto::Text {
+                content: content.into(),
+                size: 16.0,
+                color: Some(proto::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                bold: false,
+                horizontal_alignment: 0,
+                vertical_alignment: 0,
+                style: String::new(),
+                width: None,
+                height: None,
+                shaping: 0,
+                font_family: String::new(),
+            }, 
+            key: 0,
+            _marker: std::marker::PhantomData 
+        }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
+    }
+    pub fn size(mut self, size: f32) -> Self {
+        self.widget.size = size;
+        self
+    }
+    pub fn color(mut self, color: Color) -> Self {
+        self.widget.color = Some(color.to_proto());
+        self
+    }
+    pub fn style(mut self, style: impl Into<String>) -> Self {
+        self.widget.style = style.into();
+        self
+    }
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+    pub fn height(mut self, h: Length) -> Self {
+        self.widget.height = Some(h.to_proto());
+        self
+    }
+    pub fn horizontal_alignment(mut self, align: Alignment) -> Self {
+        self.widget.horizontal_alignment = align as i32;
+        self
+    }
+    pub fn vertical_alignment(mut self, align: Alignment) -> Self {
+        self.widget.vertical_alignment = align as i32;
+        self
+    }
+    pub fn shaping(mut self, advanced: bool) -> Self {
+        self.widget.shaping = if advanced { 1 } else { 0 };
+        self
+    }
+}
+
+impl<M> From<Text<M>> for Element<M> {
+    fn from(t: Text<M>) -> Self {
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Text(t.widget)), 
+            key: t.key,
+            ..Default::default() 
+        }.into()
+    }
+}
+
+pub fn text<M>(content: impl Into<String>) -> Text<M> {
+    Text::new(content)
+}
+
+pub struct Button<M> {
+    widget: proto::Button,
+    key: u64,
+    _marker: std::marker::PhantomData<M>,
+}
 
 impl<M> Button<M> {
     pub fn new(content: impl Into<Element<M>>) -> Self {
@@ -385,7 +469,11 @@ impl<M> Button<M> {
             width: None, height: None,
             style_variant: Some(proto::button::StyleVariant::StyleClass(String::new())),
             padding: None,
-        }, _marker: std::marker::PhantomData }
+        }, key: 0, _marker: std::marker::PhantomData }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
     }
     pub fn on_press(mut self, msg: M) -> Self where M: Serialize {
         self.widget.on_press = serde_json::to_string(&msg).unwrap_or_default();
@@ -421,7 +509,11 @@ impl<M> Button<M> {
 
 impl<M> From<Button<M>> for Element<M> {
     fn from(b: Button<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Button(Box::new(b.widget))), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Button(Box::new(b.widget))), 
+            key: b.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -431,6 +523,7 @@ pub fn button<M>(content: impl Into<Element<M>>) -> Button<M> {
 
 pub struct TextInput<M> {
     widget: proto::TextInput,
+    key: u64,
     _marker: std::marker::PhantomData<M>,
 }
 
@@ -444,8 +537,13 @@ impl<M> TextInput<M> {
                 padding: Some(proto::Padding { top: 8.0, bottom: 8.0, left: 12.0, right: 12.0 }),
                 ..Default::default()
             },
+            key: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
     }
     pub fn on_input(mut self, f: impl Fn(String) -> M) -> Self where M: Serialize {
         let msg = f(String::new());
@@ -476,7 +574,11 @@ impl<M> TextInput<M> {
 
 impl<M> From<TextInput<M>> for Element<M> {
     fn from(t: TextInput<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::TextInput(t.widget)), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::TextInput(t.widget)), 
+            key: t.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -486,6 +588,7 @@ pub fn text_input<M>(placeholder: &str, value: &str) -> TextInput<M> {
 
 pub struct Container<M> {
     widget: proto::Container,
+    key: u64,
     _marker: std::marker::PhantomData<M>,
 }
 
@@ -496,8 +599,13 @@ impl<M> Container<M> {
                 child: Some(Box::new(child.into().widget)),
                 ..Default::default()
             },
+            key: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
     }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
@@ -547,7 +655,11 @@ impl<M> Container<M> {
 
 impl<M> From<Container<M>> for Element<M> {
     fn from(c: Container<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Container(Box::new(c.widget))), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Container(Box::new(c.widget))), 
+            key: c.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -557,6 +669,7 @@ pub fn container<M>(child: impl Into<Element<M>>) -> Container<M> {
 
 pub struct Scrollable<M> {
     widget: proto::Scrollable,
+    key: u64,
     _marker: std::marker::PhantomData<M>,
 }
 
@@ -568,8 +681,13 @@ impl<M> Scrollable<M> {
                 width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
             },
+            key: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
     }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
@@ -583,7 +701,11 @@ impl<M> Scrollable<M> {
 
 impl<M> From<Scrollable<M>> for Element<M> {
     fn from(s: Scrollable<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Scrollable(Box::new(s.widget))), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Scrollable(Box::new(s.widget))), 
+            key: s.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -593,6 +715,7 @@ pub fn scrollable<M>(content: impl Into<Element<M>>) -> Scrollable<M> {
 
 pub struct ProgressBar<M> {
     widget: proto::ProgressBar,
+    key: u64,
     _marker: std::marker::PhantomData<M>,
 }
 
@@ -606,8 +729,13 @@ impl<M> ProgressBar<M> {
                 width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Fixed(12.0)) }),
             },
+            key: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
     }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
@@ -621,7 +749,11 @@ impl<M> ProgressBar<M> {
 
 impl<M> From<ProgressBar<M>> for Element<M> {
     fn from(p: ProgressBar<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::ProgressBar(p.widget)), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::ProgressBar(p.widget)), 
+            key: p.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -631,6 +763,7 @@ pub fn progress_bar<M>(range: std::ops::RangeInclusive<f32>, value: f32) -> Prog
 
 pub struct Space<M> {
     widget: proto::Space,
+    key: u64,
     _marker: std::marker::PhantomData<M>,
 }
 
@@ -641,8 +774,13 @@ impl<M> Space<M> {
                 width: Some(width.to_proto()),
                 height: Some(height.to_proto()),
             },
+            key: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
     }
     pub fn with_width(w: f32) -> Self {
         Self::new(Length::Fixed(w), Length::Shrink)
@@ -654,7 +792,11 @@ impl<M> Space<M> {
 
 impl<M> From<Space<M>> for Element<M> {
     fn from(s: Space<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Space(s.widget)), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Space(s.widget)), 
+            key: s.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -664,6 +806,7 @@ pub fn space<M>(width: Length, height: Length) -> Space<M> {
 
 pub struct Stack<M> {
     widget: proto::Stack,
+    key: u64,
     _marker: std::marker::PhantomData<M>,
 }
 
@@ -675,11 +818,17 @@ impl<M> Stack<M> {
                 height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
                 ..Default::default()
             },
+            key: 0,
             _marker: std::marker::PhantomData,
         }
     }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
+    }
     pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
-        self.widget.children.push(child.into().widget);
+        let e: Element<M> = child.into();
+        self.widget.children.push(e.widget);
         self
     }
     pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
@@ -698,7 +847,11 @@ impl<M> Stack<M> {
 
 impl<M> From<Stack<M>> for Element<M> {
     fn from(s: Stack<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Stack(s.widget)), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Stack(s.widget)), 
+            key: s.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -708,6 +861,7 @@ pub fn stack<M>(children: impl IntoIterator<Item = Element<M>>) -> Stack<M> {
 
 pub struct Tooltip<M> {
     widget: proto::Tooltip,
+    key: u64,
     _marker: std::marker::PhantomData<M>,
 }
 
@@ -727,11 +881,16 @@ impl<M> Tooltip<M> {
                 tooltip: label.into(),
                 position: position as u32,
                 gap: 5.0,
-                padding: Some(Padding::new(5.0).to_proto()),
+                padding: Some(proto::Padding::default()),
                 ..Default::default()
             },
+            key: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+    pub fn key(mut self, k: u64) -> Self {
+        self.key = k;
+        self
     }
     pub fn gap(mut self, gap: f32) -> Self {
         self.widget.gap = gap;
@@ -745,7 +904,11 @@ impl<M> Tooltip<M> {
 
 impl<M> From<Tooltip<M>> for Element<M> {
     fn from(t: Tooltip<M>) -> Self {
-        proto::Widget { r#type: Some(proto::widget::Type::Tooltip(Box::new(t.widget))), ..Default::default() }.into()
+        proto::Widget { 
+            r#type: Some(proto::widget::Type::Tooltip(Box::new(t.widget))), 
+            key: t.key,
+            ..Default::default() 
+        }.into()
     }
 }
 
@@ -753,65 +916,7 @@ pub fn tooltip<M>(content: impl Into<Element<M>>, label: impl Into<String>, posi
     Tooltip::new(content, label, position)
 }
 
-#[derive(Clone, Copy)]
-pub enum Length {
-    Fill,
-    Shrink,
-    Fixed(f32),
-    FillPortion(u16),
-}
-
-impl Length {
-    fn to_proto(self) -> proto::Length {
-        match self {
-            Length::Fill => proto::Length { value: Some(proto::length::Value::Fill(true)) },
-            Length::Shrink => proto::Length { value: Some(proto::length::Value::Shrink(true)) },
-            Length::Fixed(f) => proto::Length { value: Some(proto::length::Value::Fixed(f)) },
-            Length::FillPortion(p) => proto::Length { value: Some(proto::length::Value::Portion(p as f32)) },
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum Alignment {
-    Start = 0,
-    Center = 1,
-    End = 2,
-}
-
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, Default)]
-pub struct Color {
-    pub r: f32, pub g: f32, pub b: f32, pub a: f32,
-}
-
-impl Color {
-    pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    pub const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub fn from_rgb(r: f32, g: f32, b: f32) -> Self { Self { r, g, b, a: 1.0 } }
-    pub fn from_rgba(r: f32, g: f32, b: f32, a: f32) -> Self { Self { r, g, b, a } }
-    fn to_proto(self) -> proto::Color { proto::Color { r: self.r, g: self.g, b: self.b, a: self.a } }
-}
-
-#[macro_export]
-macro_rules! column {
-    ($($x:expr),* $(,)?) => {
-        $crate::Column::new()$(.push($x))*
-    };
-}
-
-#[macro_export]
-macro_rules! row {
-    ($($x:expr),* $(,)?) => {
-        $crate::Row::new()$(.push($x))*
-    };
-}
-
-#[macro_export]
-macro_rules! stack {
-    ($($x:expr),* $(,)?) => {
-        $crate::Stack::new()$(.push($x))*
-    };
-}
+// --- Diffing ---
 
 pub mod diffing {
     use super::proto;
@@ -822,11 +927,12 @@ pub mod diffing {
     pub fn assign_ids_and_hash(widget: &mut proto::Widget, index: &mut u64) -> u64 {
         let mut hasher = DefaultHasher::new();
         
-        // 1. Присваиваем стабильный позиционный ID
-        widget.id = *index;
+        // 1. Присваиваем стабильный позиционный ID, смешанный с ключом
+        let base_id = *index;
+        widget.id = base_id ^ widget.key;
         *index += 1;
         
-        // 2. Хешируем тип виджета для быстрого сравнения
+        // 2. Хешируем тип виджета
         let type_tag = match &widget.r#type {
             Some(proto::widget::Type::Column(_)) => 1,
             Some(proto::widget::Type::Row(_)) => 2,
@@ -844,8 +950,7 @@ pub mod diffing {
         };
         type_tag.hash(&mut hasher);
 
-        // 3. Рекурсивно обрабатываем детей ПЕРЕД хешированием контента, 
-        // чтобы структура влияла на хеш, но ID (которые меняются) - нет.
+        // 3. Рекурсивно обрабатываем детей
         match &mut widget.r#type {
             Some(proto::widget::Type::Column(c)) => { for child in &mut c.children { assign_ids_and_hash(child, index).hash(&mut hasher); } }
             Some(proto::widget::Type::Row(r)) => { for child in &mut r.children { assign_ids_and_hash(child, index).hash(&mut hasher); } }
@@ -881,7 +986,6 @@ pub mod diffing {
     }
 
     pub fn diff_layouts(old: &proto::Layout, new: &proto::Layout) -> Option<proto::LayoutPatch> {
-        // Если хеши корней совпали - изменений точно нет
         if let (Some(o), Some(n)) = (&old.root, &new.root) {
             if o.id == n.id && old.hash == new.hash && old.width == new.width && old.height == new.height {
                 return None;
@@ -892,7 +996,6 @@ pub mod diffing {
         if let (Some(o), Some(n)) = (&old.root, &new.root) {
             find_updates(o, n, &mut updates);
         } else if let Some(n) = &new.root {
-            // Если старого корня не было - шлем полный корень как обновление ID 0
             updates.push(proto::WidgetUpdate { widget_id: 0, new_widget: Some(n.clone()) });
         }
 
@@ -900,84 +1003,50 @@ pub mod diffing {
             return None;
         }
 
-        Some(proto::LayoutPatch {
-            updates,
-            width: new.width,
-            height: new.height,
-            new_hash: new.hash,
-        })
+        Some(proto::LayoutPatch { updates, width: new.width, height: new.height, new_hash: new.hash })
     }
 
     fn find_updates(old: &proto::Widget, new: &proto::Widget, updates: &mut Vec<proto::WidgetUpdate>) {
-        // Если это один и тот же виджет (по контенту), ничего не делаем
-        // Мы не можем сравнивать o.id == n.id напрямую для контента, 
-        // так как ID позиционный и всегда совпадает при одинаковой структуре.
-        // Поэтому сравниваем их полные дампы (без ID).
-        let mut o_copy = old.clone(); o_copy.id = 0;
-        let mut n_copy = new.clone(); n_copy.id = 0;
-        
-        if o_copy.encode_to_vec() == n_copy.encode_to_vec() {
+        if old.id != new.id {
+            updates.push(proto::WidgetUpdate { widget_id: old.id, new_widget: Some(new.clone()) });
             return;
         }
 
-        // Если типы разные или структура детей несовместима - заменяем весь узел
+        let mut o_copy = old.clone(); o_copy.id = 0;
+        let mut n_copy = new.clone(); n_copy.id = 0;
+        if o_copy.encode_to_vec() == n_copy.encode_to_vec() { return; }
+
         let mut structural_change = false;
         match (&old.r#type, &new.r#type) {
             (Some(proto::widget::Type::Column(oc)), Some(proto::widget::Type::Column(nc))) => {
                 if oc.children.len() == nc.children.len() {
-                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) {
-                        find_updates(oc_child, nc_child, updates);
-                    }
+                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) { find_updates(oc_child, nc_child, updates); }
                 } else { structural_change = true; }
             }
             (Some(proto::widget::Type::Row(oc)), Some(proto::widget::Type::Row(nc))) => {
                 if oc.children.len() == nc.children.len() {
-                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) {
-                        find_updates(oc_child, nc_child, updates);
-                    }
+                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) { find_updates(oc_child, nc_child, updates); }
                 } else { structural_change = true; }
             }
             (Some(proto::widget::Type::Stack(oc)), Some(proto::widget::Type::Stack(nc))) => {
                 if oc.children.len() == nc.children.len() {
-                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) {
-                        find_updates(oc_child, nc_child, updates);
-                    }
+                    for (oc_child, nc_child) in oc.children.iter().zip(nc.children.iter()) { find_updates(oc_child, nc_child, updates); }
                 } else { structural_change = true; }
             }
             (Some(proto::widget::Type::Scrollable(oc)), Some(proto::widget::Type::Scrollable(nc))) => {
-                match (&oc.content, &nc.content) {
-                    (Some(oc_c), Some(nc_c)) => find_updates(oc_c, nc_c, updates),
-                    (None, None) => {},
-                    _ => structural_change = true,
-                }
-            }
-            (Some(proto::widget::Type::Tooltip(oc)), Some(proto::widget::Type::Tooltip(nc))) => {
-                match (&oc.content, &nc.content) {
-                    (Some(oc_c), Some(nc_c)) => find_updates(oc_c, nc_c, updates),
-                    (None, None) => {},
-                    _ => structural_change = true,
-                }
+                if let (Some(oc_c), Some(nc_c)) = (&oc.content, &nc.content) { find_updates(oc_c, nc_c, updates); }
+                else { structural_change = true; }
             }
             (Some(proto::widget::Type::Button(oc)), Some(proto::widget::Type::Button(nc))) => {
-                match (&oc.child, &nc.child) {
-                    (Some(oc_c), Some(nc_c)) => find_updates(oc_c, nc_c, updates),
-                    (None, None) => {},
-                    _ => structural_change = true,
-                }
+                if let (Some(oc_c), Some(nc_c)) = (&oc.child, &nc.child) { find_updates(oc_c, nc_c, updates); }
+                else { structural_change = true; }
             }
-            // ... другие типы можно добавить аналогично, но для Column/Row это самое важное
-            _ => { structural_change = true; }
+            _ => structural_change = true,
         }
 
         if structural_change {
             updates.push(proto::WidgetUpdate { widget_id: old.id, new_widget: Some(new.clone()) });
         } else {
-            // Если структура та же, но контент изменился (и мы не зашли в рекурсию выше для детей),
-            // значит изменились свойства самого виджета (текст, цвет и т.д.)
-            // В этом случае мы тоже шлем этот узел. 
-            // Но чтобы не слать лишнего, проверяем, не добавили ли мы уже обновления для детей.
-            // Для простоты: если мы здесь, и это не структурное изменение, мы просто шлем этот узел,
-            // если он не является контейнером, который мы уже обработали.
             if !matches!(new.r#type, Some(proto::widget::Type::Column(_)) | Some(proto::widget::Type::Row(_))) {
                 updates.push(proto::WidgetUpdate { widget_id: old.id, new_widget: Some(new.clone()) });
             }
@@ -1146,8 +1215,6 @@ macro_rules! define_remote_ui_module {
                                             update: Some($crate::proto::set_view_request::Update::Patch(patch)),
                                         })
                                     } else {
-                                        // Визуально в структуре ничего не изменилось, но мы всё равно 
-                                        // должны продолжить, чтобы ui-service получил событие Frame.
                                         None
                                     }
                                 } else {
@@ -1205,4 +1272,25 @@ macro_rules! define_remote_ui_module {
 pub mod reexports {
     pub use std::task::{Poll, Context};
     pub use futures_util::task::noop_waker_ref;
+}
+
+#[macro_export]
+macro_rules! column {
+    ($($x:expr),* $(,)?) => {
+        $crate::Column::new()$(.push($x))*
+    };
+}
+
+#[macro_export]
+macro_rules! row {
+    ($($x:expr),* $(,)?) => {
+        $crate::Row::new()$(.push($x))*
+    };
+}
+
+#[macro_export]
+macro_rules! stack {
+    ($($x:expr),* $(,)?) => {
+        $crate::Stack::new()$(.push($x))*
+    };
 }

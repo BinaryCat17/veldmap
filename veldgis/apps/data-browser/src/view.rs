@@ -63,7 +63,8 @@ pub fn view(state: &LocalState) -> Element<Message> {
             &state.search_results, 
             &state.local_files, 
             state.downloading_key.as_deref()
-        ),
+        ).key(100),
+        
         ViewMode::Browse => crate::browse::view(
             &state.current_browse_path, 
             &state.browse_items, 
@@ -71,12 +72,13 @@ pub fn view(state: &LocalState) -> Element<Message> {
             !state.token_stack.is_empty(), 
             state.next_token.is_some(),
             state.downloading_key.as_deref()
-        ),
+        ).key(200),
+        
         ViewMode::Downloaded => crate::downloaded::view(
             &state.downloaded_state, 
             &state.local_files, 
             state.downloading_key.as_deref()
-        ),
+        ).key(300),
     };
 
     column![title_bar, status_view, progress_view, error_view, main_content]

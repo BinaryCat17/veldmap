@@ -1,4 +1,4 @@
-use veld_ui::{column, row, text, button, scrollable, text_input, container, Element};
+use veld_ui::{column, row, text, button, scrollable, text_input, Element};
 use veldmap_gis_api::dataprovider::DataProduct;
 use crate::{AppMessage as Message, common::BrowserItem};
 
