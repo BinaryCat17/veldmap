@@ -1,11 +1,11 @@
-﻿//! state.rs — чистое иерархическое состояние приложения
-//! Исправлен Default для Screen (ручная реализация, т.к. варианты с данными)
+﻿//! app/state.rs — главное состояние приложения
 
 use veldsdk::core::task::TaskStatus;
 use veldmap_gis_api::dataprovider::{SearchResponse, ListPathResponse, DownloadResponse};
 use veldsdk::rpc::core::ResourceHandle;
 
 use crate::common::BrowserItem;
+use crate::screens::{SearchState, BrowseState, DownloadedState, PreviewState};
 
 /// Глобальное состояние
 #[derive(Default)]
@@ -23,19 +23,19 @@ pub struct GlobalState {
 
 /// Все экраны приложения
 pub enum Screen {
-    Search(crate::search::SearchState),
-    Browse(crate::browse::BrowseState),
-    Downloaded(crate::downloaded::DownloadedState),
-    Preview(crate::preview::PreviewState),
+    Search(SearchState),
+    Browse(BrowseState),
+    Downloaded(DownloadedState),
+    Preview(PreviewState),
 }
 
 impl Default for Screen {
     fn default() -> Self {
-        Screen::Search(crate::search::SearchState::default())
+        Screen::Search(SearchState::default())
     }
 }
 
-/// Главное состояние приложения
+/// Главное состояние
 #[derive(Default)]
 pub struct AppState {
     pub screen: Screen,

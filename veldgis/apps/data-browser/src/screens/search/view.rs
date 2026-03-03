@@ -3,7 +3,7 @@
 };
 use crate::{
     AppMessage,
-    state::GlobalState,
+    app::state::GlobalState,
     styles,
 };
 use super::{SearchState, message::Message};

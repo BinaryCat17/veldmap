@@ -5,7 +5,7 @@ use veldsdk::core::Command;
 use veldmap_gis_api::dataprovider::{SearchRequest, SearchFilter};
 use crate::{
     AppMessage,
-    state::GlobalState,
+    app::state::GlobalState,
     service::host,
 };
 use super::{SearchState, message::Message};

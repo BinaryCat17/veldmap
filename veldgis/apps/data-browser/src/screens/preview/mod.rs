@@ -8,6 +8,5 @@ pub mod update;
 
 // Re-exports
 pub use state::PreviewState;
-pub use message::Message;
 pub use update::update;
 pub use view::view;

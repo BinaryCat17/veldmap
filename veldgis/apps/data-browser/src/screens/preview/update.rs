@@ -4,7 +4,7 @@
 use veldsdk::core::Command;
 use crate::{
     AppMessage,
-    state::GlobalState,
+    app::state::GlobalState,
 };
 use super::{PreviewState, message::Message};
 

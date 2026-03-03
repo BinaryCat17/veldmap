@@ -1,5 +1,4 @@
-﻿//! browse/view.rs — чистый вид экрана браузинга S3
-//! Использует новый render_list + closures для сообщений
+﻿//! screens/browse/view.rs
 
 use veld_ui::{
     button, column, container, row, scrollable, text, Element, Length, Alignment,
@@ -7,13 +6,13 @@ use veld_ui::{
 use crate::{
     AppMessage,
     common::render_list,
-    state::GlobalState,
+    app::state::GlobalState,          // ← исправлено
     styles,
 };
 use super::{BrowseState, message::Message};
+use crate::screens::downloaded::message::Message as DownloadedMessage;  // ← добавили
 
 pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
-    // Подготовка элементов с учётом downloading_key
     let mut display_items = state.items.clone();
     for item in &mut display_items {
         if global.downloading_key.as_deref() == Some(&item.s3_key) {
@@ -23,15 +22,11 @@ pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
 
     let list = render_list(
         &display_items,
-        // on_browse
         |path| AppMessage::Browse(Message::BrowsePath(path)),
-        // on_view — для файлов, которые уже скачаны
-        |path| AppMessage::Downloaded(crate::downloaded::Message::ViewFile(path)),
-        // on_download
-        |path| AppMessage::Downloaded(crate::downloaded::Message::DownloadFile(path)),
+        |path| AppMessage::Downloaded(DownloadedMessage::ViewFile(path)),
+        |path| AppMessage::Downloaded(DownloadedMessage::DownloadFile(path)),
     );
 
-    // Пагинация
     let mut pagination = row![].spacing(10.0);
     if !state.token_stack.is_empty() {
         pagination = pagination.push(
@@ -46,7 +41,6 @@ pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
         );
     }
 
-    // Заголовок
     let header = row![
         styles::apply_primary(button(text("\u{f062} Up")))
             .on_press(AppMessage::Browse(Message::BrowseUp)),

@@ -1,11 +1,8 @@
-//! view.rs — главный вид с обязательными стабильными ключами
+//! app/view.rs
 
-use veld_ui::{
-    column, row, text, button, Element, Color, Length,
-};
+use veld_ui::{column, row, text, button, Element, Color, Length};
 use crate::{
     AppState, AppMessage,
-    state::Screen,
     common::ViewMode,
     styles::{COLOR_TEXT, COLOR_TEXT_DIM},
 };
@@ -62,24 +59,17 @@ pub fn view(state: &AppState) -> Element<AppMessage> {
         column![].into()
     };
 
-    // ==================== ГЛАВНОЕ ИСПРАВЛЕНИЕ ====================
-    let main_content: Element<AppMessage> = match &state.screen {
-        Screen::Search(s) => crate::search::view(s, &state.global).key(100),
-        Screen::Browse(s)  => crate::browse::view(s, &state.global).key(200),
-        Screen::Downloaded(s) => crate::downloaded::view(s, &state.global).key(300),
-        Screen::Preview(s) => crate::preview::view(s, &state.global).key(400),
+    let main_content = match &state.screen {
+        crate::app::state::Screen::Search(s) => crate::screens::search::view(s, &state.global).key(100),
+        crate::app::state::Screen::Browse(s)  => crate::screens::browse::view(s, &state.global).key(200),
+        crate::app::state::Screen::Downloaded(s) => crate::screens::downloaded::view(s, &state.global).key(300),
+        crate::app::state::Screen::Preview(s) => crate::screens::preview::view(s, &state.global).key(400),
     };
 
-    column![
-        title_bar,
-        status_view,
-        progress_view,
-        error_view,
-        main_content
-    ]
-    .spacing(20.0)
-    .padding(20.0)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    column![title_bar, status_view, progress_view, error_view, main_content]
+        .spacing(20.0)
+        .padding(20.0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }

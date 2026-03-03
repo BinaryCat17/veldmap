@@ -5,6 +5,5 @@ pub mod update;
 
 // Re-exports
 pub use state::BrowseState;
-pub use message::Message;
 pub use update::update;
 pub use view::view;

@@ -6,7 +6,7 @@ use veld_ui::{
 };
 use crate::{
     AppMessage,
-    state::GlobalState,
+    app::state::GlobalState,
     styles::{COLOR_TEXT, COLOR_TEXT_DIM},
 };
 use super::{PreviewState, message::Message};

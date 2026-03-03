@@ -5,7 +5,7 @@
 use veldsdk::core::Command;
 use crate::{
     AppMessage,
-    state::GlobalState,
+    app::state::GlobalState,
     service::host,
 };
 use super::{DownloadedState, message::Message};

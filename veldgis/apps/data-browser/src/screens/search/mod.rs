@@ -8,6 +8,5 @@ pub mod update;
 
 // Re-exports для удобства использования из других модулей
 pub use state::SearchState;
-pub use message::Message;
 pub use update::update;
 pub use view::view;

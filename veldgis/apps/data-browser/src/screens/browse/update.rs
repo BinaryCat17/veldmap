@@ -2,7 +2,7 @@
 use veldmap_gis_api::dataprovider::ListPathRequest;
 use crate::{
     AppMessage,
-    state::GlobalState,
+    app::state::GlobalState,
     service::host,
     common::BrowserItem,
 };

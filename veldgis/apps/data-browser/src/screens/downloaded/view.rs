@@ -5,7 +5,7 @@ use veld_ui::{column, text, scrollable, Element, Length};
 use crate::{
     AppMessage,
     common::render_list,
-    state::GlobalState,
+    app::state::GlobalState,
     styles,
 };
 use super::{DownloadedState, message::Message};
