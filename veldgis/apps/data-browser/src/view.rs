@@ -1,5 +1,4 @@
-//! view.rs — чистый декларативный рендер новой архитектуры
-//! Никакого God Object, только match по Screen + делегирование в подмодули
+//! view.rs — главный вид с обязательными стабильными ключами
 
 use veld_ui::{
     column, row, text, button, Element, Color, Length,
@@ -12,7 +11,6 @@ use crate::{
 };
 
 pub fn view(state: &AppState) -> Element<AppMessage> {
-    // ==================== Title Bar ====================
     let title_bar = column![
         text("VeldMap Tools").size(32.0).color(COLOR_TEXT),
         row![
@@ -27,7 +25,6 @@ pub fn view(state: &AppState) -> Element<AppMessage> {
         ].spacing(15.0),
     ].spacing(20.0);
 
-    // ==================== Error ====================
     let error_view: Element<AppMessage> = if let Some(err) = &state.global.error_message {
         column![
             text(err).size(14.0).color(Color::from_rgb(1.0, 0.4, 0.4)),
@@ -37,7 +34,6 @@ pub fn view(state: &AppState) -> Element<AppMessage> {
         column![].into()
     };
 
-    // ==================== Status & Progress ====================
     let status_view = text(&state.global.status_message).size(14.0).color(COLOR_TEXT_DIM);
 
     let (active_progress, task_name) = if state.global.download_task.is_running() {
@@ -66,15 +62,14 @@ pub fn view(state: &AppState) -> Element<AppMessage> {
         column![].into()
     };
 
-    // ==================== Main Content ====================
+    // ==================== ГЛАВНОЕ ИСПРАВЛЕНИЕ ====================
     let main_content: Element<AppMessage> = match &state.screen {
-        Screen::Search(s) => crate::search::view(s, &state.global),
-        Screen::Browse(s) => crate::browse::view(s, &state.global),
-        Screen::Downloaded(s) => crate::downloaded::view(s, &state.global),
-        Screen::Preview(s) => crate::preview::view(s, &state.global),
+        Screen::Search(s) => crate::search::view(s, &state.global).key(100),
+        Screen::Browse(s)  => crate::browse::view(s, &state.global).key(200),
+        Screen::Downloaded(s) => crate::downloaded::view(s, &state.global).key(300),
+        Screen::Preview(s) => crate::preview::view(s, &state.global).key(400),
     };
 
-    // ==================== Финальная сборка ====================
     column![
         title_bar,
         status_view,

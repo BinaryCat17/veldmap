@@ -1,7 +1,4 @@
-﻿//! search/view.rs — чистый вид экрана поиска
-//! (исправлены импорты: button + все нужные для компиляции)
-
-use veld_ui::{
+﻿use veld_ui::{
     button, column, row, scrollable, text, text_input, Element, Length,
 };
 use crate::{
