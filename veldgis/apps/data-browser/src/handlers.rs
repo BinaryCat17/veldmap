@@ -55,19 +55,40 @@ pub fn handle_preview(state: &mut AppState, msg: crate::preview::Message) -> Com
 }
 
 pub fn handle_switch_mode(state: &mut AppState, mode: ViewMode) -> Command<AppMessage> {
-    // Чистое переключение экранов без дублирования данных
+    // Переключаем экран
     state.screen = match mode {
         ViewMode::Search => Screen::Search(crate::search::SearchState::default()),
-        ViewMode::Browse => Screen::Browse(crate::browse::BrowseState::default()),
+        ViewMode::Browse => {
+            let mut browse_state = crate::browse::BrowseState::default();
+            browse_state.current_path = String::new();
+            Screen::Browse(browse_state)
+        }
         ViewMode::Downloaded => Screen::Downloaded(crate::downloaded::DownloadedState::default()),
         ViewMode::View => Screen::Preview(crate::preview::PreviewState::default()),
     };
-    
-    // Если перешли в Browse и он пустой — сразу загрузим корень (логика будет в browse::update)
-    if matches!(state.screen, Screen::Browse(_)) {
-        // TODO: после создания browse модуля вызовем browse::start_root_listing
+
+    // === АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ СПИСКОВ ===
+    match &mut state.screen {
+        // Browse — уже работает
+        Screen::Browse(browse_state) => {
+            if browse_state.current_path.is_empty() && browse_state.items.is_empty() {
+                return crate::browse::update(
+                    browse_state,
+                    crate::browse::message::Message::BrowsePath(String::new()),
+                    &mut state.global,
+                );
+            }
+        }
+
+        // Downloaded — добавляем обновление списка локальных файлов
+        Screen::Downloaded(_) => {
+            state.global.local_files = crate::service::host::refresh_local_files();
+            state.global.status_message = format!("Found {} local files", state.global.local_files.len());
+        }
+
+        _ => {}
     }
-    
+
     Command::none()
 }
 
