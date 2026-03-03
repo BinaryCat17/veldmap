@@ -1,0 +1,78 @@
+﻿//! browse/view.rs — чистый вид экрана браузинга S3
+//! Использует новый render_list + closures для сообщений
+
+use veld_ui::{
+    button, column, container, row, scrollable, text, Element, Length, Alignment,
+};
+use crate::{
+    AppMessage,
+    common::render_list,
+    state::GlobalState,
+    styles,
+};
+use super::{BrowseState, message::Message};
+
+pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
+    // Подготовка элементов с учётом downloading_key
+    let mut display_items = state.items.clone();
+    for item in &mut display_items {
+        if global.downloading_key.as_deref() == Some(&item.s3_key) {
+            item.is_downloading = true;
+        }
+    }
+
+    let list = render_list(
+        &display_items,
+        // on_browse
+        |path| AppMessage::Browse(Message::BrowsePath(path)),
+        // on_view — для файлов, которые уже скачаны
+        |path| AppMessage::Downloaded(crate::downloaded::Message::ViewFile(path)),
+        // on_download
+        |path| AppMessage::Downloaded(crate::downloaded::Message::DownloadFile(path)),
+    );
+
+    // Пагинация
+    let mut pagination = row![].spacing(10.0);
+    if !state.token_stack.is_empty() {
+        pagination = pagination.push(
+            styles::apply_primary(button(text("\u{f060} Previous")))
+                .on_press(AppMessage::Browse(Message::PrevPage))
+        );
+    }
+    if state.next_token.is_some() {
+        pagination = pagination.push(
+            styles::apply_primary(button(text("Next \u{f061}")))
+                .on_press(AppMessage::Browse(Message::NextPage))
+        );
+    }
+
+    // Заголовок
+    let header = row![
+        styles::apply_primary(button(text("\u{f062} Up")))
+            .on_press(AppMessage::Browse(Message::BrowseUp)),
+        text(format!("Browsing /{}", state.current_path)).size(20.0),
+    ]
+    .spacing(10.0)
+    .align_items(Alignment::Center);
+
+    let status_text = text(&global.status_message)
+        .size(14.0)
+        .color(styles::COLOR_TEXT_DIM);
+
+    container(
+        column![
+            header,
+            status_text,
+            pagination,
+            scrollable(list)
+                .width(Length::Fill)
+                .height(Length::Fill)
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .spacing(10.0)
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}

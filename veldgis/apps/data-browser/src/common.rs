@@ -1,12 +1,15 @@
+//! common.rs — общие типы и виджеты (финальная версия)
+
 use veld_ui::{column, row, text, button, container, Element, Padding, Alignment, Length, Space};
-use crate::{AppMessage as Message, styles};
+use crate::styles;
+use crate::AppMessage;
+
+#[derive(serde::Deserialize, Clone, Default)]
+pub struct LocalConfig {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ViewMode {
-    Search,
-    Browse,
-    Downloaded,
-    View,
+    Search, Browse, Downloaded, View,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -19,15 +22,20 @@ pub struct BrowserItem {
     pub is_downloading: bool,
 }
 
-pub fn render_item(item: &BrowserItem) -> Element<Message> {
+// === ИСПРАВЛЕННЫЕ СИГНАТУРЫ (добавили Clone) ===
+pub fn render_item(
+    item: &BrowserItem,
+    on_browse: impl Fn(String) -> AppMessage + Clone + 'static,
+    on_view: impl Fn(String) -> AppMessage + Clone + 'static,
+    on_download: impl Fn(String) -> AppMessage + Clone + 'static,
+) -> Element<AppMessage> {
     let mut title_column = column![text(&item.name)];
     if let Some(desc) = &item.description {
         title_column = title_column.push(text(desc).size(12.0).color(styles::COLOR_TEXT_DIM));
     }
     title_column = title_column.spacing(2.0);
 
-    // Основная часть (Папка - кнопка перехода, Файл - текст или кнопка просмотра)
-    let main_part: Element<Message> = if item.is_folder {
+    let main_part: Element<AppMessage> = if item.is_folder {
         styles::apply_file(button(
             row![
                 text("\u{f07b}").color(styles::COLOR_FOLDER),
@@ -35,7 +43,7 @@ pub fn render_item(item: &BrowserItem) -> Element<Message> {
             ].spacing(10.0).align_items(Alignment::Center)
         ))
         .width(Length::Fill)
-        .on_press(Message::BrowsePath(item.s3_key.clone()))
+        .on_press(on_browse(item.s3_key.clone()))
         .into()
     } else {
         let content = row![
@@ -46,7 +54,7 @@ pub fn render_item(item: &BrowserItem) -> Element<Message> {
         if item.exists_locally {
             styles::apply_file(button(content))
                 .width(Length::Fill)
-                .on_press(Message::ViewFile(item.s3_key.clone()))
+                .on_press(on_view(item.s3_key.clone()))
                 .into()
         } else {
             container(content)
@@ -56,8 +64,7 @@ pub fn render_item(item: &BrowserItem) -> Element<Message> {
         }
     };
 
-    // Кнопки действий (Скачать/Обновить/Индикатор загрузки/Просмотр)
-    let status_element: Element<Message> = if item.is_downloading {
+    let status_element: Element<AppMessage> = if item.is_downloading {
         container(text("\u{f017}").color(styles::COLOR_WARNING))
             .width(Length::Fixed(120.0))
             .align_x(Alignment::Center)
@@ -65,10 +72,10 @@ pub fn render_item(item: &BrowserItem) -> Element<Message> {
     } else if item.exists_locally {
         container(row![
             text("\u{f00c}").color(styles::COLOR_SUCCESS),
-            styles::apply_icon(button(text("\u{f06e}")), styles::COLOR_TEXT) // Иконка глаза для просмотра
-                .on_press(Message::ViewFile(item.s3_key.clone())),
+            styles::apply_icon(button(text("\u{f06e}")), styles::COLOR_TEXT)
+                .on_press(on_view(item.s3_key.clone())),
             styles::apply_icon(button(text("\u{f021}")), styles::COLOR_RELOAD)
-                .on_press(Message::DownloadFile(item.s3_key.clone()))
+                .on_press(on_download(item.s3_key.clone()))
         ].spacing(10.0).align_items(Alignment::Center))
         .width(Length::Fixed(120.0))
         .align_x(Alignment::End)
@@ -76,7 +83,7 @@ pub fn render_item(item: &BrowserItem) -> Element<Message> {
     } else if !item.is_folder {
         container(
             styles::apply_icon(button(text("\u{f019}")), styles::COLOR_SUCCESS)
-                .on_press(Message::DownloadFile(item.s3_key.clone()))
+                .on_press(on_download(item.s3_key.clone()))
         )
         .width(Length::Fixed(80.0))
         .align_x(Alignment::End)
@@ -87,20 +94,24 @@ pub fn render_item(item: &BrowserItem) -> Element<Message> {
             .into()
     };
 
-    row![
-        main_part,
-        status_element
-    ]
-    .width(Length::Fill)
-    .spacing(10.0)
-    .align_items(Alignment::Center)
-    .into()
+    row![main_part, status_element]
+        .width(Length::Fill)
+        .spacing(10.0)
+        .align_items(Alignment::Center)
+        .into()
 }
 
-pub fn render_list(items: &[BrowserItem]) -> Element<Message> {
-    column(items.iter().map(render_item))
-        .width(Length::Fill)
-        .spacing(8.0)
-        .padding(Padding { right: 30.0, ..Default::default() })
-        .into()
+pub fn render_list(
+    items: &[BrowserItem],
+    on_browse: impl Fn(String) -> AppMessage + Clone + 'static,
+    on_view: impl Fn(String) -> AppMessage + Clone + 'static,
+    on_download: impl Fn(String) -> AppMessage + Clone + 'static,
+) -> Element<AppMessage> {
+    column(items.iter().map(|item| {
+        render_item(item, on_browse.clone(), on_view.clone(), on_download.clone())
+    }))
+    .width(Length::Fill)
+    .spacing(8.0)
+    .padding(Padding { right: 30.0, ..Default::default() })
+    .into()
 }

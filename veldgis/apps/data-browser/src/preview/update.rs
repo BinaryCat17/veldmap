@@ -1,0 +1,43 @@
+﻿//! preview/update.rs — вся бизнес-логика экрана предпросмотра
+//! (бывшие handle_view и handle_image_update + ClosePreview)
+
+use veldsdk::core::Command;
+use crate::{
+    AppMessage,
+    state::GlobalState,
+};
+use super::{PreviewState, message::Message};
+
+pub fn update(
+    state: &mut PreviewState,
+    msg: Message,
+    global: &mut GlobalState,
+) -> Command<AppMessage> {
+    match msg {
+        // === Загрузка изображения ===
+        Message::ImageUpdate(update) => {
+            global.image_task.handle(update);
+
+            if let veldsdk::core::task::TaskStatus::Finished(handle) = &global.image_task {
+                state.current_gpu_image = Some(handle.clone());
+                global.status_message = "Image loaded successfully".to_string();
+            } else if let Some(err) = global.image_task.error() {
+                global.error_message = Some(format!("Image load failed: {}", err));
+                // Автоматически возвращаемся назад при ошибке
+                return Command::none(); // в handle_switch_mode мы потом переключим
+            }
+            Command::none()
+        }
+
+        // === Закрытие предпросмотра ===
+        Message::ClosePreview => {
+            state.current_gpu_image = None;
+            state.current_path = String::new();
+            global.status_message = "Preview closed".to_string();
+            
+            // Возвращаемся на экран Downloaded
+            // (SwitchMode обрабатывается в handlers.rs — здесь просто очищаем)
+            Command::none()
+        }
+    }
+}

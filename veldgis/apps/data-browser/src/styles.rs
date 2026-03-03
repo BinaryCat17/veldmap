@@ -1,9 +1,11 @@
+//! styles.rs — стили приложения (обновлено под чистую архитектуру)
+
 use veld_ui::{Style, ButtonStyle, WidgetStyle, Color, Border, Background, Button, Padding};
 
 // --- Colors ---
 pub const COLOR_TEXT: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
 pub const COLOR_TEXT_DIM: Color = Color { r: 0.6, g: 0.6, b: 0.7, a: 1.0 };
-pub const COLOR_BG_LIGHT: Color = Color { r: 0.2, g: 0.2, b: 0.25, a: 1.0 };
+pub const COLOR_BG_LIGHT: Color = Color { r: 0.05, g: 0.05, b: 0.05, a: 1.0 }; // новый цвет для preview
 pub const COLOR_BG_HOVER: Color = Color { r: 0.25, g: 0.25, b: 0.35, a: 1.0 };
 pub const COLOR_PRIMARY: Color = Color { r: 0.1, g: 0.4, b: 0.7, a: 1.0 };
 pub const COLOR_PRIMARY_HOVER: Color = Color { r: 0.15, g: 0.5, b: 0.8, a: 1.0 };
@@ -13,7 +15,7 @@ pub const COLOR_FOLDER: Color = Color { r: 0.4, g: 0.6, b: 1.0, a: 1.0 };
 pub const COLOR_FILE: Color = Color { r: 0.7, g: 0.7, b: 0.7, a: 1.0 };
 pub const COLOR_RELOAD: Color = Color { r: 0.5, g: 0.5, b: 0.7, a: 1.0 };
 
-// --- Button Styles (Colors Only) ---
+// --- Button Styles ---
 
 pub fn nav_style() -> Style {
     let base = WidgetStyle {
@@ -63,7 +65,7 @@ pub fn primary_style() -> Style {
 
 pub fn file_button_style() -> Style {
     let base = WidgetStyle {
-        background: Some(Background::Color(COLOR_BG_LIGHT)),
+        background: Some(Background::Color(Color::from_rgb(0.2, 0.2, 0.25))),
         text_color: Some(Color::WHITE),
         border: Border::with_radius(4.0),
         ..Default::default()
@@ -84,7 +86,7 @@ pub fn file_button_style() -> Style {
     }.into()
 }
 
-// --- Button Factory (Style + Padding) ---
+// --- Button Factory ---
 
 pub fn apply_nav<M>(btn: Button<M>) -> Button<M> {
     btn.style(nav_style()).padding(Padding { top: 8.0, bottom: 8.0, left: 15.0, right: 15.0 })
