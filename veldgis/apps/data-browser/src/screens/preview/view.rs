@@ -37,10 +37,18 @@ pub fn view(state: &PreviewState, _global: &GlobalState) -> Element<AppMessage> 
         .into()
     } else {
         // Нет изображения (ещё загружается или ошибка)
+        let (status_text, progress) = match &_global.image_task {
+            veldsdk::core::task::TaskStatus::Running { progress, .. } => ("Loading preview...", *progress),
+            veldsdk::core::task::TaskStatus::Failed(_e) => ("Failed to load image.", 0.0),
+            _ => ("Waiting...", 0.0),
+        };
+
         column![
-            text("Loading preview...")
+            text(status_text)
                 .size(18.0)
                 .color(COLOR_TEXT_DIM),
+            veld_ui::progress_bar(0.0..=1.0, progress)
+                .width(Length::Fixed(300.0)),
             crate::styles::apply_primary(button(text("Back to Downloaded")))
                 .on_press(AppMessage::Preview(Message::ClosePreview)),
         ]

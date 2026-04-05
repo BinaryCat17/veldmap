@@ -23,6 +23,7 @@ wgpu = "28.0"
 dashmap = "6.0"
 blake3 = "1.5"
 image = "0.25"
+tiff = "0.9"
 
 [build-dependencies]
 prost-build = "0.14"

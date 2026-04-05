@@ -111,6 +111,9 @@ macro_rules! handle_proxy_method {
                                 task_id, 
                                 std::sync::Arc::clone(&f_c),
                                 std::sync::Arc::new(move |status: $crate::rpc::core::TaskStatusResponse| {
+                                    if !status.error.is_empty() {
+                                        return Err(status.error);
+                                    }
                                     $crate::decode_task_final!($res, status.payload)
                                 })
                             )) as $crate::core::BoxedStream<M>

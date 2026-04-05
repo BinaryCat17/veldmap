@@ -13,9 +13,10 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use tiff::decoder::{Decoder, DecodingResult};
+use tiff::ColorType;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use image::GenericImageView;
 
 pub struct SystemService {
     tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>,
@@ -99,35 +100,238 @@ impl NativeService for SystemService {
                         }
                     };
 
-                    // Load and decode
-                    let img = match image::open(&path) {
-                        Ok(i) => i,
-                        Err(e) => { update_status(0.0, e.to_string(), None); return; }
-                    };
-                    update_status(0.3, String::new(), None);
+                    // Load and decode using appropriate library
+                    let path_lower = path.to_lowercase();
+                    let is_tiff = path_lower.ends_with(".tif") || path_lower.ends_with(".tiff");
 
-                    // Resize if needed
-                    let final_img = if req.target_width > 0 || req.target_height > 0 {
-                        let tw = if req.target_width == 0 { img.width() } else { req.target_width };
-                        let th = if req.target_height == 0 { img.height() } else { req.target_height };
+                    let rgba = if is_tiff {
+                        let file = match std::fs::File::open(&path) {
+                            Ok(f) => f,
+                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                        };
+                        let mut decoder = match Decoder::new(file) {
+                            Ok(d) => d,
+                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                        };
                         
-                        if req.preserve_aspect {
-                            img.thumbnail(tw, th)
-                        } else {
-                            img.thumbnail_exact(tw, th)
+                        let (width, height) = match decoder.dimensions() {
+                            Ok(d) => d,
+                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                        };
+                        update_status(0.2, String::new(), None);
+
+                        let color_type = match decoder.colortype() {
+                            Ok(ct) => ct,
+                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                        };
+
+                        let img_res = match decoder.read_image() {
+                            Ok(res) => res,
+                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                        };
+                        update_status(0.5, String::new(), None);
+
+                        // Normalize and convert to RGBA8
+                        match img_res {
+                            DecodingResult::U8(data) => {
+                                let mut rgba8 = image::RgbaImage::new(width, height);
+                                let channels = match color_type { ColorType::Gray(8) => 1, ColorType::RGB(8) => 3, ColorType::RGBA(8) => 4, _ => 1 };
+                                for y in 0..height {
+                                    for x in 0..width {
+                                        let base = (y as usize * width as usize + x as usize) * channels;
+                                        let r = data[base];
+                                        let g = if channels >= 3 { data[base+1] } else { r };
+                                        let b = if channels >= 3 { data[base+2] } else { r };
+                                        let a = if channels == 4 { data[base+3] } else { 255 };
+                                        rgba8.put_pixel(x, y, image::Rgba([r, g, b, a]));
+                                    }
+                                }
+                                rgba8
+                            }
+                            DecodingResult::U16(data) => {
+                                let mut min_val = u16::MAX;
+                                let mut max_val = u16::MIN;
+                                for &v in &data { if v > 0 { min_val = min_val.min(v); } max_val = max_val.max(v); }
+                                if min_val == u16::MAX { min_val = 0; }
+                                let range = (max_val as f32 - min_val as f32).max(1.0);
+
+                                let mut rgba8 = image::RgbaImage::new(width, height);
+                                let channels = match color_type { ColorType::Gray(16) => 1, ColorType::RGB(16) => 3, ColorType::RGBA(16) => 4, _ => 1 };
+                                for y in 0..height {
+                                    for x in 0..width {
+                                        let base = (y as usize * width as usize + x as usize) * channels;
+                                        let v = data[base];
+                                        let val = if v > 0 { (((v as f32 - min_val as f32) / range) * 255.0) as u8 } else { 0 };
+                                        let r = val;
+                                        let g = if channels >= 3 { 
+                                            let vg = data[base+1];
+                                            if vg > 0 { (((vg as f32 - min_val as f32) / range) * 255.0) as u8 } else { 0 }
+                                        } else { r };
+                                        let b = if channels >= 3 { 
+                                            let vb = data[base+2];
+                                            if vb > 0 { (((vb as f32 - min_val as f32) / range) * 255.0) as u8 } else { 0 }
+                                        } else { r };
+                                        let a = if channels == 4 { (data[base+3] >> 8) as u8 } else { 255 };
+                                        rgba8.put_pixel(x, y, image::Rgba([r, g, b, a]));
+                                    }
+                                }
+                                rgba8
+                            }
+                            DecodingResult::I16(data) => {
+                                let mut min_val = i16::MAX;
+                                let mut max_val = i16::MIN;
+                                for &v in &data { if v != 0 { min_val = min_val.min(v); } max_val = max_val.max(v); }
+                                if min_val == i16::MAX { min_val = 0; }
+                                let range = (max_val as f32 - min_val as f32).max(1.0);
+
+                                let mut rgba8 = image::RgbaImage::new(width, height);
+                                for (i, &v) in data.iter().enumerate() {
+                                    let x = (i as u32) % width;
+                                    let y = (i as u32) / width;
+                                    let val = if v != 0 { (((v as f32 - min_val as f32) / range) * 255.0) as u8 } else { 0 };
+                                    rgba8.put_pixel(x, y, image::Rgba([val, val, val, 255]));
+                                }
+                                rgba8
+                            }
+                            DecodingResult::F32(data) => {
+                                let mut min_val = f32::MAX;
+                                let mut max_val = f32::MIN;
+                                for &v in &data { if v.is_finite() && v != 0.0 { min_val = min_val.min(v); } max_val = max_val.max(v); }
+                                if min_val == f32::MAX { min_val = 0.0; }
+                                let range = (max_val - min_val).max(0.0001);
+
+                                let mut rgba8 = image::RgbaImage::new(width, height);
+                                for (i, &v) in data.iter().enumerate() {
+                                    let x = (i as u32) % width;
+                                    let y = (i as u32) / width;
+                                    let val = if v != 0.0 { (((v - min_val) / range) * 255.0) as u8 } else { 0 };
+                                    rgba8.put_pixel(x, y, image::Rgba([val, val, val, 255]));
+                                }
+                                rgba8
+                            }
+                            _ => { // Fallback to standard
+                                let img = match image::open(&path) {
+                                    Ok(i) => i,
+                                    Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                                };
+                                img.to_rgba8()
+                            }
                         }
                     } else {
-                        img
-                    };
-                    update_status(0.6, String::new(), None);
+                        // Standard formats (PNG, JPEG, etc)
+                        let img = match image::open(&path) {
+                            Ok(i) => i,
+                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                        };
+                        update_status(0.3, String::new(), None);
 
-                    let (w, h) = final_img.dimensions();
-                    let rgba = final_img.to_rgba8();
+                        // Resize if needed
+                        let final_img = if req.target_width > 0 || req.target_height > 0 {
+                            let tw = if req.target_width == 0 { img.width() } else { req.target_width };
+                            let th = if req.target_height == 0 { img.height() } else { req.target_height };
+                            
+                            if req.preserve_aspect {
+                                img.thumbnail(tw, th)
+                            } else {
+                                img.thumbnail_exact(tw, th)
+                            }
+                        } else {
+                            img
+                        };
+                        update_status(0.6, String::new(), None);
+
+                        let is_hdr_or_16bit = match final_img {
+                            image::DynamicImage::ImageLuma16(_) |
+                            image::DynamicImage::ImageLumaA16(_) |
+                            image::DynamicImage::ImageRgb16(_) |
+                            image::DynamicImage::ImageRgba16(_) |
+                            image::DynamicImage::ImageRgb32F(_) |
+                            image::DynamicImage::ImageRgba32F(_) => true,
+                            _ => false,
+                        };
+
+                        if is_hdr_or_16bit {
+                            let mut img_32f = final_img.into_rgba32f();
+                            let (w, h) = img_32f.dimensions();
+                            let mut min_val = f32::MAX;
+                            let mut max_val = f32::MIN;
+                            
+                            for pixel in img_32f.pixels() {
+                                if pixel[3] > 0.0 {
+                                    if pixel[0] > 0.0 || pixel[1] > 0.0 || pixel[2] > 0.0 {
+                                        min_val = min_val.min(pixel[0]).min(pixel[1]).min(pixel[2]);
+                                    }
+                                    max_val = max_val.max(pixel[0]).max(pixel[1]).max(pixel[2]);
+                                }
+                            }
+                            if min_val == f32::MAX { min_val = 0.0; }
+                            
+                            if max_val > min_val {
+                                let range = max_val - min_val;
+                                for pixel in img_32f.pixels_mut() {
+                                    if pixel[3] > 0.0 {
+                                        pixel[0] = if pixel[0] > 0.0 { ((pixel[0] - min_val) / range).clamp(0.0, 1.0) } else { 0.0 };
+                                        pixel[1] = if pixel[1] > 0.0 { ((pixel[1] - min_val) / range).clamp(0.0, 1.0) } else { 0.0 };
+                                        pixel[2] = if pixel[2] > 0.0 { ((pixel[2] - min_val) / range).clamp(0.0, 1.0) } else { 0.0 };
+                                    }
+                                }
+                            }
+                            
+                            let mut rgba8 = image::RgbaImage::new(w, h);
+                            for (x, y, pixel) in img_32f.enumerate_pixels() {
+                                rgba8.put_pixel(x, y, image::Rgba([
+                                    (pixel[0] * 255.0) as u8,
+                                    (pixel[1] * 255.0) as u8,
+                                    (pixel[2] * 255.0) as u8,
+                                    (pixel[3] * 255.0) as u8,
+                                ]));
+                            }
+                            rgba8
+                        } else {
+                            // Standard 8-bit image with auto-contrast
+                            let mut rgba8 = final_img.into_rgba8();
+                            let mut min_val = 255u8;
+                            let mut max_val = 0u8;
+                            
+                            for pixel in rgba8.pixels() {
+                                if pixel[3] > 0 {
+                                    if pixel[0] > 0 || pixel[1] > 0 || pixel[2] > 0 {
+                                        min_val = min_val.min(pixel[0]).min(pixel[1]).min(pixel[2]);
+                                    }
+                                    max_val = max_val.max(pixel[0]).max(pixel[1]).max(pixel[2]);
+                                }
+                            }
+                            if min_val == 255 { min_val = 0; }
+                            
+                            if max_val > min_val && (min_val > 0 || max_val < 255) {
+                                let range = max_val as f32 - min_val as f32;
+                                for pixel in rgba8.pixels_mut() {
+                                    if pixel[3] > 0 {
+                                        pixel[0] = if pixel[0] > 0 { (((pixel[0] as f32 - min_val as f32) / range) * 255.0).clamp(0.0, 255.0) as u8 } else { 0 };
+                                        pixel[1] = if pixel[1] > 0 { (((pixel[1] as f32 - min_val as f32) / range) * 255.0).clamp(0.0, 255.0) as u8 } else { 0 };
+                                        pixel[2] = if pixel[2] > 0 { (((pixel[2] as f32 - min_val as f32) / range) * 255.0).clamp(0.0, 255.0) as u8 } else { 0 };
+                                    }
+                                }
+                            }
+                            rgba8
+                        }
+                    };
                     update_status(0.8, String::new(), None);
 
+                    let (w, h) = rgba.dimensions();
+                    // Resize TIFF if targets were specified (since decoder didn't do it)
+                    let final_rgba = if is_tiff && (req.target_width > 0 || req.target_height > 0) {
+                        let tw = if req.target_width == 0 { w } else { req.target_width };
+                        let th = if req.target_height == 0 { h } else { req.target_height };
+                        image::DynamicImage::ImageRgba8(rgba).thumbnail(tw, th).to_rgba8()
+                    } else {
+                        rgba
+                    };
+
+                    let (w, h) = final_rgba.dimensions();
                     // Upload to GPU
                     let tex_id = resources.create_texture(w, h, 0, 8, false, requestor_id); // 8 = TEXTURE_BINDING
-                    if let Err(e) = resources.write_resource(tex_id, 0, &rgba, requestor_id) {
+                    if let Err(e) = resources.write_resource(tex_id, 0, &final_rgba, requestor_id) {
                         update_status(0.0, e.to_string(), None);
                         return;
                     }

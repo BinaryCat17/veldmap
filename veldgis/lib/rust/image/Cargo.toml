@@ -1,9 +1,0 @@
-[package]
-name = "veldmap-image"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-veldsdk = { path = "../../../../veldcore/sdk/rust", features = ["pdk", "wgpu"] }
-image = "0.25"
-anyhow = "1.0"

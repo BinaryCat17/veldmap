@@ -1964,7 +1964,6 @@ dependencies = [
  "tokio",
  "veld-ui",
  "veldmap-api",
- "veldmap-image",
  "veldsdk",
 ]
 
@@ -1988,15 +1987,6 @@ dependencies = [
  "url",
  "urlencoding",
  "veldmap-api",
- "veldsdk",
-]
-
-[[package]]
-name = "veldmap-image"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "image",
  "veldsdk",
 ]
 

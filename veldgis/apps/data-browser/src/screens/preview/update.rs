@@ -22,6 +22,7 @@ pub fn update(
                 state.current_gpu_image = Some(handle.clone());
                 global.status_message = "Image loaded successfully".to_string();
             } else if let Some(err) = global.image_task.error() {
+                log::error!("Image load failed: {}", err);
                 global.error_message = Some(format!("Image load failed: {}", err));
                 // Автоматически возвращаемся назад при ошибке
                 return Command::perform(async {}, |_| AppMessage::SwitchMode(crate::common::ViewMode::Downloaded));
