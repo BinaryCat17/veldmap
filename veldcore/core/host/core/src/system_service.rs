@@ -69,6 +69,18 @@ impl NativeService for SystemService {
                 let resources = self.resources.clone();
                 let path = req.path.clone();
                 
+                {
+                    let mut tasks = self.tasks.lock().unwrap();
+                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
+                        progress: 0.0, 
+                        completed: false, 
+                        error: String::new(),
+                        abort_handle: None,
+                        result_handle: None,
+                        payload: Vec::new(),
+                    });
+                }
+                
                 let task_id_inner = task_id.clone();
                 let join_handle = tokio::task::spawn_blocking(move || {
                     let update_status = |progress: f32, err: String, handle: Option<ResourceHandle>| {
@@ -130,14 +142,9 @@ impl NativeService for SystemService {
 
                 {
                     let mut tasks = self.tasks.lock().unwrap();
-                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
-                        progress: 0.0, 
-                        completed: false, 
-                        error: String::new(),
-                        abort_handle: Some(join_handle.abort_handle()),
-                        result_handle: None,
-                        payload: Vec::new(),
-                    });
+                    if let Some(t) = tasks.get_mut(&task_id) {
+                        t.abort_handle = Some(join_handle.abort_handle());
+                    }
                 }
 
                 Ok(crate::core::TaskResponse { task_id }.encode_to_vec())
@@ -206,13 +213,24 @@ impl NativeService for SystemService {
                 if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
 
                 let task_id = uuid::Uuid::new_v4().to_string();
-                
+
                 let tasks_clone = self.tasks.clone();
                 if let Some(parent) = Path::new(&req.path).parent() { fs::create_dir_all(parent)?; }
-                
+
+                {
+                    let mut tasks = self.tasks.lock().unwrap();
+                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
+                        progress: 0.0, 
+                        completed: false, 
+                        error: String::new(),
+                        abort_handle: None,
+                        result_handle: None,
+                        payload: Vec::new(),
+                    });
+                }
+
                 let task_id_inner = task_id.clone();
-                let join_handle = tokio::spawn(async move {
-                    let client = reqwest::Client::new();
+                let join_handle = tokio::spawn(async move {                    let client = reqwest::Client::new();
                     let mut builder = client.get(&req.url);
                     for (key, value) in req.headers { builder = builder.header(key, value); }
                     
@@ -293,14 +311,9 @@ impl NativeService for SystemService {
 
                 {
                     let mut tasks = self.tasks.lock().unwrap();
-                    tasks.insert(task_id.clone(), crate::dispatcher::TaskState { 
-                        progress: 0.0, 
-                        completed: false, 
-                        error: String::new(),
-                        abort_handle: Some(join_handle.abort_handle()),
-                        result_handle: None,
-                        payload: Vec::new(),
-                    });
+                    if let Some(t) = tasks.get_mut(&task_id) {
+                        t.abort_handle = Some(join_handle.abort_handle());
+                    }
                 }
 
                 Ok(crate::core::TaskResponse { task_id }.encode_to_vec())

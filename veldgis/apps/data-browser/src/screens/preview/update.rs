@@ -24,7 +24,7 @@ pub fn update(
             } else if let Some(err) = global.image_task.error() {
                 global.error_message = Some(format!("Image load failed: {}", err));
                 // Автоматически возвращаемся назад при ошибке
-                return Command::none(); // в handle_switch_mode мы потом переключим
+                return Command::perform(async {}, |_| AppMessage::SwitchMode(crate::common::ViewMode::Downloaded));
             }
             Command::none()
         }
@@ -35,9 +35,7 @@ pub fn update(
             state.current_path = String::new();
             global.status_message = "Preview closed".to_string();
             
-            // Возвращаемся на экран Downloaded
-            // (SwitchMode обрабатывается в handlers.rs — здесь просто очищаем)
-            Command::none()
+            Command::perform(async {}, |_| AppMessage::SwitchMode(crate::common::ViewMode::Downloaded))
         }
     }
 }

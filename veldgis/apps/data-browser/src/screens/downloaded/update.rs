@@ -67,10 +67,10 @@ pub fn update(
         Message::ViewFile(path) => {
             global.status_message = format!("Loading preview for {}...", path);
             // Запускаем загрузку изображения
-            let cmd = host::start_image_load(path);
+            let cmd_load = host::start_image_load(path);
             // Переключаем экран
-            // (в реальной версии здесь можно было бы сделать SwitchMode, но пока просто запускаем задачу)
-            cmd
+            let cmd_switch = Command::perform(async {}, |_| AppMessage::SwitchMode(crate::common::ViewMode::View));
+            Command::batch(vec![cmd_load, cmd_switch])
         }
     }
 }
