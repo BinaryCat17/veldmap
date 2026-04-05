@@ -1,11 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = &[
         "../../../proto/common.proto", 
-        "../../../proto/dataprovider.proto",
-        "../../../proto/storage.proto",
-        "../../../proto/geomath.proto",
-        "../../../proto/render.proto",
-        "../../../proto/tileserver.proto"
+        "../../../proto/dataprovider.proto"
     ];
 
     for proto in proto_files {

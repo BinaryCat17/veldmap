@@ -10,7 +10,7 @@ pub mod service;
 pub use app::{AppState, AppMessage};
 pub use common::{BrowserItem, LocalConfig};
 pub use veldsdk::core::task::TaskStatus;
-pub use veldmap_gis_api::dataprovider::DataProduct;
+pub use veldmap_api::dataprovider::DataProduct;
 
 use veld_ui::define_remote_ui_module;
 

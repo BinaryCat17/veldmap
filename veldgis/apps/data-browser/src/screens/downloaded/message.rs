@@ -1,7 +1,7 @@
 ﻿//! screens/downloaded/message.rs
 
 use serde::{Serialize, Deserialize};
-use veldmap_gis_api::dataprovider::DownloadResponse;
+use veldmap_api::dataprovider::DownloadResponse;
 use super::state::FileFilter;                    // ← исправлено (относительный импорт)
 
 #[derive(Clone, Serialize, Deserialize)]

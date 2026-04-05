@@ -1,5 +1,5 @@
 ﻿use veldsdk::core::task::TaskUpdate;
-use veldmap_gis_api::dataprovider::ListPathResponse;
+use veldmap_api::dataprovider::ListPathResponse;
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Serialize, Deserialize)]

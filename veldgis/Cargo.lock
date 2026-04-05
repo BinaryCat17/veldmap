@@ -1938,6 +1938,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "veldmap-api"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "serde",
+ "veldsdk",
+]
+
+[[package]]
 name = "veldmap-data-browser"
 version = "0.1.0"
 dependencies = [
@@ -1953,7 +1963,7 @@ dependencies = [
  "tiff 0.9.1",
  "tokio",
  "veld-ui",
- "veldmap-gis-api",
+ "veldmap-api",
  "veldsdk",
 ]
 
@@ -1976,64 +1986,7 @@ dependencies = [
  "time",
  "url",
  "urlencoding",
- "veldmap-gis-api",
- "veldsdk",
-]
-
-[[package]]
-name = "veldmap-geo-math"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "veldsdk",
-]
-
-[[package]]
-name = "veldmap-gis-api"
-version = "0.1.0"
-dependencies = [
- "prost",
- "prost-build",
- "serde",
- "veldsdk",
-]
-
-[[package]]
-name = "veldmap-local-storage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "prost",
- "serde",
- "serde_json",
- "veldmap-gis-api",
- "veldsdk",
-]
-
-[[package]]
-name = "veldmap-render"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "prost",
- "serde",
- "serde_json",
- "veldmap-gis-api",
- "veldsdk",
-]
-
-[[package]]
-name = "veldmap-tile-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "log",
- "prost",
- "serde",
- "serde_json",
- "veldmap-gis-api",
+ "veldmap-api",
  "veldsdk",
 ]
 

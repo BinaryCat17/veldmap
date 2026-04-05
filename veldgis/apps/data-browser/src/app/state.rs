@@ -1,7 +1,7 @@
 ﻿//! app/state.rs — главное состояние приложения
 
 use veldsdk::core::task::TaskStatus;
-use veldmap_gis_api::dataprovider::{SearchResponse, ListPathResponse, DownloadResponse};
+use veldmap_api::dataprovider::{SearchResponse, ListPathResponse, DownloadResponse};
 use veldsdk::rpc::core::ResourceHandle;
 
 use crate::common::BrowserItem;

@@ -4,18 +4,6 @@
       "location": "local",
       "path": "plugins/veldmap_data_provider.wasm"
     },
-    "local-storage": {
-      "location": "local",
-      "path": "plugins/veldmap_local_storage.wasm"
-    },
-    "tile-server": {
-      "location": "local",
-      "path": "plugins/veldmap_tile_server.wasm"
-    },
-    "render": {
-      "location": "local",
-      "path": "plugins/veldmap_render.wasm"
-    },
     "ui-service": {
       "location": "local",
       "path": "plugins/veld_ui_service.wasm"

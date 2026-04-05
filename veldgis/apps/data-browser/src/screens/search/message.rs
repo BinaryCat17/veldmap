@@ -2,7 +2,7 @@
 //! (вложенные, чтобы не засорять главный AppMessage)
 
 use veldsdk::core::task::TaskUpdate;
-use veldmap_gis_api::dataprovider::SearchResponse;
+use veldmap_api::dataprovider::SearchResponse;
 use serde::{Serialize, Deserialize};
 use super::state::SearchFilterType;
 

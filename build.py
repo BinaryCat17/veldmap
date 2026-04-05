@@ -16,9 +16,6 @@ STD_MANIFEST = "veldstd/Cargo.toml"
 
 MODULES = [
     ("veldmap-data-provider", GIS_MANIFEST, "veldgis/target"),
-    ("veldmap-local-storage", GIS_MANIFEST, "veldgis/target"),
-    ("veldmap-tile-server", GIS_MANIFEST, "veldgis/target"),
-    ("veldmap-render", GIS_MANIFEST, "veldgis/target"),
     ("veldmap-data-browser", GIS_MANIFEST, "veldgis/target"),
     ("veld-ui-service", STD_MANIFEST, "veldstd/target"),
 ]

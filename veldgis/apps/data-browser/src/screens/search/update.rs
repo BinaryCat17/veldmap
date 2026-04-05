@@ -2,7 +2,7 @@
 //! (бывшие handle_search_input, handle_search_filter, handle_search_press, handle_search_update)
 
 use veldsdk::core::Command;
-use veldmap_gis_api::dataprovider::{SearchRequest, SearchFilter};
+use veldmap_api::dataprovider::{SearchRequest, SearchFilter};
 use crate::{
     AppMessage,
     app::state::GlobalState,

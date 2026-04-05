@@ -1,5 +1,5 @@
 ﻿use veldsdk::core::Command;
-use veldmap_gis_api::dataprovider::ListPathRequest;
+use veldmap_api::dataprovider::ListPathRequest;
 use crate::{
     AppMessage,
     app::state::GlobalState,

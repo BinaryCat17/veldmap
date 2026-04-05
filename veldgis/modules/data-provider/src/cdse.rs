@@ -1,4 +1,4 @@
-use veldmap_gis_api::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
+use veldmap_api::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, DownloadResponse, ListPathRequest, ListPathResponse};
 use log::info;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;

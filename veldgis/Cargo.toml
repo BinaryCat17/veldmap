@@ -1,11 +1,7 @@
 [workspace]
 members = [
-    "lib/rust/geo-math",
-    "lib/rust/gis-api",
-    "modules/render",
+    "lib/rust/api",
     "modules/data-provider",
-    "modules/local-storage",
-    "modules/tile-server",
     "apps/data-browser",
 ]
 resolver = "2"
@@ -23,16 +19,4 @@ codegen-units = 1
 opt-level = 3
 
 [profile.release.package.veldmap-data-provider]
-opt-level = "s"
-
-[profile.release.package.veldmap-geo-math]
-opt-level = "s"
-
-[profile.release.package.veldmap-local-storage]
-opt-level = "s"
-
-[profile.release.package.veldmap-tile-server]
-opt-level = "s"
-
-[profile.release.package.veldmap-render]
 opt-level = "s"

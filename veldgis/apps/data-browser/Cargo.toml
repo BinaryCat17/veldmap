@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 veldsdk = { path = "../../../veldcore/sdk/rust" }
 veld-ui = { path = "../../../veldstd/ui-service/lib/rust" }
-veldmap-gis-api = { path = "../../lib/rust/gis-api" }
+veldmap-api = { path = "../../lib/rust/api" }
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

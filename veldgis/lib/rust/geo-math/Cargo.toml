@@ -1,8 +1,0 @@
-[package]
-name = "veldmap-geo-math"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-veldsdk = { path = "../../../../veldcore/sdk/rust" }
-anyhow = "1.0"

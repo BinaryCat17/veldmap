@@ -2,20 +2,20 @@
 
 use anyhow::Result;
 use veldsdk::core::Command;
-use veldmap_gis_api::dataprovider::{
+use veldmap_api::dataprovider::{
     SearchRequest, ListPathRequest, DownloadRequest,
 };
 use crate::AppMessage;
 use crate::screens::{SearchMessage, BrowseMessage, DownloadedMessage, PreviewMessage};
 
 pub fn start_search(req: SearchRequest) -> Command<AppMessage> {
-    veldmap_gis_api::raw::search_task(req, |update| {
+    veldmap_api::raw::search_task(req, |update| {
         AppMessage::Search(SearchMessage::Update(update))
     })
 }
 
 pub fn start_browse(req: ListPathRequest) -> Command<AppMessage> {
-    veldmap_gis_api::raw::list_path_task(req, |update| {
+    veldmap_api::raw::list_path_task(req, |update| {
         AppMessage::Browse(BrowseMessage::Update(update))
     })
 }
@@ -25,7 +25,7 @@ pub fn start_download(s3_key: String) -> Command<AppMessage> {
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key.clone(), destination: dest };
 
-    veldmap_gis_api::raw::download_task(req, |update| {
+    veldmap_api::raw::download_task(req, |update| {
         AppMessage::Downloaded(DownloadedMessage::DownloadUpdate(update))
     })
 }
