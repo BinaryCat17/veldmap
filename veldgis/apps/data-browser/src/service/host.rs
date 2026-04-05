@@ -31,16 +31,15 @@ pub fn start_download(s3_key: String) -> Command<AppMessage> {
 }
 
 pub fn start_image_load(path: String) -> Command<AppMessage> {
-    let req = veldsdk::rpc::core::ImageLoadRequest {
-        path,
-        target_width: 2048,
-        target_height: 2048,
-        preserve_aspect: true,
-    };
-
-    veldsdk::core::raw::image_load_task(req, |update| {
-        AppMessage::Preview(PreviewMessage::ImageUpdate(update))
-    })
+    Command::perform(
+        async move {
+            match veldmap_image::load_image_to_gpu(&path).await {
+                Ok(handle) => veldsdk::core::task::TaskUpdate::Finished(Ok(handle)),
+                Err(e) => veldsdk::core::task::TaskUpdate::Finished(Err(e.to_string())),
+            }
+        },
+        |update| AppMessage::Preview(PreviewMessage::ImageUpdate(update))
+    )
 }
 
 pub fn refresh_local_files() -> Vec<crate::common::BrowserItem> {

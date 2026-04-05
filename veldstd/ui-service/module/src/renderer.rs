@@ -256,23 +256,22 @@ impl GpuRenderer {
     }
 
     pub fn draw_wgpu_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64) {
-        // Mode 0.0 = Texture mode in shaders.wgsl
+        // Mode 2.0 = External Image mode in shaders.wgsl
         // UV [0,0, 1,1] = Full texture
         self.push_quad_data(
             [bounds.x, bounds.y, bounds.width, bounds.height],
             [1.0, 1.0, 1.0, 1.0],
             [0.0, 0.0, 1.0, 1.0],
-            0.0, 0.0, 0.0, [0.0, 0.0, 0.0, 0.0]
+            0.0, 2.0, 0.0, [0.0, 0.0, 0.0, 0.0]
         );
 
         self.draw_commands
-            .push(DrawCmd::ExternalImage { 
-                bounds, 
+            .push(DrawCmd::ExternalImage {
+                bounds,
                 texture_id,
-                index_count: 6 
+                index_count: 6
             });
-    }
-}
+    }}
 
 impl iced_widget::core::renderer::Renderer for GpuRenderer {
     fn fill_quad(

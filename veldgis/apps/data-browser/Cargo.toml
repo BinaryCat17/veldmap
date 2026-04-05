@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 veldsdk = { path = "../../../veldcore/sdk/rust" }
 veld-ui = { path = "../../../veldstd/ui-service/lib/rust" }
 veldmap-api = { path = "../../lib/rust/api" }
+veldmap-image = { path = "../../lib/rust/image" }
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

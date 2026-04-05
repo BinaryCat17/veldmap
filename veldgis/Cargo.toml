@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "lib/rust/api",
+    "lib/rust/image",
     "modules/data-provider",
     "apps/data-browser",
 ]

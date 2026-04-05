@@ -59,7 +59,13 @@ fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Mode 1.0 = SDF Quad, Mode 0.0 = Text/Texture
+    // Mode 2.0 = External Image
+    if (in.mode > 1.5) {
+        let tex_sample = textureSample(t_diffuse, s_diffuse, in.tex_coords);
+        return vec4<f32>(tex_sample.rgb, in.color.a * tex_sample.a);
+    }
+
+    // Mode 1.0 = SDF Quad, Mode 0.0 = Text/Texture (Atlas)
     if (in.mode > 0.5) {
         // Fast path for simple rectangles with no radius and no border
         if (in.radius < 0.05 && in.border_width < 0.05) {
