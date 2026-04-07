@@ -4,7 +4,7 @@ fn main() {
         &[
             "../../proto/ui.proto",
             "../../../veldcore/proto/core.proto",
-            "../../../veldcore/proto/wgpu.proto",
+            "../../../veldcore/proto/compute.proto",
             "../../../veldcore/proto/app.proto"
         ],
         &["../../proto", "../../../veldcore/proto"],

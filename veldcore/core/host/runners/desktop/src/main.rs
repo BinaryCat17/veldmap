@@ -217,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
     let blit_shader = device_arc.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
     let blit_pipeline_layout = device_arc.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Blit Pipeline Layout"),
-        bind_group_layouts: &[&veldmap_host_gpu::get_ui_layout(&device_arc)],
+        bind_group_layouts: &[&veldmap_host_core::compute_service::get_ui_layout(&device_arc)],
         immediate_size: 0,
     });
     let blit_pipeline = device_arc.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -237,10 +237,10 @@ async fn main() -> anyhow::Result<()> {
         depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview_mask: None, cache: None,
     });
 
-    let bind_group_layout = veldmap_host_gpu::get_ui_layout(&device_arc);
-    let sampler = veldmap_host_gpu::get_ui_sampler(&device_arc);
+    let bind_group_layout = veldmap_host_core::compute_service::get_ui_layout(&device_arc);
+    let sampler = veldmap_host_core::compute_service::get_ui_sampler(&device_arc);
 
-    let render_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::wgpu::Submit>::new()));
+    let render_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::compute::Submit>::new()));
 
     let mut app_texture_id: Option<u64> = None;
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
@@ -269,19 +269,22 @@ async fn main() -> anyhow::Result<()> {
         .bind()
         .await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
-    
+
     let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
+    let system_service = Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()));
+    let compute_service = Arc::new(veldmap_host_core::compute_service::ComputeService::new(resources.clone(), render_queue.clone()));
+
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
-    dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()))));
-    
+    dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
+    dispatcher.register_service("compute".to_string(), ServiceLocation::Native(compute_service));
+
     // Register Modular Services
     dispatcher.register_service("fs".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_fs::FsService::new(resources.clone()))));
     dispatcher.register_service("network".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_network::NetworkService::new(dispatcher.tasks.clone()))));
     dispatcher.register_service("image".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_image::ImageService::new(resources.clone(), dispatcher.tasks.clone()))));
-    dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_gpu::GpuService::new(resources.clone(), render_queue.clone()))));
-    
+    // dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_gpu::GpuService::new(resources.clone(), render_queue.clone()))));
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(
         tx, 
         proxy, 
@@ -294,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
     let last_interaction_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let event_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::app::UiEvent>::new()));
 
-    plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir).await?;
+    plugin_module::load_services(dispatcher.clone(), resources.clone(), system_service.clone(), &config_dir).await?;
 
     let d_clone = dispatcher.clone();
     let is_visible_clone = is_visible.clone();
@@ -558,7 +561,7 @@ async fn main() -> anyhow::Result<()> {
                                     });
 
                                     if let Some(cb) = &req.command_buffer {
-                                        let _ = veldmap_host_gpu::execute_render_commands(&mut rp, cb, &resources, 2048, 2048, req.instance_id);
+                                        let _ = veldmap_host_core::compute_service::execute_render_commands(&mut rp, cb, &resources, 2048, 2048, req.instance_id);
                                     }
                                 }
                             }
@@ -579,7 +582,7 @@ async fn main() -> anyhow::Result<()> {
                                 // Draw Direct Surface Commands from plugins
                                 for req in &surface_cmds {
                                     if let Some(cb) = &req.command_buffer {
-                                        let _ = veldmap_host_gpu::execute_render_commands(&mut rp, cb, &resources, target_w, target_height, req.instance_id);
+                                        let _ = veldmap_host_core::compute_service::execute_render_commands(&mut rp, cb, &resources, target_w, target_height, req.instance_id);
                                     }
                                 }
 

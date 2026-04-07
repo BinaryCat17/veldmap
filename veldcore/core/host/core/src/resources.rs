@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, AtomicI32, Ordering};
-use crate::wgpu::{
+use crate::compute::{
     TextureFormat, VertexFormat, StepMode, FilterMode, 
     PrimitiveTopology, BlendFactor, BlendOperation, FrontFace, CullMode, IndexFormat
 };
@@ -237,7 +237,7 @@ impl ResourceManager {
         id
     }
 
-    pub fn create_bind_group(&self, layout_id: u64, entries_proto: &[crate::wgpu::BindGroupEntry], owner_id: u32) -> anyhow::Result<u64> {
+    pub fn create_bind_group(&self, layout_id: u64, entries_proto: &[crate::compute::BindGroupEntry], owner_id: u32) -> anyhow::Result<u64> {
         let layout_res = self.get_resource(layout_id, owner_id).ok_or_else(|| anyhow::anyhow!("BGL not found"))? ;
         let layout = match layout_res {
             Resource::BindGroupLayout(l) => l,
@@ -250,22 +250,22 @@ impl ResourceManager {
 
         for e in entries_proto {
             match &e.resource {
-                Some(crate::wgpu::bind_group_entry::Resource::BufferId(bid)) => {
+                Some(crate::compute::bind_group_entry::Resource::BufferId(bid)) => {
                     if let Some(Resource::Buffer(b)) = self.get_resource(*bid, owner_id) { keep_alive_buffers.push((e.binding, b)); }
                     else { return Err(anyhow::anyhow!("Buffer {} not found or unauthorized", bid)); }
                 }
-                Some(crate::wgpu::bind_group_entry::Resource::BufferBinding(bb)) => {
+                Some(crate::compute::bind_group_entry::Resource::BufferBinding(bb)) => {
                     if let Some(Resource::Buffer(b)) = self.get_resource(bb.buffer_id, owner_id) { keep_alive_buffers.push((e.binding, b)); }
                     else { return Err(anyhow::anyhow!("Buffer {} not found or unauthorized", bb.buffer_id)); }
                 }
-                Some(crate::wgpu::bind_group_entry::Resource::TextureViewId(tvid)) => {
+                Some(crate::compute::bind_group_entry::Resource::TextureViewId(tvid)) => {
                     if let Some(Resource::TextureView(tv)) = self.get_resource(*tvid, owner_id) { keep_alive_views.push((e.binding, tv)); }
                     else if let Some(Resource::Texture { texture, .. }) = self.get_resource(*tvid, owner_id) {
                          keep_alive_views.push((e.binding, Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()))));
                     }
                     else { return Err(anyhow::anyhow!("TextureView/Texture {} not found or unauthorized", tvid)); }
                 }
-                Some(crate::wgpu::bind_group_entry::Resource::SamplerId(sid)) => {
+                Some(crate::compute::bind_group_entry::Resource::SamplerId(sid)) => {
                     if let Some(Resource::Sampler(s)) = self.get_resource(*sid, owner_id) { keep_alive_samplers.push((e.binding, s)); }
                     else { return Err(anyhow::anyhow!("Sampler {} not found or unauthorized", sid)); }
                 }
@@ -276,11 +276,11 @@ impl ResourceManager {
         let mut entries = Vec::new();
         for e in entries_proto {
             let resource = match &e.resource {
-                Some(crate::wgpu::bind_group_entry::Resource::BufferId(_)) => {
+                Some(crate::compute::bind_group_entry::Resource::BufferId(_)) => {
                     let b = &keep_alive_buffers.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
                     wgpu::BindingResource::Buffer(b.as_entire_buffer_binding())
                 }
-                Some(crate::wgpu::bind_group_entry::Resource::BufferBinding(bb)) => {
+                Some(crate::compute::bind_group_entry::Resource::BufferBinding(bb)) => {
                     let b = &keep_alive_buffers.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
                     wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: b,
@@ -288,11 +288,11 @@ impl ResourceManager {
                         size: std::num::NonZeroU64::new(bb.size),
                     })
                 }
-                Some(crate::wgpu::bind_group_entry::Resource::TextureViewId(_)) => {
+                Some(crate::compute::bind_group_entry::Resource::TextureViewId(_)) => {
                     let tv = &keep_alive_views.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
                     wgpu::BindingResource::TextureView(tv)
                 }
-                Some(crate::wgpu::bind_group_entry::Resource::SamplerId(_)) => {
+                Some(crate::compute::bind_group_entry::Resource::SamplerId(_)) => {
                     let s = &keep_alive_samplers.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
                     wgpu::BindingResource::Sampler(s)
                 }
@@ -372,7 +372,7 @@ impl ResourceManager {
         id
     }
 
-    pub fn create_pipeline(&self, req: &crate::wgpu::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<u64> {
+    pub fn create_pipeline(&self, req: &crate::compute::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<u64> {
         let shader = match self.get_resource(req.shader_id, owner_id) {
             Some(Resource::ShaderModule(s)) => s,
             _ => return Err(anyhow::anyhow!("Resource is not a shader or unauthorized")),

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "core/host/core", "core/host/modules/fs", "core/host/modules/gpu", "core/host/modules/image", "core/host/modules/network",
+    "core/host/core", "core/host/modules/fs", "core/host/modules/image", "core/host/modules/network",
     "core/host/runners/desktop",
     "sdk/rust",
 ]

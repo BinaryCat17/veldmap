@@ -1,8 +1,8 @@
 pub mod rpc;
 pub mod core;
 
-#[cfg(feature = "wgpu")]
-pub mod wgpu;
+#[cfg(feature = "compute")]
+pub mod compute;
 #[cfg(feature = "app")]
 pub mod app;
 

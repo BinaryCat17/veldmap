@@ -180,3 +180,33 @@ message TaskStatusResponse {
 message TaskCancelRequest {
   string task_id = 1;
 }
+
+message TaskCreateRequest {
+}
+
+message TaskCreateResponse {
+  string task_id = 1;
+}
+
+message TaskUpdateRequest {
+  string task_id = 1;
+  float progress = 2;
+  bool completed = 3;
+  string error = 4;
+  bytes payload = 5;
+}
+
+message GetConfigRequest {
+  string key = 1;
+}
+
+message GetConfigResponse {
+  string value = 1;
+}
+
+message GenerateUuidRequest {
+}
+
+message GenerateUuidResponse {
+  string uuid = 1;
+}

@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package veldmap.wgpu;
+package veldmap.compute;
 
 // --- Enums for Type Safety ---
 
@@ -85,13 +85,13 @@ enum CullMode {
 
 // --- Common Structures ---
 
-message GpuBufferBinding {
+message ComputeBufferBinding {
     uint64 buffer_id = 1;
     uint64 offset = 2;
     uint64 size = 3;
 }
 
-message GpuTextureBinding {
+message ComputeTextureBinding {
     uint64 texture_id = 1;
     uint32 view_dimension = 2; // 0: 2D, 1: 2DArray, etc
 }
@@ -172,7 +172,7 @@ message BindGroupEntry {
     uint32 binding = 1;
     oneof resource {
         uint64 buffer_id = 2;
-        GpuBufferBinding buffer_binding = 3;
+        ComputeBufferBinding buffer_binding = 3;
         uint64 texture_view_id = 4;
         uint64 sampler_id = 5;
     }
@@ -232,7 +232,7 @@ import "core.proto";
 
 // --- GPU / RESOURCE SERVICE ---
 
-message GpuResourceRequest {
+message ComputeResourceRequest {
   uint32 instance_id = 16; // Added for resource isolation
   oneof command {
     CreateBuffer create_buffer = 1;
@@ -267,7 +267,7 @@ message ImageLoadToTexture {
     bool generate_mipmaps = 3;
 }
 
-message GpuColor {
+message ComputeColor {
     float r = 1;
     float g = 2;
     float b = 3;
@@ -277,11 +277,11 @@ message GpuColor {
 message Submit {
     uint32 instance_id = 4; // Added for resource isolation
     uint64 target_texture_view_id = 1;
-    GpuColor clear_color = 2;
+    ComputeColor clear_color = 2;
     CommandBuffer command_buffer = 3;
 }
 
-message GpuResourceResponse {
+message ComputeResourceResponse {
   veldmap.core.ResourceHandle handle = 1;
   string error = 2;
 }

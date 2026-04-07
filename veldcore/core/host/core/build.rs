@@ -2,7 +2,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = &[
         "../../../proto/core.proto",
         "../../../proto/app.proto",
-        "../../../proto/wgpu.proto"
+        "../../../proto/compute.proto"
     ];
 
     for proto in proto_files {

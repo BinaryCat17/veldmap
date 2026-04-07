@@ -5877,6 +5877,7 @@ dependencies = [
  "dashmap",
  "env_logger",
  "futures-util",
+ "image",
  "iroh",
  "iroh-gossip",
  "log",
@@ -5903,18 +5904,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "veldmap-host-gpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "image",
- "log",
- "prost",
- "veldmap-host-core",
- "wgpu",
-]
-
-[[package]]
 name = "veldmap-host-gui"
 version = "0.1.0"
 dependencies = [
@@ -5932,7 +5921,6 @@ dependencies = [
  "tokio",
  "veldmap-host-core",
  "veldmap-host-fs",
- "veldmap-host-gpu",
  "veldmap-host-image",
  "veldmap-host-network",
  "wasmtime",

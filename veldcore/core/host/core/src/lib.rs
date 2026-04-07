@@ -7,6 +7,7 @@ pub mod abi;
 pub mod dispatcher;
 pub mod node;
 pub mod system_service;
+pub mod compute_service;
 pub mod resources;
 pub mod logging;
 
@@ -18,8 +19,8 @@ pub mod app {
     include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
 }
 
-pub mod wgpu {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.wgpu.rs"));
+pub mod compute {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.compute.rs"));
 }
 
 pub const SURFACE_ID: u64 = 0;

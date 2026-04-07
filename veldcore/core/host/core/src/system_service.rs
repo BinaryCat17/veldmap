@@ -2,30 +2,61 @@ use crate::dispatcher::NativeService;
 use crate::resources::{ResourceManager, Resource};
 use crate::core::{
     TaskStatusRequest, TaskStatusResponse,
-    TaskCancelRequest, ResourceHandle,
-    GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse
+    TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest, ResourceHandle,
+    GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse,
+    GetConfigRequest, GetConfigResponse, GenerateUuidRequest, GenerateUuidResponse
 };
 use prost::Message;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
+use dashmap::DashMap;
 
 pub struct SystemService {
     tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>,
     resources: Arc<ResourceManager>,
+    configs: Arc<DashMap<u32, HashMap<String, serde_json::Value>>>,
 }
 
 impl SystemService {
-    pub fn new(resources: Arc<ResourceManager>, tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>) -> Self {
+    pub fn new(
+        resources: Arc<ResourceManager>, 
+        tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>
+    ) -> Self {
         Self {
             tasks,
             resources,
+            configs: Arc::new(DashMap::new()),
         }
+    }
+
+    pub fn register_config(&self, instance_id: u32, config: HashMap<String, serde_json::Value>) {
+        self.configs.insert(instance_id, config);
+    }
+
+    pub fn unregister_config(&self, instance_id: u32) {
+        self.configs.remove(&instance_id);
     }
 }
 
 impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
+            "get_config" => {
+                let req = GetConfigRequest::decode(&payload[..])?;
+                let value = if let Some(config) = self.configs.get(&requestor_id) {
+                    config.get(&req.key).map(|v| {
+                        if let Some(s) = v.as_str() { s.to_string() } else { v.to_string() }
+                    }).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                Ok(GetConfigResponse { value }.encode_to_vec())
+            }
+            "generate_uuid" => {
+                let _req = GenerateUuidRequest::decode(&payload[..])?;
+                let uuid = uuid::Uuid::new_v4().to_string();
+                Ok(GenerateUuidResponse { uuid }.encode_to_vec())
+            }
             "get_resource" => {
                 let req = GetResourceRequest::decode(&payload[..])?;
                 if let Some(id) = self.resources.get_named_resource(&req.name) {
@@ -54,6 +85,33 @@ impl NativeService for SystemService {
                     content_hash: Vec::new(),
                 };
                 Ok(CreateDataResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
+            }
+            "task_create" => {
+                let _req = TaskCreateRequest::decode(&payload[..])?;
+                let task_id = uuid::Uuid::new_v4().to_string();
+                let mut tasks = self.tasks.lock().unwrap();
+                tasks.insert(task_id.clone(), crate::dispatcher::TaskState {
+                    progress: 0.0,
+                    completed: false,
+                    error: String::new(),
+                    abort_handle: None,
+                    result_handle: None,
+                    payload: Vec::new(),
+                });
+                Ok(TaskCreateResponse { task_id }.encode_to_vec())
+            }
+            "task_update" => {
+                let req = TaskUpdateRequest::decode(&payload[..])?;
+                let mut tasks = self.tasks.lock().unwrap();
+                if let Some(t) = tasks.get_mut(&req.task_id) {
+                    t.progress = req.progress;
+                    t.completed = req.completed;
+                    if !req.error.is_empty() { t.error = req.error.clone(); }
+                    if !req.payload.is_empty() { t.payload = req.payload.clone(); }
+                    Ok(Vec::new())
+                } else {
+                    Err(anyhow::anyhow!("Task not found"))
+                }
             }
             "task_status" => {
                 let req = TaskStatusRequest::decode(&payload[..])?;

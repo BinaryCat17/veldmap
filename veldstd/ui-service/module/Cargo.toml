@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-veldsdk = { path = "../../../veldcore/sdk/rust", features = ["wgpu", "app"] }
+veldsdk = { path = "../../../veldcore/sdk/rust", features = ["compute", "app"] }
 veld-ui = { path = "../lib/rust" }
 prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }

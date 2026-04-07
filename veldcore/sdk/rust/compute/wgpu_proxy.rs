@@ -1,4 +1,4 @@
-use crate::rpc::wgpu::{
+use crate::rpc::compute::{
     CommandBuffer, WgpuCommand, SetPipeline, SetBindGroup, SetVertexBuffer, 
     SetIndexBuffer, Draw, DrawIndexed, SetViewport, SetScissorRect, Submit,
     wgpu_command::Command
@@ -6,11 +6,11 @@ use crate::rpc::wgpu::{
 use crate::rpc::host::call_service;
 use prost::Message;
 
-pub struct WgpuRecorder {
+pub struct ComputeRecorder {
     commands: Vec<WgpuCommand>,
 }
 
-impl WgpuRecorder {
+impl ComputeRecorder {
     pub fn new(_width: u32, _height: u32) -> Self {
         Self {
             commands: Vec::with_capacity(128),
@@ -76,7 +76,7 @@ impl WgpuRecorder {
         }));
     }
 
-    pub fn submit(self, target_view_id: u64, clear_color: Option<crate::rpc::wgpu::GpuColor>) -> anyhow::Result<()> {
+    pub fn submit(self, target_view_id: u64, clear_color: Option<crate::rpc::compute::ComputeColor>) -> anyhow::Result<()> {
         let cmd_buffer = CommandBuffer {
             commands: self.commands,
         };
@@ -88,10 +88,7 @@ impl WgpuRecorder {
             command_buffer: Some(cmd_buffer),
         };
         
-        call_service("wgpu", "submit", submit_req.encode_to_vec())?;
+        call_service("compute", "submit", submit_req.encode_to_vec())?;
         Ok(())
     }
-
-    }
-
-    
+}

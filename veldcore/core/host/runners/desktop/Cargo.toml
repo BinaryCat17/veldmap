@@ -8,7 +8,6 @@ veldmap-host-core = { path = "../../core" }
 veldmap-host-fs = { path = "../../modules/fs" }
 veldmap-host-network = { path = "../../modules/network" }
 veldmap-host-image = { path = "../../modules/image" }
-veldmap-host-gpu = { path = "../../modules/gpu" }
 
 tokio = { version = "1.49", features = ["full"] }
 anyhow = "1.0"

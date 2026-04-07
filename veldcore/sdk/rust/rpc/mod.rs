@@ -6,8 +6,8 @@ pub mod app {
     include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
 }
 
-pub mod wgpu {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.wgpu.rs"));
+pub mod compute {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.compute.rs"));
 }
 
 pub mod host;
