@@ -92,40 +92,6 @@ impl ResourceManager {
         self.queue.clone()
     }
 
-    pub fn get_ui_layout(&self) -> wgpu::BindGroupLayout {
-        self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("VeldMap UI BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry { 
-                    binding: 0, 
-                    visibility: wgpu::ShaderStages::FRAGMENT, 
-                    ty: wgpu::BindingType::Texture { 
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true }, 
-                        view_dimension: wgpu::TextureViewDimension::D2, 
-                        multisampled: false 
-                    }, 
-                    count: None 
-                },
-                wgpu::BindGroupLayoutEntry { 
-                    binding: 1, 
-                    visibility: wgpu::ShaderStages::FRAGMENT, 
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), 
-                    count: None 
-                },
-            ],
-        })
-    }
-
-    pub fn get_ui_sampler(&self) -> wgpu::Sampler {
-        self.device.create_sampler(&wgpu::SamplerDescriptor { 
-            address_mode_u: wgpu::AddressMode::ClampToEdge, 
-            address_mode_v: wgpu::AddressMode::ClampToEdge, 
-            mag_filter: wgpu::FilterMode::Linear, 
-            min_filter: wgpu::FilterMode::Linear, 
-            ..Default::default() 
-        })
-    }
-
     fn align_to(size: u64, alignment: u64) -> u64 {
         (size + alignment - 1) & !(alignment - 1)
     }

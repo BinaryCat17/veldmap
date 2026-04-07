@@ -1,20 +1,54 @@
-use crate::dispatcher::NativeService;
-use crate::resources::ResourceManager;
-use crate::wgpu::{GpuResourceRequest, GpuResourceResponse};
-use crate::core::ResourceHandle;
+use veldmap_host_core::dispatcher::NativeService;
+use veldmap_host_core::resources::{ResourceManager, Resource};
+use veldmap_host_core::core::ResourceHandle;
+use veldmap_host_core::wgpu::{GpuResourceRequest, GpuResourceResponse};
 use prost::Message;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use image::GenericImageView;
+
+pub fn get_ui_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("VeldMap UI BGL"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry { 
+                binding: 0, 
+                visibility: wgpu::ShaderStages::FRAGMENT, 
+                ty: wgpu::BindingType::Texture { 
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true }, 
+                    view_dimension: wgpu::TextureViewDimension::D2, 
+                    multisampled: false 
+                }, 
+                count: None 
+            },
+            wgpu::BindGroupLayoutEntry { 
+                binding: 1, 
+                visibility: wgpu::ShaderStages::FRAGMENT, 
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), 
+                count: None 
+            },
+        ],
+    })
+}
+
+pub fn get_ui_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor { 
+        address_mode_u: wgpu::AddressMode::ClampToEdge, 
+        address_mode_v: wgpu::AddressMode::ClampToEdge, 
+        mag_filter: wgpu::FilterMode::Linear, 
+        min_filter: wgpu::FilterMode::Linear, 
+        ..Default::default() 
+    })
+}
 
 pub fn execute_render_commands<'a>(
     rp: &mut wgpu::RenderPass<'a>,
-    command_buffer: &'a crate::wgpu::CommandBuffer,
-    resources: &'a crate::resources::ResourceManager,
+    command_buffer: &'a veldmap_host_core::wgpu::CommandBuffer,
+    resources: &'a ResourceManager,
     target_width: u32,
     target_height: u32,
     requestor_id: u32,
 ) -> anyhow::Result<()> {
-    use crate::wgpu::wgpu_command::Command;
+    use veldmap_host_core::wgpu::wgpu_command::Command;
 
     for wgpu_cmd in &command_buffer.commands {
         let cmd = match &wgpu_cmd.command {
@@ -24,19 +58,18 @@ pub fn execute_render_commands<'a>(
 
         match cmd {
             Command::SetPipeline(p) => {
-                if let Some(crate::resources::Resource::RenderPipeline(pipeline)) = resources.get_resource(p.pipeline_id, requestor_id) {
+                if let Some(Resource::RenderPipeline(pipeline)) = resources.get_resource(p.pipeline_id, requestor_id) {
                     rp.set_pipeline(pipeline.as_ref());
                 }
             }
             Command::SetBindGroup(bg) => {
-                if let Some(crate::resources::Resource::BindGroup(bind_group)) = resources.get_resource(bg.bind_group_id, requestor_id) {
+                if let Some(Resource::BindGroup(bind_group)) = resources.get_resource(bg.bind_group_id, requestor_id) {
                     rp.set_bind_group(bg.index, bind_group.as_ref(), &bg.dynamic_offsets);
                 } else {
-                    // Fallback for direct texture binding (common in simple plugins)
-                    if let Some(crate::resources::Resource::Texture { texture, .. }) = resources.get_resource(bg.bind_group_id, requestor_id) {
+                    if let Some(Resource::Texture { texture, .. }) = resources.get_resource(bg.bind_group_id, requestor_id) {
                         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        let bgl = resources.get_ui_layout();
-                        let sampler = resources.get_ui_sampler();
+                        let bgl = get_ui_layout(&resources.get_device());
+                        let sampler = get_ui_sampler(&resources.get_device());
                         let bg_res = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor { 
                             label: Some("Proxy Fallback BG"), 
                             layout: &bgl, 
@@ -50,14 +83,14 @@ pub fn execute_render_commands<'a>(
                 }
             }
             Command::SetVertexBuffer(vb) => {
-                if let Some(crate::resources::Resource::Buffer(buf)) = resources.get_resource(vb.buffer_id, requestor_id) {
+                if let Some(Resource::Buffer(buf)) = resources.get_resource(vb.buffer_id, requestor_id) {
                     let end = if vb.size > 0 { (vb.offset + vb.size).min(buf.size()) } else { buf.size() };
                     rp.set_vertex_buffer(vb.slot, buf.slice(vb.offset..end));
                 }
             }
             Command::SetIndexBuffer(ib) => {
                 let format = if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
-                if let Some(crate::resources::Resource::Buffer(buf)) = resources.get_resource(ib.buffer_id, requestor_id) {
+                if let Some(Resource::Buffer(buf)) = resources.get_resource(ib.buffer_id, requestor_id) {
                     let end = if ib.size > 0 { (ib.offset + ib.size).min(buf.size()) } else { buf.size() };
                     rp.set_index_buffer(buf.slice(ib.offset..end), format);
                 }
@@ -89,22 +122,20 @@ pub fn execute_render_commands<'a>(
     Ok(())
 }
 
-use std::sync::Mutex;
-
 pub struct GpuService {
     resources: Arc<ResourceManager>,
-    render_queue: Arc<Mutex<Vec<crate::wgpu::Submit>>>,
+    render_queue: Arc<Mutex<Vec<veldmap_host_core::wgpu::Submit>>>,
 }
 
 impl GpuService {
     pub fn new(
         resources: Arc<ResourceManager>, 
-        render_queue: Arc<Mutex<Vec<crate::wgpu::Submit>>>,
+        render_queue: Arc<Mutex<Vec<veldmap_host_core::wgpu::Submit>>>,
     ) -> Self {
         Self { resources, render_queue }
     }
 
-    fn submit(&self, req: crate::wgpu::Submit) -> anyhow::Result<()> {
+    fn submit(&self, req: veldmap_host_core::wgpu::Submit) -> anyhow::Result<()> {
         let mut queue = self.render_queue.lock().unwrap();
         queue.push(req);
         Ok(())
@@ -115,7 +146,7 @@ impl NativeService for GpuService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
             "submit" => {
-                let mut req = crate::wgpu::Submit::decode(&payload[..])?;
+                let mut req = veldmap_host_core::wgpu::Submit::decode(&payload[..])?;
                 req.instance_id = requestor_id; // Override with verified ID
                 self.submit(req)?;
                 Ok(Vec::new())
@@ -123,35 +154,35 @@ impl NativeService for GpuService {
             "create_resource" => {
                 let req = GpuResourceRequest::decode(&payload[..])?;
                 let mut handle = ResourceHandle::default();
-                let instance_id = requestor_id; // Use verified ID from Dispatcher
+                let instance_id = requestor_id;
 
                 match req.command {
-                    Some(crate::wgpu::gpu_resource_request::Command::CreateTexture(t)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreateTexture(t)) => {
                         handle.id = self.resources.create_texture(t.width, t.height, t.format as i32, t.usage, t.readonly, instance_id);
                         handle.size = (t.width * t.height * 4) as u64; 
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::CreateBuffer(b)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreateBuffer(b)) => {
                         handle.id = self.resources.create_buffer_ext(b.size, b.usage, b.mapped_at_creation, b.readonly, instance_id);
                         handle.size = b.size;
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::CreateShader(s)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreateShader(s)) => {
                         handle.id = self.resources.create_shader(&s.source, Some(&s.label), instance_id);
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::CreatePipeline(p)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreatePipeline(p)) => {
                         handle.id = self.resources.create_pipeline(&p, instance_id)?;
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::CreateSampler(s)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreateSampler(s)) => {
                         handle.id = self.resources.create_sampler(s.mag_filter as i32, s.min_filter as i32, instance_id);
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::CreateTextureView(tv)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreateTextureView(tv)) => {
                         handle.id = self.resources.create_texture_view(tv.texture_id, instance_id)?;
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::CreateBindGroupLayout(bgl)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreateBindGroupLayout(bgl)) => {
                         let mut entries = Vec::new();
                         for e in bgl.entries {
                             let visibility = wgpu::ShaderStages::from_bits_truncate(e.visibility);
                             let ty = match e.ty {
-                                Some(crate::wgpu::bind_group_layout_entry::Ty::Buffer(b)) => {
+                                Some(veldmap_host_core::wgpu::bind_group_layout_entry::Ty::Buffer(b)) => {
                                     wgpu::BindingType::Buffer {
                                         ty: match b.r#type {
                                             1 => wgpu::BufferBindingType::Uniform,
@@ -163,7 +194,7 @@ impl NativeService for GpuService {
                                         min_binding_size: None,
                                     }
                                 }
-                                Some(crate::wgpu::bind_group_layout_entry::Ty::Sampler(s)) => {
+                                Some(veldmap_host_core::wgpu::bind_group_layout_entry::Ty::Sampler(s)) => {
                                     wgpu::BindingType::Sampler(match s.r#type {
                                         1 => wgpu::SamplerBindingType::Filtering,
                                         2 => wgpu::SamplerBindingType::NonFiltering,
@@ -171,7 +202,7 @@ impl NativeService for GpuService {
                                         _ => wgpu::SamplerBindingType::Filtering,
                                     })
                                 }
-                                Some(crate::wgpu::bind_group_layout_entry::Ty::Texture(t)) => {
+                                Some(veldmap_host_core::wgpu::bind_group_layout_entry::Ty::Texture(t)) => {
                                     wgpu::BindingType::Texture {
                                         sample_type: match t.sample_type {
                                             1 => wgpu::TextureSampleType::Float { filterable: true },
@@ -204,18 +235,15 @@ impl NativeService for GpuService {
                         }
                         handle.id = self.resources.create_bind_group_layout(&entries, instance_id);
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::CreateBindGroup(bg)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::CreateBindGroup(bg)) => {
                         handle.id = self.resources.create_bind_group(bg.layout_id, &bg.entries, instance_id)?;
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::FsReadToBuffer(req_fs)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::FsReadToBuffer(req_fs)) => {
                         let data = std::fs::read(&req_fs.path)?;
                         handle.id = self.resources.create_buffer_with_data(&data, req_fs.usage, true, instance_id);
                         handle.size = data.len() as u64;
                     }
-                    Some(crate::wgpu::gpu_resource_request::Command::FsReadToTexture(_)) => {
-                        return Err(anyhow::anyhow!("FsReadToTexture requires dimensions. Use ImageLoadToTexture instead."));
-                    }
-                    Some(crate::wgpu::gpu_resource_request::Command::ImageLoadToTexture(req_img)) => {
+                    Some(veldmap_host_core::wgpu::gpu_resource_request::Command::ImageLoadToTexture(req_img)) => {
                         let img = image::open(&req_img.path)?;
                         let (w, h) = img.dimensions();
                         let rgba = img.to_rgba8();

@@ -38,9 +38,21 @@ impl<T: prost::Message + Default> RpcResponseDecoder for T {
     }
 }
 
-/// Макрос для генерации клиентских прокси-функций для вызова хостовых сервисов (с поддержкой синхронных и асинхронных методов).
+/// Макрос для генерации клиентских прокси-функций для вызова хостовых сервисов.
 #[macro_export]
 macro_rules! host_proxy {
+    (
+        module: $module:ident,
+        service: $service:expr,
+        $( $(@ $task:ident)? $method:ident : $req:ty => $res:ty ),* $(,)?
+    ) => {
+        pub mod $module {
+            use super::*;
+            $(
+                $crate::handle_proxy_method!($service, $method, $req, $res, $(@ $task)?);
+            )*
+        }
+    };
     (
         service: $service:expr,
         $( $(@ $task:ident)? $method:ident : $req:ty => $res:ty ),* $(,)?

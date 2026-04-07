@@ -217,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
     let blit_shader = device_arc.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
     let blit_pipeline_layout = device_arc.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("Blit Pipeline Layout"),
-        bind_group_layouts: &[&resources.get_ui_layout()],
+        bind_group_layouts: &[&veldmap_host_gpu::get_ui_layout(&device_arc)],
         immediate_size: 0,
     });
     let blit_pipeline = device_arc.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -237,8 +237,8 @@ async fn main() -> anyhow::Result<()> {
         depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview_mask: None, cache: None,
     });
 
-    let bind_group_layout = resources.get_ui_layout();
-    let sampler = resources.get_ui_sampler();
+    let bind_group_layout = veldmap_host_gpu::get_ui_layout(&device_arc);
+    let sampler = veldmap_host_gpu::get_ui_sampler(&device_arc);
 
     let render_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::wgpu::Submit>::new()));
 
@@ -275,7 +275,13 @@ async fn main() -> anyhow::Result<()> {
 
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()))));
-    dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::gpu_service::GpuService::new(resources.clone(), render_queue.clone()))));
+    
+    // Register Modular Services
+    dispatcher.register_service("fs".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_fs::FsService::new(resources.clone()))));
+    dispatcher.register_service("network".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_network::NetworkService::new(dispatcher.tasks.clone()))));
+    dispatcher.register_service("image".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_image::ImageService::new(resources.clone(), dispatcher.tasks.clone()))));
+    dispatcher.register_service("wgpu".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_gpu::GpuService::new(resources.clone(), render_queue.clone()))));
+    
     dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(
         tx, 
         proxy, 
@@ -552,7 +558,7 @@ async fn main() -> anyhow::Result<()> {
                                     });
 
                                     if let Some(cb) = &req.command_buffer {
-                                        let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources, 2048, 2048, req.instance_id);
+                                        let _ = veldmap_host_gpu::execute_render_commands(&mut rp, cb, &resources, 2048, 2048, req.instance_id);
                                     }
                                 }
                             }
@@ -573,7 +579,7 @@ async fn main() -> anyhow::Result<()> {
                                 // Draw Direct Surface Commands from plugins
                                 for req in &surface_cmds {
                                     if let Some(cb) = &req.command_buffer {
-                                        let _ = veldmap_host_core::gpu_service::execute_render_commands(&mut rp, cb, &resources, target_w, target_height, req.instance_id);
+                                        let _ = veldmap_host_gpu::execute_render_commands(&mut rp, cb, &resources, target_w, target_height, req.instance_id);
                                     }
                                 }
 

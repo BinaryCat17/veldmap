@@ -67,41 +67,71 @@ pub async fn yield_now() {
     YieldNow(false).await;
 }
 
-// Генерируем низкоуровневые прокси для системного сервиса в модуле `raw`
-crate::host_proxy! {
-    service: "system",
-    log: LogRequest => (),
-    fs_read: FsReadRequest => FsReadResponse,
-    fs_write: FsWriteRequest => (),
-    fs_list: FsListRequest => FsListResponse,
-    fs_delete: FsDeleteRequest => (),
-    @task fs_download: FsDownloadRequest => (),
-    @task http: HttpTaskRequest => HttpTaskResponse,
-    image_info: ImageInfoRequest => ImageInfoResponse,
-    @task image_load: ImageLoadRequest => ResourceHandle,
-    get_resource: GetResourceRequest => GetResourceResponse,
-    create_data: CreateDataRequest => CreateDataResponse,
-    task_status: TaskStatusRequest => TaskStatusResponse,
-    task_cancel: TaskCancelRequest => (),
+// Генерируем низкоуровневые прокси для системных сервисов
+pub mod raw {
+    use super::*;
+
+    crate::host_proxy! {
+        module: sys,
+        service: "system",
+        log: LogRequest => (),
+        get_resource: GetResourceRequest => GetResourceResponse,
+        create_data: CreateDataRequest => CreateDataResponse,
+        task_status: TaskStatusRequest => TaskStatusResponse,
+        task_cancel: TaskCancelRequest => (),
+        acquire_resource: AcquireResourceRequest => (),
+        release_resource: ReleaseResourceRequest => (),
+        freeze_resource: FreezeResourceRequest => (),
+        destroy_resource: DestroyResourceRequest => (),
+    }
+
+    crate::host_proxy! {
+        module: fs,
+        service: "fs",
+        fs_read: FsReadRequest => FsReadResponse,
+        fs_write: FsWriteRequest => (),
+        fs_list: FsListRequest => FsListResponse,
+        fs_delete: FsDeleteRequest => (),
+    }
+
+    crate::host_proxy! {
+        module: net,
+        service: "network",
+        @task fs_download: FsDownloadRequest => (),
+        @task http: HttpTaskRequest => HttpTaskResponse,
+    }
+
+    crate::host_proxy! {
+        module: img,
+        service: "image",
+        image_info: ImageInfoRequest => ImageInfoResponse,
+        @task image_load: ImageLoadRequest => ResourceHandle,
+    }
+
+    // Реэкспорт для удобства и обратной совместимости
+    pub use sys::*;
+    pub use fs::*;
+    pub use net::*;
+    pub use img::*;
 }
 
 // Высокоуровневые обертки
 pub fn fs_read_bytes(path: impl Into<String>) -> anyhow::Result<Vec<u8>> {
-    let res = raw::fs_read(&FsReadRequest { path: path.into() })?;
+    let res = raw::fs::fs_read(&FsReadRequest { path: path.into() })?;
     let handle = res.handle.ok_or_else(|| anyhow::anyhow!("No handle"))?;
     crate::rpc::host::gpu_read_resource(handle.id, 0, handle.size)
 }
 
 pub fn fs_write_bytes(path: impl Into<String>, data: &[u8]) -> anyhow::Result<()> {
-    let res = raw::create_data(&CreateDataRequest { size: data.len() as u64 })?;
+    let res = raw::sys::create_data(&CreateDataRequest { size: data.len() as u64 })?;
     let handle = res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create resource"))?;
     crate::rpc::host::gpu_write_resource(handle.id, 0, data)?;
-    raw::fs_write(&FsWriteRequest { path: path.into(), handle: Some(handle) })
+    raw::fs::fs_write(&FsWriteRequest { path: path.into(), handle: Some(handle) })
 }
 
 pub fn fs_download(url: String, path: String, headers: std::collections::HashMap<String, String>) -> anyhow::Result<String> {
     let req = FsDownloadRequest { url, path, headers };
-    let res = raw::fs_download(&req)?;
+    let res = raw::net::fs_download(&req)?;
     Ok(res.task_id)
 }
 

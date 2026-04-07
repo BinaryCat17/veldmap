@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-veldmap-host-core = { path = "../core" }
+veldmap-host-core = { path = "../../core" }
+veldmap-host-fs = { path = "../../modules/fs" }
+veldmap-host-network = { path = "../../modules/network" }
+veldmap-host-image = { path = "../../modules/image" }
+veldmap-host-gpu = { path = "../../modules/gpu" }
+
 tokio = { version = "1.49", features = ["full"] }
 anyhow = "1.0"
 log = "0.4"
@@ -23,4 +28,3 @@ rand = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.29", default-features = false, features = ["wayland"] }
-

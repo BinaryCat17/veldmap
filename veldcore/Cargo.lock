@@ -4623,7 +4623,6 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -5878,21 +5877,40 @@ dependencies = [
  "dashmap",
  "env_logger",
  "futures-util",
- "image",
  "iroh",
  "iroh-gossip",
  "log",
  "prost",
  "prost-build",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
- "tiff 0.9.1",
  "tokio",
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
+ "wgpu",
+]
+
+[[package]]
+name = "veldmap-host-fs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "prost",
+ "veldmap-host-core",
+]
+
+[[package]]
+name = "veldmap-host-gpu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "log",
+ "prost",
+ "veldmap-host-core",
  "wgpu",
 ]
 
@@ -5913,9 +5931,41 @@ dependencies = [
  "sysinfo",
  "tokio",
  "veldmap-host-core",
+ "veldmap-host-fs",
+ "veldmap-host-gpu",
+ "veldmap-host-image",
+ "veldmap-host-network",
  "wasmtime",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "veldmap-host-image"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
+ "log",
+ "prost",
+ "tiff 0.9.1",
+ "tokio",
+ "uuid",
+ "veldmap-host-core",
+]
+
+[[package]]
+name = "veldmap-host-network"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "log",
+ "prost",
+ "reqwest",
+ "tokio",
+ "uuid",
+ "veldmap-host-core",
 ]
 
 [[package]]
