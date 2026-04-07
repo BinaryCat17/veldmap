@@ -68,7 +68,7 @@ pub async fn yield_now() {
 }
 
 // Генерируем низкоуровневые прокси для системного сервиса в модуле `raw`
-crate::rpc_proxy! {
+crate::host_proxy! {
     service: "system",
     log: LogRequest => (),
     fs_read: FsReadRequest => FsReadResponse,

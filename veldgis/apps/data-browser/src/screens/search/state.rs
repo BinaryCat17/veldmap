@@ -11,7 +11,7 @@ pub enum SearchFilterType {
     GridId,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Clone)]
 pub struct SearchState {
     pub query: String,
     pub filter_type: SearchFilterType,

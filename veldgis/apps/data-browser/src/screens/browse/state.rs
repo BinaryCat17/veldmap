@@ -2,7 +2,7 @@
 
 use crate::common::BrowserItem;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BrowseState {
     pub current_path: String,
     pub items: Vec<BrowserItem>,

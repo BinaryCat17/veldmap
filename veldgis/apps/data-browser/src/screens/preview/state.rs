@@ -1,6 +1,6 @@
 ﻿use veldsdk::rpc::core::ResourceHandle;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PreviewState {
     /// Загруженное изображение в GPU (ResourceHandle от хоста)
     pub current_gpu_image: Option<ResourceHandle>,

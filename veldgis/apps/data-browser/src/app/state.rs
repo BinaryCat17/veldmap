@@ -8,7 +8,7 @@ use crate::common::BrowserItem;
 use crate::screens::{SearchState, BrowseState, DownloadedState, PreviewState};
 
 /// Глобальное состояние
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct GlobalState {
     pub status_message: String,
     pub error_message: Option<String>,
@@ -22,6 +22,7 @@ pub struct GlobalState {
 }
 
 /// Все экраны приложения
+#[derive(Clone)]
 pub enum Screen {
     Search(SearchState),
     Browse(BrowseState),
@@ -36,7 +37,7 @@ impl Default for Screen {
 }
 
 /// Главное состояние
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AppState {
     pub screen: Screen,
     pub global: GlobalState,

@@ -38,9 +38,9 @@ impl<T: prost::Message + Default> RpcResponseDecoder for T {
     }
 }
 
-/// Макрос для генерации клиентских прокси-функций для RPC сервиса.
+/// Макрос для генерации клиентских прокси-функций для вызова хостовых сервисов (с поддержкой синхронных и асинхронных методов).
 #[macro_export]
-macro_rules! rpc_proxy {
+macro_rules! host_proxy {
     (
         service: $service:expr,
         $( $(@ $task:ident)? $method:ident : $req:ty => $res:ty ),* $(,)?
@@ -49,6 +49,22 @@ macro_rules! rpc_proxy {
             use super::*;
             $(
                 $crate::handle_proxy_method!($service, $method, $req, $res, $(@ $task)?);
+            )*
+        }
+    };
+}
+
+/// Макрос для генерации клиентских прокси-функций для вызова WASM-микросервисов (все методы по умолчанию - задачи).
+#[macro_export]
+macro_rules! rpc_proxy {
+    (
+        service: $service:expr,
+        $( $method:ident : $req:ty => $res:ty ),* $(,)?
+    ) => {
+        pub mod raw {
+            use super::*;
+            $(
+                $crate::handle_proxy_method!($service, $method, $req, $res, @task);
             )*
         }
     };
@@ -291,7 +307,7 @@ macro_rules! define_module {
 
                 match request.method.as_str() {
                     "task_status" => {
-                        let req = match TaskStatusRequest::decode(&request.payload[..]) {
+                        let _req = match TaskStatusRequest::decode(&request.payload[..]) {
                             Ok(r) => r,
                             Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
                         };
@@ -302,7 +318,7 @@ macro_rules! define_module {
                         (Vec::new(), "Use system.task_status".to_string())
                     }
                     "task_cancel" => {
-                        let req = match TaskCancelRequest::decode(&request.payload[..]) {
+                        let _req = match TaskCancelRequest::decode(&request.payload[..]) {
                             Ok(r) => r,
                             Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
                         };

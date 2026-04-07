@@ -8,7 +8,7 @@ pub mod dataprovider {
 // Генерируем типизированный прокси для провайдера данных
 veldsdk::rpc_proxy! {
     service: "data-provider",
-    @task search: dataprovider::SearchRequest => dataprovider::SearchResponse,
-    @task download: dataprovider::DownloadRequest => dataprovider::DownloadResponse,
-    @task list_path: dataprovider::ListPathRequest => dataprovider::ListPathResponse,
+    search: dataprovider::SearchRequest => dataprovider::SearchResponse,
+    download: dataprovider::DownloadRequest => dataprovider::DownloadResponse,
+    list_path: dataprovider::ListPathRequest => dataprovider::ListPathResponse,
 }

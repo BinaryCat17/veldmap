@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use veldsdk::core::Command;
+use veldsdk::prost::Message;
 use crate::{AppState, AppMessage};
 use crate::screens::{SearchMessage, BrowseMessage, DownloadedMessage, PreviewMessage};
 use crate::common::ViewMode;

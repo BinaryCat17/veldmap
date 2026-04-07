@@ -8,7 +8,7 @@ pub enum FileFilter {
     Data,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Clone)]
 pub struct DownloadedState {
     pub search_query: String,
     pub filter: FileFilter,

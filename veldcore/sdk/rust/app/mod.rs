@@ -1,6 +1,6 @@
 pub use crate::rpc::app::*;
 
-crate::rpc_proxy! {
+crate::host_proxy! {
     service: "app",
     display: AppDisplayCommand => (),
 }

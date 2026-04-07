@@ -2,7 +2,7 @@ pub mod wgpu_proxy;
 pub use crate::rpc::wgpu::*;
 use crate::prost::Message;
 
-crate::rpc_proxy! {
+crate::host_proxy! {
     service: "wgpu",
     create_resource: GpuResourceRequest => GpuResourceResponse,
     submit: Submit => (),

@@ -10,7 +10,7 @@ use serde::Serialize;
 pub use futures_util::task::noop_waker_ref;
 
 // Генерируем транспорт для UI-сервиса. 
-veldsdk::rpc_proxy! {
+veldsdk::host_proxy! {
     service: "ui-service",
     set_view: proto::SetViewRequest => proto::SetViewResponse,
     handle_ui_event: proto::HandleUiEventRequest => proto::HandleUiEventResponse,
