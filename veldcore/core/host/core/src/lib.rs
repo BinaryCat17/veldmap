@@ -59,4 +59,3 @@ pub use config_module::*;
 pub use plugin_module::*;
 pub use dispatcher::*;
 pub use node::*;
-pub use system_service::*;

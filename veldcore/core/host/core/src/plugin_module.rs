@@ -25,12 +25,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(100); // Local plugins start from 100
 
-pub async fn load_services(
+pub async fn load_services<F>(
     dispatcher: Arc<Dispatcher>,
     resources: Arc<ResourceManager>,
-    system_service: Arc<crate::system_service::SystemService>,
     config_dir: &str,
-) -> anyhow::Result<()> {
+    mut register_config: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(u32, HashMap<String, serde_json::Value>),
+{
     let manifest_path = std::path::Path::new(config_dir).join("services.json");
     if !manifest_path.exists() {
         log::warn!("Manifest not found at {:?}", manifest_path);
@@ -74,7 +77,7 @@ pub async fn load_services(
                 config_map.insert("surface_format".to_string(), serde_json::Value::Number(resources.get_surface_format_proto().into()));
                 
                 let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::SeqCst);
-                system_service.register_config(instance_id, config_map.clone());
+                register_config(instance_id, config_map.clone());
                 log::trace!("Loading service '{}' with instance_id {}", name, instance_id);
                 
                 let mut linker = Linker::new(&engine);

@@ -1,7 +1,7 @@
-use crate::dispatcher::NativeService;
-use crate::resources::{ResourceManager, Resource};
-use crate::core::ResourceHandle;
-use crate::compute::{
+use veldmap_host_core::dispatcher::NativeService;
+use veldmap_host_core::resources::{ResourceManager, Resource};
+use veldmap_host_core::core::ResourceHandle;
+use veldmap_host_core::compute::{
     ComputeResourceRequest, ComputeResourceResponse, 
     compute_resource_request::Command as ComputeCommand,
     wgpu_command::Command as WgpuCommand

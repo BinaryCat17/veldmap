@@ -1,6 +1,6 @@
-use crate::dispatcher::NativeService;
-use crate::resources::{ResourceManager, Resource};
-use crate::core::{
+use veldmap_host_core::dispatcher::NativeService;
+use veldmap_host_core::resources::{ResourceManager, Resource};
+use veldmap_host_core::core::{
     TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest, ResourceHandle,
     GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse,
@@ -42,14 +42,14 @@ impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
             "log" => {
-                let req = crate::core::LogRequest::decode(&payload[..])?;
-                use crate::logging::*;
+                let req = veldmap_host_core::core::LogRequest::decode(&payload[..])?;
+                use veldmap_host_core::logging::*;
                 let level = match req.level() {
-                    crate::core::LogLevel::Trace => log::Level::Trace,
-                    crate::core::LogLevel::Debug => log::Level::Debug,
-                    crate::core::LogLevel::Info => log::Level::Info,
-                    crate::core::LogLevel::Warn => log::Level::Warn,
-                    crate::core::LogLevel::Error => log::Level::Error,
+                    veldmap_host_core::core::LogLevel::Trace => log::Level::Trace,
+                    veldmap_host_core::core::LogLevel::Debug => log::Level::Debug,
+                    veldmap_host_core::core::LogLevel::Info => log::Level::Info,
+                    veldmap_host_core::core::LogLevel::Warn => log::Level::Warn,
+                    veldmap_host_core::core::LogLevel::Error => log::Level::Error,
                 };
                 veld_log(level, req.flags | FLAG_WASM, None, &req.message);
                 Ok(Vec::new())
@@ -158,7 +158,7 @@ impl NativeService for SystemService {
                 }
             }
             "acquire_resource" => {
-                use crate::core::AcquireResourceRequest;
+                use veldmap_host_core::core::AcquireResourceRequest;
                 let req = AcquireResourceRequest::decode(&payload[..])?;
                 if self.resources.acquire_resource(req.id, requestor_id) {
                     Ok(Vec::new())
@@ -167,13 +167,13 @@ impl NativeService for SystemService {
                 }
             }
             "release_resource" => {
-                use crate::core::ReleaseResourceRequest;
+                use veldmap_host_core::core::ReleaseResourceRequest;
                 let req = ReleaseResourceRequest::decode(&payload[..])?;
                 self.resources.release_resource(req.id, requestor_id);
                 Ok(Vec::new())
             }
             "freeze_resource" => {
-                use crate::core::FreezeResourceRequest;
+                use veldmap_host_core::core::FreezeResourceRequest;
                 let req = FreezeResourceRequest::decode(&payload[..])?;
                 if self.resources.freeze_resource(req.id, requestor_id) {
                     Ok(Vec::new())
@@ -182,7 +182,7 @@ impl NativeService for SystemService {
                 }
             }
             "destroy_resource" => {
-                use crate::core::DestroyResourceRequest;
+                use veldmap_host_core::core::DestroyResourceRequest;
                 let req = DestroyResourceRequest::decode(&payload[..])?;
                 self.resources.destroy_resource(req.id, requestor_id);
                 Ok(Vec::new())
