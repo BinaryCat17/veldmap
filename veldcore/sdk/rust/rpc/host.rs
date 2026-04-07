@@ -7,32 +7,99 @@ use prost::Message;
 #[cfg(feature = "pdk")]
 #[allow(dead_code)]
 extern "C" {
-    // Message Bus (ioctl)
+    /// Главная шина сообщений (аналог ioctl). 
+    /// Возвращает упакованный u64: (len << 32) | ptr
     fn veld_host_call(ptr: u64, len: u64) -> u64;
     
-    // Zero-copy DMA-like access
+    /// Прямая запись в ресурс (Zero-copy DMA).
     fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64);
+    
+    /// Прямое чтение из ресурса (Zero-copy DMA).
     fn veld_resource_read(id: u64, offset: u64, ptr: u64, len: u64);
     
-    // Call Context exchange
+    /// Получение длины входных данных вызова.
     fn veld_input_len() -> u64;
+    
+    /// Копирование входных данных в память WASM.
     fn veld_input_copy(p: u64, n: u64);
+    
+    /// Установка выходных данных вызова.
     fn veld_output_set(p: u64, n: u64);
 }
+
+// --- УПРАВЛЕНИЕ ПАМЯТЬЮ (WASM -> Host) ---
+
+#[no_mangle]
+pub extern "C" fn veld_alloc(size: u64) -> u64 {
+    let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr as u64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
+    let _ = Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize);
+}
+
+// --- СИСТЕМНЫЕ ОБЕРТКИ ---
+
+/// Универсальный вызов любого сервиса Хоста.
+#[cfg(feature = "pdk")]
+pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    let request = RpcRequest {
+        service: service.to_string(),
+        method: method.to_string(),
+        payload,
+        sync: None,
+        instance_id: 0, // Устанавливается хостом автоматически для безопасности
+    };
+    
+    let req_buf = request.encode_to_vec();
+    unsafe {
+        let res_combined = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
+        if res_combined == 0 { return Err(anyhow::anyhow!("Host call failed (0 returned)")); }
+
+        let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
+        let len = (res_combined >> 32) as usize;
+        
+        let res_slice = std::slice::from_raw_parts(ptr, len);
+        let response = RpcResponse::decode(res_slice)?;
+        
+        veld_free_wasm(ptr as u64, len as u64);
+
+        if !response.error.is_empty() { return Err(anyhow::anyhow!(response.error)); }
+        Ok(response.payload)
+    }
+}
+
+/// Запись данных в любой ресурс Хоста (Buffer, Texture, Data).
+#[cfg(feature = "pdk")]
+pub fn resource_write(id: u64, offset: u64, data: &[u8]) {
+    unsafe { 
+        veld_resource_write(id, offset, data.as_ptr() as u64, data.len() as u64); 
+    }
+}
+
+/// Чтение данных из любого ресурса Хоста.
+#[cfg(feature = "pdk")]
+pub fn resource_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
+    unsafe {
+        let mut buf = vec![0u8; size as usize];
+        veld_resource_read(id, offset, buf.as_mut_ptr() as u64, size);
+        Ok(buf)
+    }
+}
+
+// --- SERVICE HELPERS (SYSTEM) ---
 
 #[cfg(feature = "pdk")]
 pub fn task_create() -> String {
     use crate::rpc::core::{TaskCreateRequest, TaskCreateResponse};
     let req = TaskCreateRequest {};
-    match call_service("system", "task_create", req.encode_to_vec()) {
-        Ok(res) => {
-            match TaskCreateResponse::decode(&res[..]) {
-                Ok(r) => r.task_id,
-                Err(_) => String::new(),
-            }
-        }
-        Err(_) => String::new(),
-    }
+    call_service("system", "task_create", req.encode_to_vec())
+        .and_then(|res| Ok(TaskCreateResponse::decode(&res[..])?.task_id))
+        .unwrap_or_default()
 }
 
 #[cfg(feature = "pdk")]
@@ -48,105 +115,22 @@ pub fn task_update(id: &str, progress: f32, completed: bool, error: &str, payloa
     let _ = call_service("system", "task_update", req.encode_to_vec());
 }
 
-#[no_mangle]
-pub extern "C" fn veld_alloc(size: u64) -> u64 {
-    let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
-    let ptr = buf.as_mut_ptr();
-    std::mem::forget(buf);
-    ptr as u64
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
-    let _ = Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize);
-}
-
-#[cfg(feature = "pdk")]
-pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let request = RpcRequest {
-        service: service.to_string(),
-        method: method.to_string(),
-        payload,
-        sync: None,
-        instance_id: 0,
-    };
-    
-    let req_buf = request.encode_to_vec();
-    unsafe {
-        let res_ptr = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
-        if res_ptr == 0 { return Err(anyhow::anyhow!("Veld System Call failed")); }
-
-        let ptr = (res_ptr & 0xFFFFFFFF) as *mut u8;
-        let len = (res_ptr >> 32) as usize;
-        
-        let res_buf = std::slice::from_raw_parts(ptr, len);
-        let response = RpcResponse::decode(res_buf)?;
-        
-        veld_free_wasm(ptr as u64, len as u64);
-
-        if !response.error.is_empty() { return Err(anyhow::anyhow!(response.error)); }
-        Ok(response.payload)
-    }
-}
-
-#[cfg(feature = "pdk")]
-pub fn gpu_write_resource(id: u64, offset: u64, data: &[u8]) -> anyhow::Result<()> {
-    unsafe { 
-        veld_resource_write(id, offset, data.as_ptr() as u64, data.len() as u64); 
-    }
-    Ok(())
-}
-
-#[cfg(feature = "pdk")]
-pub fn gpu_read_resource(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
-    unsafe {
-        let mut buf = vec![0u8; size as usize];
-        veld_resource_read(id, offset, buf.as_mut_ptr() as u64, size);
-        Ok(buf)
-    }
-}
-
-#[cfg(feature = "pdk")]
-pub fn compute_create_buffer(usage: u32, size: u64, readonly: bool, mapped: bool) -> anyhow::Result<u64> {
-    use crate::rpc::compute::{ComputeResourceRequest, ComputeResourceResponse, CreateBuffer, compute_resource_request::Command};
-    let req = ComputeResourceRequest {
-        command: Some(Command::CreateBuffer(CreateBuffer {
-            size,
-            usage,
-            mapped_at_creation: mapped,
-            readonly,
-        })),
-        instance_id: 0,
-    };
-    let res_bytes = call_service("compute", "create_resource", req.encode_to_vec())?;
-    let res = ComputeResourceResponse::decode(&res_bytes[..])?;
-    if let Some(h) = res.handle {
-        Ok(h.id)
-    } else {
-        Err(anyhow::anyhow!("Buffer creation failed: {}", res.error))
-    }
-}
-
 #[cfg(feature = "pdk")]
 pub fn get_config(key: &str) -> Option<String> {
     use crate::rpc::core::{GetConfigRequest, GetConfigResponse};
     let req = GetConfigRequest { key: key.to_string() };
-    match call_service("system", "get_config", req.encode_to_vec()) {
-        Ok(res_bytes) => {
-            match GetConfigResponse::decode(&res_bytes[..]) {
-                Ok(r) => Some(r.value),
-                Err(_) => None,
-            }
-        }
-        Err(_) => None,
-    }
+    call_service("system", "get_config", req.encode_to_vec())
+        .ok()
+        .and_then(|res| GetConfigResponse::decode(&res[..]).ok())
+        .map(|r| r.value)
 }
+
+// --- INTERNAL CONTEXT HELPERS ---
 
 pub fn load_input() -> Vec<u8> {
     unsafe {
         let len = veld_input_len();
         if len == 0 { return Vec::new(); }
-        
         let mut buf = vec![0u8; len as usize];
         veld_input_copy(buf.as_mut_ptr() as u64, len);
         buf
@@ -158,3 +142,9 @@ pub fn store_output(data: Vec<u8>) {
         veld_output_set(data.as_ptr() as u64, data.len() as u64);
     }
 }
+
+// Backward compatibility aliases
+#[cfg(feature = "pdk")]
+pub use resource_write as gpu_write_resource;
+#[cfg(feature = "pdk")]
+pub use resource_read as gpu_read_resource;

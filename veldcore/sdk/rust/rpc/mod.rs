@@ -25,7 +25,6 @@ pub struct ServiceState<S, M> {
     pub tasks: std::collections::HashMap<String, crate::core::BoxedStream<M>>,
 }
 
-/// Трейт-маркер для типизированного RPC ответа.
 pub trait RpcResponseDecoder {
     fn decode_from(bytes: &[u8]) -> anyhow::Result<Self>
     where
@@ -38,7 +37,6 @@ impl<T: prost::Message + Default> RpcResponseDecoder for T {
     }
 }
 
-/// Макрос для генерации клиентских прокси-функций для вызова хостовых сервисов.
 #[macro_export]
 macro_rules! host_proxy {
     (
@@ -66,7 +64,6 @@ macro_rules! host_proxy {
     };
 }
 
-/// Макрос для генерации клиентских прокси-функций для вызова WASM-микросервисов (все методы по умолчанию - задачи).
 #[macro_export]
 macro_rules! rpc_proxy {
     (
@@ -82,10 +79,8 @@ macro_rules! rpc_proxy {
     };
 }
 
-/// Внутренний макрос для генерации конкретного метода прокси.
 #[macro_export]
 macro_rules! handle_proxy_method {
-    // Обычный метод
     ($service:expr, $method:ident, $req:ty, $res:ty, ) => {
         pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
             use $crate::prost::Message;
@@ -108,7 +103,6 @@ macro_rules! handle_proxy_method {
             }
         }
     };
-    // Задача (@task)
     ($service:expr, $method:ident, $req:ty, $res:ty, @task) => {
         pub fn $method(req: &$req) -> $crate::anyhow::Result<$crate::rpc::core::TaskResponse> {
             use $crate::prost::Message;
@@ -160,7 +154,6 @@ macro_rules! handle_proxy_method {
     };
 }
 
-/// Внутренний макрос для декодирования, который умеет в ().
 #[macro_export]
 macro_rules! decode_rpc_final {
     ((), $bytes:expr) => { Ok(()) };
@@ -169,7 +162,6 @@ macro_rules! decode_rpc_final {
     };
 }
 
-/// Внутренний макрос для декодирования результата задачи.
 #[macro_export]
 macro_rules! decode_task_final {
     ((), $payload:expr) => { 
@@ -187,7 +179,6 @@ macro_rules! decode_task_final {
     };
 }
 
-/// Улучшенный макрос для определения модуля (сервиса).
 #[macro_export]
 macro_rules! define_module {
     (
@@ -247,14 +238,10 @@ macro_rules! define_module {
             };
             let mut state_lock = match state_arc.try_lock() {
                 Ok(l) => l,
-                Err(_) => return 0, // State is busy, poll later
+                Err(_) => return 0, 
             };
             let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>>>()
-                .expect("Failed to downcast state to expected type");
-
-            if !service.tasks.is_empty() {
-                 // $crate::core::raw::log(&$crate::rpc::core::LogRequest { level: 2, message: format!("Polling {} tasks", service.tasks.len()) });
-            }
+                .expect("Failed to downcast state");
 
             let mut finished_tasks = Vec::new();
             for (task_id, stream) in service.tasks.iter_mut() {
@@ -299,7 +286,7 @@ macro_rules! define_module {
         #[no_mangle]
         pub extern "C" fn handle_rpc() -> i32 {
             use $crate::prost::Message;
-            use $crate::rpc::core::{RpcRequest, RpcResponse, TaskStatusRequest, TaskStatusResponse, TaskCancelRequest};
+            use $crate::rpc::core::{RpcRequest, RpcResponse};
 
             let input = $crate::rpc::host::load_input();
             let request = match RpcRequest::decode(&input[..]) {
@@ -311,48 +298,29 @@ macro_rules! define_module {
                 let state_arc = match $crate::rpc::MODULE_STATE.get() {
                     Some(Ok(s)) => s,
                     Some(Err(e)) => return (Vec::new(), format!("Module initialization failed: {}", e)),
-                    None => return (Vec::new(), "Module not initialized (init not called)".to_string()),
+                    None => return (Vec::new(), "Module not initialized".to_string()),
                 };
                 let mut state_lock = state_arc.lock().unwrap();
                 let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>>>()
-                    .expect("Failed to downcast state to expected type");
+                    .expect("Failed to downcast state");
 
                 match request.method.as_str() {
-                    "task_status" => {
-                        let _req = match TaskStatusRequest::decode(&request.payload[..]) {
-                            Ok(r) => r,
-                            Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
-                        };
-                        
-                        // Если это системный запрос статуса, но у нас НЕТ такой задачи в локальном реестре,
-                        // это нормально — возможно, задача управляется хостом.
-                        // Но в этой реализации мы опрашиваем задачи через SystemService хоста.
-                        (Vec::new(), "Use system.task_status".to_string())
-                    }
-                    "task_cancel" => {
-                        let _req = match TaskCancelRequest::decode(&request.payload[..]) {
-                            Ok(r) => r,
-                            Err(e) => return (Vec::new(), format!("Decode error: {}", e)),
-                        };
-                        (Vec::new(), "Use system.task_cancel".to_string())
-                    }
                     $(
                         $method => {
                             let req = match <$req_type>::decode(&request.payload[..]) {
                                 Ok(r) => r,
                                 Err(e) => return (Vec::new(), format!("Failed to decode request for {}: {}", $method, e)),
                             };
-                            
                             $crate::handle_method_logic!(service, $func, req, $(@ $task)?)
                         }
                     )*
-                    _ => (Vec::new(), format!("Method '{}' not found in plugin", request.method)),
+                    _ => (Vec::new(), format!("Method '{}' not found", request.method)),
                 }
             }));
 
             let (payload, error) = match res {
                 Ok(val) => val,
-                Err(_) => (Vec::new(), "Plugin panicked during execution".to_string()),
+                Err(_) => (Vec::new(), "Plugin panicked".to_string()),
             };
 
             let response = RpcResponse { payload, error, sync: None };
@@ -364,7 +332,6 @@ macro_rules! define_module {
 
 #[macro_export]
 macro_rules! handle_method_logic {
-    // Ветка для обычного метода
     ($service:ident, $func:path, $req:ident, ) => {
         {
             match $func(&mut $service.state, $req) {
@@ -376,7 +343,6 @@ macro_rules! handle_method_logic {
             }
         }
     };
-    // Ветка для задачи (@task)
     ($service:ident, $func:path, $req:ident, @task) => {
         {
             let task_id = $crate::rpc::host::task_create();
@@ -392,7 +358,7 @@ macro_rules! handle_method_logic {
             let mut finished_immediately = false;
             let mut immediately_result = (Vec::new(), String::new());
 
-            // Выполняем первый опрос сразу, чтобы задача хотя бы перешла в Started
+            // Выполняем первый опрос сразу, чтобы kickstart'нуть футуру
             while let std::task::Poll::Ready(Some(update)) = combined_stream.poll_next_unpin(&mut cx) {
                 match update {
                     $crate::core::task::TaskUpdate::Started(_) => {
@@ -419,7 +385,7 @@ macro_rules! handle_method_logic {
             if finished_immediately {
                 immediately_result
             } else {
-                // Если задача не завершилась сразу, сохраняем поток для последующих опросов
+                // Если задача не завершилась сразу, сохраняем поток для poll_tasks
                 $service.tasks.insert(task_id.clone(), Box::pin(combined_stream));
 
                 use $crate::prost::Message;

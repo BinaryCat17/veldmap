@@ -41,6 +41,19 @@ impl SystemService {
 impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
+            "log" => {
+                let req = crate::core::LogRequest::decode(&payload[..])?;
+                use crate::logging::*;
+                let level = match req.level() {
+                    crate::core::LogLevel::Trace => log::Level::Trace,
+                    crate::core::LogLevel::Debug => log::Level::Debug,
+                    crate::core::LogLevel::Info => log::Level::Info,
+                    crate::core::LogLevel::Warn => log::Level::Warn,
+                    crate::core::LogLevel::Error => log::Level::Error,
+                };
+                veld_log(level, req.flags | FLAG_WASM, None, &req.message);
+                Ok(Vec::new())
+            }
             "get_config" => {
                 let req = GetConfigRequest::decode(&payload[..])?;
                 let value = if let Some(config) = self.configs.get(&requestor_id) {
@@ -115,7 +128,7 @@ impl NativeService for SystemService {
             }
             "task_status" => {
                 let req = TaskStatusRequest::decode(&payload[..])?;
-                let mut tasks = self.tasks.lock().unwrap();
+                let tasks = self.tasks.lock().unwrap();
                 if let Some(task) = tasks.get(&req.task_id) {
                     let response = TaskStatusResponse { 
                         progress: task.progress, 
@@ -124,11 +137,6 @@ impl NativeService for SystemService {
                         result_handle: task.result_handle.clone(),
                         payload: task.payload.clone(),
                     }.encode_to_vec();
-                    
-                    if task.completed {
-                        log::debug!(target: "host", "Task {} completed and removed from host", req.task_id);
-                        tasks.remove(&req.task_id);
-                    }
                     
                     Ok(response)
                 } else {

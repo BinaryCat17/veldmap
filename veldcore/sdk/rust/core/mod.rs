@@ -119,13 +119,13 @@ pub mod raw {
 pub fn fs_read_bytes(path: impl Into<String>) -> anyhow::Result<Vec<u8>> {
     let res = raw::fs::fs_read(&FsReadRequest { path: path.into() })?;
     let handle = res.handle.ok_or_else(|| anyhow::anyhow!("No handle"))?;
-    crate::rpc::host::gpu_read_resource(handle.id, 0, handle.size)
+    crate::rpc::host::resource_read(handle.id, 0, handle.size)
 }
 
 pub fn fs_write_bytes(path: impl Into<String>, data: &[u8]) -> anyhow::Result<()> {
     let res = raw::sys::create_data(&CreateDataRequest { size: data.len() as u64 })?;
     let handle = res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create resource"))?;
-    crate::rpc::host::gpu_write_resource(handle.id, 0, data)?;
+    crate::rpc::host::resource_write(handle.id, 0, data);
     raw::fs::fs_write(&FsWriteRequest { path: path.into(), handle: Some(handle) })
 }
 

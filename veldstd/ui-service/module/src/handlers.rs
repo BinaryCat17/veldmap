@@ -159,7 +159,7 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
 }
 
 fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, surface_handle: veldsdk::rpc::core::ResourceHandle) -> anyhow::Result<Vec<UiEventResponse>> {
-    let render_start = std::time::Instant::now();
+    let _render_start = std::time::Instant::now();
     let (width, height) = *plugin.canvas_size.borrow();
     if width == 0 || height == 0 { return Ok(Vec::new()); }
     
