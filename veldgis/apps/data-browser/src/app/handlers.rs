@@ -7,10 +7,22 @@ use crate::{AppState, AppMessage};
 use crate::screens::{SearchMessage, BrowseMessage, DownloadedMessage, PreviewMessage};
 use crate::common::ViewMode;
 
-pub fn module_init(_cfg: crate::common::LocalConfig) -> Result<(AppState, ())> {
+pub fn module_init(_cfg: crate::common::LocalConfig) -> Result<(AppState, Command<AppMessage>)> {
     let mut state = AppState::default();
     state.global.status_message = "VeldMap Data Browser Ready".to_string();
-    Ok((state, ()))
+    Ok((state, Command::none()))
+}
+
+pub fn internal_update(state: &mut AppState, message: AppMessage) -> Command<AppMessage> {
+    match message {
+        AppMessage::SwitchMode(mode) => handle_switch_mode(state, mode),
+        AppMessage::Search(m) => handle_search(state, m),
+        AppMessage::Browse(m) => handle_browse(state, m),
+        AppMessage::Downloaded(m) => handle_downloaded(state, m),
+        AppMessage::Preview(m) => handle_preview(state, m),
+        AppMessage::ClearError => handle_clear_error(state),
+        AppMessage::CancelDownload => handle_cancel_download(state),
+    }
 }
 
 // ==================== ДЕЛЕГИРОВАНИЕ ====================

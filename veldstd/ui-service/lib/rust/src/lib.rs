@@ -8,6 +8,7 @@ pub mod proto {
 
 use serde::Serialize;
 pub use futures_util::task::noop_waker_ref;
+use veldsdk::anyhow;
 
 // Генерируем транспорт для UI-сервиса. 
 veldsdk::host_proxy! {
@@ -1100,219 +1101,121 @@ pub mod diffing {
     }
 }
 
-pub struct ModuleState<S, M> {
-    pub state: S,
-    pub tasks: Vec<veldsdk::core::BoxedStream<M>>,
+pub trait VeldUiApp: Sized + 'static {
+    type Message: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;
+    type Config: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;
+
+    fn init(config: Self::Config) -> anyhow::Result<(Self, veldsdk::core::Command<Self::Message>)>;
+    fn update(&mut self, message: Self::Message) -> veldsdk::core::Command<Self::Message>;
+    fn view(&self) -> crate::Element<Self::Message>;
+}
+
+pub struct UiRunner<A: VeldUiApp> {
+    pub app: A,
     pub plugin_name: String,
     pub width: u32,
     pub height: u32,
     pub last_layout: Option<proto::Layout>,
+    pub tasks: Vec<veldsdk::core::BoxedStream<A::Message>>,
 }
 
-#[macro_export]
-macro_rules! define_remote_ui_module {
-    (
-        config: $config_type:ty,
-        state: $state_type:ty,
-        message: $message_type:ty,
-        init: $init_func:path,
-        view: $view_func:path,
-        handlers: {
-            $($msg_variant:ident $( ( $($arg:ident),* ) )? => $handler_func:path);* $(;)?
-        }
-    ) => {
-        #[no_mangle]
-        pub extern "C" fn init() -> i32 {
-            let _ = veldsdk::core::init();
-            let config_json = match veldsdk::rpc::host::get_config("config") {
-                Some(c) => c,
-                None => return 1,
-            };
-            let config: $config_type = match veldsdk::serde_json::from_str(&config_json) {
-                Ok(c) => c,
-                Err(_) => return 2,
-            };
-            let plugin_name = veldsdk::rpc::host::get_config("plugin_name").unwrap_or_else(|| "unknown".to_string());
-            let (state, _) = match $init_func(config) {
-                Ok(s) => s,
-                Err(_) => return 3,
-            };
-            let module_state = $crate::ModuleState::<$state_type, $message_type> {
-                state,
-                tasks: Vec::new(),
-                plugin_name,
-                width: 1024,
-                height: 768,
-                last_layout: None,
-            };
-            if veldsdk::rpc::MODULE_STATE.set(Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(module_state))))).is_err() { return 4; }
-            0
-        }
+impl<A: VeldUiApp> UiRunner<A> {
+    pub fn new(config: A::Config) -> anyhow::Result<Self> {
+        let plugin_name = veldsdk::rpc::host::get_config("plugin_name").unwrap_or_else(|| "unknown".to_string());
+        let (app, cmd) = A::init(config)?;
+        
+        Ok(Self {
+            app,
+            plugin_name,
+            width: 1024,
+            height: 768,
+            last_layout: None,
+            tasks: cmd.0,
+        })
+    }
 
-        #[no_mangle]
-        pub extern "C" fn poll_tasks() -> i32 {
-            let state_arc = match veldsdk::rpc::MODULE_STATE.get() {
-                Some(Ok(s)) => s,
-                _ => return 0,
-            };
-            let mut state_lock = match state_arc.try_lock() {
-                Ok(l) => l,
-                Err(_) => return 0,
-            };
-            let module = state_lock.downcast_mut::<$crate::ModuleState<$state_type, $message_type>>().unwrap();
-
-            let waker = $crate::reexports::noop_waker_ref();
-            let mut cx = $crate::reexports::Context::from_waker(waker);
-            let mut new_messages = Vec::new();
-            
-            use veldsdk::futures_util::stream::StreamExt;
-            
-            module.tasks.retain_mut(|task| {
-                loop {
-                    match task.poll_next_unpin(&mut cx) {
-                        $crate::reexports::Poll::Ready(Some(msg)) => {
-                            new_messages.push(msg);
-                        },
-                        $crate::reexports::Poll::Ready(None) => return false,
-                        $crate::reexports::Poll::Pending => return true,
-                    }
+    pub fn dispatch_event(&mut self, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<proto::HandleUiEventResponse> {
+        if let Some(ref ev_type) = event.event {
+            match ev_type {
+                veldsdk::rpc::app::ui_event::Event::Resize(r) => {
+                    self.width = r.width;
+                    self.height = r.height;
                 }
-            });
+                veldsdk::rpc::app::ui_event::Event::Frame(_f) => {
+                    let waker = crate::reexports::noop_waker_ref();
+                    let mut cx = crate::reexports::Context::from_waker(waker);
+                    let mut new_messages = Vec::new();
+                    
+                    use veldsdk::futures_util::stream::StreamExt;
+                    
+                    self.tasks.retain_mut(|task| {
+                        loop {
+                            match task.poll_next_unpin(&mut cx) {
+                                crate::reexports::Poll::Ready(Some(msg)) => {
+                                    new_messages.push(msg);
+                                },
+                                crate::reexports::Poll::Ready(None) => return false,
+                                crate::reexports::Poll::Pending => return true,
+                            }
+                        }
+                    });
 
-            for msg in new_messages {
-                let cmd = internal_update(&mut module.state, msg);
-                module.tasks.extend(cmd.0);
-            }
-            0
-        }
+                    for msg in new_messages {
+                        let cmd = self.app.update(msg);
+                        self.tasks.extend(cmd.0);
+                    }
 
-        #[no_mangle]
-        pub extern "C" fn handle_rpc() -> i32 {
-            use veldsdk::prost::Message;
-            use veldsdk::rpc::core::{RpcRequest, RpcResponse};
-
-            let input = veldsdk::rpc::host::load_input();
-            let request = match RpcRequest::decode(&input[..]) {
-                Ok(r) => r,
-                Err(_) => return 1,
-            };
-            
-            let state_arc = match veldsdk::rpc::MODULE_STATE.get() {
-                Some(Ok(s)) => s,
-                _ => return 2,
-            };
-            let mut state_lock = state_arc.lock().unwrap();
-            let module = state_lock.downcast_mut::<$crate::ModuleState<$state_type, $message_type>>().unwrap();
-
-            match request.method.as_str() {
-                "handle_ui_event" => {
-                    let event = match veldsdk::rpc::app::UiEvent::decode(&request.payload[..]) {
-                        Ok(e) => e,
-                        Err(_) => return 3,
+                    let element = self.app.view();
+                    let mut root_widget = element.widget;
+                    
+                    let mut index = 0;
+                    let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
+                    
+                    let new_layout = crate::proto::Layout {
+                        root: Some(root_widget),
+                        width: self.width, height: self.height,
+                        hash,
                     };
-                    
-                    if let Some(ref ev_type) = event.event {
-                        match ev_type {
-                            veldsdk::rpc::app::ui_event::Event::Resize(r) => {
-                                module.width = r.width;
-                                module.height = r.height;
-                            }
-                            veldsdk::rpc::app::ui_event::Event::Frame(_f) => {
-                                let waker = $crate::reexports::noop_waker_ref();
-                                let mut cx = $crate::reexports::Context::from_waker(waker);
-                                let mut new_messages = Vec::new();
-                                
-                                use veldsdk::futures_util::stream::StreamExt;
-                                
-                                module.tasks.retain_mut(|task| {
-                                    loop {
-                                        match task.poll_next_unpin(&mut cx) {
-                                            $crate::reexports::Poll::Ready(Some(msg)) => {
-                                                new_messages.push(msg);
-                                            },
-                                            $crate::reexports::Poll::Ready(None) => return false,
-                                            $crate::reexports::Poll::Pending => return true,
-                                        }
-                                    }
-                                });
 
-                                for msg in new_messages {
-                                    let cmd = internal_update(&mut module.state, msg);
-                                    module.tasks.extend(cmd.0);
-                                }
-
-                                let element = $view_func(&module.state);
-                                let mut root_widget = element.widget;
-                                
-                                // ВЫЧИСЛЯЕМ ХЕШИ И ID ДЛЯ ДИФФИНГА (Позиционные)
-                                let mut index = 0;
-                                let hash = $crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
-                                
-                                let new_layout = $crate::proto::Layout {
-                                    root: Some(root_widget),
-                                    width: module.width, height: module.height,
-                                    hash,
-                                };
-
-                                let request = if let Some(ref old_layout) = module.last_layout {
-                                    if let Some(patch) = $crate::diffing::diff_layouts(old_layout, &new_layout) {
-                                        Some($crate::proto::SetViewRequest {
-                                            plugin_id: module.plugin_name.clone(),
-                                            update: Some($crate::proto::set_view_request::Update::Patch(patch)),
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    Some($crate::proto::SetViewRequest {
-                                        plugin_id: module.plugin_name.clone(),
-                                        update: Some($crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
-                                    })
-                                };
-
-                                module.last_layout = Some(new_layout);
-                                if let Some(req) = request {
-                                    let _ = $crate::raw::set_view(&req);
-                                }
-                            }
-                            _ => {}
+                    let request = if let Some(ref old_layout) = self.last_layout {
+                        if let Some(patch) = crate::diffing::diff_layouts(old_layout, &new_layout) {
+                            Some(crate::proto::SetViewRequest {
+                                plugin_id: self.plugin_name.clone(),
+                                update: Some(crate::proto::set_view_request::Update::Patch(patch)),
+                            })
+                        } else {
+                            None
                         }
-                    }
+                    } else {
+                        Some(crate::proto::SetViewRequest {
+                            plugin_id: self.plugin_name.clone(),
+                            update: Some(crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
+                        })
+                    };
 
-                    if let Ok(ui_res) = $crate::raw::handle_ui_event(&$crate::proto::HandleUiEventRequest {
-                        plugin_id: module.plugin_name.clone(),
-                        event: Some(event),
-                    }) {
-                        for msg_res in ui_res.messages {
-                            let message: $message_type = match veldsdk::serde_json::from_str(&msg_res.message_tag) {
-                                Ok(m) => m,
-                                Err(_) => continue,
-                            };
-                            let cmd = internal_update(&mut module.state, message);
-                            module.tasks.extend(cmd.0);
-                        }
+                    self.last_layout = Some(new_layout);
+                    if let Some(req) = request {
+                        let _ = crate::raw::set_view(&req);
                     }
-                    
-                    let response = RpcResponse { payload: Vec::new(), error: String::new(), sync: None };
-                    veldsdk::rpc::host::store_output(response.encode_to_vec());
-                    0
                 }
-                _ => 6,
+                _ => {}
             }
         }
 
-        fn internal_update(state: &mut $state_type, message: $message_type) -> veldsdk::core::Command<$message_type> {
-            #[allow(unused_imports)]
-            use $message_type::*;
-            match message {
-                $(
-                    $msg_variant $( ( $($arg),* ) )? => {
-                        $handler_func(state, $($($arg),*)?)
-                    }
-                )*
+        if let Ok(ui_res) = crate::raw::handle_ui_event(&crate::proto::HandleUiEventRequest {
+            plugin_id: self.plugin_name.clone(),
+            event: Some(event),
+        }) {
+            for msg_res in ui_res.messages {
+                if let Ok(m) = veldsdk::serde_json::from_str::<A::Message>(&msg_res.message_tag) {
+                    let cmd = self.app.update(m);
+                    self.tasks.extend(cmd.0);
+                }
             }
         }
-    };
+        
+        Ok(proto::HandleUiEventResponse { messages: Vec::new() })
+    }
 }
 
 pub mod reexports {
