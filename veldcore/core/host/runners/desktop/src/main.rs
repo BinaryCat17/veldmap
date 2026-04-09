@@ -13,6 +13,7 @@ use winit::{
     window::WindowBuilder,
 };
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::io::Write;
 use prost::Message;
 
@@ -93,16 +94,53 @@ async fn main() -> anyhow::Result<()> {
         .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
         .build(&event_loop)?);
 
-    let instance = wgpu::Instance::default();
+    veldmap_host_core::vinfo!("Creating wgpu instance (Vulkan only)...");
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::all(),
+        ..Default::default()
+    });
+    
+    veldmap_host_core::vinfo!("Creating surface...");
     let surface = instance.create_surface(window.clone())?;
-    let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&surface),
-        force_fallback_adapter: false,
-    }).await.map_err(|e| anyhow::anyhow!("Adapter error: {}", e))?;
+    
+    veldmap_host_core::vinfo!("Enumerating Vulkan adapters...");
+    let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN).await;
+    for (i, adapter) in adapters.iter().enumerate() {
+        let info = adapter.get_info();
+        veldmap_host_core::vinfo!("Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
+            i, info.name, info.vendor, info.device);
+    }
+    
+    // Выбираем реальный GPU (не llvmpipe/software)
+    let mut adapter = None;
+    for a in adapters {
+        let info = a.get_info();
+        // Исключаем llvmpipe и software renderers
+        if !info.name.to_lowercase().contains("llvmpipe") && 
+           !info.name.to_lowercase().contains("software") &&
+           info.vendor != 0x1414 { // Microsoft (software adapters)
+            adapter = Some(a);
+            break;
+        }
+    }
+    
+    // Fallback: если не нашли дискретный GPU, пробуем request_adapter
+    let adapter = match adapter {
+        Some(a) => a,
+        None => {
+            veldmap_host_core::vwarn!("No discrete GPU found, trying fallback...");
+            instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: true,
+            }).await.map_err(|e| anyhow::anyhow!("Adapter error: {}", e))?
+        }
+    };
 
-    veldmap_host_core::vdebug!("Selected GPU: {:?}", adapter.get_info().name);
+    veldmap_host_core::vinfo!("Selected GPU: {:?}", adapter.get_info().name);
 
+    veldmap_host_core::vinfo!("Requesting device...");
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
         required_features: wgpu::Features::empty(),
@@ -114,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(Mutex::new(queue));
 
+    veldmap_host_core::vinfo!("Getting surface capabilities...");
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats.iter()
         .copied()
@@ -138,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
+    veldmap_host_core::vinfo!("Initial surface configure: {}x{}", config.width, config.height);
     surface.configure(&device_arc, &config);
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
@@ -350,6 +390,9 @@ async fn main() -> anyhow::Result<()> {
     // Принудительная первая отрисовка
     window.request_redraw();
 
+    // Счётчик переконфигураций surface (для отладки)
+    let surface_config_count = AtomicUsize::new(0);
+
     event_loop.run(move |event, window_target| {
         window_target.set_control_flow(ControlFlow::Wait);
 
@@ -393,9 +436,19 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => window_target.exit(),
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
-                config.width = size.width.max(1);
-                config.height = size.height.max(1);
-                surface.configure(&device_arc, &config);
+                let new_width = size.width.max(1);
+                let new_height = size.height.max(1);
+                veldmap_host_core::vdebug!("Resized event: new={}x{}, current={}x{}", new_width, new_height, config.width, config.height);
+                // Переконфигурируем только если размеры реально изменились
+                if new_width != config.width || new_height != config.height {
+                    let count = surface_config_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    config.width = new_width;
+                    config.height = new_height;
+                    veldmap_host_core::vinfo!("Surface reconfigure #{}: {}x{}", count, config.width, config.height);
+                    surface.configure(&device_arc, &config);
+                } else {
+                    veldmap_host_core::vdebug!("Skipping reconfigure - same size");
+                }
                 window.request_redraw();
                 let ev = veldmap_host_core::app::UiEvent {
                     event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent {

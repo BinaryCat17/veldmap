@@ -24,10 +24,14 @@ def main():
     
     env = os.environ.copy()
     
-    if args.vulkan or args.backend is None:
-        env["WGPU_BACKEND"] = "vulkan"
-    elif args.backend:
+    # Use Vulkan backend (with dzn support)
+    if args.backend:
         env["WGPU_BACKEND"] = args.backend
+    elif args.vulkan or args.backend is None:
+        env["WGPU_BACKEND"] = "vulkan"
+    
+    # Enable non-conformant Vulkan drivers (dzn)
+    env["WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER"] = "1"
     
     # Logging configuration: 
     # Console: veldmap=info, остальное только error
