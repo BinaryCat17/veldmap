@@ -81,6 +81,7 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
     if let Some(ev) = req_event.event {
         match ev {
             app_proto::ui_event::Event::Resize(r) => {
+                log::info!("[UI] Resize event: {}x{} sf={}", r.width, r.height, r.scale_factor);
                 *plugin.canvas_size.borrow_mut() = (r.width, r.height);
                 *plugin.scale_factor.borrow_mut() = r.scale_factor;
                 *plugin.needs_redrawing.borrow_mut() = true;
@@ -161,7 +162,11 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
 fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, surface_handle: veldsdk::rpc::core::ResourceHandle) -> anyhow::Result<Vec<UiEventResponse>> {
     let _render_start = std::time::Instant::now();
     let (width, height) = *plugin.canvas_size.borrow();
-    if width == 0 || height == 0 { return Ok(Vec::new()); }
+    log::info!("[UI] render_plugin: {}x{} for plugin {}", width, height, plugin_id);
+    if width == 0 || height == 0 { 
+        log::warn!("[UI] render_plugin: zero size, skipping");
+        return Ok(Vec::new()); 
+    }
     
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
     
@@ -198,8 +203,13 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
                            *last_verts != renderer.vertices ||
                            renderer.is_atlas_dirty();
 
+    log::info!("[UI] commands_changed={}, is_layout_dirty={}, vertices={}", commands_changed, *is_layout_dirty, renderer.vertices.len());
+    
     if commands_changed || *is_layout_dirty {
-        execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format, surface_handle)?;
+        log::info!("[UI] Executing GPU commands...");
+        let texture_id = execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format, surface_handle)?;
+        log::info!("[UI] GPU commands executed, texture_id: {}, calling display_frame", texture_id);
+        let _ = veldsdk::app::AppBridge::display_frame_with_id(texture_id);
         
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();
@@ -221,7 +231,40 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     Ok(responses)
 }
 
-fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, width: u32, height: u32, sf: f32, _plugin_id: &str, surface_format: i32, surface_handle: veldsdk::rpc::core::ResourceHandle) -> anyhow::Result<()> {
+fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, width: u32, height: u32, sf: f32, _plugin_id: &str, surface_format: i32, _surface_handle: veldsdk::rpc::core::ResourceHandle) -> anyhow::Result<u64> {
+    // Создаем offscreen текстуру для UI
+    let texture_req = ComputeResourceRequest {
+        instance_id: 0,
+        command: Some(compute_resource_request::Command::CreateTexture(CreateTexture {
+            width, height, 
+            format: surface_format as i32, 
+            usage: 2 | 4 | 16, // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC
+            dimension: 1, 
+            mip_level_count: 1, 
+            sample_count: 1, 
+            depth_or_array_layers: 1, 
+            readonly: false
+        }))
+    };
+    let texture_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", texture_req.encode_to_vec())?[..])?;
+    let texture_id = texture_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create offscreen texture"))?.id;
+    log::info!("[UI] Created offscreen texture: {}", texture_id);
+    
+    // Создаем view для текстуры
+    let view_req = ComputeResourceRequest {
+        instance_id: 0,
+        command: Some(compute_resource_request::Command::CreateTextureView(CreateTextureView {
+            texture_id, 
+            format: surface_format as i32, 
+            dimension: 0, 
+            aspect: 1, 
+            ..Default::default()
+        }))
+    };
+    let view_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", view_req.encode_to_vec())?[..])?;
+    let view_id = view_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create texture view"))?.id;
+    log::info!("[UI] Created texture view: {} for texture: {}", view_id, texture_id);
+    
     ensure_gpu_resources(plugin, renderer, surface_format)?;
 
     let mut recorder = ComputeRecorder::new(width, height);
@@ -312,9 +355,9 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
         }
     }
 
-    let _ = recorder.submit(surface_handle.id, None);
-    let _ = veldsdk::app::AppBridge::display_frame();
-    Ok(())
+    log::info!("[UI] Submitting to view_id={}", view_id);
+    let _ = recorder.submit(view_id, None);
+    Ok(texture_id)
 }
 
 fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, texture_id: u64) -> anyhow::Result<u64> {
@@ -362,6 +405,9 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
 }
 
 fn ensure_gpu_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
+    log::info!("[UI] ensure_gpu_resources: bgl_id={:?}, pipeline={:?}, atlas_tex={:?}", 
+        renderer.bgl_id, plugin.ui_pipeline.borrow(), renderer.atlas_texture_id);
+    
     if renderer.bgl_id.is_none() {
         let req = ComputeResourceRequest {
             instance_id: 0,

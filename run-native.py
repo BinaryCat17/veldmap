@@ -29,6 +29,9 @@ def main():
     elif args.backend:
         env["WGPU_BACKEND"] = args.backend
     
+    # Logging configuration
+    env["RUST_LOG"] = "veldmap=info,warn"
+    
     # Common optimizations
     env["EGL_LOG_LEVEL"] = "fatal"
     env["MESA_DEBUG"] = "silent"
@@ -40,6 +43,8 @@ def main():
     ] + profile_flag + [
         "--", "--config", args.config
     ] + extra_args
+    
+    print(f"Environment: RUST_LOG={env.get('RUST_LOG', 'not set')}")
     
     try:
         subprocess.run(cmd, env=env)

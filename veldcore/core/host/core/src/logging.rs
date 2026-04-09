@@ -32,9 +32,6 @@ pub fn veld_log(level: Level, flags: u32, plugin_name: Option<&str>, message: &s
 
 #[macro_export]
 macro_rules! vinfo {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Info, $flags, None, &format!($($arg)+));
-    };
     ($($arg:tt)+) => {
         $crate::logging::veld_log($crate::logging::Level::Info, 0, None, &format!($($arg)+));
     };
@@ -42,9 +39,6 @@ macro_rules! vinfo {
 
 #[macro_export]
 macro_rules! vwarn {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Warn, $flags, None, &format!($($arg)+));
-    };
     ($($arg:tt)+) => {
         $crate::logging::veld_log($crate::logging::Level::Warn, 0, None, &format!($($arg)+));
     };
@@ -52,9 +46,6 @@ macro_rules! vwarn {
 
 #[macro_export]
 macro_rules! verror {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Error, $flags, None, &format!($($arg)+));
-    };
     ($($arg:tt)+) => {
         $crate::logging::veld_log($crate::logging::Level::Error, 0, None, &format!($($arg)+));
     };
@@ -62,9 +53,6 @@ macro_rules! verror {
 
 #[macro_export]
 macro_rules! vdebug {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Debug, $flags, None, &format!($($arg)+));
-    };
     ($($arg:tt)+) => {
         $crate::logging::veld_log($crate::logging::Level::Debug, 0, None, &format!($($arg)+));
     };
@@ -72,9 +60,6 @@ macro_rules! vdebug {
 
 #[macro_export]
 macro_rules! vtrace {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Trace, $flags, None, &format!($($arg)+));
-    };
     ($($arg:tt)+) => {
         $crate::logging::veld_log($crate::logging::Level::Trace, 0, None, &format!($($arg)+));
     };
