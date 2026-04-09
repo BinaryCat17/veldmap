@@ -668,8 +668,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -5921,6 +5923,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "chrono",
  "env_logger",
  "image",
  "iroh",
@@ -5931,10 +5934,12 @@ dependencies = [
  "spin_sleep",
  "sysinfo",
  "tokio",
+ "veldmap-host-compute",
  "veldmap-host-core",
  "veldmap-host-fs",
  "veldmap-host-image",
  "veldmap-host-network",
+ "veldmap-host-system",
  "wasmtime",
  "wgpu",
  "winit",

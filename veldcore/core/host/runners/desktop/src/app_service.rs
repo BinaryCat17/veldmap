@@ -8,6 +8,7 @@ use prost::Message;
 use tokio::sync::mpsc;
 use winit::event_loop::EventLoopProxy;
 
+#[allow(dead_code)]
 pub enum AppCommand {
     Draw(u64), // resource_id
 }

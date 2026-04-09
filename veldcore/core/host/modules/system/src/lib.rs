@@ -1,4 +1,4 @@
-use veldmap_host_core::dispatcher::NativeService;
+use veldmap_host_core::dispatcher::{NativeService, TaskState};
 use veldmap_host_core::resources::{ResourceManager, Resource};
 use veldmap_host_core::core::{
     TaskStatusRequest, TaskStatusResponse,
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use dashmap::DashMap;
 
 pub struct SystemService {
-    tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>,
+    tasks: Arc<Mutex<HashMap<String, TaskState>>>,
     resources: Arc<ResourceManager>,
     configs: Arc<DashMap<u32, HashMap<String, serde_json::Value>>>,
 }
@@ -20,7 +20,7 @@ pub struct SystemService {
 impl SystemService {
     pub fn new(
         resources: Arc<ResourceManager>, 
-        tasks: Arc<Mutex<HashMap<String, crate::dispatcher::TaskState>>>
+        tasks: Arc<Mutex<HashMap<String, TaskState>>>
     ) -> Self {
         Self {
             tasks,
@@ -103,7 +103,7 @@ impl NativeService for SystemService {
                 let _req = TaskCreateRequest::decode(&payload[..])?;
                 let task_id = uuid::Uuid::new_v4().to_string();
                 let mut tasks = self.tasks.lock().unwrap();
-                tasks.insert(task_id.clone(), crate::dispatcher::TaskState {
+                tasks.insert(task_id.clone(), TaskState {
                     progress: 0.0,
                     completed: false,
                     error: String::new(),

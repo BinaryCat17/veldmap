@@ -6,6 +6,7 @@ use iced_core::{Point, Event};
 use iced_runtime::user_interface;
 use crate::renderer::GpuRenderer;
 
+#[allow(dead_code)]
 pub struct PluginUiState {
     pub layout: proto::Layout,
     pub is_layout_dirty: RefCell<bool>,

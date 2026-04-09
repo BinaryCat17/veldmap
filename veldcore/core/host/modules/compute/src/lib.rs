@@ -1,10 +1,17 @@
 use veldmap_host_core::dispatcher::NativeService;
 use veldmap_host_core::resources::{ResourceManager, Resource};
 use veldmap_host_core::core::ResourceHandle;
+#[allow(unused_imports)]
 use veldmap_host_core::compute::{
-    ComputeResourceRequest, ComputeResourceResponse, 
+    ComputeResourceRequest, ComputeResourceResponse, Submit, CommandBuffer,
     compute_resource_request::Command as ComputeCommand,
-    wgpu_command::Command as WgpuCommand
+    wgpu_command::Command as WgpuCommand,
+    CreateTexture, CreateBuffer, CreateShaderModule, CreateRenderPipeline,
+    CreateSampler, CreateTextureView, CreateBindGroupLayout, CreateBindGroup,
+    bind_group_layout_entry::Ty, BufferBindingLayout, SamplerBindingLayout,
+    TextureBindingLayout, StepMode, VertexAttribute, VertexBufferLayout,
+    PrimitiveTopology, FrontFace, CullMode, IndexFormat, BindGroupEntry,
+    bind_group_entry, FilterMode, TextureFormat,
 };
 use image::GenericImageView;
 use prost::Message;
@@ -46,7 +53,7 @@ pub fn get_ui_sampler(device: &wgpu::Device) -> wgpu::Sampler {
 
 pub fn execute_render_commands<'a>(
     rp: &mut wgpu::RenderPass<'a>,
-    command_buffer: &'a crate::compute::CommandBuffer,
+    command_buffer: &'a CommandBuffer,
     resources: &'a ResourceManager,
     target_width: u32,
     target_height: u32,
@@ -126,18 +133,18 @@ pub fn execute_render_commands<'a>(
 
 pub struct ComputeService {
     resources: Arc<ResourceManager>,
-    render_queue: Arc<Mutex<Vec<crate::compute::Submit>>>,
+    render_queue: Arc<Mutex<Vec<Submit>>>,
 }
 
 impl ComputeService {
     pub fn new(
         resources: Arc<ResourceManager>, 
-        render_queue: Arc<Mutex<Vec<crate::compute::Submit>>>,
+        render_queue: Arc<Mutex<Vec<Submit>>>,
     ) -> Self {
         Self { resources, render_queue }
     }
 
-    fn submit(&self, req: crate::compute::Submit) -> anyhow::Result<()> {
+    fn submit(&self, req: Submit) -> anyhow::Result<()> {
         let mut queue = self.render_queue.lock().unwrap();
         queue.push(req);
         Ok(())
@@ -148,7 +155,7 @@ impl NativeService for ComputeService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
             "submit" => {
-                let mut req = crate::compute::Submit::decode(&payload[..])?;
+                let mut req = Submit::decode(&payload[..])?;
                 req.instance_id = requestor_id; // Override with verified ID
                 self.submit(req)?;
                 Ok(Vec::new())
@@ -184,7 +191,7 @@ impl NativeService for ComputeService {
                         for e in bgl.entries {
                             let visibility = wgpu::ShaderStages::from_bits_truncate(e.visibility);
                             let ty = match e.ty {
-                                Some(crate::compute::bind_group_layout_entry::Ty::Buffer(b)) => {
+                                Some(Ty::Buffer(b)) => {
                                     wgpu::BindingType::Buffer {
                                         ty: match b.r#type {
                                             1 => wgpu::BufferBindingType::Uniform,
@@ -196,7 +203,7 @@ impl NativeService for ComputeService {
                                         min_binding_size: None,
                                     }
                                 }
-                                Some(crate::compute::bind_group_layout_entry::Ty::Sampler(s)) => {
+                                Some(Ty::Sampler(s)) => {
                                     wgpu::BindingType::Sampler(match s.r#type {
                                         1 => wgpu::SamplerBindingType::Filtering,
                                         2 => wgpu::SamplerBindingType::NonFiltering,
@@ -204,7 +211,7 @@ impl NativeService for ComputeService {
                                         _ => wgpu::SamplerBindingType::Filtering,
                                     })
                                 }
-                                Some(crate::compute::bind_group_layout_entry::Ty::Texture(t)) => {
+                                Some(Ty::Texture(t)) => {
                                     wgpu::BindingType::Texture {
                                         sample_type: match t.sample_type {
                                             1 => wgpu::TextureSampleType::Float { filterable: true },

@@ -6,8 +6,6 @@ pub mod plugin_module;
 pub mod abi;
 pub mod dispatcher;
 pub mod node;
-pub mod system_service;
-pub mod compute_service;
 pub mod resources;
 pub mod logging;
 
