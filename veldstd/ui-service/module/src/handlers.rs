@@ -201,7 +201,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
 
     if commands_changed || *is_layout_dirty {
         let texture_id = execute_gpu_commands(plugin, renderer, width, height, sf, plugin_id, surface_format, surface_handle)?;
-        let _ = veldsdk::app::AppBridge::display_frame_with_id(texture_id);
+        let _ = veldsdk::app::AppBridge::display_frame(texture_id);
         
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();
