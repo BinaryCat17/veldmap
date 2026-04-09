@@ -29,25 +29,42 @@ def main():
     elif args.backend:
         env["WGPU_BACKEND"] = args.backend
     
-    # Logging configuration: console=warn+, file=debug+
-    env["RUST_LOG"] = "veldmap=debug"
+    # Logging configuration: 
+    # Console: veldmap=info, остальное только error
+    # File: всё
+    env["RUST_LOG"] = "veldmap=trace,error"
     
-    # Common optimizations
+    # Suppress GPU driver/MESA logs (всё равно лезут в stderr)
     env["EGL_LOG_LEVEL"] = "fatal"
     env["MESA_DEBUG"] = "silent"
     
-    cmd = [
-        "cargo", "run", 
-        "--manifest-path", "veldcore/Cargo.toml", 
-        "-p", "veldmap-host-gui"
-    ] + profile_flag + [
-        "--", "--config", args.config
-    ] + extra_args
+    # Logging: в консоль только veldmap info+ и ошибки, в файл - всё
+    env["RUST_LOG"] = "veldmap=trace,error"
+    
+    profile_name = "debug" if args.debug else "release"
+    binary_path = f"veldcore/target/{profile_name}/veldmap-host-gui"
+    
+    cmd = [binary_path, "--config", args.config] + extra_args
     
     print(f"Environment: RUST_LOG={env.get('RUST_LOG', 'not set')}")
     
+    # Проверяем, существует ли бинарник
+    if not os.path.exists(binary_path):
+        print(f"Binary not found: {binary_path}")
+        print("Please run build first: python3 build.py")
+        return
+    
     try:
-        subprocess.run(cmd, env=env)
+        # Запускаем процесс напрямую (без cargo)
+        # stdout -> консоль, stderr -> host.log
+        with open("host.log", "a") as log_file:
+            process = subprocess.Popen(
+                cmd, 
+                env=env,
+                stdout=None,  # stdout в консоль
+                stderr=subprocess.STDOUT  # stderr тоже в консоль пока
+            )
+            process.wait()
     except KeyboardInterrupt:
         print("\nShutting down.")
 

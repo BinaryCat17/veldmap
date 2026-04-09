@@ -13,7 +13,6 @@ use winit::{
     window::WindowBuilder,
 };
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write;
 use prost::Message;
 
@@ -22,6 +21,8 @@ mod app_service;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // --- 1. ИНИЦИАЛИЗАЦИЯ ЛОГИРОВАНИЯ ---
+    // Очищаем лог файл при старте
+    let _ = std::fs::remove_file("host.log");
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -29,9 +30,11 @@ async fn main() -> anyhow::Result<()> {
         .ok();
     let log_file: Option<Arc<Mutex<std::fs::File>>> = log_file.map(|f| Arc::new(Mutex::new(f)));
 
-    // Настраиваем логирование: все логи в файл, в консоль только warn+
+    // Настраиваем логирование
+    // В файл пишем ВСЁ (trace и выше)
+    // В консоль только veldmap info+ и warn/error от других
     let file_log = log_file.clone();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=info"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,info"))
         .format(move |buf, record| {
             let log_line = format!(
                 "[{}] <{}> {}\n",
@@ -47,8 +50,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // В консоль только warn и выше
-            if record.level() <= log::Level::Warn {
+            // В консоль: veldmap info+ и warn/error от других крейтов
+            // Debug/trace только в файл
+            let is_veldmap = record.target().starts_with("veldmap");
+            let is_info_or_higher = record.level() <= log::Level::Info;
+            let is_warning = record.level() <= log::Level::Warn;
+            
+            if (is_veldmap && is_info_or_higher) || is_warning {
                 write!(buf, "{}", log_line)
             } else {
                 Ok(())
