@@ -13,6 +13,7 @@ use winit::{
     window::WindowBuilder,
 };
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::io::Write;
 use prost::Message;
 
@@ -26,8 +27,10 @@ async fn main() -> anyhow::Result<()> {
         .append(true)
         .open("host.log")
         .ok();
-    let log_file = log_file.map(|f| std::sync::Mutex::new(f));
+    let log_file: Option<Arc<Mutex<std::fs::File>>> = log_file.map(|f| Arc::new(Mutex::new(f)));
 
+    // Настраиваем логирование: все логи в файл, в консоль только warn+
+    let file_log = log_file.clone();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=info"))
         .format(move |buf, record| {
             let log_line = format!(
@@ -37,23 +40,23 @@ async fn main() -> anyhow::Result<()> {
                 record.args()
             );
 
-            if let Some(file) = &log_file {
+            // Пишем в файл всё
+            if let Some(file) = &file_log {
                 if let Ok(mut f) = file.lock() {
                     let _ = f.write_all(log_line.as_bytes());
-                    let _ = f.flush();
                 }
             }
 
-            write!(buf, "{}", log_line)
+            // В консоль только warn и выше
+            if record.level() <= log::Level::Warn {
+                write!(buf, "{}", log_line)
+            } else {
+                Ok(())
+            }
         })
         .init();
 
-    eprintln!("[DIAGNOSTIC] VeldMap GUI Host starting - stderr test");
-    println!("[DIAGNOSTIC] VeldMap GUI Host starting - stdout test");
-    veldmap_host_core::vinfo!("=== VeldMap GUI Host starting ===");
-    
-    // Принудительно flush stdout
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+    veldmap_host_core::vinfo!("VeldMap GUI Host starting...");
 
     // --- 2. ПАРСИНГ АРГУМЕНТОВ ---
     let args: Vec<String> = std::env::args().collect();
@@ -90,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
         force_fallback_adapter: false,
     }).await.map_err(|e| anyhow::anyhow!("Adapter error: {}", e))?;
 
-    veldmap_host_core::vinfo!("Selected GPU: {:?}", adapter.get_info().name);
+    veldmap_host_core::vdebug!("Selected GPU: {:?}", adapter.get_info().name);
 
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
@@ -109,13 +112,13 @@ async fn main() -> anyhow::Result<()> {
         .find(|f| f.is_srgb())
         .unwrap_or(caps.formats[0]);
 
-    veldmap_host_core::vinfo!("Available Present Modes: {:?}", caps.present_modes);
+    veldmap_host_core::vdebug!("Available Present Modes: {:?}", caps.present_modes);
     let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
         wgpu::PresentMode::Mailbox
     } else {
         wgpu::PresentMode::Fifo
     };
-    veldmap_host_core::vinfo!("Selected Present Mode: {:?}", present_mode);
+    veldmap_host_core::vdebug!("Selected Present Mode: {:?}", present_mode);
 
     let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -231,7 +234,6 @@ async fn main() -> anyhow::Result<()> {
 
     // 1. ЦИКЛ ОБРАБОТКИ ЗАДАЧ (POLLING)
     tokio::spawn(async move {
-        let mut frame_count = 0u64;
         loop {
             let has_tasks = {
                 let tasks = d_clone.tasks.lock().unwrap();
@@ -250,10 +252,6 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 if needs_frame && !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                    frame_count += 1;
-                    if frame_count % 60 == 1 {
-                        veldmap_host_core::vinfo!("Frame cycle triggered (count={})", frame_count);
-                    }
                     frame_pending_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                     frame_wake_clone.notify_one();
                 }
@@ -275,21 +273,16 @@ async fn main() -> anyhow::Result<()> {
     let event_queue_render = event_queue.clone();
     let actual_fps_render = actual_fps.clone();
 
+    // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
     tokio::spawn(async move {
-        let mut render_count = 0u64;
         loop {
             frame_wake_render.notified().await;
-            render_count += 1;
             
             let start_redraw = std::time::Instant::now();
             let mut events = {
                 let mut eq = event_queue_render.lock().unwrap();
                 std::mem::take(&mut *eq)
             };
-            
-            if render_count <= 5 || render_count % 60 == 0 {
-                veldmap_host_core::vinfo!("Render cycle #{} started, events count: {}", render_count, events.len());
-            }
 
             let dt = start_redraw.duration_since(last_render_finish).as_secs_f32();
             let fps = *actual_fps_render.lock().unwrap();
@@ -306,10 +299,7 @@ async fn main() -> anyhow::Result<()> {
 
             for ev in events {
                 let payload = ev.encode_to_vec();
-                let result = dispatcher_render.call("data-browser", "handle_ui_event", payload, 0).await;
-                if let Err(e) = &result {
-                    veldmap_host_core::verror!("handle_ui_event failed: {:?}", e);
-                }
+                let _ = dispatcher_render.call("data-browser", "handle_ui_event", payload, 0).await;
             }
 
             window_render.request_redraw();
@@ -323,12 +313,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Начальная инициализация: проверяем актуальные размеры окна
     let actual_size = window.inner_size();
-    veldmap_host_core::vinfo!("Window actual size: {}x{}, config size: {}x{}", 
-        actual_size.width, actual_size.height, config.width, config.height);
     
     // Если размеры изменились - переконфигурируем surface
     if actual_size.width != config.width || actual_size.height != config.height {
-        veldmap_host_core::vinfo!("Updating surface config to actual window size");
         config.width = actual_size.width.max(1);
         config.height = actual_size.height.max(1);
         surface.configure(&device_arc, &config);
@@ -351,28 +338,9 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     event_queue.lock().unwrap().push(initial_ev);
-    veldmap_host_core::vinfo!("Initial resize event queued: {}x{}", config.width, config.height);
     
     // Принудительная первая отрисовка
     window.request_redraw();
-    
-    // Отправляем несколько начальных Frame событий, чтобы UI сервис успел инициализироваться
-    veldmap_host_core::vinfo!("Sending initial frame events for UI warmup...");
-    for i in 0..5 {
-        let frame_ev = veldmap_host_core::app::UiEvent {
-            event: Some(veldmap_host_core::app::ui_event::Event::Frame(
-                veldmap_host_core::app::FrameEvent {
-                    dt: 0.016,
-                    actual_fps: 60.0,
-                    monitor_fps: 60,
-                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: 0, size: 0, content_hash: Vec::new() }),
-                }
-            )),
-            ..Default::default()
-        };
-        event_queue.lock().unwrap().push(frame_ev);
-        veldmap_host_core::vinfo!("  -> Warmup frame {} queued", i + 1);
-    }
 
     event_loop.run(move |event, window_target| {
         window_target.set_control_flow(ControlFlow::Wait);
@@ -384,15 +352,12 @@ async fn main() -> anyhow::Result<()> {
                     last_draw_cmd = Some(cmd);
                 }
                 if let Some(AppCommand::Draw(id)) = last_draw_cmd {
-                    veldmap_host_core::vinfo!("UserEvent: AppCommand::Draw(id={})", id);
                     if is_visible.load(std::sync::atomic::Ordering::SeqCst) {
                         if id == veldmap_host_core::SURFACE_ID {
                             // SURFACE_ID (0) означает, что UI сервис ещё не готов
                             // Не очищаем bind_group, просто запрашиваем redraw
-                            veldmap_host_core::vinfo!("  -> SURFACE_ID received, UI not ready yet");
                         } else if Some(id) != app_texture_id {
                             if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id, 0) {
-                                veldmap_host_core::vinfo!("  -> Creating bind_group for texture {}", id);
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let bind_group = device_arc.create_bind_group(&wgpu::BindGroupDescriptor {
                                     label: Some("App Bind Group"),
@@ -411,17 +376,15 @@ async fn main() -> anyhow::Result<()> {
                                 app_texture_id = Some(id);
                                 app_bind_group = Some(bind_group);
                             } else {
-                                veldmap_host_core::vwarn!("  -> Failed to get texture resource for id {}", id);
+                                veldmap_host_core::vwarn!("Failed to get texture resource for id {}", id);
                             }
                         }
-                        veldmap_host_core::vinfo!("  -> Requesting redraw, bind_group exists: {}", app_bind_group.is_some());
                         window.request_redraw();
                     }
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => window_target.exit(),
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
-                veldmap_host_core::vinfo!("Window resized: {}x{}", size.width, size.height);
                 config.width = size.width.max(1);
                 config.height = size.height.max(1);
                 surface.configure(&device_arc, &config);
@@ -520,12 +483,9 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     if let Some(bg) = &app_bind_group {
-                        veldmap_host_core::vinfo!("Redraw: drawing UI with bind_group");
                         rp.set_pipeline(&blit_pipeline);
                         rp.set_bind_group(0, bg, &[]);
                         rp.draw(0..3, 0..1);
-                    } else {
-                        veldmap_host_core::vwarn!("Redraw: NO bind_group, UI not drawn!");
                     }
                 }
 

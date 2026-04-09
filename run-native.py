@@ -29,8 +29,8 @@ def main():
     elif args.backend:
         env["WGPU_BACKEND"] = args.backend
     
-    # Logging configuration
-    env["RUST_LOG"] = "veldmap=info,warn"
+    # Logging configuration: console=warn+, file=debug+
+    env["RUST_LOG"] = "veldmap=debug"
     
     # Common optimizations
     env["EGL_LOG_LEVEL"] = "fatal"

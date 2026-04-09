@@ -42,8 +42,6 @@ impl NativeService for AppService {
                 match cmd.command {
                     Some(veldmap_host_core::app::app_display_command::Command::DrawFrame(draw_frame)) => {
                         let texture_id = draw_frame.texture_id;
-                        veldmap_host_core::vinfo!("AppService::display DrawFrame(texture_id={}), is_visible={}", 
-                            texture_id, self.is_visible.load(Ordering::SeqCst));
                         
                         // Обновляем время отрисовки СРАЗУ, чтобы цикл Frame не уходил в idle
                         if let Ok(mut last) = self.last_render_time.lock() {
@@ -61,12 +59,10 @@ impl NativeService for AppService {
                             texture_id 
                         };
                         
-                        let send_result = self.tx.send(AppCommand::Draw(target_id));
-                        veldmap_host_core::vinfo!("AppService::display tx.send({}) result: {:?}", target_id, send_result);
+                        let _ = self.tx.send(AppCommand::Draw(target_id));
                         
                         if self.is_visible.load(Ordering::SeqCst) {
-                            let proxy_result = self.proxy.send_event(());
-                            veldmap_host_core::vinfo!("AppService::display proxy.send result: {:?}", proxy_result);
+                            let _ = self.proxy.send_event(());
                         }
 
                         Ok(Vec::new())
