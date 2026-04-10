@@ -70,7 +70,17 @@ pub fn update(
                     if !res.error.is_empty() {
                         global.error_message = Some(format!("Search API Error: {}", res.error));
                     } else {
-                        state.results = res.products;
+                        let local_files = host::refresh_local_files();
+                        state.results = res.products.into_iter().map(|p| {
+                            let exists_locally = local_files.iter().any(|f| f.name == p.name);
+                            crate::common::BrowserItem {
+                                s3_key: p.path,
+                                name: p.name,
+                                description: Some(format!("Grid: {}, Date: {}", p.grid_id, p.timestamp)),
+                                is_folder: false,
+                                exists_locally,
+                            }
+                        }).collect();
                         global.status_message = format!("Found {} results", state.results.len());
                     }
                 }

@@ -15,6 +15,6 @@ pub enum SearchFilterType {
 pub struct SearchState {
     pub query: String,
     pub filter_type: SearchFilterType,
-    pub results: Vec<veldmap_api::dataprovider::DataProduct>,
+    pub results: Vec<crate::common::BrowserItem>,
     pub is_loading: bool,
 }

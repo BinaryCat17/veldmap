@@ -41,7 +41,7 @@ pub fn view(state: &PreviewState, _global: &GlobalState) -> Element<AppMessage> 
         let mut progress = 0.0;
 
         for task in _global.task_manager.active() {
-            if let crate::service::task_manager::TaskKind::ImageLoad { .. } = task.kind {
+            if let crate::components::task_manager::TaskKind::ImageLoad { .. } = task.kind {
                 status_text = "Loading preview...";
                 progress = task.progress;
                 break;

@@ -5,7 +5,7 @@ use veld_ui::{
 };
 use crate::{
     AppMessage,
-    common::render_list,
+    components::browser_list::render_list,
     app::state::GlobalState,
     styles,
 };

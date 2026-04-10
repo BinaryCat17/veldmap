@@ -6,7 +6,7 @@ use crate::{
     AppMessage,
     app::state::GlobalState,
     service::host,
-    service::task_manager::TaskKind,
+    components::task_manager::TaskKind,
 };
 use super::{DownloadedState, message::Message};
 

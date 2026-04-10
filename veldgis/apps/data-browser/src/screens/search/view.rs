@@ -5,13 +5,30 @@ use crate::{
     AppMessage,
     app::state::GlobalState,
     styles,
+    components::browser_list::render_list,
 };
 use super::{SearchState, message::Message};
+use crate::screens::downloaded::message::Message as DownloadedMessage;
 
-pub fn view(state: &SearchState, _global: &GlobalState) -> Element<AppMessage> {
-    let results_list = text("Enter search query and press Search")
-        .size(16.0)
-        .color(styles::COLOR_TEXT_DIM);
+pub fn view(state: &SearchState, global: &GlobalState) -> Element<AppMessage> {
+    let results_list = if state.is_loading {
+        column![text("Searching...").size(16.0).color(styles::COLOR_TEXT_DIM)].into()
+    } else if state.results.is_empty() {
+        if state.query.is_empty() {
+            column![text("Enter search query and press Search").size(16.0).color(styles::COLOR_TEXT_DIM)].into()
+        } else {
+            column![text("No results found").size(16.0).color(styles::COLOR_TEXT_DIM)].into()
+        }
+    } else {
+        render_list(
+            &state.results,
+            &global.task_manager,
+            "search_results",
+            |_| AppMessage::Search(Message::Pressed), // Папки в результатах поиска пока не поддерживаются, но обработчик нужен
+            |path| AppMessage::Downloaded(DownloadedMessage::ViewFile(path)),
+            |path| AppMessage::Downloaded(DownloadedMessage::DownloadFile(path)),
+        )
+    };
 
     column![
         text("Search Copernicus Data Space").size(20.0),

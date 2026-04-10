@@ -5,7 +5,7 @@ use crate::{
     AppState, AppMessage,
     common::ViewMode,
     styles::{COLOR_TEXT, COLOR_TEXT_DIM},
-    widgets::task_panel,
+    components::task_manager::task_panel,
 };
 
 pub fn view(state: &AppState) -> Element<AppMessage> {

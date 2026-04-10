@@ -1,7 +1,7 @@
 ﻿//! app/state.rs — главное состояние приложения
 
 use crate::common::BrowserItem;
-use crate::service::task_manager::TaskManager;
+use crate::components::task_manager::TaskManager;
 use crate::screens::{SearchState, BrowseState, DownloadedState, PreviewState};
 
 /// Глобальное состояние
