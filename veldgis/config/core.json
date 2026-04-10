@@ -1,1 +1,13 @@
-{}
+{
+  "log_flags": [
+    "PERF",
+    "WASM",
+    "DISPATCHER",
+    "ABI",
+    "HOST_RENDER",
+    "COMPUTE",
+    "SDK",
+    "UI_HANDLERS",
+    "GRAPHICS"
+  ]
+}

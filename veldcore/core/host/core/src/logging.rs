@@ -8,9 +8,8 @@ pub const FLAG_ABI: u32 = 1 << 3;
 pub const FLAG_HOST_RENDER: u32 = 1 << 4;
 pub const FLAG_COMPUTE: u32 = 1 << 5;
 pub const FLAG_SDK: u32 = 1 << 6;
-pub const FLAG_UI_SERVICE: u32 = 1 << 7;
-pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
-pub const FLAG_GRAPHICS: u32 = 1 << 9;
+pub const FLAG_UI_HANDLERS: u32 = 1 << 7;
+pub const FLAG_GRAPHICS: u32 = 1 << 8;
 
 static ENABLED_FLAGS: AtomicU32 = AtomicU32::new(0);
 
