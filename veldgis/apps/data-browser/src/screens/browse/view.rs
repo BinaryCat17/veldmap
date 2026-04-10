@@ -57,21 +57,24 @@ pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
         .size(14.0)
         .color(styles::COLOR_TEXT_DIM);
 
-    container(
-        column![
-            header,
-            status_text,
-            pagination,
-            scrollable(list)
-                .width(Length::Fill)
-                .height(Length::Fill)
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .spacing(10.0)
-        .align_items(Alignment::Start)  // Прижимаем содержимое к верху
-    )
+    // Ключ для списка на основе токена страницы — заставляет UI мост пересоздать при пагинации
+    let list_key = state.current_page_token.len() as u64;
+    
+    log::info!("Browse view: items={}, next_token={:?}, current_token='{}'", 
+        state.items.len(), state.next_token, state.current_page_token);
+    
+    column![
+        header,
+        status_text,
+        pagination,
+        scrollable(list)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .key(list_key)
+    ]
     .width(Length::Fill)
     .height(Length::Fill)
+    .spacing(10.0)
+    .align_items(Alignment::Start)
     .into()
 }

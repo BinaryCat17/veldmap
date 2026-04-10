@@ -2,7 +2,7 @@
 use veldmap_api::dataprovider::ListPathResponse;
 use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum Message {
     /// Пользователь кликнул на папку (переход в путь)
     BrowsePath(String),

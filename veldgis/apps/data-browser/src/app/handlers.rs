@@ -13,6 +13,7 @@ pub fn module_init(_cfg: crate::common::LocalConfig) -> Result<(AppState, Comman
 }
 
 pub fn internal_update(state: &mut AppState, message: AppMessage) -> Command<AppMessage> {
+    log::info!("internal_update: msg={:?}", std::mem::discriminant(&message));
     match message {
         AppMessage::SwitchMode(mode) => handle_switch_mode(state, mode),
         AppMessage::Search(m) => handle_search(state, m),
@@ -35,9 +36,11 @@ pub fn handle_search(state: &mut AppState, msg: SearchMessage) -> Command<AppMes
 }
 
 pub fn handle_browse(state: &mut AppState, msg: BrowseMessage) -> Command<AppMessage> {
+    log::info!("handle_browse: screen={:?}", std::mem::discriminant(&state.screen));
     if let crate::app::state::Screen::Browse(s) = &mut state.screen {
         crate::screens::browse::update(s, msg, &mut state.global)
     } else {
+        log::warn!("handle_browse: not on Browse screen!");
         Command::none()
     }
 }

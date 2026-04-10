@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use veldmap_api::dataprovider::DownloadResponse;
 use super::state::FileFilter;                    // ← исправлено (относительный импорт)
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum Message {
     LocalSearchChanged(String),
     LocalFilterChanged(FileFilter),

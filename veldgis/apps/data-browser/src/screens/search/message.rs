@@ -6,7 +6,7 @@ use veldmap_api::dataprovider::SearchResponse;
 use serde::{Serialize, Deserialize};
 use super::state::SearchFilterType;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum Message {
     /// Пользователь ввёл текст в поисковую строку
     InputChanged(String),

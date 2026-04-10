@@ -2,7 +2,7 @@
 use veldsdk::rpc::core::ResourceHandle;
 use serde::{Serialize, Deserialize};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum Message {
     /// Обновление от задачи загрузки изображения (ImageUpdate)
     ImageUpdate(TaskUpdate<ResourceHandle>),

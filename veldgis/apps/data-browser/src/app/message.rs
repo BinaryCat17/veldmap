@@ -4,7 +4,7 @@ use serde::{Serialize, Deserialize};
 use crate::common::ViewMode;
 use crate::screens::{SearchMessage, BrowseMessage, DownloadedMessage, PreviewMessage};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum AppMessage {
     SwitchMode(ViewMode),
 

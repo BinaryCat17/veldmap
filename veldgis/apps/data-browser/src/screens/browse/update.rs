@@ -33,6 +33,7 @@ pub fn update(
 
         // === Обработка обновления задачи ===
         Message::Update(update) => {
+            log::info!("Browse Update: items before = {}, loading = {}", state.items.len(), state.is_loading);
             global.browse_task.handle(update.clone());
             state.is_loading = false;
 
@@ -62,6 +63,7 @@ pub fn update(
                         Some(response.next_token.clone())
                     };
 
+                    log::info!("Browse items updated: {} items", state.items.len());
                     global.status_message = format!("Loaded {} items", state.items.len());
                     
                     // Если список пустой но есть next_token, автоматически загружаем следующую страницу
@@ -86,8 +88,10 @@ pub fn update(
 
         // === Пагинация Next ===
         Message::NextPage => {
-            log::info!("NextPage clicked: next_token={:?}, current_page_token='{}'", state.next_token, state.current_page_token);
+            log::info!("NextPage: next_token={:?}, current_token='{}', items={}", 
+                state.next_token, state.current_page_token, state.items.len());
             if let Some(token) = state.next_token.clone() {
+                log::info!("NextPage: WILL start with token='{}'", token);
                 state.token_stack.push(state.current_page_token.clone());
                 state.current_page_token = token.clone();
                 state.is_loading = true;
@@ -99,7 +103,7 @@ pub fn update(
                 log::info!("Starting browse with token='{}'", token);
                 host::start_browse(req)
             } else {
-                log::info!("NextPage: no next_token available");
+                log::info!("NextPage: SKIPPED — next_token is None!");
                 Command::none()
             }
         }
