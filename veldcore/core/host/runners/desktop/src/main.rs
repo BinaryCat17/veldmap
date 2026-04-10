@@ -286,28 +286,16 @@ async fn main() -> anyhow::Result<()> {
             let is_visible = is_visible_clone.load(std::sync::atomic::Ordering::Relaxed);
             veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: is_visible={}", is_visible);
 
-            if has_tasks || is_visible {
+            // Запрашиваем кадр если есть задачи или интерактивность
+            // НЕ используем event_queue здесь чтобы избежать deadlock с render loop
+            let needs_frame = has_tasks || is_visible;
+            
+            if needs_frame {
                 let _ = d_clone.poll_all_tasks().await;
                 
-                // Проверяем нужен ли кадр - БЕЗ использования last_render_time (избегаем deadlock)
-                let (needs_frame, eq_len, int_elapsed) = {
-                    let eq = event_queue_clone.lock().unwrap();
-                    let last_int = last_int_clone.lock().unwrap();
-                    
-                    let eq_len = eq.len();
-                    let int_elapsed = last_int.elapsed().as_millis();
-                    let needs = !eq.is_empty() || int_elapsed < 500;
-                    (needs, eq_len, int_elapsed)
-                };
-                
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, 
-                    "[HOST] Polling: needs_frame={}, eq={}, int_elapsed={}ms, frame_pending={}",
-                    needs_frame, eq_len, int_elapsed,
-                    frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst));
-
-                if needs_frame && !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                if !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
                     frame_pending_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop notifying render thread");
+                    veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop notifying render thread (has_tasks={}, is_visible={})", has_tasks, is_visible);
                     frame_wake_clone.notify_one();
                 }
 
