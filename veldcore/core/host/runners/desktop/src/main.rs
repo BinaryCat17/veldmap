@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .init();
 
-    veldmap_host_core::vinfo!("VeldMap GUI Host starting...");
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "VeldMap GUI Host starting...");
 
     // --- 2. ПАРСИНГ АРГУМЕНТОВ ---
     let args: Vec<String> = std::env::args().collect();
@@ -85,11 +85,11 @@ async fn main() -> anyhow::Result<()> {
     let (window_width, window_height, window_title, _ui_scale) = plugin_windows
         .first()
         .map(|(name, cfg)| {
-            veldmap_host_core::vinfo!("Using window config from plugin '{}'", name);
+            veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Using window config from plugin '{}'", name);
             (cfg.width as f64, cfg.height as f64, cfg.title.clone(), cfg.ui_scale)
         })
         .unwrap_or_else(|| {
-            veldmap_host_core::vwarn!("No plugin window config found, using defaults");
+            veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "No plugin window config found, using defaults");
             (1024.0, 768.0, "VeldMap".to_string(), 1.0f32)
         });
 
@@ -99,21 +99,21 @@ async fn main() -> anyhow::Result<()> {
         .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
         .build(&event_loop)?);
 
-    veldmap_host_core::vinfo!("Creating wgpu instance (Vulkan only)...");
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Creating wgpu instance (Vulkan only)...");
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags: wgpu::InstanceFlags::all(),
         ..Default::default()
     });
     
-    veldmap_host_core::vinfo!("Creating surface...");
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Creating surface...");
     let surface = instance.create_surface(window.clone())?;
     
-    veldmap_host_core::vinfo!("Enumerating Vulkan adapters...");
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Enumerating Vulkan adapters...");
     let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN).await;
     for (i, adapter) in adapters.iter().enumerate() {
         let info = adapter.get_info();
-        veldmap_host_core::vinfo!("Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
+        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
             i, info.name, info.vendor, info.device);
     }
     
@@ -134,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
     let adapter = match adapter {
         Some(a) => a,
         None => {
-            veldmap_host_core::vwarn!("No discrete GPU found, trying fallback...");
+            veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "No discrete GPU found, trying fallback...");
             instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
@@ -143,9 +143,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    veldmap_host_core::vinfo!("Selected GPU: {:?}", adapter.get_info().name);
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Selected GPU: {:?}", adapter.get_info().name);
 
-    veldmap_host_core::vinfo!("Requesting device...");
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Requesting device...");
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,
         required_features: wgpu::Features::empty(),
@@ -157,20 +157,20 @@ async fn main() -> anyhow::Result<()> {
     let device_arc = Arc::new(device);
     let queue_arc = Arc::new(Mutex::new(queue));
 
-    veldmap_host_core::vinfo!("Getting surface capabilities...");
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Getting surface capabilities...");
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats.iter()
         .copied()
         .find(|f| f.is_srgb())
         .unwrap_or(caps.formats[0]);
 
-    veldmap_host_core::vdebug!("Available Present Modes: {:?}", caps.present_modes);
+    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Available Present Modes: {:?}", caps.present_modes);
     let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
         wgpu::PresentMode::Mailbox
     } else {
         wgpu::PresentMode::Fifo
     };
-    veldmap_host_core::vdebug!("Selected Present Mode: {:?}", present_mode);
+    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Selected Present Mode: {:?}", present_mode);
 
     let mut config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -182,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
-    veldmap_host_core::vinfo!("Initial surface configure: {}x{}", config.width, config.height);
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Initial surface configure: {}x{}", config.width, config.height);
     surface.configure(&device_arc, &config);
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
@@ -284,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
 
                 if needs_frame && !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
                     frame_pending_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    veldmap_host_core::vdebug!("[HOST] Polling loop notifying render thread");
+                    veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop notifying render thread");
                     frame_wake_clone.notify_one();
                 }
 
@@ -293,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
-        veldmap_host_core::vinfo!("Polling loop exiting...");
+        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Polling loop exiting...");
     });
 
     // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
@@ -309,11 +309,11 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
     tokio::spawn(async move {
-        veldmap_host_core::vinfo!("[HOST-RENDER] Render loop started");
+        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Render loop started");
         while running_render.load(Ordering::Relaxed) {
-            veldmap_host_core::vdebug!("[HOST-RENDER] Waiting for frame notification...");
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Waiting for frame notification...");
             frame_wake_render.notified().await;
-            veldmap_host_core::vdebug!("[HOST-RENDER] Got frame notification");
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Got frame notification");
             
             let start_redraw = std::time::Instant::now();
             let mut events = {
@@ -336,11 +336,11 @@ async fn main() -> anyhow::Result<()> {
 
             for (idx, ev) in events.iter().enumerate() {
                 let payload = ev.encode_to_vec();
-                veldmap_host_core::vinfo!("[HOST-RENDER] Calling data-browser::handle_ui_event event #{}", idx);
+                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Calling data-browser::handle_ui_event event #{}", idx);
                 let result = dispatcher_render.call("data-browser", "handle_ui_event", payload, 0).await;
                 match &result {
-                    Ok(_) => veldmap_host_core::vinfo!("[HOST-RENDER] data-browser::handle_ui_event returned OK"),
-                    Err(e) => veldmap_host_core::verror!("[HOST-RENDER] data-browser::handle_ui_event FAILED: {}", e),
+                    Ok(_) => veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] data-browser::handle_ui_event returned OK"),
+                    Err(e) => veldmap_host_core::verror!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] data-browser::handle_ui_event FAILED: {}", e),
                 }
             }
 
@@ -348,11 +348,11 @@ async fn main() -> anyhow::Result<()> {
             frame_pending_render.store(false, std::sync::atomic::Ordering::SeqCst);
             last_render_finish = std::time::Instant::now();
         }
-        veldmap_host_core::vinfo!("Render loop exiting...");
+        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Render loop exiting...");
     });
 
-    veldmap_host_core::vinfo!("Core ready. Render loop started...");
-    veldmap_host_core::vinfo!("Veldmap Iroh Node listening. Node ID: {}", endpoint.id());
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Core ready. Render loop started...");
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Veldmap Iroh Node listening. Node ID: {}", endpoint.id());
 
     // Начальная инициализация: проверяем актуальные размеры окна
     let actual_size = window.inner_size();
@@ -409,7 +409,7 @@ async fn main() -> anyhow::Result<()> {
                                 app_texture_id = Some(id);
                                 app_bind_group = Some(bind_group);
                             } else {
-                                veldmap_host_core::vwarn!("Failed to get texture resource for id {}", id);
+                                veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Failed to get texture resource for id {}", id);
                             }
                         }
                         window.request_redraw();
@@ -417,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                veldmap_host_core::vinfo!("Close requested, shutting down...");
+                veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Close requested, shutting down...");
                 running.store(false, Ordering::Relaxed);
                 frame_wake.notify_one(); // Wake up render loop to exit
                 window_target.exit();
@@ -425,16 +425,16 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 let new_width = size.width.max(1);
                 let new_height = size.height.max(1);
-                veldmap_host_core::vdebug!("Resized event: new={}x{}, current={}x{}", new_width, new_height, config.width, config.height);
+                veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Resized event: new={}x{}, current={}x{}", new_width, new_height, config.width, config.height);
                 // Переконфигурируем только если размеры реально изменились
                 if new_width != config.width || new_height != config.height {
                     let count = surface_config_count.fetch_add(1, Ordering::Relaxed) + 1;
                     config.width = new_width;
                     config.height = new_height;
-                    veldmap_host_core::vinfo!("Surface reconfigure #{}: {}x{}", count, config.width, config.height);
+                    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface reconfigure #{}: {}x{}", count, config.width, config.height);
                     surface.configure(&device_arc, &config);
                 } else {
-                    veldmap_host_core::vdebug!("Skipping reconfigure - same size");
+                    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Skipping reconfigure - same size");
                 }
                 window.request_redraw();
                 let ev = veldmap_host_core::app::UiEvent {
@@ -453,23 +453,23 @@ async fn main() -> anyhow::Result<()> {
                 event_queue.lock().unwrap().push(ev);
             }
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
-                veldmap_host_core::vdebug!("[HOST-EVENT] RedrawRequested received");
+                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-EVENT] RedrawRequested received");
                 let start_redraw = std::time::Instant::now();
                 let frame = match surface.get_current_texture() {
                     Ok(f) => f,
                     Err(wgpu::SurfaceError::Lost) => {
-                        veldmap_host_core::vwarn!("Surface lost, reconfiguring...");
+                        veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface lost, reconfiguring...");
                         surface.configure(&device_arc, &config);
                         window.request_redraw();
                         return;
                     }
                     Err(wgpu::SurfaceError::Outdated) => {
-                        veldmap_host_core::vdebug!("Surface outdated, requesting redraw...");
+                        veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface outdated, requesting redraw...");
                         window.request_redraw();
                         return;
                     }
                     Err(e) => { 
-                        veldmap_host_core::verror!("Surface error: {}", e); 
+                        veldmap_host_core::verror!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface error: {}", e); 
                         return; 
                     }
                 };

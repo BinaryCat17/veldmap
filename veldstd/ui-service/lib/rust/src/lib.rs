@@ -1144,7 +1144,7 @@ impl<A: VeldUiApp> UiRunner<A> {
             veldsdk::rpc::app::ui_event::Event::Key(_) => "Key",
             _ => "Unknown",
         }).unwrap_or("None");
-        veldsdk::vinfo!("[UI-RUNNER] dispatch_event ENTER: {}", event_name);
+        veldsdk::vtrace!(veldsdk::FLAG_UI_SERVICE, "[UI-RUNNER] dispatch_event ENTER: {}", event_name);
         
         if let Some(ref ev_type) = event.event {
             match ev_type {
@@ -1160,26 +1160,18 @@ impl<A: VeldUiApp> UiRunner<A> {
                     use veldsdk::futures_util::stream::StreamExt;
                     
                     let task_count_before = self.tasks.len();
-                    veldsdk::vdebug!("[UI-RUNNER] Polling {} tasks", task_count_before);
-                    
                     self.tasks.retain_mut(|task| {
-                        for i in 0..100 {
+                        for _ in 0..100 {
                             match task.poll_next_unpin(&mut cx) {
                                 crate::reexports::Poll::Ready(Some(msg)) => {
                                     new_messages.push(msg);
                                 },
-                                crate::reexports::Poll::Ready(None) => {
-                                    veldsdk::vdebug!("[UI-RUNNER] Task completed after {} polls", i);
-                                    return false;
-                                },
+                                crate::reexports::Poll::Ready(None) => return false,
                                 crate::reexports::Poll::Pending => return true,
                             }
                         }
-                        veldsdk::vwarn!("[UI-RUNNER] Task exceeded 100 polls, retaining");
                         true
                     });
-                    
-                    veldsdk::vdebug!("[UI-RUNNER] Polling done: {} tasks remain, {} new messages", self.tasks.len(), new_messages.len());
 
                     for msg in new_messages {
                         let cmd = self.app.update(msg);
@@ -1235,7 +1227,7 @@ impl<A: VeldUiApp> UiRunner<A> {
             }
         }
         
-        veldsdk::vinfo!("[UI-RUNNER] dispatch_event EXIT: {}", event_name);
+        veldsdk::vtrace!(veldsdk::FLAG_UI_SERVICE, "[UI-RUNNER] dispatch_event EXIT: {}", event_name);
         Ok(proto::HandleUiEventResponse { messages: Vec::new() })
     }
 }

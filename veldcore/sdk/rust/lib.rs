@@ -8,6 +8,12 @@ pub mod app;
 
 pub use core::{yield_now, FLAG_PERF};
 
+// Flags for logging
+pub const FLAG_SDK: u32 = 1 << 6;
+pub const FLAG_UI_SERVICE: u32 = 1 << 7;
+pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
+pub const FLAG_GRAPHICS: u32 = 1 << 9;
+
 // Re-exports for macros
 pub use serde_json;
 pub use prost;

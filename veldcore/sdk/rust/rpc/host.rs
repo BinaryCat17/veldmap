@@ -47,7 +47,7 @@ pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
 /// Универсальный вызов любого сервиса Хоста.
 #[cfg(feature = "pdk")]
 pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    crate::vinfo!("[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
+    crate::vinfo!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
     let request = RpcRequest {
         service: service.to_string(),
         method: method.to_string(),
@@ -57,10 +57,10 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
     };
     
     let req_buf = request.encode_to_vec();
-    crate::vinfo!("[SDK-CALL] Calling veld_host_call");
+    crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] Calling veld_host_call");
     unsafe {
         let res_combined = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
-        crate::vinfo!("[SDK-CALL] veld_host_call returned: {}", res_combined);
+        crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] veld_host_call returned: {}", res_combined);
         if res_combined == 0 { return Err(anyhow::anyhow!("Host call failed (0 returned)")); }
 
         let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
@@ -72,10 +72,10 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         veld_free_wasm(ptr as u64, len as u64);
 
         if !response.error.is_empty() { 
-            crate::verror!("[SDK-CALL] {}::{} error: {}", service, method, response.error);
+            crate::verror!(crate::FLAG_SDK, "[SDK-CALL] {}::{} error: {}", service, method, response.error);
             return Err(anyhow::anyhow!(response.error)); 
         }
-        crate::vinfo!("[SDK-CALL] {}::{} OK ({} bytes)", service, method, response.payload.len());
+        crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} OK ({} bytes)", service, method, response.payload.len());
         Ok(response.payload)
     }
 }

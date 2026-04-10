@@ -139,36 +139,51 @@ pub const FLAG_PERF: u32 = 1 << 0;
 
 #[macro_export]
 macro_rules! vinfo {
+    ($flags:expr, $($arg:tt)+) => {
+        $crate::log::log!(target: &format!("veldmap_vlog:{}", $flags), $crate::log::Level::Info, $($arg)+)
+    };
     ($($arg:tt)+) => {
-        $crate::log::log!($crate::log::Level::Info, $($arg)+);
+        $crate::log::log!($crate::log::Level::Info, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! vwarn {
+    ($flags:expr, $($arg:tt)+) => {
+        $crate::log::log!(target: &format!("veldmap_vlog:{}", $flags), $crate::log::Level::Warn, $($arg)+)
+    };
     ($($arg:tt)+) => {
-        $crate::log::log!($crate::log::Level::Warn, $($arg)+);
+        $crate::log::log!($crate::log::Level::Warn, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! verror {
+    ($flags:expr, $($arg:tt)+) => {
+        $crate::log::log!(target: &format!("veldmap_vlog:{}", $flags), $crate::log::Level::Error, $($arg)+)
+    };
     ($($arg:tt)+) => {
-        $crate::log::log!($crate::log::Level::Error, $($arg)+);
+        $crate::log::log!($crate::log::Level::Error, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! vdebug {
+    ($flags:expr, $($arg:tt)+) => {
+        $crate::log::log!(target: &format!("veldmap_vlog:{}", $flags), $crate::log::Level::Debug, $($arg)+)
+    };
     ($($arg:tt)+) => {
-        $crate::log::log!($crate::log::Level::Debug, $($arg)+);
+        $crate::log::log!($crate::log::Level::Debug, $($arg)+)
     };
 }
 
 #[macro_export]
 macro_rules! vtrace {
+    ($flags:expr, $($arg:tt)+) => {
+        $crate::log::log!(target: &format!("veldmap_vlog:{}", $flags), $crate::log::Level::Trace, $($arg)+)
+    };
     ($($arg:tt)+) => {
-        $crate::log::log!($crate::log::Level::Trace, $($arg)+);
+        $crate::log::log!($crate::log::Level::Trace, $($arg)+)
     };
 }
 

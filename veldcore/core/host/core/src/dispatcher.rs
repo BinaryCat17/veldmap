@@ -57,7 +57,7 @@ impl Dispatcher {
     }
 
     pub fn register_service(&self, name: String, location: ServiceLocation) {
-        log::trace!("[DISPATCHER] Registering service: {}", name);
+        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Registering service: {}", name);
         let mut services = self.services.lock().unwrap();
         services.insert(name, location);
     }
@@ -76,7 +76,7 @@ impl Dispatcher {
                     // Polling tasks - disabled to reduce noise
                     // veldmap_host_core::vtrace!("[DISPATCHER] Polling tasks for {}", name);
                     if let Err(e) = poll_tasks.call_async(&mut module.store, ()).await {
-                        log::warn!("[DISPATCHER] poll_tasks failed for {}: {}", name, e);
+                        crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_tasks failed for {}: {}", name, e);
                     }
                 }
             }
@@ -109,9 +109,9 @@ impl Dispatcher {
                 let req_buf = request.encode_to_vec();
                 let ser_time = ser_start.elapsed();
 
-                log::info!("[DISPATCHER] Acquiring lock for {}::{}", service_name, method);
+                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Acquiring lock for {}::{}", service_name, method);
                 let mut module = wasm_module.lock().await;
-                log::info!("[DISPATCHER] Lock acquired for {}::{}", service_name, method);
+                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Lock acquired for {}::{}", service_name, method);
                 
                 // Set the call context in the HostState
                 let ctx = crate::CallContext::new(req_buf);
@@ -120,15 +120,15 @@ impl Dispatcher {
                 let instance = module.instance;
                 let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
                 
-                log::info!("[DISPATCHER] >>> CALLING WASM handle_rpc: {}::{}", service_name, method);
+                crate::vinfo!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] >>> CALLING WASM handle_rpc: {}::{}", service_name, method);
                 
                 let wasm_start = std::time::Instant::now();
                 let result = handle_rpc.call_async(&mut module.store, ()).await;
                 let wasm_time = wasm_start.elapsed();
                 
                 match &result {
-                    Ok(_) => log::info!("[DISPATCHER] <<< WASM handle_rpc RETURNED OK: {}::{}", service_name, method),
-                    Err(e) => log::error!("[DISPATCHER] <<< WASM handle_rpc FAILED: {}::{} - {:?}", service_name, method, e),
+                    Ok(_) => crate::vinfo!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] <<< WASM handle_rpc RETURNED OK: {}::{}", service_name, method),
+                    Err(e) => crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] <<< WASM handle_rpc FAILED: {}::{} - {:?}", service_name, method, e),
                 }
                 
                 // Extract output from shared context
@@ -141,7 +141,7 @@ impl Dispatcher {
                 let response = match RpcResponse::decode(&res_buf[..]) {
                     Ok(r) => r,
                     Err(e) => {
-                        log::error!("[DISPATCHER] Failed to decode RpcResponse from WASM: {}. Raw size: {} bytes", e, res_buf.len());
+                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Failed to decode RpcResponse from WASM: {}. Raw size: {} bytes", e, res_buf.len());
                         return Err(anyhow::anyhow!("Decode error: {}", e));
                     }
                 };
@@ -165,7 +165,7 @@ impl Dispatcher {
                              let avg_wasm = entry.2 as f64 / 1000.0 / entry.0 as f64;
                              let avg_ser = entry.3 as f64 / 1000.0 / entry.0 as f64;
                              let avg_deser = entry.4 as f64 / 1000.0 / entry.0 as f64;
-                             crate::vinfo!("[P] Dispatcher (5s avg) {}: count={}, total={:.2}ms, wasm={:.2}ms, ser={:.2}ms, deser={:.2}ms", 
+                             crate::vinfo!(crate::logging::FLAG_DISPATCHER, "[P] Dispatcher (5s avg) {}: count={}, total={:.2}ms, wasm={:.2}ms, ser={:.2}ms, deser={:.2}ms", 
                                  key, entry.0, avg_tot, avg_wasm, avg_ser, avg_deser);
                          }
                          *entry = (0, 0, 0, 0, 0, std::time::Instant::now());

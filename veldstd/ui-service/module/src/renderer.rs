@@ -402,11 +402,11 @@ impl iced_core::text::Paragraph for RealParagraph {
                 let mut line_height = text.line_height.to_absolute(text.size).0;
 
                 if size <= 0.0 {
-                    log::error!("Cosmic-text: invalid font size: {}. Resetting to 16.0", size);
+                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text: invalid font size: {}. Resetting to 16.0", size);
                     size = 16.0;
                 }
                 if line_height <= 0.0 {
-                    log::error!("Cosmic-text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
+                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
                     line_height = size * 1.2;
                 }
 
@@ -646,11 +646,11 @@ impl iced_core::text::Renderer for GpuRenderer {
             let mut line_height = text.line_height.to_absolute(text.size).0;
 
             if size <= 0.0 {
-                log::error!("Cosmic-text fill_text: invalid font size: {}. Resetting to 16.0", size);
+                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text fill_text: invalid font size: {}. Resetting to 16.0", size);
                 size = 16.0;
             }
             if line_height <= 0.0 {
-                log::error!("Cosmic-text fill_text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
+                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text fill_text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
                 line_height = size * 1.2;
             }
 
