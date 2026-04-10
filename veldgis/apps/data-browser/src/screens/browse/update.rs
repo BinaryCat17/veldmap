@@ -53,7 +53,6 @@ pub fn update(
                             description: None,
                             is_folder,
                             exists_locally,
-                            is_downloading: false,
                         }
                     }).collect();
 

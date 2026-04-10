@@ -1,5 +1,5 @@
-﻿//! downloaded/view.rs — чистый вид экрана скачанных файлов
-//! Использует новый render_list + closures для всех действий
+//! downloaded/view.rs — чистый вид экрана скачанных файлов
+//! Использует новый render_list с TaskManager для проверки is_downloading
 
 use veld_ui::{column, text, scrollable, Element, Length};
 use crate::{
@@ -11,19 +11,12 @@ use crate::{
 use super::{DownloadedState, message::Message};
 
 pub fn view(state: &DownloadedState, global: &GlobalState) -> Element<AppMessage> {
-    // Подготовка списка с учётом состояния загрузки
-    let mut display_items = global.local_files.clone();
-    for item in &mut display_items {
-        if global.downloading_key.as_deref() == Some(&item.s3_key) {
-            item.is_downloading = true;
-        }
-    }
-
-    // Рендер списка через общий компонент
+    // Рендер списка через общий компонент с TaskManager
     let file_list = render_list(
-        &display_items,
+        &global.local_files,
+        &global.task_manager,
         // on_browse — не используется на этом экране (файлы уже локальные)
-        |_| AppMessage::Downloaded(Message::LocalSearchChanged(String::new())), // заглушка
+        |_| AppMessage::Downloaded(Message::LocalSearchChanged(String::new())),
         // on_view
         |path| AppMessage::Downloaded(Message::ViewFile(path)),
         // on_download
@@ -33,7 +26,7 @@ pub fn view(state: &DownloadedState, global: &GlobalState) -> Element<AppMessage
     column![
         text("Local Files").size(20.0),
 
-        // Простой вывод текущего поискового запроса (фильтр пока не рендерим)
+        // Простой вывод текущего поискового запроса
         text(format!("Search: {}", state.search_query))
             .size(14.0)
             .color(styles::COLOR_TEXT_DIM),

@@ -13,15 +13,11 @@ use super::{BrowseState, message::Message};
 use crate::screens::downloaded::message::Message as DownloadedMessage;  // ← добавили
 
 pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
-    let mut display_items = state.items.clone();
-    for item in &mut display_items {
-        if global.downloading_key.as_deref() == Some(&item.s3_key) {
-            item.is_downloading = true;
-        }
-    }
-
+    // is_downloading теперь проверяется через task_manager внутри render_list
+    let display_items = &state.items;
     let list = render_list(
         &display_items,
+        &global.task_manager,  // Передаём task_manager для проверки is_downloading
         |path| AppMessage::Browse(Message::BrowsePath(path)),
         |path| AppMessage::Downloaded(DownloadedMessage::ViewFile(path)),
         |path| AppMessage::Downloaded(DownloadedMessage::DownloadFile(path)),

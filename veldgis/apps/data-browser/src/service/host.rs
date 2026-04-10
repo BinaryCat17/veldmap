@@ -52,7 +52,6 @@ pub fn refresh_local_files() -> Vec<crate::common::BrowserItem> {
             description: None,
             is_folder: false,
             exists_locally: true,
-            is_downloading: false,
         }).collect()
     } else {
         vec![]

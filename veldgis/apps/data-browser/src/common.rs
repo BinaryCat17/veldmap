@@ -1,4 +1,4 @@
-//! common.rs — общие типы и виджеты (финальная версия)
+//! common.rs — общие типы и виджеты (финальная версия с TaskManager)
 
 use veld_ui::{column, row, text, button, container, Element, Padding, Alignment, Length, Space};
 use crate::styles;
@@ -19,12 +19,13 @@ pub struct BrowserItem {
     pub description: Option<String>,
     pub is_folder: bool,
     pub exists_locally: bool,
-    pub is_downloading: bool,
+    // is_downloading удалён — теперь проверяется через task_manager
 }
 
-// === ИСПРАВЛЕННЫЕ СИГНАТУРЫ (добавили Clone) ===
+// === ОБНОВЛЁННЫЕ СИГНАТУРЫ ===
 pub fn render_item(
     item: &BrowserItem,
+    is_downloading: bool,  // Передаём извне из task_manager
     on_browse: impl Fn(String) -> AppMessage + Clone + 'static,
     on_view: impl Fn(String) -> AppMessage + Clone + 'static,
     on_download: impl Fn(String) -> AppMessage + Clone + 'static,
@@ -64,9 +65,11 @@ pub fn render_item(
         }
     };
 
-    let status_element: Element<AppMessage> = if item.is_downloading {
+    // Статус/кнопки справа — упрощённая версия без прогресс-бара
+    let status_element: Element<AppMessage> = if is_downloading {
+        // Показываем иконку загрузки (без прогресса — он теперь в боковой панели)
         container(text("\u{f017}").color(styles::COLOR_WARNING))
-            .width(Length::Fixed(120.0))
+            .width(Length::Fixed(80.0))
             .align_x(Alignment::Center)
             .into()
     } else if item.exists_locally {
@@ -103,12 +106,14 @@ pub fn render_item(
 
 pub fn render_list(
     items: &[BrowserItem],
+    task_manager: &crate::task_manager::TaskManager,  // Добавляем для проверки is_downloading
     on_browse: impl Fn(String) -> AppMessage + Clone + 'static,
     on_view: impl Fn(String) -> AppMessage + Clone + 'static,
     on_download: impl Fn(String) -> AppMessage + Clone + 'static,
 ) -> Element<AppMessage> {
     column(items.iter().map(|item| {
-        render_item(item, on_browse.clone(), on_view.clone(), on_download.clone())
+        let is_downloading = task_manager.is_downloading(&item.s3_key);
+        render_item(item, is_downloading, on_browse.clone(), on_view.clone(), on_download.clone())
     }))
     .width(Length::Fill)
     .spacing(8.0)

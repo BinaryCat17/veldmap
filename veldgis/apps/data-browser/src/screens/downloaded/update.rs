@@ -1,19 +1,31 @@
-﻿//! downloaded/update.rs — вся бизнес-логика экрана скачанных файлов
-//! (бывшие handle_local_search, handle_local_filter, handle_download,
-//! handle_download_update, handle_delete, handle_view)
+//! downloaded/update.rs — вся бизнес-логика экрана скачанных файлов
+//! (с TaskManager)
 
 use veldsdk::core::Command;
 use crate::{
     AppMessage,
     app::state::GlobalState,
     service::host,
+    task_manager::TaskKind,
 };
 use super::{DownloadedState, message::Message};
 
 /// Запуск скачивания файла (может быть вызван с любого экрана)
+/// Теперь создаёт задачу в TaskManager и возвращает Command для отслеживания
 pub fn update_download_file(global: &mut GlobalState, s3_key: String) -> Command<AppMessage> {
-    global.downloading_key = Some(s3_key.clone());
-    global.status_message = format!("Downloading {}...", s3_key.split('/').last().unwrap_or("file"));
+    let filename = s3_key.split('/').last().unwrap_or("file").to_string();
+    global.status_message = format!("Downloading {}...", filename);
+    
+    // Сохраняем текущую загрузку для обновления TaskManager
+    global.current_download = Some(s3_key.clone());
+    
+    // Создаём задачу в TaskManager
+    let _task_id = global.task_manager.spawn(TaskKind::Download { 
+        s3_key: s3_key.clone(), 
+        filename: filename.clone() 
+    });
+    
+    // Запускаем скачивание
     host::start_download(s3_key)
 }
 
@@ -43,19 +55,30 @@ pub fn update(
         Message::DownloadUpdate(update) => {
             global.download_task.handle(update);
 
-            if let veldsdk::core::task::TaskStatus::Finished(res) = &global.download_task {
-                global.downloading_key = None;
-
-                if !res.error.is_empty() {
-                    global.error_message = Some(format!("Download Error: {}", res.error));
-                } else {
-                    global.status_message = "Download complete".to_string();
-                    // Обновляем список локальных файлов
-                    global.local_files = host::refresh_local_files();
+            // Обновляем TaskManager на основе статуса задачи
+            if let Some(s3_key) = &global.current_download {
+                match &global.download_task {
+                    veldsdk::core::task::TaskStatus::Running { progress, .. } => {
+                        global.task_manager.update_progress_by_s3_key(s3_key, *progress);
+                    }
+                    veldsdk::core::task::TaskStatus::Finished(res) => {
+                        global.task_manager.finish_by_s3_key(s3_key);
+                        global.current_download = None;
+                        
+                        if !res.error.is_empty() {
+                            global.error_message = Some(format!("Download Error: {}", res.error));
+                        } else {
+                            global.status_message = "Download complete".to_string();
+                            global.local_files = host::refresh_local_files();
+                        }
+                    }
+                    veldsdk::core::task::TaskStatus::Failed(err) => {
+                        global.task_manager.fail_by_s3_key(s3_key, err.clone());
+                        global.current_download = None;
+                        global.error_message = Some(format!("Download Task Failed: {}", err));
+                    }
+                    _ => {}
                 }
-            } else if let Some(err) = global.download_task.error() {
-                global.downloading_key = None;
-                global.error_message = Some(format!("Download Task Failed: {}", err));
             }
             Command::none()
         }
@@ -71,6 +94,13 @@ pub fn update(
         // Просмотр файла → переключаемся на экран Preview
         Message::ViewFile(path) => {
             global.status_message = format!("Loading preview for {}...", path);
+            // Создаём задачу загрузки изображения
+            let filename = path.split('/').last().unwrap_or("image").to_string();
+            let _task_id = global.task_manager.spawn(TaskKind::ImageLoad { 
+                path: path.clone(), 
+                filename 
+            });
+            
             // Запускаем загрузку изображения
             let cmd_load = host::start_image_load(path);
             // Переключаем экран

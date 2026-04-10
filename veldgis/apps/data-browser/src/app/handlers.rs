@@ -99,7 +99,7 @@ pub fn handle_clear_error(state: &mut AppState) -> Command<AppMessage> {
 }
 
 pub fn handle_cancel_download(state: &mut AppState) -> Command<AppMessage> {
-    state.global.downloading_key = None;
+    // TODO: Отмена конкретной задачи через task_manager
     state.global.download_task = veldsdk::core::task::TaskStatus::Idle;
     state.global.status_message = "Download cancelled".to_string();
     Command::none()

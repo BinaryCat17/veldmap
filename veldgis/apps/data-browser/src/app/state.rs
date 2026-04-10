@@ -5,6 +5,7 @@ use veldmap_api::dataprovider::{SearchResponse, ListPathResponse, DownloadRespon
 use veldsdk::rpc::core::ResourceHandle;
 
 use crate::common::BrowserItem;
+use crate::task_manager::TaskManager;
 use crate::screens::{SearchState, BrowseState, DownloadedState, PreviewState};
 
 /// Глобальное состояние
@@ -12,9 +13,16 @@ use crate::screens::{SearchState, BrowseState, DownloadedState, PreviewState};
 pub struct GlobalState {
     pub status_message: String,
     pub error_message: Option<String>,
-    pub downloading_key: Option<String>,
     pub local_files: Vec<BrowserItem>,
 
+    // Единый менеджер задач вместо разрозненных TaskStatus
+    pub task_manager: TaskManager,
+    
+    // Текущая загрузка (для обновления TaskManager)
+    pub current_download: Option<String>, // s3_key
+    
+    // Пока оставляем TaskStatus для совместимости с существующим кодом
+    // TODO: постепенно перевести всё на task_manager
     pub search_task: TaskStatus<SearchResponse>,
     pub browse_task: TaskStatus<ListPathResponse>,
     pub download_task: TaskStatus<DownloadResponse>,

@@ -2,10 +2,13 @@
 
 mod app;
 mod screens;
+pub mod task_manager;
+pub mod widgets;
 
 pub mod styles;
 pub mod common;
 pub mod service;
+pub use task_manager::{TaskManager, TaskKind, TaskInfo};
 
 pub use app::{AppState, AppMessage};
 pub use common::{BrowserItem, LocalConfig};
