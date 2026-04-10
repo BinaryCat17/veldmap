@@ -63,24 +63,29 @@ impl Dispatcher {
     }
 
     pub async fn poll_all_tasks(&self) -> Result<()> {
+        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks START");
         let locations: Vec<(String, ServiceLocation)> = {
             let services = self.services.lock().unwrap();
             services.iter().map(|(n, l)| (n.clone(), l.clone())).collect()
         };
+        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: {} services", locations.len());
 
         for (name, location) in locations {
             if let ServiceLocation::LocalWasm(wasm_module) = location {
+                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: acquiring lock for {}", name);
                 let mut module = wasm_module.lock().await;
+                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: lock acquired for {}", name);
                 let instance = module.instance;
                 if let Ok(poll_tasks) = instance.get_typed_func::<(), i32>(&mut module.store, "poll_tasks") {
-                    // Polling tasks - disabled to reduce noise
-                    // veldmap_host_core::vtrace!("[DISPATCHER] Polling tasks for {}", name);
+                    crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: calling poll_tasks for {}", name);
                     if let Err(e) = poll_tasks.call_async(&mut module.store, ()).await {
                         crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_tasks failed for {}: {}", name, e);
                     }
+                    crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: poll_tasks done for {}", name);
                 }
             }
         }
+        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks END");
         Ok(())
     }
 

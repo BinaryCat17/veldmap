@@ -275,12 +275,18 @@ async fn main() -> anyhow::Result<()> {
     // 1. ЦИКЛ ОБРАБОТКИ ЗАДАЧ (POLLING)
     tokio::spawn(async move {
         while running_polling.load(Ordering::Relaxed) {
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop iteration");
             let has_tasks = {
                 let tasks = d_clone.tasks.lock().unwrap();
-                !tasks.is_empty()
+                let has = !tasks.is_empty();
+                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: has_tasks={}", has);
+                has
             };
+            
+            let is_visible = is_visible_clone.load(std::sync::atomic::Ordering::Relaxed);
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: is_visible={}", is_visible);
 
-            if has_tasks || is_visible_clone.load(std::sync::atomic::Ordering::Relaxed) {
+            if has_tasks || is_visible {
                 let _ = d_clone.poll_all_tasks().await;
                 
                 let (needs_frame, eq_len, int_elapsed, rend_elapsed) = {
@@ -308,6 +314,7 @@ async fn main() -> anyhow::Result<()> {
 
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             } else {
+                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: sleeping (no tasks, not visible)");
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
