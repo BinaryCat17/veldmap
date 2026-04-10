@@ -6,11 +6,13 @@ use crate::renderer::{GpuRenderer, DrawCmd};
 use veldsdk::compute::*;
 use veldsdk::compute::wgpu_proxy::ComputeRecorder;
 use veldsdk::rpc::host::{call_service, gpu_write_resource};
+use veldsdk::rpc::core::ResourceHandle;
 use veldsdk::OwnedResource;
 use prost::Message;
 use anyhow::anyhow;
 
 /// Renders UI to an offscreen texture and returns its ID
+/// Uses cached texture if size matches, otherwise creates new one
 pub fn render_ui(
     plugin: &PluginUiState,
     renderer: &mut GpuRenderer,
@@ -20,11 +22,35 @@ pub fn render_ui(
     surface_format: i32,
 ) -> anyhow::Result<u64> {
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] START {}x{}", width, height);
-    // Create offscreen texture
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Creating offscreen texture");
-    let texture_id = create_offscreen_texture(width, height, surface_format)?;
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Creating texture view for texture_id={}", texture_id);
-    let view_id = create_texture_view(texture_id, surface_format)?;
+    
+    // Check if we can reuse cached texture
+    let cached_size = *plugin.offscreen_texture_size.borrow();
+    let needs_new_texture = plugin.offscreen_texture.borrow().is_none() || cached_size != (width, height);
+    
+    let (texture_id, view_id) = if needs_new_texture {
+        veldsdk::vdebug!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Creating new offscreen texture (cached={:?}, size={:?})", 
+            plugin.offscreen_texture.borrow().is_some(), cached_size);
+        // Create offscreen texture
+        let texture_id = create_offscreen_texture(width, height, surface_format)?;
+        let view_id = create_texture_view(texture_id, surface_format)?;
+        
+        // Update cache
+        *plugin.offscreen_texture.borrow_mut() = Some(OwnedResource::new(ResourceHandle { 
+            id: texture_id, 
+            content_hash: vec![], 
+            size: 0 
+        }));
+        *plugin.offscreen_view.borrow_mut() = Some(view_id);
+        *plugin.offscreen_texture_size.borrow_mut() = (width, height);
+        
+        (texture_id, view_id)
+    } else {
+        // Reuse cached texture
+        let texture_id = plugin.offscreen_texture.borrow().as_ref().unwrap().id();
+        let view_id = plugin.offscreen_view.borrow().unwrap();
+        veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Reusing cached texture_id={}", texture_id);
+        (texture_id, view_id)
+    };
     
     // Ensure all GPU resources are ready
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Ensuring resources");
