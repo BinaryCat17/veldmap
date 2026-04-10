@@ -5,6 +5,7 @@ use veldmap_host_core::{
 };
 use veldmap_host_system::SystemService;
 use veldmap_host_compute::ComputeService;
+use compositor::Compositor;
 
 use crate::app_service::{AppCommand, AppService};
 use winit::{
@@ -18,6 +19,7 @@ use std::io::Write;
 use prost::Message;
 
 mod app_service;
+mod compositor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -182,39 +184,9 @@ async fn main() -> anyhow::Result<()> {
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
     let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(device_arc.clone(), queue_arc.clone(), surface_format));
-
-    let blit_shader = device_arc.create_shader_module(wgpu::include_wgsl!("blit.wgsl"));
-    let blit_pipeline_layout = device_arc.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Blit Pipeline Layout"),
-        bind_group_layouts: &[&veldmap_host_compute::get_ui_layout(&device_arc)],
-        immediate_size: 0,
-    });
-    let blit_pipeline = device_arc.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Blit Pipeline"),
-        layout: Some(&blit_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &blit_shader, entry_point: Some("vs_main"), buffers: &[], compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &blit_shader, entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview_mask: None, cache: None,
-    });
-
-    let sampler = device_arc.create_sampler(&wgpu::SamplerDescriptor {
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Nearest,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-        ..Default::default()
-    });
+    
+    // Initialize compositor for final UI composition
+    let compositor = Arc::new(Compositor::new(&device_arc, surface_format));
 
     let render_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::compute::Submit>::new()));
 
@@ -417,20 +389,7 @@ async fn main() -> anyhow::Result<()> {
                         } else if Some(id) != app_texture_id {
                             if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id, 0) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                                let bind_group = device_arc.create_bind_group(&wgpu::BindGroupDescriptor {
-                                    label: Some("App Bind Group"),
-                                    layout: &veldmap_host_compute::get_ui_layout(&device_arc),
-                                    entries: &[
-                                        wgpu::BindGroupEntry {
-                                            binding: 0,
-                                            resource: wgpu::BindingResource::TextureView(&view),
-                                        },
-                                        wgpu::BindGroupEntry {
-                                            binding: 1,
-                                            resource: wgpu::BindingResource::Sampler(&sampler),
-                                        },
-                                    ],
-                                });
+                                let bind_group = compositor.create_bind_group(&device_arc, &view);
                                 app_texture_id = Some(id);
                                 app_bind_group = Some(bind_group);
                             } else {
@@ -556,9 +515,7 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     if let Some(bg) = &app_bind_group {
-                        rp.set_pipeline(&blit_pipeline);
-                        rp.set_bind_group(0, bg, &[]);
-                        rp.draw(0..3, 0..1);
+                        compositor.blit_ui(&mut rp, bg);
                     }
                 }
 
