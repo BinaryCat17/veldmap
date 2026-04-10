@@ -339,9 +339,11 @@ async fn main() -> anyhow::Result<()> {
                 std::mem::take(&mut *eq)
             };
 
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Acquiring locks for frame event...");
             let dt = start_redraw.duration_since(last_render_finish).as_secs_f32();
             let fps = *actual_fps_render.lock().unwrap();
             
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Building frame event...");
             events.push(veldmap_host_core::app::UiEvent {
                 event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent {
                     dt,
@@ -363,7 +365,9 @@ async fn main() -> anyhow::Result<()> {
             }
 
             window_render.request_redraw();
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Resetting frame_pending");
             frame_pending_render.store(false, std::sync::atomic::Ordering::SeqCst);
+            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Frame done, last_render_finish updated");
             last_render_finish = std::time::Instant::now();
         }
         veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Render loop exiting...");
