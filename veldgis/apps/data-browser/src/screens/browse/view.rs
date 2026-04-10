@@ -1,4 +1,4 @@
-﻿//! screens/browse/view.rs
+//! screens/browse/view.rs
 
 use veld_ui::{
     button, column, container, row, scrollable, text, Element, Length, Alignment,
@@ -6,23 +6,31 @@ use veld_ui::{
 use crate::{
     AppMessage,
     common::render_list,
-    app::state::GlobalState,          // ← исправлено
+    app::state::GlobalState,
     styles,
 };
 use super::{BrowseState, message::Message};
-use crate::screens::downloaded::message::Message as DownloadedMessage;  // ← добавили
+use crate::screens::downloaded::message::Message as DownloadedMessage;
 
 pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
-    // is_downloading теперь проверяется через task_manager внутри render_list
-    let display_items = &state.items;
+    
+    if state.items.is_empty() {
+        return column![
+            text("No items found").size(16.0).color(styles::COLOR_TEXT_DIM),
+        ].into();
+    }
+    
+    let path_key = format!("{}_{}", state.current_path, state.current_page_token);
     let list = render_list(
-        &display_items,
-        &global.task_manager,  // Передаём task_manager для проверки is_downloading
+        &state.items,
+        &global.task_manager,
+        &path_key,
         |path| AppMessage::Browse(Message::BrowsePath(path)),
         |path| AppMessage::Downloaded(DownloadedMessage::ViewFile(path)),
         |path| AppMessage::Downloaded(DownloadedMessage::DownloadFile(path)),
     );
 
+    // Пагинация без ключей — стабильные кнопки
     let mut pagination = row![].spacing(10.0);
     if !state.token_stack.is_empty() {
         pagination = pagination.push(
@@ -61,6 +69,7 @@ pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
         .width(Length::Fill)
         .height(Length::Fill)
         .spacing(10.0)
+        .align_items(Alignment::Start)  // Прижимаем содержимое к верху
     )
     .width(Length::Fill)
     .height(Length::Fill)

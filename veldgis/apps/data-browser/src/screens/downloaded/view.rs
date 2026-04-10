@@ -15,6 +15,7 @@ pub fn view(state: &DownloadedState, global: &GlobalState) -> Element<AppMessage
     let file_list = render_list(
         &global.local_files,
         &global.task_manager,
+        "downloaded",  // Уникальный префикс для downloaded
         // on_browse — не используется на этом экране (файлы уже локальные)
         |_| AppMessage::Downloaded(Message::LocalSearchChanged(String::new())),
         // on_view

@@ -106,14 +106,18 @@ pub fn render_item(
 
 pub fn render_list(
     items: &[BrowserItem],
-    task_manager: &crate::task_manager::TaskManager,  // Добавляем для проверки is_downloading
+    task_manager: &crate::task_manager::TaskManager,
+    path_prefix: &str,  // Уникальный префикс для ключей (например, путь + страница)
     on_browse: impl Fn(String) -> AppMessage + Clone + 'static,
     on_view: impl Fn(String) -> AppMessage + Clone + 'static,
     on_download: impl Fn(String) -> AppMessage + Clone + 'static,
 ) -> Element<AppMessage> {
-    column(items.iter().map(|item| {
+    column(items.iter().enumerate().map(|(idx, item)| {
         let is_downloading = task_manager.is_downloading(&item.s3_key);
+        // Уникальный ключ: хэш пути + индекс
+        let unique_key = path_prefix.len() as u64 * 10000 + idx as u64;
         render_item(item, is_downloading, on_browse.clone(), on_view.clone(), on_download.clone())
+            .key(unique_key)
     }))
     .width(Length::Fill)
     .spacing(8.0)

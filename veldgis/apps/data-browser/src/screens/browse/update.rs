@@ -33,7 +33,7 @@ pub fn update(
 
         // === Обработка обновления задачи ===
         Message::Update(update) => {
-            global.browse_task.handle(update);
+            global.browse_task.handle(update.clone());
             state.is_loading = false;
 
             if let veldsdk::core::task::TaskStatus::Finished(response) = &global.browse_task {
@@ -63,6 +63,20 @@ pub fn update(
                     };
 
                     global.status_message = format!("Loaded {} items", state.items.len());
+                    
+                    // Если список пустой но есть next_token, автоматически загружаем следующую страницу
+                    // (некоторые API возвращают пустую первую страницу с токеном)
+                    if state.items.is_empty() && state.next_token.is_some() {
+                        let token = state.next_token.clone().unwrap();
+                        state.token_stack.push(state.current_page_token.clone());
+                        state.current_page_token = token.clone();
+                        
+                        let req = ListPathRequest {
+                            path: state.current_path.clone(),
+                            token,
+                        };
+                        return host::start_browse(req);
+                    }
                 }
             } else if let Some(err) = global.browse_task.error() {
                 global.error_message = Some(format!("Browse Task Failed: {}", err));
@@ -72,6 +86,7 @@ pub fn update(
 
         // === Пагинация Next ===
         Message::NextPage => {
+            log::info!("NextPage clicked: next_token={:?}, current_page_token='{}'", state.next_token, state.current_page_token);
             if let Some(token) = state.next_token.clone() {
                 state.token_stack.push(state.current_page_token.clone());
                 state.current_page_token = token.clone();
@@ -79,10 +94,12 @@ pub fn update(
 
                 let req = ListPathRequest {
                     path: state.current_path.clone(),
-                    token,
+                    token: token.clone(),
                 };
+                log::info!("Starting browse with token='{}'", token);
                 host::start_browse(req)
             } else {
+                log::info!("NextPage: no next_token available");
                 Command::none()
             }
         }
