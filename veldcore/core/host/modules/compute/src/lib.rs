@@ -17,6 +17,17 @@ use image::GenericImageView;
 use prost::Message;
 use std::sync::{Arc, Mutex};
 
+// Global pending render ops queue - main thread will execute these
+pub static PENDING_OPS: Mutex<Vec<PendingRenderOp>> = Mutex::new(Vec::new());
+
+pub struct PendingRenderOp {
+    pub target_view_id: u64,
+    pub command_buffer: CommandBuffer,
+    pub instance_id: u32,
+}
+
+
+
 pub fn get_ui_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("VeldMap UI BGL"),
@@ -140,10 +151,9 @@ impl ComputeService {
         Self { resources }
     }
 
-    /// Execute commands immediately to the target texture
-    fn execute_immediate(&self, req: Submit, requestor_id: u32) -> anyhow::Result<()> {
+    /// Build command encoder for execution (must be submitted by caller from main thread)
+    pub fn build_encoder(&self, req: Submit, requestor_id: u32) -> anyhow::Result<wgpu::CommandEncoder> {
         let device = self.resources.get_device();
-        let queue = self.resources.get_queue();
         
         // Get target texture view
         let target_view = self.resources.get_resource(req.target_texture_view_id, requestor_id)
@@ -183,9 +193,7 @@ impl ComputeService {
             }
         }
 
-        // Submit
-        queue.lock().unwrap().submit(Some(encoder.finish()));
-        Ok(())
+        Ok(encoder)
     }
 }
 
@@ -193,9 +201,16 @@ impl NativeService for ComputeService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
             "execute" => {
-                // Immediate execution to offscreen texture
+                // Queue for execution by main thread (thread-safe GPU access)
                 let req = Submit::decode(&payload[..])?;
-                self.execute_immediate(req, requestor_id)?;
+                if let Some(cb) = req.command_buffer {
+                    let mut ops = PENDING_OPS.lock().unwrap();
+                    ops.push(PendingRenderOp {
+                        target_view_id: req.target_texture_view_id,
+                        command_buffer: cb,
+                        instance_id: requestor_id,
+                    });
+                }
                 Ok(Vec::new())
             }
             "create_resource" => {

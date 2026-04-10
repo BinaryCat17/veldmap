@@ -466,8 +466,36 @@ async fn main() -> anyhow::Result<()> {
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let mut encoder = device_arc.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-                // Note: Plugin render commands are now executed immediately by ComputeService
-                // We just compose the final frame here
+                // Execute pending plugin render ops (queued by compute service)
+                {
+                    let mut ops = veldmap_host_compute::PENDING_OPS.lock().unwrap();
+                    for op in ops.drain(..) {
+                        if let Some(veldmap_host_core::resources::Resource::TextureView(target_view)) = 
+                            resources.get_resource(op.target_view_id, op.instance_id) 
+                        {
+                            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("Plugin Render Pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &target_view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations { 
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
+                                        store: wgpu::StoreOp::Store 
+                                    },
+                                    depth_slice: None,
+                                })],
+                                depth_stencil_attachment: None,
+                                multiview_mask: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+
+                            let _ = veldmap_host_compute::execute_render_commands(
+                                &mut rp, &op.command_buffer, &resources, 2048, 2048, op.instance_id
+                            );
+                        }
+                    }
+                }
 
                 // Compose final frame: clear + blit UI
                 {
