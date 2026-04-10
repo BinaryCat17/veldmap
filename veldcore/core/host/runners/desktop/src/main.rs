@@ -68,16 +68,25 @@ async fn main() -> anyhow::Result<()> {
         })
         .init();
 
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "VeldMap GUI Host starting...");
-
-    // --- 2. ПАРСИНГ АРГУМЕНТОВ ---
+    // --- 2. ЗАГРУЗКА КОНФИГА CORE ---
     let args: Vec<String> = std::env::args().collect();
     let config_dir = args.iter().position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_else(|| "config".to_string());
+    
+    // Загружаем core.json для получения флагов логирования
+    let core_config: veldmap_host_core::CoreConfig = 
+        veldmap_host_core::load_config_with_path::<veldmap_host_core::CoreConfig, _>(&format!("{}/core.json", config_dir))
+            .unwrap_or_default();
+    
+    // Инициализируем флаги логирования
+    veldmap_host_core::logging::init_logging(core_config.log_flags);
+    
+    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "VeldMap GUI Host starting...");
+    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Log flags: 0b{:b}", core_config.log_flags);
 
-    // --- 3. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
+    // --- 4. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
     // Сканируем конфиги плагинов до создания окна
     let mut plugin_windows = veldmap_host_core::plugin_module::scan_window_configs(&config_dir)?;
     

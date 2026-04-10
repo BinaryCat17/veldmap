@@ -23,13 +23,18 @@ pub fn is_flag_enabled(flag: u32) -> bool {
 }
 
 pub fn veld_log(level: Level, flags: u32, plugin_name: Option<&str>, message: &str) {
-    // 1. Глобальная фильтрация по флагам (например, если PERF не включен)
-    if (flags & FLAG_PERF) != 0 && !is_flag_enabled(FLAG_PERF) {
-        return;
+    // 1. Глобальная фильтрация по флагам
+    // Если указаны флаги (flags != 0), проверяем что хотя бы один из них включен
+    if flags != 0 {
+        let enabled = ENABLED_FLAGS.load(Ordering::Relaxed);
+        if (flags & enabled) == 0 {
+            // Ни один из запрошенных флагов не включен - пропускаем лог
+            return;
+        }
     }
 
     // 2. Формируем префикс производительности
-    let p_tag = if (flags & FLAG_PERF) != 0 { "[P]" } else { "" };
+    let p_tag = if (flags & FLAG_PERF) != 0 && is_flag_enabled(FLAG_PERF) { "[P]" } else { "" };
     
     // 3. Формируем имя источника (если None - значит хост)
     let source_name = plugin_name.unwrap_or("host");

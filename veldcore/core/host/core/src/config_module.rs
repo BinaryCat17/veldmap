@@ -1,12 +1,18 @@
 use serde::de::DeserializeOwned;
 use std::fs;
+use std::path::Path;
 use regex::Regex;
 
 pub fn load_config<T: DeserializeOwned>(crate_name: &str) -> anyhow::Result<T> {
     let mut path = std::env::current_dir()?;
     path.push("config");
     path.push(format!("{}.json", crate_name));
+    load_config_with_path(path)
+}
 
+pub fn load_config_with_path<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> anyhow::Result<T> {
+    let path = path.as_ref();
+    
     if !path.exists() {
         return Err(anyhow::anyhow!("Config file not found: {:?}", path));
     }
