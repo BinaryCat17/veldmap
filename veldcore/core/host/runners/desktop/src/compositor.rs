@@ -1,9 +1,7 @@
 //! GPU Compositor for VeldMap Host
 //! 
-//! Handles final composition of UI and plugin renders to the screen.
-//! Uses a simple fullscreen triangle blit for UI texture overlay.
-
-use veldmap_host_core::resources::ResourceManager;
+//! Handles final composition of plugin renders to the screen.
+//! Uses a simple fullscreen triangle blit for texture overlay.
 
 pub struct Compositor {
     blit_pipeline: wgpu::RenderPipeline,
@@ -113,51 +111,3 @@ impl Compositor {
     }
 }
 
-/// Render commands to their target surfaces
-pub fn execute_offscreen_passes(
-    encoder: &mut wgpu::CommandEncoder,
-    render_queue: &std::sync::Mutex<Vec<veldmap_host_core::compute::Submit>>,
-    resources: &std::sync::Arc<ResourceManager>,
-) -> Vec<veldmap_host_core::compute::Submit> {
-    let mut surface_cmds = Vec::new();
-    
-    let queue = {
-        let mut q = render_queue.lock().unwrap();
-        std::mem::take(&mut *q)
-    };
-    
-    for req in queue {
-        if req.target_texture_view_id == 0 {
-            // Target is surface - defer to surface pass
-            surface_cmds.push(req);
-        } else {
-            // Target is offscreen texture - render now
-            if let Some(veldmap_host_core::resources::Resource::TextureView(target_view)) = 
-                resources.get_resource(req.target_texture_view_id, req.instance_id) 
-            {
-                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Offscreen Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    ..Default::default()
-                });
-
-                if let Some(ref cb) = req.command_buffer {
-                    let _ = veldmap_host_compute::execute_render_commands(
-                        &mut rp, cb, resources, 2048, 2048, req.instance_id
-                    );
-                }
-            }
-        }
-    }
-    
-    surface_cmds
-}

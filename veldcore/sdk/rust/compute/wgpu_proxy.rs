@@ -76,6 +76,8 @@ impl ComputeRecorder {
         }));
     }
 
+    /// Submit commands to be executed later (queued execution)
+    /// Deprecated: Use execute() for immediate offscreen rendering
     pub fn submit(self, target_view_id: u64, clear_color: Option<crate::rpc::compute::ComputeColor>) -> anyhow::Result<()> {
         let cmd_buffer = CommandBuffer {
             commands: self.commands,
@@ -89,6 +91,24 @@ impl ComputeRecorder {
         };
         
         call_service("compute", "submit", submit_req.encode_to_vec())?;
+        Ok(())
+    }
+
+    /// Execute commands immediately to the specified texture
+    /// This performs the actual GPU rendering before returning
+    pub fn execute(self, target_texture_view_id: u64) -> anyhow::Result<()> {
+        let cmd_buffer = CommandBuffer {
+            commands: self.commands,
+        };
+        
+        let submit_req = Submit {
+            instance_id: 0,
+            target_texture_view_id,
+            clear_color: None,
+            command_buffer: Some(cmd_buffer),
+        };
+        
+        call_service("compute", "execute", submit_req.encode_to_vec())?;
         Ok(())
     }
 }

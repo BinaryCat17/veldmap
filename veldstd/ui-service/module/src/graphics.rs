@@ -51,7 +51,8 @@ pub fn render_ui(
         render_geometry(plugin, renderer, &mut recorder, width, height)?;
     }
 
-    let _ = recorder.submit(view_id, None);
+    // Execute immediately to the offscreen texture
+    let _ = recorder.execute(view_id)?;
     Ok(texture_id)
 }
 

@@ -133,20 +133,58 @@ pub fn execute_render_commands<'a>(
 
 pub struct ComputeService {
     resources: Arc<ResourceManager>,
-    render_queue: Arc<Mutex<Vec<Submit>>>,
 }
 
 impl ComputeService {
-    pub fn new(
-        resources: Arc<ResourceManager>, 
-        render_queue: Arc<Mutex<Vec<Submit>>>,
-    ) -> Self {
-        Self { resources, render_queue }
+    pub fn new(resources: Arc<ResourceManager>) -> Self {
+        Self { resources }
     }
 
-    fn submit(&self, req: Submit) -> anyhow::Result<()> {
-        let mut queue = self.render_queue.lock().unwrap();
-        queue.push(req);
+    /// Execute commands immediately to the target texture
+    fn execute_immediate(&self, req: Submit, requestor_id: u32) -> anyhow::Result<()> {
+        let device = self.resources.get_device();
+        let queue = self.resources.get_queue();
+        
+        // Get target texture view
+        let target_view = self.resources.get_resource(req.target_texture_view_id, requestor_id)
+            .ok_or_else(|| anyhow::anyhow!("Target texture view {} not found", req.target_texture_view_id))?;
+        
+        let view = match target_view {
+            Resource::TextureView(view) => view,
+            _ => return Err(anyhow::anyhow!("Resource {} is not a texture view", req.target_texture_view_id)),
+        };
+
+        // Create command encoder
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { 
+            label: Some("Compute Execute") 
+        });
+
+        // Begin render pass and execute commands
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Compute Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                multiview_mask: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            if let Some(cb) = &req.command_buffer {
+                let _ = execute_render_commands(&mut rp, cb, &self.resources, 2048, 2048, requestor_id);
+            }
+        }
+
+        // Submit
+        queue.lock().unwrap().submit(Some(encoder.finish()));
         Ok(())
     }
 }
@@ -154,10 +192,10 @@ impl ComputeService {
 impl NativeService for ComputeService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
-            "submit" => {
-                let mut req = Submit::decode(&payload[..])?;
-                req.instance_id = requestor_id; // Override with verified ID
-                self.submit(req)?;
+            "execute" => {
+                // Immediate execution to offscreen texture
+                let req = Submit::decode(&payload[..])?;
+                self.execute_immediate(req, requestor_id)?;
                 Ok(Vec::new())
             }
             "create_resource" => {

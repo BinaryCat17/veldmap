@@ -191,8 +191,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize compositor for final UI composition
     let compositor = Arc::new(Compositor::new(&device_arc, surface_format));
 
-    let render_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::compute::Submit>::new()));
-
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut app_texture_id: Option<u64> = None;
     let mut cursor_pos = (0.0f32, 0.0f32);
@@ -213,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
     let system_service = Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()));
-    let compute_service = Arc::new(ComputeService::new(resources.clone(), render_queue.clone()));
+    let compute_service = Arc::new(ComputeService::new(resources.clone()));
 
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
@@ -468,60 +466,25 @@ async fn main() -> anyhow::Result<()> {
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let mut encoder = device_arc.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-                let target_w = config.width;
-                let target_h = config.height;
+                // Note: Plugin render commands are now executed immediately by ComputeService
+                // We just compose the final frame here
 
-                // Offscreen pass
-                let mut surface_cmds = Vec::new();
-                {
-                    let mut queue = render_queue.lock().unwrap();
-                    let q = std::mem::take(&mut *queue);
-                    for req in q {
-                        if req.target_texture_view_id == 0 {
-                            surface_cmds.push(req);
-                        } else {
-                            if let Some(veldmap_host_core::resources::Resource::TextureView(target_view)) = resources.get_resource(req.target_texture_view_id, req.instance_id) {
-                                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                    label: Some("Plugin Offscreen RP"),
-                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                        view: &target_view, resolve_target: None,
-                                        ops: wgpu::Operations { 
-                                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
-                                            store: wgpu::StoreOp::Store 
-                                        },
-                                        depth_slice: None,
-                                    })],
-                                    depth_stencil_attachment: None, ..Default::default()
-                                });
-
-                                if let Some(cb) = &req.command_buffer {
-                                    let _ = veldmap_host_compute::execute_render_commands(&mut rp, cb, &resources, 2048, 2048, req.instance_id);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Surface pass
+                // Compose final frame: clear + blit UI
                 {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Main Surface RP"),
+                        label: Some("Compositor Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view, resolve_target: None,
+                            view: &view,
+                            resolve_target: None,
                             ops: wgpu::Operations { 
                                 load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.03, a: 1.0 }), 
                                 store: wgpu::StoreOp::Store 
                             },
                             depth_slice: None,
                         })],
-                        depth_stencil_attachment: None, ..Default::default()
+                        depth_stencil_attachment: None,
+                        ..Default::default()
                     });
-
-                    for req in &surface_cmds {
-                        if let Some(cb) = &req.command_buffer {
-                            let _ = veldmap_host_compute::execute_render_commands(&mut rp, cb, &resources, target_w, target_h, req.instance_id);
-                        }
-                    }
 
                     if let Some(bg) = &app_bind_group {
                         compositor.blit_ui(&mut rp, bg);
