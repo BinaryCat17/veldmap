@@ -269,8 +269,10 @@ fn execute_gpu_commands(plugin: &PluginUiState, renderer: &mut GpuRenderer, widt
 
     if renderer.is_atlas_dirty() {
         if let Some(tid) = renderer.atlas_texture_id {
-            let (offset, data) = renderer.atlas_dirty_range();
-            let _ = gpu_write_resource(tid, offset, data);
+            // NOTE: For dzn (DirectX 12 on Vulkan), we need full texture writes only
+            // Using full atlas data instead of dirty range
+            let data = renderer.atlas_data_full();
+            let _ = gpu_write_resource(tid, 0, data);
             renderer.mark_atlas_clean();
         }
     }

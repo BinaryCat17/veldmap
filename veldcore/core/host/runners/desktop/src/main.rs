@@ -13,7 +13,7 @@ use winit::{
     window::WindowBuilder,
 };
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::io::Write;
 use prost::Message;
 
@@ -265,6 +265,9 @@ async fn main() -> anyhow::Result<()> {
 
     let last_interaction_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let event_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::app::UiEvent>::new()));
+    
+    // Флаг для graceful shutdown
+    let running = Arc::new(AtomicBool::new(true));
 
     let sys_clone = system_service.clone();
     plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir, move |id, cfg| {
@@ -273,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
 
     let d_clone = dispatcher.clone();
     let is_visible_clone = is_visible.clone();
+    let running_polling = running.clone();
     let frame_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let frame_pending_clone = frame_pending.clone();
     let last_int_clone = last_interaction_time.clone();
@@ -282,7 +286,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 1. ЦИКЛ ОБРАБОТКИ ЗАДАЧ (POLLING)
     tokio::spawn(async move {
-        loop {
+        while running_polling.load(Ordering::Relaxed) {
             let has_tasks = {
                 let tasks = d_clone.tasks.lock().unwrap();
                 !tasks.is_empty()
@@ -309,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
+        veldmap_host_core::vinfo!("Polling loop exiting...");
     });
 
     // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
@@ -316,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
     let frame_wake_render = frame_wake.clone();
     let window_render = window.clone();
     let frame_pending_render = frame_pending.clone();
+    let running_render = running.clone();
     
     let dispatcher_render = dispatcher.clone();
     let event_queue_render = event_queue.clone();
@@ -323,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
     tokio::spawn(async move {
-        loop {
+        while running_render.load(Ordering::Relaxed) {
             frame_wake_render.notified().await;
             
             let start_redraw = std::time::Instant::now();
@@ -354,6 +360,7 @@ async fn main() -> anyhow::Result<()> {
             frame_pending_render.store(false, std::sync::atomic::Ordering::SeqCst);
             last_render_finish = std::time::Instant::now();
         }
+        veldmap_host_core::vinfo!("Render loop exiting...");
     });
 
     veldmap_host_core::vinfo!("Core ready. Render loop started...");
@@ -434,7 +441,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => window_target.exit(),
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                veldmap_host_core::vinfo!("Close requested, shutting down...");
+                running.store(false, Ordering::Relaxed);
+                frame_wake.notify_one(); // Wake up render loop to exit
+                window_target.exit();
+            }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 let new_width = size.width.max(1);
                 let new_height = size.height.max(1);

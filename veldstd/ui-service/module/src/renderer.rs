@@ -180,6 +180,11 @@ impl GpuRenderer {
         (start as u64, &self.atlas_data[start..end])
     }
 
+    /// Returns full atlas data for dzn compatibility (full texture writes only)
+    pub fn atlas_data_full(&self) -> &[u8] {
+        &self.atlas_data
+    }
+
     pub fn is_atlas_dirty(&self) -> bool {
         self.atlas_dirty_y_min < self.atlas_dirty_y_max
     }

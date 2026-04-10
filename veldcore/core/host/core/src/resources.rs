@@ -562,25 +562,24 @@ impl ResourceManager {
                 };
 
                 let bytes_per_row = bytes_per_pixel * width;
-                let y_origin = (offset / bytes_per_row as u64) as u32;
-                let rows_to_write = (data.len() as u32 + bytes_per_row - 1) / bytes_per_row;
-                let height_to_write = rows_to_write.min(height - y_origin);
 
                 let q = self.queue.lock().unwrap();
+                // NOTE: For dzn (DirectX 12 on Vulkan), we must use origin=(0,0,0) and full extent
+                // Partial texture copies are not supported (minImageTransferGranularity = 0,0,0)
                 q.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
                         mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y: y_origin, z: 0 },
+                        origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
                         aspect: wgpu::TextureAspect::All,
                     },
                     data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(height_to_write),
+                        rows_per_image: Some(height),
                     },
-                    wgpu::Extent3d { width, height: height_to_write, depth_or_array_layers: 1 }
+                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 }
                 );
             },
             _ => return Err(anyhow::anyhow!("Writing to this resource type is not supported")),
