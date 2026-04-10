@@ -109,7 +109,9 @@ impl Dispatcher {
                 let req_buf = request.encode_to_vec();
                 let ser_time = ser_start.elapsed();
 
+                log::info!("[DISPATCHER] Acquiring lock for {}::{}", service_name, method);
                 let mut module = wasm_module.lock().await;
+                log::info!("[DISPATCHER] Lock acquired for {}::{}", service_name, method);
                 
                 // Set the call context in the HostState
                 let ctx = crate::CallContext::new(req_buf);
@@ -118,9 +120,16 @@ impl Dispatcher {
                 let instance = module.instance;
                 let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
                 
+                log::info!("[DISPATCHER] >>> CALLING WASM handle_rpc: {}::{}", service_name, method);
+                
                 let wasm_start = std::time::Instant::now();
-                let _ = handle_rpc.call_async(&mut module.store, ()).await?;
+                let result = handle_rpc.call_async(&mut module.store, ()).await;
                 let wasm_time = wasm_start.elapsed();
+                
+                match &result {
+                    Ok(_) => log::info!("[DISPATCHER] <<< WASM handle_rpc RETURNED OK: {}::{}", service_name, method),
+                    Err(e) => log::error!("[DISPATCHER] <<< WASM handle_rpc FAILED: {}::{} - {:?}", service_name, method, e),
+                }
                 
                 // Extract output from shared context
                 let res_buf = {

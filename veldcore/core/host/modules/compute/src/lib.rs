@@ -237,7 +237,9 @@ impl NativeService for ComputeService {
                         handle.id = self.resources.create_sampler(s.mag_filter as i32, s.min_filter as i32, instance_id);
                     }
                     Some(ComputeCommand::CreateTextureView(tv)) => {
+                        veldmap_host_core::vinfo!("[COMPUTE] Creating texture view for texture_id={}", tv.texture_id);
                         handle.id = self.resources.create_texture_view(tv.texture_id, instance_id)?;
+                        veldmap_host_core::vinfo!("[COMPUTE] Created texture view: id={}", handle.id);
                     }
                     Some(ComputeCommand::CreateBindGroupLayout(bgl)) => {
                         let mut entries = Vec::new();

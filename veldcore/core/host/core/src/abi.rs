@@ -30,7 +30,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let dispatcher = caller.data().dispatcher.clone();
             let instance_id = caller.data().instance_id;
             
-            log::debug!(target: "wasm", "[{}] Call: {}.{} (ID: {})", plugin_name, request.service, request.method, instance_id);
+            log::info!(target: "wasm", "[ABI] [{}] Call: {}::{} (ID: {})", plugin_name, request.service, request.method, instance_id);
 
             // Special handling for log to avoid circular dependencies and for performance
             let result = if request.service == "system" && request.method == "log" {
@@ -54,8 +54,14 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             };
 
             let (payload, error): (Vec<u8>, String) = match result {
-                Ok(p) => (p, String::new()),
-                Err(e) => (Vec::new(), e.to_string()),
+                Ok(p) => {
+                    log::info!(target: "wasm", "[ABI] [{}] Call OK: {}::{} ({} bytes)", plugin_name, request.service, request.method, p.len());
+                    (p, String::new())
+                },
+                Err(e) => {
+                    log::error!(target: "wasm", "[ABI] [{}] Call ERR: {}::{} - {}", plugin_name, request.service, request.method, e);
+                    (Vec::new(), e.to_string())
+                },
             };
 
             let res_buf = RpcResponse { payload, error, sync: None }.encode_to_vec();

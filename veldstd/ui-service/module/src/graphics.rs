@@ -19,11 +19,15 @@ pub fn render_ui(
     scale_factor: f32,
     surface_format: i32,
 ) -> anyhow::Result<u64> {
+    log::info!("[RENDER-UI] START {}x{}", width, height);
     // Create offscreen texture
+    log::info!("[RENDER-UI] Creating offscreen texture");
     let texture_id = create_offscreen_texture(width, height, surface_format)?;
+    log::info!("[RENDER-UI] Creating texture view for texture_id={}", texture_id);
     let view_id = create_texture_view(texture_id, surface_format)?;
     
     // Ensure all GPU resources are ready
+    log::info!("[RENDER-UI] Ensuring resources");
     ensure_resources(plugin, renderer, surface_format)?;
 
     let mut recorder = ComputeRecorder::new(width, height);
@@ -39,6 +43,7 @@ pub fn render_ui(
 
     // Update texture atlas if dirty
     if renderer.is_atlas_dirty() {
+        log::info!("[RENDER-UI] Updating texture atlas");
         if let Some(tid) = renderer.atlas_texture_id {
             // NOTE: For dzn (DirectX 12 on Vulkan), we need full texture writes only
             let data = renderer.atlas_data_full();
@@ -49,16 +54,20 @@ pub fn render_ui(
 
     // Render geometry if present
     if !renderer.vertices.is_empty() {
+        log::info!("[RENDER-UI] Rendering {} vertices", renderer.vertices.len());
         render_geometry(plugin, renderer, &mut recorder, width, height)?;
     }
 
     // Execute immediately to the offscreen texture
+    log::info!("[RENDER-UI] Executing recorder to view_id={}", view_id);
     let _ = recorder.execute(view_id)?;
+    log::info!("[RENDER-UI] END, returning texture_id={}", texture_id);
     Ok(texture_id)
 }
 
 /// Create offscreen texture for UI rendering
 fn create_offscreen_texture(width: u32, height: u32, surface_format: i32) -> anyhow::Result<u64> {
+    log::info!("[CREATE-TEXTURE] START {}x{}", width, height);
     let texture_req = ComputeResourceRequest {
         instance_id: 0,
         command: Some(compute_resource_request::Command::CreateTexture(CreateTexture {
@@ -72,13 +81,16 @@ fn create_offscreen_texture(width: u32, height: u32, surface_format: i32) -> any
             readonly: false
         }))
     };
+    log::info!("[CREATE-TEXTURE] Calling compute service");
     let texture_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", texture_req.encode_to_vec())?[..])?;
     let texture_id = texture_res.handle.ok_or_else(|| anyhow!("Failed to create offscreen texture"))?.id;
+    log::info!("[CREATE-TEXTURE] END, texture_id={}", texture_id);
     Ok(texture_id)
 }
 
 /// Create texture view for rendering
 fn create_texture_view(texture_id: u64, surface_format: i32) -> anyhow::Result<u64> {
+    log::info!("[CREATE-VIEW] START texture_id={}", texture_id);
     let view_req = ComputeResourceRequest {
         instance_id: 0,
         command: Some(compute_resource_request::Command::CreateTextureView(CreateTextureView {
@@ -89,8 +101,10 @@ fn create_texture_view(texture_id: u64, surface_format: i32) -> anyhow::Result<u
             ..Default::default()
         }))
     };
+    log::info!("[CREATE-VIEW] Calling compute service");
     let view_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", view_req.encode_to_vec())?[..])?;
     let view_id = view_res.handle.ok_or_else(|| anyhow!("Failed to create texture view"))?.id;
+    log::info!("[CREATE-VIEW] END, view_id={}", view_id);
     Ok(view_id)
 }
 
@@ -236,12 +250,14 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
 
 /// Ensure all GPU resources are created (bind group layouts, pipeline, buffers, atlas)
 pub fn ensure_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
+    log::info!("[ENSURE-RESOURCES] START");
     ensure_atlas_bind_group_layout(renderer)?;
     ensure_uniform_bind_group_layout(plugin)?;
     ensure_pipeline(plugin, renderer, surface_format)?;
     ensure_uniform_buffer(plugin)?;
     ensure_atlas_texture(renderer)?;
     ensure_atlas_bind_group(renderer)?;
+    log::info!("[ENSURE-RESOURCES] END");
     Ok(())
 }
 

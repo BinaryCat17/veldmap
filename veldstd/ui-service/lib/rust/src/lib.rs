@@ -1135,6 +1135,17 @@ impl<A: VeldUiApp> UiRunner<A> {
     }
 
     pub fn dispatch_event(&mut self, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<proto::HandleUiEventResponse> {
+        let event_name = event.event.as_ref().map(|e| match e {
+            veldsdk::rpc::app::ui_event::Event::Resize(_) => "Resize",
+            veldsdk::rpc::app::ui_event::Event::Frame(_) => "Frame",
+            veldsdk::rpc::app::ui_event::Event::CursorMoved(_) => "CursorMoved",
+            veldsdk::rpc::app::ui_event::Event::Click(_) => "Click",
+            veldsdk::rpc::app::ui_event::Event::Scroll(_) => "Scroll",
+            veldsdk::rpc::app::ui_event::Event::Key(_) => "Key",
+            _ => "Unknown",
+        }).unwrap_or("None");
+        veldsdk::vinfo!("[UI-RUNNER] dispatch_event ENTER: {}", event_name);
+        
         if let Some(ref ev_type) = event.event {
             match ev_type {
                 veldsdk::rpc::app::ui_event::Event::Resize(r) => {
@@ -1148,18 +1159,27 @@ impl<A: VeldUiApp> UiRunner<A> {
                     
                     use veldsdk::futures_util::stream::StreamExt;
                     
+                    let task_count_before = self.tasks.len();
+                    veldsdk::vdebug!("[UI-RUNNER] Polling {} tasks", task_count_before);
+                    
                     self.tasks.retain_mut(|task| {
-                        for _ in 0..100 {
+                        for i in 0..100 {
                             match task.poll_next_unpin(&mut cx) {
                                 crate::reexports::Poll::Ready(Some(msg)) => {
                                     new_messages.push(msg);
                                 },
-                                crate::reexports::Poll::Ready(None) => return false,
+                                crate::reexports::Poll::Ready(None) => {
+                                    veldsdk::vdebug!("[UI-RUNNER] Task completed after {} polls", i);
+                                    return false;
+                                },
                                 crate::reexports::Poll::Pending => return true,
                             }
                         }
+                        veldsdk::vwarn!("[UI-RUNNER] Task exceeded 100 polls, retaining");
                         true
                     });
+                    
+                    veldsdk::vdebug!("[UI-RUNNER] Polling done: {} tasks remain, {} new messages", self.tasks.len(), new_messages.len());
 
                     for msg in new_messages {
                         let cmd = self.app.update(msg);
@@ -1215,6 +1235,7 @@ impl<A: VeldUiApp> UiRunner<A> {
             }
         }
         
+        veldsdk::vinfo!("[UI-RUNNER] dispatch_event EXIT: {}", event_name);
         Ok(proto::HandleUiEventResponse { messages: Vec::new() })
     }
 }

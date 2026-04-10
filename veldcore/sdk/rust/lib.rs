@@ -14,6 +14,7 @@ pub use prost;
 pub use anyhow;
 pub use paste;
 pub use futures_util;
+pub use log;
 
 pub use rpc::core::ResourceHandle;
 use rpc::host::call_service;

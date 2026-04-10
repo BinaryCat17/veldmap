@@ -288,11 +288,15 @@ macro_rules! define_module {
             use $crate::prost::Message;
             use $crate::rpc::core::{RpcRequest, RpcResponse};
 
+            veldsdk::vtrace!("[SDK] handle_rpc START");
             let input = $crate::rpc::host::load_input();
+            veldsdk::vtrace!("[SDK] handle_rpc loaded input: {} bytes", input.len());
             let request = match RpcRequest::decode(&input[..]) {
                 Ok(r) => r,
                 Err(_) => return 1,
             };
+            
+            veldsdk::vinfo!("[SDK] handle_rpc ENTER: {}::{}", request.service, request.method);
             
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let state_arc = match $crate::rpc::MODULE_STATE.get() {
@@ -322,6 +326,12 @@ macro_rules! define_module {
                 Ok(val) => val,
                 Err(_) => (Vec::new(), "Plugin panicked".to_string()),
             };
+            
+            if error.is_empty() {
+                veldsdk::vinfo!("[SDK] handle_rpc EXIT OK: {}::{}", request.service, request.method);
+            } else {
+                veldsdk::verror!("[SDK] handle_rpc EXIT ERROR: {}::{} - {}", request.service, request.method, error);
+            }
 
             let response = RpcResponse { payload, error, sync: None };
             $crate::rpc::host::store_output(response.encode_to_vec());

@@ -284,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
 
                 if needs_frame && !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
                     frame_pending_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    veldmap_host_core::vdebug!("[HOST] Polling loop notifying render thread");
                     frame_wake_clone.notify_one();
                 }
 
@@ -308,8 +309,11 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
     tokio::spawn(async move {
+        veldmap_host_core::vinfo!("[HOST-RENDER] Render loop started");
         while running_render.load(Ordering::Relaxed) {
+            veldmap_host_core::vdebug!("[HOST-RENDER] Waiting for frame notification...");
             frame_wake_render.notified().await;
+            veldmap_host_core::vdebug!("[HOST-RENDER] Got frame notification");
             
             let start_redraw = std::time::Instant::now();
             let mut events = {
@@ -330,9 +334,14 @@ async fn main() -> anyhow::Result<()> {
                 ..Default::default()
             });
 
-            for ev in events {
+            for (idx, ev) in events.iter().enumerate() {
                 let payload = ev.encode_to_vec();
-                let _ = dispatcher_render.call("data-browser", "handle_ui_event", payload, 0).await;
+                veldmap_host_core::vinfo!("[HOST-RENDER] Calling data-browser::handle_ui_event event #{}", idx);
+                let result = dispatcher_render.call("data-browser", "handle_ui_event", payload, 0).await;
+                match &result {
+                    Ok(_) => veldmap_host_core::vinfo!("[HOST-RENDER] data-browser::handle_ui_event returned OK"),
+                    Err(e) => veldmap_host_core::verror!("[HOST-RENDER] data-browser::handle_ui_event FAILED: {}", e),
+                }
             }
 
             window_render.request_redraw();
@@ -444,6 +453,7 @@ async fn main() -> anyhow::Result<()> {
                 event_queue.lock().unwrap().push(ev);
             }
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
+                veldmap_host_core::vdebug!("[HOST-EVENT] RedrawRequested received");
                 let start_redraw = std::time::Instant::now();
                 let frame = match surface.get_current_texture() {
                     Ok(f) => f,

@@ -55,10 +55,14 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
 }
 
 pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> anyhow::Result<HandleUiEventResponse> {
+    log::info!("[MODULE-HANDLERS] handle_ui_event START");
     let mut messages = Vec::new();
     if let Some(event_proto) = req.event {
+        log::info!("[MODULE-HANDLERS] Processing event for plugin: {}", req.plugin_id);
         messages = process_ui_event_recursive(state, &req.plugin_id, event_proto)?;
+        log::info!("[MODULE-HANDLERS] process_ui_event_recursive returned {} messages", messages.len());
     }
+    log::info!("[MODULE-HANDLERS] handle_ui_event END");
     Ok(HandleUiEventResponse { messages })
 }
 
@@ -122,10 +126,16 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
                 }
 
                 if !plugin.pending_events.borrow().is_empty() || *plugin.is_layout_dirty.borrow() {
+                    log::info!("[MODULE-HANDLERS] Frame: needs rendering, pending={}, dirty={}", 
+                        plugin.pending_events.borrow().len(), *plugin.is_layout_dirty.borrow());
                     if let Some(_handle) = f.surface_handle {
+                        log::info!("[MODULE-HANDLERS] Calling render_plugin for {}", plugin_id);
                         let mut msgs = render_plugin(plugin, &mut state.renderer, plugin_id, state.surface_format)?;
+                        log::info!("[MODULE-HANDLERS] render_plugin returned {} messages", msgs.len());
                         messages.append(&mut msgs);
                     }
+                } else {
+                    log::info!("[MODULE-HANDLERS] Frame: no rendering needed");
                 }
             }
             _ => {
@@ -154,12 +164,16 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
 }
 
 fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32) -> anyhow::Result<Vec<UiEventResponse>> {
+    log::info!("[RENDER-PLUGIN] START for {}", plugin_id);
     let (width, height) = *plugin.canvas_size.borrow();
+    log::info!("[RENDER-PLUGIN] canvas size: {}x{}", width, height);
     if width == 0 || height == 0 { 
+        log::info!("[RENDER-PLUGIN] Empty canvas, returning");
         return Ok(Vec::new()); 
     }
     
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
+    log::info!("[RENDER-PLUGIN] Processing {} events", events.len());
     
     let sf = *plugin.scale_factor.borrow();
     renderer.update_params(width, height, sf);
@@ -168,9 +182,11 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let viewport = Viewport::with_physical_size(Size::new(width, height), sf.into());
     let mut captured_messages = Vec::new();
 
+    log::info!("[RENDER-PLUGIN] Clearing renderer and converting layout");
     renderer.clear();
     let element = converter::convert_layout(&plugin.layout);
     
+    log::info!("[RENDER-PLUGIN] Building UI");
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
     let _guard = crate::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
 
@@ -181,9 +197,11 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         renderer,
     );
     
+    log::info!("[RENDER-PLUGIN] Updating UI with {} events", events.len());
     let mut clipboard = iced_core::clipboard::Null;
     let _ = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
     
+    log::info!("[RENDER-PLUGIN] Drawing UI");
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
 
     let mut last_cmds = plugin.last_draw_commands.borrow_mut();
@@ -193,9 +211,12 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let commands_changed = *last_cmds != renderer.draw_commands || 
                            *last_verts != renderer.vertices ||
                            renderer.is_atlas_dirty();
+    log::info!("[RENDER-PLUGIN] commands_changed={}, is_layout_dirty={}", commands_changed, *is_layout_dirty);
 
     if commands_changed || *is_layout_dirty {
+        log::info!("[RENDER-PLUGIN] Calling render_ui");
         let texture_id = crate::graphics::render_ui(plugin, renderer, width, height, sf, surface_format)?;
+        log::info!("[RENDER-PLUGIN] display_frame with texture_id={}", texture_id);
         let _ = veldsdk::app::AppBridge::display_frame(texture_id);
         
         *last_cmds = renderer.draw_commands.clone();
@@ -204,6 +225,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     }
 
     *plugin.needs_redrawing.borrow_mut() = false;
+    log::info!("[RENDER-PLUGIN] Caching UI");
     plugin.interface_cache.replace(ui.into_cache());
     
     let mut responses = Vec::new();
@@ -215,5 +237,6 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         });
     }
     
+    log::info!("[RENDER-PLUGIN] END, returning {} responses", responses.len());
     Ok(responses)
 }
