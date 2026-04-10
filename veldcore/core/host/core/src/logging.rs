@@ -22,9 +22,13 @@ pub fn is_flag_enabled(flag: u32) -> bool {
 }
 
 pub fn veld_log(level: Level, flags: u32, plugin_name: Option<&str>, message: &str) {
-    // 1. Глобальная фильтрация по флагам
-    // Если указаны флаги (flags != 0), проверяем что хотя бы один из них включен
-    if flags != 0 {
+    // 1. Формируем имя источника (если None - значит хост)
+    let source_name = plugin_name.unwrap_or("host");
+    let is_host = plugin_name.is_none();
+    
+    // 2. Глобальная фильтрация по флагам ТОЛЬКО для хостовских логов
+    // Для плагинов флаги не используются - они логируют всегда
+    if is_host && flags != 0 {
         let enabled = ENABLED_FLAGS.load(Ordering::Relaxed);
         if (flags & enabled) == 0 {
             // Ни один из запрошенных флагов не включен - пропускаем лог
@@ -32,11 +36,8 @@ pub fn veld_log(level: Level, flags: u32, plugin_name: Option<&str>, message: &s
         }
     }
 
-    // 2. Формируем префикс производительности
-    let p_tag = if (flags & FLAG_PERF) != 0 && is_flag_enabled(FLAG_PERF) { "[P]" } else { "" };
-    
-    // 3. Формируем имя источника (если None - значит хост)
-    let source_name = plugin_name.unwrap_or("host");
+    // 3. Формируем префикс производительности (только для хоста)
+    let p_tag = if is_host && (flags & FLAG_PERF) != 0 && is_flag_enabled(FLAG_PERF) { "[P]" } else { "" };
 
     // 4. Используем ЕДИНЫЙ таргет для всех системных логов
     log::log!(target: "veldmap", level, "{}[{}] {}", p_tag, source_name, message);
