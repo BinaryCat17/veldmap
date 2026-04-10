@@ -289,21 +289,20 @@ async fn main() -> anyhow::Result<()> {
             if has_tasks || is_visible {
                 let _ = d_clone.poll_all_tasks().await;
                 
-                let (needs_frame, eq_len, int_elapsed, rend_elapsed) = {
+                // Проверяем нужен ли кадр - БЕЗ использования last_render_time (избегаем deadlock)
+                let (needs_frame, eq_len, int_elapsed) = {
                     let eq = event_queue_clone.lock().unwrap();
                     let last_int = last_int_clone.lock().unwrap();
-                    let last_rend = last_rend_clone.lock().unwrap();
                     
                     let eq_len = eq.len();
                     let int_elapsed = last_int.elapsed().as_millis();
-                    let rend_elapsed = last_rend.elapsed().as_millis();
-                    let needs = !eq.is_empty() || int_elapsed < 500 || rend_elapsed > 1000;
-                    (needs, eq_len, int_elapsed, rend_elapsed)
+                    let needs = !eq.is_empty() || int_elapsed < 500;
+                    (needs, eq_len, int_elapsed)
                 };
                 
                 veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, 
-                    "[HOST] Polling: needs_frame={}, eq={}, int_elapsed={}ms, rend_elapsed={}ms, frame_pending={}",
-                    needs_frame, eq_len, int_elapsed, rend_elapsed,
+                    "[HOST] Polling: needs_frame={}, eq={}, int_elapsed={}ms, frame_pending={}",
+                    needs_frame, eq_len, int_elapsed,
                     frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst));
 
                 if needs_frame && !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
