@@ -197,16 +197,20 @@ impl ResourceManager {
 
     pub fn create_texture_view(&self, texture_id: u64, owner_id: u32) -> anyhow::Result<u64> {
         log::trace!("[RESOURCES] create_texture_view: texture_id={}, owner_id={}", texture_id, owner_id);
-        let entry = self.resources.get(&texture_id).ok_or_else(|| anyhow::anyhow!("Texture not found"))?;
-        // View creation is allowed for sharing
         
-        let view = match &entry.resource {
-            Resource::Texture { texture, .. } => texture.create_view(&wgpu::TextureViewDescriptor::default()),
-            _ => return Err(anyhow::anyhow!("Resource is not a texture")),
-        };
+        // Сначала получаем texture из entry, затем отпускаем lock (entry выходит из scope)
+        let texture = {
+            let entry = self.resources.get(&texture_id).ok_or_else(|| anyhow::anyhow!("Texture not found"))?;
+            match &entry.resource {
+                Resource::Texture { texture, .. } => texture.clone(),
+                _ => return Err(anyhow::anyhow!("Resource is not a texture")),
+            }
+        }; // entry drop здесь, read lock отпущен
+        
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         log::trace!("[RESOURCES] insert_resource: id={}, owner_id={}", id, owner_id);
-        self.insert_resource(id, Resource::TextureView(Arc::new(view)), entry.readonly, owner_id);
+        self.insert_resource(id, Resource::TextureView(Arc::new(view)), false, owner_id);
         log::trace!("[RESOURCES] create_texture_view: created view id={}", id);
         Ok(id)
     }
