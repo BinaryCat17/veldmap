@@ -1,4 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::collections::HashMap;
+use std::time::{Instant, Duration};
 pub use log::Level;
 
 pub const FLAG_PERF: u32 = 1 << 0;
@@ -12,9 +15,45 @@ pub const FLAG_UI_HANDLERS: u32 = 1 << 7;
 pub const FLAG_GRAPHICS: u32 = 1 << 8;
 
 static ENABLED_FLAGS: AtomicU32 = AtomicU32::new(0);
+static RATE_LIMIT: Mutex<Option<RateLimiter>> = Mutex::new(None);
+
+struct RateLimiter {
+    min_interval: Duration,
+    last_log: HashMap<String, Instant>,
+}
 
 pub fn init_logging(flags: u32) {
     ENABLED_FLAGS.store(flags, Ordering::SeqCst);
+}
+
+/// Initialize rate limiting with minimum interval between identical log messages
+pub fn init_rate_limiting(min_interval_ms: u64) {
+    if min_interval_ms == 0 {
+        *RATE_LIMIT.lock().unwrap() = None;
+    } else {
+        *RATE_LIMIT.lock().unwrap() = Some(RateLimiter {
+            min_interval: Duration::from_millis(min_interval_ms),
+            last_log: HashMap::new(),
+        });
+    }
+}
+
+/// Check if this message should be rate limited (returns true if should skip)
+fn is_rate_limited(message: &str) -> bool {
+    let mut limiter = RATE_LIMIT.lock().unwrap();
+    if let Some(ref mut limiter) = *limiter {
+        let now = Instant::now();
+        // Use first 50 chars of message as key for rate limiting
+        let key = if message.len() > 50 { &message[..50] } else { message };
+        
+        if let Some(last_time) = limiter.last_log.get(key) {
+            if now.duration_since(*last_time) < limiter.min_interval {
+                return true; // Skip this log
+            }
+        }
+        limiter.last_log.insert(key.to_string(), now);
+    }
+    false
 }
 
 pub fn is_flag_enabled(flag: u32) -> bool {
@@ -36,10 +75,15 @@ pub fn veld_log(level: Level, flags: u32, plugin_name: Option<&str>, message: &s
         }
     }
 
-    // 3. Формируем префикс производительности (только для хоста)
+    // 3. Rate limiting только для хостовских логов
+    if is_host && is_rate_limited(message) {
+        return;
+    }
+
+    // 4. Формируем префикс производительности (только для хоста)
     let p_tag = if is_host && (flags & FLAG_PERF) != 0 && is_flag_enabled(FLAG_PERF) { "[P]" } else { "" };
 
-    // 4. Используем ЕДИНЫЙ таргет для всех системных логов
+    // 5. Используем ЕДИНЫЙ таргет для всех системных логов
     log::log!(target: "veldmap", level, "{}[{}] {}", p_tag, source_name, message);
 }
 

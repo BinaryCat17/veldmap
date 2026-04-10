@@ -60,11 +60,27 @@ pub use dispatcher::*;
 pub use node::*;
 
 /// Конфигурация core модуля
-#[derive(serde::Deserialize, Debug, Default)]
+#[derive(serde::Deserialize, Debug)]
 pub struct CoreConfig {
     /// Флаги логирования - массив строк, например: ["DISPATCHER", "ABI", "HOST_RENDER"]
     #[serde(default, deserialize_with = "deserialize_log_flags")]
     pub log_flags: u32,
+    /// Минимальный интервал между одинаковыми логами в миллисекундах (0 = без ограничения)
+    #[serde(default = "default_log_rate_limit_ms")]
+    pub log_rate_limit_ms: u64,
+}
+
+fn default_log_rate_limit_ms() -> u64 {
+    1000 // По умолчанию 1 секунда
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            log_flags: 0,
+            log_rate_limit_ms: default_log_rate_limit_ms(),
+        }
+    }
 }
 
 fn deserialize_log_flags<'de, D>(deserializer: D) -> Result<u32, D::Error>

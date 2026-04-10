@@ -82,9 +82,12 @@ async fn main() -> anyhow::Result<()> {
     
     // Инициализируем флаги логирования
     veldmap_host_core::logging::init_logging(core_config.log_flags);
+    // Инициализируем rate limiting (минимальный интервал между одинаковыми логами)
+    veldmap_host_core::logging::init_rate_limiting(core_config.log_rate_limit_ms);
     
     veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "VeldMap GUI Host starting...");
     veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Log flags: 0b{:b}", core_config.log_flags);
+    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Log rate limit: {}ms", core_config.log_rate_limit_ms);
 
     // --- 4. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
     // Сканируем конфиги плагинов до создания окна
