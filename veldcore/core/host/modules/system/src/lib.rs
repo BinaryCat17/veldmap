@@ -121,6 +121,18 @@ impl NativeService for SystemService {
                     t.completed = req.completed;
                     if !req.error.is_empty() { t.error = req.error.clone(); }
                     if !req.payload.is_empty() { t.payload = req.payload.clone(); }
+                    
+                    // Log task completion or errors
+                    if req.completed {
+                        if req.error.is_empty() {
+                            veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_DISPATCHER, "[TASK] Task {} completed (progress={:.1}%)", req.task_id, req.progress * 100.0);
+                        } else {
+                            veldmap_host_core::verror!(veldmap_host_core::logging::FLAG_DISPATCHER, "[TASK] Task {} failed: {}", req.task_id, req.error);
+                        }
+                    } else if !req.error.is_empty() {
+                        veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_DISPATCHER, "[TASK] Task {} error: {}", req.task_id, req.error);
+                    }
+                    
                     Ok(Vec::new())
                 } else {
                     Err(anyhow::anyhow!("Task not found"))

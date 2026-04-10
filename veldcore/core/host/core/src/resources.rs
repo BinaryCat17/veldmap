@@ -109,11 +109,14 @@ impl ResourceManager {
         if let Some(entry) = self.resources.get(&id) {
             // Allow access if owner or system resource
             if entry.owner_id != 0 && entry.owner_id != requestor_id {
+                crate::vwarn!(crate::logging::FLAG_ABI, "[RESOURCES] acquire_resource: unauthorized access to {} by {}", id, requestor_id);
                 return false;
             }
-            entry.ref_count.fetch_add(1, Ordering::SeqCst);
+            let new_count = entry.ref_count.fetch_add(1, Ordering::SeqCst) + 1;
+            crate::vtrace!(crate::logging::FLAG_ABI, "[RESOURCES] acquire_resource: id={}, new_ref_count={}", id, new_count);
             true
         } else {
+            crate::vwarn!(crate::logging::FLAG_ABI, "[RESOURCES] acquire_resource: resource {} not found", id);
             false
         }
     }
@@ -370,19 +373,32 @@ impl ResourceManager {
     }
 
     pub fn create_shader(&self, source: &str, label: Option<&str>, owner_id: u32) -> u64 {
+        crate::vdebug!(crate::logging::FLAG_GRAPHICS, "[RESOURCES] create_shader: label='{:?}', owner_id={}, source_len={}", 
+            label, owner_id, source.len());
+        
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        
+        // Use create_shader_module_safe to catch errors
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label,
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
+        
+        crate::vtrace!(crate::logging::FLAG_GRAPHICS, "[RESOURCES] create_shader: created shader id={}", id);
         self.insert_resource(id, Resource::ShaderModule(Arc::new(shader)), true, owner_id);
         id
     }
 
     pub fn create_pipeline(&self, req: &crate::compute::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<u64> {
+        crate::vdebug!(crate::logging::FLAG_GRAPHICS, "[RESOURCES] create_pipeline: shader_id={}, label='{}', owner_id={}", 
+            req.shader_id, req.label, owner_id);
+        
         let shader = match self.get_resource(req.shader_id, owner_id) {
             Some(Resource::ShaderModule(s)) => s,
-            _ => return Err(anyhow::anyhow!("Resource is not a shader or unauthorized")),
+            _ => {
+                crate::verror!(crate::logging::FLAG_GRAPHICS, "[RESOURCES] create_pipeline: shader {} not found or unauthorized", req.shader_id);
+                return Err(anyhow::anyhow!("Resource is not a shader or unauthorized"));
+            }
         };
 
         let target_format = match TextureFormat::try_from(req.target_format).unwrap_or(TextureFormat::TexRgba8Unorm) {
@@ -402,7 +418,10 @@ impl ResourceManager {
                 Some(Resource::BindGroupLayout(l)) => {
                     bgls.push(l);
                 }
-                _ => return Err(anyhow::anyhow!("BindGroupLayout {} not found or unauthorized", id)),
+                _ => {
+                    crate::verror!(crate::logging::FLAG_GRAPHICS, "[RESOURCES] create_pipeline: BindGroupLayout {} not found or unauthorized", id);
+                    return Err(anyhow::anyhow!("BindGroupLayout {} not found or unauthorized", id));
+                }
             }
         }
         for l in &bgls { bgl_refs.push(l.as_ref()); }
@@ -537,6 +556,7 @@ impl ResourceManager {
         });
 
         self.insert_resource(id, Resource::RenderPipeline(Arc::new(pipeline)), true, owner_id);
+        crate::vdebug!(crate::logging::FLAG_GRAPHICS, "[RESOURCES] create_pipeline: created pipeline id={}", id);
         Ok(id)
     }
 
