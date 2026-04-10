@@ -43,6 +43,12 @@ pub fn handle_browse(state: &mut AppState, msg: BrowseMessage) -> Command<AppMes
 }
 
 pub fn handle_downloaded(state: &mut AppState, msg: DownloadedMessage) -> Command<AppMessage> {
+    // DownloadFile работает с глобальным состоянием и может быть вызван с любого экрана
+    if let DownloadedMessage::DownloadFile(s3_key) = &msg {
+        return crate::screens::downloaded::update_download_file(&mut state.global, s3_key.clone());
+    }
+    
+    // Остальные сообщения требуют экран Downloaded
     if let crate::app::state::Screen::Downloaded(s) = &mut state.screen {
         crate::screens::downloaded::update(s, msg, &mut state.global)
     } else {

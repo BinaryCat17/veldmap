@@ -10,6 +10,13 @@ use crate::{
 };
 use super::{DownloadedState, message::Message};
 
+/// Запуск скачивания файла (может быть вызван с любого экрана)
+pub fn update_download_file(global: &mut GlobalState, s3_key: String) -> Command<AppMessage> {
+    global.downloading_key = Some(s3_key.clone());
+    global.status_message = format!("Downloading {}...", s3_key.split('/').last().unwrap_or("file"));
+    host::start_download(s3_key)
+}
+
 pub fn update(
     state: &mut DownloadedState,
     msg: Message,
@@ -29,9 +36,7 @@ pub fn update(
 
         // Запуск скачивания
         Message::DownloadFile(s3_key) => {
-            global.downloading_key = Some(s3_key.clone());
-            global.status_message = format!("Downloading {}...", s3_key.split('/').last().unwrap_or("file"));
-            host::start_download(s3_key)
+            update_download_file(global, s3_key)
         }
 
         // Обработка обновления задачи скачивания
