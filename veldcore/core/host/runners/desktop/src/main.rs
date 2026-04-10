@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     // В файл пишем ВСЁ (trace и выше)
     // В консоль только veldmap info+ и warn/error от других
     let file_log = log_file.clone();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,info"))
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,veldmap_vlog=trace,info"))
         .format(move |buf, record| {
             let log_line = format!(
                 "[{}] <{}> {}\n",
