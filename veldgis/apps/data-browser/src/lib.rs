@@ -1,4 +1,4 @@
-//! Главный lib.rs после финальной реорганизации
+//! VeldMap Data Browser - GIS data discovery and download application
 
 mod app;
 mod screens;
@@ -42,10 +42,6 @@ define_module! {
     state: UiRunner<DataBrowserApp>,
     init: UiRunner::<DataBrowserApp>::new,
     handlers: {
-        "handle_ui_event" => handle_ui_event_wrapper : veldsdk::rpc::app::UiEvent => veld_ui::proto::HandleUiEventResponse,
+        "handle_ui_event" => veld_ui::handle_ui_event::<DataBrowserApp> : veldsdk::rpc::app::UiEvent => veld_ui::proto::HandleUiEventResponse,
     }
-}
-
-pub fn handle_ui_event_wrapper(runner: &mut UiRunner<DataBrowserApp>, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<veld_ui::proto::HandleUiEventResponse> {
-    runner.dispatch_event(event)
 }

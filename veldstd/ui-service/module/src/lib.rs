@@ -7,6 +7,7 @@ mod state;
 mod handlers;
 mod renderer;
 mod converter;
+mod graphics;
 
 #[derive(serde::Deserialize, Clone)]
 pub struct LocalConfig {}

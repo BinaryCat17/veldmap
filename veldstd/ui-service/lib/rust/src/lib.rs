@@ -1218,6 +1218,33 @@ impl<A: VeldUiApp> UiRunner<A> {
     }
 }
 
+/// Global wrapper function for use with define_module! macro.
+/// 
+/// Instead of defining your own wrapper:
+/// ```rust
+/// pub fn handle_ui_event_wrapper(runner: &mut UiRunner<MyApp>, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<proto::HandleUiEventResponse> {
+///     runner.dispatch_event(event)
+/// }
+/// ```
+/// 
+/// You can use this directly in define_module!:
+/// ```rust
+/// define_module! {
+///     config: MyConfig,
+///     state: UiRunner<MyApp>,
+///     init: UiRunner::<MyApp>::new,
+///     handlers: {
+///         "handle_ui_event" => veld_ui::handle_ui_event::<MyApp> : veldsdk::rpc::app::UiEvent => proto::HandleUiEventResponse,
+///     }
+/// }
+/// ```
+pub fn handle_ui_event<A: VeldUiApp>(
+    runner: &mut UiRunner<A>,
+    event: veldsdk::rpc::app::UiEvent,
+) -> anyhow::Result<proto::HandleUiEventResponse> {
+    runner.dispatch_event(event)
+}
+
 pub mod reexports {
     pub use std::task::{Poll, Context};
     pub use futures_util::task::noop_waker_ref;
