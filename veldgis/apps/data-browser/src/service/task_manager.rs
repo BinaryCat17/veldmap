@@ -24,8 +24,8 @@ impl TaskKind {
         }
     }
     
-    /// Проверяет, относится ли задача к конкретному файлу (для проверки is_downloading)
-    pub fn matches_s3_key(&self, key: &str) -> bool {
+    /// Проверяет, относится ли задача к конкретному ключу (для проверки is_downloading)
+    pub fn matches_key(&self, key: &str) -> bool {
         match self {
             TaskKind::Download { s3_key, .. } => s3_key == key,
             _ => false,
@@ -137,27 +137,27 @@ impl TaskManager {
         self.tasks.retain(|_, t| !t.is_finished);
     }
     
-    /// Проверяет, скачивается ли файл с данным s3_key
-    pub fn is_downloading(&self, s3_key: &str) -> bool {
+    /// Проверяет, скачивается ли файл с данным ключом
+    pub fn is_downloading(&self, key: &str) -> bool {
         self.tasks
             .values()
-            .any(|t| !t.is_finished && t.kind.matches_s3_key(s3_key))
+            .any(|t| !t.is_finished && t.kind.matches_key(key))
     }
     
-    /// Обновляет прогресс задачи по s3_key (для Download задач)
-    pub fn update_progress_by_s3_key(&mut self, s3_key: &str, progress: f32) {
+    /// Обновляет прогресс задачи по ключу
+    pub fn update_progress_by_key(&mut self, key: &str, progress: f32) {
         for task in self.tasks.values_mut() {
-            if !task.is_finished && task.kind.matches_s3_key(s3_key) {
+            if !task.is_finished && task.kind.matches_key(key) {
                 task.progress = progress.clamp(0.0, 1.0);
                 break;
             }
         }
     }
     
-    /// Завершает задачу по s3_key
-    pub fn finish_by_s3_key(&mut self, s3_key: &str) {
+    /// Завершает задачу по ключу
+    pub fn finish_by_key(&mut self, key: &str) {
         for task in self.tasks.values_mut() {
-            if !task.is_finished && task.kind.matches_s3_key(s3_key) {
+            if !task.is_finished && task.kind.matches_key(key) {
                 task.is_finished = true;
                 task.progress = 1.0;
                 break;
@@ -165,10 +165,10 @@ impl TaskManager {
         }
     }
     
-    /// Помечает задачу как failed по s3_key
-    pub fn fail_by_s3_key(&mut self, s3_key: &str, error: String) {
+    /// Помечает задачу как failed по ключу
+    pub fn fail_by_key(&mut self, key: &str, error: String) {
         for task in self.tasks.values_mut() {
-            if !task.is_finished && task.kind.matches_s3_key(s3_key) {
+            if !task.is_finished && task.kind.matches_key(key) {
                 task.is_finished = true;
                 task.error = Some(error);
                 break;

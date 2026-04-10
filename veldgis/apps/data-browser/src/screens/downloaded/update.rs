@@ -6,7 +6,7 @@ use crate::{
     AppMessage,
     app::state::GlobalState,
     service::host,
-    task_manager::TaskKind,
+    service::task_manager::TaskKind,
 };
 use super::{DownloadedState, message::Message};
 
@@ -59,10 +59,10 @@ pub fn update(
             if let Some(s3_key) = &global.current_download {
                 match &global.download_task {
                     veldsdk::core::task::TaskStatus::Running { progress, .. } => {
-                        global.task_manager.update_progress_by_s3_key(s3_key, *progress);
+                        global.task_manager.update_progress_by_key(s3_key, *progress);
                     }
                     veldsdk::core::task::TaskStatus::Finished(res) => {
-                        global.task_manager.finish_by_s3_key(s3_key);
+                        global.task_manager.finish_by_key(s3_key);
                         global.current_download = None;
                         
                         if !res.error.is_empty() {
@@ -73,7 +73,7 @@ pub fn update(
                         }
                     }
                     veldsdk::core::task::TaskStatus::Failed(err) => {
-                        global.task_manager.fail_by_s3_key(s3_key, err.clone());
+                        global.task_manager.fail_by_key(s3_key, err.clone());
                         global.current_download = None;
                         global.error_message = Some(format!("Download Task Failed: {}", err));
                     }

@@ -106,7 +106,7 @@ pub fn render_item(
 
 pub fn render_list(
     items: &[BrowserItem],
-    task_manager: &crate::task_manager::TaskManager,
+    task_manager: &crate::service::task_manager::TaskManager,
     path_prefix: &str,  // Уникальный префикс для ключей (например, путь + страница)
     on_browse: impl Fn(String) -> AppMessage + Clone + 'static,
     on_view: impl Fn(String) -> AppMessage + Clone + 'static,

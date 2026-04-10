@@ -1159,7 +1159,6 @@ impl<A: VeldUiApp> UiRunner<A> {
                     
                     use veldsdk::futures_util::stream::StreamExt;
                     
-                    let task_count_before = self.tasks.len();
                     self.tasks.retain_mut(|task| {
                         for _ in 0..100 {
                             match task.poll_next_unpin(&mut cx) {

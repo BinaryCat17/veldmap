@@ -5,7 +5,7 @@ use veldmap_api::dataprovider::{SearchResponse, ListPathResponse, DownloadRespon
 use veldsdk::rpc::core::ResourceHandle;
 
 use crate::common::BrowserItem;
-use crate::task_manager::TaskManager;
+use crate::service::task_manager::TaskManager;
 use crate::screens::{SearchState, BrowseState, DownloadedState, PreviewState};
 
 /// Глобальное состояние

@@ -18,9 +18,8 @@ pub fn update(
         Message::BrowsePath(path) => {
             global.status_message = format!("Listing /{}...", path);
             state.items.clear();
-            state.next_token = None;
-            state.token_stack.clear();
-            state.current_page_token = String::new();
+            state.page_tokens = vec![String::new()];
+            state.current_page = 0;
             state.current_path = path.clone();
             state.is_loading = true;
 
@@ -57,21 +56,23 @@ pub fn update(
                         }
                     }).collect();
 
-                    state.next_token = if response.next_token.is_empty() {
-                        None
+                    if !response.next_token.is_empty() {
+                        if state.current_page == state.page_tokens.len() - 1 {
+                            state.page_tokens.push(response.next_token.clone());
+                        } else {
+                            state.page_tokens[state.current_page + 1] = response.next_token.clone();
+                        }
                     } else {
-                        Some(response.next_token.clone())
-                    };
+                        state.page_tokens.truncate(state.current_page + 1);
+                    }
 
                     log::info!("Browse items updated: {} items", state.items.len());
                     global.status_message = format!("Loaded {} items", state.items.len());
                     
-                    // Если список пустой но есть next_token, автоматически загружаем следующую страницу
-                    // (некоторые API возвращают пустую первую страницу с токеном)
-                    if state.items.is_empty() && state.next_token.is_some() {
-                        let token = state.next_token.clone().unwrap();
-                        state.token_stack.push(state.current_page_token.clone());
-                        state.current_page_token = token.clone();
+                    // Если список пустой но есть следующая страница, автоматически загружаем следующую
+                    if state.items.is_empty() && state.current_page + 1 < state.page_tokens.len() {
+                        state.current_page += 1;
+                        let token = state.page_tokens[state.current_page].clone();
                         
                         let req = ListPathRequest {
                             path: state.current_path.clone(),
@@ -88,13 +89,11 @@ pub fn update(
 
         // === Пагинация Next ===
         Message::NextPage => {
-            log::info!("NextPage: next_token={:?}, current_token='{}', items={}", 
-                state.next_token, state.current_page_token, state.items.len());
-            if let Some(token) = state.next_token.clone() {
-                log::info!("NextPage: WILL start with token='{}'", token);
-                state.token_stack.push(state.current_page_token.clone());
-                state.current_page_token = token.clone();
+            log::info!("NextPage: current_page={}, items={}", state.current_page, state.items.len());
+            if state.current_page + 1 < state.page_tokens.len() {
+                state.current_page += 1;
                 state.is_loading = true;
+                let token = state.page_tokens[state.current_page].clone();
 
                 let req = ListPathRequest {
                     path: state.current_path.clone(),
@@ -103,16 +102,17 @@ pub fn update(
                 log::info!("Starting browse with token='{}'", token);
                 host::start_browse(req)
             } else {
-                log::info!("NextPage: SKIPPED — next_token is None!");
+                log::info!("NextPage: SKIPPED — no next token!");
                 Command::none()
             }
         }
 
         // === Пагинация Prev ===
         Message::PrevPage => {
-            if let Some(token) = state.token_stack.pop() {
-                state.current_page_token = token.clone();
+            if state.current_page > 0 {
+                state.current_page -= 1;
                 state.is_loading = true;
+                let token = state.page_tokens[state.current_page].clone();
 
                 let req = ListPathRequest {
                     path: state.current_path.clone(),

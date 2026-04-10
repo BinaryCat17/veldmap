@@ -8,7 +8,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use crate::dispatcher::{Dispatcher, ServiceLocation};
 use crate::{HostState, WasmModule, CallContext};
 use crate::resources::ResourceManager;
-use crate::window::{PluginWindowConfig, parse_window_config};
+use crate::window::parse_window_config;
 
 #[derive(Deserialize)]
 struct ServiceEntry {

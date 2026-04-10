@@ -2,7 +2,6 @@
 use veldmap_host_core::{
     dispatcher::{Dispatcher, ServiceLocation},
     plugin_module,
-    window::PluginWindows,
 };
 use veldmap_host_system::SystemService;
 use veldmap_host_compute::ComputeService;
@@ -270,10 +269,7 @@ async fn main() -> anyhow::Result<()> {
     let running_polling = running.clone();
     let frame_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let frame_pending_clone = frame_pending.clone();
-    let last_int_clone = last_interaction_time.clone();
-    let last_rend_clone = last_render_time.clone();
     let frame_wake_clone = frame_wake.clone();
-    let event_queue_clone = event_queue.clone();
 
     // 1. ЦИКЛ ОБРАБОТКИ ЗАДАЧ (POLLING)
     tokio::spawn(async move {

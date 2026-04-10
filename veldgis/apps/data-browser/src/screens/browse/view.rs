@@ -1,7 +1,7 @@
 //! screens/browse/view.rs
 
 use veld_ui::{
-    button, column, container, row, scrollable, text, Element, Length, Alignment,
+    button, column, row, scrollable, text, Element, Length, Alignment,
 };
 use crate::{
     AppMessage,
@@ -20,7 +20,7 @@ pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
         ].into();
     }
     
-    let path_key = format!("{}_{}", state.current_path, state.current_page_token);
+    let path_key = format!("{}_{}", state.current_path, state.current_page);
     let list = render_list(
         &state.items,
         &global.task_manager,
@@ -32,13 +32,13 @@ pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
 
     // Пагинация без ключей — стабильные кнопки
     let mut pagination = row![].spacing(10.0);
-    if !state.token_stack.is_empty() {
+    if state.current_page > 0 {
         pagination = pagination.push(
             styles::apply_primary(button(text("\u{f060} Previous")))
                 .on_press(AppMessage::Browse(Message::PrevPage))
         );
     }
-    if state.next_token.is_some() {
+    if state.current_page + 1 < state.page_tokens.len() {
         pagination = pagination.push(
             styles::apply_primary(button(text("Next \u{f061}")))
                 .on_press(AppMessage::Browse(Message::NextPage))
@@ -58,10 +58,10 @@ pub fn view(state: &BrowseState, global: &GlobalState) -> Element<AppMessage> {
         .color(styles::COLOR_TEXT_DIM);
 
     // Ключ для списка на основе токена страницы — заставляет UI мост пересоздать при пагинации
-    let list_key = state.current_page_token.len() as u64;
+    let list_key = state.current_page as u64;
     
-    log::info!("Browse view: items={}, next_token={:?}, current_token='{}'", 
-        state.items.len(), state.next_token, state.current_page_token);
+    log::info!("Browse view: items={}, current_page={}, page_tokens={}", 
+        state.items.len(), state.current_page, state.page_tokens.len());
     
     column![
         header,

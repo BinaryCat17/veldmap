@@ -1,7 +1,7 @@
 //! widgets.rs — общие виджеты приложения
 
 use veld_ui::{column, row, text, container, progress_bar, scrollable, Element, Length, Alignment};
-use crate::{AppMessage, styles, task_manager::TaskManager};
+use crate::{AppMessage, styles, service::task_manager::TaskManager};
 
 /// Панель активных задач для отображения справа
 pub fn task_panel(task_manager: &TaskManager) -> Element<AppMessage> {

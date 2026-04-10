@@ -2,14 +2,25 @@
 
 use crate::common::BrowserItem;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct BrowseState {
     pub current_path: String,
     pub items: Vec<BrowserItem>,
 
-    pub token_stack: Vec<String>,
-    pub current_page_token: String,
-    pub next_token: Option<String>,
+    pub page_tokens: Vec<String>,
+    pub current_page: usize,
 
     pub is_loading: bool,
+}
+
+impl Default for BrowseState {
+    fn default() -> Self {
+        Self {
+            current_path: String::new(),
+            items: Vec::new(),
+            page_tokens: vec![String::new()],
+            current_page: 0,
+            is_loading: false,
+        }
+    }
 }
