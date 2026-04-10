@@ -296,7 +296,7 @@ macro_rules! define_module {
                 Err(_) => return 1,
             };
             
-            veldsdk::vinfo!(veldsdk::FLAG_SDK, "[SDK] handle_rpc ENTER: {}::{}", request.service, request.method);
+            veldsdk::vdebug!(veldsdk::FLAG_SDK, "[SDK] handle_rpc ENTER: {}::{}", request.service, request.method);
             
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let state_arc = match $crate::rpc::MODULE_STATE.get() {
@@ -328,7 +328,7 @@ macro_rules! define_module {
             };
             
             if error.is_empty() {
-                veldsdk::vinfo!(veldsdk::FLAG_SDK, "[SDK] handle_rpc EXIT OK: {}::{}", request.service, request.method);
+                veldsdk::vdebug!(veldsdk::FLAG_SDK, "[SDK] handle_rpc EXIT OK: {}::{}", request.service, request.method);
             } else {
                 veldsdk::verror!(veldsdk::FLAG_SDK, "[SDK] handle_rpc EXIT ERROR: {}::{} - {}", request.service, request.method, error);
             }

@@ -54,13 +54,13 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // В консоль: veldmap info+ и warn/error от других крейтов
+            // В консоль: veldmap info и warn/error от других крейтов
             // Debug/trace только в файл
             let is_veldmap = record.target().starts_with("veldmap");
-            let is_info_or_higher = record.level() <= log::Level::Info;
-            let is_warning = record.level() <= log::Level::Warn;
+            let is_info = record.level() == log::Level::Info;
+            let is_warn_or_error = record.level() == log::Level::Warn || record.level() == log::Level::Error;
             
-            if (is_veldmap && is_info_or_higher) || is_warning {
+            if (is_veldmap && is_info) || is_warn_or_error {
                 write!(buf, "{}", log_line)
             } else {
                 Ok(())

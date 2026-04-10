@@ -30,7 +30,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let dispatcher = caller.data().dispatcher.clone();
             let instance_id = caller.data().instance_id;
             
-            crate::vinfo!(crate::logging::FLAG_ABI, "[ABI] [{}] Call: {}::{} (ID: {})", plugin_name, request.service, request.method, instance_id);
+            crate::vdebug!(crate::logging::FLAG_ABI, "[ABI] [{}] Call: {}::{} (ID: {})", plugin_name, request.service, request.method, instance_id);
 
             // Special handling for log to avoid circular dependencies and for performance
             let result = if request.service == "system" && request.method == "log" {

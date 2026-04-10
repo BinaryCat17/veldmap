@@ -120,14 +120,14 @@ impl Dispatcher {
                 let instance = module.instance;
                 let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
                 
-                crate::vinfo!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] >>> CALLING WASM handle_rpc: {}::{}", service_name, method);
+                crate::vdebug!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] >>> CALLING WASM handle_rpc: {}::{}", service_name, method);
                 
                 let wasm_start = std::time::Instant::now();
                 let result = handle_rpc.call_async(&mut module.store, ()).await;
                 let wasm_time = wasm_start.elapsed();
                 
                 match &result {
-                    Ok(_) => crate::vinfo!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] <<< WASM handle_rpc RETURNED OK: {}::{}", service_name, method),
+                    Ok(_) => crate::vdebug!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] <<< WASM handle_rpc RETURNED OK: {}::{}", service_name, method),
                     Err(e) => crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] <<< WASM handle_rpc FAILED: {}::{} - {:?}", service_name, method, e),
                 }
                 
