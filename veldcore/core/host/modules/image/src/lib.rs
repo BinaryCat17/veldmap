@@ -74,7 +74,7 @@ impl NativeService for ImageService {
                 let task_id_inner = task_id.clone();
                 
                 let join_handle = tokio::task::spawn_blocking(move || {
-                    let update_status = |progress: f32, err: String, handle: Option<ResourceHandle>| {
+                    let update_status = |progress: f32, err: String, handle: Option<ResourceHandle>, payload: Option<Vec<u8>>| {
                         let mut tasks = tasks_clone.lock().unwrap();
                         if let Some(t) = tasks.get_mut(&task_id_inner) {
                             t.progress = progress;
@@ -84,6 +84,9 @@ impl NativeService for ImageService {
                             }
                             if handle.is_some() {
                                 t.result_handle = handle;
+                                if let Some(p) = payload {
+                                    t.payload = p;
+                                }
                                 t.completed = true;
                                 t.progress = 1.0;
                             }
@@ -96,22 +99,22 @@ impl NativeService for ImageService {
                     let rgba = if is_tiff {
                         let file = match std::fs::File::open(&path) {
                             Ok(f) => f,
-                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                            Err(e) => { update_status(0.0, e.to_string(), None, None); return; }
                         };
                         let buf_reader = std::io::BufReader::with_capacity(1024 * 1024, file);
                         let mut decoder = match Decoder::new(buf_reader) {
                             Ok(d) => d,
-                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                            Err(e) => { update_status(0.0, e.to_string(), None, None); return; }
                         };
                         
                         let (width, height) = match decoder.dimensions() {
                             Ok(d) => d,
-                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                            Err(e) => { update_status(0.0, e.to_string(), None, None); return; }
                         };
                         
                         let color_type = match decoder.colortype() {
                             Ok(ct) => ct,
-                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                            Err(e) => { update_status(0.0, e.to_string(), None, None); return; }
                         };
 
                         let planar_config = decoder.get_tag_u32(tiff::tags::Tag::PlanarConfiguration).unwrap_or(1);
@@ -124,10 +127,10 @@ impl NativeService for ImageService {
 
                         log::info!(target: "host", "Loading TIFF: {}x{} {:?} (Planar: {}, Samples: {})", 
                             width, height, color_type, planar_config, samples_per_pixel);
-                        update_status(0.2, String::new(), None);
+                        update_status(0.2, String::new(), None, None);
 
                         let img_res = decoder.read_image();
-                        update_status(0.5, String::new(), None);
+                        update_status(0.5, String::new(), None, None);
 
                         match img_res {
                             Ok(res) => {
@@ -146,13 +149,13 @@ impl NativeService for ImageService {
                                         log::warn!(target: "host", "Unhandled TIFF DecodingResult variant. Falling back.");
                                         let fallback_img = match image::open(&path) {
                                             Ok(i) => i,
-                                            Err(fe) => { update_status(0.0, format!("Fallback error: {}", fe), None); return; }
+                                            Err(fe) => { update_status(0.0, format!("Fallback error: {}", fe), None, None); return; }
                                         };
                                         let rgba8 = fallback_img.to_rgba8();
                                         let (w, h) = rgba8.dimensions();
                                         let tex_id = resources.create_texture(w, h, 0, 8, false, requestor_id);
                                         if let Err(e) = resources.write_resource(tex_id, 0, &rgba8, requestor_id) {
-                                            update_status(0.0, e.to_string(), None);
+                                            update_status(0.0, e.to_string(), None, None);
                                             return;
                                         }
                                         let handle = ResourceHandle {
@@ -160,7 +163,8 @@ impl NativeService for ImageService {
                                             size: (w * h * 4) as u64,
                                             content_hash: resources.compute_hash(tex_id, requestor_id).unwrap_or_default(),
                                         };
-                                        update_status(1.0, String::new(), Some(handle));
+                                        let payload = handle.encode_to_vec();
+                                        update_status(1.0, String::new(), Some(handle), Some(payload));
                                         return;
                                     }
                                 };
@@ -207,7 +211,7 @@ impl NativeService for ImageService {
                                 log::warn!(target: "host", "Specialized TIFF decoder failed: {:?}. Falling back to standard image crate.", e);
                                 let fallback_img = match image::open(&path) {
                                     Ok(i) => i,
-                                    Err(fe) => { update_status(0.0, format!("TIFF error: {:?}, Fallback error: {}", e, fe), None); return; }
+                                    Err(fe) => { update_status(0.0, format!("TIFF error: {:?}, Fallback error: {}", e, fe), None, None); return; }
                                 };
                                 fallback_img.to_rgba8()
                             }
@@ -215,9 +219,9 @@ impl NativeService for ImageService {
                     } else {
                         let img = match image::open(&path) {
                             Ok(i) => i,
-                            Err(e) => { update_status(0.0, e.to_string(), None); return; }
+                            Err(e) => { update_status(0.0, e.to_string(), None, None); return; }
                         };
-                        update_status(0.3, String::new(), None);
+                        update_status(0.3, String::new(), None, None);
 
                         let final_img = if req.target_width > 0 || req.target_height > 0 {
                             let tw = if req.target_width == 0 { img.width() } else { req.target_width };
@@ -255,7 +259,7 @@ impl NativeService for ImageService {
                         }
                         rgba8
                     };
-                    update_status(0.8, String::new(), None);
+                    update_status(0.8, String::new(), None, None);
 
                     let (w, h) = rgba.dimensions();
                     let final_rgba = if is_tiff && (req.target_width > 0 || req.target_height > 0) {
@@ -269,7 +273,7 @@ impl NativeService for ImageService {
                     let (w, h) = final_rgba.dimensions();
                     let tex_id = resources.create_texture(w, h, 0, 8, false, requestor_id); // 8 = TEXTURE_BINDING
                     if let Err(e) = resources.write_resource(tex_id, 0, &final_rgba, requestor_id) {
-                        update_status(0.0, e.to_string(), None);
+                        update_status(0.0, e.to_string(), None, None);
                         return;
                     }
 
@@ -278,7 +282,9 @@ impl NativeService for ImageService {
                         size: (w * h * 4) as u64,
                         content_hash: resources.compute_hash(tex_id, requestor_id).unwrap_or_default(),
                     };
-                    update_status(1.0, String::new(), Some(handle));
+                    let payload = handle.encode_to_vec();
+                    log::info!("[IMAGE] Loaded '{}': texture_id={}, size={}x{}", path, tex_id, w, h);
+                    update_status(1.0, String::new(), Some(handle), Some(payload));
                 });
 
                 {

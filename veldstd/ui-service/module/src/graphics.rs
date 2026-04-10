@@ -8,6 +8,7 @@ use veldsdk::compute::wgpu_proxy::ComputeRecorder;
 use veldsdk::rpc::host::{call_service, gpu_write_resource};
 use veldsdk::OwnedResource;
 use prost::Message;
+use anyhow::anyhow;
 
 /// Renders UI to an offscreen texture and returns its ID
 pub fn render_ui(
@@ -72,7 +73,7 @@ fn create_offscreen_texture(width: u32, height: u32, surface_format: i32) -> any
         }))
     };
     let texture_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", texture_req.encode_to_vec())?[..])?;
-    let texture_id = texture_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create offscreen texture"))?.id;
+    let texture_id = texture_res.handle.ok_or_else(|| anyhow!("Failed to create offscreen texture"))?.id;
     Ok(texture_id)
 }
 
@@ -89,7 +90,7 @@ fn create_texture_view(texture_id: u64, surface_format: i32) -> anyhow::Result<u
         }))
     };
     let view_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", view_req.encode_to_vec())?[..])?;
-    let view_id = view_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create texture view"))?.id;
+    let view_id = view_res.handle.ok_or_else(|| anyhow!("Failed to create texture view"))?.id;
     Ok(view_id)
 }
 
@@ -162,15 +163,19 @@ fn render_geometry(
                     recorder.set_scissor_rect(*x, *y, *width, *height);
                 }
                 DrawCmd::ExternalImage { texture_id, index_count, .. } => {
-                    if let Ok(bg_id) = get_external_bind_group(plugin, renderer, *texture_id) {
-                        recorder.set_bind_group(0, bg_id);
-                        recorder.draw_indexed(current_index_offset..(current_index_offset + *index_count), 0, 0..1);
-                        current_index_offset += *index_count;
-                        if let Some(atlas_bg) = renderer.atlas_bind_group_id {
-                            recorder.set_bind_group(0, atlas_bg);
+                    match get_external_bind_group(plugin, renderer, *texture_id) {
+                        Ok(bg_id) => {
+                            recorder.set_bind_group(0, bg_id);
+                            recorder.draw_indexed(current_index_offset..(current_index_offset + *index_count), 0, 0..1);
+                            current_index_offset += *index_count;
+                            if let Some(atlas_bg) = renderer.atlas_bind_group_id {
+                                recorder.set_bind_group(0, atlas_bg);
+                            }
                         }
-                    } else {
-                        current_index_offset += *index_count;
+                        Err(e) => {
+                            log::error!("Failed to create external bind group for texture {}: {}", texture_id, e);
+                            current_index_offset += *index_count;
+                        }
                     }
                 }
             }
@@ -182,6 +187,9 @@ fn render_geometry(
 
 /// Get or create bind group for external texture
 fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, texture_id: u64) -> anyhow::Result<u64> {
+    if texture_id == 0 {
+        return Err(anyhow!("Invalid texture_id: 0"));
+    }
     let mut cache = plugin.external_bind_groups.borrow_mut();
     if let Some(&bg_id) = cache.get(&texture_id) {
         return Ok(bg_id);
@@ -194,7 +202,7 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
         }))
     };
     let view_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", view_req.encode_to_vec())?[..])?;
-    let view_id = view_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create texture view"))?.id;
+    let view_id = view_res.handle.ok_or_else(|| anyhow!("Failed to create texture view"))?.id;
 
     let sampler_req = ComputeResourceRequest {
         instance_id: 0,
@@ -205,12 +213,12 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
         }))
     };
     let sampler_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", sampler_req.encode_to_vec())?[..])?;
-    let sampler_id = sampler_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create sampler"))?.id;
+    let sampler_id = sampler_res.handle.ok_or_else(|| anyhow!("Failed to create sampler"))?.id;
 
     let bg_req = ComputeResourceRequest {
         instance_id: 0,
         command: Some(compute_resource_request::Command::CreateBindGroup(CreateBindGroup {
-            layout_id: renderer.bgl_id.ok_or_else(|| anyhow::anyhow!("No BGL"))?,
+            layout_id: renderer.bgl_id.ok_or_else(|| anyhow!("No BGL"))?,
             entries: vec![
                 BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::TextureViewId(view_id)) },
                 BindGroupEntry { binding: 1, resource: Some(bind_group_entry::Resource::SamplerId(sampler_id)) },
@@ -219,9 +227,10 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
         }))
     };
     let bg_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", bg_req.encode_to_vec())?[..])?;
-    let bg_id = bg_res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create bind group"))?.id;
+    let bg_id = bg_res.handle.ok_or_else(|| anyhow!("Failed to create bind group"))?.id;
 
     cache.insert(texture_id, bg_id);
+    log::debug!("Created external bind group {} for texture {}", bg_id, texture_id);
     Ok(bg_id)
 }
 

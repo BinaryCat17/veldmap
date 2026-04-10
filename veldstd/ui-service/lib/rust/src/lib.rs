@@ -1149,7 +1149,7 @@ impl<A: VeldUiApp> UiRunner<A> {
                     use veldsdk::futures_util::stream::StreamExt;
                     
                     self.tasks.retain_mut(|task| {
-                        loop {
+                        for _ in 0..100 {
                             match task.poll_next_unpin(&mut cx) {
                                 crate::reexports::Poll::Ready(Some(msg)) => {
                                     new_messages.push(msg);
@@ -1158,6 +1158,7 @@ impl<A: VeldUiApp> UiRunner<A> {
                                 crate::reexports::Poll::Pending => return true,
                             }
                         }
+                        true
                     });
 
                     for msg in new_messages {

@@ -19,6 +19,7 @@ pub fn update(
             global.image_task.handle(update);
 
             if let veldsdk::core::task::TaskStatus::Finished(handle) = &global.image_task {
+                log::info!("Image loaded: handle.id = {}, handle.size = {}", handle.id, handle.size);
                 state.current_gpu_image = Some(handle.clone());
                 global.status_message = "Image loaded successfully".to_string();
             } else if let Some(err) = global.image_task.error() {

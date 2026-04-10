@@ -205,8 +205,10 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .into()
         }
         Some(proto::widget::Type::Image(img)) => {
+            let handle = img.handle.clone().unwrap_or_default();
+            log::debug!("WgpuImage: handle.id = {}, handle.size = {}", handle.id, handle.size);
             WgpuImageWidget {
-                handle: img.handle.clone().unwrap_or_default(),
+                handle,
                 width: convert_length(&img.width),
                 height: convert_length(&img.height),
             }.into()
