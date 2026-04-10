@@ -25,8 +25,9 @@ pub fn start_download(s3_key: String) -> Command<AppMessage> {
     let dest = format!("data/dem/source/{}", filename);
     let req = DownloadRequest { identifier: s3_key.clone(), destination: dest };
 
-    veldmap_api::raw::download_task(req, |update| {
-        AppMessage::Downloaded(DownloadedMessage::DownloadUpdate(update))
+    let key_clone = s3_key.clone();
+    veldmap_api::raw::download_task(req, move |update| {
+        AppMessage::Downloaded(DownloadedMessage::DownloadUpdate(key_clone.clone(), update))
     })
 }
 

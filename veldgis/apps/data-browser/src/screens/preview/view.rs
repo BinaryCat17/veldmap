@@ -37,11 +37,16 @@ pub fn view(state: &PreviewState, _global: &GlobalState) -> Element<AppMessage> 
         .into()
     } else {
         // Нет изображения (ещё загружается или ошибка)
-        let (status_text, progress) = match &_global.image_task {
-            veldsdk::core::task::TaskStatus::Running { progress, .. } => ("Loading preview...", *progress),
-            veldsdk::core::task::TaskStatus::Failed(_e) => ("Failed to load image.", 0.0),
-            _ => ("Waiting...", 0.0),
-        };
+        let mut status_text = "Waiting...";
+        let mut progress = 0.0;
+
+        for task in _global.task_manager.active() {
+            if let crate::service::task_manager::TaskKind::ImageLoad { .. } = task.kind {
+                status_text = "Loading preview...";
+                progress = task.progress;
+                break;
+            }
+        }
 
         column![
             text(status_text)

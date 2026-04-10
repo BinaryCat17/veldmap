@@ -9,7 +9,7 @@ pub enum Message {
     LocalSearchChanged(String),
     LocalFilterChanged(FileFilter),
     DownloadFile(String),
-    DownloadUpdate(veldsdk::core::task::TaskUpdate<DownloadResponse>),
+    DownloadUpdate(String, veldsdk::core::task::TaskUpdate<DownloadResponse>),
     DeleteLocalFile(String),
     ViewFile(String),
 }

@@ -46,16 +46,20 @@ pub fn handle_browse(state: &mut AppState, msg: BrowseMessage) -> Command<AppMes
 }
 
 pub fn handle_downloaded(state: &mut AppState, msg: DownloadedMessage) -> Command<AppMessage> {
-    // DownloadFile работает с глобальным состоянием и может быть вызван с любого экрана
-    if let DownloadedMessage::DownloadFile(s3_key) = &msg {
-        return crate::screens::downloaded::update_download_file(&mut state.global, s3_key.clone());
-    }
-    
-    // Остальные сообщения требуют экран Downloaded
-    if let crate::app::state::Screen::Downloaded(s) = &mut state.screen {
-        crate::screens::downloaded::update(s, msg, &mut state.global)
-    } else {
-        Command::none()
+    match msg {
+        DownloadedMessage::DownloadFile(s3_key) => {
+            return crate::screens::downloaded::update_download_file(&mut state.global, s3_key);
+        }
+        DownloadedMessage::DownloadUpdate(s3_key, update) => {
+            return crate::screens::downloaded::handle_download_update(&mut state.global, s3_key, update);
+        }
+        _ => {
+            if let crate::app::state::Screen::Downloaded(s) = &mut state.screen {
+                crate::screens::downloaded::update(s, msg, &mut state.global)
+            } else {
+                Command::none()
+            }
+        }
     }
 }
 
@@ -103,7 +107,6 @@ pub fn handle_clear_error(state: &mut AppState) -> Command<AppMessage> {
 
 pub fn handle_cancel_download(state: &mut AppState) -> Command<AppMessage> {
     // TODO: Отмена конкретной задачи через task_manager
-    state.global.download_task = veldsdk::core::task::TaskStatus::Idle;
     state.global.status_message = "Download cancelled".to_string();
     Command::none()
 }

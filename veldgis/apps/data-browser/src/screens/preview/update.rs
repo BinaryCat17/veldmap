@@ -16,17 +16,19 @@ pub fn update(
     match msg {
         // === Загрузка изображения ===
         Message::ImageUpdate(update) => {
-            global.image_task.handle(update);
-
-            if let veldsdk::core::task::TaskStatus::Finished(handle) = &global.image_task {
-                log::info!("Image loaded: handle.id = {}, handle.size = {}", handle.id, handle.size);
-                state.current_gpu_image = Some(handle.clone());
-                global.status_message = "Image loaded successfully".to_string();
-            } else if let Some(err) = global.image_task.error() {
-                log::error!("Image load failed: {}", err);
-                global.error_message = Some(format!("Image load failed: {}", err));
-                // Автоматически возвращаемся назад при ошибке
-                return Command::perform(async {}, |_| AppMessage::SwitchMode(crate::common::ViewMode::Downloaded));
+            match update {
+                veldsdk::core::task::TaskUpdate::Started(_) => {}
+                veldsdk::core::task::TaskUpdate::Progress(..) => {}
+                veldsdk::core::task::TaskUpdate::Finished(Ok(handle)) => {
+                    log::info!("Image loaded: handle.id = {}, handle.size = {}", handle.id, handle.size);
+                    state.current_gpu_image = Some(handle.clone());
+                    global.status_message = "Image loaded successfully".to_string();
+                }
+                veldsdk::core::task::TaskUpdate::Finished(Err(err)) => {
+                    log::error!("Image load failed: {}", err);
+                    global.error_message = Some(format!("Image load failed: {}", err));
+                    return Command::perform(async {}, |_| AppMessage::SwitchMode(crate::common::ViewMode::Downloaded));
+                }
             }
             Command::none()
         }

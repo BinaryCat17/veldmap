@@ -11,8 +11,10 @@ pub enum SearchFilterType {
     GridId,
 }
 
-#[derive(Default, Serialize, Deserialize, Clone)]
+#[derive(Default, Clone)]
 pub struct SearchState {
     pub query: String,
     pub filter_type: SearchFilterType,
+    pub results: Vec<veldmap_api::dataprovider::DataProduct>,
+    pub is_loading: bool,
 }

@@ -30,7 +30,8 @@ pub fn update(
         // Запуск поиска
         Message::Pressed => {
             global.status_message = "Searching...".to_string();
-            global.search_task = veldsdk::core::task::TaskStatus::Idle;
+            state.is_loading = true;
+            state.results.clear();
 
             let mut filters = Vec::new();
             match state.filter_type {
@@ -61,18 +62,22 @@ pub fn update(
 
         // Обработка обновлений от задачи
         Message::Update(update) => {
-            global.search_task.handle(update);
-
-            if let veldsdk::core::task::TaskStatus::Finished(res) = &global.search_task {
-                if !res.error.is_empty() {
-                    global.error_message = Some(format!("Search API Error: {}", res.error));
-                } else {
-                    // Пока результаты хранятся в GlobalState (потом перенесём в SearchState)
-                    // global.search_results = res.products.clone(); // закомментировано до следующего шага
-                    global.status_message = format!("Found {} results", res.products.len());
+            match update {
+                veldsdk::core::task::TaskUpdate::Started(_) => {}
+                veldsdk::core::task::TaskUpdate::Progress(..) => {}
+                veldsdk::core::task::TaskUpdate::Finished(Ok(res)) => {
+                    state.is_loading = false;
+                    if !res.error.is_empty() {
+                        global.error_message = Some(format!("Search API Error: {}", res.error));
+                    } else {
+                        state.results = res.products;
+                        global.status_message = format!("Found {} results", state.results.len());
+                    }
                 }
-            } else if let Some(err) = global.search_task.error() {
-                global.error_message = Some(format!("Search Task Failed: {}", err));
+                veldsdk::core::task::TaskUpdate::Finished(Err(err)) => {
+                    state.is_loading = false;
+                    global.error_message = Some(format!("Search Task Failed: {}", err));
+                }
             }
             Command::none()
         }

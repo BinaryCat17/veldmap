@@ -33,56 +33,59 @@ pub fn update(
         // === Обработка обновления задачи ===
         Message::Update(update) => {
             log::info!("Browse Update: items before = {}, loading = {}", state.items.len(), state.is_loading);
-            global.browse_task.handle(update.clone());
-            state.is_loading = false;
 
-            if let veldsdk::core::task::TaskStatus::Finished(response) = &global.browse_task {
-                if !response.error.is_empty() {
-                    global.error_message = Some(format!("S3 Error: {}", response.error));
-                } else {
-                    // Обновляем exists_locally через локальные файлы
-                    let local_files = host::refresh_local_files();
-                    state.items = response.items.iter().map(|s3_key| {
-                        let is_folder = s3_key.ends_with('/');
-                        let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(s3_key).to_string();
-                        let exists_locally = !is_folder && local_files.iter().any(|f| f.name == name);
-
-                        BrowserItem {
-                            s3_key: s3_key.clone(),
-                            name,
-                            description: None,
-                            is_folder,
-                            exists_locally,
-                        }
-                    }).collect();
-
-                    if !response.next_token.is_empty() {
-                        if state.current_page == state.page_tokens.len() - 1 {
-                            state.page_tokens.push(response.next_token.clone());
-                        } else {
-                            state.page_tokens[state.current_page + 1] = response.next_token.clone();
-                        }
+            match update {
+                veldsdk::core::task::TaskUpdate::Started(_) => {}
+                veldsdk::core::task::TaskUpdate::Progress(..) => {}
+                veldsdk::core::task::TaskUpdate::Finished(Ok(response)) => {
+                    state.is_loading = false;
+                    if !response.error.is_empty() {
+                        global.error_message = Some(format!("S3 Error: {}", response.error));
                     } else {
-                        state.page_tokens.truncate(state.current_page + 1);
-                    }
+                        let local_files = host::refresh_local_files();
+                        state.items = response.items.iter().map(|s3_key| {
+                            let is_folder = s3_key.ends_with('/');
+                            let name = s3_key.trim_end_matches('/').split('/').last().unwrap_or(s3_key).to_string();
+                            let exists_locally = !is_folder && local_files.iter().any(|f| f.name == name);
 
-                    log::info!("Browse items updated: {} items", state.items.len());
-                    global.status_message = format!("Loaded {} items", state.items.len());
-                    
-                    // Если список пустой но есть следующая страница, автоматически загружаем следующую
-                    if state.items.is_empty() && state.current_page + 1 < state.page_tokens.len() {
-                        state.current_page += 1;
-                        let token = state.page_tokens[state.current_page].clone();
+                            BrowserItem {
+                                s3_key: s3_key.clone(),
+                                name,
+                                description: None,
+                                is_folder,
+                                exists_locally,
+                            }
+                        }).collect();
+
+                        if !response.next_token.is_empty() {
+                            if state.current_page == state.page_tokens.len() - 1 {
+                                state.page_tokens.push(response.next_token.clone());
+                            } else {
+                                state.page_tokens[state.current_page + 1] = response.next_token.clone();
+                            }
+                        } else {
+                            state.page_tokens.truncate(state.current_page + 1);
+                        }
+
+                        log::info!("Browse items updated: {} items", state.items.len());
+                        global.status_message = format!("Loaded {} items", state.items.len());
                         
-                        let req = ListPathRequest {
-                            path: state.current_path.clone(),
-                            token,
-                        };
-                        return host::start_browse(req);
+                        if state.items.is_empty() && state.current_page + 1 < state.page_tokens.len() {
+                            state.current_page += 1;
+                            let token = state.page_tokens[state.current_page].clone();
+                            
+                            let req = ListPathRequest {
+                                path: state.current_path.clone(),
+                                token,
+                            };
+                            return host::start_browse(req);
+                        }
                     }
                 }
-            } else if let Some(err) = global.browse_task.error() {
-                global.error_message = Some(format!("Browse Task Failed: {}", err));
+                veldsdk::core::task::TaskUpdate::Finished(Err(err)) => {
+                    state.is_loading = false;
+                    global.error_message = Some(format!("Browse Task Failed: {}", err));
+                }
             }
             Command::none()
         }

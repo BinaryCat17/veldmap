@@ -8,5 +8,5 @@ pub mod update;
 
 // Re-exports
 pub use state::DownloadedState;
-pub use update::{update, update_download_file};
+pub use update::{update, update_download_file, handle_download_update};
 pub use view::view;

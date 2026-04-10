@@ -15,18 +15,37 @@ use super::{DownloadedState, message::Message};
 pub fn update_download_file(global: &mut GlobalState, s3_key: String) -> Command<AppMessage> {
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     global.status_message = format!("Downloading {}...", filename);
-    
-    // Сохраняем текущую загрузку для обновления TaskManager
-    global.current_download = Some(s3_key.clone());
-    
+
     // Создаём задачу в TaskManager
-    let _task_id = global.task_manager.spawn(TaskKind::Download { 
-        s3_key: s3_key.clone(), 
-        filename: filename.clone() 
+    let _task_id = global.task_manager.spawn(TaskKind::Download {
+        s3_key: s3_key.clone(),
+        filename: filename.clone()
     });
-    
+
     // Запускаем скачивание
     host::start_download(s3_key)
+}
+pub fn handle_download_update(global: &mut GlobalState, s3_key: String, update: veldsdk::core::task::TaskUpdate<veldmap_api::dataprovider::DownloadResponse>) -> Command<AppMessage> {
+    match update {
+        veldsdk::core::task::TaskUpdate::Started(_) => {}
+        veldsdk::core::task::TaskUpdate::Progress(progress, _) => {
+            global.task_manager.update_progress_by_key(&s3_key, progress);
+        }
+        veldsdk::core::task::TaskUpdate::Finished(Ok(res)) => {
+            global.task_manager.finish_by_key(&s3_key);
+            if !res.error.is_empty() {
+                global.error_message = Some(format!("Download Error: {}", res.error));
+            } else {
+                global.status_message = "Download complete".to_string();
+                global.local_files = host::refresh_local_files();
+            }
+        }
+        veldsdk::core::task::TaskUpdate::Finished(Err(err)) => {
+            global.task_manager.fail_by_key(&s3_key, err.clone());
+            global.error_message = Some(format!("Download Task Failed: {}", err));
+        }
+    }
+    Command::none()
 }
 
 pub fn update(
@@ -46,42 +65,8 @@ pub fn update(
             Command::none()
         }
 
-        // Запуск скачивания
-        Message::DownloadFile(s3_key) => {
-            update_download_file(global, s3_key)
-        }
-
-        // Обработка обновления задачи скачивания
-        Message::DownloadUpdate(update) => {
-            global.download_task.handle(update);
-
-            // Обновляем TaskManager на основе статуса задачи
-            if let Some(s3_key) = &global.current_download {
-                match &global.download_task {
-                    veldsdk::core::task::TaskStatus::Running { progress, .. } => {
-                        global.task_manager.update_progress_by_key(s3_key, *progress);
-                    }
-                    veldsdk::core::task::TaskStatus::Finished(res) => {
-                        global.task_manager.finish_by_key(s3_key);
-                        global.current_download = None;
-                        
-                        if !res.error.is_empty() {
-                            global.error_message = Some(format!("Download Error: {}", res.error));
-                        } else {
-                            global.status_message = "Download complete".to_string();
-                            global.local_files = host::refresh_local_files();
-                        }
-                    }
-                    veldsdk::core::task::TaskStatus::Failed(err) => {
-                        global.task_manager.fail_by_key(s3_key, err.clone());
-                        global.current_download = None;
-                        global.error_message = Some(format!("Download Task Failed: {}", err));
-                    }
-                    _ => {}
-                }
-            }
-            Command::none()
-        }
+        // Запуск скачивания (обработано выше, но оставляем на всякий случай)
+        Message::DownloadFile(_) | Message::DownloadUpdate(_, _) => Command::none(),
 
         // Удаление локального файла
         Message::DeleteLocalFile(path) => {
