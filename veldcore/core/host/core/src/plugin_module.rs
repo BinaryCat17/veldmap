@@ -8,6 +8,7 @@ use wasmtime_wasi::WasiCtxBuilder;
 use crate::dispatcher::{Dispatcher, ServiceLocation};
 use crate::{HostState, WasmModule, CallContext};
 use crate::resources::ResourceManager;
+use crate::window::{PluginWindowConfig, parse_window_config};
 
 #[derive(Deserialize)]
 struct ServiceEntry {
@@ -25,11 +26,43 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(100); // Local plugins start from 100
 
+/// Scan plugin configs for window preferences without loading WASM modules
+pub fn scan_window_configs(config_dir: &str) -> anyhow::Result<crate::window::PluginWindows> {
+    let manifest_path = std::path::Path::new(config_dir).join("services.json");
+    if !manifest_path.exists() {
+        log::warn!("Manifest not found at {:?}", manifest_path);
+        return Ok(crate::window::PluginWindows::new());
+    }
+
+    let content = fs::read_to_string(&manifest_path)?;
+    let manifest: ServicesManifest = serde_json::from_str(&content)?;
+    
+    let mut windows = crate::window::PluginWindows::new();
+
+    for (name, entry) in manifest.services {
+        if entry.location == "local" {
+            let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
+            if let Ok(config_str) = fs::read_to_string(&service_config_path) {
+                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_str) {
+                    if let Some(window_config) = parse_window_config(&config) {
+                        log::info!("Plugin '{}' requests window: {}x{} (scale: {})", 
+                            name, window_config.width, window_config.height, window_config.ui_scale);
+                        windows.add(name, window_config);
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(windows)
+}
+
 pub async fn load_services<F>(
     dispatcher: Arc<Dispatcher>,
     resources: Arc<ResourceManager>,
     config_dir: &str,
     mut register_config: F,
+    windows: &mut crate::window::PluginWindows,
 ) -> anyhow::Result<()>
 where
     F: FnMut(u32, HashMap<String, serde_json::Value>),
@@ -72,6 +105,15 @@ where
                 }
 
                 let mut config_map: HashMap<String, serde_json::Value> = serde_json::from_str(&service_config_str)?;
+                
+                // Parse window config if present
+                let raw_config: serde_json::Value = serde_json::from_str(&service_config_str)?;
+                if let Some(window_config) = parse_window_config(&raw_config) {
+                    log::info!("Plugin '{}' requests window: {}x{} (scale: {})", 
+                        name, window_config.width, window_config.height, window_config.ui_scale);
+                    windows.add(name.clone(), window_config);
+                }
+                
                 config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
                 config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
                 config_map.insert("surface_format".to_string(), serde_json::Value::Number(resources.get_surface_format_proto().into()));

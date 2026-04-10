@@ -8,6 +8,7 @@ pub mod dispatcher;
 pub mod node;
 pub mod resources;
 pub mod logging;
+pub mod window;
 
 pub mod core {
     include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));

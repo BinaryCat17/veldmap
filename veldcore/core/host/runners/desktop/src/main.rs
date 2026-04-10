@@ -2,6 +2,7 @@
 use veldmap_host_core::{
     dispatcher::{Dispatcher, ServiceLocation},
     plugin_module,
+    window::PluginWindows,
 };
 use veldmap_host_system::SystemService;
 use veldmap_host_compute::ComputeService;
@@ -76,19 +77,21 @@ async fn main() -> anyhow::Result<()> {
         .cloned()
         .unwrap_or_else(|| "config".to_string());
 
-    // --- 3. ИНИЦИАЛИЗАЦИЯ ГРАФИКИ (WGPU) ---
-    let mut window_width = 1024.0;
-    let mut window_height = 768.0;
-    let mut window_title = "VeldMap".to_string();
-
-    let core_config_path = std::path::Path::new(&config_dir).join("core.json");
-    if let Ok(config_str) = std::fs::read_to_string(core_config_path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&config_str) {
-            if let Some(w) = v["window"]["width"].as_f64() { window_width = w; }
-            if let Some(h) = v["window"]["height"].as_f64() { window_height = h; }
-            if let Some(t) = v["window"]["title"].as_str() { window_title = t.to_string(); }
-        }
-    }
+    // --- 3. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
+    // Сканируем конфиги плагинов до создания окна
+    let mut plugin_windows = veldmap_host_core::plugin_module::scan_window_configs(&config_dir)?;
+    
+    // Получаем параметры окна из первого плагина с window config
+    let (window_width, window_height, window_title, _ui_scale) = plugin_windows
+        .first()
+        .map(|(name, cfg)| {
+            veldmap_host_core::vinfo!("Using window config from plugin '{}'", name);
+            (cfg.width as f64, cfg.height as f64, cfg.title.clone(), cfg.ui_scale)
+        })
+        .unwrap_or_else(|| {
+            veldmap_host_core::vwarn!("No plugin window config found, using defaults");
+            (1024.0, 768.0, "VeldMap".to_string(), 1.0f32)
+        });
 
     let event_loop = EventLoopBuilder::<()>::with_user_event().build()?;
     let window = Arc::new(WindowBuilder::new()
@@ -242,9 +245,15 @@ async fn main() -> anyhow::Result<()> {
     let running = Arc::new(AtomicBool::new(true));
 
     let sys_clone = system_service.clone();
-    plugin_module::load_services(dispatcher.clone(), resources.clone(), &config_dir, move |id, cfg| {
-        sys_clone.register_config(id, cfg);
-    }).await?;
+    plugin_module::load_services(
+        dispatcher.clone(), 
+        resources.clone(), 
+        &config_dir, 
+        move |id, cfg| {
+            sys_clone.register_config(id, cfg);
+        },
+        &mut plugin_windows,
+    ).await?;
 
     let d_clone = dispatcher.clone();
     let is_visible_clone = is_visible.clone();
