@@ -1,16 +1,13 @@
-﻿//! browse/state.rs
-
-use crate::common::BrowserItem;
-
-#[derive(Clone)]
 pub struct BrowseState {
     pub current_path: String,
-    pub items: Vec<BrowserItem>,
-
-    pub page_tokens: Vec<String>,
-    pub current_page: usize,
-
+    pub items: Vec<BrowseItem>,
     pub is_loading: bool,
+}
+
+pub struct BrowseItem {
+    pub s3_key: String,
+    pub name: String,
+    pub is_folder: bool,
 }
 
 impl Default for BrowseState {
@@ -18,8 +15,6 @@ impl Default for BrowseState {
         Self {
             current_path: String::new(),
             items: Vec::new(),
-            page_tokens: vec![String::new()],
-            current_page: 0,
             is_loading: false,
         }
     }

@@ -1,49 +1,33 @@
 //! VeldMap Data Browser - GIS data discovery and download application
 
-mod app;
-mod screens;
+pub mod handlers;
+pub mod state;
+pub mod view;
 pub mod components;
-
 pub mod styles;
 pub mod common;
-pub mod service;
-pub use components::task_manager::{TaskManager, TaskKind, TaskInfo};
 
-pub use app::{AppState, AppMessage};
-pub use common::{BrowserItem, LocalConfig};
-pub use veldsdk::core::task::TaskStatus;
-pub use veldmap_api::dataprovider::DataProduct;
-
-use veld_ui::{VeldUiApp, UiRunner, Element};
 use veldsdk::define_module;
 
-pub struct DataBrowserApp {
-    pub state: AppState,
-}
-
-impl VeldUiApp for DataBrowserApp {
-    type Message = AppMessage;
-    type Config = LocalConfig;
-
-    fn init(config: Self::Config) -> anyhow::Result<(Self, veldsdk::core::Command<Self::Message>)> {
-        let (state, cmd) = app::handlers::module_init(config)?;
-        Ok((Self { state }, cmd))
-    }
-
-    fn update(&mut self, message: Self::Message) -> veldsdk::core::Command<Self::Message> {
-        app::handlers::internal_update(&mut self.state, message)
-    }
-
-    fn view(&self) -> Element<Self::Message> {
-        app::view::view(&self.state)
-    }
+fn module_init(config: handlers::Config) -> anyhow::Result<state::State> {
+    state::State::new(config)
 }
 
 define_module! {
-    config: LocalConfig,
-    state: UiRunner<DataBrowserApp>,
-    init: UiRunner::<DataBrowserApp>::new,
+    config: handlers::Config,
+    state: state::State,
+    init: module_init,
     handlers: {
-        "handle_ui_event" => veld_ui::handle_ui_event::<DataBrowserApp> : veldsdk::rpc::app::UiEvent => veld_ui::proto::HandleUiEventResponse,
+        // UI события от хоста
+        "handle_ui_event" => handlers::handle_ui_event : veldmap_api::data_browser::HandleUiEventRequest => veldmap_api::data_browser::HandleUiEventResponse,
+        
+        // Поиск
+        "search" => handlers::search::search : veldmap_api::data_browser::SearchRequest => veldmap_api::data_browser::SearchResponse,
+        
+        // Браузинг
+        "browse" => handlers::browse::browse : veldmap_api::data_browser::BrowseRequest => veldmap_api::data_browser::BrowseResponse,
+        
+        // Загрузка
+        "download" => handlers::download::download : veldmap_api::data_browser::DownloadRequest => veldmap_api::data_browser::DownloadResponse,
     }
 }

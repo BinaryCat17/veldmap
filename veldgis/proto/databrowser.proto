@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package veldmap.data_browser;
+
+// UI события
+message HandleUiEventRequest {
+    UiEvent event = 1;
+}
+
+message HandleUiEventResponse {
+    bool accepted = 1;
+    string error = 2;
+}
+
+message UiEvent {
+    oneof payload {
+        ButtonPressed button_pressed = 1;
+        TextInputChanged text_input_changed = 2;
+        ScrollEvent scroll = 3;
+    }
+}
+
+message ButtonPressed {
+    string id = 1;
+}
+
+message TextInputChanged {
+    string widget_id = 1;
+    string value = 2;
+}
+
+message ScrollEvent {
+    float delta_x = 1;
+    float delta_y = 2;
+}
+
+// Навигация
+message NavigateRequest {
+    string screen = 1;  // "search", "browse", "downloads", "preview"
+    bytes params = 2;   // сериализованные параметры
+}
+
+message NavigateResponse {
+    bool success = 1;
+    string current_screen = 2;
+    string error = 3;
+}
+
+// Поиск
+message SearchRequest {
+    string query = 1;
+    int32 filter = 2;  // 0=All, 1=Raster, 2=Vector
+}
+
+message SearchResponse {
+    repeated DataProduct products = 1;
+    string error = 2;
+}
+
+message DataProduct {
+    string identifier = 1;
+    string name = 2;
+    string description = 3;
+    string collection = 4;
+    string date = 5;
+    double cloud_cover = 6;
+}
+
+// Браузинг
+message BrowseRequest {
+    string path = 1;
+    string token = 2;  // для пагинации
+}
+
+message BrowseResponse {
+    repeated BrowseItem items = 1;
+    string next_token = 2;
+    string error = 3;
+}
+
+message BrowseItem {
+    string path = 1;
+    string name = 2;
+    bool is_prefix = 3;  // true для папок
+    int64 size = 4;
+    string modified = 5;
+}
+
+// Загрузка
+message DownloadRequest {
+    string s3_key = 1;
+}
+
+message DownloadResponse {
+    bool success = 1;
+    string local_path = 2;
+    string error = 3;
+}
+
+// Рендеринг
+message RenderRequest {
+    // Пустой запрос - рендерим текущее состояние
+}
+
+message RenderResponse {
+    uint64 view_id = 1;
+    bool success = 2;
+    string error = 3;
+}

@@ -2,12 +2,14 @@ use veldmap_api::dataprovider::{SearchRequest, SearchResponse, DownloadRequest, 
 use log::info;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
 use veldsdk::prost::Message;
+use veldsdk::core::{Command, task::TaskUpdate};
 use crate::{LocalConfig, LocalState};
 
 const S3_HOST: &str = "eodata.dataspace.copernicus.eu";
@@ -49,7 +51,7 @@ fn get_s3_headers(state: &LocalState, method: &str, uri: &str) -> std::collectio
         headers.iter().map(|(k, v)| (*k, *v)),
         aws_sigv4::http_request::SignableBody::Bytes(&[]),
     ).unwrap();
-
+    
     let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
     
     let mut signed_headers = std::collections::HashMap::new();
@@ -60,21 +62,27 @@ fn get_s3_headers(state: &LocalState, method: &str, uri: &str) -> std::collectio
     signed_headers
 }
 
-pub fn search(_state: LocalState, _request: SearchRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
+pub fn search(
+    _state: Arc<Mutex<LocalState>>, 
+    _request: SearchRequest
+) -> Command<TaskUpdate<Vec<u8>>> {
     veldsdk::core::task::spawn(async move {
-        // Здесь будет логика поиска через OData/OpenSearch
-        // Пока возвращаем пустой результат для примера
-        use veldsdk::prost::Message;
+        // TODO: Реализовать поиск через OData/OpenSearch
         Ok(SearchResponse { products: vec![], error: String::new() }.encode_to_vec())
     }, |u| u)
 }
 
-pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
+pub fn download(
+    state: Arc<Mutex<LocalState>>, 
+    request: DownloadRequest
+) -> Command<TaskUpdate<Vec<u8>>> {
     let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     let url = format!("https://{}/eodata/{}", S3_HOST, s3_key);
     let uri = format!("/eodata/{}", s3_key);
 
-    let headers = get_s3_headers(&state, "GET", &uri);
+    let state_guard = state.lock().unwrap();
+    let headers = get_s3_headers(&state_guard, "GET", &uri);
+    drop(state_guard);
 
     let req_task = veldsdk::core::FsDownloadRequest {
         url,
@@ -82,21 +90,25 @@ pub fn download(state: LocalState, request: DownloadRequest) -> veldsdk::core::C
         headers,
     };
 
-    veldsdk::core::raw::fs_download_task(req_task, |u| match u {
-        veldsdk::core::task::TaskUpdate::Started(_) => veldsdk::core::task::TaskUpdate::Started(None),
-        veldsdk::core::task::TaskUpdate::Progress(p, _) => veldsdk::core::task::TaskUpdate::Progress(p, None),
-        veldsdk::core::task::TaskUpdate::Finished(Ok(_)) => {
-            veldsdk::core::task::TaskUpdate::Finished(Ok(DownloadResponse { 
-                success: true, 
-                error: String::new(), 
-                download_url: String::new(), 
-            }.encode_to_vec()))
-        }
-        veldsdk::core::task::TaskUpdate::Finished(Err(e)) => veldsdk::core::task::TaskUpdate::Finished(Err(e)),
-    })
+    veldsdk::core::raw::fs_download(req_task)
+        .map(|update| match update {
+            TaskUpdate::Started(_) => TaskUpdate::Started(None),
+            TaskUpdate::Progress(p, _) => TaskUpdate::Progress(p, None),
+            TaskUpdate::Finished(Ok(_)) => {
+                TaskUpdate::Finished(Ok(DownloadResponse { 
+                    success: true, 
+                    error: String::new(), 
+                    download_url: String::new(), 
+                }.encode_to_vec()))
+            }
+            TaskUpdate::Finished(Err(e)) => TaskUpdate::Finished(Err(e)),
+        })
 }
 
-pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::Command<veldsdk::core::task::TaskUpdate<Vec<u8>>> {
+pub fn list_path(
+    state: Arc<Mutex<LocalState>>, 
+    request: ListPathRequest
+) -> Command<TaskUpdate<Vec<u8>>> {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     
     let mut query_params = vec![
@@ -128,7 +140,9 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
         url.path().to_string()
     };
     
-    let headers = get_s3_headers(&state, "GET", &uri_with_query);
+    let state_guard = state.lock().unwrap();
+    let headers = get_s3_headers(&state_guard, "GET", &uri_with_query);
+    drop(state_guard);
 
     let req_task = veldsdk::core::HttpTaskRequest {
         url: full_url,
@@ -141,27 +155,28 @@ pub fn list_path(state: LocalState, request: ListPathRequest) -> veldsdk::core::
 
     let filter_path = format!("eodata/{}", request.path.trim_start_matches('/').trim_start_matches("eodata/").trim_start_matches('/'));
 
-    veldsdk::core::raw::http_task(req_task, move |u| {
-        use veldsdk::core::task::TaskUpdate::*;
-        match u {
-            Started(id) => Started(id),
-            Progress(p, id) => Progress(p, id),
-            Finished(Ok(res)) => {
-                if res.status >= 200 && res.status < 300 {
-                    if res.body.is_empty() {
-                         Finished(Err("Empty S3 response".to_string()))
+    veldsdk::core::raw::http(req_task)
+        .map(move |update| {
+            use veldsdk::core::task::TaskUpdate::*;
+            match update {
+                Started(id) => Started(id),
+                Progress(p, id) => Progress(p, id),
+                Finished(Ok(res)) => {
+                    if res.status >= 200 && res.status < 300 {
+                        if res.body.is_empty() {
+                             Finished(Err("Empty S3 response".to_string()))
+                        } else {
+                             let parsed = parse_s3_xml(res.body, Some(&filter_path));
+                             info!("S3 found {} items", parsed.items.len());
+                             Finished(Ok(parsed.encode_to_vec()))
+                        }
                     } else {
-                         let parsed = parse_s3_xml(res.body, Some(&filter_path));
-                         info!("S3 found {} items", parsed.items.len());
-                         Finished(Ok(parsed.encode_to_vec()))
+                        Finished(Err(format!("HTTP Error {}: {}", res.status, String::from_utf8_lossy(&res.body))))
                     }
-                } else {
-                    Finished(Err(format!("HTTP Error {}: {}", res.status, String::from_utf8_lossy(&res.body))))
                 }
+                Finished(Err(e)) => Finished(Err(e)),
             }
-            Finished(Err(e)) => Finished(Err(e)),
-        }
-    })
+        })
 }
 
 fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
@@ -214,4 +229,3 @@ fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
     
     ListPathResponse { items, next_token, error: String::new() }
 }
-

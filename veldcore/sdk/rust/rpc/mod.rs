@@ -20,9 +20,9 @@ pub static MODULE_STATE: once_cell::sync::OnceCell<
     anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>,
 > = once_cell::sync::OnceCell::new();
 
-pub struct ServiceState<S, M> {
-    pub state: S,
-    pub tasks: std::collections::HashMap<String, crate::core::BoxedStream<M>>,
+pub struct ServiceState<S> {
+    pub state: std::sync::Arc<std::sync::Mutex<S>>,
+    pub tasks: std::collections::HashMap<String, crate::core::BoxedStream<crate::core::task::TaskUpdate<Vec<u8>>>>,
 }
 
 pub trait RpcResponseDecoder {
@@ -42,23 +42,23 @@ macro_rules! host_proxy {
     (
         module: $module:ident,
         service: $service:expr,
-        $( $(@ $task:ident)? $method:ident : $req:ty => $res:ty ),* $(,)?
+        $($method:ident : $req:ty => $res:ty),* $(,)?
     ) => {
         pub mod $module {
             use super::*;
             $(
-                $crate::handle_proxy_method!($service, $method, $req, $res, $(@ $task)?);
+                $crate::handle_proxy_method!($service, $method, $req, $res);
             )*
         }
     };
     (
         service: $service:expr,
-        $( $(@ $task:ident)? $method:ident : $req:ty => $res:ty ),* $(,)?
+        $($method:ident : $req:ty => $res:ty),* $(,)?
     ) => {
         pub mod raw {
             use super::*;
             $(
-                $crate::handle_proxy_method!($service, $method, $req, $res, $(@ $task)?);
+                $crate::handle_proxy_method!($service, $method, $req, $res);
             )*
         }
     };
@@ -68,12 +68,13 @@ macro_rules! host_proxy {
 macro_rules! rpc_proxy {
     (
         service: $service:expr,
-        $( $method:ident : $req:ty => $res:ty ),* $(,)?
+        namespace: $ns:ident,
+        $($method:ident : $req:ty => $res:ty),* $(,)?
     ) => {
-        pub mod raw {
+        pub mod $ns {
             use super::*;
             $(
-                $crate::handle_proxy_method!($service, $method, $req, $res, @task);
+                $crate::handle_proxy_method!($service, $method, $req, $res);
             )*
         }
     };
@@ -81,75 +82,36 @@ macro_rules! rpc_proxy {
 
 #[macro_export]
 macro_rules! handle_proxy_method {
-    ($service:expr, $method:ident, $req:ty, $res:ty, ) => {
-        pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
+    ($service:expr, $method:ident, $req:ty, $res:ty) => {
+        pub fn $method(
+            req: $req
+        ) -> $crate::core::Command<$crate::core::task::TaskUpdate<$res>> {
+            use $crate::futures_util::stream::once;
             use $crate::prost::Message;
+            
             let payload = req.encode_to_vec();
-            let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
-            $crate::decode_rpc_final!($res, res_bytes)
-        }
-
-        $crate::paste::paste! {
-            pub fn [<$method _cmd>]<M: 'static>(
-                req: $req, 
-                f: impl Fn(Result<$res, String>) -> M + Send + Sync + 'static
-            ) -> $crate::core::Command<M> {
-                $crate::core::Command::perform(
-                    async move {
-                        $method(&req).map_err(|e| e.to_string())
-                    },
-                    f
-                )
-            }
-        }
-    };
-    ($service:expr, $method:ident, $req:ty, $res:ty, @task) => {
-        pub fn $method(req: &$req) -> $crate::anyhow::Result<$crate::rpc::core::TaskResponse> {
-            use $crate::prost::Message;
-            let payload = req.encode_to_vec();
-            let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
-            Ok(<$crate::rpc::core::TaskResponse as Message>::decode(&res_bytes[..])?)
-        }
-
-        $crate::paste::paste! {
-            pub fn [<$method _task>]<M: 'static>(
-                req: $req, 
-                f: impl Fn($crate::core::task::TaskUpdate<$res>) -> M + Send + Sync + 'static
-            ) -> $crate::core::Command<M> {
-                use $crate::futures_util::stream::{once, StreamExt};
-                
-                let f = std::sync::Arc::new(f);
-                let f_c = std::sync::Arc::clone(&f);
-
-                let s = once(async move {
-                    match $method(&req) {
-                        Ok(res) => Ok(res.task_id),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }).flat_map(move |res| {
-                    match res {
-                        Ok(task_id) => {
-                            Box::pin($crate::core::task::host_stream(
-                                task_id, 
-                                std::sync::Arc::clone(&f_c),
-                                std::sync::Arc::new(move |status: $crate::rpc::core::TaskStatusResponse| {
-                                    if !status.error.is_empty() {
-                                        return Err(status.error);
-                                    }
-                                    $crate::decode_task_final!($res, status.payload)
-                                })
-                            )) as $crate::core::BoxedStream<M>
-                        }
-                        Err(e) => {
-                            let f_err = std::sync::Arc::clone(&f_c);
-                            Box::pin(once(async move { 
-                                f_err( $crate::core::task::TaskUpdate::Finished(Err(e)) ) 
-                            })) as $crate::core::BoxedStream<M>
+            
+            let stream = once(async move {
+                match $crate::rpc::host::call_service($service, stringify!($method), payload) {
+                    Ok(res_bytes) => {
+                        match <$crate::rpc::core::TaskResponse as Message>::decode(&res_bytes[..]) {
+                            Ok(res) => {
+                                // Возвращаем Started с task_id
+                                $crate::core::task::TaskUpdate::Started(Some(res.task_id))
+                            }
+                            Err(e) => {
+                                $crate::core::task::TaskUpdate::Finished(Err(e.to_string()))
+                            }
                         }
                     }
-                });
-                $crate::core::Command::stream(s)
-            }
+                    Err(e) => {
+                        $crate::core::task::TaskUpdate::Finished(Err(e.to_string()))
+                    }
+                }
+            });
+            
+            // Дальше обновления придут через _task_update от хоста
+            $crate::core::Command::stream(stream)
         }
     };
 }
@@ -186,7 +148,7 @@ macro_rules! define_module {
         state: $state_type:ty,
         init: $init_func:path,
         handlers: {
-            $( $(@ $task:ident)? $method:expr => $func:path : $req_type:ty => $res_type:ty),* $(,)?
+            $($method:expr => $func:path : $req_type:ty => $res_type:ty),* $(,)?
         }
     ) => {
         #[no_mangle]
@@ -214,8 +176,8 @@ macro_rules! define_module {
             let state_result = $init_func(config);
             let boxed_state: $crate::anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>> = match state_result {
                 Ok(s) => {
-                    let service_state = $crate::rpc::ServiceState::<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>> {
-                        state: s,
+                    let service_state = $crate::rpc::ServiceState::<$state_type> {
+                        state: std::sync::Arc::new(std::sync::Mutex::new(s)),
                         tasks: std::collections::HashMap::new(),
                     };
                     Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(service_state))))
@@ -240,7 +202,7 @@ macro_rules! define_module {
                 Ok(l) => l,
                 Err(_) => return 0, 
             };
-            let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>>>()
+            let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type>>()
                 .expect("Failed to downcast state");
 
             let mut finished_tasks = Vec::new();
@@ -253,7 +215,7 @@ macro_rules! define_module {
                         Some(update) => {
                             match update {
                                 $crate::core::task::TaskUpdate::Started(_) => {
-                                    $crate::rpc::host::task_update(&task_id, 0.0, false, "", &[]);
+                                    // Хост сам разберется
                                 }
                                 $crate::core::task::TaskUpdate::Progress(p, _) => {
                                     $crate::rpc::host::task_update(&task_id, p, false, "", &[]);
@@ -305,17 +267,22 @@ macro_rules! define_module {
                     None => return (Vec::new(), "Module not initialized".to_string()),
                 };
                 let mut state_lock = state_arc.lock().unwrap();
-                let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type, $crate::core::task::TaskUpdate<Vec<u8>>>>()
+                let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type>>()
                     .expect("Failed to downcast state");
 
                 match request.method.as_str() {
+                    "_task_update" => {
+                        // Обработка push-обновления от хоста
+                        // TODO: Реализовать диспатч на callback
+                        (Vec::new(), String::new())
+                    }
                     $(
                         $method => {
                             let req = match <$req_type>::decode(&request.payload[..]) {
                                 Ok(r) => r,
                                 Err(e) => return (Vec::new(), format!("Failed to decode request for {}: {}", $method, e)),
                             };
-                            $crate::handle_method_logic!(service, $func, req, $(@ $task)?)
+                            $crate::handle_method_logic!(service, $func, req)
                         }
                     )*
                     _ => (Vec::new(), format!("Method '{}' not found", request.method)),
@@ -342,18 +309,7 @@ macro_rules! define_module {
 
 #[macro_export]
 macro_rules! handle_method_logic {
-    ($service:ident, $func:path, $req:ident, ) => {
-        {
-            match $func(&mut $service.state, $req) {
-                Ok(res) => {
-                    use $crate::prost::Message;
-                    (res.encode_to_vec(), String::new())
-                },
-                Err(e) => (Vec::new(), e.to_string()),
-            }
-        }
-    };
-    ($service:ident, $func:path, $req:ident, @task) => {
+    ($service:ident, $func:path, $req:ident) => {
         {
             let task_id = $crate::rpc::host::task_create();
             let state_clone = $service.state.clone();
@@ -368,11 +324,11 @@ macro_rules! handle_method_logic {
             let mut finished_immediately = false;
             let mut immediately_result = (Vec::new(), String::new());
 
-            // Выполняем первый опрос сразу, чтобы kickstart'нуть футуру
+            // Выполняем первый опрос сразу
             while let std::task::Poll::Ready(Some(update)) = combined_stream.poll_next_unpin(&mut cx) {
                 match update {
                     $crate::core::task::TaskUpdate::Started(_) => {
-                        $crate::rpc::host::task_update(&task_id, 0.0, false, "", &[]);
+                        // Пропускаем, task_id уже создан
                     }
                     $crate::core::task::TaskUpdate::Progress(p, _) => {
                         $crate::rpc::host::task_update(&task_id, p, false, "", &[]);
@@ -395,7 +351,7 @@ macro_rules! handle_method_logic {
             if finished_immediately {
                 immediately_result
             } else {
-                // Если задача не завершилась сразу, сохраняем поток для poll_tasks
+                // Сохраняем поток для poll_tasks (свои задачи)
                 $service.tasks.insert(task_id.clone(), Box::pin(combined_stream));
 
                 use $crate::prost::Message;
@@ -405,3 +361,4 @@ macro_rules! handle_method_logic {
         }
     };
 }
+

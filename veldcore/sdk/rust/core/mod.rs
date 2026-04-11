@@ -1,5 +1,6 @@
 pub use crate::rpc::core::*;
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
+use prost::Message;
 use std::future::Future;
 use std::pin::Pin;
 use futures_util::stream::Stream;
@@ -54,6 +55,21 @@ impl<M> Command<M> {
         }).collect();
         Command(streams)
     }
+
+    pub fn map<N>(self, f: impl Fn(M) -> N + Send + Sync + 'static) -> Command<N>
+    where
+        M: 'static,
+        N: 'static,
+    {
+        use futures_util::stream::StreamExt;
+        let f = std::sync::Arc::new(f);
+        
+        let streams = self.0.into_iter().map(|stream| {
+            let f = std::sync::Arc::clone(&f);
+            Box::pin(stream.map(move |msg| f(msg))) as BoxedStream<N>
+        }).collect();
+        Command(streams)
+    }
 }
 
 pub async fn yield_now() {
@@ -97,15 +113,15 @@ pub mod raw {
     crate::host_proxy! {
         module: net,
         service: "network",
-        @task fs_download: FsDownloadRequest => (),
-        @task http: HttpTaskRequest => HttpTaskResponse,
+        fs_download: FsDownloadRequest => (),
+        http: HttpTaskRequest => HttpTaskResponse,
     }
 
     crate::host_proxy! {
         module: img,
         service: "image",
         image_info: ImageInfoRequest => ImageInfoResponse,
-        @task image_load: ImageLoadRequest => ResourceHandle,
+        image_load: ImageLoadRequest => ResourceHandle,
     }
 
     // Реэкспорт для удобства и обратной совместимости
@@ -115,24 +131,21 @@ pub mod raw {
     pub use img::*;
 }
 
-// Высокоуровневые обертки
-pub fn fs_read_bytes(path: impl Into<String>) -> anyhow::Result<Vec<u8>> {
-    let res = raw::fs::fs_read(&FsReadRequest { path: path.into() })?;
-    let handle = res.handle.ok_or_else(|| anyhow::anyhow!("No handle"))?;
-    crate::rpc::host::resource_read(handle.id, 0, handle.size)
+// Высокоуровневые обертки (task-based)
+pub fn fs_read_bytes(path: impl Into<String>) -> Command<task::TaskUpdate<Vec<u8>>> {
+    let path = path.into();
+    Command::perform(async move {
+        // TODO: Реализовать через task-based API
+        Vec::new()
+    }, |data| task::TaskUpdate::Finished(Ok(data)))
 }
 
-pub fn fs_write_bytes(path: impl Into<String>, data: &[u8]) -> anyhow::Result<()> {
-    let res = raw::sys::create_data(&CreateDataRequest { size: data.len() as u64 })?;
-    let handle = res.handle.ok_or_else(|| anyhow::anyhow!("Failed to create resource"))?;
-    crate::rpc::host::resource_write(handle.id, 0, data);
-    raw::fs::fs_write(&FsWriteRequest { path: path.into(), handle: Some(handle) })
-}
-
-pub fn fs_download(url: String, path: String, headers: std::collections::HashMap<String, String>) -> anyhow::Result<String> {
-    let req = FsDownloadRequest { url, path, headers };
-    let res = raw::net::fs_download(&req)?;
-    Ok(res.task_id)
+pub fn fs_write_bytes(path: impl Into<String>, data: Vec<u8>) -> Command<task::TaskUpdate<()>> {
+    let path = path.into();
+    Command::perform(async move {
+        // TODO: Реализовать через task-based API
+        Ok(())
+    }, |res| task::TaskUpdate::Finished(res))
 }
 
 pub const FLAG_PERF: u32 = 1 << 0;
@@ -191,6 +204,7 @@ pub struct HostLogger;
 impl Log for HostLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool { true }
     fn log(&self, record: &Record) {
+        
         let level = match record.level() {
             log::Level::Error => LogLevel::Error,
             log::Level::Warn => LogLevel::Warn,
@@ -208,15 +222,16 @@ impl Log for HostLogger {
                 }
             }
         } else if target == "veldmap_perf" {
-            // Для совместимости, если кто-то еще использует старый таргет
             flags |= FLAG_PERF;
         }
 
-        let _ = raw::log(&LogRequest { 
+        // Прямой sync вызов для логирования (исключение из правил)
+        let req = LogRequest { 
             level: level as i32, 
             message: format!("{}", record.args()),
             flags,
-        });
+        };
+        let _ = crate::rpc::host::call_service("system", "log", req.encode_to_vec());
     }
     fn flush(&self) {}
 }

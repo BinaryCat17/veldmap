@@ -1207,24 +1207,22 @@ impl<A: VeldUiApp> UiRunner<A> {
 
                     self.last_layout = Some(new_layout);
                     if let Some(req) = request {
-                        let _ = crate::raw::set_view(&req);
+                        // TODO: Обновить для task-based API
+                        // let _ = crate::raw::set_view(req);
+                        let _ = req;
                     }
                 }
                 _ => {}
             }
         }
 
-        if let Ok(ui_res) = crate::raw::handle_ui_event(&crate::proto::HandleUiEventRequest {
-            plugin_id: self.plugin_name.clone(),
-            event: Some(event),
-        }) {
-            for msg_res in ui_res.messages {
-                if let Ok(m) = veldsdk::serde_json::from_str::<A::Message>(&msg_res.message_tag) {
-                    let cmd = self.app.update(m);
-                    self.tasks.extend(cmd.0);
-                }
-            }
-        }
+        // TODO: Обновить для task-based API
+        // let cmd = crate::raw::handle_ui_event(crate::proto::HandleUiEventRequest {
+        //     plugin_id: self.plugin_name.clone(),
+        //     event: Some(event),
+        // });
+        // self.tasks.extend(cmd.0);
+        let _ = event;
         
         veldsdk::vtrace!(veldsdk::FLAG_UI_SERVICE, "[UI-RUNNER] dispatch_event EXIT: {}", event_name);
         Ok(proto::HandleUiEventResponse { messages: Vec::new() })

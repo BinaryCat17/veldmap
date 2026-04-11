@@ -1,7 +1,9 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = &[
         "../../../proto/common.proto", 
-        "../../../proto/dataprovider.proto"
+        "../../../proto/dataprovider.proto",
+        "../../../proto/databrowser.proto",
+        "../../../../veldstd/proto/ui.proto",
     ];
 
     for proto in proto_files {
@@ -10,6 +12,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = prost_build::Config::new();
     config.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
-    config.compile_protos(proto_files, &["../../../proto/"])?;
+    config.compile_protos(
+        proto_files, 
+        &[
+            "../../../proto/", 
+            "../../../../veldstd/proto/",
+            "../../../../veldcore/proto/"
+        ]
+    )?;
     Ok(())
 }
