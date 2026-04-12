@@ -106,28 +106,6 @@ pub fn resource_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>
 // --- SERVICE HELPERS (SYSTEM) ---
 
 #[cfg(feature = "pdk")]
-pub fn task_create() -> String {
-    use crate::rpc::core::{TaskCreateRequest, TaskCreateResponse};
-    let req = TaskCreateRequest {};
-    call_service("system", "task_create", req.encode_to_vec())
-        .and_then(|res| Ok(TaskCreateResponse::decode(&res[..])?.task_id))
-        .unwrap_or_default()
-}
-
-#[cfg(feature = "pdk")]
-pub fn task_update(id: &str, progress: f32, completed: bool, error: &str, payload: &[u8]) {
-    use crate::rpc::core::TaskUpdateRequest;
-    let req = TaskUpdateRequest {
-        task_id: id.to_string(),
-        progress,
-        completed,
-        error: error.to_string(),
-        payload: payload.to_vec(),
-    };
-    let _ = call_service("system", "task_update", req.encode_to_vec());
-}
-
-#[cfg(feature = "pdk")]
 pub fn get_config(key: &str) -> Option<String> {
     use crate::rpc::core::{GetConfigRequest, GetConfigResponse};
     let req = GetConfigRequest { key: key.to_string() };
@@ -152,6 +130,34 @@ pub fn load_input() -> Vec<u8> {
 pub fn store_output(data: Vec<u8>) {
     unsafe {
         veld_output_set(data.as_ptr() as u64, data.len() as u64);
+    }
+}
+
+// --- PUB/SUB HELPERS ---
+
+/// Fire-and-forget публикация события.
+/// Топик формата: "service/method"
+#[cfg(feature = "pdk")]
+pub fn publish(topic: &str, payload: Vec<u8>) {
+    // Парсим топик service/method
+    let parts: Vec<&str> = topic.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        crate::verror!(crate::FLAG_SDK, "[SDK] Invalid topic format: {}", topic);
+        return;
+    }
+    
+    let request = RpcRequest {
+        service: parts[0].to_string(),
+        method: parts[1].to_string(),
+        payload,
+        sync: None,
+        instance_id: 0,
+    };
+    
+    let req_buf = request.encode_to_vec();
+    unsafe {
+        // Вызываем хост, но игнорируем результат (fire-and-forget)
+        let _ = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
     }
 }
 

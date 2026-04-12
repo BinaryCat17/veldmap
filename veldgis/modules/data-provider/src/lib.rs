@@ -1,7 +1,7 @@
 mod cdse;
 
 use veldsdk::define_module;
-use veldmap_api::dataprovider::{SearchRequest, DownloadRequest, ListPathRequest};
+use veldmap_api::dataprovider::{DownloadRequest, ListPathRequest, SearchRequest};
 use aws_smithy_runtime_api::client::identity::Identity;
 
 #[derive(serde::Deserialize, Clone)]
@@ -20,8 +20,9 @@ define_module! {
     state: LocalState,
     init: cdse::module_init,
     handlers: {
-        "search" => cdse::search : SearchRequest => SearchResponse,
-        "download" => cdse::download : DownloadRequest => DownloadResponse,
-        "list_path" => cdse::list_path : ListPathRequest => ListPathResponse,
+        // Команды (входящие)
+        "data-provider/download" => cdse::on_download : DownloadRequest,
+        "data-provider/list_path" => cdse::on_list_path : ListPathRequest,
+        "data-provider/search" => cdse::on_search : SearchRequest,
     }
 }

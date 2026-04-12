@@ -13,6 +13,7 @@ pub struct LocalFile {
 
 pub struct DownloadProgress {
     pub s3_key: String,
+    pub task_id: String,
     pub progress: f32,
     pub status: DownloadStatus,
 }

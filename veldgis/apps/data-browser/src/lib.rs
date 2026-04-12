@@ -8,6 +8,8 @@ pub mod styles;
 pub mod common;
 
 use veldsdk::define_module;
+use veldmap_api::data_browser::{DownloadPressed, SearchRequest, BrowseRequest};
+use veldmap_api::dataprovider::{DownloadStarted, DownloadProgress, Downloaded};
 
 fn module_init(config: handlers::Config) -> anyhow::Result<state::State> {
     state::State::new(config)
@@ -18,16 +20,14 @@ define_module! {
     state: state::State,
     init: module_init,
     handlers: {
-        // UI события от хоста
-        "handle_ui_event" => handlers::handle_ui_event : veldmap_api::data_browser::HandleUiEventRequest => veldmap_api::data_browser::HandleUiEventResponse,
+        // UI события от пользователя
+        "data-browser/download_pressed" => handlers::download::on_download_pressed : DownloadPressed,
+        "data-browser/search" => handlers::search::on_search : SearchRequest,
+        "data-browser/browse" => handlers::browse::on_browse : BrowseRequest,
         
-        // Поиск
-        "search" => handlers::search::search : veldmap_api::data_browser::SearchRequest => veldmap_api::data_browser::SearchResponse,
-        
-        // Браузинг
-        "browse" => handlers::browse::browse : veldmap_api::data_browser::BrowseRequest => veldmap_api::data_browser::BrowseResponse,
-        
-        // Загрузка
-        "download" => handlers::download::download : veldmap_api::data_browser::DownloadRequest => veldmap_api::data_browser::DownloadResponse,
+        // Подписки на события от data-provider
+        "data-provider/download_started" => handlers::download::on_download_started : DownloadStarted,
+        "data-provider/download_progress" => handlers::download::on_download_progress : DownloadProgress,
+        "data-provider/downloaded" => handlers::download::on_downloaded : Downloaded,
     }
 }

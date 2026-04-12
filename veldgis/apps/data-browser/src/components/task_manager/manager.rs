@@ -8,7 +8,7 @@ use std::collections::HashMap;
 /// Тип фоновой задачи
 #[derive(Debug, Clone)]
 pub enum TaskKind {
-    Download { s3_key: String, filename: String },
+    Download { task_id: String, s3_key: String, filename: String },
     Browse { path: String },
     ImageLoad { path: String, filename: String },
     Search { query: String },
@@ -47,14 +47,12 @@ pub struct TaskInfo {
 #[derive(Debug, Default, Clone)]
 pub struct TaskManager {
     tasks: HashMap<String, TaskInfo>,
-    next_id: u64,
 }
 
 impl TaskManager {
-    /// Создаёт новую задачу и возвращает её ID
-    pub fn spawn(&mut self, kind: TaskKind) -> String {
-        let id = format!("task_{}", self.next_id);
-        self.next_id += 1;
+    /// Создаёт новую задачу с заданным ID (обычно task_id из внешнего сервиса)
+    pub fn spawn(&mut self, id: impl Into<String>, kind: TaskKind) -> String {
+        let id = id.into();
         
         let info = TaskInfo {
             id: id.clone(),
