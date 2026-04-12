@@ -22,6 +22,6 @@ define_module! {
     init: init_module,
     handlers: {
         "ui-service/set_view" => handle_set_view,
-        "ui-service/handle_ui_event" => handle_ui_event,
+        "host/handle_ui_event" => handle_ui_event,
     }
 }

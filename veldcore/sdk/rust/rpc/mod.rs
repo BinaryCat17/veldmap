@@ -60,20 +60,20 @@ pub fn call_handler<S, Req, F>(
     func: F,
     state: std::sync::Arc<std::sync::Mutex<S>>,
     payload: &[u8],
-) -> Result<crate::core::Command<()>, String>
+) -> anyhow::Result<()>
 where
     Req: prost::Message + Default,
-    F: Fn(std::sync::Arc<std::sync::Mutex<S>>, Req) -> crate::core::Command<()>,
+    F: Fn(std::sync::Arc<std::sync::Mutex<S>>, Req) -> anyhow::Result<()>,
 {
-    let req = Req::decode(payload).map_err(|e| format!("Decode error: {}", e))?;
-    Ok(func(state, req))
+    let req = Req::decode(payload).map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
+    func(state, req)
 }
 
-/// Тип хэндлера: принимает состояние и запрос, возвращает Command с задачами
+/// Тип хэндлера: принимает состояние и запрос, возвращает anyhow::Result<()>
 pub type HandlerFn<S, R> = fn(
     std::sync::Arc<std::sync::Mutex<S>>,
     R
-) -> crate::core::Command<()>;
+) -> anyhow::Result<()>;
 
 #[macro_export]
 macro_rules! define_module {

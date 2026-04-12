@@ -1110,6 +1110,46 @@ pub mod diffing {
     }
 }
 
+pub fn render<M>(plugin_id: &str, element: Element<M>, last_layout: &mut Option<proto::Layout>) {
+    let mut root_widget = element.widget;
+    
+    let mut index = 0;
+    let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
+    
+    // Fallback dimensions if not known
+    let width = last_layout.as_ref().map(|l| l.width).unwrap_or(1024);
+    let height = last_layout.as_ref().map(|l| l.height).unwrap_or(768);
+
+    let new_layout = crate::proto::Layout {
+        root: Some(root_widget),
+        width,
+        height,
+        hash,
+    };
+
+    let request = if let Some(ref old_layout) = last_layout {
+        if let Some(patch) = crate::diffing::diff_layouts(old_layout, &new_layout) {
+            Some(crate::proto::SetViewRequest {
+                plugin_id: plugin_id.to_string(),
+                update: Some(crate::proto::set_view_request::Update::Patch(patch)),
+            })
+        } else {
+            None
+        }
+    } else {
+        Some(crate::proto::SetViewRequest {
+            plugin_id: plugin_id.to_string(),
+            update: Some(crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
+        })
+    };
+
+    if let Some(req) = request {
+        veldsdk::publish!("ui-service/set_view", req);
+    }
+    
+    *last_layout = Some(new_layout);
+}
+
 pub trait VeldUiApp: Sized + 'static {
     type Message: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;
     type Config: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;

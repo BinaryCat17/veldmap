@@ -349,12 +349,8 @@ async fn main() -> anyhow::Result<()> {
 
             for (idx, ev) in events.iter().enumerate() {
                 let payload = ev.encode_to_vec();
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Calling data-browser::handle_ui_event event #{}", idx);
-                let result = dispatcher_render.call("data-browser", "handle_ui_event", payload, 0).await;
-                match &result {
-                    Ok(_) => veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] data-browser::handle_ui_event returned OK"),
-                    Err(e) => veldmap_host_core::verror!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] data-browser::handle_ui_event FAILED: {}", e),
-                }
+                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Publishing to host/handle_ui_event event #{}", idx);
+                veldsdk::publish!("host/handle_ui_event", ev);
             }
 
             window_render.request_redraw();

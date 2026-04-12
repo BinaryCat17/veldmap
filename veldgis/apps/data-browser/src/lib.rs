@@ -19,10 +19,7 @@ define_module! {
     state: state::State,
     init: module_init,
     handlers: {
-        // UI события от хоста
-        "data-browser/handle_ui_event" => handlers::ui::on_ui_event,
-        
-        // UI события от пользователя
+        // UI события от пользователя (высокоуровневые, от ui-service)
         "data-browser/download_pressed" => handlers::download::on_download_pressed,
         
         "data-browser/nav_browse" => handlers::nav::on_nav_browse,

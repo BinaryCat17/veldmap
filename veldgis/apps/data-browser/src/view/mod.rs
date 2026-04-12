@@ -9,28 +9,9 @@ use veld_ui::proto::{SetViewRequest, set_view_request::Update, Layout};
 use crate::state::State;
 use veld_ui::{Element, column, row, text, button, Length, Padding};
 
-pub fn render(state: &State) {
+pub fn render(state: &mut State) {
     let root_element = build_root(state);
-    
-    // В FaF мы не делаем diffing на клиенте (data-browser), а шлем FullLayout.
-    // ui-service сам сделает diffing, если нужно.
-    // Устанавливаем plugin_id в "data-browser"
-    
-    let mut widget = root_element.widget;
-    let mut idx = 0;
-    let hash = veld_ui::diffing::assign_ids_and_hash(&mut widget, &mut idx);
-    
-    let req = SetViewRequest {
-        plugin_id: "data-browser".to_string(),
-        update: Some(Update::FullLayout(Layout {
-            root: Some(widget),
-            width: 1024,
-            height: 768,
-            hash,
-        })),
-    };
-    
-    veldsdk::publish!("ui-service/set_view", req);
+    veld_ui::render("data-browser", root_element, &mut state.last_layout);
 }
 
 pub fn build_root(state: &State) -> Element<()> {
