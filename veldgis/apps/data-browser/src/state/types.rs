@@ -11,4 +11,5 @@ pub struct GlobalState {
     pub error_message: Option<String>,
     // Задачи управляются через components/task_manager
     pub task_manager: crate::components::task_manager::TaskManager,
+    pub has_rendered: bool,
 }

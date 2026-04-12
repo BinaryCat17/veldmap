@@ -182,14 +182,14 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] START for {}", plugin_id);
     let (width, height) = *plugin.canvas_size.borrow();
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] canvas size: {}x{}", width, height);
-    if width == 0 || height == 0 { 
+    if width == 0 || height == 0 {
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Empty canvas, returning");
-        return Ok(Vec::new()); 
+        return Ok(Vec::new());
     }
-    
+
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Processing {} events", events.len());
-    
+
     let sf = *plugin.scale_factor.borrow();
     renderer.update_params(width, height, sf);
     let cursor_pos = *plugin.cursor_position.borrow();
@@ -200,7 +200,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Clearing renderer and converting layout");
     renderer.clear();
     let element = converter::convert_layout(&plugin.layout);
-    
+
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Building UI");
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
     let _guard = crate::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
@@ -211,11 +211,11 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         cache,
         renderer,
     );
-    
+
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Updating UI with {} events", events.len());
     let mut clipboard = iced_core::clipboard::Null;
     let _ = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
-    
+
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Drawing UI");
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
 
@@ -223,7 +223,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let mut last_verts = plugin.last_vertices.borrow_mut();
     let mut is_layout_dirty = plugin.is_layout_dirty.borrow_mut();
 
-    let commands_changed = *last_cmds != renderer.draw_commands || 
+    let commands_changed = *last_cmds != renderer.draw_commands ||
                            *last_verts != renderer.vertices ||
                            renderer.is_atlas_dirty();
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] commands_changed={}, is_layout_dirty={}", commands_changed, *is_layout_dirty);
@@ -232,8 +232,12 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Calling render_ui");
         let texture_id = crate::graphics::render_ui(plugin, renderer, width, height, sf, surface_format)?;
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] display_frame with texture_id={}", texture_id);
-        let _ = veldsdk::app::AppBridge::display_frame(texture_id);
-        
+
+        let cmd = veldsdk::rpc::app::AppDisplayCommand {
+            command: Some(veldsdk::rpc::app::app_display_command::Command::DrawFrame(veldsdk::rpc::app::DrawFrame { texture_id }))
+        };
+        let _ = veldsdk::publish!("app/display", cmd);
+
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();
         *is_layout_dirty = false;
@@ -242,7 +246,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     *plugin.needs_redrawing.borrow_mut() = false;
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Caching UI");
     plugin.interface_cache.replace(ui.into_cache());
-    
+
     let mut responses = Vec::new();
     for msg in captured_messages {
         responses.push(UiEventResponse {
@@ -251,7 +255,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
             value: msg.value,
         });
     }
-    
+
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] END, returning {} responses", responses.len());
     Ok(responses)
 }

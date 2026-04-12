@@ -22,6 +22,7 @@ impl State {
                 status_message: "VeldMap Data Browser".to_string(),
                 error_message: None,
                 task_manager: crate::components::task_manager::TaskManager::default(),
+                has_rendered: false,
             },
         })
     }
