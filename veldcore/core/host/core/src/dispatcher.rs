@@ -175,6 +175,9 @@ impl Dispatcher {
             ServiceLocation::Native(service) => {
                 service.call(method, payload, requestor_id)
             }
+            ServiceLocation::NativeAsync(_) => {
+                Err(anyhow::anyhow!("Async services cannot be called via sync RPC (use publish instead)"))
+            }
             ServiceLocation::LocalWasm(wasm_module) => {
                 let start_total = std::time::Instant::now();
                 let request = RpcRequest {

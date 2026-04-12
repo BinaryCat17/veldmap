@@ -9,6 +9,7 @@ pub mod node;
 pub mod resources;
 pub mod logging;
 pub mod window;
+pub mod compute_service;
 
 pub mod core {
     include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
@@ -58,6 +59,7 @@ pub use config_module::*;
 pub use plugin_module::*;
 pub use dispatcher::*;
 pub use node::*;
+pub use compute_service::*;
 
 /// Конфигурация core модуля
 #[derive(serde::Deserialize, Debug)]

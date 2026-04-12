@@ -3,7 +3,7 @@ use crate::rpc::compute::{
     SetIndexBuffer, Draw, DrawIndexed, SetViewport, SetScissorRect, Submit,
     wgpu_command::Command
 };
-use crate::rpc::host::call_service;
+use crate::rpc::host::compute_execute;
 use prost::Message;
 
 pub struct ComputeRecorder {
@@ -89,7 +89,7 @@ impl ComputeRecorder {
             command_buffer: Some(cmd_buffer),
         };
         
-        call_service("compute", "execute", submit_req.encode_to_vec())?;
+        compute_execute(submit_req.encode_to_vec())?;
         Ok(())
     }
 }

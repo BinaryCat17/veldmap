@@ -17,6 +17,12 @@ extern "C" {
     /// Возвращает упакованный u64: (len << 32) | ptr
     fn veld_host_call(ptr: u64, len: u64) -> u64;
     
+    /// ABI-level compute resource creation (bypasses dispatcher).
+    fn veld_compute_create_resource(ptr: u64, len: u64) -> u64;
+    
+    /// ABI-level compute execution (bypasses dispatcher).
+    fn veld_compute_execute(ptr: u64, len: u64) -> u64;
+    
     /// Прямая запись в ресурс (Zero-copy DMA).
     fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64);
     
@@ -85,6 +91,56 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         }
         
         crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} OK ({} bytes)", service, method, response.payload.len());
+        Ok(response.payload)
+    }
+}
+
+/// ABI-level compute resource creation (synchronous, bypasses dispatcher)
+#[cfg(feature = "pdk")]
+pub fn compute_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    crate::vtrace!(crate::FLAG_SDK, "[SDK-COMPUTE] create_resource ({} bytes)", payload.len());
+    unsafe {
+        let res_combined = veld_compute_create_resource(payload.as_ptr() as u64, payload.len() as u64);
+        if res_combined == 0 { return Err(anyhow::anyhow!("Compute create_resource failed (0 returned)")); }
+
+        let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
+        let len = (res_combined >> 32) as usize;
+        
+        let res_slice = std::slice::from_raw_parts(ptr, len);
+        let response = RpcResponse::decode(res_slice)?;
+        
+        veld_free_wasm(ptr as u64, len as u64);
+
+        if !response.error.is_empty() { 
+            return Err(anyhow::anyhow!(response.error)); 
+        }
+        
+        crate::vtrace!(crate::FLAG_SDK, "[SDK-COMPUTE] create_resource OK ({} bytes)", response.payload.len());
+        Ok(response.payload)
+    }
+}
+
+/// ABI-level compute execution (synchronous, bypasses dispatcher)
+#[cfg(feature = "pdk")]
+pub fn compute_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    crate::vtrace!(crate::FLAG_SDK, "[SDK-COMPUTE] execute ({} bytes)", payload.len());
+    unsafe {
+        let res_combined = veld_compute_execute(payload.as_ptr() as u64, payload.len() as u64);
+        if res_combined == 0 { return Err(anyhow::anyhow!("Compute execute failed (0 returned)")); }
+
+        let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
+        let len = (res_combined >> 32) as usize;
+        
+        let res_slice = std::slice::from_raw_parts(ptr, len);
+        let response = RpcResponse::decode(res_slice)?;
+        
+        veld_free_wasm(ptr as u64, len as u64);
+
+        if !response.error.is_empty() { 
+            return Err(anyhow::anyhow!(response.error)); 
+        }
+        
+        crate::vtrace!(crate::FLAG_SDK, "[SDK-COMPUTE] execute OK ({} bytes)", response.payload.len());
         Ok(response.payload)
     }
 }

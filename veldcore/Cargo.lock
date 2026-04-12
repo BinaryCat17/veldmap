@@ -5871,19 +5871,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
-name = "veldmap-host-compute"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "image",
- "log",
- "prost",
- "veldmap-host-core",
- "wgpu",
-]
-
-[[package]]
 name = "veldmap-host-core"
 version = "0.1.0"
 dependencies = [
@@ -5937,7 +5924,6 @@ dependencies = [
  "spin_sleep",
  "sysinfo",
  "tokio",
- "veldmap-host-compute",
  "veldmap-host-core",
  "veldmap-host-fs",
  "veldmap-host-image",

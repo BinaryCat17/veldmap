@@ -1,8 +1,7 @@
-use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
-use veldmap_host_core::resources::{ResourceManager, Resource};
-use veldmap_host_core::core::ResourceHandle;
-use veldmap_host_core::compute::{
-    ComputeResourceRequest, ComputeResourceResult, ComputeExecuteResult, Submit, CommandBuffer,
+use crate::resources::{ResourceManager, Resource};
+use crate::core::ResourceHandle;
+use crate::compute::{
+    ComputeResourceRequest, ComputeResourceResponse, Submit, CommandBuffer,
     compute_resource_request::Command as ComputeCommand,
     wgpu_command::Command as WgpuCommand,
     CreateTexture, CreateBuffer, CreateShaderModule, CreateRenderPipeline,
@@ -91,8 +90,8 @@ pub fn execute_render_commands<'a>(
                             label: Some("Proxy Fallback BG"), 
                             layout: &bgl, 
                             entries: &[
-                                wgpu::BindingGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
-                                wgpu::BindingGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
+                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
                             ] 
                         });
                         rp.set_bind_group(bg.index, &bg_res, &[]);
@@ -139,14 +138,14 @@ pub fn execute_render_commands<'a>(
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct ComputeService {
-    dispatcher: Arc<Dispatcher>,
     resources: Arc<ResourceManager>,
 }
 
 impl ComputeService {
-    pub fn new(dispatcher: Arc<Dispatcher>, resources: Arc<ResourceManager>) -> Self {
-        Self { dispatcher, resources }
+    pub fn new(resources: Arc<ResourceManager>) -> Self {
+        Self { resources }
     }
 
     /// Build command encoder for execution (must be submitted by caller from main thread)
@@ -191,45 +190,10 @@ impl ComputeService {
         Ok(encoder)
     }
 
-    async fn handle_execute(&self, payload: Vec<u8>, requestor_id: u32) {
-        let req = match Submit::decode(&payload[..]) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!(target: "host", "Failed to decode Submit: {}", e);
-                let correlation_id = String::new();
-                let result = ComputeExecuteResult { error: e.to_string(), correlation_id };
-                self.dispatcher.publish("compute/execute_result", result.encode_to_vec());
-                return;
-            }
-        };
-        let correlation_id = req.correlation_id.clone();
-        if let Some(cb) = req.command_buffer {
-            let mut ops = PENDING_OPS.lock().unwrap();
-            ops.push(PendingRenderOp {
-                target_view_id: req.target_texture_view_id,
-                command_buffer: cb,
-                instance_id: requestor_id,
-            });
-        }
-        let result = ComputeExecuteResult { error: String::new(), correlation_id };
-        self.dispatcher.publish("compute/execute_result", result.encode_to_vec());
-    }
-
-    async fn handle_create_resource(&self, payload: Vec<u8>, requestor_id: u32) {
-        let req = match ComputeResourceRequest::decode(&payload[..]) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!(target: "host", "Failed to decode ComputeResourceRequest: {}", e);
-                let correlation_id = String::new();
-                let result = ComputeResourceResult { handle: None, error: e.to_string(), correlation_id };
-                self.dispatcher.publish("compute/create_resource_result", result.encode_to_vec());
-                return;
-            }
-        };
-        let correlation_id = req.correlation_id.clone();
+    pub fn create_resource(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+        let req = ComputeResourceRequest::decode(&payload[..])?;
         let mut handle = ResourceHandle::default();
         let instance_id = requestor_id;
-        let mut error = String::new();
 
         match req.command {
             Some(ComputeCommand::CreateTexture(t)) => {
@@ -244,20 +208,15 @@ impl ComputeService {
                 handle.id = self.resources.create_shader(&s.source, Some(&s.label), instance_id);
             }
             Some(ComputeCommand::CreatePipeline(p)) => {
-                if let Err(e) = self.resources.create_pipeline(&p, instance_id) {
-                    error = e.to_string();
-                }
+                handle.id = self.resources.create_pipeline(&p, instance_id)?;
             }
             Some(ComputeCommand::CreateSampler(s)) => {
                 handle.id = self.resources.create_sampler(s.mag_filter as i32, s.min_filter as i32, instance_id);
             }
             Some(ComputeCommand::CreateTextureView(tv)) => {
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_COMPUTE, "[COMPUTE] Creating texture view for texture_id={}", tv.texture_id);
-                match self.resources.create_texture_view(tv.texture_id, instance_id) {
-                    Ok(id) => handle.id = id,
-                    Err(e) => error = e.to_string(),
-                }
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_COMPUTE, "[COMPUTE] Created texture view: id={}", handle.id);
+                crate::vtrace!(crate::logging::FLAG_COMPUTE, "[COMPUTE] Creating texture view for texture_id={}", tv.texture_id);
+                handle.id = self.resources.create_texture_view(tv.texture_id, instance_id)?;
+                crate::vtrace!(crate::logging::FLAG_COMPUTE, "[COMPUTE] Created texture view: id={}", handle.id);
             }
             Some(ComputeCommand::CreateBindGroupLayout(bgl)) => {
                 let mut entries = Vec::new();
@@ -306,7 +265,7 @@ impl ComputeService {
                                 multisampled: t.multisampled,
                             }
                         }
-                        None => { error = "Binding type missing".into(); }
+                        None => return Err(anyhow::anyhow!("Binding type missing")),
                     };
                     entries.push(wgpu::BindGroupLayoutEntry {
                         binding: e.binding,
@@ -318,53 +277,37 @@ impl ComputeService {
                 handle.id = self.resources.create_bind_group_layout(&entries, instance_id);
             }
             Some(ComputeCommand::CreateBindGroup(bg)) => {
-                match self.resources.create_bind_group(bg.layout_id, &bg.entries, instance_id) {
-                    Ok(id) => handle.id = id,
-                    Err(e) => error = e.to_string(),
-                }
+                handle.id = self.resources.create_bind_group(bg.layout_id, &bg.entries, instance_id)?;
             }
             Some(ComputeCommand::FsReadToBuffer(req_fs)) => {
-                match std::fs::read(&req_fs.path) {
-                    Ok(data) => {
-                        handle.id = self.resources.create_buffer_with_data(&data, req_fs.usage, true, instance_id);
-                        handle.size = data.len() as u64;
-                    }
-                    Err(e) => error = e.to_string(),
-                }
+                let data = std::fs::read(&req_fs.path)?;
+                handle.id = self.resources.create_buffer_with_data(&data, req_fs.usage, true, instance_id);
+                handle.size = data.len() as u64;
             }
             Some(ComputeCommand::ImageLoadToTexture(req_img)) => {
-                match image::open(&req_img.path) {
-                    Ok(img) => {
-                        let (w, h) = img.dimensions();
-                        let rgba = img.to_rgba8();
-                        handle.id = self.resources.create_texture(w, h, 0, req_img.usage, true, instance_id);
-                        if let Err(e) = self.resources.write_resource(handle.id, 0, &rgba, instance_id) {
-                            error = e.to_string();
-                        }
-                        handle.size = (w * h * 4) as u64;
-                    }
-                    Err(e) => error = e.to_string(),
-                }
+                let img = image::open(&req_img.path)?;
+                let (w, h) = img.dimensions();
+                let rgba = img.to_rgba8();
+                
+                handle.id = self.resources.create_texture(w, h, 0, req_img.usage, true, instance_id);
+                self.resources.write_resource(handle.id, 0, &rgba, instance_id)?;
+                handle.size = (w * h * 4) as u64;
             }
-            _ => error = "Unsupported resource command".into(),
+            _ => return Err(anyhow::anyhow!("Unsupported resource command")),
         }
-
-        let result = ComputeResourceResult {
-            handle: if error.is_empty() { Some(handle) } else { None },
-            error,
-            correlation_id,
-        };
-        self.dispatcher.publish("compute/create_resource_result", result.encode_to_vec());
+        Ok(ComputeResourceResponse { handle: Some(handle), error: String::new(), correlation_id: String::new() }.encode_to_vec())
     }
-}
 
-#[async_trait::async_trait]
-impl AsyncNativeService for ComputeService {
-    async fn handle(&self, topic: &str, payload: Vec<u8>, requestor_id: u32) {
-        match topic {
-            "execute" => self.handle_execute(payload, requestor_id).await,
-            "create_resource" => self.handle_create_resource(payload, requestor_id).await,
-            _ => log::warn!(target: "host", "Unknown compute topic: {}", topic),
+    pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+        let req = Submit::decode(&payload[..])?;
+        if let Some(cb) = req.command_buffer {
+            let mut ops = PENDING_OPS.lock().unwrap();
+            ops.push(PendingRenderOp {
+                target_view_id: req.target_texture_view_id,
+                command_buffer: cb,
+                instance_id: requestor_id,
+            });
         }
+        Ok(Vec::new())
     }
 }

@@ -9,7 +9,7 @@ veldmap-host-fs = { path = "../../modules/fs" }
 veldmap-host-network = { path = "../../modules/network" }
 veldmap-host-image = { path = "../../modules/image" }
 veldmap-host-system = { path = "../../modules/system" }
-veldmap-host-compute = { path = "../../modules/compute" }
+
 
 tokio = { version = "1.49", features = ["full"] }
 anyhow = "1.0"

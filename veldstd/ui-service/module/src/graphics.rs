@@ -4,7 +4,7 @@
 use crate::state::PluginUiState;
 use crate::renderer::{GpuRenderer, DrawCmd};
 use veldsdk::compute::*;
-use veldsdk::compute::raw::create_resource;
+use veldsdk::compute::create_resource;
 use veldsdk::compute::wgpu_proxy::ComputeRecorder;
 use veldsdk::rpc::host::gpu_write_resource;
 use veldsdk::rpc::core::ResourceHandle;

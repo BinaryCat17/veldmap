@@ -200,5 +200,77 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
+    // 7. veld_compute_create_resource (sync ABI - part of core)
+    linker.func_wrap_async("env", "veld_compute_create_resource", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
+        Box::new(async move {
+            let mem = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return Ok(0u64),
+            };
+            let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
+            let payload = match data_bytes {
+                Some(b) => b,
+                None => return Ok(0u64),
+            };
+            let instance_id = caller.data().instance_id;
+            let resources = caller.data().resources.clone();
+            let service = crate::compute_service::ComputeService::new(resources);
+            let result: anyhow::Result<Vec<u8>> = service.create_resource(payload, instance_id);
+            let (res_payload, error) = match result {
+                Ok(p) => (p, String::new()),
+                Err(e) => (Vec::new(), e.to_string()),
+            };
+            let res_buf = RpcResponse { payload: res_payload, error, sync: None }.encode_to_vec();
+            if let Some(Extern::Func(alloc_func)) = caller.get_export("veld_alloc") {
+                if let Ok(typed_alloc) = alloc_func.typed::<u64, u64>(&caller) {
+                    if let Ok(res_ptr) = typed_alloc.call_async(&mut caller, res_buf.len() as u64).await {
+                        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                        if let Some(target) = mem.data_mut(&mut caller).get_mut(res_ptr as usize..(res_ptr as usize + res_buf.len())) {
+                            target.copy_from_slice(&res_buf);
+                            return Ok((res_buf.len() as u64) << 32 | res_ptr);
+                        }
+                    }
+                }
+            }
+            Ok(0u64)
+        })
+    })?;
+
+    // 8. veld_compute_execute (sync ABI - part of core)
+    linker.func_wrap_async("env", "veld_compute_execute", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
+        Box::new(async move {
+            let mem = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return Ok(0u64),
+            };
+            let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
+            let payload = match data_bytes {
+                Some(b) => b,
+                None => return Ok(0u64),
+            };
+            let instance_id = caller.data().instance_id;
+            let resources = caller.data().resources.clone();
+            let service = crate::compute_service::ComputeService::new(resources);
+            let result: anyhow::Result<Vec<u8>> = service.execute(payload, instance_id);
+            let (res_payload, error) = match result {
+                Ok(p) => (p, String::new()),
+                Err(e) => (Vec::new(), e.to_string()),
+            };
+            let res_buf = RpcResponse { payload: res_payload, error, sync: None }.encode_to_vec();
+            if let Some(Extern::Func(alloc_func)) = caller.get_export("veld_alloc") {
+                if let Ok(typed_alloc) = alloc_func.typed::<u64, u64>(&caller) {
+                    if let Ok(res_ptr) = typed_alloc.call_async(&mut caller, res_buf.len() as u64).await {
+                        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                        if let Some(target) = mem.data_mut(&mut caller).get_mut(res_ptr as usize..(res_ptr as usize + res_buf.len())) {
+                            target.copy_from_slice(&res_buf);
+                            return Ok((res_buf.len() as u64) << 32 | res_ptr);
+                        }
+                    }
+                }
+            }
+            Ok(0u64)
+        })
+    })?;
+
     Ok(())
 }

@@ -4,7 +4,7 @@ use veldmap_host_core::{
     plugin_module,
 };
 use veldmap_host_system::SystemService;
-use veldmap_host_compute::ComputeService;
+
 use compositor::Compositor;
 
 use crate::app_service::{AppCommand, AppService};
@@ -222,15 +222,10 @@ async fn main() -> anyhow::Result<()> {
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
     let system_service = Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()));
-    let compute_service = Arc::new(ComputeService::new(dispatcher.clone(), resources.clone()));
-
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
     dispatcher.register_subscription("system/release_resource".to_string(), ServiceLocation::Native(system_service.clone()));
     dispatcher.register_subscription("system/acquire_resource".to_string(), ServiceLocation::Native(system_service.clone()));
-
-    dispatcher.register_subscription("compute/execute".to_string(), ServiceLocation::NativeAsync(compute_service.clone()));
-    dispatcher.register_subscription("compute/create_resource".to_string(), ServiceLocation::NativeAsync(compute_service.clone()));
 
     // Register Modular Services
     let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), resources.clone()));
@@ -504,7 +499,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // Execute pending plugin render ops (queued by compute service)
                 {
-                    let mut ops = veldmap_host_compute::PENDING_OPS.lock().unwrap();
+                    let mut ops = veldmap_host_core::PENDING_OPS.lock().unwrap();
                     for op in ops.drain(..) {
                         if let Some(veldmap_host_core::resources::Resource::TextureView(target_view)) = 
                             resources.get_resource(op.target_view_id, op.instance_id) 
