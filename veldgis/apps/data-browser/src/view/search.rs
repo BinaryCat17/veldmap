@@ -31,9 +31,9 @@ pub fn view(state: &State) -> Element<()> {
             &items,
             task_manager,
             "search_results",
-            |_| (), // Папки не поддерживаются
-            |_| (),
-            |_| (),
+            |_| String::new(), // Папки не поддерживаются
+            |_| String::new(),
+            |_| String::new(),
         )
     };
     

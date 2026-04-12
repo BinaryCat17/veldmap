@@ -1,21 +1,19 @@
 // Реэкспортируем системные протоколы, чтобы сгенерированный ui.rs мог их найти
 pub use veldsdk::rpc::core;
-pub use veldsdk::rpc::app;
 
 pub mod proto {
+    // Re-export app for generated proto code
+    // Generated code uses super::app, so we need to re-export at crate root level
+    pub use veldsdk::rpc::app;
     include!(concat!(env!("OUT_DIR"), "/veldmap.ui.rs"));
 }
+
+// Re-export app at root for proto generated code that uses super::app
+pub use veldsdk::rpc::app;
 
 use serde::Serialize;
 pub use futures_util::task::noop_waker_ref;
 use veldsdk::anyhow;
-
-// Генерируем транспорт для UI-сервиса. 
-veldsdk::host_proxy! {
-    service: "ui-service",
-    set_view: proto::SetViewRequest => proto::SetViewResponse,
-    handle_ui_event: proto::HandleUiEventRequest => proto::HandleUiEventResponse,
-}
 
 pub struct Element<M> {
     pub widget: proto::Widget,
@@ -480,6 +478,12 @@ impl<M> Button<M> {
         self.widget.on_press = serde_json::to_string(&msg).unwrap_or_default();
         self
     }
+    /// Set the message tag for fire-and-forget event handling.
+    /// This is a convenience method for string message tags.
+    pub fn on_press_tag(mut self, tag: impl Into<String>) -> Self {
+        self.widget.on_press = serde_json::to_string(&tag.into()).unwrap_or_default();
+        self
+    }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
         self
@@ -551,8 +555,16 @@ impl<M> TextInput<M> {
         self.widget.on_input = serde_json::to_string(&msg).unwrap_or_default();
         self
     }
+    pub fn on_input_tag(mut self, tag: impl Into<String>) -> Self {
+        self.widget.on_input = serde_json::to_string(&tag.into()).unwrap_or_default();
+        self
+    }
     pub fn on_submit(mut self, msg: M) -> Self where M: Serialize {
         self.widget.on_submit = serde_json::to_string(&msg).unwrap_or_default();
+        self
+    }
+    pub fn on_submit_tag(mut self, tag: impl Into<String>) -> Self {
+        self.widget.on_submit = serde_json::to_string(&tag.into()).unwrap_or_default();
         self
     }
     pub fn width(mut self, w: Length) -> Self {
@@ -1101,17 +1113,10 @@ pub mod diffing {
     }
 }
 
-/// Внутренняя функция для диспетчеризации событий.
-/// Больше не является публичным API - диспетчеризация происходит
-/// автоматически в ui-service при обработке set_view.
-#[doc(hidden)]
-pub fn dispatch_event(event: proto::UiEventResponse) -> anyhow::Result<()> {
-    let topic = event.message_tag.clone();
-    veldsdk::publish!(&topic, event);
-    Ok(())
-}
 
-pub mod app {
+
+/// UI Rendering module
+pub mod render {
     use super::*;
 
     /// Единственная точка входа для рендеринга.

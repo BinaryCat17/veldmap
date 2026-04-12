@@ -235,19 +235,24 @@ message WidgetUpdate {
     Widget new_widget = 2;
 }
 
-message SetViewResponse {}
+// SetView is fire-and-forget, no response needed
 
 message HandleUiEventRequest {
     string plugin_id = 1;
     veldmap.app.UIEvent event = 2;
 }
 
-message HandleUiEventResponse {
-    repeated UiEventResponse messages = 1;
-}
+// HandleUiEvent is fire-and-forget, responses are dispatched via set_view flow
 
 message UiEventResponse {
     string plugin_id = 1;
     string message_tag = 2;
     string value = 3; // For TextInput or similar
+}
+
+// Frame event for ui-service/frame topic
+message FrameEvent {
+    uint32 width = 1;
+    uint32 height = 2;
+    float dt = 3;
 }

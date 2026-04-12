@@ -1,19 +1,15 @@
 use veldmap_api::dataprovider::{
-    SearchRequest, SearchResponse, 
-    DownloadRequest, DownloadStarted, DownloadProgress, Downloaded,
+    DownloadRequest, DownloadStarted, Downloaded,
     ListPathRequest, ListPathResponse
 };
 use log::info;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
-use veldsdk::prost::Message;
-use veldsdk::core::Command;
 use crate::{LocalConfig, LocalState};
 
 const S3_HOST: &str = "eodata.dataspace.copernicus.eu";
@@ -67,18 +63,17 @@ fn get_s3_headers(state: &LocalState, method: &str, uri: &str) -> std::collectio
 // --- Handlers (pub/sub) ---
 
 pub fn on_search(
-    _state: Arc<Mutex<LocalState>>, 
-    _request: SearchRequest
-) -> Command<()> {
+    _state: &mut LocalState, 
+    _request: veldmap_api::dataprovider::SearchRequest
+) {
     // TODO: Implement search via OData/OpenSearch
     info!("Search requested (not implemented)");
-    Command::none()
 }
 
 pub fn on_download(
-    state: Arc<Mutex<LocalState>>, 
+    state: &mut LocalState, 
     request: DownloadRequest
-) -> Command<()> {
+) {
     let task_id = veldsdk::generate_id!();
     let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     let destination = request.destination.clone();
@@ -91,17 +86,18 @@ pub fn on_download(
         destination: destination.clone(),
     });
     
-    // Create async command that does the download
-    Command::perform(
+    // Spawn async task for download
+    let state_clone = LocalState {
+        identity: state.identity.clone(),
+    };
+    
+    veldsdk::core::task::spawn(
         async move {
             let url = format!("https://{}/eodata/{}", S3_HOST, s3_key);
             let uri = format!("/eodata/{}", s3_key);
 
             // Get headers
-            let headers = {
-                let guard = state.lock().unwrap();
-                get_s3_headers(&*guard, "GET", &uri)
-            };
+            let headers = get_s3_headers(&state_clone, "GET", &uri);
 
             // Use host's fs_download
             let req_task = veldsdk::core::FsDownloadRequest {
@@ -123,13 +119,14 @@ pub fn on_download(
                     veldsdk::publish!("data-provider/downloaded", Downloaded {
                         task_id: task_id.clone(),
                         success: false,
-                        error: e,
+                        error: e.clone(),
                     });
                 }
             }
+            Ok(())
         },
         |_| ()
-    )
+    );
 }
 
 async fn do_download(req: veldsdk::core::FsDownloadRequest) -> Result<(), String> {
@@ -140,9 +137,9 @@ async fn do_download(req: veldsdk::core::FsDownloadRequest) -> Result<(), String
 }
 
 pub fn on_list_path(
-    state: Arc<Mutex<LocalState>>, 
+    state: &mut LocalState, 
     request: ListPathRequest
-) -> Command<()> {
+) {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     
     let mut query_params = vec![
@@ -174,10 +171,7 @@ pub fn on_list_path(
         url.path().to_string()
     };
     
-    let headers = {
-        let guard = state.lock().unwrap();
-        get_s3_headers(&*guard, "GET", &uri_with_query)
-    };
+    let headers = get_s3_headers(state, "GET", &uri_with_query);
 
     let req_task = veldsdk::core::HttpTaskRequest {
         url: full_url,
@@ -188,8 +182,7 @@ pub fn on_list_path(
     
     info!("Requesting S3 list: {}", req_task.url);
 
-    // TODO: Return Command that performs the HTTP request
-    Command::none()
+    // TODO: Spawn async task that performs the HTTP request and publishes result
 }
 
 fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {

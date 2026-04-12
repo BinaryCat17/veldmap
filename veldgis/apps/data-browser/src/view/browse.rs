@@ -24,9 +24,9 @@ pub fn view(state: &State) -> Element<()> {
             &items,
             task_manager,
             &browse_state.current_path,
-            |_| (),
-            |_| (),
-            |_| (),
+            |_| String::new(),
+            |_| String::new(),
+            |_| String::new(),
         )
     };
     

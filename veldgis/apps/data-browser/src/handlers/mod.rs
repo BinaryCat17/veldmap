@@ -12,7 +12,7 @@ pub struct Config {
 
 /// Frame handler - единственное место где вызывается render.
 /// Вызывается каждый кадр, рендерит текущее состояние.
-pub fn on_frame(state: &mut crate::state::State, frame: veldsdk::rpc::core::FrameEvent) {
+pub fn on_frame(state: &mut crate::state::State, frame: veld_ui::proto::FrameEvent) {
     let root = crate::view::build_root(state);
-    veld_ui::app::render("data-browser", root, &mut state.last_layout, frame.width, frame.height);
+    veld_ui::render::render("data-browser", root, &mut state.last_layout, frame.width, frame.height);
 }

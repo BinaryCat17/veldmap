@@ -29,7 +29,7 @@ pub fn on_view_pressed(
     if value.is_empty() { return; }
     
     state.current_screen = crate::state::Screen::Preview;
-    state.preview.current_file = value.clone();
+    state.preview.current_path = value.clone();
     state.preview.is_loading = true;
     
     // Запрашиваем загрузку изображения у хоста

@@ -17,15 +17,15 @@ pub fn view(state: &State) -> Element<()> {
         .into();
     }
 
-    if let Some(handle) = &preview.current_gpu_image {
+    if let Some(handle) = &preview.current_image {
         column![
             row![
                 button(text("Back")).on_press_tag("data-browser/nav_downloaded"),
-                text(format!("Preview: {}", preview.current_file)).size(18.0),
+                text(format!("Preview: {}", preview.current_path)).size(18.0),
             ].spacing(20.0).align_items(Alignment::Center),
 
             container(
-                image(handle.clone())
+                image::<()>(veld_ui::core::ResourceHandle { id: *handle, content_hash: Vec::new(), size: 0 })
                     .width(Length::Fill)
                     .height(Length::Fill)
             )

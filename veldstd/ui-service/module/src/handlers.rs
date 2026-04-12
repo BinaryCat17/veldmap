@@ -7,20 +7,23 @@ use iced_core::{Point, Event, Size, Theme};
 use iced_runtime::UserInterface;
 use iced_graphics::Viewport;
 
-pub fn handle_set_view(state: std::sync::Arc<std::sync::Mutex<LocalState>>, req: SetViewRequest) -> veldsdk::core::Command<()> {
-    let mut state = state.lock().unwrap();
-    let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
+pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) {
+    let plugin_id = req.plugin_id.clone();
+    let surface_format = state.surface_format;
+    
+    // Get or create plugin
+    let plugin = state.plugins.entry(plugin_id.clone()).or_insert_with(PluginUiState::new);
     
     // 1. Dispatch pending messages for this plugin BEFORE rendering
     // This ensures the plugin has processed all UI events before we render
     let pending = plugin.pending_messages.borrow_mut().drain(..).collect::<Vec<_>>();
     for msg in pending {
         let resp = UiEventResponse {
-            plugin_id: req.plugin_id.clone(),
+            plugin_id: plugin_id.clone(),
             message_tag: msg.message_tag,
             value: msg.value,
         };
-        veldsdk::publish!(&resp.message_tag, resp);
+        let _ = dispatch_event(resp);
     }
     
     // 2. Update layout
@@ -47,16 +50,27 @@ pub fn handle_set_view(state: std::sync::Arc<std::sync::Mutex<LocalState>>, req:
         None => {}
     }
     
-    // 3. Render via iced if we have surface handle and need to render
-    if let Some(surface_handle) = *plugin.surface_handle.borrow() {
-        if *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow() {
-            if let Err(e) = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format, surface_handle) {
-                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[handle_set_view] render_plugin failed: {}", e);
+    // 3. Check if we need to render
+    let needs_render = *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow();
+    let surface_handle = *plugin.surface_handle.borrow();
+    
+    // Drop plugin borrow before rendering
+    drop(plugin);
+    
+    // 4. Render via iced if we have surface handle and need to render
+    if let Some(handle) = surface_handle {
+        if needs_render {
+            // Get plugin and renderer separately to avoid borrow issues
+            let plugin_ref = state.plugins.get_mut(&plugin_id).unwrap() as *mut PluginUiState;
+            let renderer_ref = &mut state.renderer as *mut GpuRenderer;
+            unsafe {
+                if let Err(e) = render_plugin(&mut *plugin_ref, &mut *renderer_ref, &plugin_id, surface_format, handle) {
+                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[handle_set_view] render_plugin failed: {}", e);
+                }
             }
         }
     }
     
-    veldsdk::core::Command::none()
 }
 
 fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
@@ -78,27 +92,24 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
     false
 }
 
-pub fn handle_ui_event(state: std::sync::Arc<std::sync::Mutex<LocalState>>, event_proto: app_proto::UiEvent) -> veldsdk::core::Command<()> {
+pub fn handle_ui_event(state: &mut LocalState, event_proto: app_proto::UiEvent) {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (from host)");
     
-    let mut state_locked = state.lock().unwrap();
     // Process event for ALL plugins - we don't know which one it's for
-    // ui-service stores layouts for all plugins.
-    let plugin_ids: Vec<String> = state_locked.plugins.keys().cloned().collect();
+    // ui-service stores layouts of all plugins.
+    let plugin_ids: Vec<String> = state.plugins.keys().cloned().collect();
     
     for plugin_id in plugin_ids {
-        if let Err(e) = process_ui_event(&mut state_locked, &plugin_id, event_proto.clone()) {
+        if let Err(e) = process_ui_event(state, &plugin_id, event_proto.clone()) {
             veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event failed for {}: {}", plugin_id, e);
         }
     }
     
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
-    veldsdk::core::Command::none()
 }
 
 /// Handle frame event - broadcasts ui-service/frame to all plugins
-pub fn handle_frame(state: std::sync::Arc<std::sync::Mutex<LocalState>>, frame: veldsdk::rpc::core::FrameEvent) -> veldsdk::core::Command<()> {
-    let state = state.lock().unwrap();
+pub fn handle_frame(state: &mut LocalState, frame: app_proto::FrameEvent) {
     
     for (plugin_id, plugin) in state.plugins.iter() {
         let (width, height) = *plugin.canvas_size.borrow();
@@ -107,16 +118,14 @@ pub fn handle_frame(state: std::sync::Arc<std::sync::Mutex<LocalState>>, frame: 
         }
         
         // Publish frame event to plugin
-        let frame_event = veldsdk::rpc::core::FrameEvent {
+        let frame_event = veld_ui::proto::FrameEvent {
             width,
             height,
             dt: frame.dt,
-            ..Default::default()
         };
         veldsdk::publish!("ui-service/frame", frame_event);
     }
     
-    veldsdk::core::Command::none()
 }
 
 fn process_ui_event(state: &mut LocalState, plugin_id: &str, mut req_event: app_proto::UiEvent) -> anyhow::Result<()> {
@@ -145,9 +154,9 @@ fn process_ui_event(state: &mut LocalState, plugin_id: &str, mut req_event: app_
                 vel.y = vel.y.clamp(-3000.0, 3000.0);
             }
             app_proto::ui_event::Event::Frame(f) => {
-                // Save surface handle for rendering
+                // Save surface handle for rendering (extract id from ResourceHandle)
                 if let Some(handle) = f.surface_handle {
-                    *plugin.surface_handle.borrow_mut() = Some(handle);
+                    *plugin.surface_handle.borrow_mut() = Some(handle.id);
                 }
                 
                 *plugin.monitor_fps.borrow_mut() = f.monitor_fps;
@@ -210,6 +219,14 @@ fn process_iced_events(plugin: &PluginUiState, plugin_id: &str, _surface_handle:
     *plugin.needs_redrawing.borrow_mut() = true;
     
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[PROCESS-ICED] Events queued for {}", plugin_id);
+    Ok(())
+}
+
+/// Внутренняя функция для диспетчеризации событий плагину.
+/// Вызывается в handle_set_view перед рендерингом.
+fn dispatch_event(event: UiEventResponse) -> anyhow::Result<()> {
+    let topic = event.message_tag.clone();
+    veldsdk::publish!(&topic, event);
     Ok(())
 }
 
