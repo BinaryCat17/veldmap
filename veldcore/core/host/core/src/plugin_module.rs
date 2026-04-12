@@ -168,8 +168,34 @@ where
                     store.data_mut().call_context = None;
                 }
 
-                let wasm_module = WasmModule { store, instance };
-                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::new(AsyncMutex::new(wasm_module))));
+                let mut wasm_module = WasmModule { store, instance };
+
+                // Extract subscriptions
+                let mut subs: Vec<String> = Vec::new();
+                if let Ok(get_subs) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "get_subscriptions") {
+                    let ctx = CallContext::new(Vec::new());
+                    wasm_module.store.data_mut().call_context = Some(ctx.clone());
+                    match get_subs.call_async(&mut wasm_module.store, ()).await {
+                        Ok(0) => {
+                            let out = {
+                                let inner = ctx.0.lock().unwrap();
+                                inner.output.clone()
+                            };
+                            if let Ok(topics) = serde_json::from_slice::<Vec<String>>(&out) {
+                                subs = topics;
+                            }
+                        }
+                        Ok(code) => log::warn!("Plugin '{}' get_subscriptions returned code: {}", name, code),
+                        Err(e) => log::warn!("Plugin '{}' get_subscriptions failed: {}", name, e),
+                    }
+                    wasm_module.store.data_mut().call_context = None;
+                }
+
+                let wasm_arc = Arc::new(AsyncMutex::new(wasm_module));
+                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::clone(&wasm_arc)));
+                for topic in subs {
+                    dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(Arc::clone(&wasm_arc)));
+                }
             }
             "remote" => {
                 let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;

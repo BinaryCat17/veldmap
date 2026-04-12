@@ -226,26 +226,36 @@ async fn main() -> anyhow::Result<()> {
 
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
+    dispatcher.register_subscription("system/release_resource".to_string(), ServiceLocation::Native(system_service.clone()));
+    dispatcher.register_subscription("system/acquire_resource".to_string(), ServiceLocation::Native(system_service.clone()));
     dispatcher.register_service("compute".to_string(), ServiceLocation::Native(compute_service));
 
     // Register Modular Services
-    dispatcher.register_service("fs".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_fs::FsService::new(resources.clone()))));
+    let fs_service = Arc::new(veldmap_host_fs::FsService::new(resources.clone()));
+    dispatcher.register_service("fs".to_string(), ServiceLocation::Native(fs_service.clone()));
+    dispatcher.register_subscription("fs/list".to_string(), ServiceLocation::Native(fs_service));
+
     dispatcher.register_service("network".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_network::NetworkService::new(dispatcher.tasks.clone()))));
-    dispatcher.register_service("image".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_image::ImageService::new(resources.clone(), dispatcher.tasks.clone()))));
+
+    let image_service = Arc::new(veldmap_host_image::ImageService::new(resources.clone(), dispatcher.tasks.clone()));
+    dispatcher.register_service("image".to_string(), ServiceLocation::Native(image_service.clone()));
+    dispatcher.register_subscription("image/load".to_string(), ServiceLocation::Native(image_service));
     
     let is_visible = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppCommand>();
     let proxy = event_loop.create_proxy();
     let frame_wake = Arc::new(tokio::sync::Notify::new());
 
-    dispatcher.register_service("app".to_string(), ServiceLocation::Native(Arc::new(AppService::new(
+    let app_service = Arc::new(AppService::new(
         tx, 
         proxy.clone(), 
         is_visible.clone(), 
         resources.clone(),
         last_render_time.clone(),
         frame_wake.clone(),
-    ))));
+    ));
+    dispatcher.register_service("app".to_string(), ServiceLocation::Native(app_service.clone()));
+    dispatcher.register_subscription("app/display".to_string(), ServiceLocation::Native(app_service));
 
     let last_interaction_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let event_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::app::UiEvent>::new()));
@@ -349,10 +359,8 @@ async fn main() -> anyhow::Result<()> {
 
             for (idx, ev) in events.iter().enumerate() {
                 let payload = ev.encode_to_vec();
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Calling ui-service::handle_ui_event event #{}", idx);
-                if let Err(e) = dispatcher_render.call("ui-service", "handle_ui_event", payload, 0).await {
-                    veldmap_host_core::verror!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Failed to call ui-service::handle_ui_event: {}", e);
-                }
+                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Publishing ui-service/handle_ui_event event #{}", idx);
+                dispatcher_render.publish("ui-service/handle_ui_event", payload);
             }
 
             window_render.request_redraw();

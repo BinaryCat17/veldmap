@@ -42,6 +42,7 @@ pub struct TaskState {
 pub struct Dispatcher {
     endpoint: Endpoint,
     services: Mutex<HashMap<String, ServiceLocation>>,
+    subscriptions: Mutex<HashMap<String, Vec<ServiceLocation>>>,
     pub tasks: Arc<Mutex<HashMap<String, TaskState>>>,
     stats: Arc<Mutex<HashMap<String, (u64, u128, u128, u128, u128, std::time::Instant)>>>,
 }
@@ -51,8 +52,71 @@ impl Dispatcher {
         Self {
             endpoint,
             services: Mutex::new(HashMap::new()),
+            subscriptions: Mutex::new(HashMap::new()),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             stats: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn register_subscription(&self, topic: String, location: ServiceLocation) {
+        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Registering subscription: {}", topic);
+        let mut subscriptions = self.subscriptions.lock().unwrap();
+        subscriptions.entry(topic).or_default().push(location);
+    }
+
+    pub fn publish(&self, topic: &str, payload: Vec<u8>) {
+        let subs = {
+            let subscriptions = self.subscriptions.lock().unwrap();
+            subscriptions.get(topic).cloned().unwrap_or_default()
+        };
+
+        let parts: Vec<&str> = topic.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Invalid publish topic: {}", topic);
+            return;
+        }
+        let service_name = parts[0].to_string();
+        let method = parts[1].to_string();
+
+        let locations = subs;
+
+        for location in locations {
+            let payload = payload.clone();
+            let service_name = service_name.clone();
+            let method = method.clone();
+            tokio::spawn(async move {
+                if let Err(e) = Self::notify(location, &service_name, &method, payload).await {
+                    crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Publish notify failed for {}: {}", service_name, e);
+                }
+            });
+        }
+    }
+
+    async fn notify(location: ServiceLocation, service_name: &str, method: &str, payload: Vec<u8>) -> Result<Vec<u8>> {
+        match location {
+            ServiceLocation::Native(service) => {
+                service.call(method, payload, 0)
+            }
+            ServiceLocation::LocalWasm(wasm_module) => {
+                let request = RpcRequest {
+                    service: service_name.to_string(),
+                    method: method.to_string(),
+                    payload,
+                    sync: None,
+                    instance_id: 0,
+                };
+                let req_buf = request.encode_to_vec();
+                let mut module = wasm_module.lock().await;
+                let ctx = crate::CallContext::new(req_buf);
+                module.store.data_mut().call_context = Some(ctx.clone());
+                let instance = module.instance;
+                let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
+                let _ = handle_rpc.call_async(&mut module.store, ()).await;
+                Ok(Vec::new())
+            }
+            ServiceLocation::RemoteIroh(_) => {
+                Err(anyhow::anyhow!("Remote publish not supported"))
+            }
         }
     }
 

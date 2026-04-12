@@ -93,7 +93,9 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
 }
 
 pub fn handle_ui_event(state: &mut LocalState, event_proto: app_proto::UiEvent) {
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (from host)");
+    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (via publish)");
+    
+    let is_frame = matches!(event_proto.event, Some(app_proto::ui_event::Event::Frame(_)));
     
     // Process event for ALL plugins - we don't know which one it's for
     // ui-service stores layouts of all plugins.
@@ -105,27 +107,27 @@ pub fn handle_ui_event(state: &mut LocalState, event_proto: app_proto::UiEvent) 
         }
     }
     
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
-}
-
-/// Handle frame event - broadcasts ui-service/frame to all plugins
-pub fn handle_frame(state: &mut LocalState, frame: app_proto::FrameEvent) {
-    
-    for (_plugin_id, plugin) in state.plugins.iter() {
-        let (width, height) = *plugin.canvas_size.borrow();
-        if width == 0 || height == 0 {
-            continue;
+    // Publish frame event to all subscribers after processing all plugins
+    if is_frame {
+        let mut frame_event = veld_ui::proto::FrameEvent { width: 0, height: 0, dt: 0.0 };
+        if let Some(app_proto::ui_event::Event::Frame(f)) = event_proto.event {
+            frame_event.dt = f.dt;
         }
-        
-        // Publish frame event to plugin
-        let frame_event = veld_ui::proto::FrameEvent {
-            width,
-            height,
-            dt: frame.dt,
-        };
-        veldsdk::publish!("ui-service/frame", frame_event);
+        // Use dimensions from the first plugin with a valid canvas size
+        for plugin in state.plugins.values() {
+            let (w, h) = *plugin.canvas_size.borrow();
+            if w > 0 && h > 0 {
+                frame_event.width = w;
+                frame_event.height = h;
+                break;
+            }
+        }
+        if frame_event.width > 0 && frame_event.height > 0 {
+            veldsdk::publish!("ui-service/frame", frame_event);
+        }
     }
     
+    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
 }
 
 fn process_ui_event(state: &mut LocalState, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<()> {

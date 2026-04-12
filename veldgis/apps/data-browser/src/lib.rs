@@ -20,7 +20,7 @@ define_module! {
         // Frame signal - рендер каждый кадр (единственное место с render!)
         "ui-service/frame" => handlers::on_frame,
         
-        // UI события (диспатчатся из ui-service при обработке set_view)
+        // UI события (диспатчатся из ui-service при обработке пользовательского ввода)
         "data-browser/nav_browse" => handlers::nav::on_nav_browse,
         "data-browser/nav_search" => handlers::nav::on_nav_search,
         "data-browser/nav_downloaded" => handlers::nav::on_nav_downloaded,

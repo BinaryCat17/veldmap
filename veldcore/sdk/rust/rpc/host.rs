@@ -7,6 +7,9 @@ use prost::Message;
 #[cfg(feature = "pdk")]
 #[allow(dead_code)]
 extern "C" {
+    /// Fire-and-forget публикация события.
+    fn veld_host_publish(ptr: u64, len: u64);
+
     /// Главная шина сообщений (аналог ioctl). 
     /// Возвращает упакованный u64: (len << 32) | ptr
     fn veld_host_call(ptr: u64, len: u64) -> u64;
@@ -156,8 +159,7 @@ pub fn publish(topic: &str, payload: Vec<u8>) {
     
     let req_buf = request.encode_to_vec();
     unsafe {
-        // Вызываем хост, но игнорируем результат (fire-and-forget)
-        let _ = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
+        veld_host_publish(req_buf.as_ptr() as u64, req_buf.len() as u64);
     }
 }
 

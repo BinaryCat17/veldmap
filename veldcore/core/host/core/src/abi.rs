@@ -4,6 +4,35 @@ use crate::core::{RpcRequest, RpcResponse};
 use prost::Message;
 
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
+    // 0. veld_host_publish (ASYNC) - Fire-and-forget publish
+    linker.func_wrap_async("env", "veld_host_publish", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
+        Box::new(async move {
+            let mem = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return Ok(0u64),
+            };
+
+            let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
+            let req_buf = match data_bytes {
+                Some(b) => b,
+                None => return Ok(0u64),
+            };
+
+            let request = match RpcRequest::decode(&req_buf[..]) {
+                Ok(r) => r,
+                Err(e) => {
+                    crate::verror!(crate::logging::FLAG_ABI, "[{}] RpcRequest decode error in publish: {}", caller.data().plugin_name, e);
+                    return Ok(0u64);
+                }
+            };
+
+            let topic = format!("{}/{}", request.service, request.method);
+            let dispatcher = caller.data().dispatcher.clone();
+            dispatcher.publish(&topic, request.payload);
+            Ok(0u64)
+        })
+    })?;
+
     // 1. veld_host_call (ASYNC) - The main Message Bus (ioctl)
     linker.func_wrap_async("env", "veld_host_call", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {

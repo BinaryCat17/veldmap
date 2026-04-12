@@ -166,6 +166,14 @@ macro_rules! define_module {
         }
 
         #[no_mangle]
+        pub extern "C" fn get_subscriptions() -> i32 {
+            const SUBS: &[&str] = &[$($topic),*];
+            let out = $crate::serde_json::to_vec(&SUBS).unwrap_or_default();
+            $crate::rpc::host::store_output(out);
+            0
+        }
+
+        #[no_mangle]
         pub extern "C" fn poll_tasks() -> i32 { 0 }
     };
 }

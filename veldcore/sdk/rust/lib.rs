@@ -22,9 +22,6 @@ pub use paste;
 pub use log;
 
 pub use rpc::core::ResourceHandle;
-use rpc::host::call_service;
-use prost::Message;
-
 pub const SURFACE_ID: u64 = 0;
 
 pub struct OwnedResource {
@@ -54,14 +51,14 @@ impl OwnedResource {
 impl Drop for OwnedResource {
     fn drop(&mut self) {
         let req = rpc::core::ReleaseResourceRequest { id: self.handle.id };
-        let _ = call_service("system", "release_resource", req.encode_to_vec());
+        crate::publish!("system/release_resource", req);
     }
 }
 
 impl Clone for OwnedResource {
     fn clone(&self) -> Self {
         let req = rpc::core::AcquireResourceRequest { id: self.handle.id };
-        let _ = call_service("system", "acquire_resource", req.encode_to_vec());
+        crate::publish!("system/acquire_resource", req);
         Self { handle: self.handle.clone() }
     }
 }
