@@ -7,7 +7,6 @@ pub mod search;
 pub mod downloaded;
 pub mod preview;
 
-use veld_ui::proto::{SetViewRequest, set_view_request::Update, Layout};
 use crate::state::State;
 use veld_ui::{Element, column, row, text, button, Length, Padding};
 

@@ -86,54 +86,23 @@ pub fn on_download(
         destination: destination.clone(),
     });
     
-    // Spawn async task for download
-    let state_clone = LocalState {
-        identity: state.identity.clone(),
+    let url = format!("https://{}/eodata/{}", S3_HOST, s3_key);
+    let uri = format!("/eodata/{}", s3_key);
+    let headers = get_s3_headers(state, "GET", &uri);
+
+    let req_task = veldsdk::core::FsDownloadRequest {
+        url,
+        path: destination,
+        headers,
     };
-    
-    veldsdk::core::task::spawn(
-        async move {
-            let url = format!("https://{}/eodata/{}", S3_HOST, s3_key);
-            let uri = format!("/eodata/{}", s3_key);
 
-            // Get headers
-            let headers = get_s3_headers(&state_clone, "GET", &uri);
-
-            // Use host's fs_download
-            let req_task = veldsdk::core::FsDownloadRequest {
-                url,
-                path: destination,
-                headers,
-            };
-
-            // Call host download
-            match do_download(req_task).await {
-                Ok(_) => {
-                    veldsdk::publish!("data-provider/downloaded", Downloaded {
-                        task_id: task_id.clone(),
-                        success: true,
-                        error: String::new(),
-                    });
-                }
-                Err(e) => {
-                    veldsdk::publish!("data-provider/downloaded", Downloaded {
-                        task_id: task_id.clone(),
-                        success: false,
-                        error: e.clone(),
-                    });
-                }
-            }
-            Ok(())
-        },
-        |_| ()
-    );
-}
-
-async fn do_download(req: veldsdk::core::FsDownloadRequest) -> Result<(), String> {
-    // TODO: Use proper async download with progress
-    let _ = req;
-    veldsdk::core::yield_now().await;
-    Ok(())
+    if let Err(e) = veldsdk::core::raw::net::fs_download(&req_task) {
+        veldsdk::publish!("data-provider/downloaded", Downloaded {
+            task_id,
+            success: false,
+            error: e.to_string(),
+        });
+    }
 }
 
 pub fn on_list_path(
@@ -182,7 +151,16 @@ pub fn on_list_path(
     
     info!("Requesting S3 list: {}", req_task.url);
 
-    // TODO: Spawn async task that performs the HTTP request and publishes result
+    let response = match veldsdk::core::raw::net::http(&req_task) {
+        Ok(res) => parse_s3_xml(res.body, Some(&request.path)),
+        Err(e) => ListPathResponse {
+            items: vec![],
+            next_token: "".into(),
+            error: e.to_string(),
+        },
+    };
+
+    veldsdk::publish!("data-provider/list_path_result", response);
 }
 
 fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {

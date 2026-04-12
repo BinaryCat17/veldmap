@@ -54,8 +54,8 @@ pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) {
     let needs_render = *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow();
     let surface_handle = *plugin.surface_handle.borrow();
     
-    // Drop plugin borrow before rendering
-    drop(plugin);
+    // plugin borrow ends here before rendering
+    let _ = plugin;
     
     // 4. Render via iced if we have surface handle and need to render
     if let Some(handle) = surface_handle {
@@ -111,7 +111,7 @@ pub fn handle_ui_event(state: &mut LocalState, event_proto: app_proto::UiEvent) 
 /// Handle frame event - broadcasts ui-service/frame to all plugins
 pub fn handle_frame(state: &mut LocalState, frame: app_proto::FrameEvent) {
     
-    for (plugin_id, plugin) in state.plugins.iter() {
+    for (_plugin_id, plugin) in state.plugins.iter() {
         let (width, height) = *plugin.canvas_size.borrow();
         if width == 0 || height == 0 {
             continue;
@@ -128,7 +128,7 @@ pub fn handle_frame(state: &mut LocalState, frame: app_proto::FrameEvent) {
     
 }
 
-fn process_ui_event(state: &mut LocalState, plugin_id: &str, mut req_event: app_proto::UiEvent) -> anyhow::Result<()> {
+fn process_ui_event(state: &mut LocalState, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<()> {
     let plugin = state.plugins.entry(plugin_id.to_string()).or_insert_with(PluginUiState::new);
 
     if let Some(ev) = req_event.event {
@@ -242,7 +242,7 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
     }
 }
 
-fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, surface_handle: u64) -> anyhow::Result<()> {
+fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, _surface_handle: u64) -> anyhow::Result<()> {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] START for {}", plugin_id);
     let (width, height) = *plugin.canvas_size.borrow();
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] canvas size: {}x{}", width, height);

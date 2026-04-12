@@ -1,4 +1,3 @@
-use veld_ui::proto::*;
 use crate::handlers::*;
 use veldsdk::define_module;
 use crate::state::LocalState;
@@ -22,7 +21,7 @@ define_module! {
     init: init_module,
     handlers: {
         "ui-service/set_view" => handle_set_view,
-        "host/handle_ui_event" => handle_ui_event,
-        "host/frame" => handle_frame,
+        "ui-service/handle_ui_event" => handle_ui_event,
+        "ui-service/frame" => handle_frame,
     }
 }

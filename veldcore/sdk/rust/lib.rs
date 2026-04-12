@@ -6,7 +6,7 @@ pub mod compute;
 #[cfg(feature = "app")]
 pub mod app;
 
-pub use core::{yield_now, FLAG_PERF};
+pub use core::FLAG_PERF;
 
 // Flags for logging
 pub const FLAG_SDK: u32 = 1 << 6;
@@ -19,7 +19,6 @@ pub use serde_json;
 pub use prost;
 pub use anyhow;
 pub use paste;
-pub use futures_util;
 pub use log;
 
 pub use rpc::core::ResourceHandle;
@@ -76,6 +75,4 @@ impl AsRef<ResourceHandle> for OwnedResource {
 pub mod prelude {
     pub use crate::rpc::core::*;
     pub use crate::OwnedResource;
-    #[cfg(feature = "pdk")]
-    pub use crate::core::{Command, BoxedStream};
 }

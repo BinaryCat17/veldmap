@@ -13,7 +13,6 @@ pub use veldsdk::rpc::app;
 
 use serde::Serialize;
 pub use futures_util::task::noop_waker_ref;
-use veldsdk::anyhow;
 
 pub struct Element<M> {
     pub widget: proto::Widget,

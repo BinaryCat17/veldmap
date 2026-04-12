@@ -349,8 +349,10 @@ async fn main() -> anyhow::Result<()> {
 
             for (idx, ev) in events.iter().enumerate() {
                 let payload = ev.encode_to_vec();
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Publishing to host/handle_ui_event event #{}", idx);
-                veldsdk::publish!("host/handle_ui_event", ev);
+                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Calling ui-service::handle_ui_event event #{}", idx);
+                if let Err(e) = dispatcher_render.call("ui-service", "handle_ui_event", payload, 0).await {
+                    veldmap_host_core::verror!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Failed to call ui-service::handle_ui_event: {}", e);
+                }
             }
 
             window_render.request_redraw();

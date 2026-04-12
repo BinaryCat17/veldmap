@@ -1,87 +1,6 @@
 pub use crate::rpc::core::*;
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 use prost::Message;
-use std::future::Future;
-use std::pin::Pin;
-use futures_util::stream::Stream;
-
-pub mod task;
-
-pub type BoxedStream<M> = Pin<Box<dyn Stream<Item = M> + Send + Sync + 'static>>;
-
-/// A command that describes a side effect to be performed.
-pub struct Command<M>(pub Vec<BoxedStream<M>>);
-
-impl<M> Command<M> {
-    pub fn none() -> Self { Self(Vec::new()) }
-    pub fn perform<F, T, G>(future: F, msg_wrap: G) -> Self 
-    where 
-        F: Future<Output = T> + Send + Sync + 'static,
-        G: FnOnce(T) -> M + Send + Sync + 'static,
-        T: 'static, M: 'static 
-    {
-        use futures_util::stream::once;
-        Self(vec![Box::pin(once(async move { msg_wrap(future.await) }))])
-    }
-    pub fn stream(stream: impl Stream<Item = M> + Send + Sync + 'static) -> Self {
-        Self(vec![Box::pin(stream)])
-    }
-    pub fn batch(commands: impl IntoIterator<Item = Self>) -> Self {
-        let mut streams = Vec::new();
-        for cmd in commands { streams.extend(cmd.0); }
-        Self(streams)
-    }
-
-    pub fn map_task<T, U>(self, f: impl Fn(T) -> U + Send + Sync + 'static) -> Command<crate::core::task::TaskUpdate<U>> 
-    where 
-        M: Into<crate::core::task::TaskUpdate<T>> + 'static,
-        T: Send + Sync + 'static,
-        U: Send + Sync + 'static
-    {
-        use futures_util::stream::StreamExt;
-        use crate::core::task::TaskUpdate;
-        let f = std::sync::Arc::new(f);
-        
-        let streams = self.0.into_iter().map(|stream| {
-            let f = std::sync::Arc::clone(&f);
-            Box::pin(stream.map(move |msg| {
-                let update: TaskUpdate<T> = msg.into();
-                match update {
-                    TaskUpdate::Started(id) => TaskUpdate::Started(id),
-                    TaskUpdate::Progress(p, id) => TaskUpdate::Progress(p, id),
-                    TaskUpdate::Finished(res) => TaskUpdate::Finished(res.map(|t| f(t))),
-                }
-            })) as BoxedStream<crate::core::task::TaskUpdate<U>>
-        }).collect();
-        Command(streams)
-    }
-
-    pub fn map<N>(self, f: impl Fn(M) -> N + Send + Sync + 'static) -> Command<N>
-    where
-        M: 'static,
-        N: 'static,
-    {
-        use futures_util::stream::StreamExt;
-        let f = std::sync::Arc::new(f);
-        
-        let streams = self.0.into_iter().map(|stream| {
-            let f = std::sync::Arc::clone(&f);
-            Box::pin(stream.map(move |msg| f(msg))) as BoxedStream<N>
-        }).collect();
-        Command(streams)
-    }
-}
-
-pub async fn yield_now() {
-    struct YieldNow(bool);
-    impl std::future::Future for YieldNow {
-        type Output = ();
-        fn poll(mut self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
-            if self.0 { std::task::Poll::Ready(()) } else { self.0 = true; std::task::Poll::Pending }
-        }
-    }
-    YieldNow(false).await;
-}
 
 // Генерируем низкоуровневые прокси для системных сервисов
 pub mod raw {
@@ -141,23 +60,6 @@ pub mod raw {
     pub use fs::*;
     pub use net::*;
     pub use img::*;
-}
-
-// Высокоуровневые обертки (task-based)
-pub fn fs_read_bytes(path: impl Into<String>) -> Command<task::TaskUpdate<Vec<u8>>> {
-    let path = path.into();
-    Command::perform(async move {
-        // TODO: Реализовать через task-based API
-        Vec::new()
-    }, |data| task::TaskUpdate::Finished(Ok(data)))
-}
-
-pub fn fs_write_bytes(path: impl Into<String>, data: Vec<u8>) -> Command<task::TaskUpdate<()>> {
-    let path = path.into();
-    Command::perform(async move {
-        // TODO: Реализовать через task-based API
-        Ok(())
-    }, |res| task::TaskUpdate::Finished(res))
 }
 
 pub const FLAG_PERF: u32 = 1 << 0;
