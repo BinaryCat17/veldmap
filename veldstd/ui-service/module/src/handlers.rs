@@ -55,28 +55,29 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
     false
 }
 
-pub fn handle_ui_event(state: std::sync::Arc<std::sync::Mutex<LocalState>>, req: HandleUiEventRequest) -> veldsdk::core::Command<()> {
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START");
-    let mut messages = Vec::new();
-    if let Some(event_proto) = req.event {
-        veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Processing event for plugin: {}", req.plugin_id);
+pub fn handle_ui_event(state: std::sync::Arc<std::sync::Mutex<LocalState>>, event_proto: app_proto::UiEvent) -> veldsdk::core::Command<()> {
+    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (from host)");
+    
+    let mut responses = Vec::new();
+    {
         let mut state_locked = state.lock().unwrap();
-        if let Ok(mut msgs) = process_ui_event_recursive(&mut state_locked, &req.plugin_id, event_proto) {
-            messages.append(&mut msgs);
+        // Нам нужно пройтись по ВСЕМ плагинам, так как мы не знаем, в кого попало событие
+        // ui-service хранит лейауты всех плагинов.
+        let plugin_ids: Vec<String> = state_locked.plugins.keys().cloned().collect();
+        
+        for plugin_id in plugin_ids {
+            if let Ok(mut msgs) = process_ui_event_recursive(&mut state_locked, &plugin_id, event_proto.clone()) {
+                responses.append(&mut msgs);
+            }
         }
-        veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event_recursive returned {} messages", messages.len());
     }
-    for mut msg in messages {
-        // Поддержка роутинга: если tag содержит '|', часть до '|' это топик, остальное - payload (value)
-        let topic = if let Some(idx) = msg.message_tag.find('|') {
-            let (t, payload) = msg.message_tag.split_at(idx);
-            msg.value = payload[1..].to_string(); // пропускаем '|'
-            t.to_string()
-        } else {
-            msg.message_tag.clone()
-        };
-        veldsdk::publish!(&topic, msg);
+    
+    // Публикуем ВСЕ ответы в единую точку входа
+    for resp in responses {
+        veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Publishing response for {}: {}", resp.plugin_id, resp.message_tag);
+        veldsdk::publish!("ui-service/event", resp);
     }
+    
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
     veldsdk::core::Command::none()
 }

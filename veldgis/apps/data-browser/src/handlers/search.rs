@@ -1,47 +1,40 @@
 use std::sync::{Arc, Mutex};
-use veldmap_api::ui::UiEventResponse;
-use veldsdk::core::Command;
-
 use crate::state::State;
 
 /// Поиск запрошен
 pub fn on_search(
-    state: Arc<Mutex<State>>,
-    _request: UiEventResponse,
-) -> Command<()> {
-    let mut guard = state.lock().unwrap();
-    let query = guard.search.query.clone();
+    state: &mut State,
+    _value: String,
+) -> anyhow::Result<()> {
+    let query = state.search.query.clone();
     
     if !query.is_empty() {
-        guard.search.is_loading = true;
+        state.search.is_loading = true;
         veldsdk::publish!("data-provider/search", veldmap_api::dataprovider::SearchRequest {
             query,
             filters: vec![],
         });
     }
     
-    crate::view::render(&guard);
-    Command::none()
+    Ok(())
 }
 
 pub fn on_search_input(
-    state: Arc<Mutex<State>>,
-    request: UiEventResponse,
-) -> Command<()> {
-    let mut guard = state.lock().unwrap();
-    guard.search.query = request.value;
-    crate::view::render(&guard);
-    Command::none()
+    state: &mut State,
+    value: String,
+) -> anyhow::Result<()> {
+    state.search.query = value;
+    Ok(())
 }
 
 /// Результат поиска
 pub fn on_search_result(
     state: Arc<Mutex<State>>,
     response: veldmap_api::dataprovider::SearchResponse,
-) -> Command<()> {
+) -> anyhow::Result<()> {
     let mut guard = state.lock().unwrap();
     guard.search.is_loading = false;
     guard.search.results = response.products;
-    crate::view::render(&guard);
-    Command::none()
+    crate::view::render(&mut guard);
+    Ok(())
 }

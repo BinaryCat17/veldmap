@@ -19,20 +19,10 @@ define_module! {
     state: state::State,
     init: module_init,
     handlers: {
-        // UI события от пользователя (высокоуровневые, от ui-service)
-        "data-browser/download_pressed" => handlers::download::on_download_pressed,
+        // Единая точка входа для всех UI событий
+        "ui-service/event" => handlers::on_ui_event,
         
-        "data-browser/nav_browse" => handlers::nav::on_nav_browse,
-        "data-browser/nav_search" => handlers::nav::on_nav_search,
-        "data-browser/nav_downloaded" => handlers::nav::on_nav_downloaded,
-        
-        "data-browser/search" => handlers::search::on_search,
-        "data-browser/search_input" => handlers::search::on_search_input,
-        
-        "data-browser/browse" => handlers::browse::on_browse,
-        "data-browser/browse_up" => handlers::browse::on_browse_up,
-        
-        // Подписки на события от data-provider
+        // Подписки на события от data-provider (бизнес-логика)
         "data-provider/download_started" => handlers::download::on_download_started,
         "data-provider/download_progress" => handlers::download::on_download_progress,
         "data-provider/downloaded" => handlers::download::on_downloaded,

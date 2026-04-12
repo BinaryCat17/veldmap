@@ -1110,6 +1110,31 @@ pub mod diffing {
     }
 }
 
+#[macro_export]
+macro_rules! handle_ui_event {
+    ($plugin_id:expr, $state:expr, $event:expr, { $($tag:expr => $handler:path),* $(,)? }) => {{
+        if $event.plugin_id == $plugin_id {
+            let mut guard = $state.lock().unwrap();
+            let mut handled = false;
+            match $event.message_tag.as_str() {
+                $(
+                    $tag => {
+                        $handler(&mut guard, $event.value.clone())?;
+                        handled = true;
+                    }
+                )*
+                _ => {}
+            }
+            if handled {
+                $crate::render($plugin_id, crate::view::build_root(&guard), &mut guard.last_layout);
+            }
+            Ok(())
+        } else {
+            Ok(())
+        }
+    }};
+}
+
 pub fn render<M>(plugin_id: &str, element: Element<M>, last_layout: &mut Option<proto::Layout>) {
     let mut root_widget = element.widget;
     

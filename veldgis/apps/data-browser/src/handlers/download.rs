@@ -1,20 +1,16 @@
 use std::sync::{Arc, Mutex};
-use veldmap_api::data_browser::DownloadPressed;
 use veldmap_api::dataprovider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded};
-use veldsdk::core::Command;
 
 use crate::state::{State, downloaded::DownloadStatus};
 use crate::components::task_manager::TaskKind;
-use veldmap_api::ui::UiEventResponse;
 
 /// Пользователь нажал кнопку скачать
-/// Просто публикуем запрос к data-provider и забываем
 pub fn on_download_pressed(
-    state: Arc<Mutex<State>>,
-    request: UiEventResponse,
-) -> Command<()> {
+    state: &mut State,
+    value: String,
+) -> anyhow::Result<()> {
     // В FaF мы берем выбранный элемент из value
-    let s3_key = request.value;
+    let s3_key = value;
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     
     if !s3_key.is_empty() {
@@ -23,16 +19,15 @@ pub fn on_download_pressed(
             destination: format!("data/dem/source/{}", filename),
         });
     }
-    // Fire-and-forget! Не ждём ответа.
-    crate::view::render(&state.lock().unwrap());
-    Command::none()
+    
+    Ok(())
 }
 
 /// Data-provider сообщил что загрузка началась
 pub fn on_download_started(
     state: Arc<Mutex<State>>,
     event: DownloadStarted,
-) -> Command<()> {
+) -> anyhow::Result<()> {
     let filename = event.identifier.split('/').last().unwrap_or("file").to_string();
     
     let mut guard = state.lock().unwrap();
@@ -56,14 +51,15 @@ pub fn on_download_started(
     });
     
     guard.global.status_message = format!("Starting download: {}", filename);
-    Command::none()
+    crate::view::render(&mut guard);
+    Ok(())
 }
 
 /// Data-provider сообщил прогресс
 pub fn on_download_progress(
     state: Arc<Mutex<State>>,
     event: DownloadProgress,
-) -> Command<()> {
+) -> anyhow::Result<()> {
     let mut guard = state.lock().unwrap();
     
     // Обновляем TaskManager
@@ -76,14 +72,15 @@ pub fn on_download_progress(
             break;
         }
     }
-    Command::none()
+    crate::view::render(&mut guard);
+    Ok(())
 }
 
 /// Data-provider сообщил что загрузка завершена
 pub fn on_downloaded(
     state: Arc<Mutex<State>>,
     event: Downloaded,
-) -> Command<()> {
+) -> anyhow::Result<()> {
     let mut guard = state.lock().unwrap();
     
     // Находим по task_id
@@ -105,5 +102,6 @@ pub fn on_downloaded(
             guard.global.task_manager.fail(&event.task_id, event.error);
         }
     }
-    Command::none()
+    crate::view::render(&mut guard);
+    Ok(())
 }
