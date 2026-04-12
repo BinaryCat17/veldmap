@@ -10,13 +10,7 @@ use serde::Serialize;
 pub use futures_util::task::noop_waker_ref;
 use veldsdk::anyhow;
 
-// Генерируем транспорт для UI-сервиса. 
-veldsdk::host_proxy! {
-    service: "ui-service",
-    set_view: proto::SetViewRequest => proto::SetViewResponse,
-    handle_ui_event: proto::HandleUiEventRequest => proto::HandleUiEventResponse,
-}
-
+// (Удален неиспользуемый host_proxy!)
 pub struct Element<M> {
     pub widget: proto::Widget,
     pub _marker: std::marker::PhantomData<M>,

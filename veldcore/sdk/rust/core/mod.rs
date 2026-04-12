@@ -87,41 +87,53 @@ pub async fn yield_now() {
 pub mod raw {
     use super::*;
 
-    crate::host_proxy! {
-        module: sys,
-        service: "system",
-        log: LogRequest => (),
-        get_resource: GetResourceRequest => GetResourceResponse,
-        create_data: CreateDataRequest => CreateDataResponse,
-        task_status: TaskStatusRequest => TaskStatusResponse,
-        task_cancel: TaskCancelRequest => (),
-        acquire_resource: AcquireResourceRequest => (),
-        release_resource: ReleaseResourceRequest => (),
-        freeze_resource: FreezeResourceRequest => (),
-        destroy_resource: DestroyResourceRequest => (),
+    macro_rules! sync_call {
+        ($service:expr, $method:expr, $req:expr, $res:ty) => {{
+            use prost::Message;
+            let payload = $req.encode_to_vec();
+            let res_bytes = crate::rpc::host::call_service($service, $method, payload)?;
+            Ok(<$res>::decode(&res_bytes[..])?)
+        }};
     }
 
-    crate::host_proxy! {
-        module: fs,
-        service: "fs",
-        fs_read: FsReadRequest => FsReadResponse,
-        fs_write: FsWriteRequest => (),
-        fs_list: FsListRequest => FsListResponse,
-        fs_delete: FsDeleteRequest => (),
+    macro_rules! faf_call {
+        ($topic:expr, $req:expr) => {{
+            crate::publish!($topic, $req);
+            Ok(())
+        }};
     }
 
-    crate::host_proxy! {
-        module: net,
-        service: "network",
-        fs_download: FsDownloadRequest => (),
-        http: HttpTaskRequest => HttpTaskResponse,
+    pub mod sys {
+        use super::*;
+        pub fn log(req: &LogRequest) -> anyhow::Result<()> { faf_call!("system/log", req) }
+        pub fn get_resource(req: &GetResourceRequest) -> anyhow::Result<GetResourceResponse> { sync_call!("system", "get_resource", req, GetResourceResponse) }
+        pub fn create_data(req: &CreateDataRequest) -> anyhow::Result<CreateDataResponse> { sync_call!("system", "create_data", req, CreateDataResponse) }
+        pub fn task_status(req: &TaskStatusRequest) -> anyhow::Result<TaskStatusResponse> { sync_call!("system", "task_status", req, TaskStatusResponse) }
+        pub fn task_cancel(req: &TaskCancelRequest) -> anyhow::Result<()> { faf_call!("system/task_cancel", req) }
+        pub fn acquire_resource(req: &AcquireResourceRequest) -> anyhow::Result<()> { faf_call!("system/acquire_resource", req) }
+        pub fn release_resource(req: &ReleaseResourceRequest) -> anyhow::Result<()> { faf_call!("system/release_resource", req) }
+        pub fn freeze_resource(req: &FreezeResourceRequest) -> anyhow::Result<()> { faf_call!("system/freeze_resource", req) }
+        pub fn destroy_resource(req: &DestroyResourceRequest) -> anyhow::Result<()> { faf_call!("system/destroy_resource", req) }
     }
 
-    crate::host_proxy! {
-        module: img,
-        service: "image",
-        image_info: ImageInfoRequest => ImageInfoResponse,
-        image_load: ImageLoadRequest => ResourceHandle,
+    pub mod fs {
+        use super::*;
+        pub fn fs_read(req: &FsReadRequest) -> anyhow::Result<FsReadResponse> { sync_call!("fs", "fs_read", req, FsReadResponse) }
+        pub fn fs_write(req: &FsWriteRequest) -> anyhow::Result<()> { faf_call!("fs/fs_write", req) }
+        pub fn fs_list(req: &FsListRequest) -> anyhow::Result<FsListResponse> { sync_call!("fs", "fs_list", req, FsListResponse) }
+        pub fn fs_delete(req: &FsDeleteRequest) -> anyhow::Result<()> { faf_call!("fs/fs_delete", req) }
+    }
+
+    pub mod net {
+        use super::*;
+        pub fn fs_download(req: &FsDownloadRequest) -> anyhow::Result<()> { faf_call!("network/fs_download", req) }
+        pub fn http(req: &HttpTaskRequest) -> anyhow::Result<HttpTaskResponse> { sync_call!("network", "http", req, HttpTaskResponse) }
+    }
+
+    pub mod img {
+        use super::*;
+        pub fn image_info(req: &ImageInfoRequest) -> anyhow::Result<ImageInfoResponse> { sync_call!("image", "image_info", req, ImageInfoResponse) }
+        pub fn image_load(req: &ImageLoadRequest) -> anyhow::Result<ResourceHandle> { sync_call!("image", "image_load", req, ResourceHandle) }
     }
 
     // Реэкспорт для удобства и обратной совместимости

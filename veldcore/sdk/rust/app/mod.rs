@@ -1,8 +1,11 @@
 pub use crate::rpc::app::*;
 
-crate::host_proxy! {
-    service: "app",
-    display: AppDisplayCommand => (),
+pub mod raw {
+    use super::*;
+    pub fn display(req: &AppDisplayCommand) -> anyhow::Result<()> {
+        crate::publish!("app/display", req);
+        Ok(())
+    }
 }
 
 pub struct AppBridge;

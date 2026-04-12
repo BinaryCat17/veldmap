@@ -12,64 +12,6 @@ pub mod compute {
 
 pub mod host;
 
-pub trait RpcResponseDecoder {
-    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self>
-    where
-        Self: Sized;
-}
-
-impl<T: prost::Message + Default> RpcResponseDecoder for T {
-    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self> {
-        Ok(T::decode(bytes)?)
-    }
-}
-
-/// Генерация клиентского прокси для системных сервисов (host calls)
-#[macro_export]
-macro_rules! host_proxy {
-    (
-        module: $module:ident,
-        service: $service:expr,
-        $($method:ident : $req:ty => $res:ty),* $(,)?
-    ) => {
-        pub mod $module {
-            use super::*;
-            $(
-                pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
-                    use $crate::prost::Message;
-                    let payload = req.encode_to_vec();
-                    let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
-                    $crate::decode_rpc_final!($res, res_bytes)
-                }
-            )*
-        }
-    };
-    (
-        service: $service:expr,
-        $($method:ident : $req:ty => $res:ty),* $(,)?
-    ) => {
-        pub mod raw {
-            use super::*;
-            $(
-                pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
-                    use $crate::prost::Message;
-                    let payload = req.encode_to_vec();
-                    let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
-                    $crate::decode_rpc_final!($res, res_bytes)
-                }
-            )*
-        }
-    };
-}
-
-#[macro_export]
-macro_rules! decode_rpc_final {
-    ((), $bytes:expr) => { Ok(()) };
-    ($t:ty, $bytes:expr) => {
-        <$t as $crate::rpc::RpcResponseDecoder>::decode_from(&$bytes[..])
-    };
-}
-
 #[cfg(feature = "client")]
 pub mod client;
 
