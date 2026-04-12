@@ -3,6 +3,8 @@
 pub mod search;
 pub mod browse;
 pub mod download;
+pub mod nav;
+pub mod ui;
 
 #[derive(serde::Deserialize)]
 pub struct Config {

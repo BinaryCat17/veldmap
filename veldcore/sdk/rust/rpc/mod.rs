@@ -12,8 +12,19 @@ pub mod compute {
 
 pub mod host;
 
+pub trait RpcResponseDecoder {
+    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self>
+    where
+        Self: Sized;
+}
+
+impl<T: prost::Message + Default> RpcResponseDecoder for T {
+    fn decode_from(bytes: &[u8]) -> anyhow::Result<Self> {
+        Ok(T::decode(bytes)?)
+    }
+}
+
 /// Генерация клиентского прокси для системных сервисов (host calls)
-/// Возвращает Command<()> так как это fire-and-forget публикации
 #[macro_export]
 macro_rules! host_proxy {
     (
@@ -24,12 +35,11 @@ macro_rules! host_proxy {
         pub mod $module {
             use super::*;
             $(
-                pub fn $method(req: $req) -> $crate::core::Command<()> {
+                pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
                     use $crate::prost::Message;
-                    $crate::core::Command::perform(async move {
-                        let payload = req.encode_to_vec();
-                        let _ = $crate::rpc::host::call_service($service, stringify!($method), payload);
-                    }, |_| ())
+                    let payload = req.encode_to_vec();
+                    let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
+                    $crate::decode_rpc_final!($res, res_bytes)
                 }
             )*
         }
@@ -41,15 +51,22 @@ macro_rules! host_proxy {
         pub mod raw {
             use super::*;
             $(
-                pub fn $method(req: $req) -> $crate::core::Command<()> {
+                pub fn $method(req: &$req) -> $crate::anyhow::Result<$res> {
                     use $crate::prost::Message;
-                    $crate::core::Command::perform(async move {
-                        let payload = req.encode_to_vec();
-                        let _ = $crate::rpc::host::call_service($service, stringify!($method), payload);
-                    }, |_| ())
+                    let payload = req.encode_to_vec();
+                    let res_bytes = $crate::rpc::host::call_service($service, stringify!($method), payload)?;
+                    $crate::decode_rpc_final!($res, res_bytes)
                 }
             )*
         }
+    };
+}
+
+#[macro_export]
+macro_rules! decode_rpc_final {
+    ((), $bytes:expr) => { Ok(()) };
+    ($t:ty, $bytes:expr) => {
+        <$t as $crate::rpc::RpcResponseDecoder>::decode_from(&$bytes[..])
     };
 }
 
@@ -96,6 +113,20 @@ macro_rules! generate_id {
     }};
 }
 
+/// Вспомогательная функция для вызова хэндлера
+pub fn call_handler<S, Req, F>(
+    func: F,
+    state: std::sync::Arc<std::sync::Mutex<S>>,
+    payload: &[u8],
+) -> Result<crate::core::Command<()>, String>
+where
+    Req: prost::Message + Default,
+    F: Fn(std::sync::Arc<std::sync::Mutex<S>>, Req) -> crate::core::Command<()>,
+{
+    let req = Req::decode(payload).map_err(|e| format!("Decode error: {}", e))?;
+    Ok(func(state, req))
+}
+
 /// Тип хэндлера: принимает состояние и запрос, возвращает Command с задачами
 pub type HandlerFn<S, R> = fn(
     std::sync::Arc<std::sync::Mutex<S>>,
@@ -109,7 +140,7 @@ macro_rules! define_module {
         state: $state_type:ty,
         init: $init_func:path,
         handlers: {
-            $($topic:expr => $func:path : $req_type:ty),* $(,)?
+            $($topic:expr => $func:path),* $(,)?
         }
     ) => {
         #[no_mangle]
@@ -223,12 +254,8 @@ macro_rules! define_module {
                 match topic.as_str() {
                     $(
                         $topic => {
-                            let req = match <$req_type>::decode(&request.payload[..]) {
-                                Ok(r) => r,
-                                Err(e) => return Err(format!("Failed to decode request for {}: {}", $topic, e)),
-                            };
                             let state_clone = service.state.clone();
-                            let cmd = $func(state_clone, req);
+                            let cmd = $crate::rpc::call_handler($func, state_clone, &request.payload[..]).map_err(|e| format!("Failed to handle request for {}: {}", $topic, e))?;
                             
                             // Если есть streams - сохраняем как задачи для poll_tasks
                             if !cmd.0.is_empty() {

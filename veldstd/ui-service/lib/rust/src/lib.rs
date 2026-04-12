@@ -480,6 +480,11 @@ impl<M> Button<M> {
         self.widget.on_press = serde_json::to_string(&msg).unwrap_or_default();
         self
     }
+    
+    pub fn on_press_tag(mut self, tag: impl Into<String>) -> Self {
+        self.widget.on_press = tag.into();
+        self
+    }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
         self
@@ -553,6 +558,16 @@ impl<M> TextInput<M> {
     }
     pub fn on_submit(mut self, msg: M) -> Self where M: Serialize {
         self.widget.on_submit = serde_json::to_string(&msg).unwrap_or_default();
+        self
+    }
+    
+    pub fn on_submit_tag(mut self, tag: impl Into<String>) -> Self {
+        self.widget.on_submit = tag.into();
+        self
+    }
+    
+    pub fn on_input_tag(mut self, tag: impl Into<String>) -> Self {
+        self.widget.on_input = tag.into();
         self
     }
     pub fn width(mut self, w: Length) -> Self {
@@ -1233,8 +1248,8 @@ impl<A: VeldUiApp> UiRunner<A> {
 /// 
 /// Instead of defining your own wrapper:
 /// ```rust
-/// pub fn handle_ui_event_wrapper(runner: &mut UiRunner<MyApp>, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<proto::HandleUiEventResponse> {
-///     runner.dispatch_event(event)
+/// pub fn handle_ui_event_wrapper(state: Arc<Mutex<UiRunner<MyApp>>>, req: proto::HandleUiEventRequest) -> veldsdk::core::Command<()> {
+///     // ...
 /// }
 /// ```
 /// 
@@ -1245,15 +1260,23 @@ impl<A: VeldUiApp> UiRunner<A> {
 ///     state: UiRunner<MyApp>,
 ///     init: UiRunner::<MyApp>::new,
 ///     handlers: {
-///         "handle_ui_event" => veld_ui::handle_ui_event::<MyApp> : veldsdk::rpc::app::UiEvent => proto::HandleUiEventResponse,
+///         "ui-service/handle_ui_event" => veld_ui::handle_ui_event::<MyApp>,
 ///     }
 /// }
 /// ```
 pub fn handle_ui_event<A: VeldUiApp>(
-    runner: &mut UiRunner<A>,
-    event: veldsdk::rpc::app::UiEvent,
-) -> anyhow::Result<proto::HandleUiEventResponse> {
-    runner.dispatch_event(event)
+    state: std::sync::Arc<std::sync::Mutex<UiRunner<A>>>,
+    req: proto::HandleUiEventRequest,
+) -> veldsdk::core::Command<()> {
+    if let Some(event_proto) = req.event {
+        let mut runner = state.lock().unwrap();
+        if let Ok(response) = runner.dispatch_event(event_proto) {
+            for msg in response.messages {
+                veldsdk::publish!(&msg.message_tag, msg);
+            }
+        }
+    }
+    veldsdk::core::Command::none()
 }
 
 pub mod reexports {

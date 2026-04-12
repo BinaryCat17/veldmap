@@ -134,9 +134,8 @@ pub fn on_download(
 
 async fn do_download(req: veldsdk::core::FsDownloadRequest) -> Result<(), String> {
     // TODO: Use proper async download with progress
-    // For now, simulate the download
     let _ = req;
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    veldsdk::core::yield_now().await;
     Ok(())
 }
 

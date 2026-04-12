@@ -7,7 +7,8 @@ use iced_core::{Point, Event, Size, Theme};
 use iced_runtime::UserInterface;
 use iced_graphics::Viewport;
 
-pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::Result<SetViewResponse> {
+pub fn handle_set_view(state: std::sync::Arc<std::sync::Mutex<LocalState>>, req: SetViewRequest) -> veldsdk::core::Command<()> {
+    let mut state = state.lock().unwrap();
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     
     match req.update {
@@ -32,7 +33,7 @@ pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) -> anyhow::R
         }
         None => {}
     }
-    Ok(SetViewResponse {})
+    veldsdk::core::Command::none()
 }
 
 fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
@@ -54,16 +55,30 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
     false
 }
 
-pub fn handle_ui_event(state: &mut LocalState, req: HandleUiEventRequest) -> anyhow::Result<HandleUiEventResponse> {
+pub fn handle_ui_event(state: std::sync::Arc<std::sync::Mutex<LocalState>>, req: HandleUiEventRequest) -> veldsdk::core::Command<()> {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START");
     let mut messages = Vec::new();
     if let Some(event_proto) = req.event {
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Processing event for plugin: {}", req.plugin_id);
-        messages = process_ui_event_recursive(state, &req.plugin_id, event_proto)?;
+        let mut state_locked = state.lock().unwrap();
+        if let Ok(mut msgs) = process_ui_event_recursive(&mut state_locked, &req.plugin_id, event_proto) {
+            messages.append(&mut msgs);
+        }
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event_recursive returned {} messages", messages.len());
     }
+    for mut msg in messages {
+        // Поддержка роутинга: если tag содержит '|', часть до '|' это топик, остальное - payload (value)
+        let topic = if let Some(idx) = msg.message_tag.find('|') {
+            let (t, payload) = msg.message_tag.split_at(idx);
+            msg.value = payload[1..].to_string(); // пропускаем '|'
+            t.to_string()
+        } else {
+            msg.message_tag.clone()
+        };
+        veldsdk::publish!(&topic, msg);
+    }
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
-    Ok(HandleUiEventResponse { messages })
+    veldsdk::core::Command::none()
 }
 
 fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_event: app_proto::UiEvent) -> anyhow::Result<Vec<UiEventResponse>> {

@@ -1,9 +1,9 @@
 //! View для экрана браузера
 
-use veld_ui::{column, row, text, button, scrollable, Element, Length};
+use veld_ui::{column, text, button, scrollable, Element, Length};
 use crate::state::State;
 use crate::components::browser_list::render_list;
-use crate::common::BrowserItem;
+use crate::components::browser_list::BrowserItem;
 
 pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;
@@ -32,7 +32,7 @@ pub fn view(state: &State) -> Element<()> {
     
     column![
         text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-        button(text("⬆ Up")).on_press(()),
+        button(text("⬆ Up")).on_press_tag("data-browser/browse_up"),
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)

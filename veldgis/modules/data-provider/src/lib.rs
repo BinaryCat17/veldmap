@@ -21,8 +21,8 @@ define_module! {
     init: cdse::module_init,
     handlers: {
         // Команды (входящие)
-        "data-provider/download" => cdse::on_download : DownloadRequest,
-        "data-provider/list_path" => cdse::on_list_path : ListPathRequest,
-        "data-provider/search" => cdse::on_search : SearchRequest,
+        "data-provider/download" => cdse::on_download,
+        "data-provider/list_path" => cdse::on_list_path,
+        "data-provider/search" => cdse::on_search,
     }
 }

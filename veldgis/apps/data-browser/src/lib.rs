@@ -5,7 +5,6 @@ pub mod state;
 pub mod view;
 pub mod components;
 pub mod styles;
-pub mod common;
 
 use veldsdk::define_module;
 use veldmap_api::data_browser::{DownloadPressed, SearchRequest, BrowseRequest};
@@ -20,14 +19,28 @@ define_module! {
     state: state::State,
     init: module_init,
     handlers: {
+        // UI события от хоста
+        "data-browser/handle_ui_event" => handlers::ui::on_ui_event,
+        
         // UI события от пользователя
-        "data-browser/download_pressed" => handlers::download::on_download_pressed : DownloadPressed,
-        "data-browser/search" => handlers::search::on_search : SearchRequest,
-        "data-browser/browse" => handlers::browse::on_browse : BrowseRequest,
+        "data-browser/download_pressed" => handlers::download::on_download_pressed,
+        
+        "data-browser/nav_browse" => handlers::nav::on_nav_browse,
+        "data-browser/nav_search" => handlers::nav::on_nav_search,
+        "data-browser/nav_downloaded" => handlers::nav::on_nav_downloaded,
+        
+        "data-browser/search" => handlers::search::on_search,
+        "data-browser/search_input" => handlers::search::on_search_input,
+        
+        "data-browser/browse" => handlers::browse::on_browse,
+        "data-browser/browse_up" => handlers::browse::on_browse_up,
         
         // Подписки на события от data-provider
-        "data-provider/download_started" => handlers::download::on_download_started : DownloadStarted,
-        "data-provider/download_progress" => handlers::download::on_download_progress : DownloadProgress,
-        "data-provider/downloaded" => handlers::download::on_downloaded : Downloaded,
+        "data-provider/download_started" => handlers::download::on_download_started,
+        "data-provider/download_progress" => handlers::download::on_download_progress,
+        "data-provider/downloaded" => handlers::download::on_downloaded,
+        
+        "data-provider/search_result" => handlers::search::on_search_result,
+        "data-provider/list_path_result" => handlers::browse::on_list_result,
     }
 }

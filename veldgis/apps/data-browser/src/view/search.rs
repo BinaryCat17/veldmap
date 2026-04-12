@@ -3,7 +3,7 @@
 use veld_ui::{column, row, text, text_input, button, scrollable, Element, Length};
 use crate::state::State;
 use crate::components::browser_list::render_list;
-use crate::common::BrowserItem;
+use crate::components::browser_list::BrowserItem;
 
 pub fn view(state: &State) -> Element<()> {
     let search_state = &state.search;
@@ -20,9 +20,9 @@ pub fn view(state: &State) -> Element<()> {
         column![text(msg).size(16.0)].into()
     } else {
         let items: Vec<BrowserItem> = search_state.results.iter().map(|p| BrowserItem {
-            s3_key: p.identifier.clone(),
+            s3_key: p.path.clone(),
             name: p.name.clone(),
-            description: Some(p.description.clone()),
+            description: Some(p.timestamp.clone()),
             is_folder: false,
             exists_locally: false,
         }).collect();
@@ -42,9 +42,9 @@ pub fn view(state: &State) -> Element<()> {
         
         row![
             text_input("Search query...", &search_state.query)
-                .on_input(|_| ()) // TODO: обработка ввода
-                .on_submit(()),
-            button(text("Search")).on_press(())
+                .on_input_tag("data-browser/search_input")
+                .on_submit_tag("data-browser/search"),
+            button(text("Search")).on_press_tag("data-browser/search")
         ]
         .spacing(10.0)
         .width(Length::Fill),

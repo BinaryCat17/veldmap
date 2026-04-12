@@ -5,27 +5,34 @@ use veldsdk::core::Command;
 
 use crate::state::{State, downloaded::DownloadStatus};
 use crate::components::task_manager::TaskKind;
+use veldmap_api::ui::UiEventResponse;
 
 /// Пользователь нажал кнопку скачать
 /// Просто публикуем запрос к data-provider и забываем
 pub fn on_download_pressed(
-    _state: Arc<Mutex<State>>,
-    request: DownloadPressed,
-) {
-    let filename = request.s3_key.split('/').last().unwrap_or("file").to_string();
+    state: Arc<Mutex<State>>,
+    request: UiEventResponse,
+) -> Command<()> {
+    // В FaF мы берем выбранный элемент из value
+    let s3_key = request.value;
+    let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     
-    veldsdk::publish!("data-provider/download", DownloadRequest {
-        identifier: request.s3_key,
-        destination: format!("data/dem/source/{}", filename),
-    });
+    if !s3_key.is_empty() {
+        veldsdk::publish!("data-provider/download", DownloadRequest {
+            identifier: s3_key,
+            destination: format!("data/dem/source/{}", filename),
+        });
+    }
     // Fire-and-forget! Не ждём ответа.
+    crate::view::render(&state.lock().unwrap());
+    Command::none()
 }
 
 /// Data-provider сообщил что загрузка началась
 pub fn on_download_started(
     state: Arc<Mutex<State>>,
     event: DownloadStarted,
-) {
+) -> Command<()> {
     let filename = event.identifier.split('/').last().unwrap_or("file").to_string();
     
     let mut guard = state.lock().unwrap();
@@ -49,13 +56,14 @@ pub fn on_download_started(
     });
     
     guard.global.status_message = format!("Starting download: {}", filename);
+    Command::none()
 }
 
 /// Data-provider сообщил прогресс
 pub fn on_download_progress(
     state: Arc<Mutex<State>>,
     event: DownloadProgress,
-) {
+) -> Command<()> {
     let mut guard = state.lock().unwrap();
     
     // Обновляем TaskManager
@@ -68,13 +76,14 @@ pub fn on_download_progress(
             break;
         }
     }
+    Command::none()
 }
 
 /// Data-provider сообщил что загрузка завершена
 pub fn on_downloaded(
     state: Arc<Mutex<State>>,
     event: Downloaded,
-) {
+) -> Command<()> {
     let mut guard = state.lock().unwrap();
     
     // Находим по task_id
@@ -96,4 +105,5 @@ pub fn on_downloaded(
             guard.global.task_manager.fail(&event.task_id, event.error);
         }
     }
+    Command::none()
 }
