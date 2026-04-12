@@ -10,7 +10,13 @@ use serde::Serialize;
 pub use futures_util::task::noop_waker_ref;
 use veldsdk::anyhow;
 
-// (Удален неиспользуемый host_proxy!)
+// Генерируем транспорт для UI-сервиса. 
+veldsdk::host_proxy! {
+    service: "ui-service",
+    set_view: proto::SetViewRequest => proto::SetViewResponse,
+    handle_ui_event: proto::HandleUiEventRequest => proto::HandleUiEventResponse,
+}
+
 pub struct Element<M> {
     pub widget: proto::Widget,
     pub _marker: std::marker::PhantomData<M>,
@@ -474,11 +480,6 @@ impl<M> Button<M> {
         self.widget.on_press = serde_json::to_string(&msg).unwrap_or_default();
         self
     }
-    
-    pub fn on_press_tag(mut self, tag: impl Into<String>) -> Self {
-        self.widget.on_press = tag.into();
-        self
-    }
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
         self
@@ -552,16 +553,6 @@ impl<M> TextInput<M> {
     }
     pub fn on_submit(mut self, msg: M) -> Self where M: Serialize {
         self.widget.on_submit = serde_json::to_string(&msg).unwrap_or_default();
-        self
-    }
-    
-    pub fn on_submit_tag(mut self, tag: impl Into<String>) -> Self {
-        self.widget.on_submit = tag.into();
-        self
-    }
-    
-    pub fn on_input_tag(mut self, tag: impl Into<String>) -> Self {
-        self.widget.on_input = tag.into();
         self
     }
     pub fn width(mut self, w: Length) -> Self {
@@ -1110,71 +1101,6 @@ pub mod diffing {
     }
 }
 
-#[macro_export]
-macro_rules! handle_ui_event {
-    ($plugin_id:expr, $state:expr, $event:expr, { $($tag:expr => $handler:path),* $(,)? }) => {{
-        if $event.plugin_id == $plugin_id {
-            let mut guard = $state.lock().unwrap();
-            let mut handled = false;
-            match $event.message_tag.as_str() {
-                $(
-                    $tag => {
-                        $handler(&mut guard, $event.value.clone())?;
-                        handled = true;
-                    }
-                )*
-                _ => {}
-            }
-            if handled {
-                $crate::render($plugin_id, crate::view::build_root(&guard), &mut guard.last_layout);
-            }
-            Ok(())
-        } else {
-            Ok(())
-        }
-    }};
-}
-
-pub fn render<M>(plugin_id: &str, element: Element<M>, last_layout: &mut Option<proto::Layout>) {
-    let mut root_widget = element.widget;
-    
-    let mut index = 0;
-    let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
-    
-    // Fallback dimensions if not known
-    let width = last_layout.as_ref().map(|l| l.width).unwrap_or(1024);
-    let height = last_layout.as_ref().map(|l| l.height).unwrap_or(768);
-
-    let new_layout = crate::proto::Layout {
-        root: Some(root_widget),
-        width,
-        height,
-        hash,
-    };
-
-    let request = if let Some(ref old_layout) = last_layout {
-        if let Some(patch) = crate::diffing::diff_layouts(old_layout, &new_layout) {
-            Some(crate::proto::SetViewRequest {
-                plugin_id: plugin_id.to_string(),
-                update: Some(crate::proto::set_view_request::Update::Patch(patch)),
-            })
-        } else {
-            None
-        }
-    } else {
-        Some(crate::proto::SetViewRequest {
-            plugin_id: plugin_id.to_string(),
-            update: Some(crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
-        })
-    };
-
-    if let Some(req) = request {
-        veldsdk::publish!("ui-service/set_view", req);
-    }
-    
-    *last_layout = Some(new_layout);
-}
-
 pub trait VeldUiApp: Sized + 'static {
     type Message: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;
     type Config: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;
@@ -1281,22 +1207,24 @@ impl<A: VeldUiApp> UiRunner<A> {
 
                     self.last_layout = Some(new_layout);
                     if let Some(req) = request {
-                        // TODO: Обновить для task-based API
-                        // let _ = crate::raw::set_view(req);
-                        let _ = req;
+                        let _ = crate::raw::set_view(&req);
                     }
                 }
                 _ => {}
             }
         }
 
-        // TODO: Обновить для task-based API
-        // let cmd = crate::raw::handle_ui_event(crate::proto::HandleUiEventRequest {
-        //     plugin_id: self.plugin_name.clone(),
-        //     event: Some(event),
-        // });
-        // self.tasks.extend(cmd.0);
-        let _ = event;
+        if let Ok(ui_res) = crate::raw::handle_ui_event(&crate::proto::HandleUiEventRequest {
+            plugin_id: self.plugin_name.clone(),
+            event: Some(event),
+        }) {
+            for msg_res in ui_res.messages {
+                if let Ok(m) = veldsdk::serde_json::from_str::<A::Message>(&msg_res.message_tag) {
+                    let cmd = self.app.update(m);
+                    self.tasks.extend(cmd.0);
+                }
+            }
+        }
         
         veldsdk::vtrace!(veldsdk::FLAG_UI_SERVICE, "[UI-RUNNER] dispatch_event EXIT: {}", event_name);
         Ok(proto::HandleUiEventResponse { messages: Vec::new() })
@@ -1307,8 +1235,8 @@ impl<A: VeldUiApp> UiRunner<A> {
 /// 
 /// Instead of defining your own wrapper:
 /// ```rust
-/// pub fn handle_ui_event_wrapper(state: Arc<Mutex<UiRunner<MyApp>>>, req: proto::HandleUiEventRequest) -> veldsdk::core::Command<()> {
-///     // ...
+/// pub fn handle_ui_event_wrapper(runner: &mut UiRunner<MyApp>, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<proto::HandleUiEventResponse> {
+///     runner.dispatch_event(event)
 /// }
 /// ```
 /// 
@@ -1319,23 +1247,15 @@ impl<A: VeldUiApp> UiRunner<A> {
 ///     state: UiRunner<MyApp>,
 ///     init: UiRunner::<MyApp>::new,
 ///     handlers: {
-///         "ui-service/handle_ui_event" => veld_ui::handle_ui_event::<MyApp>,
+///         "handle_ui_event" => veld_ui::handle_ui_event::<MyApp> : veldsdk::rpc::app::UiEvent => proto::HandleUiEventResponse,
 ///     }
 /// }
 /// ```
 pub fn handle_ui_event<A: VeldUiApp>(
-    state: std::sync::Arc<std::sync::Mutex<UiRunner<A>>>,
-    req: proto::HandleUiEventRequest,
-) -> veldsdk::core::Command<()> {
-    if let Some(event_proto) = req.event {
-        let mut runner = state.lock().unwrap();
-        if let Ok(response) = runner.dispatch_event(event_proto) {
-            for msg in response.messages {
-                veldsdk::publish!(&msg.message_tag, msg);
-            }
-        }
-    }
-    veldsdk::core::Command::none()
+    runner: &mut UiRunner<A>,
+    event: veldsdk::rpc::app::UiEvent,
+) -> anyhow::Result<proto::HandleUiEventResponse> {
+    runner.dispatch_event(event)
 }
 
 pub mod reexports {
