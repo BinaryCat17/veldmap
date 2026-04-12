@@ -74,7 +74,7 @@ pub fn handle_ui_event(state: std::sync::Arc<std::sync::Mutex<LocalState>>, even
     
     // Публикуем ВСЕ ответы в единую точку входа
     for resp in responses {
-        veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Publishing response for {}: {}", resp.plugin_id, resp.message_tag);
+        veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Publishing UI response for {}: {}", resp.plugin_id, resp.message_tag);
         veldsdk::publish!("ui-service/event", resp);
     }
     

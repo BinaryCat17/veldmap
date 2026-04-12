@@ -22,7 +22,7 @@ define_module! {
         // Единая точка входа для всех UI событий
         "ui-service/event" => handlers::on_ui_event,
         
-        // Подписки на события от data-provider (бизнес-логика)
+        // Подписки на события от data-provider (бизнес-логика, не UI)
         "data-provider/download_started" => handlers::download::on_download_started,
         "data-provider/download_progress" => handlers::download::on_download_progress,
         "data-provider/downloaded" => handlers::download::on_downloaded,

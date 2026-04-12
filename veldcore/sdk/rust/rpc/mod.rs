@@ -126,61 +126,17 @@ macro_rules! define_module {
         }
 
         #[no_mangle]
-        pub extern "C" fn poll_tasks() -> i32 {
-            use $crate::futures_util::stream::StreamExt;
-            let state_arc = match $crate::rpc::MODULE_STATE.get() {
-                Some(Ok(s)) => s,
-                _ => return 0,
-            };
-            let mut state_lock = match state_arc.try_lock() {
-                Ok(l) => l,
-                Err(_) => return 0, 
-            };
-            let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type>>()
-                .expect("Failed to downcast state");
-
-            let mut finished_tasks = Vec::new();
-            for (task_id, stream) in service.tasks.iter_mut() {
-                let waker = $crate::futures_util::task::noop_waker_ref();
-                let mut cx = std::task::Context::from_waker(waker);
-
-                // Опрашиваем stream пока он готов давать значения
-                while let std::task::Poll::Ready(maybe_item) = stream.poll_next_unpin(&mut cx) {
-                    match maybe_item {
-                        Some(()) => {
-                            // Stream вернул () - просто продолжаем
-                        }
-                        None => {
-                            // Stream закончился
-                            finished_tasks.push(task_id.clone());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            for task_id in finished_tasks {
-                service.tasks.remove(&task_id);
-            }
-            0
-        }
-
-        #[no_mangle]
         pub extern "C" fn handle_rpc() -> i32 {
             use $crate::prost::Message;
             use $crate::rpc::core::{RpcRequest, RpcResponse};
 
-            veldsdk::vtrace!(veldsdk::FLAG_SDK, "[SDK] handle_rpc START");
             let input = $crate::rpc::host::load_input();
-            veldsdk::vtrace!(veldsdk::FLAG_SDK, "[SDK] handle_rpc loaded input: {} bytes", input.len());
             let request = match RpcRequest::decode(&input[..]) {
                 Ok(r) => r,
                 Err(_) => return 1,
             };
             
-            // topic = service/method
             let topic = format!("{}/{}", request.service, request.method);
-            veldsdk::vdebug!(veldsdk::FLAG_SDK, "[SDK] handle_rpc ENTER: {}", topic);
             
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let state_arc = match $crate::rpc::MODULE_STATE.get() {
@@ -197,16 +153,7 @@ macro_rules! define_module {
                     $(
                         $topic => {
                             let state_clone = service.state.clone();
-                            let cmd = $crate::rpc::call_handler($func, state_clone, &request.payload[..]).map_err(|e| format!("Failed to handle request for {}: {}", $topic, e))?;
-                            
-                            // Если есть streams - сохраняем как задачи для poll_tasks
-                            if !cmd.0.is_empty() {
-                                use $crate::futures_util::stream::StreamExt;
-                                let task_id = veldsdk::generate_id!();
-                                let combined = $crate::futures_util::stream::iter(cmd.0).flatten();
-                                service.tasks.insert(task_id, Box::pin(combined));
-                            }
-                            
+                            $crate::rpc::call_handler($func, state_clone, &request.payload[..]).map_err(|e| format!("Failed to handle request for {}: {}", $topic, e))?;
                             Ok(())
                         }
                     )*
@@ -215,23 +162,17 @@ macro_rules! define_module {
             }));
 
             let error = match res {
-                Ok(Ok(())) => {
-                    veldsdk::vdebug!(veldsdk::FLAG_SDK, "[SDK] handle_rpc EXIT OK: {}", topic);
-                    String::new()
-                }
-                Ok(Err(e)) => {
-                    veldsdk::verror!(veldsdk::FLAG_SDK, "[SDK] handle_rpc EXIT ERROR: {} - {}", topic, e);
-                    e
-                }
-                Err(_) => {
-                    veldsdk::verror!(veldsdk::FLAG_SDK, "[SDK] handle_rpc PANIC: {}", topic);
-                    "Plugin panicked".to_string()
-                }
+                Ok(Ok(())) => String::new(),
+                Ok(Err(e)) => e,
+                Err(_) => "Plugin panicked".to_string(),
             };
 
             let response = RpcResponse { payload: Vec::new(), error, sync: None };
             $crate::rpc::host::store_output(response.encode_to_vec());
             0
         }
+
+        #[no_mangle]
+        pub extern "C" fn poll_tasks() -> i32 { 0 }
     };
 }

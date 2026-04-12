@@ -1101,164 +1101,54 @@ pub mod diffing {
     }
 }
 
-pub trait VeldUiApp: Sized + 'static {
-    type Message: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;
-    type Config: for<'de> serde::Deserialize<'de> + Send + Sync + 'static;
+pub mod app {
+    use super::*;
 
-    fn init(config: Self::Config) -> anyhow::Result<(Self, veldsdk::core::Command<Self::Message>)>;
-    fn update(&mut self, message: Self::Message) -> veldsdk::core::Command<Self::Message>;
-    fn view(&self) -> crate::Element<Self::Message>;
-}
+    /// Единственная точка входа для рендеринга.
+    /// Вызывается автоматически макросом define_module! после каждого хендлера.
+    pub fn render(plugin_id: &str, state: &mut crate::state::State) {
+        let root_element = crate::view::build_root(state);
+        let mut root_widget = root_element.widget;
 
-pub struct UiRunner<A: VeldUiApp> {
-    pub app: A,
-    pub plugin_name: String,
-    pub width: u32,
-    pub height: u32,
-    pub last_layout: Option<proto::Layout>,
-    pub tasks: Vec<veldsdk::core::BoxedStream<A::Message>>,
-}
+        let mut index = 0;
+        let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
 
-impl<A: VeldUiApp> UiRunner<A> {
-    pub fn new(config: A::Config) -> anyhow::Result<Self> {
-        let plugin_name = veldsdk::rpc::host::get_config("plugin_name").unwrap_or_else(|| "unknown".to_string());
-        let (app, cmd) = A::init(config)?;
-        
-        Ok(Self {
-            app,
-            plugin_name,
-            width: 1024,
-            height: 768,
-            last_layout: None,
-            tasks: cmd.0,
-        })
-    }
+        let width = state.last_layout.as_ref().map(|l| l.width).unwrap_or(1024);
+        let height = state.last_layout.as_ref().map(|l| l.height).unwrap_or(768);
 
-    pub fn dispatch_event(&mut self, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<proto::HandleUiEventResponse> {
-        let event_name = event.event.as_ref().map(|e| match e {
-            veldsdk::rpc::app::ui_event::Event::Resize(_) => "Resize",
-            veldsdk::rpc::app::ui_event::Event::Frame(_) => "Frame",
-            veldsdk::rpc::app::ui_event::Event::CursorMoved(_) => "CursorMoved",
-            veldsdk::rpc::app::ui_event::Event::Click(_) => "Click",
-            veldsdk::rpc::app::ui_event::Event::Scroll(_) => "Scroll",
-            veldsdk::rpc::app::ui_event::Event::Key(_) => "Key",
-            _ => "Unknown",
-        }).unwrap_or("None");
-        veldsdk::vtrace!(veldsdk::FLAG_UI_SERVICE, "[UI-RUNNER] dispatch_event ENTER: {}", event_name);
-        
-        if let Some(ref ev_type) = event.event {
-            match ev_type {
-                veldsdk::rpc::app::ui_event::Event::Resize(r) => {
-                    self.width = r.width;
-                    self.height = r.height;
-                }
-                veldsdk::rpc::app::ui_event::Event::Frame(_f) => {
-                    let waker = crate::reexports::noop_waker_ref();
-                    let mut cx = crate::reexports::Context::from_waker(waker);
-                    let mut new_messages = Vec::new();
-                    
-                    use veldsdk::futures_util::stream::StreamExt;
-                    
-                    self.tasks.retain_mut(|task| {
-                        for _ in 0..100 {
-                            match task.poll_next_unpin(&mut cx) {
-                                crate::reexports::Poll::Ready(Some(msg)) => {
-                                    new_messages.push(msg);
-                                },
-                                crate::reexports::Poll::Ready(None) => return false,
-                                crate::reexports::Poll::Pending => return true,
-                            }
-                        }
-                        true
-                    });
+        let new_layout = crate::proto::Layout {
+            root: Some(root_widget),
+            width,
+            height,
+            hash,
+        };
 
-                    for msg in new_messages {
-                        let cmd = self.app.update(msg);
-                        self.tasks.extend(cmd.0);
-                    }
-
-                    let element = self.app.view();
-                    let mut root_widget = element.widget;
-                    
-                    let mut index = 0;
-                    let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
-                    
-                    let new_layout = crate::proto::Layout {
-                        root: Some(root_widget),
-                        width: self.width, height: self.height,
-                        hash,
-                    };
-
-                    let request = if let Some(ref old_layout) = self.last_layout {
-                        if let Some(patch) = crate::diffing::diff_layouts(old_layout, &new_layout) {
-                            Some(crate::proto::SetViewRequest {
-                                plugin_id: self.plugin_name.clone(),
-                                update: Some(crate::proto::set_view_request::Update::Patch(patch)),
-                            })
-                        } else {
-                            None
-                        }
-                    } else {
-                        Some(crate::proto::SetViewRequest {
-                            plugin_id: self.plugin_name.clone(),
-                            update: Some(crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
-                        })
-                    };
-
-                    self.last_layout = Some(new_layout);
-                    if let Some(req) = request {
-                        let _ = crate::raw::set_view(&req);
-                    }
-                }
-                _ => {}
+        let request = if let Some(ref old_layout) = state.last_layout {
+            if let Some(patch) = crate::diffing::diff_layouts(old_layout, &new_layout) {
+                Some(crate::proto::SetViewRequest {
+                    plugin_id: plugin_id.to_string(),
+                    update: Some(crate::proto::set_view_request::Update::Patch(patch)),
+                })
+            } else {
+                None
             }
+        } else {
+            Some(crate::proto::SetViewRequest {
+                plugin_id: plugin_id.to_string(),
+                update: Some(crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
+            })
+        };
+
+        if let Some(req) = request {
+            veldsdk::publish!("ui-service/set_view", req);
         }
 
-        if let Ok(ui_res) = crate::raw::handle_ui_event(&crate::proto::HandleUiEventRequest {
-            plugin_id: self.plugin_name.clone(),
-            event: Some(event),
-        }) {
-            for msg_res in ui_res.messages {
-                if let Ok(m) = veldsdk::serde_json::from_str::<A::Message>(&msg_res.message_tag) {
-                    let cmd = self.app.update(m);
-                    self.tasks.extend(cmd.0);
-                }
-            }
-        }
-        
-        veldsdk::vtrace!(veldsdk::FLAG_UI_SERVICE, "[UI-RUNNER] dispatch_event EXIT: {}", event_name);
-        Ok(proto::HandleUiEventResponse { messages: Vec::new() })
+        state.last_layout = Some(new_layout);
     }
-}
-
-/// Global wrapper function for use with define_module! macro.
-/// 
-/// Instead of defining your own wrapper:
-/// ```rust
-/// pub fn handle_ui_event_wrapper(runner: &mut UiRunner<MyApp>, event: veldsdk::rpc::app::UiEvent) -> anyhow::Result<proto::HandleUiEventResponse> {
-///     runner.dispatch_event(event)
-/// }
-/// ```
-/// 
-/// You can use this directly in define_module!:
-/// ```rust
-/// define_module! {
-///     config: MyConfig,
-///     state: UiRunner<MyApp>,
-///     init: UiRunner::<MyApp>::new,
-///     handlers: {
-///         "handle_ui_event" => veld_ui::handle_ui_event::<MyApp> : veldsdk::rpc::app::UiEvent => proto::HandleUiEventResponse,
-///     }
-/// }
-/// ```
-pub fn handle_ui_event<A: VeldUiApp>(
-    runner: &mut UiRunner<A>,
-    event: veldsdk::rpc::app::UiEvent,
-) -> anyhow::Result<proto::HandleUiEventResponse> {
-    runner.dispatch_event(event)
 }
 
 pub mod reexports {
+
     pub use std::task::{Poll, Context};
     pub use futures_util::task::noop_waker_ref;
 }
