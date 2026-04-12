@@ -41,19 +41,6 @@ impl SystemService {
 impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
-            "log" => {
-                let req = veldmap_host_core::core::LogRequest::decode(&payload[..])?;
-                use veldmap_host_core::logging::*;
-                let level = match req.level() {
-                    veldmap_host_core::core::LogLevel::Trace => log::Level::Trace,
-                    veldmap_host_core::core::LogLevel::Debug => log::Level::Debug,
-                    veldmap_host_core::core::LogLevel::Info => log::Level::Info,
-                    veldmap_host_core::core::LogLevel::Warn => log::Level::Warn,
-                    veldmap_host_core::core::LogLevel::Error => log::Level::Error,
-                };
-                veld_log(level, req.flags | FLAG_WASM, None, &req.message);
-                Ok(Vec::new())
-            }
             "get_config" => {
                 let req = GetConfigRequest::decode(&payload[..])?;
                 let value = if let Some(config) = self.configs.get(&requestor_id) {

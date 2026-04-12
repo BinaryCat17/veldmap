@@ -33,6 +33,36 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
+    // 0.5 veld_log - direct logging ABI (fundamental, bypasses dispatcher)
+    linker.func_wrap_async("env", "veld_host_log", |mut caller: Caller<'_, HostState>, (level, flags, ptr, len): (u64, u64, u64, u64)| {
+        Box::new(async move {
+            use crate::logging::*;
+            use log::Level;
+
+            let mem = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => m,
+                _ => return Ok(()),
+            };
+
+            let msg = mem.data(&caller)
+                .get(ptr as usize..(ptr + len) as usize)
+                .and_then(|s| std::str::from_utf8(s).ok())
+                .unwrap_or("<invalid log message>");
+
+            let log_level = match level {
+                4 => Level::Error,
+                3 => Level::Warn,
+                2 => Level::Info,
+                1 => Level::Debug,
+                _ => Level::Trace,
+            };
+
+            let plugin_name = caller.data().plugin_name.clone();
+            veld_log(log_level, flags as u32 | FLAG_WASM, Some(&plugin_name), msg);
+            Ok(())
+        })
+    })?;
+
     // 1. veld_host_call (ASYNC) - The main Message Bus (ioctl)
     linker.func_wrap_async("env", "veld_host_call", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
@@ -61,26 +91,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             
             crate::vdebug!(crate::logging::FLAG_ABI, "[ABI] [{}] Call: {}::{} (ID: {})", plugin_name, request.service, request.method, instance_id);
 
-            // Special handling for log to avoid circular dependencies and for performance
-            let result = if request.service == "system" && request.method == "log" {
-                if let Ok(log_req) = crate::core::LogRequest::decode(&request.payload[..]) {
-                    use crate::logging::*;
-                    let level = match log_req.level() {
-                        crate::core::LogLevel::Trace => log::Level::Trace,
-                        crate::core::LogLevel::Debug => log::Level::Debug,
-                        crate::core::LogLevel::Info => log::Level::Info,
-                        crate::core::LogLevel::Warn => log::Level::Warn,
-                        crate::core::LogLevel::Error => log::Level::Error,
-                    };
-                    
-                    veld_log(level, log_req.flags | FLAG_WASM, Some(&plugin_name), &log_req.message);
-                    Ok(Vec::new())
-                } else {
-                    dispatcher.call(&request.service, &request.method, request.payload, instance_id).await
-                }
-            } else {
-                dispatcher.call(&request.service, &request.method, request.payload, instance_id).await
-            };
+            let result = dispatcher.call(&request.service, &request.method, request.payload, instance_id).await;
 
             let (payload, error): (Vec<u8>, String) = match result {
                 Ok(p) => {

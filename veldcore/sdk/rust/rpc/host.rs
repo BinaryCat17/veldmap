@@ -10,6 +10,9 @@ extern "C" {
     /// Fire-and-forget публикация события.
     fn veld_host_publish(ptr: u64, len: u64);
 
+    /// Прямое логирование в хост (обходя диспетчер).
+    fn veld_host_log(level: u64, flags: u64, ptr: u64, len: u64);
+
     /// Главная шина сообщений (аналог ioctl). 
     /// Возвращает упакованный u64: (len << 32) | ptr
     fn veld_host_call(ptr: u64, len: u64) -> u64;
@@ -56,6 +59,8 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
     }
     
+    crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
+    
     let request = RpcRequest {
         service: service.to_string(),
         method: method.to_string(),
@@ -81,9 +86,7 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
             return Err(anyhow::anyhow!(response.error)); 
         }
         
-        if !is_log_call {
-            crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} OK ({} bytes)", service, method, response.payload.len());
-        }
+        crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} OK ({} bytes)", service, method, response.payload.len());
         Ok(response.payload)
     }
 }
@@ -103,6 +106,21 @@ pub fn resource_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>
         let mut buf = vec![0u8; size as usize];
         veld_resource_read(id, offset, buf.as_mut_ptr() as u64, size);
         Ok(buf)
+    }
+}
+
+/// Прямое логирование в хост, минуя диспетчер.
+#[cfg(feature = "pdk")]
+pub fn log(level: log::Level, flags: u32, message: &str) {
+    let level_u64 = match level {
+        log::Level::Error => 4u64,
+        log::Level::Warn => 3u64,
+        log::Level::Info => 2u64,
+        log::Level::Debug => 1u64,
+        log::Level::Trace => 0u64,
+    };
+    unsafe {
+        veld_host_log(level_u64, flags as u64, message.as_ptr() as u64, message.len() as u64);
     }
 }
 

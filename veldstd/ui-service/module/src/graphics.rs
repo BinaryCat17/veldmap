@@ -4,11 +4,12 @@
 use crate::state::PluginUiState;
 use crate::renderer::{GpuRenderer, DrawCmd};
 use veldsdk::compute::*;
+use veldsdk::compute::raw::create_resource;
 use veldsdk::compute::wgpu_proxy::ComputeRecorder;
-use veldsdk::rpc::host::{call_service, gpu_write_resource};
+use veldsdk::rpc::host::gpu_write_resource;
 use veldsdk::rpc::core::ResourceHandle;
 use veldsdk::OwnedResource;
-use prost::Message;
+
 use anyhow::anyhow;
 
 /// Renders UI to an offscreen texture and returns its ID
@@ -108,7 +109,7 @@ fn create_offscreen_texture(width: u32, height: u32, surface_format: i32) -> any
         }))
     };
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-TEXTURE] Calling compute service");
-    let texture_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", texture_req.encode_to_vec())?[..])?;
+    let texture_res = create_resource(&texture_req)?;
     let texture_id = texture_res.handle.ok_or_else(|| anyhow!("Failed to create offscreen texture"))?.id;
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-TEXTURE] END, texture_id={}", texture_id);
     Ok(texture_id)
@@ -128,7 +129,7 @@ fn create_texture_view(texture_id: u64, surface_format: i32) -> anyhow::Result<u
         }))
     };
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-VIEW] Calling compute service");
-    let view_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", view_req.encode_to_vec())?[..])?;
+    let view_res = create_resource(&view_req)?;
     let view_id = view_res.handle.ok_or_else(|| anyhow!("Failed to create texture view"))?.id;
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-VIEW] END, view_id={}", view_id);
     Ok(view_id)
@@ -153,7 +154,7 @@ fn render_geometry(
                 size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false, readonly: false
             }))
         };
-        let res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", req.encode_to_vec())?[..])?;
+        let res = create_resource(&req)?;
         *vertex_buffer = res.handle.map(OwnedResource::new);
     }
 
@@ -166,7 +167,7 @@ fn render_geometry(
                 size: 1024 * 1024 * 2, usage: 16, mapped_at_creation: false, readonly: false
             }))
         };
-        let res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", req.encode_to_vec())?[..])?;
+        let res = create_resource(&req)?;
         *index_buffer = res.handle.map(OwnedResource::new);
     }
 
@@ -241,7 +242,7 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
             texture_id, format: TextureFormat::TexRgba8Unorm as i32, dimension: 0, aspect: 1, ..Default::default()
         }))
     };
-    let view_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", view_req.encode_to_vec())?[..])?;
+    let view_res = create_resource(&view_req)?;
     let view_id = view_res.handle.ok_or_else(|| anyhow!("Failed to create texture view"))?.id;
 
     let sampler_req = ComputeResourceRequest {
@@ -252,7 +253,7 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
             ..Default::default() 
         }))
     };
-    let sampler_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", sampler_req.encode_to_vec())?[..])?;
+    let sampler_res = create_resource(&sampler_req)?;
     let sampler_id = sampler_res.handle.ok_or_else(|| anyhow!("Failed to create sampler"))?.id;
 
     let bg_req = ComputeResourceRequest {
@@ -266,7 +267,7 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
             label: format!("External Image BG {}", texture_id),
         }))
     };
-    let bg_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", bg_req.encode_to_vec())?[..])?;
+    let bg_res = create_resource(&bg_req)?;
     let bg_id = bg_res.handle.ok_or_else(|| anyhow!("Failed to create bind group"))?.id;
 
     cache.insert(texture_id, bg_id);
@@ -297,10 +298,8 @@ fn ensure_atlas_bind_group_layout(renderer: &mut GpuRenderer) -> anyhow::Result<
                 ],
             }))
         };
-        if let Ok(res_bytes) = call_service("compute", "create_resource", req.encode_to_vec()) {
-            if let Ok(res) = ComputeResourceResponse::decode(&res_bytes[..]) {
-                renderer.bgl_id = res.handle.map(|h| h.id);
-            }
+        if let Ok(res) = create_resource(&req) {
+            renderer.bgl_id = res.handle.map(|h| h.id);
         }
     }
     Ok(())
@@ -318,7 +317,7 @@ fn ensure_uniform_bind_group_layout(plugin: &PluginUiState) -> anyhow::Result<()
                 }]
             }))
         };
-        let bgl_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", bgl_req.encode_to_vec())?[..])?;
+        let bgl_res = create_resource(&bgl_req)?;
         *uniform_layout_id = bgl_res.handle.map(|h| h.id);
     }
     Ok(())
@@ -334,7 +333,7 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
                 source: shader_source.into(), label: "UI Shader".into()
             }))
         };
-        let sh_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", sh_req.encode_to_vec())?[..])?;
+        let sh_res = create_resource(&sh_req)?;
         if let Some(sh) = sh_res.handle {
             let mut bgl_ids = Vec::new();
             if let Some(id) = renderer.bgl_id { bgl_ids.push(id); }
@@ -368,7 +367,7 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
                     ..Default::default()
                 }))
             };
-            let pip_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", pip_req.encode_to_vec())?[..])?;
+            let pip_res = create_resource(&pip_req)?;
             *ui_pipeline = pip_res.handle.map(|h| h.id);
         }
     }
@@ -385,7 +384,7 @@ fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
                 size: 16, usage: 64, mapped_at_creation: false, readonly: false
             }))
         };
-        let buf_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", buf_req.encode_to_vec())?[..])?;
+        let buf_res = create_resource(&buf_req)?;
         if let Some(bh) = buf_res.handle {
             *uniform_buffer_id = Some(bh.id);
             let bg_req = ComputeResourceRequest {
@@ -396,7 +395,7 @@ fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
                     label: "UI Uniform BG".into()
                 }))
             };
-            let bg_res = ComputeResourceResponse::decode(&call_service("compute", "create_resource", bg_req.encode_to_vec())?[..])?;
+            let bg_res = create_resource(&bg_req)?;
             *uniform_buffer = bg_res.handle.map(OwnedResource::new);
         }
     }
@@ -412,11 +411,9 @@ fn ensure_atlas_texture(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
                 width: w, height: h, format: TextureFormat::TexRgba8Unorm as i32, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
             }))
         };
-        if let Ok(res_bytes) = call_service("compute", "create_resource", req.encode_to_vec()) {
-            if let Ok(res) = ComputeResourceResponse::decode(&res_bytes[..]) {
-                renderer.atlas_texture_id = res.handle.map(|h| h.id);
-                renderer.mark_atlas_dirty();
-            }
+        if let Ok(res) = create_resource(&req) {
+            renderer.atlas_texture_id = res.handle.map(|h| h.id);
+            renderer.mark_atlas_dirty();
         }
     }
     Ok(())
@@ -432,9 +429,8 @@ fn ensure_atlas_bind_group(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
                 ..Default::default() 
             }))
         };
-        let sampler_id = call_service("compute", "create_resource", sampler_req.encode_to_vec())
-            .ok().and_then(|b| ComputeResourceResponse::decode(&b[..]).ok())
-            .and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
+        let sampler_id = create_resource(&sampler_req)
+            .ok().and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
         
         let req = ComputeResourceRequest {
             instance_id: 0,
@@ -447,10 +443,8 @@ fn ensure_atlas_bind_group(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
                 label: "Iced Atlas BG".into(),
             }))
         };
-        if let Ok(res_bytes) = call_service("compute", "create_resource", req.encode_to_vec()) {
-            if let Ok(res) = ComputeResourceResponse::decode(&res_bytes[..]) {
-                renderer.atlas_bind_group_id = res.handle.map(|h| h.id);
-            }
+        if let Ok(res) = create_resource(&req) {
+            renderer.atlas_bind_group_id = res.handle.map(|h| h.id);
         }
     }
     Ok(())

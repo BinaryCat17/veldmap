@@ -24,7 +24,6 @@ pub mod raw {
 
     pub mod sys {
         use super::*;
-        pub fn log(req: &LogRequest) -> anyhow::Result<()> { faf_call!("system/log", req) }
         pub fn get_resource(req: &GetResourceRequest) -> anyhow::Result<GetResourceResponse> { sync_call!("system", "get_resource", req, GetResourceResponse) }
         pub fn create_data(req: &CreateDataRequest) -> anyhow::Result<CreateDataResponse> { sync_call!("system", "create_data", req, CreateDataResponse) }
         pub fn task_status(req: &TaskStatusRequest) -> anyhow::Result<TaskStatusResponse> { sync_call!("system", "task_status", req, TaskStatusResponse) }
