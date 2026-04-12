@@ -6,6 +6,13 @@ use iced_core::{Point, Event};
 use iced_runtime::user_interface;
 use crate::renderer::GpuRenderer;
 
+/// Response message waiting to be dispatched to plugin
+#[derive(Clone)]
+pub struct PendingMessage {
+    pub message_tag: String,
+    pub value: String,
+}
+
 #[allow(dead_code)]
 pub struct PluginUiState {
     pub layout: proto::Layout,
@@ -44,6 +51,11 @@ pub struct PluginUiState {
 
     pub monitor_fps: RefCell<u32>,
     pub actual_fps: RefCell<f32>,
+    
+    /// Messages captured from iced UI events, waiting to be dispatched
+    pub pending_messages: RefCell<Vec<PendingMessage>>,
+    /// Surface handle for rendering (set from Frame event)
+    pub surface_handle: RefCell<Option<u64>>,
 }
 
 pub struct LocalState {
@@ -107,6 +119,8 @@ impl PluginUiState {
             
             monitor_fps: RefCell::new(60),
             actual_fps: RefCell::new(60.0),
+            pending_messages: RefCell::new(Vec::new()),
+            surface_handle: RefCell::new(None),
         }
     }
 }

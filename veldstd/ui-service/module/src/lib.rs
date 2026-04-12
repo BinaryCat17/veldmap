@@ -23,5 +23,6 @@ define_module! {
     handlers: {
         "ui-service/set_view" => handle_set_view,
         "host/handle_ui_event" => handle_ui_event,
+        "host/frame" => handle_frame,
     }
 }

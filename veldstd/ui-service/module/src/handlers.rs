@@ -1,5 +1,5 @@
 use veld_ui::proto::*;
-use crate::state::{PluginUiState, LocalState};
+use crate::state::{PluginUiState, LocalState, PendingMessage};
 use veldsdk::rpc::app as app_proto;
 use crate::renderer::GpuRenderer;
 use crate::converter;
@@ -11,6 +11,19 @@ pub fn handle_set_view(state: std::sync::Arc<std::sync::Mutex<LocalState>>, req:
     let mut state = state.lock().unwrap();
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     
+    // 1. Dispatch pending messages for this plugin BEFORE rendering
+    // This ensures the plugin has processed all UI events before we render
+    let pending = plugin.pending_messages.borrow_mut().drain(..).collect::<Vec<_>>();
+    for msg in pending {
+        let resp = UiEventResponse {
+            plugin_id: req.plugin_id.clone(),
+            message_tag: msg.message_tag,
+            value: msg.value,
+        };
+        veldsdk::publish!(&resp.message_tag, resp);
+    }
+    
+    // 2. Update layout
     match req.update {
         Some(set_view_request::Update::FullLayout(l)) => {
             plugin.layout = l;
@@ -33,6 +46,16 @@ pub fn handle_set_view(state: std::sync::Arc<std::sync::Mutex<LocalState>>, req:
         }
         None => {}
     }
+    
+    // 3. Render via iced if we have surface handle and need to render
+    if let Some(surface_handle) = *plugin.surface_handle.borrow() {
+        if *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow() {
+            if let Err(e) = render_plugin(plugin, &mut state.renderer, &req.plugin_id, state.surface_format, surface_handle) {
+                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[handle_set_view] render_plugin failed: {}", e);
+            }
+        }
+    }
+    
     veldsdk::core::Command::none()
 }
 
@@ -58,39 +81,45 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
 pub fn handle_ui_event(state: std::sync::Arc<std::sync::Mutex<LocalState>>, event_proto: app_proto::UiEvent) -> veldsdk::core::Command<()> {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (from host)");
     
-    let mut responses = Vec::new();
-    {
-        let mut state_locked = state.lock().unwrap();
-        // Нам нужно пройтись по ВСЕМ плагинам, так как мы не знаем, в кого попало событие
-        // ui-service хранит лейауты всех плагинов.
-        let plugin_ids: Vec<String> = state_locked.plugins.keys().cloned().collect();
-        
-        for plugin_id in plugin_ids {
-            if let Ok(mut msgs) = process_ui_event_recursive(&mut state_locked, &plugin_id, event_proto.clone()) {
-                responses.append(&mut msgs);
-            }
-        }
-    }
+    let mut state_locked = state.lock().unwrap();
+    // Process event for ALL plugins - we don't know which one it's for
+    // ui-service stores layouts for all plugins.
+    let plugin_ids: Vec<String> = state_locked.plugins.keys().cloned().collect();
     
-    // Публикуем ВСЕ ответы в единую точку входа
-    for resp in responses {
-        veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Publishing UI response for {}: {}", resp.plugin_id, resp.message_tag);
-        veldsdk::publish!("ui-service/event", resp);
+    for plugin_id in plugin_ids {
+        if let Err(e) = process_ui_event(&mut state_locked, &plugin_id, event_proto.clone()) {
+            veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event failed for {}: {}", plugin_id, e);
+        }
     }
     
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
     veldsdk::core::Command::none()
 }
 
-fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_event: app_proto::UiEvent) -> anyhow::Result<Vec<UiEventResponse>> {
-    let mut messages = Vec::new();
-
-    let sub_events = std::mem::take(&mut req_event.sub_events);
-    for sub_event in sub_events {
-        let mut msgs = process_ui_event_recursive(state, plugin_id, sub_event)?;
-        messages.append(&mut msgs);
+/// Handle frame event - broadcasts ui-service/frame to all plugins
+pub fn handle_frame(state: std::sync::Arc<std::sync::Mutex<LocalState>>, frame: veldsdk::rpc::core::FrameEvent) -> veldsdk::core::Command<()> {
+    let state = state.lock().unwrap();
+    
+    for (plugin_id, plugin) in state.plugins.iter() {
+        let (width, height) = *plugin.canvas_size.borrow();
+        if width == 0 || height == 0 {
+            continue;
+        }
+        
+        // Publish frame event to plugin
+        let frame_event = veldsdk::rpc::core::FrameEvent {
+            width,
+            height,
+            dt: frame.dt,
+            ..Default::default()
+        };
+        veldsdk::publish!("ui-service/frame", frame_event);
     }
+    
+    veldsdk::core::Command::none()
+}
 
+fn process_ui_event(state: &mut LocalState, plugin_id: &str, mut req_event: app_proto::UiEvent) -> anyhow::Result<()> {
     let plugin = state.plugins.entry(plugin_id.to_string()).or_insert_with(PluginUiState::new);
 
     if let Some(ev) = req_event.event {
@@ -116,10 +145,16 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
                 vel.y = vel.y.clamp(-3000.0, 3000.0);
             }
             app_proto::ui_event::Event::Frame(f) => {
-                {
-                    *plugin.monitor_fps.borrow_mut() = f.monitor_fps;
-                    *plugin.actual_fps.borrow_mut() = f.actual_fps;
+                // Save surface handle for rendering
+                if let Some(handle) = f.surface_handle {
+                    *plugin.surface_handle.borrow_mut() = Some(handle);
+                }
+                
+                *plugin.monitor_fps.borrow_mut() = f.monitor_fps;
+                *plugin.actual_fps.borrow_mut() = f.actual_fps;
 
+                // Process scroll inertia
+                {
                     let mut vel = plugin.scroll_velocity.borrow_mut();
                     if vel.x.abs() > 0.1 || vel.y.abs() > 0.1 {
                         let monitor_fps = *plugin.monitor_fps.borrow() as f32;
@@ -141,17 +176,11 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
                     }
                 }
 
+                // Process events with iced to capture messages
                 if !plugin.pending_events.borrow().is_empty() || *plugin.is_layout_dirty.borrow() {
-                    veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Frame: needs rendering, pending={}, dirty={}", 
-                        plugin.pending_events.borrow().len(), *plugin.is_layout_dirty.borrow());
-                    if let Some(_handle) = f.surface_handle {
-                        veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Calling render_plugin for {}", plugin_id);
-                        let mut msgs = render_plugin(plugin, &mut state.renderer, plugin_id, state.surface_format)?;
-                        veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] render_plugin returned {} messages", msgs.len());
-                        messages.append(&mut msgs);
+                    if let Some(handle) = *plugin.surface_handle.borrow() {
+                        let _ = process_iced_events(plugin, plugin_id, handle)?;
                     }
-                } else {
-                    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] Frame: no rendering needed");
                 }
             }
             _ => {
@@ -164,7 +193,24 @@ fn process_ui_event_recursive(state: &mut LocalState, plugin_id: &str, mut req_e
         }
     }
 
-    Ok(messages)
+    Ok(())
+}
+
+/// Process iced events and capture messages to pending_messages
+fn process_iced_events(plugin: &PluginUiState, plugin_id: &str, _surface_handle: u64) -> anyhow::Result<()> {
+    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[PROCESS-ICED] START for {}", plugin_id);
+    
+    let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
+    if events.is_empty() && !*plugin.is_layout_dirty.borrow() {
+        return Ok(());
+    }
+    
+    // For now, we don't have access to renderer here - just store that we need processing
+    // The actual rendering happens in handle_set_view when plugin calls render()
+    *plugin.needs_redrawing.borrow_mut() = true;
+    
+    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[PROCESS-ICED] Events queued for {}", plugin_id);
+    Ok(())
 }
 
 fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
@@ -179,13 +225,13 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
     }
 }
 
-fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32) -> anyhow::Result<Vec<UiEventResponse>> {
+fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, surface_handle: u64) -> anyhow::Result<()> {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] START for {}", plugin_id);
     let (width, height) = *plugin.canvas_size.borrow();
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] canvas size: {}x{}", width, height);
     if width == 0 || height == 0 {
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Empty canvas, returning");
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
@@ -248,15 +294,14 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Caching UI");
     plugin.interface_cache.replace(ui.into_cache());
 
-    let mut responses = Vec::new();
+    // Store captured messages for dispatch on next set_view
     for msg in captured_messages {
-        responses.push(UiEventResponse {
-            plugin_id: plugin_id.to_string(),
+        plugin.pending_messages.borrow_mut().push(PendingMessage {
             message_tag: msg.tag,
             value: msg.value,
         });
     }
 
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] END, returning {} responses", responses.len());
-    Ok(responses)
+    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] END");
+    Ok(())
 }

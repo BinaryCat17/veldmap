@@ -1101,9 +1101,11 @@ pub mod diffing {
     }
 }
 
+/// Внутренняя функция для диспетчеризации событий.
+/// Больше не является публичным API - диспетчеризация происходит
+/// автоматически в ui-service при обработке set_view.
+#[doc(hidden)]
 pub fn dispatch_event(event: proto::UiEventResponse) -> anyhow::Result<()> {
-    // В новой архитектуре мы просто пересылаем событие на топик, 
-    // который был указан в теге (message_tag)
     let topic = event.message_tag.clone();
     veldsdk::publish!(&topic, event);
     Ok(())

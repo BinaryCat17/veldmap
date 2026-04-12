@@ -17,10 +17,10 @@ define_module! {
     state: state::State,
     init: module_init,
     handlers: {
-        // Главная точка входа для UI (диспетчеризация + рендер)
-        "ui-service/event" => handlers::on_ui_event,
+        // Frame signal - рендер каждый кадр (единственное место с render!)
+        "ui-service/frame" => handlers::on_frame,
         
-        // UI события (приходят через dispatch_event внутри on_ui_event)
+        // UI события (приходят через dispatch_event внутри ui-service при set_view)
         "data-browser/nav_browse" => handlers::nav::on_nav_browse,
         "data-browser/nav_search" => handlers::nav::on_nav_search,
         "data-browser/nav_downloaded" => handlers::nav::on_nav_downloaded,
@@ -34,7 +34,7 @@ define_module! {
         "data-browser/download_pressed" => handlers::download::on_download_pressed,
         "data-browser/view_pressed" => handlers::download::on_view_pressed,
         
-        // События данных (бизнес-логика)
+        // События данных (бизнес-логика) - только меняют state, НЕ рендерят
         "data-provider/download_started" => handlers::download::on_download_started,
         "data-provider/download_progress" => handlers::download::on_download_progress,
         "data-provider/downloaded" => handlers::download::on_downloaded,

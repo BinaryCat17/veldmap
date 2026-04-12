@@ -28,12 +28,5 @@ pub fn on_fs_list_result(state: &mut State, response: veldsdk::rpc::core::FsList
             size: 0,
         }
     }).collect();
-    
-    // Рендер теперь НЕ НУЖЕН внутри хэндлеров данных, так как SDK 
-    // может вызвать render в конце handle_rpc, если мы так решим, 
-    // но пока оставим явный рендер в on_ui_event.
-    // Если это не-UI событие, то рендер нужно вызвать явно.
-    let root = crate::view::build_root(state);
-    let (w, h) = state.last_layout.as_ref().map(|l| (l.width, l.height)).unwrap_or((1024, 768));
-    veld_ui::app::render("data-browser", root, &mut state.last_layout, w, h);
+    // Рендер происходит автоматически в on_frame
 }

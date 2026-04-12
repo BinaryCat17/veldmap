@@ -65,10 +65,7 @@ pub fn on_download_started(
     });
     
     state.global.status_message = format!("Starting download: {}", filename);
-    
-    let root = crate::view::build_root(state);
-    let (w, h) = state.last_layout.as_ref().map(|l| (l.width, l.height)).unwrap_or((1024, 768));
-    veld_ui::app::render("data-browser", root, &mut state.last_layout, w, h);
+    // Рендер происходит автоматически в on_frame
 }
 
 pub fn on_download_progress(
@@ -83,13 +80,10 @@ pub fn on_download_progress(
             break;
         }
     }
-    
-    let root = crate::view::build_root(state);
-    let (w, h) = state.last_layout.as_ref().map(|l| (l.width, l.height)).unwrap_or((1024, 768));
-    veld_ui::app::render("data-browser", root, &mut state.last_layout, w, h);
+    // Рендер происходит автоматически в on_frame
 }
 
-pub fn с(
+pub fn on_downloaded(
     state: &mut State,
     event: Downloaded,
 ) {
@@ -110,8 +104,5 @@ pub fn с(
             state.global.task_manager.fail(&event.task_id, event.error);
         }
     }
-    
-    let root = crate::view::build_root(state);
-    let (w, h) = state.last_layout.as_ref().map(|l| (l.width, l.height)).unwrap_or((1024, 768));
-    veld_ui::app::render("data-browser", root, &mut state.last_layout, w, h);
+    // Рендер происходит автоматически в on_frame
 }
