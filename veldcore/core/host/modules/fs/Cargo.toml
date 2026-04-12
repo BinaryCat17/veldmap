@@ -8,3 +8,4 @@ veldmap-host-core = { path = "../../core" }
 prost = "0.14"
 anyhow = "1.0"
 log = "0.4"
+async-trait = "0.1"

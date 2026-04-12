@@ -59,8 +59,6 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
         crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
     }
     
-    crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
-    
     let request = RpcRequest {
         service: service.to_string(),
         method: method.to_string(),

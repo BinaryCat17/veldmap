@@ -36,11 +36,13 @@ define_module! {
         
         // События данных (бизнес-логика) - только меняют state, НЕ рендерят
         "data-provider/download_started" => handlers::download::on_download_started,
-        "data-provider/download_progress" => handlers::download::on_download_progress,
         "data-provider/downloaded" => handlers::download::on_downloaded,
         
         "data-provider/search_result" => handlers::search::on_search_result,
         "data-provider/list_path_result" => handlers::browse::on_list_result,
         "fs/list_result" => handlers::nav::on_fs_list_result,
+        
+        // Async callbacks from host services
+        "image/load_result" => handlers::download::on_image_loaded,
     }
 }

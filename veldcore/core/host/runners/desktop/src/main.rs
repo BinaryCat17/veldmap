@@ -222,24 +222,29 @@ async fn main() -> anyhow::Result<()> {
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
     let system_service = Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()));
-    let compute_service = Arc::new(ComputeService::new(resources.clone()));
+    let compute_service = Arc::new(ComputeService::new(dispatcher.clone(), resources.clone()));
 
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
     dispatcher.register_subscription("system/release_resource".to_string(), ServiceLocation::Native(system_service.clone()));
     dispatcher.register_subscription("system/acquire_resource".to_string(), ServiceLocation::Native(system_service.clone()));
-    dispatcher.register_service("compute".to_string(), ServiceLocation::Native(compute_service));
+
+    dispatcher.register_subscription("compute/execute".to_string(), ServiceLocation::NativeAsync(compute_service.clone()));
+    dispatcher.register_subscription("compute/create_resource".to_string(), ServiceLocation::NativeAsync(compute_service.clone()));
 
     // Register Modular Services
-    let fs_service = Arc::new(veldmap_host_fs::FsService::new(resources.clone()));
-    dispatcher.register_service("fs".to_string(), ServiceLocation::Native(fs_service.clone()));
-    dispatcher.register_subscription("fs/list".to_string(), ServiceLocation::Native(fs_service));
+    let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), resources.clone()));
+    dispatcher.register_subscription("fs/read".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
+    dispatcher.register_subscription("fs/write".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
+    dispatcher.register_subscription("fs/list".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
 
-    dispatcher.register_service("network".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_network::NetworkService::new(dispatcher.tasks.clone()))));
+    let network_service = Arc::new(veldmap_host_network::NetworkService::new(dispatcher.clone(), dispatcher.tasks.clone()));
+    dispatcher.register_subscription("network/fs_download".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
+    dispatcher.register_subscription("network/http".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
 
-    let image_service = Arc::new(veldmap_host_image::ImageService::new(resources.clone(), dispatcher.tasks.clone()));
-    dispatcher.register_service("image".to_string(), ServiceLocation::Native(image_service.clone()));
-    dispatcher.register_subscription("image/load".to_string(), ServiceLocation::Native(image_service));
+    let image_service = Arc::new(veldmap_host_image::ImageService::new(dispatcher.clone(), resources.clone(), dispatcher.tasks.clone()));
+    dispatcher.register_subscription("image/info".to_string(), ServiceLocation::NativeAsync(image_service.clone()));
+    dispatcher.register_subscription("image/load".to_string(), ServiceLocation::NativeAsync(image_service.clone()));
     
     let is_visible = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppCommand>();

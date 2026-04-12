@@ -68,23 +68,28 @@ message DestroyResourceRequest {
 
 message FsReadRequest {
   string path = 1;
+  string correlation_id = 2;
 }
 
 message FsReadResponse {
   ResourceHandle handle = 1;
+  string correlation_id = 2;
 }
 
 message FsWriteRequest {
   string path = 1;
   ResourceHandle handle = 2;
+  string correlation_id = 3;
 }
 
 message FsListRequest {
   string path = 1;
+  string correlation_id = 2;
 }
 
 message FsListResponse {
   repeated string entries = 1;
+  string correlation_id = 2;
 }
 
 message FsDeleteRequest {
@@ -95,10 +100,13 @@ message FsDownloadRequest {
   string url = 1;
   string path = 2;
   map<string, string> headers = 3;
+  string correlation_id = 4;
 }
 
 message FsDownloadResponse {
   TaskResponse task = 1;
+  string correlation_id = 2;
+  string error = 3;
 }
 
 // --- HTTP API ---
@@ -108,17 +116,20 @@ message HttpTaskRequest {
   string method = 2;
   map<string, string> headers = 3;
   bytes body = 4;
+  string correlation_id = 5;
 }
 
 message HttpTaskResponse {
   uint32 status = 1;
   bytes body = 2;
+  string correlation_id = 3;
 }
 
 // --- IMAGE API ---
 
 message ImageInfoRequest {
   string path = 1;
+  string correlation_id = 2;
 }
 
 message ImageInfoResponse {
@@ -126,6 +137,7 @@ message ImageInfoResponse {
   uint32 height = 2;
   uint32 channels = 3;
   string error = 4;
+  string correlation_id = 5;
 }
 
 message ImageLoadRequest {
@@ -133,10 +145,43 @@ message ImageLoadRequest {
   uint32 target_width = 2;  // 0 means original
   uint32 target_height = 3; // 0 means original
   bool preserve_aspect = 4;
+  string correlation_id = 5;
 }
 
 message ImageLoadResponse {
   TaskResponse task = 1;
+  string correlation_id = 2;
+}
+
+message ImageLoadResult {
+  ResourceHandle handle = 1;
+  string error = 2;
+  string correlation_id = 3;
+}
+
+message ImageInfoResult {
+  uint32 width = 1;
+  uint32 height = 2;
+  uint32 channels = 3;
+  string error = 4;
+  string correlation_id = 5;
+}
+
+message FsReadResult {
+  ResourceHandle handle = 1;
+  string error = 2;
+  string correlation_id = 3;
+}
+
+message FsWriteResult {
+  string error = 1;
+  string correlation_id = 2;
+}
+
+message FsListResult {
+  repeated string entries = 1;
+  string error = 2;
+  string correlation_id = 3;
 }
 
 // --- DYNAMIC RESOURCE DISCOVERY ---

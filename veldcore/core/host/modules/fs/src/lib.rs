@@ -1,7 +1,8 @@
-use veldmap_host_core::dispatcher::NativeService;
+use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
 use veldmap_host_core::resources::ResourceManager;
 use veldmap_host_core::core::{
-    FsReadRequest, FsReadResponse, FsWriteRequest, FsListRequest, FsListResponse, ResourceHandle
+    FsReadRequest, FsReadResult, FsWriteRequest, FsWriteResult,
+    FsListRequest, FsListResult, ResourceHandle
 };
 use prost::Message;
 use std::sync::Arc;
@@ -9,12 +10,13 @@ use std::path::Path;
 use std::fs;
 
 pub struct FsService {
+    dispatcher: Arc<Dispatcher>,
     resources: Arc<ResourceManager>,
 }
 
 impl FsService {
-    pub fn new(resources: Arc<ResourceManager>) -> Self {
-        Self { resources }
+    pub fn new(dispatcher: Arc<Dispatcher>, resources: Arc<ResourceManager>) -> Self {
+        Self { dispatcher, resources }
     }
 
     fn is_path_safe(path: &str) -> bool {
@@ -25,54 +27,119 @@ impl FsService {
         }
         true
     }
+
+    async fn handle_fs_read(&self, payload: Vec<u8>, requestor_id: u32) {
+        let req = match FsReadRequest::decode(&payload[..]) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!(target: "host", "Failed to decode FsReadRequest: {}", e);
+                return;
+            }
+        };
+
+        let correlation_id = req.correlation_id.clone();
+        let result = if !Self::is_path_safe(&req.path) {
+            FsReadResult { handle: None, error: "Access denied".into(), correlation_id }
+        } else {
+            match fs::read(&req.path) {
+                Ok(data) => {
+                    let size = data.len() as u64;
+                    let id = self.resources.create_data_resource(data, requestor_id);
+                    let handle = ResourceHandle {
+                        id,
+                        size,
+                        content_hash: self.resources.compute_hash(id, requestor_id).unwrap_or_default(),
+                    };
+                    FsReadResult { handle: Some(handle), error: String::new(), correlation_id }
+                }
+                Err(e) => FsReadResult { handle: None, error: e.to_string(), correlation_id },
+            }
+        };
+        self.dispatcher.publish("fs/read_result", result.encode_to_vec());
+    }
+
+    async fn handle_fs_write(&self, payload: Vec<u8>, requestor_id: u32) {
+        let req = match FsWriteRequest::decode(&payload[..]) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!(target: "host", "Failed to decode FsWriteRequest: {}", e);
+                return;
+            }
+        };
+
+        let correlation_id = req.correlation_id.clone();
+        let result = if !Self::is_path_safe(&req.path) {
+            FsWriteResult { error: "Access denied".into(), correlation_id }
+        } else {
+            let handle = match req.handle {
+                Some(h) => h,
+                None => {
+                    self.dispatcher.publish("fs/write_result", FsWriteResult { error: "Missing handle".into(), correlation_id }.encode_to_vec());
+                    return;
+                }
+            };
+            
+            let data = if handle.id == 0 {
+                FsWriteResult { error: "Handle ID 0 not supported for fs_write yet".into(), correlation_id }
+            } else {
+                match self.resources.read_resource(handle.id, 0, handle.size, requestor_id) {
+                    Ok(data) => {
+                        if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
+                        match fs::write(&req.path, &data) {
+                            Ok(()) => FsWriteResult { error: String::new(), correlation_id },
+                            Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
+                        }
+                    }
+                    Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
+                }
+            };
+            data
+        };
+        self.dispatcher.publish("fs/write_result", result.encode_to_vec());
+    }
+
+    async fn handle_fs_list(&self, payload: Vec<u8>) {
+        let req = match FsListRequest::decode(&payload[..]) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!(target: "host", "Failed to decode FsListRequest: {}", e);
+                return;
+            }
+        };
+
+        let correlation_id = req.correlation_id.clone();
+        let result = if !Self::is_path_safe(&req.path) {
+            FsListResult { entries: vec![], error: "Access denied".into(), correlation_id }
+        } else {
+            let mut entries = Vec::new();
+            if Path::new(&req.path).exists() {
+                match fs::read_dir(&req.path) {
+                    Ok(iter) => {
+                        for entry in iter {
+                            if let Ok(entry) = entry {
+                                if let Some(name) = entry.file_name().to_str() { entries.push(name.to_string()); }
+                            }
+                        }
+                        FsListResult { entries, error: String::new(), correlation_id }
+                    }
+                    Err(e) => FsListResult { entries: vec![], error: e.to_string(), correlation_id },
+                }
+            } else {
+                FsListResult { entries: vec![], error: String::new(), correlation_id }
+            }
+        };
+        self.dispatcher.publish("fs/list_result", result.encode_to_vec());
+    }
 }
 
-impl NativeService for FsService {
-    fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
-        match method {
-            "fs_read" => {
-                let req = FsReadRequest::decode(&payload[..])?;
-                if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
-                
-                let data = fs::read(&req.path)?;
-                let size = data.len() as u64;
-                let id = self.resources.create_data_resource(data, requestor_id);
-                
-                let handle = ResourceHandle {
-                    id,
-                    size,
-                    content_hash: self.resources.compute_hash(id, requestor_id).unwrap_or_default(),
-                };
-                Ok(FsReadResponse { handle: Some(handle) }.encode_to_vec())
-            }
-            "fs_write" => {
-                let req = FsWriteRequest::decode(&payload[..])?;
-                if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
-                let handle = req.handle.ok_or_else(|| anyhow::anyhow!("Missing handle"))?;
-                
-                let data = if handle.id == 0 {
-                    return Err(anyhow::anyhow!("Handle ID 0 not supported for fs_write yet"));
-                } else {
-                    self.resources.read_resource(handle.id, 0, handle.size, requestor_id)?
-                };
-
-                if let Some(parent) = Path::new(&req.path).parent() { fs::create_dir_all(parent)?; }
-                fs::write(&req.path, &data)?;
-                Ok(Vec::new())
-            }
-            "fs_list" => {
-                let req = FsListRequest::decode(&payload[..])?;
-                if !Self::is_path_safe(&req.path) { return Err(anyhow::anyhow!("Access denied")); }
-                let mut entries = Vec::new();
-                if Path::new(&req.path).exists() {
-                    for entry in fs::read_dir(&req.path)? {
-                        let entry = entry?;
-                        if let Some(name) = entry.file_name().to_str() { entries.push(name.to_string()); }
-                    }
-                }
-                Ok(FsListResponse { entries }.encode_to_vec())
-            }
-            _ => Err(anyhow::anyhow!("Unknown FS method")),
+#[async_trait::async_trait]
+impl AsyncNativeService for FsService {
+    async fn handle(&self, topic: &str, payload: Vec<u8>, requestor_id: u32) {
+        match topic {
+            "read" => self.handle_fs_read(payload, requestor_id).await,
+            "write" => self.handle_fs_write(payload, requestor_id).await,
+            "list" => self.handle_fs_list(payload).await,
+            _ => log::warn!(target: "host", "Unknown fs topic: {}", topic),
         }
     }
 }

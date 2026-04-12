@@ -234,6 +234,7 @@ import "core.proto";
 
 message ComputeResourceRequest {
   uint32 instance_id = 16; // Added for resource isolation
+  string correlation_id = 17;
   oneof command {
     CreateBuffer create_buffer = 1;
     CreateTexture create_texture = 2;
@@ -276,6 +277,7 @@ message ComputeColor {
 
 message Submit {
     uint32 instance_id = 4; // Added for resource isolation
+    string correlation_id = 5;
     uint64 target_texture_view_id = 1;
     ComputeColor clear_color = 2;
     CommandBuffer command_buffer = 3;
@@ -284,6 +286,18 @@ message Submit {
 message ComputeResourceResponse {
   veldmap.core.ResourceHandle handle = 1;
   string error = 2;
+  string correlation_id = 3;
+}
+
+message ComputeResourceResult {
+  veldmap.core.ResourceHandle handle = 1;
+  string error = 2;
+  string correlation_id = 3;
+}
+
+message ComputeExecuteResult {
+  string error = 1;
+  string correlation_id = 2;
 }
 
 // --- COMMAND BUFFER ---

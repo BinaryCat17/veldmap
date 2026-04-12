@@ -3,6 +3,7 @@ use veld_ui::proto::UiEventResponse;
 
 use crate::state::{State, downloaded::DownloadStatus};
 use crate::components::task_manager::TaskKind;
+use veldsdk::rpc::core::ImageLoadResult;
 
 /// Пользователь нажал кнопку скачать
 pub fn on_download_pressed(
@@ -38,6 +39,7 @@ pub fn on_view_pressed(
         target_width: 2048,
         target_height: 2048,
         preserve_aspect: true,
+        correlation_id: String::new(),
     });
 }
 
@@ -105,4 +107,22 @@ pub fn on_downloaded(
         }
     }
     // Рендер происходит автоматически в on_frame
+}
+
+pub fn on_image_loaded(
+    state: &mut State,
+    result: ImageLoadResult,
+) {
+    state.preview.is_loading = false;
+    if result.error.is_empty() {
+        if let Some(handle) = result.handle {
+            state.preview.current_image = Some(handle.id);
+        } else {
+            state.preview.current_image = None;
+            state.global.error_message = Some("Image loaded but handle is missing".to_string());
+        }
+    } else {
+        state.preview.current_image = None;
+        state.global.error_message = Some(format!("Image load failed: {}", result.error));
+    }
 }

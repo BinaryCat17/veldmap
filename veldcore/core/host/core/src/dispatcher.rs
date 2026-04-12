@@ -11,6 +11,11 @@ pub trait NativeService: Send + Sync {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>>;
 }
 
+#[async_trait::async_trait]
+pub trait AsyncNativeService: Send + Sync {
+    async fn handle(&self, topic: &str, payload: Vec<u8>, requestor_id: u32);
+}
+
 pub struct CoreService;
 
 impl NativeService for CoreService {
@@ -27,6 +32,7 @@ pub enum ServiceLocation {
     LocalWasm(Arc<AsyncMutex<WasmModule>>),
     RemoteIroh(iroh::EndpointId),
     Native(Arc<dyn NativeService>),
+    NativeAsync(Arc<dyn AsyncNativeService>),
 }
 
 #[derive(Clone)]
@@ -96,6 +102,10 @@ impl Dispatcher {
         match location {
             ServiceLocation::Native(service) => {
                 service.call(method, payload, 0)
+            }
+            ServiceLocation::NativeAsync(service) => {
+                service.handle(method, payload, 0).await;
+                Ok(Vec::new())
             }
             ServiceLocation::LocalWasm(wasm_module) => {
                 let request = RpcRequest {

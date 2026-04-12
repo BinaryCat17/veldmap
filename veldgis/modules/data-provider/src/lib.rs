@@ -12,6 +12,8 @@ pub(crate) struct LocalConfig {
 #[derive(Clone)]
 pub(crate) struct LocalState {
     pub identity: Identity,
+    pub pending_downloads: std::collections::HashSet<String>,
+    pub pending_http: std::collections::HashMap<String, String>,
 }
 
 define_module! {
@@ -23,5 +25,9 @@ define_module! {
         "data-provider/download" => cdse::on_download,
         "data-provider/list_path" => cdse::on_list_path,
         "data-provider/search" => cdse::on_search,
+        
+        // Async callbacks from host services
+        "network/fs_download_result" => cdse::on_fs_download_result,
+        "network/http_result" => cdse::on_http_result,
     }
 }

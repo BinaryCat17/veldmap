@@ -5875,6 +5875,7 @@ name = "veldmap-host-compute"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "image",
  "log",
  "prost",
@@ -5887,6 +5888,7 @@ name = "veldmap-host-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "dashmap",
  "env_logger",
@@ -5912,6 +5914,7 @@ name = "veldmap-host-fs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "log",
  "prost",
  "veldmap-host-core",
@@ -5950,6 +5953,7 @@ name = "veldmap-host-image"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "image",
  "log",
  "prost",
@@ -5964,6 +5968,7 @@ name = "veldmap-host-network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures-util",
  "log",
  "prost",

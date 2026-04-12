@@ -24,7 +24,11 @@ pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
     );
     let identity = Identity::new(credentials, None);
     
-    Ok(LocalState { identity })
+    Ok(LocalState { 
+        identity,
+        pending_downloads: std::collections::HashSet::new(),
+        pending_http: std::collections::HashMap::new(),
+    })
 }
 
 fn get_s3_headers(state: &LocalState, method: &str, uri: &str) -> std::collections::HashMap<String, String> {
@@ -79,7 +83,7 @@ pub fn on_download(
     let destination = request.destination.clone();
     let identifier = request.identifier.clone();
     
-    // Publish started immediately (synchronously)
+    // Publish started immediately
     veldsdk::publish!("data-provider/download_started", DownloadStarted {
         task_id: task_id.clone(),
         identifier: identifier.clone(),
@@ -90,19 +94,32 @@ pub fn on_download(
     let uri = format!("/eodata/{}", s3_key);
     let headers = get_s3_headers(state, "GET", &uri);
 
-    let req_task = veldsdk::core::FsDownloadRequest {
+    let req_task = veldsdk::rpc::core::FsDownloadRequest {
         url,
         path: destination,
         headers,
+        correlation_id: task_id.clone(),
     };
 
-    if let Err(e) = veldsdk::core::raw::net::fs_download(&req_task) {
-        veldsdk::publish!("data-provider/downloaded", Downloaded {
-            task_id,
-            success: false,
-            error: e.to_string(),
-        });
+    state.pending_downloads.insert(task_id);
+    veldsdk::publish!("network/fs_download", req_task);
+}
+
+pub fn on_fs_download_result(
+    state: &mut LocalState,
+    response: veldsdk::rpc::core::FsDownloadResponse,
+) {
+    let correlation_id = response.correlation_id;
+    if !state.pending_downloads.remove(&correlation_id) {
+        return;
     }
+
+    let success = response.error.is_empty();
+    veldsdk::publish!("data-provider/downloaded", Downloaded {
+        task_id: correlation_id,
+        success,
+        error: response.error,
+    });
 }
 
 pub fn on_list_path(
@@ -110,6 +127,7 @@ pub fn on_list_path(
     request: ListPathRequest
 ) {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
+    let correlation_id = veldsdk::generate_id!();
     
     let mut query_params = vec![
         ("delimiter", "/"),
@@ -142,25 +160,38 @@ pub fn on_list_path(
     
     let headers = get_s3_headers(state, "GET", &uri_with_query);
 
-    let req_task = veldsdk::core::HttpTaskRequest {
+    let req_task = veldsdk::rpc::core::HttpTaskRequest {
         url: full_url,
         method: "GET".to_string(),
         headers,
         body: Vec::new(),
+        correlation_id: correlation_id.clone(),
     };
     
     info!("Requesting S3 list: {}", req_task.url);
 
-    let response = match veldsdk::core::raw::net::http(&req_task) {
-        Ok(res) => parse_s3_xml(res.body, Some(&request.path)),
-        Err(e) => ListPathResponse {
+    state.pending_http.insert(correlation_id.clone(), request.path);
+    veldsdk::publish!("network/http", req_task);
+}
+
+pub fn on_http_result(
+    state: &mut LocalState,
+    response: veldsdk::rpc::core::HttpTaskResponse,
+) {
+    let correlation_id = response.correlation_id;
+    let filter_path = state.pending_http.remove(&correlation_id);
+    
+    let list_response = if response.status >= 200 && response.status < 300 {
+        parse_s3_xml(response.body, filter_path.as_deref())
+    } else {
+        ListPathResponse {
             items: vec![],
             next_token: "".into(),
-            error: e.to_string(),
-        },
+            error: format!("HTTP error: {}", response.status),
+        }
     };
 
-    veldsdk::publish!("data-provider/list_path_result", response);
+    veldsdk::publish!("data-provider/list_path_result", list_response);
 }
 
 fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
