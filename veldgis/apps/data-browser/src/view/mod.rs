@@ -11,11 +11,6 @@ use veld_ui::proto::{SetViewRequest, set_view_request::Update, Layout};
 use crate::state::State;
 use veld_ui::{Element, column, row, text, button, Length, Padding};
 
-pub fn render(state: &mut State) {
-    let root_element = build_root(state);
-    veld_ui::app::render("data-browser", state);
-}
-
 pub fn build_root(state: &State) -> Element<()> {
     let main_content = match state.current_screen {
         crate::state::Screen::Browse => browse::view(state),

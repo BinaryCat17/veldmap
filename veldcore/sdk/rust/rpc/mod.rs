@@ -56,15 +56,16 @@ macro_rules! generate_id {
 /// Вспомогательная функция для вызова хэндлера
 pub fn call_handler<S, Req, F>(
     func: F,
-    state: std::sync::Arc<std::sync::Mutex<S>>,
+    state: &mut S,
     payload: &[u8],
 ) -> anyhow::Result<()>
 where
     Req: prost::Message + Default,
-    F: Fn(std::sync::Arc<std::sync::Mutex<S>>, Req) -> anyhow::Result<()>,
+    F: Fn(&mut S, Req),
 {
     let req = Req::decode(payload).map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
-    func(state, req)
+    func(state, req);
+    Ok(())
 }
 
 #[macro_export]
@@ -81,7 +82,7 @@ macro_rules! define_module {
         pub extern "C" fn init() -> i32 {
             let _ = $crate::core::init();
             let input = $crate::rpc::host::load_input();
-            
+
             let config_json = if input.is_empty() {
                 match $crate::rpc::host::get_config("config") {
                     Some(c) => c,
@@ -93,7 +94,7 @@ macro_rules! define_module {
                     Err(_) => return 1,
                 }
             };
-            
+
             let config: $config_type = match $crate::serde_json::from_str(&config_json) {
                 Ok(c) => c,
                 Err(_) => return 2,
@@ -126,9 +127,9 @@ macro_rules! define_module {
                 Ok(r) => r,
                 Err(_) => return 1,
             };
-            
+
             let topic = format!("{}/{}", request.service, request.method);
-            
+
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let state_arc = match $crate::rpc::MODULE_STATE.get() {
                     Some(Ok(s)) => s,
@@ -139,12 +140,13 @@ macro_rules! define_module {
                 let service = state_lock.downcast_mut::<$crate::rpc::ServiceState<$state_type>>()
                     .expect("Failed to downcast state");
 
+                let mut app_state = service.state.lock().unwrap();
+
                 // Матч по топику
                 match topic.as_str() {
                     $(
                         $topic => {
-                            let state_clone = service.state.clone();
-                            $crate::rpc::call_handler($func, state_clone, &request.payload[..]).map_err(|e| format!("Failed to handle request for {}: {}", $topic, e))?;
+                            $crate::rpc::call_handler($func, &mut *app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {}: {}", $topic, e))?;
                             Ok(())
                         }
                     )*

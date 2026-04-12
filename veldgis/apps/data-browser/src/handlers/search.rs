@@ -1,37 +1,32 @@
-use std::sync::{Arc, Mutex};
 use veld_ui::proto::UiEventResponse;
 use veldmap_api::dataprovider::SearchResponse;
 use crate::state::State;
 
-pub fn on_search_input(state: Arc<Mutex<State>>, event: UiEventResponse) -> anyhow::Result<()> {
-    let mut guard = state.lock().unwrap();
-    guard.search.query = event.value;
-    Ok(())
+pub fn on_search_input(state: &mut State, event: UiEventResponse) {
+    state.search.query = event.value;
 }
 
-pub fn on_search(state: Arc<Mutex<State>>, _event: UiEventResponse) -> anyhow::Result<()> {
-    let mut guard = state.lock().unwrap();
-    let query = guard.search.query.clone();
+pub fn on_search(state: &mut State, _event: UiEventResponse) {
+    let query = state.search.query.clone();
     
     if !query.is_empty() {
-        guard.search.is_loading = true;
+        state.search.is_loading = true;
         veldsdk::publish!("data-provider/search", veldmap_api::dataprovider::SearchRequest {
             query,
             filters: vec![],
         });
     }
-    Ok(())
 }
 
 /// Результат поиска
 pub fn on_search_result(
-    state: Arc<Mutex<State>>,
+    state: &mut State,
     response: SearchResponse,
-) -> anyhow::Result<()> {
-    let mut guard = state.lock().unwrap();
-    guard.search.is_loading = false;
-    guard.search.results = response.products;
+) {
+    state.search.is_loading = false;
+    state.search.results = response.products;
     
-    crate::view::render(&mut guard);
-    Ok(())
+    let root = crate::view::build_root(state);
+    let (w, h) = state.last_layout.as_ref().map(|l| (l.width, l.height)).unwrap_or((1024, 768));
+    veld_ui::app::render("data-browser", root, &mut state.last_layout, w, h);
 }

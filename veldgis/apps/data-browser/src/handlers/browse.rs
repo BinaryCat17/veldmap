@@ -1,25 +1,23 @@
-use std::sync::{Arc, Mutex};
 use veld_ui::proto::UiEventResponse;
 use crate::state::State;
 
 /// Браузинг запрошен (через UI событие)
 pub fn on_browse(
-    state: Arc<Mutex<State>>,
+    state: &mut State,
     event: UiEventResponse,
-) -> anyhow::Result<()> {
-    let mut guard = state.lock().unwrap();
+) {
     let value = event.value;
     
     // Путь берется из value, если есть (нажатие на папку)
     let target_path = if !value.is_empty() {
         value
     } else {
-        guard.browse.current_path.clone()
+        state.browse.current_path.clone()
     };
     
-    if target_path != guard.browse.current_path {
-        guard.browse.current_path = target_path.clone();
-        guard.browse.is_loading = true;
+    if target_path != state.browse.current_path {
+        state.browse.current_path = target_path.clone();
+        state.browse.is_loading = true;
     }
     
     // Публикуем запрос к data-provider
@@ -27,16 +25,13 @@ pub fn on_browse(
         path: target_path,
         token: String::new(),
     });
-    
-    Ok(())
 }
 
 pub fn on_browse_up(
-    state: Arc<Mutex<State>>,
+    state: &mut State,
     _event: UiEventResponse,
-) -> anyhow::Result<()> {
-    let mut guard = state.lock().unwrap();
-    let mut path = guard.browse.current_path.clone();
+) {
+    let mut path = state.browse.current_path.clone();
     
     if path.ends_with('/') {
         path.pop();
@@ -47,24 +42,21 @@ pub fn on_browse_up(
         path = String::new(); // Root
     }
     
-    guard.browse.current_path = path.clone();
-    guard.browse.is_loading = true;
+    state.browse.current_path = path.clone();
+    state.browse.is_loading = true;
     
     veldsdk::publish!("data-provider/list_path", veldmap_api::dataprovider::ListPathRequest {
         path,
         token: String::new(),
     });
-    
-    Ok(())
 }
 
 pub fn on_list_result(
-    state: Arc<Mutex<State>>,
+    state: &mut State,
     response: veldmap_api::dataprovider::ListPathResponse,
-) -> anyhow::Result<()> {
-    let mut guard = state.lock().unwrap();
-    guard.browse.is_loading = false;
-    guard.browse.items = response.items.into_iter().map(|s| {
+) {
+    state.browse.is_loading = false;
+    state.browse.items = response.items.into_iter().map(|s| {
         let is_folder = s.ends_with('/');
         crate::state::browse::BrowseItem {
             s3_key: s.clone(),
@@ -73,6 +65,7 @@ pub fn on_list_result(
         }
     }).collect();
     
-    crate::view::render(&mut guard);
-    Ok(())
+    let root = crate::view::build_root(state);
+    let (w, h) = state.last_layout.as_ref().map(|l| (l.width, l.height)).unwrap_or((1024, 768));
+    veld_ui::app::render("data-browser", root, &mut state.last_layout, w, h);
 }

@@ -1113,17 +1113,19 @@ pub mod app {
     use super::*;
 
     /// Единственная точка входа для рендеринга.
-    /// Вызывается плагином в конце on_ui_event.
-    pub fn render(plugin_id: &str, state: &mut crate::state::State) {
-        let root_element = crate::view::build_root(state);
+    /// Теперь принимает готовый корень и ссылку на хранилище старого лейаута.
+    pub fn render(
+        plugin_id: &str, 
+        root_element: Element<()>, 
+        last_layout: &mut Option<crate::proto::Layout>,
+        width: u32,
+        height: u32
+    ) {
         let mut root_widget = root_element.widget;
         
         let mut index = 0;
         let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
         
-        let width = state.last_layout.as_ref().map(|l| l.width).unwrap_or(1024);
-        let height = state.last_layout.as_ref().map(|l| l.height).unwrap_or(768);
-
         let new_layout = crate::proto::Layout {
             root: Some(root_widget),
             width,
@@ -1131,7 +1133,7 @@ pub mod app {
             hash,
         };
 
-        let request = if let Some(ref old_layout) = state.last_layout {
+        let request = if let Some(ref old_layout) = last_layout {
             if let Some(patch) = crate::diffing::diff_layouts(old_layout, &new_layout) {
                 Some(crate::proto::SetViewRequest {
                     plugin_id: plugin_id.to_string(),
@@ -1151,7 +1153,7 @@ pub mod app {
             veldsdk::publish!("ui-service/set_view", req);
         }
         
-        state.last_layout = Some(new_layout);
+        *last_layout = Some(new_layout);
     }
 }
 

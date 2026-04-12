@@ -7,8 +7,6 @@ pub mod components;
 pub mod styles;
 
 use veldsdk::define_module;
-use veldmap_api::data_browser::{DownloadPressed, SearchRequest, BrowseRequest};
-use veldmap_api::dataprovider::{DownloadStarted, DownloadProgress, Downloaded};
 
 fn module_init(config: handlers::Config) -> anyhow::Result<state::State> {
     state::State::new(config)
