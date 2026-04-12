@@ -1,23 +1,25 @@
 use std::sync::{Arc, Mutex};
-use veldsdk::core::Command;
-
+use veld_ui::proto::UiEventResponse;
 use crate::state::State;
 
 /// Браузинг запрошен (через UI событие)
 pub fn on_browse(
-    state: &mut State,
-    value: String,
+    state: Arc<Mutex<State>>,
+    event: UiEventResponse,
 ) -> anyhow::Result<()> {
+    let mut guard = state.lock().unwrap();
+    let value = event.value;
+    
     // Путь берется из value, если есть (нажатие на папку)
     let target_path = if !value.is_empty() {
         value
     } else {
-        state.browse.current_path.clone() // Либо текущий путь (например, обновление)
+        guard.browse.current_path.clone()
     };
     
-    if target_path != state.browse.current_path {
-        state.browse.current_path = target_path.clone();
-        state.browse.is_loading = true;
+    if target_path != guard.browse.current_path {
+        guard.browse.current_path = target_path.clone();
+        guard.browse.is_loading = true;
     }
     
     // Публикуем запрос к data-provider
@@ -30,10 +32,11 @@ pub fn on_browse(
 }
 
 pub fn on_browse_up(
-    state: &mut State,
-    _value: String,
+    state: Arc<Mutex<State>>,
+    _event: UiEventResponse,
 ) -> anyhow::Result<()> {
-    let mut path = state.browse.current_path.clone();
+    let mut guard = state.lock().unwrap();
+    let mut path = guard.browse.current_path.clone();
     
     if path.ends_with('/') {
         path.pop();
@@ -44,8 +47,8 @@ pub fn on_browse_up(
         path = String::new(); // Root
     }
     
-    state.browse.current_path = path.clone();
-    state.browse.is_loading = true;
+    guard.browse.current_path = path.clone();
+    guard.browse.is_loading = true;
     
     veldsdk::publish!("data-provider/list_path", veldmap_api::dataprovider::ListPathRequest {
         path,
@@ -69,6 +72,7 @@ pub fn on_list_result(
             is_folder,
         }
     }).collect();
+    
     crate::view::render(&mut guard);
     Ok(())
 }

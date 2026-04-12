@@ -20,12 +20,10 @@ pub static MODULE_STATE: once_cell::sync::OnceCell<
     anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>,
 > = once_cell::sync::OnceCell::new();
 
-/// Состояние сервиса с задачами
+/// Состояние сервиса
 #[cfg(feature = "pdk")]
 pub struct ServiceState<S> {
     pub state: std::sync::Arc<std::sync::Mutex<S>>,
-    /// Активные задачи (streams), ничего не возвращают, просто выполняются
-    pub tasks: std::collections::HashMap<String, crate::core::BoxedStream<()>>,
 }
 
 /// Fire-and-forget публикация события
@@ -38,7 +36,7 @@ macro_rules! publish {
     }};
 }
 
-/// Генерация UUID для task_id
+/// Генерация UUID
 #[macro_export]
 macro_rules! generate_id {
     () => {{
@@ -68,12 +66,6 @@ where
     let req = Req::decode(payload).map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
     func(state, req)
 }
-
-/// Тип хэндлера: принимает состояние и запрос, возвращает anyhow::Result<()>
-pub type HandlerFn<S, R> = fn(
-    std::sync::Arc<std::sync::Mutex<S>>,
-    R
-) -> anyhow::Result<()>;
 
 #[macro_export]
 macro_rules! define_module {
@@ -112,7 +104,6 @@ macro_rules! define_module {
                 Ok(s) => {
                     let service_state = $crate::rpc::ServiceState::<$state_type> {
                         state: std::sync::Arc::new(std::sync::Mutex::new(s)),
-                        tasks: std::collections::HashMap::new(),
                     };
                     Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(service_state))))
                 },

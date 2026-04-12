@@ -4,6 +4,8 @@
 
 pub mod browse;
 pub mod search;
+pub mod downloaded;
+pub mod preview;
 
 use veld_ui::proto::{SetViewRequest, set_view_request::Update, Layout};
 use crate::state::State;
@@ -11,14 +13,15 @@ use veld_ui::{Element, column, row, text, button, Length, Padding};
 
 pub fn render(state: &mut State) {
     let root_element = build_root(state);
-    veld_ui::render("data-browser", root_element, &mut state.last_layout);
+    veld_ui::app::render("data-browser", state);
 }
 
 pub fn build_root(state: &State) -> Element<()> {
     let main_content = match state.current_screen {
         crate::state::Screen::Browse => browse::view(state),
         crate::state::Screen::Search => search::view(state),
-        _ => column![text("Not implemented yet").size(24.0)].into(),
+        crate::state::Screen::Downloaded => downloaded::view(state),
+        crate::state::Screen::Preview => preview::view(state),
     };
     
     // Header navigation

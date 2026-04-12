@@ -1,16 +1,16 @@
 use std::sync::{Arc, Mutex};
 use veldmap_api::dataprovider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded};
+use veld_ui::proto::UiEventResponse;
 
 use crate::state::{State, downloaded::DownloadStatus};
 use crate::components::task_manager::TaskKind;
 
 /// Пользователь нажал кнопку скачать
 pub fn on_download_pressed(
-    state: &mut State,
-    value: String,
+    state: Arc<Mutex<State>>,
+    event: UiEventResponse,
 ) -> anyhow::Result<()> {
-    // В FaF мы берем выбранный элемент из value
-    let s3_key = value;
+    let s3_key = event.value;
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     
     if !s3_key.is_empty() {
@@ -19,6 +19,30 @@ pub fn on_download_pressed(
             destination: format!("data/dem/source/{}", filename),
         });
     }
+    
+    Ok(())
+}
+
+/// Пользователь нажал кнопку просмотра
+pub fn on_view_pressed(
+    state: Arc<Mutex<State>>,
+    event: UiEventResponse,
+) -> anyhow::Result<()> {
+    let value = event.value;
+    if value.is_empty() { return Ok(()); }
+    
+    let mut guard = state.lock().unwrap();
+    guard.current_screen = crate::state::Screen::Preview;
+    guard.preview.current_file = value.clone();
+    guard.preview.is_loading = true;
+    
+    // Запрашиваем загрузку изображения у хоста
+    veldsdk::publish!("image/load", veldsdk::rpc::core::ImageLoadRequest {
+        path: value,
+        target_width: 2048,
+        target_height: 2048,
+        preserve_aspect: true,
+    });
     
     Ok(())
 }
@@ -32,7 +56,6 @@ pub fn on_download_started(
     
     let mut guard = state.lock().unwrap();
     
-    // Добавляем в TaskManager
     guard.global.task_manager.spawn(
         event.task_id.clone(),
         TaskKind::Download { 
@@ -42,7 +65,6 @@ pub fn on_download_started(
         }
     );
     
-    // Добавляем в active_downloads
     guard.downloaded.active_downloads.insert(event.identifier.clone(), crate::state::downloaded::DownloadProgress {
         s3_key: event.identifier,
         task_id: event.task_id,
@@ -55,17 +77,13 @@ pub fn on_download_started(
     Ok(())
 }
 
-/// Data-provider сообщил прогресс
 pub fn on_download_progress(
     state: Arc<Mutex<State>>,
     event: DownloadProgress,
 ) -> anyhow::Result<()> {
     let mut guard = state.lock().unwrap();
-    
-    // Обновляем TaskManager
     guard.global.task_manager.update_progress(&event.task_id, event.progress);
     
-    // Обновляем active_downloads
     for dl in guard.downloaded.active_downloads.values_mut() {
         if dl.task_id == event.task_id {
             dl.progress = event.progress;
@@ -76,14 +94,12 @@ pub fn on_download_progress(
     Ok(())
 }
 
-/// Data-provider сообщил что загрузка завершена
 pub fn on_downloaded(
     state: Arc<Mutex<State>>,
     event: Downloaded,
 ) -> anyhow::Result<()> {
     let mut guard = state.lock().unwrap();
     
-    // Находим по task_id
     let s3_key = guard.downloaded.active_downloads
         .iter()
         .find(|(_, dl)| dl.task_id == event.task_id)
@@ -91,7 +107,6 @@ pub fn on_downloaded(
     
     if let Some(key) = s3_key {
         let filename = key.split('/').last().unwrap_or("file").to_string();
-        
         guard.downloaded.active_downloads.remove(&key);
         guard.global.task_manager.finish(&event.task_id);
         

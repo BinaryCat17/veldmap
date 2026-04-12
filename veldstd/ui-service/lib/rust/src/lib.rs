@@ -1101,18 +1101,26 @@ pub mod diffing {
     }
 }
 
+pub fn dispatch_event(event: proto::UiEventResponse) -> anyhow::Result<()> {
+    // В новой архитектуре мы просто пересылаем событие на топик, 
+    // который был указан в теге (message_tag)
+    let topic = event.message_tag.clone();
+    veldsdk::publish!(&topic, event);
+    Ok(())
+}
+
 pub mod app {
     use super::*;
 
     /// Единственная точка входа для рендеринга.
-    /// Вызывается автоматически макросом define_module! после каждого хендлера.
+    /// Вызывается плагином в конце on_ui_event.
     pub fn render(plugin_id: &str, state: &mut crate::state::State) {
         let root_element = crate::view::build_root(state);
         let mut root_widget = root_element.widget;
-
+        
         let mut index = 0;
         let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
-
+        
         let width = state.last_layout.as_ref().map(|l| l.width).unwrap_or(1024);
         let height = state.last_layout.as_ref().map(|l| l.height).unwrap_or(768);
 
@@ -1142,13 +1150,12 @@ pub mod app {
         if let Some(req) = request {
             veldsdk::publish!("ui-service/set_view", req);
         }
-
+        
         state.last_layout = Some(new_layout);
     }
 }
 
 pub mod reexports {
-
     pub use std::task::{Poll, Context};
     pub use futures_util::task::noop_waker_ref;
 }
