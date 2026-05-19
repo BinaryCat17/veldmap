@@ -11,7 +11,7 @@ pub fn on_search(state: &mut State, _event: UiEventResponse) {
     
     if !query.is_empty() {
         state.search.is_loading = true;
-        veldsdk::publish!("data-provider/search", veldmap_api::dataprovider::SearchRequest {
+        veldsdk::call!("data-provider/search", veldmap_api::dataprovider::SearchRequest {
             query,
             filters: vec![],
         });

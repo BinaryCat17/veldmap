@@ -36,6 +36,26 @@ macro_rules! publish {
     }};
 }
 
+/// Вызов зависимости (запрос к другому модулю/сервису)
+#[macro_export]
+macro_rules! call {
+    ($topic:expr, $msg:expr) => {{
+        use $crate::prost::Message;
+        let payload = $msg.encode_to_vec();
+        let _ = $crate::rpc::host::publish($topic, payload);
+    }};
+}
+
+/// Публикация результата работы модуля (исходящее событие)
+#[macro_export]
+macro_rules! output {
+    ($topic:expr, $msg:expr) => {{
+        use $crate::prost::Message;
+        let payload = $msg.encode_to_vec();
+        let _ = $crate::rpc::host::publish($topic, payload);
+    }};
+}
+
 /// Генерация UUID
 #[macro_export]
 macro_rules! generate_id {

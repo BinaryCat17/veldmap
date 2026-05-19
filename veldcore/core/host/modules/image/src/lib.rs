@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
 use veldmap_host_core::resources::ResourceManager;
 use veldmap_host_core::core::{
@@ -214,7 +215,7 @@ impl ImageService {
                                     content_hash: resources.compute_hash(tex_id, requestor_id).unwrap_or_default(),
                                 };
                                 let payload = handle.encode_to_vec();
-                                update_status(1.0, String::new(), Some(handle), Some(payload));
+                                update_status(1.0, String::new(), Some(handle.clone()), Some(payload));
                                 let result = ImageLoadResult { handle: Some(handle), error: String::new(), correlation_id: correlation_id_inner.clone() };
                                 dispatcher_clone.publish("image/load_result", result.encode_to_vec());
                                 return;
@@ -348,7 +349,7 @@ impl ImageService {
             };
             let payload = handle.encode_to_vec();
             log::info!("[IMAGE] Loaded '{}': texture_id={}, size={}x{}", path, tex_id, w, h);
-            update_status(1.0, String::new(), Some(handle), Some(payload));
+            update_status(1.0, String::new(), Some(handle.clone()), Some(payload));
             let result = ImageLoadResult { handle: Some(handle), error: String::new(), correlation_id: correlation_id_inner.clone() };
             dispatcher_clone.publish("image/load_result", result.encode_to_vec());
         });

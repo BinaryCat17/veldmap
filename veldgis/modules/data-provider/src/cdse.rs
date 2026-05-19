@@ -10,7 +10,7 @@ use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
-use crate::{LocalConfig, LocalState};
+use super::{LocalConfig, LocalState};
 
 const S3_HOST: &str = "eodata.dataspace.copernicus.eu";
 const S3_REGION: &str = "default";
@@ -84,7 +84,7 @@ pub fn on_download(
     let identifier = request.identifier.clone();
     
     // Publish started immediately
-    veldsdk::publish!("data-provider/download_started", DownloadStarted {
+    veldsdk::output!("data-provider/download_started", DownloadStarted {
         task_id: task_id.clone(),
         identifier: identifier.clone(),
         destination: destination.clone(),
@@ -102,7 +102,7 @@ pub fn on_download(
     };
 
     state.pending_downloads.insert(task_id);
-    veldsdk::publish!("network/fs_download", req_task);
+    veldsdk::call!("network/fs_download", req_task);
 }
 
 pub fn on_fs_download_result(
@@ -115,7 +115,7 @@ pub fn on_fs_download_result(
     }
 
     let success = response.error.is_empty();
-    veldsdk::publish!("data-provider/downloaded", Downloaded {
+    veldsdk::output!("data-provider/downloaded", Downloaded {
         task_id: correlation_id,
         success,
         error: response.error,
@@ -171,7 +171,7 @@ pub fn on_list_path(
     info!("Requesting S3 list: {}", req_task.url);
 
     state.pending_http.insert(correlation_id.clone(), request.path);
-    veldsdk::publish!("network/http", req_task);
+    veldsdk::call!("network/http", req_task);
 }
 
 pub fn on_http_result(
@@ -191,7 +191,7 @@ pub fn on_http_result(
         }
     };
 
-    veldsdk::publish!("data-provider/list_path_result", list_response);
+    veldsdk::output!("data-provider/list_path_result", list_response);
 }
 
 fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {

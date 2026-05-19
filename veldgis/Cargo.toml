@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "lib/rust/api",
-    "modules/data-provider",
+    "modules/data-provider/generated",
     "apps/data-browser",
 ]
 resolver = "2"

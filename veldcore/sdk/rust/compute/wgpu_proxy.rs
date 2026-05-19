@@ -87,6 +87,7 @@ impl ComputeRecorder {
             target_texture_view_id,
             clear_color: None,
             command_buffer: Some(cmd_buffer),
+            correlation_id: crate::generate_id!(),
         };
         
         compute_execute(submit_req.encode_to_vec())?;

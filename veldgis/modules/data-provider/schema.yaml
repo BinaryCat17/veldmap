@@ -1,32 +1,34 @@
 name: data-provider
 version: 1.0.0
-language: rust
 
-rust:
-  config: crate::module::LocalConfig
-  state: crate::module::LocalState
-  init: crate::module::cdse::module_init
-  dependencies:
-    veldmap-api: '{ path = "../../../../veldgis/lib/rust/api" }'
-    prost: '"0.14"'
-    serde: '{ version = "1.0", features = ["derive"] }'
-    serde_json: '"1.0"'
-    log: '"0.4"'
-    anyhow: '"1.0"'
-    quick-xml: '"0.36"'
-    urlencoding: '"2.1"'
-    rusty-s3: '"0.8.1"'
-    http: '"1.0"'
-    aws-sigv4: '"1.2.2"'
-    aws-credential-types: '"1.2.0"'
-    aws-smithy-runtime-api: '{ version = "1.1", features = ["client"] }'
-    url: '"2.5"'
+interface:
+  inputs:
+    download:
+      type: module/DownloadRequest
+    list_path:
+      type: module/ListPathRequest
+    search:
+      type: module/SearchRequest
 
-inputs:
-  "data-provider/download": crate::module::cdse::on_download
-  "data-provider/list_path": crate::module::cdse::on_list_path
-  "data-provider/search": crate::module::cdse::on_search
+  outputs:
+    download_started: 
+      called_by: module/download 
+      type: module/DownloadStartedEvent
+    downloaded:
+      called_by: network/fs_download_result
+      type: module/DownloadedEvent
 
-subscriptions:
-  "network/fs_download_result": crate::module::cdse::on_fs_download_result
-  "network/http_result": crate::module::cdse::on_http_result
+dependencies:
+  network:
+    subs:
+      fs_download_result: 
+        type: network/FsResult
+      http_result:
+        type: network/HttpResult
+    calls:
+      fs_download:
+        called_by: module/download
+        type: network/FsDownloadRequest
+      http:
+        called_by: module/list_path
+        type: network/HttpTaskRequest

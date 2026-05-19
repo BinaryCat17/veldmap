@@ -1792,7 +1792,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9da98b7d9b7dad93488a84b8248efc35352b0b2657397d4167e7ad67e5d535e5"
 dependencies = [
  "deranged",
- "itoa",
  "num-conv",
  "powerfmt",
  "serde_core",
@@ -1969,13 +1968,12 @@ dependencies = [
 
 [[package]]
 name = "veldmap-data-provider"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-runtime-api",
- "futures-util",
  "http 1.4.0",
  "log",
  "prost",
@@ -1983,7 +1981,6 @@ dependencies = [
  "rusty-s3",
  "serde",
  "serde_json",
- "time",
  "url",
  "urlencoding",
  "veldmap-api",

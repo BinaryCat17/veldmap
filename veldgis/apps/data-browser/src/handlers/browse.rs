@@ -21,7 +21,7 @@ pub fn on_browse(
     }
     
     // Публикуем запрос к data-provider
-    veldsdk::publish!("data-provider/list_path", veldmap_api::dataprovider::ListPathRequest {
+    veldsdk::call!("data-provider/list_path", veldmap_api::dataprovider::ListPathRequest {
         path: target_path,
         token: String::new(),
     });
@@ -45,7 +45,7 @@ pub fn on_browse_up(
     state.browse.current_path = path.clone();
     state.browse.is_loading = true;
     
-    veldsdk::publish!("data-provider/list_path", veldmap_api::dataprovider::ListPathRequest {
+    veldsdk::call!("data-provider/list_path", veldmap_api::dataprovider::ListPathRequest {
         path,
         token: String::new(),
     });

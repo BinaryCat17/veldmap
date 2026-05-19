@@ -1,7 +1,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = &[
         "../../../proto/common.proto", 
-        "../../../proto/dataprovider.proto",
+        "../../../modules/data-provider/types.proto",
         "../../../proto/databrowser.proto",
         "../../../../veldstd/proto/ui.proto",
     ];
@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         proto_files, 
         &[
             "../../../proto/", 
+            "../../../modules/data-provider/",
             "../../../../veldstd/proto/",
             "../../../../veldcore/proto/"
         ]

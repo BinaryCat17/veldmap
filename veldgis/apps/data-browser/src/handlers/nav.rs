@@ -14,8 +14,9 @@ pub fn on_nav_downloaded(state: &mut State, _event: UiEventResponse) {
     state.current_screen = Screen::Downloaded;
     
     // Запрашиваем список файлов при переходе на экран
-    veldsdk::publish!("fs/list", FsListRequest {
+    veldsdk::call!("fs/list", FsListRequest {
         path: "data/dem/source".to_string(),
+        correlation_id: veldsdk::generate_id!(),
     });
 }
 

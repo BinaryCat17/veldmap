@@ -521,7 +521,7 @@ async fn main() -> anyhow::Result<()> {
                                 occlusion_query_set: None,
                             });
 
-                            let _ = veldmap_host_compute::execute_render_commands(
+                            let _ = veldmap_host_core::compute_service::execute_render_commands(
                                 &mut rp, &op.command_buffer, &resources, 2048, 2048, op.instance_id
                             );
                         }

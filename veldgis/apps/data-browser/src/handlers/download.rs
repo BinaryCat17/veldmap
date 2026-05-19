@@ -14,7 +14,7 @@ pub fn on_download_pressed(
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     
     if !s3_key.is_empty() {
-        veldsdk::publish!("data-provider/download", DownloadRequest {
+        veldsdk::call!("data-provider/download", DownloadRequest {
             identifier: s3_key,
             destination: format!("data/dem/source/{}", filename),
         });

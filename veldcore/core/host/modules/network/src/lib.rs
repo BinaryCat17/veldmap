@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
 use veldmap_host_core::core::{
     FsDownloadRequest, HttpTaskRequest, HttpTaskResponse,
@@ -42,6 +43,7 @@ impl NetworkService {
         if !Self::is_path_safe(&req.path) {
             let correlation_id = req.correlation_id;
             let response = FsDownloadResponse {
+                                error: String::new(),
                 task: Some(TaskResponse { task_id: String::new() }),
                 correlation_id: correlation_id.clone(),
             };
@@ -86,6 +88,7 @@ impl NetworkService {
                         t.completed = true;
                     }
                     let response = FsDownloadResponse {
+                                error: String::new(),
                         task: Some(TaskResponse { task_id: task_id_inner.clone() }),
                         correlation_id: correlation_id.clone(),
                     };
@@ -101,6 +104,7 @@ impl NetworkService {
                     t.completed = true;
                 }
                 let response = FsDownloadResponse {
+                                error: String::new(),
                     task: Some(TaskResponse { task_id: task_id_inner.clone() }),
                     correlation_id: correlation_id.clone(),
                 };
@@ -124,6 +128,7 @@ impl NetworkService {
                                         t.completed = true;
                                     }
                                     let response = FsDownloadResponse {
+                                error: String::new(),
                                         task: Some(TaskResponse { task_id: task_id_inner.clone() }),
                                         correlation_id: correlation_id.clone(),
                                     };
@@ -145,6 +150,7 @@ impl NetworkService {
                                     t.completed = true;
                                 }
                                 let response = FsDownloadResponse {
+                                error: String::new(),
                                     task: Some(TaskResponse { task_id: task_id_inner.clone() }),
                                     correlation_id: correlation_id.clone(),
                                 };
@@ -162,6 +168,7 @@ impl NetworkService {
                         t.completed = true;
                     }
                     let response = FsDownloadResponse {
+                                error: String::new(),
                         task: Some(TaskResponse { task_id: task_id_inner.clone() }),
                         correlation_id: correlation_id.clone(),
                     };
@@ -176,6 +183,7 @@ impl NetworkService {
                 t.completed = true;
             }
             let response = FsDownloadResponse {
+                                error: String::new(),
                 task: Some(TaskResponse { task_id: task_id_inner.clone() }),
                 correlation_id: correlation_id.clone(),
             };

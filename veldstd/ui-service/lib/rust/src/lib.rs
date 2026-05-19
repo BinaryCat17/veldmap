@@ -1156,7 +1156,7 @@ pub mod render {
         };
 
         if let Some(req) = request {
-            veldsdk::publish!("ui-service/set_view", req);
+            veldsdk::output!("ui-service/set_view", req);
         }
         
         *last_layout = Some(new_layout);

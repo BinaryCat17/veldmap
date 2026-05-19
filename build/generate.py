@@ -14,22 +14,43 @@ def main():
     with open(args.schema, 'r') as f:
         schema = yaml.safe_load(f)
 
-    # Prepare data for template
-    rust_config = schema.get("rust", {})
-    
-    # Collect all handlers mapping topic -> rust_function
+    # Load config.yaml if exists
+    config_path = os.path.join(os.path.dirname(args.schema), "config.yaml")
+    config_data = {}
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            config_data = yaml.safe_load(f)
+
+    name = schema.get("name")
+    package_name = config_data.get("package", name)
+    version = schema.get("version", "0.1.0")
+
+    rust_config = config_data.get("rust", {})
+    dependencies = rust_config.get("dependencies", {})
+
+    # Construct handlers automatically
     handlers = {}
-    if "inputs" in schema:
-        handlers.update(schema["inputs"])
-    if "subscriptions" in schema:
-        handlers.update(schema["subscriptions"])
+    
+    # Inputs
+    inputs = schema.get("interface", {}).get("inputs", {})
+    for input_name in inputs:
+        topic = f"{name}/{input_name}"
+        handlers[topic] = f"crate::module::on_{input_name}"
+
+    # Subscriptions
+    deps = schema.get("dependencies", {})
+    for dep_name, dep_data in deps.items():
+        subs = dep_data.get("subs", {})
+        for sub_name in subs:
+            topic = f"{dep_name}/{sub_name}"
+            handlers[topic] = f"crate::module::on_{sub_name}"
 
     # Template variables
     template_data = {
-        "module_name": schema.get("name"),
-        "version": schema.get("version", "0.1.0"),
+        "module_name": package_name,
+        "version": version,
         "sdk_path": "../../../../veldcore/sdk/rust",
-        "dependencies": schema.get("rust", {}).get("dependencies", {}),
+        "dependencies": dependencies,
         "rust": {
             "config": rust_config.get("config", "crate::module::Config"),
             "state": rust_config.get("state", "crate::module::State"),

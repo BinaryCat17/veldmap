@@ -3,14 +3,6 @@ version: 1.0.0
 language: rust
 
 interface:
-  types:
-    DownloadRequest:
-      url: string
-    DownloadStartedEvent:
-      task_id: string
-    DownloadedEvent:
-      path: string
-
   inputs:
     download:
       type: module/DownloadRequest

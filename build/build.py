@@ -14,31 +14,51 @@ CORE_MANIFEST = "veldcore/Cargo.toml"
 GIS_MANIFEST = "veldgis/Cargo.toml"
 STD_MANIFEST = "veldstd/Cargo.toml"
 
+# Format: (name, workspace_manifest, target_dir, schema_path, generated_dir)
 MODULES = [
-    ("veldmap-data-provider", GIS_MANIFEST, "veldgis/target"),
-    ("veldmap-data-browser", GIS_MANIFEST, "veldgis/target"),
-    ("veld-ui-service", STD_MANIFEST, "veldstd/target"),
+    ("veldmap-data-provider", "veldgis/modules/data-provider/generated/Cargo.toml", "veldgis/target", "veldgis/modules/data-provider/schema.yaml", "veldgis/modules/data-provider/generated"),
+    ("veldmap-data-browser", GIS_MANIFEST, "veldgis/target", None, None),
+    ("veld-ui-service", STD_MANIFEST, "veldstd/target", None, None),
 ]
 
-def run(cmd, cwd=None):
+def run(cmd, cwd=None, env=None):
     """Run a shell command and exit on failure."""
     print(f"-> {' '.join(cmd)}")
-    res = subprocess.run(cmd, cwd=cwd)
+    res = subprocess.run(cmd, cwd=cwd, env=env)
     if res.returncode != 0:
         print(f"\nFATAL: Command failed with exit code {res.returncode}")
         sys.exit(1)
+
+def generate_code():
+    """Run the code generator for modules with schemas."""
+    print("\n[0/2] Generating module bindings...")
+    build_dir = os.path.dirname(os.path.abspath(__file__))
+    venv_python = os.path.join(build_dir, ".venv", "bin", "python")
+    gen_script = os.path.join(build_dir, "generate.py")
+    
+    if not os.path.exists(venv_python):
+        print("Initializing build venv...")
+        run(["python3", "-m", "venv", ".venv"], cwd=build_dir)
+        run([venv_python, "-m", "pip", "install", "pyyaml", "jinja2"])
+
+    for module, manifest, target_dir, schema_path, generated_dir in MODULES:
+        if schema_path and generated_dir:
+            print(f"Generating {module} from {schema_path}...")
+            run([venv_python, gen_script, "--schema", f"../{schema_path}", "--output-dir", f"../{generated_dir}"], cwd=build_dir)
 
 def build_all(debug=False, windows=False):
     """Build WASM modules and Host."""
     profile = "debug" if debug else "release"
     cargo_args = [] if debug else ["--release"]
     
+    generate_code()
+    
     # 1. Build WASM Modules
     print(f"\n[1/2] Building WASM Modules ({profile})...")
     if not os.path.exists(PLUGINS_DIR):
         os.makedirs(PLUGINS_DIR)
 
-    for module, manifest, target_dir in MODULES:
+    for module, manifest, target_dir, schema, gen_dir in MODULES:
         print(f"\n--- Module: {module} ---")
         cmd = ["cargo", "build", "--manifest-path", manifest, "-p", module, "--target", WASM_TARGET] + cargo_args
         run(cmd)

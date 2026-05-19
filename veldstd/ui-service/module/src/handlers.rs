@@ -228,7 +228,7 @@ fn process_iced_events(plugin: &PluginUiState, plugin_id: &str, _surface_handle:
 /// Вызывается в handle_set_view перед рендерингом.
 fn dispatch_event(event: UiEventResponse) -> anyhow::Result<()> {
     let topic = event.message_tag.clone();
-    veldsdk::publish!(&topic, event);
+    veldsdk::output!(&topic, event);
     Ok(())
 }
 
