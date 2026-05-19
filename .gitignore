@@ -21,3 +21,6 @@ cache/
 
 data
 project_context.txt
+
+generated
+.venv

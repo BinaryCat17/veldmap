@@ -1,0 +1,37 @@
+﻿name: data-provider
+version: 1.0.0
+language: rust
+
+interface:
+  types:
+    DownloadRequest:
+      url: string
+    DownloadStartedEvent:
+      task_id: string
+    DownloadedEvent:
+      path: string
+
+  inputs:
+    download:
+      type: module/DownloadRequest
+
+  outputs:
+    download_started: 
+      called_by: module/download 
+      type: module/DownloadStartedEvent
+
+    downloaded:
+      called_by: network/fs_download_result
+      type: module/DownloadedEvent
+
+
+dependencies:
+  network:
+    subs:
+      network/fs_download_result: 
+        type: network/FsResult
+      
+    calls:
+      fetch:
+        called_by: module/download
+        type: network/Fetch
