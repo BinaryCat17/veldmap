@@ -35,7 +35,7 @@ def main():
     inputs = schema.get("interface", {}).get("inputs", {})
     for input_name in inputs:
         topic = f"{name}/{input_name}"
-        handlers[topic] = f"crate::module::on_{input_name}"
+        handlers[topic] = f"crate::module::on_input_{input_name}"
 
     # Subscriptions
     deps = schema.get("dependencies", {})
@@ -43,7 +43,7 @@ def main():
         subs = dep_data.get("subs", {})
         for sub_name in subs:
             topic = f"{dep_name}/{sub_name}"
-            handlers[topic] = f"crate::module::on_{sub_name}"
+            handlers[topic] = f"crate::module::on_sub_{sub_name}"
 
     # Template variables
     template_data = {

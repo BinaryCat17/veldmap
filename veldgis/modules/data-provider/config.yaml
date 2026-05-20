@@ -1,9 +1,6 @@
 package: veldmap-data-provider
 language: rust
 rust:
-  config: crate::module::LocalConfig
-  state: crate::module::LocalState
-  init: crate::module::init
   dependencies:
     veldmap-api: '{ path = "../../../../veldgis/lib/rust/api" }'
     prost: '"0.14"'

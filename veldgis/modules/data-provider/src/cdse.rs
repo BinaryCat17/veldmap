@@ -10,13 +10,13 @@ use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
-use super::{LocalConfig, LocalState};
+use super::{Config, State};
 
 const S3_HOST: &str = "eodata.dataspace.copernicus.eu";
 const S3_REGION: &str = "default";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
+pub fn module_init(config: Config) -> anyhow::Result<State> {
     let credentials = aws_credential_types::Credentials::new(
         config.access_key, 
         config.secret_key, 
@@ -24,58 +24,25 @@ pub fn module_init(config: LocalConfig) -> anyhow::Result<LocalState> {
     );
     let identity = Identity::new(credentials, None);
     
-    Ok(LocalState { 
+    Ok(State { 
         identity,
         pending_downloads: std::collections::HashSet::new(),
         pending_http: std::collections::HashMap::new(),
     })
 }
 
-fn get_s3_headers(state: &LocalState, method: &str, uri: &str) -> std::collections::HashMap<String, String> {
-    let signing_settings = SigningSettings::default();
-    let signing_params = v4::SigningParams::builder()
-        .identity(&state.identity)
-        .region(S3_REGION)
-        .name("s3")
-        .time(SystemTime::now())
-        .settings(signing_settings)
-        .build()
-        .unwrap();
+//  inputs ---------------------------------------------------------------------------------------------------------------------------
 
-    let headers = [
-        ("host", S3_HOST),
-        ("x-amz-content-sha256", EMPTY_SHA256),
-    ];
-    
-    let signable_request = SignableRequest::new(
-        method,
-        uri,
-        headers.iter().map(|(k, v)| (*k, *v)),
-        aws_sigv4::http_request::SignableBody::Bytes(&[]),
-    ).unwrap();
-    
-    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
-    
-    let mut signed_headers = std::collections::HashMap::new();
-    for (name, value) in instructions.headers() {
-        signed_headers.insert(name.to_string(), value.to_string());
-    }
-    signed_headers.insert("x-amz-content-sha256".to_string(), EMPTY_SHA256.to_string());
-    signed_headers
-}
-
-// --- Handlers (pub/sub) ---
-
-pub fn on_search(
-    _state: &mut LocalState, 
+pub fn on_input_search(
+    _state: &mut State, 
     _request: veldmap_api::dataprovider::SearchRequest
 ) {
     // TODO: Implement search via OData/OpenSearch
     info!("Search requested (not implemented)");
 }
 
-pub fn on_download(
-    state: &mut LocalState, 
+pub fn on_input_download(
+    state: &mut State, 
     request: DownloadRequest
 ) {
     let task_id = veldsdk::generate_id!();
@@ -105,25 +72,8 @@ pub fn on_download(
     veldsdk::call!("network/fs_download", req_task);
 }
 
-pub fn on_fs_download_result(
-    state: &mut LocalState,
-    response: veldsdk::rpc::core::FsDownloadResponse,
-) {
-    let correlation_id = response.correlation_id;
-    if !state.pending_downloads.remove(&correlation_id) {
-        return;
-    }
-
-    let success = response.error.is_empty();
-    veldsdk::output!("data-provider/downloaded", Downloaded {
-        task_id: correlation_id,
-        success,
-        error: response.error,
-    });
-}
-
-pub fn on_list_path(
-    state: &mut LocalState, 
+pub fn on_input_list_path(
+    state: &mut State, 
     request: ListPathRequest
 ) {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
@@ -174,8 +124,10 @@ pub fn on_list_path(
     veldsdk::call!("network/http", req_task);
 }
 
-pub fn on_http_result(
-    state: &mut LocalState,
+// subs ---------------------------------------------------------------------------------------------------------------------------
+
+pub fn on_sub_http_result(
+    state: &mut State,
     response: veldsdk::rpc::core::HttpTaskResponse,
 ) {
     let correlation_id = response.correlation_id;
@@ -192,6 +144,58 @@ pub fn on_http_result(
     };
 
     veldsdk::output!("data-provider/list_path_result", list_response);
+}
+
+pub fn on_sub_fs_download_result(
+    state: &mut State,
+    response: veldsdk::rpc::core::FsDownloadResponse,
+) {
+    let correlation_id = response.correlation_id;
+    if !state.pending_downloads.remove(&correlation_id) {
+        return;
+    }
+
+    let success = response.error.is_empty();
+    veldsdk::output!("data-provider/downloaded", Downloaded {
+        task_id: correlation_id,
+        success,
+        error: response.error,
+    });
+}
+
+// utils ---------------------------------------------------------------------------------------------------------------------------
+
+fn get_s3_headers(state: &State, method: &str, uri: &str) -> std::collections::HashMap<String, String> {
+    let signing_settings = SigningSettings::default();
+    let signing_params = v4::SigningParams::builder()
+        .identity(&state.identity)
+        .region(S3_REGION)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(signing_settings)
+        .build()
+        .unwrap();
+
+    let headers = [
+        ("host", S3_HOST),
+        ("x-amz-content-sha256", EMPTY_SHA256),
+    ];
+    
+    let signable_request = SignableRequest::new(
+        method,
+        uri,
+        headers.iter().map(|(k, v)| (*k, *v)),
+        aws_sigv4::http_request::SignableBody::Bytes(&[]),
+    ).unwrap();
+    
+    let (instructions, _signature) = sign(signable_request, &signing_params.into()).unwrap().into_parts();
+    
+    let mut signed_headers = std::collections::HashMap::new();
+    for (name, value) in instructions.headers() {
+        signed_headers.insert(name.to_string(), value.to_string());
+    }
+    signed_headers.insert("x-amz-content-sha256".to_string(), EMPTY_SHA256.to_string());
+    signed_headers
 }
 
 fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
@@ -243,4 +247,5 @@ fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
     }
     
     ListPathResponse { items, next_token, error: String::new() }
+}
 }
