@@ -1,0 +1,67 @@
+name: data-browser
+version: 0.1.0
+
+interface:
+  inputs:
+    nav_browse:
+      type: veld-ui/UiEventResponse
+    nav_search:
+      type: veld-ui/UiEventResponse
+    nav_downloaded:
+      type: veld-ui/UiEventResponse
+    browse:
+      type: veld-ui/UiEventResponse
+    browse_up:
+      type: veld-ui/UiEventResponse
+    search:
+      type: veld-ui/UiEventResponse
+    search_input:
+      type: veld-ui/UiEventResponse
+    download_pressed:
+      type: veld-ui/UiEventResponse
+    view_pressed:
+      type: veld-ui/UiEventResponse
+
+  outputs:
+    load:
+      called_by: module/download_pressed
+      type: core/ImageLoadRequest
+
+dependencies:
+  ui-service:
+    subs:
+      frame:
+        type: veld-ui/FrameEvent
+    calls:
+      set_view:
+        type: veld-ui/SetViewRequest
+  data-provider:
+    subs:
+      download_started:
+        type: dataprovider/DownloadStarted
+      download_progress:
+        type: dataprovider/DownloadProgress
+      downloaded:
+        type: dataprovider/Downloaded
+      search_result:
+        type: dataprovider/SearchResponse
+      list_path_result:
+        type: dataprovider/ListPathResponse
+    calls:
+      list_path:
+        type: dataprovider/ListPathRequest
+      download:
+        type: dataprovider/DownloadRequest
+      search:
+        type: dataprovider/SearchRequest
+  fs:
+    subs:
+      list_result:
+        type: core/FsListResponse
+    calls:
+      list:
+        type: core/FsListRequest
+  image:
+    subs:
+      load_result:
+        type: core/ImageLoadResult

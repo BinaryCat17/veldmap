@@ -1,7 +1,7 @@
 //! view/preview.rs — экран предпросмотра изображения
 
 use veld_ui::{column, row, text, button, container, image, Element, Length, Alignment, Padding};
-use crate::state::State;
+use crate::module::state::State;
 
 pub fn view(state: &State) -> Element<()> {
     let preview = &state.preview;

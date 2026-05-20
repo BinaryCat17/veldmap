@@ -248,4 +248,3 @@ fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
     
     ListPathResponse { items, next_token, error: String::new() }
 }
-}

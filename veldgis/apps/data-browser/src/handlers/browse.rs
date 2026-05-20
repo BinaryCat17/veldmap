@@ -1,8 +1,8 @@
 use veld_ui::proto::UiEventResponse;
-use crate::state::State;
+use crate::module::state::State;
 
 /// Браузинг запрошен (через UI событие)
-pub fn on_browse(
+pub fn on_input_browse(
     state: &mut State,
     event: UiEventResponse,
 ) {
@@ -27,7 +27,7 @@ pub fn on_browse(
     });
 }
 
-pub fn on_browse_up(
+pub fn on_input_browse_up(
     state: &mut State,
     _event: UiEventResponse,
 ) {
@@ -51,14 +51,14 @@ pub fn on_browse_up(
     });
 }
 
-pub fn on_list_result(
+pub fn on_sub_list_path_result(
     state: &mut State,
     response: veldmap_api::dataprovider::ListPathResponse,
 ) {
     state.browse.is_loading = false;
     state.browse.items = response.items.into_iter().map(|s| {
         let is_folder = s.ends_with('/');
-        crate::state::browse::BrowseItem {
+        crate::module::state::browse::BrowseItem {
             s3_key: s.clone(),
             name: s.split('/').filter(|x| !x.is_empty()).last().unwrap_or("").to_string(),
             is_folder,

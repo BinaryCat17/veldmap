@@ -1,12 +1,12 @@
 use veld_ui::proto::UiEventResponse;
 use veldmap_api::dataprovider::SearchResponse;
-use crate::state::State;
+use crate::module::state::State;
 
-pub fn on_search_input(state: &mut State, event: UiEventResponse) {
+pub fn on_input_search_input(state: &mut State, event: UiEventResponse) {
     state.search.query = event.value;
 }
 
-pub fn on_search(state: &mut State, _event: UiEventResponse) {
+pub fn on_input_search(state: &mut State, _event: UiEventResponse) {
     let query = state.search.query.clone();
     
     if !query.is_empty() {
@@ -19,7 +19,7 @@ pub fn on_search(state: &mut State, _event: UiEventResponse) {
 }
 
 /// Результат поиска
-pub fn on_search_result(
+pub fn on_sub_search_result(
     state: &mut State,
     response: SearchResponse,
 ) {

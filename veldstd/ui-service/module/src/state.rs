@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 use iced_core::{Point, Event};
 use iced_runtime::user_interface;
-use crate::renderer::GpuRenderer;
+use crate::module::renderer::GpuRenderer;
 
 /// Response message waiting to be dispatched to plugin
 #[derive(Clone)]
@@ -30,8 +30,8 @@ pub struct PluginUiState {
     pub uniform_buffer_id: RefCell<Option<u64>>,
     pub uniform_layout_id: RefCell<Option<u64>>,
     pub ui_pipeline: RefCell<Option<u64>>,
-    pub last_vertices: RefCell<Vec<crate::renderer::Vertex>>,
-    pub last_draw_commands: RefCell<Vec<crate::renderer::DrawCmd>>,
+    pub last_vertices: RefCell<Vec<crate::module::renderer::Vertex>>,
+    pub last_draw_commands: RefCell<Vec<crate::module::renderer::DrawCmd>>,
     pub external_bind_groups: RefCell<HashMap<u64, u64>>,
     
     // Cached offscreen texture for rendering (reused if size matches)

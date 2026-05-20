@@ -1,8 +1,8 @@
 use veld_ui::proto::*;
-use crate::state::{PluginUiState, LocalState, PendingMessage};
+use crate::module::state::{PluginUiState, LocalState, PendingMessage};
 use veldsdk::rpc::app as app_proto;
-use crate::renderer::GpuRenderer;
-use crate::converter;
+use crate::module::renderer::GpuRenderer;
+use crate::module::converter;
 use iced_core::{Point, Event, Size, Theme};
 use iced_runtime::UserInterface;
 use iced_graphics::Viewport;
@@ -269,7 +269,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Building UI");
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
-    let _guard = crate::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
+    let _guard = crate::module::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
 
     let mut ui = UserInterface::build(
         element,
@@ -296,7 +296,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
 
     if commands_changed || *is_layout_dirty {
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Calling render_ui");
-        let texture_id = crate::graphics::render_ui(plugin, renderer, width, height, sf, surface_format)?;
+        let texture_id = crate::module::graphics::render_ui(plugin, renderer, width, height, sf, surface_format)?;
         veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] display_frame with texture_id={}", texture_id);
 
         let cmd = veldsdk::rpc::app::AppDisplayCommand {

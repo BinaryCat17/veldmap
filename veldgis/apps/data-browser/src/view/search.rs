@@ -1,9 +1,9 @@
 //! View для экрана поиска
 
 use veld_ui::{column, row, text, text_input, button, scrollable, Element, Length};
-use crate::state::State;
-use crate::components::browser_list::render_list;
-use crate::components::browser_list::BrowserItem;
+use crate::module::state::State;
+use crate::module::components::browser_list::render_list;
+use crate::module::components::browser_list::BrowserItem;
 
 pub fn view(state: &State) -> Element<()> {
     let search_state = &state.search;

@@ -7,15 +7,15 @@ pub mod search;
 pub mod downloaded;
 pub mod preview;
 
-use crate::state::State;
+use crate::module::state::State;
 use veld_ui::{Element, column, row, text, button, Length, Padding};
 
 pub fn build_root(state: &State) -> Element<()> {
     let main_content = match state.current_screen {
-        crate::state::Screen::Browse => browse::view(state),
-        crate::state::Screen::Search => search::view(state),
-        crate::state::Screen::Downloaded => downloaded::view(state),
-        crate::state::Screen::Preview => preview::view(state),
+        crate::module::state::Screen::Browse => browse::view(state),
+        crate::module::state::Screen::Search => search::view(state),
+        crate::module::state::Screen::Downloaded => downloaded::view(state),
+        crate::module::state::Screen::Preview => preview::view(state),
     };
     
     // Header navigation

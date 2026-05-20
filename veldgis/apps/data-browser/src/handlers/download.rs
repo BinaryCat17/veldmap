@@ -1,12 +1,12 @@
 use veldmap_api::dataprovider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded};
 use veld_ui::proto::UiEventResponse;
 
-use crate::state::{State, downloaded::DownloadStatus};
-use crate::components::task_manager::TaskKind;
+use crate::module::state::{State, downloaded::DownloadStatus};
+use crate::module::components::task_manager::TaskKind;
 use veldsdk::rpc::core::ImageLoadResult;
 
 /// Пользователь нажал кнопку скачать
-pub fn on_download_pressed(
+pub fn on_input_download_pressed(
     _state: &mut State,
     event: UiEventResponse,
 ) {
@@ -22,14 +22,14 @@ pub fn on_download_pressed(
 }
 
 /// Пользователь нажал кнопку просмотра
-pub fn on_view_pressed(
+pub fn on_input_view_pressed(
     state: &mut State,
     event: UiEventResponse,
 ) {
     let value = event.value;
     if value.is_empty() { return; }
     
-    state.current_screen = crate::state::Screen::Preview;
+    state.current_screen = crate::module::state::Screen::Preview;
     state.preview.current_path = value.clone();
     state.preview.is_loading = true;
     
@@ -44,7 +44,7 @@ pub fn on_view_pressed(
 }
 
 /// Data-provider сообщил что загрузка началась
-pub fn on_download_started(
+pub fn on_sub_download_started(
     state: &mut State,
     event: DownloadStarted,
 ) {
@@ -59,7 +59,7 @@ pub fn on_download_started(
         }
     );
     
-    state.downloaded.active_downloads.insert(event.identifier.clone(), crate::state::downloaded::DownloadProgress {
+    state.downloaded.active_downloads.insert(event.identifier.clone(), crate::module::state::downloaded::DownloadProgress {
         s3_key: event.identifier,
         task_id: event.task_id,
         progress: 0.0,
@@ -70,7 +70,7 @@ pub fn on_download_started(
     // Рендер происходит автоматически в on_frame
 }
 
-pub fn on_download_progress(
+pub fn on_sub_download_progress(
     state: &mut State,
     event: DownloadProgress,
 ) {
@@ -85,14 +85,14 @@ pub fn on_download_progress(
     // Рендер происходит автоматически в on_frame
 }
 
-pub fn on_downloaded(
+pub fn on_sub_downloaded(
     state: &mut State,
     event: Downloaded,
 ) {
     let s3_key = state.downloaded.active_downloads
         .iter()
         .find(|(_, dl)| dl.task_id == event.task_id)
-        .map(|(k, _)| k.clone());
+        .map(|(k, _): (&String, &crate::module::state::downloaded::DownloadProgress)| k.clone());
     
     if let Some(key) = s3_key {
         let filename = key.split('/').last().unwrap_or("file").to_string();
@@ -109,7 +109,7 @@ pub fn on_downloaded(
     // Рендер происходит автоматически в on_frame
 }
 
-pub fn on_image_loaded(
+pub fn on_sub_load_result(
     state: &mut State,
     result: ImageLoadResult,
 ) {

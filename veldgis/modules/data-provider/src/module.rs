@@ -17,7 +17,7 @@ pub struct State {
 
 // Re-export handlers to match the expected names in generated code
 pub use cdse::{
-    module_init,
+    module_init as init,
     
     // calls
     on_input_download,

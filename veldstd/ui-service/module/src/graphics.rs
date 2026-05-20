@@ -1,8 +1,8 @@
 //! GPU graphics rendering for UI service
 //! Handles all GPU resource management and command encoding
 
-use crate::state::PluginUiState;
-use crate::renderer::{GpuRenderer, DrawCmd};
+use crate::module::state::PluginUiState;
+use crate::module::renderer::{GpuRenderer, DrawCmd};
 use veldsdk::compute::*;
 use veldsdk::compute::create_resource;
 use veldsdk::compute::wgpu_proxy::ComputeRecorder;
@@ -145,7 +145,7 @@ fn render_geometry(
     width: u32,
     height: u32,
 ) -> anyhow::Result<()> {
-    let vertex_size = std::mem::size_of::<crate::renderer::Vertex>();
+    let vertex_size = std::mem::size_of::<crate::module::renderer::Vertex>();
     
     // Ensure vertex buffer exists
     let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
@@ -357,7 +357,7 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
                     vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
                     target_format: surface_format,
                     vertex_layouts: vec![VertexBufferLayout {
-                        array_stride: std::mem::size_of::<crate::renderer::Vertex>() as u64,
+                        array_stride: std::mem::size_of::<crate::module::renderer::Vertex>() as u64,
                         step_mode: StepMode::StepVertex as i32,
                         attributes: vec![
                             VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 0, shader_location: 0 },

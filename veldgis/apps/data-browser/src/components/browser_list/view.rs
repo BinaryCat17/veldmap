@@ -1,8 +1,8 @@
 //! components/browser_list/view.rs — рендеринг списка файлов
 
 use veld_ui::{column, row, text, button, Element, Length, Alignment};
-use crate::components::browser_list::BrowserItem;
-use crate::components::task_manager::TaskManager;
+use crate::module::components::browser_list::BrowserItem;
+use crate::module::components::task_manager::TaskManager;
 
 pub fn render_item(
     item: &BrowserItem,

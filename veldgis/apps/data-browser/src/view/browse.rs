@@ -1,9 +1,9 @@
 //! View для экрана браузера
 
 use veld_ui::{column, text, button, scrollable, Element, Length};
-use crate::state::State;
-use crate::components::browser_list::render_list;
-use crate::components::browser_list::BrowserItem;
+use crate::module::state::State;
+use crate::module::components::browser_list::render_list;
+use crate::module::components::browser_list::BrowserItem;
 
 pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;

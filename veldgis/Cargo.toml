@@ -2,7 +2,7 @@
 members = [
     "lib/rust/api",
     "modules/data-provider/generated",
-    "apps/data-browser",
+    "apps/data-browser/generated",
 ]
 resolver = "2"
 

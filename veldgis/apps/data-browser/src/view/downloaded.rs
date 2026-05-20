@@ -1,8 +1,8 @@
 //! view/downloaded.rs — экран скачанных файлов
 
 use veld_ui::{column, text, scrollable, Element, Length, Padding};
-use crate::state::State;
-use crate::components::browser_list::{render_list, BrowserItem};
+use crate::module::state::State;
+use crate::module::components::browser_list::{render_list, BrowserItem};
 
 pub fn view(state: &State) -> Element<()> {
     let downloaded = &state.downloaded;

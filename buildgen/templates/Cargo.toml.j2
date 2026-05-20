@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-veldsdk = { path = "{{ sdk_path }}" }
+veldsdk = { path = "{{ sdk_path }}"{% if sdk_features %}, features = [{% for feat in sdk_features %}"{{ feat }}"{% if not loop.last %}, {% endif %}{% endfor %}]{% endif %} }
 {% for name, version in dependencies.items() %}
 {{ name }} = {{ version }}
 {% endfor %}

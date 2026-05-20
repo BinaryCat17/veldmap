@@ -49,7 +49,8 @@ def main():
     template_data = {
         "module_name": package_name,
         "version": version,
-        "sdk_path": "../../../../veldcore/sdk/rust",
+        "sdk_path": rust_config.get("sdk_path", "../../../../veldcore/sdk/rust"),
+        "sdk_features": rust_config.get("sdk_features", []),
         "dependencies": dependencies,
         "rust": {
             "config": rust_config.get("config", "crate::module::Config"),

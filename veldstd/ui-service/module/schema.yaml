@@ -1,0 +1,9 @@
+name: ui-service
+version: 0.1.0
+
+interface:
+  inputs:
+    set_view:
+      type: veld-ui/SetViewRequest
+    handle_ui_event:
+      type: app/UiEvent

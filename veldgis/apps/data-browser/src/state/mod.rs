@@ -12,7 +12,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(_config: crate::handlers::Config) -> anyhow::Result<Self> {
+    pub fn new(_config: crate::module::handlers::Config) -> anyhow::Result<Self> {
         Ok(Self {
             current_screen: types::Screen::Search,
             search: search::SearchState::default(),
@@ -22,7 +22,7 @@ impl State {
             global: types::GlobalState {
                 status_message: "VeldMap Data Browser".to_string(),
                 error_message: None,
-                task_manager: crate::components::task_manager::TaskManager::default(),
+                task_manager: crate::module::components::task_manager::TaskManager::default(),
                 has_rendered: false,
             },
             last_layout: None,
