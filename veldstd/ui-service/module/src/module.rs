@@ -1,4 +1,3 @@
-use crate::module::handlers::*;
 pub use crate::module::state::LocalState;
 
 mod state;

@@ -7,3 +7,14 @@ interface:
       type: veld-ui/SetViewRequest
     handle_ui_event:
       type: app/UiEvent
+  
+  outputs:
+    frame:
+      called_by: module/handle_ui_event
+      type: veld-ui/FrameEvent
+
+dependencies:
+  app:
+    calls:
+      display:
+        type: app/AppDisplayCommand
