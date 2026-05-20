@@ -1,4 +1,4 @@
-use veldmap_api::dataprovider::{
+use crate::proto::dataprovider::{
     DownloadRequest, DownloadStarted, Downloaded,
     ListPathRequest, ListPathResponse
 };
@@ -35,7 +35,7 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
 
 pub fn on_input_search(
     _state: &mut State, 
-    _request: veldmap_api::dataprovider::SearchRequest
+    _request: crate::proto::dataprovider::SearchRequest
 ) {
     // TODO: Implement search via OData/OpenSearch
     info!("Search requested (not implemented)");

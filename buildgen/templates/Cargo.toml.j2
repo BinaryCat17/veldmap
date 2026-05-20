@@ -12,3 +12,6 @@ veldsdk = { path = "{{ sdk_path }}"{% if sdk_features %}, features = [{% for fea
 {% for name, version in dependencies.items() %}
 {{ name }} = {{ version }}
 {% endfor %}
+
+[build-dependencies]
+prost-build = "0.14"

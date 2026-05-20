@@ -610,17 +610,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f29059c0c2090612e8d742178b0580d2dc940c837851ad723096f87af6663e"
 
 [[package]]
-name = "futures-macro"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "162ee34ebcb7c64a8abebc059ce0fee27c2262618d7b60ed8faf72fef13c3650"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "futures-task"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -633,11 +622,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9fa08315bb612088cc391249efdc3bc77536f16c91f6cf495e6fbe85b20a4a81"
 dependencies = [
  "futures-core",
- "futures-macro",
  "futures-task",
  "pin-project-lite",
  "pin-utils",
- "slab",
 ]
 
 [[package]]
@@ -1682,12 +1669,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "slab"
-version = "0.4.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
-
-[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1925,28 +1906,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "veld-ui"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "prost",
- "prost-build",
- "serde",
- "serde_json",
- "veldsdk",
-]
-
-[[package]]
-name = "veldmap-api"
-version = "0.1.0"
-dependencies = [
- "prost",
- "prost-build",
- "serde",
- "veldsdk",
-]
-
-[[package]]
 name = "veldmap-data-browser"
 version = "0.1.0"
 dependencies = [
@@ -1957,12 +1916,11 @@ dependencies = [
  "log",
  "once_cell",
  "prost",
+ "prost-build",
  "serde",
  "serde_json",
  "tiff 0.9.1",
  "tokio",
- "veld-ui",
- "veldmap-api",
  "veldsdk",
 ]
 
@@ -1977,13 +1935,13 @@ dependencies = [
  "http 1.4.0",
  "log",
  "prost",
+ "prost-build",
  "quick-xml 0.36.2",
  "rusty-s3",
  "serde",
  "serde_json",
  "url",
  "urlencoding",
- "veldmap-api",
  "veldsdk",
 ]
 

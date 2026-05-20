@@ -17,8 +17,8 @@ STD_MANIFEST = "veldstd/Cargo.toml"
 # Format: (name, workspace_manifest, target_dir, schema_path, generated_dir)
 MODULES = [
     ("veldmap-data-provider", "veldgis/modules/data-provider/generated/Cargo.toml", "veldgis/target", "veldgis/modules/data-provider/schema.yaml", "veldgis/modules/data-provider/generated"),
-    ("veldmap-data-browser", "veldgis/apps/data-browser/generated/Cargo.toml", "veldgis/target", "veldgis/apps/data-browser/schema.yaml", "veldgis/apps/data-browser/generated"),
-    ("veld-ui-service", "veldstd/ui-service/module/generated/Cargo.toml", "veldstd/target", "veldstd/ui-service/module/schema.yaml", "veldstd/ui-service/module/generated"),
+    ("veldmap-data-browser", "veldgis/modules/data-browser/generated/Cargo.toml", "veldgis/target", "veldgis/modules/data-browser/schema.yaml", "veldgis/modules/data-browser/generated"),
+    ("veld-ui-service", "veldstd/ui-service/generated/Cargo.toml", "veldstd/target", "veldstd/ui-service/schema.yaml", "veldstd/ui-service/generated"),
 ]
 
 def run(cmd, cwd=None, env=None):

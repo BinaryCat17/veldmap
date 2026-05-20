@@ -1,7 +1,6 @@
 [workspace]
 members = [
-    "ui-service/module/generated",
-    "ui-service/lib/rust",
+    "ui-service/generated",
 ]
 resolver = "2"
 

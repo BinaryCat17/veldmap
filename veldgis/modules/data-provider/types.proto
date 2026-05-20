@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package veldmap.dataprovider;
 
-import "common.proto";
-
 // --- Search ---
 
 message SearchFilter {
