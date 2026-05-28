@@ -23,13 +23,39 @@ mod compositor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // --- 0. ПАРСИНГ ПУТЕЙ И ЧТЕНИЕ КОНФИГА ЛОГОВ ---
+    let args: Vec<String> = std::env::args().collect();
+    let config_dir = args.iter().position(|a| a == "--config")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "config".to_string());
+
+    let mut log_path = std::path::PathBuf::from("logs/host.log");
+    
+    // Пытаемся прочитать путь к логам из services.json
+    let services_manifest_path = std::path::Path::new(&config_dir).join("services.json");
+    if let Ok(content) = std::fs::read_to_string(&services_manifest_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(logs) = json.get("logs").and_then(|v| v.as_str()) {
+                log_path = std::path::PathBuf::from(logs);
+            }
+        }
+    }
+
+    // Разрешаем путь относительно родителя папки config (то есть папки runtime)
+    let project_root = std::path::Path::new(&config_dir).parent().unwrap_or(std::path::Path::new("."));
+    let final_log_path = project_root.join(log_path);
+
     // --- 1. ИНИЦИАЛИЗАЦИЯ ЛОГИРОВАНИЯ ---
     // Очищаем лог файл при старте
-    let _ = std::fs::remove_file("host.log");
+    if let Some(parent) = final_log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::remove_file(&final_log_path);
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("host.log")
+        .open(&final_log_path)
         .ok();
     let log_file: Option<Arc<Mutex<std::fs::File>>> = log_file.map(|f| Arc::new(Mutex::new(f)));
 
@@ -68,11 +94,6 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // --- 2. ЗАГРУЗКА КОНФИГА CORE ---
-    let args: Vec<String> = std::env::args().collect();
-    let config_dir = args.iter().position(|a| a == "--config")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .unwrap_or_else(|| "config".to_string());
     
     // Загружаем core.json для получения флагов логирования
     let core_config: veldmap_host_core::CoreConfig = 

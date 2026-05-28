@@ -60,15 +60,14 @@ def main():
     
     try:
         # Запускаем процесс напрямую (без cargo)
-        # stdout -> консоль, stderr -> host.log
-        with open("host.log", "a") as log_file:
-            process = subprocess.Popen(
-                cmd, 
-                env=env,
-                stdout=None,  # stdout в консоль
-                stderr=subprocess.STDOUT  # stderr тоже в консоль пока
-            )
-            process.wait()
+        # stdout и stderr -> консоль
+        process = subprocess.Popen(
+            cmd, 
+            env=env,
+            stdout=None,  # stdout в консоль
+            stderr=subprocess.STDOUT  # stderr тоже в консоль
+        )
+        process.wait()
     except KeyboardInterrupt:
         print("\nShutting down.")
 
