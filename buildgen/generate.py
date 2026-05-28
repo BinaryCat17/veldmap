@@ -110,51 +110,56 @@ def main():
         os.path.join(workspace_root_rel, "veldcore", "proto"),
     ]
 
-    # ── Discover dependent protos (from path-based dependencies) ─────────────
+    # ── Workspace Config ─────────────────────────────────────────────────────
+    workspace_path = os.path.join(project_root, "veld-workspace.yaml")
+    workspace_data = {}
+    if os.path.exists(workspace_path):
+        with open(workspace_path) as f:
+            workspace_data = yaml.safe_load(f) or {}
+    
+    sdk_base = workspace_data.get("workspace", {}).get("sdk", "veldcore/sdk")
+    sdk_path = os.path.join(workspace_root_rel, sdk_base, "rust").replace("\\", "/")
+    
+    wrap_sdk_path = os.path.join(os.path.relpath(project_root, os.path.join(output_dir, "wraps", "rust")), sdk_base, "rust").replace("\\", "/")
+
+    # ── Discover dependent protos (from schema.yaml dependencies) ─────────────
     raw_deps    = rust_config.get("dependencies", {})
     proto_paths = []
     dep_protos  = []
-
-    for dep_val in raw_deps.values():
-        rel = dep_path(dep_val)
-        if rel is None:
-            continue
-
-        # Resolve path relative to output_dir (where Cargo.toml lives)
-        abs_dep = os.path.normpath(os.path.join(output_dir, rel))
-
-        # Walk up to 3 levels looking for types.proto
-        check_dir = abs_dep
-        for _ in range(3):
-            proto_file = os.path.join(check_dir, "types.proto")
+    cargo_dependencies = {}
+    
+    # 1. Add explicitly defined third-party deps
+    for dep_name, dep_val in raw_deps.items():
+        cargo_dependencies[dep_name] = yaml_dep_to_toml(dep_val)
+        
+    # 2. Add schema-inferred internal dependencies
+    schema_deps = schema.get("dependencies", {})
+    for dep_name in schema_deps.keys():
+        dep_dir = os.path.normpath(os.path.join(schema_dir, "..", dep_name))
+        if os.path.isdir(dep_dir):
+            dep_config_path = os.path.join(dep_dir, "config.yaml")
+            dep_pkg_name = dep_name
+            if os.path.exists(dep_config_path):
+                with open(dep_config_path) as df:
+                    dep_cfg = yaml.safe_load(df) or {}
+                    dep_pkg_name = dep_cfg.get("package", dep_name)
+                    
+            api_crate_name = f"{dep_pkg_name}-wrap"
+            api_crate_snake = api_crate_name.replace("-", "_")
+            
+            # Dependency on the generated wrap crate
+            cargo_dependencies[api_crate_name] = f'{{ path = "../../{dep_name}/generated/wraps/rust" }}'
+            
+            # Extract package name for aliasing
+            proto_file = os.path.join(dep_dir, "types.proto")
             if os.path.exists(proto_file):
-                rel_to_ws   = os.path.relpath(proto_file, project_root)
-                proto_entry = os.path.join(workspace_root_rel, rel_to_ws)
-
-                if proto_entry not in proto_paths:
-                    proto_paths.append(proto_entry)
-                    pkg = read_proto_package(proto_file)
-                    if pkg:
-                        dep_snake = pkg.split(".")[-1]
-                        wrap_abs = os.path.join(check_dir, "wraps", "rust", "src", "wrap.rs")
-                        has_dep_wrap = os.path.exists(wrap_abs)
-                        if has_dep_wrap:
-                            # Wrap is included INSIDE pub mod proto { pub mod {snake} { } }
-                            # in generated/src/lib.rs (an inline module block).
-                            # Rust resolves #[path] relative to the VIRTUAL directory of the
-                            # containing inline module, which is src/proto/{snake}/.
-                            virtual_dir = os.path.join(output_dir, "src", "proto", dep_snake)
-                            wrap_rel = wrap_abs
-                        else:
-                            wrap_rel = None
-                        dep_protos.append({
-                            "package":   pkg,
-                            "snake":     dep_snake,
-                            "has_wrap":  has_dep_wrap,
-                            "wrap_path": wrap_rel,
-                        })
-                break
-            check_dir = os.path.dirname(check_dir)
+                pkg = read_proto_package(proto_file)
+                if pkg:
+                    dep_snake = pkg.split(".")[-1]
+                    dep_protos.append({
+                        "snake": dep_snake,
+                        "api_crate": api_crate_snake,
+                    })
 
     # ── Local proto metadata ─────────────────────────────────────────────────
     local_proto_package = None
@@ -165,16 +170,7 @@ def main():
         local_proto_path = os.path.join(workspace_root_rel, rel_to_ws)
         local_proto_package = read_proto_package(lp)
 
-    # ── Convert dependencies to TOML strings for Cargo.toml template ─────────
-    cargo_dependencies = {}
-    for dep_name, dep_val in raw_deps.items():
-        p = dep_path(dep_val)
-        if p is not None:
-            # Only include path deps whose target actually exists
-            abs_p = os.path.normpath(os.path.join(output_dir, p))
-            if not os.path.exists(os.path.join(abs_p, "Cargo.toml")):
-                continue
-        cargo_dependencies[dep_name] = yaml_dep_to_toml(dep_val)
+
 
     # ── Template context ─────────────────────────────────────────────────────
     module_name_snake = package_name.replace("-", "_")
@@ -183,7 +179,7 @@ def main():
         "module_name":        package_name,
         "module_name_snake":  module_name_snake,
         "version":            version,
-        "sdk_path":           rust_config.get("sdk_path", "../../../veldcore/sdk/rust"),
+        "sdk_path":           sdk_path,
         "sdk_features":       rust_config.get("sdk_features", []),
         "dependencies":       cargo_dependencies,
         "rust": {
@@ -210,6 +206,22 @@ def main():
         os.path.join(output_dir, "rust-toolchain.toml"):          env.get_template("rust-toolchain.toml.j2"),
         os.path.join(output_dir, ".cargo", "config.toml"):        env.get_template("cargo-config.toml.j2"),
     }
+    
+    # ── Render API Crate (Wrap) ──────────────────────────────────────────────
+    if has_local_proto:
+        wrap_dir = os.path.join(output_dir, "wraps", "rust")
+        wrap_renders = {
+            os.path.join(wrap_dir, "src", "lib.rs"): env.get_template("wrap_lib.rs.j2"),
+            os.path.join(wrap_dir, "Cargo.toml"):    env.get_template("wrap_Cargo.toml.j2"),
+            os.path.join(wrap_dir, "build.rs"):      env.get_template("wrap_build.rs.j2"),
+        }
+        renders.update(wrap_renders)
+        
+        template_data["api_crate_name"] = f"{package_name}-wrap"
+        template_data["proto_package"] = local_proto_package
+        template_data["has_custom_wrap"] = has_wrap
+        template_data["wrap_sdk_path"] = wrap_sdk_path
+        template_data["include_proto_dir"] = os.path.join(os.path.relpath(project_root, wrap_dir), "veldcore", "proto").replace("\\", "/")
 
     for path, template in renders.items():
         os.makedirs(os.path.dirname(path), exist_ok=True)

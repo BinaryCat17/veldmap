@@ -1,7 +1,6 @@
 package: veld-ui-service
 language: rust
 rust:
-  sdk_path: "../../../veldcore/sdk/rust"
   sdk_features: ["compute", "app"]
   dependencies:
     prost: "0.14"

@@ -1,0 +1,3 @@
+workspace:
+  modules_dir: "veldmodules"
+  sdk: "veldcore/sdk"

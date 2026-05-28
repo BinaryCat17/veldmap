@@ -1,7 +1,6 @@
 package: veldmap-data-provider
 language: rust
 rust:
-  sdk_path: "../../../veldcore/sdk/rust"
   dependencies:
     prost: "0.14"
     serde:

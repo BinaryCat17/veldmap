@@ -1,0 +1,13 @@
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/{{ proto_package }}.rs"));
+}
+{% if has_custom_wrap %}
+#[path = "../../../../wraps/rust/src/wrap.rs"]
+pub mod custom_wrap;
+pub use custom_wrap::*;
+{% else %}
+pub use proto::*;
+{% endif %}
+
+pub use veldsdk::rpc::core;
+pub use veldsdk::rpc::app;

@@ -1,12 +1,7 @@
 package: veldmap-data-browser
 language: rust
 rust:
-  sdk_path: "../../../veldcore/sdk/rust"
   dependencies:
-    veld-ui-service:
-      path: "../../ui-service/generated"
-    veldmap-data-provider:
-      path: "../../data-provider/generated"
     prost: "0.14"
     serde:
       version: "1.0"

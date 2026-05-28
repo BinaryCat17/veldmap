@@ -87,16 +87,29 @@ def _topo_sort(modules: list[dict]) -> list[dict]:
     # Build adjacency: name -> set of names it depends on
     deps: dict[str, set] = {m["name"]: set() for m in modules}
     for m in modules:
-        config_path = os.path.join(m["dir"], "config.yaml")
-        # Simple scan: look for  path: "../../<name>/generated"  patterns
-        with open(config_path) as f:
-            for line in f:
-                line = line.strip()
-                if "path:" not in line and "path =" not in line:
-                    continue
-                for other in by_name:
-                    if f"/{other}/generated" in line or f"/{other}/generated\"" in line:
-                        deps[m["name"]].add(other)
+        schema_path = os.path.join(m["dir"], "schema.yaml")
+        # Simple scan: look for modules defined in `dependencies:` block
+        try:
+            with open(schema_path) as f:
+                in_deps = False
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if line.startswith("dependencies:"):
+                        in_deps = True
+                        continue
+                    if in_deps:
+                        if not line.startswith(" ") and not line.startswith("\t"):
+                            in_deps = False
+                            continue
+                        # Direct children of dependencies block
+                        if line.startswith("  ") and not line.startswith("   ") and ":" in stripped:
+                            dep_name = stripped.split(":")[0].strip()
+                            if dep_name in by_name:
+                                deps[m["name"]].add(dep_name)
+        except Exception:
+            pass
 
     # Kahn's algorithm
     in_degree = {name: 0 for name in by_name}

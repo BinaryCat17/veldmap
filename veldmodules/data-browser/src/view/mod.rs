@@ -8,7 +8,7 @@ pub mod downloaded;
 pub mod preview;
 
 use crate::module::state::State;
-use crate::{column, row, stack};
+use veld_ui_service_wrap::{column, row, stack};
 use crate::proto::ui::{Element, text, button, Length, Padding};
 
 pub fn build_root(state: &State) -> Element<()> {

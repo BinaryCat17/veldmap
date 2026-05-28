@@ -1162,20 +1162,20 @@ pub mod reexports {
 #[macro_export]
 macro_rules! column {
     ($($x:expr),* $(,)?) => {
-        $crate::proto::ui::Column::new()$(.push($x))*
+        $crate::Column::new()$(.push($x))*
     };
 }
 
 #[macro_export]
 macro_rules! row {
     ($($x:expr),* $(,)?) => {
-        $crate::proto::ui::Row::new()$(.push($x))*
+        $crate::Row::new()$(.push($x))*
     };
 }
 
 #[macro_export]
 macro_rules! stack {
     ($($x:expr),* $(,)?) => {
-        $crate::proto::ui::Stack::new()$(.push($x))*
+        $crate::Stack::new()$(.push($x))*
     };
 }
