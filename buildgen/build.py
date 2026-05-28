@@ -12,14 +12,15 @@ import subprocess
 import sys
 import argparse
 
-# ── Project paths ────────────────────────────────────────────────────────────
-MODULES_DIR      = "veldmodules"
-PLUGINS_DIR      = "veldmodules/plugins"
-WASM_TARGET      = "wasm32-wasip1"
-CORE_MANIFEST    = "veldcore/Cargo.toml"
-WINDOWS_DIST_DIR = "/mnt/c/Users/smirn/Documents/veldmap/build"
+# ── Project paths ─────────────────────────────────────────────────────────────
+PROJECT_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODULES_DIR   = os.path.join(PROJECT_ROOT, "veldmodules")
+PLUGINS_DIR   = os.path.join(PROJECT_ROOT, "build", "plugins")
+RUNTIME_DIR   = os.path.join(PROJECT_ROOT, "runtime")
+WASM_TARGET   = "wasm32-wasip1"
+CORE_MANIFEST = os.path.join(PROJECT_ROOT, "veldcore", "Cargo.toml")
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def run(cmd, cwd=None, env=None):
     """Run a shell command; exit on failure."""
@@ -30,8 +31,13 @@ def run(cmd, cwd=None, env=None):
         sys.exit(1)
 
 
-def _yaml_scalar(path, key):
-    """Read a top-level 'key: value' from a simple YAML file without pyyaml."""
+def _load_yaml_scalar(path: str, key: str) -> str | None:
+    """Read a top-level scalar value from a YAML file.
+
+    Intentionally avoids pyyaml: build.py runs with system Python before
+    the venv is created. Only used for simple top-level string fields
+    (package, language) that never require full YAML parsing.
+    """
     with open(path) as f:
         for line in f:
             stripped = line.strip()
@@ -40,15 +46,17 @@ def _yaml_scalar(path, key):
     return None
 
 
-def discover_modules():
-    """
-    Scan veldmodules/ for module directories.
+def discover_modules() -> list[dict]:
+    """Scan veldmodules/ for module directories, sorted in dependency order.
 
-    A directory is considered a module when it contains both:
+    A directory is a module when it contains both:
       - schema.yaml  (module interface definition)
       - config.yaml  (language + build config)
+
+    Modules that are depended upon (via path deps in config.yaml) are returned
+    before the modules that depend on them (topological sort).
     """
-    modules = []
+    raw = []
     for name in sorted(os.listdir(MODULES_DIR)):
         module_dir = os.path.join(MODULES_DIR, name)
         if not os.path.isdir(module_dir):
@@ -57,43 +65,104 @@ def discover_modules():
         config_path = os.path.join(module_dir, "config.yaml")
         if not os.path.exists(schema_path) or not os.path.exists(config_path):
             continue
-        modules.append({
-            "name":      name,
-            "package":   _yaml_scalar(config_path, "package") or name,
-            "language":  _yaml_scalar(config_path, "language") or "rust",
-            "dir":       module_dir,
+        raw.append({
+            "name":     name,
+            "package":  _load_yaml_scalar(config_path, "package") or name,
+            "language": _load_yaml_scalar(config_path, "language") or "rust",
+            "dir":      module_dir,
         })
-    return modules
 
-# ── Code generation ──────────────────────────────────────────────────────────
+    return _topo_sort(raw)
 
-def generate_code():
-    """Run generate.py for every discovered module."""
-    print("\n[0/2] Generating module bindings...")
-    build_dir = os.path.dirname(os.path.abspath(__file__))
+
+def _topo_sort(modules: list[dict]) -> list[dict]:
+    """Return modules in build order: dependencies before dependents.
+
+    Dependency edges are inferred from 'path' entries in config.yaml:
+    if module A's generated/ is referenced by module B, A must build first.
+    """
+    # Map: module name -> module dict
+    by_name = {m["name"]: m for m in modules}
+
+    # Build adjacency: name -> set of names it depends on
+    deps: dict[str, set] = {m["name"]: set() for m in modules}
+    for m in modules:
+        config_path = os.path.join(m["dir"], "config.yaml")
+        # Simple scan: look for  path: "../../<name>/generated"  patterns
+        with open(config_path) as f:
+            for line in f:
+                line = line.strip()
+                if "path:" not in line and "path =" not in line:
+                    continue
+                for other in by_name:
+                    if f"/{other}/generated" in line or f"/{other}/generated\"" in line:
+                        deps[m["name"]].add(other)
+
+    # Kahn's algorithm
+    in_degree = {name: 0 for name in by_name}
+    for name, dep_set in deps.items():
+        for dep in dep_set:
+            in_degree[name] = in_degree.get(name, 0)
+            # name depends on dep → dep must come first → name's in_degree++
+    # Recompute properly
+    in_degree = {name: 0 for name in by_name}
+    for name, dep_set in deps.items():
+        for dep in dep_set:
+            in_degree[name] += 1
+
+    queue  = [n for n in by_name if in_degree[n] == 0]
+    result = []
+    while queue:
+        queue.sort()  # deterministic order within same level
+        node = queue.pop(0)
+        result.append(by_name[node])
+        for name, dep_set in deps.items():
+            if node in dep_set:
+                in_degree[name] -= 1
+                if in_degree[name] == 0:
+                    queue.append(name)
+
+    if len(result) != len(modules):
+        print("WARNING: Circular dependency detected in modules, using original order.")
+        return modules
+
+    return result
+
+
+
+# ── Code generation ───────────────────────────────────────────────────────────
+
+def ensure_venv() -> str:
+    """Create the buildgen venv if missing; return path to its Python binary."""
+    build_dir  = os.path.dirname(os.path.abspath(__file__))
     venv_python = os.path.join(build_dir, ".venv", "bin", "python")
-    gen_script  = os.path.join(build_dir, "generate.py")
-
     if not os.path.exists(venv_python):
         print("Initializing build venv...")
         run(["python3", "-m", "venv", ".venv"], cwd=build_dir)
         run([venv_python, "-m", "pip", "install", "pyyaml", "jinja2"])
+    return venv_python
+
+
+def generate_code():
+    """Run generate.py for every discovered module (using absolute paths)."""
+    print("\n[0/2] Generating module bindings...")
+    build_dir   = os.path.dirname(os.path.abspath(__file__))
+    venv_python = ensure_venv()
+    gen_script  = os.path.join(build_dir, "generate.py")
 
     for module in discover_modules():
         schema_path   = os.path.join(module["dir"], "schema.yaml")
         generated_dir = os.path.join(module["dir"], "generated")
         print(f"  Generating {module['name']} ...")
-        run(
-            [venv_python, gen_script,
-             "--schema",     f"../{schema_path}",
-             "--output-dir", f"../{generated_dir}"],
-            cwd=build_dir,
-        )
+        run([venv_python, gen_script,
+             "--schema",     schema_path,
+             "--output-dir", generated_dir])
 
-# ── Module builders (one per language) ───────────────────────────────────────
 
-def build_rust_module(module, profile, cargo_args):
-    """Build a standalone Rust WASM module."""
+# ── Module builders (one per language) ────────────────────────────────────────
+
+def build_rust_module(module: dict, profile: str, cargo_args: list):
+    """Build a standalone Rust WASM module and deploy to PLUGINS_DIR."""
     package       = module["package"]
     generated_dir = os.path.join(module["dir"], "generated")
     manifest      = os.path.join(generated_dir, "Cargo.toml")
@@ -104,30 +173,30 @@ def build_rust_module(module, profile, cargo_args):
          "--target", WASM_TARGET,
          ] + cargo_args)
 
-    # Each module owns its own target/ next to its Cargo.toml
     wasm_name   = package.replace("-", "_") + ".wasm"
     source_path = os.path.join(generated_dir, "target", WASM_TARGET, profile, wasm_name)
     dest_path   = os.path.join(PLUGINS_DIR, wasm_name)
 
-    print(f"  Deploying {wasm_name} -> {PLUGINS_DIR}/")
+    print(f"  Deploying {wasm_name} -> build/plugins/")
     shutil.copy(source_path, dest_path)
 
-# ── Main build ────────────────────────────────────────────────────────────────
 
-def build_all(debug=False, windows=False):
+# ── Main build ─────────────────────────────────────────────────────────────────
+
+def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None = None):
     """Generate bindings, build all WASM modules, then build the native host."""
-    profile     = "debug" if debug else "release"
-    cargo_args  = [] if debug else ["--release"]
+    profile    = "debug" if debug else "release"
+    cargo_args = [] if debug else ["--release"]
 
     generate_code()
 
-    # ── 1. WASM modules ──────────────────────────────────────────────────────
+    # 1. WASM modules
     print(f"\n[1/2] Building WASM modules ({profile})...")
     os.makedirs(PLUGINS_DIR, exist_ok=True)
 
     BUILDERS = {
         "rust": build_rust_module,
-        # "go":   build_go_module,   ← extend here for new languages
+        # "go":   build_go_module,  ← extend here for new languages
     }
 
     for module in discover_modules():
@@ -139,7 +208,7 @@ def build_all(debug=False, windows=False):
         else:
             print(f"  WARNING: no builder for language '{lang}', skipping")
 
-    # ── 2. Native host ───────────────────────────────────────────────────────
+    # 2. Native host
     print(f"\n[2/2] Building native host ({profile})...")
     host_args = list(cargo_args)
     if windows:
@@ -151,21 +220,27 @@ def build_all(debug=False, windows=False):
          ] + host_args)
 
     if windows:
-        _deploy_windows(profile)
+        _deploy_windows(profile, dist_dir)
 
-# ── Windows deployment ────────────────────────────────────────────────────────
 
-def _deploy_windows(profile):
-    gui_exe     = os.path.join("veldcore/target", "x86_64-pc-windows-gnu", profile, "veldmap-host-gui.exe")
-    config_dir  = os.path.join(MODULES_DIR, "config")
-    dist_plugins = os.path.join(WINDOWS_DIST_DIR, "plugins")
-    dist_config  = os.path.join(WINDOWS_DIST_DIR, "config")
+# ── Windows deployment ─────────────────────────────────────────────────────────
 
-    print(f"\n[Deploy] -> {WINDOWS_DIST_DIR}")
-    for d in [WINDOWS_DIST_DIR, dist_plugins, dist_config]:
+def _deploy_windows(profile: str, dist_dir: str | None):
+    if dist_dir is None:
+        print("ERROR: --dist-dir is required for --windows deployment.")
+        sys.exit(1)
+
+    gui_exe      = os.path.join(PROJECT_ROOT, "veldcore", "target",
+                                "x86_64-pc-windows-gnu", profile, "veldmap-host-gui.exe")
+    config_dir   = os.path.join(RUNTIME_DIR, "config")
+    dist_plugins = os.path.join(dist_dir, "plugins")
+    dist_config  = os.path.join(dist_dir, "config")
+
+    print(f"\n[Deploy] -> {dist_dir}")
+    for d in [dist_dir, dist_plugins, dist_config]:
         os.makedirs(d, exist_ok=True)
 
-    shutil.copy(gui_exe, os.path.join(WINDOWS_DIST_DIR, "veldmap-host-gui.exe"))
+    shutil.copy(gui_exe, os.path.join(dist_dir, "veldmap-host-gui.exe"))
 
     for wasm in os.listdir(PLUGINS_DIR):
         if wasm.endswith(".wasm"):
@@ -176,23 +251,26 @@ def _deploy_windows(profile):
             if cfg.endswith(".json"):
                 shutil.copy(os.path.join(config_dir, cfg), os.path.join(dist_config, cfg))
 
-    if os.path.exists(".env"):
+    env_file = os.path.join(PROJECT_ROOT, ".env")
+    if os.path.exists(env_file):
         print("  Deploying .env ...")
-        shutil.copy(".env", os.path.join(WINDOWS_DIST_DIR, ".env"))
+        shutil.copy(env_file, os.path.join(dist_dir, ".env"))
 
-    print(f"Windows x64 build deployed to: {WINDOWS_DIST_DIR}")
+    print(f"Windows x64 build deployed to: {dist_dir}")
 
-# ── Clean ─────────────────────────────────────────────────────────────────────
+
+# ── Clean ──────────────────────────────────────────────────────────────────────
 
 def clean():
     """Remove all build artefacts."""
     print("Cleaning project...")
-    targets = ["veldcore/target", PLUGINS_DIR]
+    targets = [
+        os.path.join(PROJECT_ROOT, "veldcore", "target"),
+        PLUGINS_DIR,
+    ]
 
-    # Each module has its own target/ inside generated/
     for module in discover_modules():
-        t = os.path.join(module["dir"], "generated", "target")
-        targets.append(t)
+        targets.append(os.path.join(module["dir"], "generated", "target"))
 
     for folder in targets:
         if os.path.exists(folder):
@@ -200,21 +278,26 @@ def clean():
             shutil.rmtree(folder)
     print("Done.")
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="VeldMap Build Script")
     parser.add_argument("command", choices=["build", "clean"],
                         nargs="?", default="build",
                         help="Command to run (default: build)")
-    parser.add_argument("--debug",   action="store_true", help="Build in debug mode")
-    parser.add_argument("--windows", action="store_true", help="Cross-compile for Windows x86_64")
+    parser.add_argument("--debug",    action="store_true",
+                        help="Build in debug mode")
+    parser.add_argument("--windows",  action="store_true",
+                        help="Cross-compile for Windows x86_64")
+    parser.add_argument("--dist-dir", default=None,
+                        help="Windows deployment directory (required with --windows)")
     args = parser.parse_args()
 
     if args.command == "clean":
         clean()
     else:
-        build_all(debug=args.debug, windows=args.windows)
+        build_all(debug=args.debug, windows=args.windows, dist_dir=args.dist_dir)
         mode   = "DEBUG" if args.debug else "RELEASE"
         target = " (Windows x64)" if args.windows else ""
         print(f"\n{'='*35}")

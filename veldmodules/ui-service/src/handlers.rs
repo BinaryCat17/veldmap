@@ -1,5 +1,5 @@
-use veld_ui::proto::*;
-use crate::module::state::{PluginUiState, LocalState, PendingMessage};
+use crate::proto::ui::*;
+use crate::module::state::{PluginUiState, State, PendingMessage};
 use veldsdk::rpc::app as app_proto;
 use crate::module::renderer::GpuRenderer;
 use crate::module::converter;
@@ -7,7 +7,7 @@ use iced_core::{Point, Event, Size, Theme};
 use iced_runtime::UserInterface;
 use iced_graphics::Viewport;
 
-pub fn handle_set_view(state: &mut LocalState, req: SetViewRequest) {
+pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     let plugin_id = req.plugin_id.clone();
     let surface_format = state.surface_format;
     
@@ -92,7 +92,7 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
     false
 }
 
-pub fn handle_ui_event(state: &mut LocalState, event_proto: app_proto::UiEvent) {
+pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (via publish)");
     
     let is_frame = matches!(event_proto.event, Some(app_proto::ui_event::Event::Frame(_)));
@@ -109,7 +109,7 @@ pub fn handle_ui_event(state: &mut LocalState, event_proto: app_proto::UiEvent) 
     
     // Publish frame event to all subscribers after processing all plugins
     if is_frame {
-        let mut frame_event = veld_ui::proto::FrameEvent { width: 0, height: 0, dt: 0.0 };
+        let mut frame_event = crate::proto::ui::FrameEvent { width: 0, height: 0, dt: 0.0 };
         if let Some(app_proto::ui_event::Event::Frame(f)) = event_proto.event {
             frame_event.dt = f.dt;
         }
@@ -130,7 +130,7 @@ pub fn handle_ui_event(state: &mut LocalState, event_proto: app_proto::UiEvent) 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
 }
 
-fn process_ui_event(state: &mut LocalState, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<()> {
+fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<()> {
     let plugin = state.plugins.entry(plugin_id.to_string()).or_insert_with(PluginUiState::new);
 
     if let Some(ev) = req_event.event {

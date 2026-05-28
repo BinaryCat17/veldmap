@@ -1,6 +1,7 @@
 //! View для экрана браузера
 
-use crate::proto::ui::{column, text, button, scrollable, Element, Length};
+use crate::{column, row};
+use crate::proto::ui::{text, button, scrollable, Element, Length};
 use crate::module::state::State;
 use crate::module::components::browser_list::render_list;
 use crate::module::components::browser_list::BrowserItem;

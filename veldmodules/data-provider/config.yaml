@@ -1,15 +1,19 @@
 package: veldmap-data-provider
 language: rust
 rust:
-  sdk_path: "../../../../veldcore/sdk/rust"
+  sdk_path: "../../../veldcore/sdk/rust"
   dependencies:
-    prost: '"0.14"'
-    serde: '{ version = "1.0", features = ["derive"] }'
-    serde_json: '"1.0"'
-    log: '"0.4"'
-    anyhow: '"1.0"'
-    quick-xml: '"0.36"'
-    aws-sigv4: '"1.2.2"'
-    aws-credential-types: '"1.2.0"'
-    aws-smithy-runtime-api: '{ version = "1.1", features = ["client"] }'
-    url: '"2.5"'
+    prost: "0.14"
+    serde:
+      version: "1.0"
+      features: ["derive"]
+    serde_json: "1.0"
+    log: "0.4"
+    anyhow: "1.0"
+    quick-xml: "0.36"
+    aws-sigv4: "1.2.2"
+    aws-credential-types: "1.2.0"
+    aws-smithy-runtime-api:
+      version: "1.1"
+      features: ["client"]
+    url: "2.5"

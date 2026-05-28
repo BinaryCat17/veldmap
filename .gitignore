@@ -1,10 +1,7 @@
 # Rust artifacts
 **/target/
-plugins/
+build
 
-# Project-specific ignores
-veldgis/data/
-cache/
 
 # Binary data
 *.tif
@@ -19,8 +16,9 @@ cache/
 .idea/
 .vscode/
 
-data
+
 project_context.txt
 
 generated
 .venv
+runtime/data

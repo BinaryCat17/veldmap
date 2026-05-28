@@ -925,7 +925,7 @@ pub struct Image<M> {
 }
 
 impl<M> Image<M> {
-    pub fn new(handle: core::ResourceHandle) -> Self {
+    pub fn new(handle: veldsdk::rpc::core::ResourceHandle) -> Self {
         Self {
             widget: proto::WgpuImage {
                 handle: Some(handle),
@@ -960,7 +960,7 @@ impl<M> From<Image<M>> for Element<M> {
     }
 }
 
-pub fn image<M>(handle: core::ResourceHandle) -> Image<M> {
+pub fn image<M>(handle: veldsdk::rpc::core::ResourceHandle) -> Image<M> {
     Image::new(handle)
 }
 
@@ -1113,16 +1113,17 @@ pub mod render {
     pub fn render(
         plugin_id: &str, 
         root_element: Element<()>, 
-        last_layout: &mut Option<crate::proto::Layout>,
+        last_layout: &mut Option<super::Layout>,
         width: u32,
         height: u32
     ) {
+        use prost::Message;
         let mut root_widget = root_element.widget;
         
         let mut index = 0;
-        let hash = crate::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
+        let hash = super::diffing::assign_ids_and_hash(&mut root_widget, &mut index);
         
-        let new_layout = crate::proto::Layout {
+        let new_layout = super::Layout {
             root: Some(root_widget),
             width,
             height,
@@ -1130,18 +1131,18 @@ pub mod render {
         };
 
         let request = if let Some(ref old_layout) = last_layout {
-            if let Some(patch) = crate::diffing::diff_layouts(old_layout, &new_layout) {
-                Some(crate::proto::SetViewRequest {
+            if let Some(patch) = super::diffing::diff_layouts(old_layout, &new_layout) {
+                Some(super::SetViewRequest {
                     plugin_id: plugin_id.to_string(),
-                    update: Some(crate::proto::set_view_request::Update::Patch(patch)),
+                    update: Some(super::set_view_request::Update::Patch(patch)),
                 })
             } else {
                 None
             }
         } else {
-            Some(crate::proto::SetViewRequest {
+            Some(super::SetViewRequest {
                 plugin_id: plugin_id.to_string(),
-                update: Some(crate::proto::set_view_request::Update::FullLayout(new_layout.clone())),
+                update: Some(super::set_view_request::Update::FullLayout(new_layout.clone())),
             })
         };
 
@@ -1161,20 +1162,20 @@ pub mod reexports {
 #[macro_export]
 macro_rules! column {
     ($($x:expr),* $(,)?) => {
-        $crate::Column::new()$(.push($x))*
+        $crate::proto::ui::Column::new()$(.push($x))*
     };
 }
 
 #[macro_export]
 macro_rules! row {
     ($($x:expr),* $(,)?) => {
-        $crate::Row::new()$(.push($x))*
+        $crate::proto::ui::Row::new()$(.push($x))*
     };
 }
 
 #[macro_export]
 macro_rules! stack {
     ($($x:expr),* $(,)?) => {
-        $crate::Stack::new()$(.push($x))*
+        $crate::proto::ui::Stack::new()$(.push($x))*
     };
 }

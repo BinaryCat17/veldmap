@@ -1,4 +1,4 @@
-use veld_ui::proto;
+use crate::proto::ui as proto;
 use veldsdk::OwnedResource;
 use std::collections::HashMap;
 use std::cell::RefCell;
@@ -58,16 +58,16 @@ pub struct PluginUiState {
     pub surface_handle: RefCell<Option<u64>>,
 }
 
-pub struct LocalState {
+pub struct State {
     pub plugins: HashMap<String, PluginUiState>,
     pub renderer: GpuRenderer,
     pub surface_format: i32,
 }
 
-unsafe impl Send for LocalState {}
-unsafe impl Sync for LocalState {}
+unsafe impl Send for State {}
+unsafe impl Sync for State {}
 
-impl LocalState {
+impl State {
     pub fn new() -> Self {
         let sf = veldsdk::rpc::host::get_config("surface_format")
             .and_then(|s| s.parse::<i32>().ok())
@@ -76,7 +76,7 @@ impl LocalState {
         Self {
             plugins: HashMap::new(),
             renderer: GpuRenderer::new("JetBrains Mono", vec![
-                ("JetBrains Mono", include_bytes!("../../assets/JetBrainsMono.ttf")),
+                ("JetBrains Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
             ]),
             surface_format: sf,
         }

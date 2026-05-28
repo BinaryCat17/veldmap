@@ -1,4 +1,4 @@
-pub use crate::module::state::LocalState;
+pub use crate::module::state::State;
 
 mod state;
 mod handlers;
@@ -7,15 +7,11 @@ mod converter;
 mod graphics;
 
 #[derive(serde::Deserialize, Clone)]
-pub struct LocalConfig {}
-
-// -- Types --
-pub use LocalConfig as Config;
-pub use LocalState as State;
+pub struct Config {}
 
 // -- Init --
-pub fn init_module(_config: LocalConfig) -> anyhow::Result<LocalState> {
-    Ok(LocalState::new())
+pub fn init(_config: Config) -> anyhow::Result<State> {
+    Ok(State::new())
 }
 
 // -- Input handlers --

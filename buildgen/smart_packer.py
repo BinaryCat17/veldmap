@@ -1,6 +1,5 @@
-﻿import os
+import os
 import subprocess
-import hashlib
 
 # --- НАСТРОЙКИ ---
 OUTPUT_FILE = "project_context.txt"
@@ -18,18 +17,6 @@ ALLOWED_EXTENSIONS = {
     '.qml', '.js', '.rs', '.toml', '.py'                               # UI
 }
 
-def get_file_hash(filepath):
-    """Считает хеш файла, чтобы найти полные дубликаты по содержимому"""
-    hasher = hashlib.md5()
-    try:
-        with open(filepath, 'rb') as f:
-            buf = f.read(65536)
-            while len(buf) > 0:
-                hasher.update(buf)
-                buf = f.read(65536)
-        return hasher.hexdigest()
-    except:
-        return None
 
 def is_allowed(filename):
     if filename in BLACKLIST_FILES: return False
@@ -74,30 +61,22 @@ def create_dump():
                 raw_files.append(os.path.join(root, file))
 
     # 2. УМНАЯ ФИЛЬТРАЦИЯ (Deduplication)
-    unique_paths = {} # {canonical_path: original_relative_path}
-    seen_hashes = set()
-    
+    unique_paths = {}  # {canonical_path: original_relative_path}
+
     print("Обработка файлов...")
     for rel_path in raw_files:
         filename = os.path.basename(rel_path)
-        
+
         # Проверка 1: Черный список и расширения
         if not is_allowed(filename): continue
         if any(d in rel_path.split(os.sep) for d in BLACKLIST_DIRS): continue
 
         # Проверка 2: Канонический путь (Abs + LowerCase)
         full_path = os.path.abspath(rel_path)
-        canonical = os.path.normcase(full_path) # c:\proj\file.c == C:\Proj\File.c
-        
+        canonical = os.path.normcase(full_path)  # c:\proj\file.c == C:\Proj\File.c
+
         if canonical in unique_paths:
-            continue # Уже есть этот путь
-            
-        # Проверка 3: Хеш содержимого (на случай симлинков или копий)
-        # file_hash = get_file_hash(full_path)
-        # if file_hash and file_hash in seen_hashes:
-        #    print(f"  -> Пропуск дубликата по содержимому: {rel_path}")
-        #    continue
-        # seen_hashes.add(file_hash)
+            continue  # Уже есть этот путь
 
         unique_paths[canonical] = rel_path
 

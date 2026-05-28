@@ -1,6 +1,7 @@
 //! view/preview.rs — экран предпросмотра изображения
 
-use crate::proto::ui::{column, row, text, button, container, image, Element, Length, Alignment, Padding};
+use crate::{column, row, stack};
+use crate::proto::ui::{text, button, container, image, Element, Length, Padding, Alignment};
 use crate::module::state::State;
 
 pub fn view(state: &State) -> Element<()> {

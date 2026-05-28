@@ -143,6 +143,7 @@ where
                 };
 
                 let mut store = Store::new(&engine, state);
+                linker.define_unknown_imports_as_traps(&module)?;
                 let instance = linker.instantiate_async(&mut store, &module).await?;
 
                 // Call init if it exists

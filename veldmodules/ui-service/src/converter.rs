@@ -1,4 +1,4 @@
-use veld_ui::proto;
+use crate::proto::ui as proto;
 use crate::module::renderer::GpuRenderer;
 use iced_widget::{column, row, text, button, container, scrollable, progress_bar, stack, tooltip, Space};
 use iced_core::{Element, Theme, Length, Color, alignment, Size};

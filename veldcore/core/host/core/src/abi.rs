@@ -9,27 +9,27 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         Box::new(async move {
             let mem = match caller.get_export("memory") {
                 Some(Extern::Memory(m)) => m,
-                _ => return Ok(0u64),
+                _ => return Ok(()),
             };
 
             let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
             let req_buf = match data_bytes {
                 Some(b) => b,
-                None => return Ok(0u64),
+                None => return Ok(()),
             };
 
             let request = match RpcRequest::decode(&req_buf[..]) {
                 Ok(r) => r,
                 Err(e) => {
                     crate::verror!(crate::logging::FLAG_ABI, "[{}] RpcRequest decode error in publish: {}", caller.data().plugin_name, e);
-                    return Ok(0u64);
+                    return Ok(());
                 }
             };
 
             let topic = format!("{}/{}", request.service, request.method);
             let dispatcher = caller.data().dispatcher.clone();
             dispatcher.publish(&topic, request.payload);
-            Ok(0u64)
+            Ok(())
         })
     })?;
 
@@ -270,6 +270,14 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             }
             Ok(0u64)
         })
+    })?;
+
+    // Dummy implementations for wasm-bindgen to allow UI service to load
+    linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_describe", |_: u32| {
+        // Ignored
+    })?;
+    linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_throw", |_: u32, _: u32| {
+        // Ignored
     })?;
 
     Ok(())
