@@ -1,3 +1,6 @@
+# Standalone workspace — prevents cargo from inheriting a parent workspace
+[workspace]
+
 [package]
 name = "{{ module_name }}"
 version = "{{ version }}"
@@ -15,3 +18,9 @@ veldsdk = { path = "{{ sdk_path }}"{% if sdk_features %}, features = [{% for fea
 
 [build-dependencies]
 prost-build = "0.14"
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+lto = true
+codegen-units = 1

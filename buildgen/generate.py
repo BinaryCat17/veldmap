@@ -164,20 +164,24 @@ def main():
     template_rs = env.get_template("lib.rs.j2")
     template_toml = env.get_template("Cargo.toml.j2")
     template_build = env.get_template("build.rs.j2")
+    template_toolchain = env.get_template("rust-toolchain.toml.j2")
+    template_cargo_config = env.get_template("cargo-config.toml.j2")
 
     # Render templates
     rendered_rust = template_rs.render(template_data)
     rendered_toml = template_toml.render(template_data)
     rendered_build = template_build.render(template_data)
+    rendered_toolchain = template_toolchain.render(template_data)
+    rendered_cargo_config = template_cargo_config.render(template_data)
 
     # Save to output directory
     src_dir = os.path.join(args.output_dir, "src")
     os.makedirs(src_dir, exist_ok=True)
-    
+
     lib_rs_path = os.path.join(src_dir, "lib.rs")
     with open(lib_rs_path, 'w') as f:
         f.write(rendered_rust)
-        
+
     cargo_toml_path = os.path.join(args.output_dir, "Cargo.toml")
     with open(cargo_toml_path, 'w') as f:
         f.write(rendered_toml)
@@ -185,6 +189,17 @@ def main():
     build_rs_path = os.path.join(args.output_dir, "build.rs")
     with open(build_rs_path, 'w') as f:
         f.write(rendered_build)
+
+    # Per-module toolchain: each generated/ is fully self-contained
+    toolchain_path = os.path.join(args.output_dir, "rust-toolchain.toml")
+    with open(toolchain_path, 'w') as f:
+        f.write(rendered_toolchain)
+
+    # Per-module cargo config: build flags, no shared .cargo/ in veldmodules root
+    cargo_config_dir = os.path.join(args.output_dir, ".cargo")
+    os.makedirs(cargo_config_dir, exist_ok=True)
+    with open(os.path.join(cargo_config_dir, "config.toml"), 'w') as f:
+        f.write(rendered_cargo_config)
 
     print(f"✅ Generated module at {args.output_dir}")
 
