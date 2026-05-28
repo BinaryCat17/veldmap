@@ -1,6 +1,6 @@
 //! view/downloaded.rs — экран скачанных файлов
 
-use veld_ui_service_wrap::{column, row, stack};
+use veld_ui_service_wrap::column;
 use crate::proto::ui::{text, scrollable, Element, Length, Padding};
 use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, BrowserItem};

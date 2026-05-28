@@ -1117,7 +1117,6 @@ pub mod render {
         width: u32,
         height: u32
     ) {
-        use prost::Message;
         let mut root_widget = root_element.widget;
         
         let mut index = 0;

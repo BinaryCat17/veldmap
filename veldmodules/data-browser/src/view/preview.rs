@@ -1,6 +1,6 @@
 //! view/preview.rs — экран предпросмотра изображения
 
-use veld_ui_service_wrap::{column, row, stack};
+use veld_ui_service_wrap::{column, row};
 use crate::proto::ui::{text, button, container, image, Element, Length, Padding, Alignment};
 use crate::module::state::State;
 

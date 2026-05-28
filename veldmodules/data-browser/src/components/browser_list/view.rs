@@ -1,7 +1,7 @@
 //! components/browser_list/view.rs — рендеринг списка файлов
 
-use veld_ui_service_wrap::{column, row, stack};
-use crate::proto::ui::{text, button, Element, Length, Alignment, Padding, Color};
+use veld_ui_service_wrap::{column, row};
+use crate::proto::ui::{text, button, Element, Length, Alignment};
 use crate::module::components::browser_list::BrowserItem;
 use crate::module::components::task_manager::TaskManager;
 

@@ -27,10 +27,3 @@ compute = []
 app = []
 pdk = []
 client = []
-
-[profile.release]
-opt-level = 3
-lto = false
-codegen-units = 16
-panic = "abort"
-strip = true

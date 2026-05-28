@@ -4,12 +4,7 @@ use crate::compute::{
     ComputeResourceRequest, ComputeResourceResponse, Submit, CommandBuffer,
     compute_resource_request::Command as ComputeCommand,
     wgpu_command::Command as WgpuCommand,
-    CreateTexture, CreateBuffer, CreateShaderModule, CreateRenderPipeline,
-    CreateSampler, CreateTextureView, CreateBindGroupLayout, CreateBindGroup,
-    bind_group_layout_entry::Ty, BufferBindingLayout, SamplerBindingLayout,
-    TextureBindingLayout, StepMode, VertexAttribute, VertexBufferLayout,
-    PrimitiveTopology, FrontFace, CullMode, IndexFormat, BindGroupEntry,
-    bind_group_entry, FilterMode, TextureFormat,
+    bind_group_layout_entry::Ty,
 };
 use image::GenericImageView;
 use prost::Message;

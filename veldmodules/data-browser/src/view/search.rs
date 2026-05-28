@@ -1,6 +1,6 @@
 //! View для экрана поиска
 
-use veld_ui_service_wrap::{column, row, stack};
+use veld_ui_service_wrap::{column, row};
 use crate::proto::ui::{text, text_input, button, scrollable, Element, Length};
 use crate::module::state::State;
 use crate::module::components::browser_list::render_list;
