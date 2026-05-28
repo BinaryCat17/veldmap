@@ -1,0 +1,5 @@
+workspace:
+  modules_dir: "veldmodules"
+  sdk: "veldcore/sdk"
+  services_config: "runtime/config/services.json"
+  plugins_dir: "build/plugins"

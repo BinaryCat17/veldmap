@@ -12,15 +12,24 @@ import subprocess
 import sys
 import argparse
 
-# ── Project paths ─────────────────────────────────────────────────────────────
-PROJECT_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODULES_DIR   = os.path.join(PROJECT_ROOT, "veldmodules")
-PLUGINS_DIR   = os.path.join(PROJECT_ROOT, "build", "plugins")
-RUNTIME_DIR   = os.path.join(PROJECT_ROOT, "runtime")
-WASM_TARGET   = "wasm32-wasip1"
-CORE_MANIFEST = os.path.join(PROJECT_ROOT, "veldcore", "Cargo.toml")
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _load_yaml_scalar(path: str, key: str) -> str | None:
+    """Read a top-level scalar value from a YAML file.
+
+    Intentionally avoids pyyaml: build.py runs with system Python before
+    the venv is created. Only used for simple top-level string fields
+    (package, language) that never require full YAML parsing.
+    """
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith(f"{key}:"):
+                return stripped.split(":", 1)[1].strip()
+    return None
+
 
 def run(cmd, cwd=None, env=None):
     """Run a shell command; exit on failure."""
@@ -31,19 +40,27 @@ def run(cmd, cwd=None, env=None):
         sys.exit(1)
 
 
-def _load_yaml_scalar(path: str, key: str) -> str | None:
-    """Read a top-level scalar value from a YAML file.
+# ── Project paths ─────────────────────────────────────────────────────────────
+PROJECT_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKSPACE_PATH = os.path.join(PROJECT_ROOT, "workspace.yaml")
 
-    Intentionally avoids pyyaml: build.py runs with system Python before
-    the venv is created. Only used for simple top-level string fields
-    (package, language) that never require full YAML parsing.
-    """
-    with open(path) as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped.startswith(f"{key}:"):
-                return stripped.split(":", 1)[1].strip()
-    return None
+_modules_val = _load_yaml_scalar(WORKSPACE_PATH, "modules_dir")
+if _modules_val:
+    _modules_val = _modules_val.strip('"\'')
+else:
+    _modules_val = "veldmodules"
+
+_plugins_val = _load_yaml_scalar(WORKSPACE_PATH, "plugins_dir")
+if _plugins_val:
+    _plugins_val = _plugins_val.strip('"\'')
+else:
+    _plugins_val = "build/plugins"
+
+MODULES_DIR   = os.path.join(PROJECT_ROOT, _modules_val)
+PLUGINS_DIR   = os.path.join(PROJECT_ROOT, _plugins_val)
+RUNTIME_DIR   = os.path.join(PROJECT_ROOT, "runtime")
+WASM_TARGET   = "wasm32-wasip1"
+CORE_MANIFEST = os.path.join(PROJECT_ROOT, "veldcore", "Cargo.toml")
 
 
 def discover_modules() -> list[dict]:

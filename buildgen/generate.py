@@ -111,7 +111,7 @@ def main():
     ]
 
     # ── Workspace Config ─────────────────────────────────────────────────────
-    workspace_path = os.path.join(project_root, "veld-workspace.yaml")
+    workspace_path = os.path.join(project_root, "workspace.yaml")
     workspace_data = {}
     if os.path.exists(workspace_path):
         with open(workspace_path) as f:
