@@ -115,7 +115,7 @@ def build_all(debug=False, windows=False):
 def clean():
     """Remove build artifacts."""
     print("Cleaning project...")
-    folders_to_remove = ["veldcore/target", "veldgis/target", "veldsdk/rust/target", PLUGINS_DIR]
+    folders_to_remove = ["veldcore/target", "veldmodules/target", "veldcore/sdk/rust/target", PLUGINS_DIR]
     for folder in folders_to_remove:
         if os.path.exists(folder):
             print(f"Removing {folder}/")

@@ -7,7 +7,7 @@ import argparse
 def main():
     parser = argparse.ArgumentParser(description="VeldMap Run Script")
     parser.add_argument("--debug", action="store_true", help="Run debug build")
-    parser.add_argument("--config", default="veldgis/config", help="Path to config directory")
+    parser.add_argument("--config", default="veldmodules/config", help="Path to config directory")
     parser.add_argument("--vulkan", action="store_true", help="Force Vulkan backend")
     parser.add_argument("--backend", default=None, help="Force specific WGPU backend (vulkan, gl, dx12, etc.)")
     

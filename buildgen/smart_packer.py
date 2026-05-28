@@ -52,10 +52,10 @@ def get_git_files(root_path):
         return None
 
 def create_dump():
-    # Определяем корень проекта (родительская папка, если скрипт в tools/)
+    # Определяем корень проекта (родительская папка, если скрипт в buildgen/)
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Если скрипт в tools, поднимаемся на уровень выше. Если в корне - остаемся.
-    project_root = os.path.dirname(script_dir) if os.path.basename(script_dir) == 'tools' else script_dir
+    # Если скрипт в buildgen, поднимаемся на уровень выше. Если в корне - остаемся.
+    project_root = os.path.dirname(script_dir) if os.path.basename(script_dir) == 'buildgen' else script_dir
     
     if os.getcwd() != project_root:
         print(f"Меняем рабочую папку на: {project_root}")

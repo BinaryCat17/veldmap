@@ -76,7 +76,7 @@ impl LocalState {
         Self {
             plugins: HashMap::new(),
             renderer: GpuRenderer::new("JetBrains Mono", vec![
-                ("JetBrains Mono", include_bytes!("../../../../veldgis/assets/JetBrainsMono.ttf")),
+                ("JetBrains Mono", include_bytes!("../../assets/JetBrainsMono.ttf")),
             ]),
             surface_format: sf,
         }

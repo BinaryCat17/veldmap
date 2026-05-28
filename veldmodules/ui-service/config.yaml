@@ -13,8 +13,6 @@ rust:
     iced_widget: '{ version = "0.13", default-features = false }'
     iced_renderer: '{ version = "0.13", features = ["tiny-skia"] }'
     cosmic-text: '"0.12"'
-    futures-util: '"0.3"'
-    lazy_static: '"1.4"'
   config: "crate::module::LocalConfig"
   state: "crate::module::LocalState"
   init: "crate::module::init_module"
