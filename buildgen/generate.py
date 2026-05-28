@@ -77,8 +77,10 @@ def main():
                 check_dir = abs_dep_path
                 for _ in range(3):
                     if os.path.exists(os.path.join(check_dir, "types.proto")):
-                        rel_include = os.path.relpath(check_dir, args.output_dir)
-                        proto_file = os.path.join(rel_include, "types.proto")
+                        # Use path relative to workspace root for protoc
+                        rel_to_ws = os.path.relpath(os.path.join(check_dir, "types.proto"), os.path.join(script_dir, ".."))
+                        proto_file = os.path.join(workspace_root_rel, rel_to_ws)
+                        
                         if proto_file not in proto_paths:
                             proto_paths.append(proto_file)
                             
@@ -94,7 +96,8 @@ def main():
                                 # Check for wrap
                                 wrap_path_abs = os.path.join(check_dir, "wraps", "rust", "src", "wrap.rs")
                                 has_dep_wrap = os.path.exists(wrap_path_abs)
-                                rel_wrap_path = os.path.relpath(wrap_path_abs, args.output_dir) if has_dep_wrap else None
+                                # rel_wrap_path must be relative to the file where it is used (src/lib.rs)
+                                rel_wrap_path = os.path.relpath(wrap_path_abs, os.path.join(args.output_dir, "src")) if has_dep_wrap else None
                                 
                                 dep_protos.append({
                                     "package": package_name_proto,

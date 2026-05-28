@@ -1,5 +1,5 @@
-use crate::proto::data_provider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded};
-use crate::proto::ui_service::proto::UiEventResponse;
+use crate::proto::dataprovider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded};
+use crate::proto::ui::proto::UiEventResponse;
 
 use crate::module::state::{State, downloaded::DownloadStatus};
 use crate::module::components::task_manager::TaskKind;

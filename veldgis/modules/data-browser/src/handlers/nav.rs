@@ -1,6 +1,6 @@
 use crate::module::state::{State, Screen, downloaded::LocalFile};
 use veldsdk::rpc::core::FsListRequest;
-use crate::proto::ui_service::proto::UiEventResponse;
+use crate::proto::ui::proto::UiEventResponse;
 
 pub fn on_input_nav_browse(state: &mut State, _event: UiEventResponse) {
     state.current_screen = Screen::Browse;

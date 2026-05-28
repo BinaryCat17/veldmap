@@ -1,4 +1,4 @@
-use crate::proto::ui_service::proto::UiEventResponse;
+use crate::proto::ui::proto::UiEventResponse;
 use crate::module::state::State;
 
 /// Браузинг запрошен (через UI событие)
@@ -21,7 +21,7 @@ pub fn on_input_browse(
     }
     
     // Публикуем запрос к data-provider
-    veldsdk::call!("data-provider/list_path", crate::proto::data_provider::ListPathRequest {
+    veldsdk::call!("data-provider/list_path", crate::proto::dataprovider::ListPathRequest {
         path: target_path,
         token: String::new(),
     });
@@ -45,7 +45,7 @@ pub fn on_input_browse_up(
     state.browse.current_path = path.clone();
     state.browse.is_loading = true;
     
-    veldsdk::call!("data-provider/list_path", crate::proto::data_provider::ListPathRequest {
+    veldsdk::call!("data-provider/list_path", crate::proto::dataprovider::ListPathRequest {
         path,
         token: String::new(),
     });
@@ -53,7 +53,7 @@ pub fn on_input_browse_up(
 
 pub fn on_sub_list_path_result(
     state: &mut State,
-    response: crate::proto::data_provider::ListPathResponse,
+    response: crate::proto::dataprovider::ListPathResponse,
 ) {
     state.browse.is_loading = false;
     state.browse.items = response.items.into_iter().map(|s| {

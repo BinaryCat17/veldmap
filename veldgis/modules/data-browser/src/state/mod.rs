@@ -8,7 +8,7 @@ pub struct State {
     pub downloaded: downloaded::DownloadedState,
     pub preview: preview::PreviewState,
     pub global: types::GlobalState,
-    pub last_layout: Option<crate::proto::ui_service::proto::Layout>,
+    pub last_layout: Option<crate::proto::ui::proto::Layout>,
 }
 
 impl State {

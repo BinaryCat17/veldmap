@@ -1,6 +1,6 @@
 //! styles.rs — стили приложения (обновлено под чистую архитектуру)
 
-use crate::proto::ui_service::{Style, ButtonStyle, WidgetStyle, Color, Border, Background, Button, Padding};
+use crate::proto::ui::{Style, ButtonStyle, WidgetStyle, Color, Border, Background, Button, Padding};
 
 // --- Colors ---
 pub const COLOR_TEXT: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
@@ -100,7 +100,7 @@ pub fn apply_file<M>(btn: Button<M>) -> Button<M> {
     btn.style(file_button_style()).padding(5.0)
 }
 
-pub fn apply_search_input<M>(input: crate::proto::ui_service::TextInput<M>) -> crate::proto::ui_service::TextInput<M> {
+pub fn apply_search_input<M>(input: crate::proto::ui::TextInput<M>) -> crate::proto::ui::TextInput<M> {
     input.padding(10.0).size(16.0)
 }
 

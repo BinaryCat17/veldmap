@@ -1,6 +1,6 @@
 //! view/preview.rs — экран предпросмотра изображения
 
-use crate::proto::ui_service::{column, row, text, button, container, image, Element, Length, Alignment, Padding};
+use crate::proto::ui::{column, row, text, button, container, image, Element, Length, Alignment, Padding};
 use crate::module::state::State;
 
 pub fn view(state: &State) -> Element<()> {
@@ -25,7 +25,7 @@ pub fn view(state: &State) -> Element<()> {
             ].spacing(20.0).align_items(Alignment::Center),
 
             container(
-                image::<()>(crate::proto::ui_service::core::ResourceHandle { id: *handle, content_hash: Vec::new(), size: 0 })
+                image::<()>(crate::proto::ui::core::ResourceHandle { id: *handle, content_hash: Vec::new(), size: 0 })
                     .width(Length::Fill)
                     .height(Length::Fill)
             )

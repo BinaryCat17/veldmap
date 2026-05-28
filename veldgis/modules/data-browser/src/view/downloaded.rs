@@ -1,6 +1,6 @@
 //! view/downloaded.rs — экран скачанных файлов
 
-use crate::proto::ui_service::{column, text, scrollable, Element, Length, Padding};
+use crate::proto::ui::{column, text, scrollable, Element, Length, Padding};
 use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, BrowserItem};
 

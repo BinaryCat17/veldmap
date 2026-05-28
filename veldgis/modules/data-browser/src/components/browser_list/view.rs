@@ -1,6 +1,6 @@
 //! components/browser_list/view.rs — рендеринг списка файлов
 
-use crate::proto::ui_service::{column, row, text, button, Element, Length, Alignment};
+use crate::proto::ui::{column, row, text, button, Element, Length, Alignment};
 use crate::module::components::browser_list::BrowserItem;
 use crate::module::components::task_manager::TaskManager;
 

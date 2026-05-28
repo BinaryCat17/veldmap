@@ -8,7 +8,7 @@ pub mod downloaded;
 pub mod preview;
 
 use crate::module::state::State;
-use crate::proto::ui_service::{Element, column, row, text, button, Length, Padding};
+use crate::proto::ui::{Element, column, row, text, button, Length, Padding};
 
 pub fn build_root(state: &State) -> Element<()> {
     let main_content = match state.current_screen {

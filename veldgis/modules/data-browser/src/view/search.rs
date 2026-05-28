@@ -1,6 +1,6 @@
 //! View для экрана поиска
 
-use crate::proto::ui_service::{column, row, text, text_input, button, scrollable, Element, Length};
+use crate::proto::ui::{column, row, text, text_input, button, scrollable, Element, Length};
 use crate::module::state::State;
 use crate::module::components::browser_list::render_list;
 use crate::module::components::browser_list::BrowserItem;
