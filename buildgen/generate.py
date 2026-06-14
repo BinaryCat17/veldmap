@@ -180,7 +180,7 @@ def main():
         "module_name_snake":  module_name_snake,
         "version":            version,
         "sdk_path":           sdk_path,
-        "sdk_features":       rust_config.get("sdk_features", []),
+        "sdk_features":       config_data.get("sdk_features", []),
         "dependencies":       cargo_dependencies,
         "rust": {
             "config": "crate::module::Config",
