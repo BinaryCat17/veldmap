@@ -46,22 +46,15 @@ impl OwnedResource {
 
 impl Drop for OwnedResource {
     fn drop(&mut self) {
-        // Direct arena release — no RPC, no protobuf, no dispatcher
         #[cfg(feature = "pdk")]
         {
-            let req = rpc::core::ReleaseResourceRequest { id: self.handle.id };
-            crate::publish!("system/release_resource", req);
+            rpc::host::arena_free(self.handle.id);
         }
     }
 }
 
 impl Clone for OwnedResource {
     fn clone(&self) -> Self {
-        #[cfg(feature = "pdk")]
-        {
-            let req = rpc::core::AcquireResourceRequest { id: self.handle.id };
-            crate::publish!("system/acquire_resource", req);
-        }
         Self { handle: self.handle.clone() }
     }
 }

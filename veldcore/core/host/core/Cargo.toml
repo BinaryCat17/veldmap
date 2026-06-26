@@ -22,7 +22,6 @@ wgpu = "28.0"
 dashmap = "6.0"
 async-trait = "0.1"
 blake3 = "1.5"
-image = "0.25"
 
 [build-dependencies]
 prost-build = "0.14"

@@ -85,7 +85,7 @@ impl NativeService for SystemService {
             }
             "create_data" => {
                 let req = CreateDataRequest::decode(&payload[..])?;
-                let id = self.resources.create_data_resource(vec![0u8; req.size as usize], requestor_id);
+                let id = self.resources.arena().alloc_cpu(vec![0u8; req.size as usize], requestor_id);
                 let handle = ResourceHandle {
                     id,
                     size: req.size,
@@ -162,36 +162,6 @@ impl NativeService for SystemService {
                 } else {
                     Err(anyhow::anyhow!("Task not found"))
                 }
-            }
-            "acquire_resource" => {
-                use veldmap_host_core::core::AcquireResourceRequest;
-                let req = AcquireResourceRequest::decode(&payload[..])?;
-                if self.resources.acquire_resource(req.id, requestor_id) {
-                    Ok(Vec::new())
-                } else {
-                    Err(anyhow::anyhow!("Resource {} not found or unauthorized", req.id))
-                }
-            }
-            "release_resource" => {
-                use veldmap_host_core::core::ReleaseResourceRequest;
-                let req = ReleaseResourceRequest::decode(&payload[..])?;
-                self.resources.release_resource(req.id, requestor_id);
-                Ok(Vec::new())
-            }
-            "freeze_resource" => {
-                use veldmap_host_core::core::FreezeResourceRequest;
-                let req = FreezeResourceRequest::decode(&payload[..])?;
-                if self.resources.freeze_resource(req.id, requestor_id) {
-                    Ok(Vec::new())
-                } else {
-                    Err(anyhow::anyhow!("Resource {} not found to freeze or unauthorized", req.id))
-                }
-            }
-            "destroy_resource" => {
-                use veldmap_host_core::core::DestroyResourceRequest;
-                let req = DestroyResourceRequest::decode(&payload[..])?;
-                self.resources.destroy_resource(req.id, requestor_id);
-                Ok(Vec::new())
             }
             _ => Err(anyhow::anyhow!("Unknown system method")),
         }

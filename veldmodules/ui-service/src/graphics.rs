@@ -6,7 +6,7 @@ use crate::module::renderer::{GpuRenderer, DrawCmd};
 use veldsdk::compute::*;
 use veldsdk::compute::create_resource;
 use veldsdk::compute::wgpu_proxy::ComputeRecorder;
-use veldsdk::rpc::host::gpu_write_resource;
+use veldsdk::rpc::host::{arena_write, arena_alloc_buffer, arena_alloc_texture};
 use veldsdk::rpc::core::ResourceHandle;
 use veldsdk::OwnedResource;
 
@@ -65,7 +65,7 @@ pub fn render_ui(
     if let Some(u_id) = *plugin.uniform_buffer_id.borrow() {
         let res_data: [f32; 2] = [logical_w, logical_h];
         let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
-        let _ = gpu_write_resource(u_id, 0, data);
+        arena_write(u_id, 0, data);
     }
 
     // Update texture atlas if dirty
@@ -74,7 +74,7 @@ pub fn render_ui(
         if let Some(tid) = renderer.atlas_texture_id {
             // NOTE: For dzn (DirectX 12 on Vulkan), we need full texture writes only
             let data = renderer.atlas_data_full();
-            let _ = gpu_write_resource(tid, 0, data);
+            arena_write(tid, 0, data);
             renderer.mark_atlas_clean();
         }
     }
@@ -95,23 +95,8 @@ pub fn render_ui(
 /// Create offscreen texture for UI rendering
 fn create_offscreen_texture(width: u32, height: u32, surface_format: i32) -> anyhow::Result<u64> {
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-TEXTURE] START {}x{}", width, height);
-    let texture_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-        instance_id: 0,
-        command: Some(compute_resource_request::Command::CreateTexture(CreateTexture {
-            width, height, 
-            format: surface_format, 
-            usage: 2 | 4 | 16, // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC
-            dimension: 1, 
-            mip_level_count: 1, 
-            sample_count: 1, 
-            depth_or_array_layers: 1, 
-            readonly: false
-        }))
-    };
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-TEXTURE] Calling compute service");
-    let texture_res = create_resource(&texture_req)?;
-    let texture_id = texture_res.handle.ok_or_else(|| anyhow!("Failed to create offscreen texture"))?.id;
+    let texture_id = arena_alloc_texture(width, height, surface_format, 2 | 4 | 16)
+        .ok_or_else(|| anyhow!("Failed to allocate offscreen texture"))?;
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-TEXTURE] END, texture_id={}", texture_id);
     Ok(texture_id)
 }
@@ -150,38 +135,26 @@ fn render_geometry(
     // Ensure vertex buffer exists
     let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
     if vertex_buffer.is_none() {
-        let req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
-            command: Some(compute_resource_request::Command::CreateBuffer(CreateBuffer {
-                size: 1024 * 1024 * 8, usage: 32, mapped_at_creation: false, readonly: false
-            }))
-        };
-        let res = create_resource(&req)?;
-        *vertex_buffer = res.handle.map(OwnedResource::new);
+        let id = arena_alloc_buffer(1024 * 1024 * 8, 32, false)
+            .ok_or_else(|| anyhow!("Failed to allocate vertex buffer"))?;
+        *vertex_buffer = Some(OwnedResource::new(ResourceHandle { id, size: 1024 * 1024 * 8, ..Default::default() }));
     }
 
     // Ensure index buffer exists
     let mut index_buffer = plugin.index_buffer.borrow_mut();
     if index_buffer.is_none() {
-        let req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
-            command: Some(compute_resource_request::Command::CreateBuffer(CreateBuffer {
-                size: 1024 * 1024 * 2, usage: 16, mapped_at_creation: false, readonly: false
-            }))
-        };
-        let res = create_resource(&req)?;
-        *index_buffer = res.handle.map(OwnedResource::new);
+        let id = arena_alloc_buffer(1024 * 1024 * 2, 16, false)
+            .ok_or_else(|| anyhow!("Failed to allocate index buffer"))?;
+        *index_buffer = Some(OwnedResource::new(ResourceHandle { id, size: 1024 * 1024 * 2, ..Default::default() }));
     }
 
     // Upload vertex and index data
     if let (Some(ref v_h), Some(ref i_h)) = (&*vertex_buffer, &*index_buffer) {
         let v_data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
-        let _ = gpu_write_resource(v_h.id(), 0, v_data);
+        arena_write(v_h.id(), 0, v_data);
 
         let i_data = unsafe { std::slice::from_raw_parts(renderer.indices.as_ptr() as *const u8, renderer.indices.len() * 2) };
-        let _ = gpu_write_resource(i_h.id(), 0, i_data);
+        arena_write(i_h.id(), 0, i_data);
     }
 
     // Record draw commands if pipeline is ready
@@ -389,22 +362,14 @@ fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
     let mut uniform_buffer = plugin.uniform_buffer.borrow_mut();
     let mut uniform_buffer_id = plugin.uniform_buffer_id.borrow_mut();
     if uniform_buffer.is_none() && plugin.uniform_layout_id.borrow().is_some() {
-        let buf_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
-            command: Some(compute_resource_request::Command::CreateBuffer(CreateBuffer {
-                size: 16, usage: 64, mapped_at_creation: false, readonly: false
-            }))
-        };
-        let buf_res = create_resource(&buf_req)?;
-        if let Some(bh) = buf_res.handle {
-            *uniform_buffer_id = Some(bh.id);
+        if let Some(buf_id) = arena_alloc_buffer(16, 64, false) {
+            *uniform_buffer_id = Some(buf_id);
             let bg_req = ComputeResourceRequest {
         correlation_id: veldsdk::generate_id!(),
                 instance_id: 0,
                 command: Some(compute_resource_request::Command::CreateBindGroup(CreateBindGroup {
                     layout_id: plugin.uniform_layout_id.borrow().unwrap(), 
-                    entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(bh.id)) }], 
+                    entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(buf_id)) }], 
                     label: "UI Uniform BG".into()
                 }))
             };
@@ -418,15 +383,8 @@ fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
 fn ensure_atlas_texture(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     if renderer.atlas_texture_id.is_none() {
         let (w, h) = renderer.atlas_dimensions();
-        let req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
-            command: Some(compute_resource_request::Command::CreateTexture(CreateTexture {
-                width: w, height: h, format: TextureFormat::TexRgba8Unorm as i32, usage: 2 | 4, dimension: 1, mip_level_count: 1, sample_count: 1, depth_or_array_layers: 1, readonly: false
-            }))
-        };
-        if let Ok(res) = create_resource(&req) {
-            renderer.atlas_texture_id = res.handle.map(|h| h.id);
+        if let Some(id) = arena_alloc_texture(w, h, TextureFormat::TexRgba8Unorm as i32, 2 | 4) {
+            renderer.atlas_texture_id = Some(id);
             renderer.mark_atlas_dirty();
         }
     }

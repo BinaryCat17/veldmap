@@ -258,10 +258,6 @@ async fn main() -> anyhow::Result<()> {
     dispatcher.register_subscription("network/fs_download".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
     dispatcher.register_subscription("network/http".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
 
-    let image_service = Arc::new(veldmap_host_image::ImageService::new(dispatcher.clone(), resources.clone(), dispatcher.tasks.clone()));
-    dispatcher.register_subscription("image/info".to_string(), ServiceLocation::NativeAsync(image_service.clone()));
-    dispatcher.register_subscription("image/load".to_string(), ServiceLocation::NativeAsync(image_service.clone()));
-    
     let is_visible = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppCommand>();
     let proxy = event_loop.create_proxy();

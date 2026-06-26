@@ -45,11 +45,11 @@ impl FsService {
             match fs::read(&req.path) {
                 Ok(data) => {
                     let size = data.len() as u64;
-                    let id = self.resources.create_data_resource(data, requestor_id);
+                    let id = self.resources.arena().alloc_cpu(data, requestor_id);
                     let handle = ResourceHandle {
                         id,
                         size,
-                        content_hash: self.resources.compute_hash(id, requestor_id).unwrap_or_default(),
+                        content_hash: self.resources.arena().compute_hash(id, requestor_id).unwrap_or_default(),
                     };
                     FsReadResult { handle: Some(handle), error: String::new(), correlation_id }
                 }
@@ -83,7 +83,7 @@ impl FsService {
             let data = if handle.id == 0 {
                 FsWriteResult { error: "Handle ID 0 not supported for fs_write yet".into(), correlation_id }
             } else {
-                match self.resources.read_resource(handle.id, 0, handle.size, requestor_id) {
+                match self.resources.arena().read(handle.id, 0, handle.size, requestor_id) {
                     Ok(data) => {
                         if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
                         match fs::write(&req.path, &data) {
