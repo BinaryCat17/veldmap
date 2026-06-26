@@ -3,7 +3,7 @@ pub use crate::rpc::app::*;
 pub mod raw {
     use super::*;
     pub fn display(req: &AppDisplayCommand) -> anyhow::Result<()> {
-        crate::publish!("app/display", req);
+        crate::call!("app/display", req);
         Ok(())
     }
 }

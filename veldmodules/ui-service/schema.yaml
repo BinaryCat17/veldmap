@@ -12,6 +12,9 @@ interface:
     frame:
       called_by: module/handle_ui_event
       type: veld-ui/FrameEvent
+    set_view:
+      called_by: wrap/render
+      type: veld-ui/SetViewRequest
 
 dependencies:
   app:

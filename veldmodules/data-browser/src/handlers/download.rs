@@ -34,7 +34,7 @@ pub fn on_input_view_pressed(
     state.preview.is_loading = true;
     
     // Запрашиваем загрузку изображения у хоста
-    veldsdk::publish!("image/load", veldsdk::rpc::core::ImageLoadRequest {
+    veldsdk::output!("image/load", veldsdk::rpc::core::ImageLoadRequest {
         path: value,
         target_width: 2048,
         target_height: 2048,

@@ -32,9 +32,6 @@ dependencies:
     subs:
       frame:
         type: veld-ui/FrameEvent
-    calls:
-      set_view:
-        type: veld-ui/SetViewRequest
   data-provider:
     subs:
       download_started:

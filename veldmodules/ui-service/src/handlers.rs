@@ -123,7 +123,7 @@ pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
             }
         }
         if frame_event.width > 0 && frame_event.height > 0 {
-            veldsdk::publish!("ui-service/frame", frame_event);
+            veldsdk::output!("ui-service/frame", frame_event);
         }
     }
     
@@ -302,7 +302,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         let cmd = veldsdk::rpc::app::AppDisplayCommand {
             command: Some(veldsdk::rpc::app::app_display_command::Command::DrawFrame(veldsdk::rpc::app::DrawFrame { texture_id }))
         };
-        let _ = veldsdk::publish!("app/display", cmd);
+        let _ = veldsdk::call!("app/display", cmd);
 
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();

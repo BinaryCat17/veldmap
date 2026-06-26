@@ -11,9 +11,12 @@ interface:
       type: module/SearchRequest
 
   outputs:
-    download_started: 
-      called_by: module/download 
+    download_started:
+      called_by: module/download
       type: module/DownloadStartedEvent
+    list_path_result:
+      called_by: module/list_path
+      type: module/ListPathResponse
     downloaded:
       called_by: network/fs_download_result
       type: module/DownloadedEvent

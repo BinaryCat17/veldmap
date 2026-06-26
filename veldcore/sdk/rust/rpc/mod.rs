@@ -26,17 +26,7 @@ pub struct ServiceState<S> {
     pub state: std::sync::Arc<std::sync::Mutex<S>>,
 }
 
-/// Fire-and-forget публикация события
-#[macro_export]
-macro_rules! publish {
-    ($topic:expr, $msg:expr) => {{
-        use $crate::prost::Message;
-        let payload = $msg.encode_to_vec();
-        let _ = $crate::rpc::host::publish($topic, payload);
-    }};
-}
-
-/// Вызов зависимости (запрос к другому модулю/сервису)
+/// Вызов зависимости (запрос к declared dependency через dependencies.*.calls)
 #[macro_export]
 macro_rules! call {
     ($topic:expr, $msg:expr) => {{
@@ -46,7 +36,7 @@ macro_rules! call {
     }};
 }
 
-/// Публикация результата работы модуля (исходящее событие)
+/// Публикация исходящего события (declared output через interface.outputs)
 #[macro_export]
 macro_rules! output {
     ($topic:expr, $msg:expr) => {{
