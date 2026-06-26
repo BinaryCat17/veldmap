@@ -6,7 +6,6 @@ use crate::compute::{
     wgpu_command::Command as WgpuCommand,
     bind_group_layout_entry::Ty,
 };
-use image::GenericImageView;
 use prost::Message;
 use std::sync::{Arc, Mutex};
 
@@ -160,14 +159,6 @@ impl ComputeService {
         let mut handle = ResourceHandle::default();
 
         match req.command {
-            Some(ComputeCommand::CreateTexture(t)) => {
-                handle.id = self.resources.create_texture(t.width, t.height, t.format as i32, t.usage, t.readonly, requestor_id);
-                handle.size = (t.width * t.height * 4) as u64;
-            }
-            Some(ComputeCommand::CreateBuffer(b)) => {
-                handle.id = self.resources.create_buffer_ext(b.size, b.usage, b.mapped_at_creation, b.readonly, requestor_id);
-                handle.size = b.size;
-            }
             Some(ComputeCommand::CreateShader(s)) => {
                 handle.id = self.resources.create_shader(&s.source, Some(&s.label), requestor_id);
             }
@@ -229,19 +220,6 @@ impl ComputeService {
             }
             Some(ComputeCommand::CreateBindGroup(bg)) => {
                 handle.id = self.resources.create_bind_group(bg.layout_id, &bg.entries, requestor_id)?;
-            }
-            Some(ComputeCommand::FsReadToBuffer(req_fs)) => {
-                let data = std::fs::read(&req_fs.path)?;
-                handle.size = data.len() as u64;
-                handle.id = self.resources.create_buffer_with_data(&data, req_fs.usage, true, requestor_id);
-            }
-            Some(ComputeCommand::ImageLoadToTexture(req_img)) => {
-                let img = image::open(&req_img.path)?;
-                let (w, h) = img.dimensions();
-                let rgba = img.to_rgba8();
-                handle.id = self.resources.create_texture(w, h, 0, req_img.usage, true, requestor_id);
-                self.resources.write_resource(handle.id, 0, &rgba, requestor_id)?;
-                handle.size = (w * h * 4) as u64;
             }
             _ => return Err(anyhow::anyhow!("Unsupported resource command")),
         }

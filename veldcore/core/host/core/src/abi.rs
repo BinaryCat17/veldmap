@@ -92,32 +92,6 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // Backward compat aliases
-    linker.func_wrap("env", "veld_resource_write", |mut caller: Caller<'_, HostState>, id: u64, offset: u64, ptr: u64, len: u64| {
-        let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return };
-        let instance_id = caller.data().instance_id;
-        if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
-            let arena = caller.data().resources.arena().clone();
-            let _ = arena.write(id, offset, data, instance_id);
-        }
-    })?;
-
-    linker.func_wrap_async("env", "veld_resource_read", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
-        Box::new(async move {
-            let arena = caller.data().resources.arena().clone();
-            let instance_id = caller.data().instance_id;
-            let data = tokio::task::block_in_place(|| arena.read(id, offset, len, instance_id));
-            if let Ok(data) = data {
-                let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(()) };
-                if let Some(target) = mem.data_mut(&mut caller).get_mut(ptr as usize..(ptr as usize + len as usize)) {
-                    let copy_len = data.len().min(len as usize);
-                    target[..copy_len].copy_from_slice(&data[..copy_len]);
-                }
-            }
-            Ok(())
-        })
-    })?;
-
     // ── Arena management ──────────────────────────────────────
 
     // veld_arena_alloc(size) → region_id
@@ -132,6 +106,13 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         let arena = caller.data().resources.arena().clone();
         let owner_id = caller.data().instance_id;
         arena.alloc_buffer(size, usage as u32, mapped != 0, false, owner_id)
+    })?;
+
+    // veld_arena_alloc_texture(width, height, format, usage) → region_id
+    linker.func_wrap("env", "veld_arena_alloc_texture", |caller: Caller<'_, HostState>, width: u64, height: u64, format: u64, usage: u64| -> u64 {
+        let arena = caller.data().resources.arena().clone();
+        let owner_id = caller.data().instance_id;
+        arena.alloc_texture(width as u32, height as u32, format as i32, usage as u32, false, owner_id)
     })?;
 
     // veld_arena_transfer(region_id, target_module) → bool

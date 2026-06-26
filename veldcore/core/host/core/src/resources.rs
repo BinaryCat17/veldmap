@@ -149,28 +149,6 @@ impl ResourceManager {
         self.arena.get_texture(id)
     }
 
-    // ── Data resource creation (delegates to Arena) ───────────
-
-    pub fn create_buffer_ext(&self, size: u64, usage: u32, mapped: bool, readonly: bool, owner_id: u32) -> u64 {
-        self.arena.alloc_buffer(size, usage, mapped, readonly, owner_id)
-    }
-
-    pub fn create_buffer(&self, size: u64, usage: u32, owner_id: u32) -> u64 {
-        self.create_buffer_ext(size, usage, false, false, owner_id)
-    }
-
-    pub fn create_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool, owner_id: u32) -> u64 {
-        self.arena.alloc_buffer_with_data(data, usage, readonly, owner_id)
-    }
-
-    pub fn create_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool, owner_id: u32) -> u64 {
-        self.arena.alloc_texture(width, height, format_proto, usage, readonly, owner_id)
-    }
-
-    pub fn create_data_resource(&self, data: Vec<u8>, owner_id: u32) -> u64 {
-        self.arena.alloc_cpu(data, owner_id)
-    }
-
     // ── GPU object creation ───────────────────────────────────
 
     pub fn create_texture_view(&self, texture_id: u64, owner_id: u32) -> anyhow::Result<u64> {
@@ -419,34 +397,7 @@ impl ResourceManager {
         Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline)), owner_id))
     }
 
-    // ── Data access (delegates to Arena) ──────────────────────
-
-    pub fn write_resource(&self, id: u64, offset: u64, data: &[u8], requestor_id: u32) -> anyhow::Result<()> {
-        self.arena.write(id, offset, data, requestor_id)
-    }
-
-    pub fn read_resource(&self, id: u64, offset: u64, size: u64, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
-        self.arena.read(id, offset, size, requestor_id)
-    }
-
     // ── Lifecycle ─────────────────────────────────────────────
-
-    pub fn acquire_resource(&self, id: u64, requestor_id: u32) -> bool {
-        // Arena regions
-        if self.arena.acquire_read(id, requestor_id) { return true; }
-        // GPU objects — no lease needed, just check existence
-        self.gpu_objects.contains_key(&id)
-    }
-
-    pub fn release_resource(&self, id: u64, requestor_id: u32) {
-        // Try arena first
-        self.arena.release(id, requestor_id);
-        // GPU objects: no ref counting needed (DashMap keeps them alive)
-    }
-
-    pub fn freeze_resource(&self, id: u64, requestor_id: u32) -> bool {
-        self.arena.freeze(id, requestor_id)
-    }
 
     pub fn destroy_resource(&self, id: u64, requestor_id: u32) {
         if self.arena.free(id, requestor_id) { return; }

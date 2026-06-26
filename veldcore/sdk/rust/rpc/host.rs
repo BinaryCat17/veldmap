@@ -13,21 +13,16 @@ extern "C" {
     fn veld_compute_create_resource(ptr: u64, len: u64) -> u64;
     fn veld_compute_execute(ptr: u64, len: u64) -> u64;
 
-    // Arena data access (replaces veld_resource_write/read)
     fn veld_arena_write(id: u64, offset: u64, ptr: u64, len: u64);
     fn veld_arena_read(id: u64, offset: u64, ptr: u64, len: u64);
 
-    // Arena management
     fn veld_arena_alloc(size: u64) -> u64;
     fn veld_arena_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
+    fn veld_arena_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
     fn veld_arena_transfer(region_id: u64, target_module: u64) -> u64;
     fn veld_arena_grant_read(region_id: u64, target_module: u64) -> u64;
     fn veld_arena_revoke(region_id: u64) -> u64;
     fn veld_arena_free(region_id: u64) -> u64;
-
-    // Backward compat (same ABI, old names)
-    fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64);
-    fn veld_resource_read(id: u64, offset: u64, ptr: u64, len: u64);
 
     fn veld_input_len() -> u64;
     fn veld_input_copy(p: u64, n: u64);
@@ -120,26 +115,6 @@ pub fn arena_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
     }
 }
 
-// Backward compat aliases (old names → arena)
-#[cfg(feature = "pdk")]
-pub fn resource_write(id: u64, offset: u64, data: &[u8]) {
-    unsafe { veld_resource_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
-}
-
-#[cfg(feature = "pdk")]
-pub fn resource_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
-    unsafe {
-        let mut buf = vec![0u8; size as usize];
-        veld_resource_read(id, offset, buf.as_mut_ptr() as u64, size);
-        Ok(buf)
-    }
-}
-
-#[cfg(feature = "pdk")]
-pub use resource_write as gpu_write_resource;
-#[cfg(feature = "pdk")]
-pub use resource_read as gpu_read_resource;
-
 // ── Arena management ───────────────────────────────────────────
 
 /// Allocate a CPU data region in the arena
@@ -153,6 +128,13 @@ pub fn arena_alloc(size: u64) -> Option<u64> {
 #[cfg(feature = "pdk")]
 pub fn arena_alloc_buffer(size: u64, usage: u32, mapped: bool) -> Option<u64> {
     let id = unsafe { veld_arena_alloc_buffer(size, usage as u64, mapped as u64) };
+    if id == 0 { None } else { Some(id) }
+}
+
+/// Allocate a GPU texture region in the arena
+#[cfg(feature = "pdk")]
+pub fn arena_alloc_texture(width: u32, height: u32, format: i32, usage: u32) -> Option<u64> {
+    let id = unsafe { veld_arena_alloc_texture(width as u64, height as u64, format as u64, usage as u64) };
     if id == 0 { None } else { Some(id) }
 }
 
