@@ -246,8 +246,6 @@ async fn main() -> anyhow::Result<()> {
     let system_service = Arc::new(SystemService::new(arena.clone(), gpu.clone(), dispatcher.tasks.clone()));
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
-    dispatcher.register_subscription("system/release_resource".to_string(), ServiceLocation::Native(system_service.clone()));
-    dispatcher.register_subscription("system/acquire_resource".to_string(), ServiceLocation::Native(system_service.clone()));
 
     // Register Modular Services
     let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), arena.clone()));

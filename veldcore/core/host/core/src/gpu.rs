@@ -38,7 +38,6 @@ pub enum GpuObject {
 
 struct GpuEntry {
     obj: GpuObject,
-    owner_id: u32,
 }
 
 // ── Render command queue ───────────────────────────────────────
@@ -93,9 +92,9 @@ impl GpuService {
 
     // ── GPU object helpers ────────────────────────────────────
 
-    fn insert_gpu(&self, obj: GpuObject, owner_id: u32) -> u64 {
+    fn insert_gpu(&self, obj: GpuObject) -> u64 {
         let id = self.next_gpu_id.fetch_add(1, Ordering::SeqCst);
-        self.gpu_objects.insert(id, GpuEntry { obj, owner_id });
+        self.gpu_objects.insert(id, GpuEntry { obj });
         id
     }
 
@@ -129,14 +128,14 @@ impl GpuService {
 
     // ── GPU object creation ───────────────────────────────────
 
-    pub fn create_texture_view(&self, texture_id: u64, owner_id: u32) -> anyhow::Result<u64> {
+    pub fn create_texture_view(&self, texture_id: u64, _owner_id: u32) -> anyhow::Result<u64> {
         let (texture, _, _, _) = self.arena.get_texture(texture_id)
             .ok_or_else(|| anyhow::anyhow!("Texture region {} not found", texture_id))?;
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Ok(self.insert_gpu(GpuObject::TextureView(Arc::new(view)), owner_id))
+        Ok(self.insert_gpu(GpuObject::TextureView(Arc::new(view))))
     }
 
-    pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, owner_id: u32) -> u64 {
+    pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, _owner_id: u32) -> u64 {
         let mag = match FilterMode::try_from(mag_proto).unwrap_or(FilterMode::FiltLinear) {
             FilterMode::FiltNearest => wgpu::FilterMode::Nearest,
             FilterMode::FiltLinear => wgpu::FilterMode::Linear,
@@ -148,24 +147,24 @@ impl GpuService {
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: mag, min_filter: min, ..Default::default()
         });
-        self.insert_gpu(GpuObject::Sampler(Arc::new(sampler)), owner_id)
+        self.insert_gpu(GpuObject::Sampler(Arc::new(sampler)))
     }
 
-    pub fn create_bind_group_layout(&self, entries: &[wgpu::BindGroupLayoutEntry], owner_id: u32) -> u64 {
+    pub fn create_bind_group_layout(&self, entries: &[wgpu::BindGroupLayoutEntry], _owner_id: u32) -> u64 {
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None, entries,
         });
-        self.insert_gpu(GpuObject::BindGroupLayout(Arc::new(layout)), owner_id)
+        self.insert_gpu(GpuObject::BindGroupLayout(Arc::new(layout)))
     }
 
-    pub fn create_shader(&self, source: &str, label: Option<&str>, owner_id: u32) -> u64 {
+    pub fn create_shader(&self, source: &str, label: Option<&str>, _owner_id: u32) -> u64 {
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label, source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)), owner_id)
+        self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)))
     }
 
-    pub fn create_bind_group(&self, layout_id: u64, entries_proto: &[crate::compute::BindGroupEntry], owner_id: u32) -> anyhow::Result<u64> {
+    pub fn create_bind_group(&self, layout_id: u64, entries_proto: &[crate::compute::BindGroupEntry], _owner_id: u32) -> anyhow::Result<u64> {
         let layout = match self.get_gpu(layout_id) {
             Some(GpuObject::BindGroupLayout(l)) => l,
             _ => return Err(anyhow::anyhow!("BGL {} not found", layout_id)),
@@ -240,10 +239,10 @@ impl GpuService {
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None, layout: &layout, entries: &entries,
         });
-        Ok(self.insert_gpu(GpuObject::BindGroup(Arc::new(bg)), owner_id))
+        Ok(self.insert_gpu(GpuObject::BindGroup(Arc::new(bg))))
     }
 
-    pub fn create_pipeline(&self, req: &crate::compute::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<u64> {
+    pub fn create_pipeline(&self, req: &crate::compute::CreateRenderPipeline, _owner_id: u32) -> anyhow::Result<u64> {
         let shader = match self.get_gpu(req.shader_id) {
             Some(GpuObject::ShaderModule(s)) => s,
             _ => return Err(anyhow::anyhow!("Shader {} not found", req.shader_id)),
@@ -371,7 +370,7 @@ impl GpuService {
             cache: None,
         });
 
-        Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline)), owner_id))
+        Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline))))
     }
 
     // ── Compute: create resource (protobuf dispatch) ──────────
@@ -485,21 +484,6 @@ impl GpuService {
         Ok(encoder)
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────
-
-    pub fn destroy_resource(&self, id: u64, requestor_id: u32) {
-        if self.arena.free(id, requestor_id) { return; }
-        let can_remove = self.gpu_objects.get(&id)
-            .map(|e| e.owner_id == requestor_id || requestor_id == 0)
-            .unwrap_or(false);
-        if can_remove { self.gpu_objects.remove(&id); }
-    }
-
-    pub fn cleanup_resources(&self, owner_id: u32) {
-        if owner_id == 0 { return; }
-        self.arena.cleanup_owner(owner_id);
-        self.gpu_objects.retain(|_, e| e.owner_id != owner_id);
-    }
 }
 
 // ── Render command execution ───────────────────────────────────

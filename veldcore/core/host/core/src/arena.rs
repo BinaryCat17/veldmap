@@ -229,26 +229,6 @@ impl Arena {
 
     // ── Lease management ──────────────────────────────────────
 
-    pub fn acquire_read(&self, region_id: RegionId, module_id: u32) -> bool {
-        if let Some(mut lease) = self.leases.get_mut(&region_id) {
-            lease.add_reader(module_id);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn release(&self, region_id: RegionId, module_id: u32) {
-        if let Some(mut lease) = self.leases.get_mut(&region_id) {
-            if lease.owner_id == module_id {
-                drop(lease);
-                self.free(region_id, module_id);
-            } else {
-                lease.remove_reader(module_id);
-            }
-        }
-    }
-
     pub fn grant_read(&self, region_id: RegionId, target_module: u32, owner_id: u32) -> bool {
         if let Some(mut lease) = self.leases.get_mut(&region_id) {
             if lease.can_write(owner_id) {
@@ -461,31 +441,6 @@ impl Arena {
             self.regions.remove(&region_id);
             self.leases.remove(&region_id);
             true
-        } else {
-            false
-        }
-    }
-
-    pub fn cleanup_owner(&self, owner_id: u32) {
-        if owner_id == 0 { return; }
-        let to_remove: Vec<RegionId> = self.regions.iter()
-            .filter(|e| e.value().owner_id == owner_id)
-            .map(|e| *e.key())
-            .collect();
-        for id in to_remove {
-            self.regions.remove(&id);
-            self.leases.remove(&id);
-        }
-    }
-
-    pub fn freeze(&self, region_id: RegionId, requestor_id: u32) -> bool {
-        if let Some(mut region) = self.regions.get_mut(&region_id) {
-            if region.owner_id == requestor_id || requestor_id == 0 {
-                region.readonly = true;
-                true
-            } else {
-                false
-            }
         } else {
             false
         }
