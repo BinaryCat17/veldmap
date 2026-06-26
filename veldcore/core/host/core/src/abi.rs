@@ -65,20 +65,20 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
     // ── Arena data access ─────────────────────────────────────
 
-    // veld_arena_write — write data into an arena region (replaces veld_resource_write)
+    // veld_arena_write — write data into an arena region
     linker.func_wrap("env", "veld_arena_write", |mut caller: Caller<'_, HostState>, id: u64, offset: u64, ptr: u64, len: u64| {
         let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return };
         let instance_id = caller.data().instance_id;
         if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
-            let arena = caller.data().resources.arena().clone();
+            let arena = caller.data().arena.clone();
             let _ = arena.write(id, offset, data, instance_id);
         }
     })?;
 
-    // veld_arena_read — read data from an arena region (replaces veld_resource_read)
+    // veld_arena_read — read data from an arena region
     linker.func_wrap_async("env", "veld_arena_read", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
         Box::new(async move {
-            let arena = caller.data().resources.arena().clone();
+            let arena = caller.data().arena.clone();
             let instance_id = caller.data().instance_id;
             let data = tokio::task::block_in_place(|| arena.read(id, offset, len, instance_id));
             if let Ok(data) = data {
@@ -96,49 +96,49 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
     // veld_arena_alloc(size) → region_id
     linker.func_wrap("env", "veld_arena_alloc", |caller: Caller<'_, HostState>, size: u64| -> u64 {
-        let arena = caller.data().resources.arena().clone();
+        let arena = caller.data().arena.clone();
         let owner_id = caller.data().instance_id;
         arena.alloc_cpu(vec![0u8; size as usize], owner_id)
     })?;
 
     // veld_arena_alloc_buffer(size, usage, mapped) → region_id
     linker.func_wrap("env", "veld_arena_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {
-        let arena = caller.data().resources.arena().clone();
+        let arena = caller.data().arena.clone();
         let owner_id = caller.data().instance_id;
         arena.alloc_buffer(size, usage as u32, mapped != 0, false, owner_id)
     })?;
 
     // veld_arena_alloc_texture(width, height, format, usage) → region_id
     linker.func_wrap("env", "veld_arena_alloc_texture", |caller: Caller<'_, HostState>, width: u64, height: u64, format: u64, usage: u64| -> u64 {
-        let arena = caller.data().resources.arena().clone();
+        let arena = caller.data().arena.clone();
         let owner_id = caller.data().instance_id;
         arena.alloc_texture(width as u32, height as u32, format as i32, usage as u32, false, owner_id)
     })?;
 
     // veld_arena_transfer(region_id, target_module) → bool
     linker.func_wrap("env", "veld_arena_transfer", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
-        let arena = caller.data().resources.arena().clone();
+        let arena = caller.data().arena.clone();
         let owner_id = caller.data().instance_id;
         if arena.transfer(region_id, target_module as u32, owner_id) { 1 } else { 0 }
     })?;
 
     // veld_arena_grant_read(region_id, target_module) → bool
     linker.func_wrap("env", "veld_arena_grant_read", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
-        let arena = caller.data().resources.arena().clone();
+        let arena = caller.data().arena.clone();
         let owner_id = caller.data().instance_id;
         if arena.grant_read(region_id, target_module as u32, owner_id) { 1 } else { 0 }
     })?;
 
     // veld_arena_revoke(region_id) → bool
     linker.func_wrap("env", "veld_arena_revoke", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
-        let arena = caller.data().resources.arena().clone();
+        let arena = caller.data().arena.clone();
         let owner_id = caller.data().instance_id;
         if arena.revoke_access(region_id, owner_id) { 1 } else { 0 }
     })?;
 
     // veld_arena_free(region_id) → bool
     linker.func_wrap("env", "veld_arena_free", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
-        let arena = caller.data().resources.arena().clone();
+        let arena = caller.data().arena.clone();
         let owner_id = caller.data().instance_id;
         if arena.free(region_id, owner_id) { 1 } else { 0 }
     })?;
@@ -180,9 +180,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
             let payload = match data_bytes { Some(b) => b, None => return Ok(0u64) };
             let instance_id = caller.data().instance_id;
-            let resources = caller.data().resources.clone();
-            let service = crate::compute_service::ComputeService::new(resources);
-            let result = service.create_resource(payload, instance_id);
+            let gpu = caller.data().gpu.clone();
+            let result = gpu.create_resource(payload, instance_id);
             let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
             let res_buf = RpcResponse { payload: res_payload, error, sync: None }.encode_to_vec();
             write_response_back(&mut caller, &res_buf).await
@@ -195,9 +194,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
             let payload = match data_bytes { Some(b) => b, None => return Ok(0u64) };
             let instance_id = caller.data().instance_id;
-            let resources = caller.data().resources.clone();
-            let service = crate::compute_service::ComputeService::new(resources);
-            let result = service.execute(payload, instance_id);
+            let gpu = caller.data().gpu.clone();
+            let result = gpu.execute(payload, instance_id);
             let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
             let res_buf = RpcResponse { payload: res_payload, error, sync: None }.encode_to_vec();
             write_response_back(&mut caller, &res_buf).await

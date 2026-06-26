@@ -2,15 +2,14 @@
 use std::sync::Arc;
 
 pub mod arena;
+pub mod gpu;
 pub mod config_module;
 pub mod plugin_module;
 pub mod abi;
 pub mod dispatcher;
 pub mod node;
-pub mod resources;
 pub mod logging;
 pub mod window;
-pub mod compute_service;
 
 pub mod core {
     include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
@@ -42,7 +41,8 @@ impl CallContext {
 
 pub struct HostState {
     pub dispatcher: Arc<Dispatcher>,
-    pub resources: Arc<crate::resources::ResourceManager>,
+    pub arena: Arc<crate::arena::Arena>,
+    pub gpu: Arc<crate::gpu::GpuService>,
     pub plugin_name: String,
     pub instance_id: u32,
     pub config: std::collections::HashMap<String, serde_json::Value>,
@@ -60,7 +60,7 @@ pub use config_module::*;
 pub use plugin_module::*;
 pub use dispatcher::*;
 pub use node::*;
-pub use compute_service::*;
+pub use gpu::*;
 
 /// Конфигурация core модуля
 #[derive(serde::Deserialize, Debug)]

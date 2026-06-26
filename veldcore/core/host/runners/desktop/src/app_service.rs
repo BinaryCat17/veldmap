@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use veldmap_host_core::dispatcher::NativeService;
 use veldmap_host_core::app::AppDisplayCommand;
-use veldmap_host_core::resources::ResourceManager;
 use prost::Message;
 use tokio::sync::mpsc;
 use winit::event_loop::EventLoopProxy;
@@ -23,10 +22,9 @@ pub struct AppService {
 
 impl AppService {
     pub fn new(
-        tx: mpsc::UnboundedSender<AppCommand>, 
-        proxy: EventLoopProxy<()>, 
-        is_visible: Arc<AtomicBool>, 
-        _resources: Arc<ResourceManager>,
+        tx: mpsc::UnboundedSender<AppCommand>,
+        proxy: EventLoopProxy<()>,
+        is_visible: Arc<AtomicBool>,
         last_render_time: Arc<Mutex<std::time::Instant>>,
         frame_wake: Arc<tokio::sync::Notify>,
     ) -> Self {

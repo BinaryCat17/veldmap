@@ -7,7 +7,8 @@ use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
 use crate::dispatcher::{Dispatcher, ServiceLocation};
 use crate::{HostState, WasmModule, CallContext};
-use crate::resources::ResourceManager;
+use crate::arena::Arena;
+use crate::gpu::GpuService;
 use crate::window::parse_window_config;
 
 #[derive(Deserialize)]
@@ -59,7 +60,8 @@ pub fn scan_window_configs(config_dir: &str) -> anyhow::Result<crate::window::Pl
 
 pub async fn load_services<F>(
     dispatcher: Arc<Dispatcher>,
-    resources: Arc<ResourceManager>,
+    arena: Arc<Arena>,
+    gpu: Arc<GpuService>,
     config_dir: &str,
     mut register_config: F,
     windows: &mut crate::window::PluginWindows,
@@ -116,7 +118,7 @@ where
                 
                 config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
                 config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
-                config_map.insert("surface_format".to_string(), serde_json::Value::Number(resources.get_surface_format_proto().into()));
+                config_map.insert("surface_format".to_string(), serde_json::Value::Number(gpu.get_surface_format_proto().into()));
                 
                 let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::SeqCst);
                 register_config(instance_id, config_map.clone());
@@ -133,7 +135,8 @@ where
 
                 let state = HostState {
                     dispatcher: dispatcher.clone(),
-                    resources: resources.clone(),
+                    arena: arena.clone(),
+                    gpu: gpu.clone(),
                     plugin_name: name.clone(),
                     instance_id,
                     config: config_map,

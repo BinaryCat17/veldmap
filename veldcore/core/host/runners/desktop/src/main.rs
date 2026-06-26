@@ -218,7 +218,8 @@ async fn main() -> anyhow::Result<()> {
     surface.configure(&device_arc, &config);
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
-    let resources = Arc::new(veldmap_host_core::resources::ResourceManager::new(device_arc.clone(), queue_arc.clone(), surface_format));
+    let arena = Arc::new(veldmap_host_core::arena::Arena::new(device_arc.clone(), queue_arc.clone()));
+    let gpu = Arc::new(veldmap_host_core::gpu::GpuService::new(device_arc.clone(), queue_arc.clone(), surface_format, arena.clone()));
     
     // Initialize compositor for final UI composition
     let compositor = Arc::new(Compositor::new(&device_arc, surface_format));
@@ -242,14 +243,14 @@ async fn main() -> anyhow::Result<()> {
     let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
-    let system_service = Arc::new(SystemService::new(resources.clone(), dispatcher.tasks.clone()));
+    let system_service = Arc::new(SystemService::new(arena.clone(), gpu.clone(), dispatcher.tasks.clone()));
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
     dispatcher.register_subscription("system/release_resource".to_string(), ServiceLocation::Native(system_service.clone()));
     dispatcher.register_subscription("system/acquire_resource".to_string(), ServiceLocation::Native(system_service.clone()));
 
     // Register Modular Services
-    let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), resources.clone()));
+    let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), arena.clone()));
     dispatcher.register_subscription("fs/read".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
     dispatcher.register_subscription("fs/write".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
     dispatcher.register_subscription("fs/list".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
@@ -264,10 +265,9 @@ async fn main() -> anyhow::Result<()> {
     let frame_wake = Arc::new(tokio::sync::Notify::new());
 
     let app_service = Arc::new(AppService::new(
-        tx, 
-        proxy.clone(), 
-        is_visible.clone(), 
-        resources.clone(),
+        tx,
+        proxy.clone(),
+        is_visible.clone(),
         last_render_time.clone(),
         frame_wake.clone(),
     ));
@@ -282,9 +282,10 @@ async fn main() -> anyhow::Result<()> {
 
     let sys_clone = system_service.clone();
     plugin_module::load_services(
-        dispatcher.clone(), 
-        resources.clone(), 
-        &config_dir, 
+        dispatcher.clone(),
+        arena.clone(),
+        gpu.clone(),
+        &config_dir,
         move |id, cfg| {
             sys_clone.register_config(id, cfg);
         },
@@ -441,7 +442,7 @@ async fn main() -> anyhow::Result<()> {
                             // SURFACE_ID (0) означает, что UI сервис ещё не готов
                             // Не очищаем bind_group, просто запрашиваем redraw
                         } else if Some(id) != app_texture_id {
-                            if let Some(texture) = resources.get_texture(id) {
+                            if let Some(texture) = arena.get_texture(id).map(|(t, _, _, _)| t) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let bind_group = compositor.create_bind_group(&device_arc, &view);
                                 app_texture_id = Some(id);
@@ -518,9 +519,9 @@ async fn main() -> anyhow::Result<()> {
                 {
                     let mut ops = veldmap_host_core::PENDING_OPS.lock().unwrap();
                     for op in ops.drain(..) {
-                        if let Some(veldmap_host_core::resources::Resource::GpuObj(
-                            veldmap_host_core::resources::GpuObject::TextureView(target_view)
-                        )) = resources.get_resource(op.target_view_id, op.instance_id)
+                        if let Some(veldmap_host_core::gpu::Resource::GpuObj(
+                            veldmap_host_core::gpu::GpuObject::TextureView(target_view)
+                        )) = gpu.get_resource(op.target_view_id, op.instance_id)
                         {
                             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("Plugin Render Pass"),
@@ -539,8 +540,8 @@ async fn main() -> anyhow::Result<()> {
                                 occlusion_query_set: None,
                             });
 
-                            let _ = veldmap_host_core::compute_service::execute_render_commands(
-                                &mut rp, &op.command_buffer, &resources, 2048, 2048, op.instance_id
+                            let _ = veldmap_host_core::gpu::execute_render_commands(
+                                &mut rp, &op.command_buffer, &gpu, 2048, 2048, op.instance_id
                             );
                         }
                     }

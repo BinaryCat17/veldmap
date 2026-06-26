@@ -2,8 +2,45 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use crate::compute::TextureFormat;
 
 pub type RegionId = u64;
+
+// ── Format helpers (self-contained) ────────────────────────────
+
+pub fn bytes_per_pixel(format_proto: i32) -> u32 {
+    match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
+        TextureFormat::TexR8Unorm => 1,
+        TextureFormat::TexR32Float => 4,
+        TextureFormat::TexRgba16Float => 8,
+        TextureFormat::TexRgba32Float => 16,
+        _ => 4,
+    }
+}
+
+pub fn proto_to_wgpu_format(format_proto: i32) -> wgpu::TextureFormat {
+    match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
+        TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
+        TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
+        TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
+        TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
+        TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
+        TextureFormat::TexRgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+        _ => wgpu::TextureFormat::Rgba8Unorm,
+    }
+}
+
+pub fn surface_format_to_proto(fmt: wgpu::TextureFormat) -> i32 {
+    match fmt {
+        wgpu::TextureFormat::R32Float => TextureFormat::TexR32Float as i32,
+        wgpu::TextureFormat::Rgba16Float => TextureFormat::TexRgba16Float as i32,
+        wgpu::TextureFormat::Rgba32Float => TextureFormat::TexRgba32Float as i32,
+        wgpu::TextureFormat::R8Unorm => TextureFormat::TexR8Unorm as i32,
+        wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::TexBgra8UnormSrgb as i32,
+        wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::TexRgba8UnormSrgb as i32,
+        _ => TextureFormat::TexRgba8Unorm as i32,
+    }
+}
 
 /// How the bytes in a region are backed
 pub enum DataBacking {
@@ -42,7 +79,7 @@ impl DataBacking {
             Self::Cpu(v) => v.len() as u64,
             Self::Buffer(b) | Self::Mapped(b) => b.size(),
             Self::Texture { width, height, format, .. } => {
-                let bpp = crate::resources::bytes_per_pixel(*format);
+                let bpp = bytes_per_pixel(*format);
                 (*width as u64) * (*height as u64) * (bpp as u64)
             }
         }
@@ -152,7 +189,7 @@ impl Arena {
     }
 
     pub fn alloc_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool, owner_id: u32) -> RegionId {
-        let format = crate::resources::proto_to_wgpu_format(format_proto);
+        let format = proto_to_wgpu_format(format_proto);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&format!("arena-tex-{}", self.next_id.load(Ordering::Relaxed))),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -288,7 +325,7 @@ impl Arena {
                 view[..data.len()].copy_from_slice(data);
             }
             DataBacking::Texture { ref texture, width, height, format } => {
-                let bpp = crate::resources::bytes_per_pixel(*format);
+                let bpp = bytes_per_pixel(*format);
                 let bytes_per_row = bpp * *width;
                 let q = self.queue.lock().unwrap();
                 q.write_texture(
@@ -389,7 +426,7 @@ impl Arena {
         self.regions.contains_key(&region_id)
     }
 
-    // ── Lookup (for ResourceManager interop) ──────────────────
+    // ── Lookup helpers (for GpuService / main.rs) ────────────
 
     pub fn get_buffer(&self, region_id: RegionId) -> Option<Arc<wgpu::Buffer>> {
         self.regions.get(&region_id).and_then(|r| match &r.backing {

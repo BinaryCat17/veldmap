@@ -1,11 +1,18 @@
 use std::sync::Arc;
-use dashmap::DashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use crate::arena::{Arena, RegionId};
+use dashmap::DashMap;
+use crate::arena::{Arena, RegionId, proto_to_wgpu_format, surface_format_to_proto};
+use crate::core::ResourceHandle;
 use crate::compute::{
-    TextureFormat, VertexFormat, StepMode, FilterMode,
+    ComputeResourceRequest, ComputeResourceResponse, Submit, CommandBuffer,
+    compute_resource_request::Command as ComputeCommand,
+    wgpu_command::Command as WgpuCommand,
+    bind_group_layout_entry::Ty,
+    VertexFormat, StepMode, FilterMode,
     PrimitiveTopology, BlendFactor, BlendOperation, FrontFace, CullMode,
 };
+use prost::Message;
 
 // ── Unified Resource Enum ──────────────────────────────────────
 
@@ -27,51 +34,26 @@ pub enum GpuObject {
     ShaderModule(Arc<wgpu::ShaderModule>),
 }
 
-// ── Format helpers ─────────────────────────────────────────────
+// ── GPU Object Registry Entry ──────────────────────────────────
 
-pub fn bytes_per_pixel(format_proto: i32) -> u32 {
-    match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
-        TextureFormat::TexR8Unorm => 1,
-        TextureFormat::TexR32Float => 4,
-        TextureFormat::TexRgba16Float => 8,
-        TextureFormat::TexRgba32Float => 16,
-        _ => 4,
-    }
-}
-
-pub fn proto_to_wgpu_format(format_proto: i32) -> wgpu::TextureFormat {
-    match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
-        TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
-        TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
-        TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
-        TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
-        TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
-        TextureFormat::TexRgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-        _ => wgpu::TextureFormat::Rgba8Unorm,
-    }
-}
-
-pub fn surface_format_to_proto(fmt: wgpu::TextureFormat) -> i32 {
-    match fmt {
-        wgpu::TextureFormat::R32Float => TextureFormat::TexR32Float as i32,
-        wgpu::TextureFormat::Rgba16Float => TextureFormat::TexRgba16Float as i32,
-        wgpu::TextureFormat::Rgba32Float => TextureFormat::TexRgba32Float as i32,
-        wgpu::TextureFormat::R8Unorm => TextureFormat::TexR8Unorm as i32,
-        wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::TexBgra8UnormSrgb as i32,
-        wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::TexRgba8UnormSrgb as i32,
-        _ => TextureFormat::TexRgba8Unorm as i32,
-    }
-}
-
-// ── Resource Manager ───────────────────────────────────────────
-
-/// Thin ID tracker for GPU objects (non-data resources)
 struct GpuEntry {
     obj: GpuObject,
     owner_id: u32,
 }
 
-pub struct ResourceManager {
+// ── Render command queue ───────────────────────────────────────
+
+pub static PENDING_OPS: Mutex<Vec<PendingRenderOp>> = Mutex::new(Vec::new());
+
+pub struct PendingRenderOp {
+    pub target_view_id: u64,
+    pub command_buffer: CommandBuffer,
+    pub instance_id: u32,
+}
+
+// ── GpuService ─────────────────────────────────────────────────
+
+pub struct GpuService {
     arena: Arc<Arena>,
     gpu_objects: DashMap<u64, GpuEntry>,
     named_resources: DashMap<String, u64>,
@@ -81,14 +63,13 @@ pub struct ResourceManager {
     surface_format: wgpu::TextureFormat,
 }
 
-impl ResourceManager {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>, surface_format: wgpu::TextureFormat) -> Self {
-        let arena = Arc::new(Arena::new(device.clone(), queue.clone()));
+impl GpuService {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>, surface_format: wgpu::TextureFormat, arena: Arc<Arena>) -> Self {
         Self {
             arena,
             gpu_objects: DashMap::new(),
             named_resources: DashMap::new(),
-            next_gpu_id: AtomicU64::new(1_000_000), // GPU objects start at 1M to avoid collisions
+            next_gpu_id: AtomicU64::new(1_000_000),
             device,
             queue,
             surface_format,
@@ -134,17 +115,14 @@ impl ResourceManager {
         None
     }
 
-    /// Extract a wgpu::Buffer from a resource ID (Data + Buffer/Mapped backing)
     pub fn get_buffer(&self, id: u64) -> Option<Arc<wgpu::Buffer>> {
         self.arena.get_buffer(id)
     }
 
-    /// Extract a wgpu::Texture from a resource ID (Data + Texture backing)
     pub fn get_texture(&self, id: u64) -> Option<Arc<wgpu::Texture>> {
         self.arena.get_texture(id).map(|(t, _, _, _)| t)
     }
 
-    /// Extract texture info from a resource ID
     pub fn get_texture_info(&self, id: u64) -> Option<(Arc<wgpu::Texture>, u32, u32, i32)> {
         self.arena.get_texture(id)
     }
@@ -213,7 +191,6 @@ impl ResourceManager {
                     match self.get_gpu(*tvid) {
                         Some(GpuObject::TextureView(tv)) => { keep_views.push((e.binding, tv)); }
                         _ => {
-                            // Fallback: try as texture region → create view on the fly
                             if let Some((tex, _, _, _)) = self.arena.get_texture(*tvid) {
                                 let v = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor::default()));
                                 keep_views.push((e.binding, v));
@@ -397,11 +374,121 @@ impl ResourceManager {
         Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline)), owner_id))
     }
 
+    // ── Compute: create resource (protobuf dispatch) ──────────
+
+    pub fn create_resource(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+        let req = ComputeResourceRequest::decode(&payload[..])?;
+        let mut handle = ResourceHandle::default();
+
+        match req.command {
+            Some(ComputeCommand::CreateShader(s)) => {
+                handle.id = self.create_shader(&s.source, Some(&s.label), requestor_id);
+            }
+            Some(ComputeCommand::CreatePipeline(p)) => {
+                handle.id = self.create_pipeline(&p, requestor_id)?;
+            }
+            Some(ComputeCommand::CreateSampler(s)) => {
+                handle.id = self.create_sampler(s.mag_filter as i32, s.min_filter as i32, requestor_id);
+            }
+            Some(ComputeCommand::CreateTextureView(tv)) => {
+                handle.id = self.create_texture_view(tv.texture_id, requestor_id)?;
+            }
+            Some(ComputeCommand::CreateBindGroupLayout(bgl)) => {
+                let entries: Vec<wgpu::BindGroupLayoutEntry> = bgl.entries.iter().map(|e| {
+                    let visibility = wgpu::ShaderStages::from_bits_truncate(e.visibility);
+                    let ty = match &e.ty {
+                        Some(Ty::Buffer(b)) => wgpu::BindingType::Buffer {
+                            ty: match b.r#type {
+                                1 => wgpu::BufferBindingType::Uniform,
+                                2 => wgpu::BufferBindingType::Storage { read_only: false },
+                                3 => wgpu::BufferBindingType::Storage { read_only: true },
+                                _ => wgpu::BufferBindingType::Uniform,
+                            },
+                            has_dynamic_offset: b.has_dynamic_offset, min_binding_size: None,
+                        },
+                        Some(Ty::Sampler(s)) => wgpu::BindingType::Sampler(match s.r#type {
+                            1 => wgpu::SamplerBindingType::Filtering,
+                            2 => wgpu::SamplerBindingType::NonFiltering,
+                            3 => wgpu::SamplerBindingType::Comparison,
+                            _ => wgpu::SamplerBindingType::Filtering,
+                        }),
+                        Some(Ty::Texture(t)) => wgpu::BindingType::Texture {
+                            sample_type: match t.sample_type {
+                                1 => wgpu::TextureSampleType::Float { filterable: true },
+                                2 => wgpu::TextureSampleType::Float { filterable: false },
+                                3 => wgpu::TextureSampleType::Depth,
+                                4 => wgpu::TextureSampleType::Uint,
+                                5 => wgpu::TextureSampleType::Sint,
+                                _ => wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            view_dimension: match t.view_dimension {
+                                1 => wgpu::TextureViewDimension::D1,
+                                2 => wgpu::TextureViewDimension::D2,
+                                3 => wgpu::TextureViewDimension::D2Array,
+                                4 => wgpu::TextureViewDimension::Cube,
+                                5 => wgpu::TextureViewDimension::CubeArray,
+                                6 => wgpu::TextureViewDimension::D3,
+                                _ => wgpu::TextureViewDimension::D2,
+                            },
+                            multisampled: t.multisampled,
+                        },
+                        None => wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None,
+                        },
+                    };
+                    wgpu::BindGroupLayoutEntry { binding: e.binding, visibility, ty, count: None }
+                }).collect();
+                handle.id = self.create_bind_group_layout(&entries, requestor_id);
+            }
+            Some(ComputeCommand::CreateBindGroup(bg)) => {
+                handle.id = self.create_bind_group(bg.layout_id, &bg.entries, requestor_id)?;
+            }
+            _ => return Err(anyhow::anyhow!("Unsupported resource command")),
+        }
+        Ok(ComputeResourceResponse { handle: Some(handle), error: String::new(), correlation_id: String::new() }.encode_to_vec())
+    }
+
+    // ── Compute: execute (record render commands) ─────────────
+
+    pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+        let req = Submit::decode(&payload[..])?;
+        if let Some(cb) = req.command_buffer {
+            let mut ops = PENDING_OPS.lock().unwrap();
+            ops.push(PendingRenderOp { target_view_id: req.target_texture_view_id, command_buffer: cb, instance_id: requestor_id });
+        }
+        Ok(Vec::new())
+    }
+
+    // ── Compute: build encoder from pending op ────────────────
+
+    pub fn build_encoder(&self, req: Submit, requestor_id: u32) -> anyhow::Result<wgpu::CommandEncoder> {
+        let device = self.get_device();
+        let view = match self.get_resource(req.target_texture_view_id, requestor_id) {
+            Some(Resource::GpuObj(GpuObject::TextureView(v))) => v,
+            _ => return Err(anyhow::anyhow!("Target view {} not found", req.target_texture_view_id)),
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compute Execute") });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Compute Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None, multiview_mask: None, timestamp_writes: None, occlusion_query_set: None,
+            });
+            if let Some(cb) = &req.command_buffer {
+                let _ = execute_render_commands(&mut rp, cb, self, 2048, 2048, requestor_id);
+            }
+        }
+        Ok(encoder)
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────
 
     pub fn destroy_resource(&self, id: u64, requestor_id: u32) {
         if self.arena.free(id, requestor_id) { return; }
-        // Try GPU objects
         let can_remove = self.gpu_objects.get(&id)
             .map(|e| e.owner_id == requestor_id || requestor_id == 0)
             .unwrap_or(false);
@@ -413,9 +500,110 @@ impl ResourceManager {
         self.arena.cleanup_owner(owner_id);
         self.gpu_objects.retain(|_, e| e.owner_id != owner_id);
     }
+}
 
-    pub fn compute_hash(&self, id: u64, requestor_id: u32) -> Option<Vec<u8>> {
-        self.arena.compute_hash(id, requestor_id)
+// ── Render command execution ───────────────────────────────────
+
+fn get_ui_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("VeldMap UI BGL"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+fn get_ui_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
+}
+
+pub fn execute_render_commands<'a>(
+    rp: &mut wgpu::RenderPass<'a>,
+    command_buffer: &'a CommandBuffer,
+    gpu: &'a GpuService,
+    target_width: u32,
+    target_height: u32,
+    requestor_id: u32,
+) -> anyhow::Result<()> {
+    for wgpu_cmd in &command_buffer.commands {
+        let cmd = match &wgpu_cmd.command { Some(c) => c, None => continue };
+        match cmd {
+            WgpuCommand::SetPipeline(p) => {
+                if let Some(Resource::GpuObj(GpuObject::RenderPipeline(pipeline))) = gpu.get_resource(p.pipeline_id, requestor_id) {
+                    rp.set_pipeline(pipeline.as_ref());
+                }
+            }
+            WgpuCommand::SetBindGroup(bg) => {
+                if let Some(Resource::GpuObj(GpuObject::BindGroup(bind_group))) = gpu.get_resource(bg.bind_group_id, requestor_id) {
+                    rp.set_bind_group(bg.index, bind_group.as_ref(), &bg.dynamic_offsets);
+                } else if let Some(Resource::Data(region_id)) = gpu.get_resource(bg.bind_group_id, requestor_id) {
+                    if let Some((texture, _, _, _)) = gpu.get_texture_info(region_id) {
+                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let bgl = get_ui_layout(&gpu.get_device());
+                        let sampler = get_ui_sampler(&gpu.get_device());
+                        let bg_res = gpu.get_device().create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Proxy Fallback BG"), layout: &bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                            ],
+                        });
+                        rp.set_bind_group(bg.index, &bg_res, &[]);
+                    }
+                }
+            }
+            WgpuCommand::SetVertexBuffer(vb) => {
+                if let Some(buffer) = gpu.get_buffer(vb.buffer_id) {
+                    let end = if vb.size > 0 { (vb.offset + vb.size).min(buffer.size()) } else { buffer.size() };
+                    rp.set_vertex_buffer(vb.slot, buffer.slice(vb.offset..end));
+                }
+            }
+            WgpuCommand::SetIndexBuffer(ib) => {
+                let format = if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
+                if let Some(buffer) = gpu.get_buffer(ib.buffer_id) {
+                    let end = if ib.size > 0 { (ib.offset + ib.size).min(buffer.size()) } else { buffer.size() };
+                    rp.set_index_buffer(buffer.slice(ib.offset..end), format);
+                }
+            }
+            WgpuCommand::Draw(d) => {
+                rp.draw(d.first_vertex..(d.first_vertex + d.vertex_count), d.first_instance..(d.first_instance + d.instance_count));
+            }
+            WgpuCommand::DrawIndexed(di) => {
+                rp.draw_indexed(di.first_index..(di.first_index + di.index_count), di.base_vertex, di.first_instance..(di.first_instance + di.instance_count));
+            }
+            WgpuCommand::SetViewport(v) => {
+                let x = v.x.clamp(0.0, target_width as f32);
+                let y = v.y.clamp(0.0, target_height as f32);
+                let w = v.width.min(target_width as f32 - x);
+                let h = v.height.min(target_height as f32 - y);
+                if w > 0.0 && h > 0.0 { rp.set_viewport(x, y, w, h, v.min_depth, v.max_depth); }
+            }
+            WgpuCommand::SetScissorRect(s) => {
+                let x = s.x.min(target_width.saturating_sub(1));
+                let y = s.y.min(target_height.saturating_sub(1));
+                let w = s.width.min(target_width - x).max(1);
+                let h = s.height.min(target_height - y).max(1);
+                rp.set_scissor_rect(x, y, w, h);
+            }
+        }
     }
-
+    Ok(())
 }

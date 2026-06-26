@@ -1,5 +1,6 @@
 use veldmap_host_core::dispatcher::{NativeService, TaskState};
-use veldmap_host_core::resources::{ResourceManager, Resource};
+use veldmap_host_core::arena::Arena;
+use veldmap_host_core::gpu::{GpuService, Resource};
 use veldmap_host_core::core::{
     TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest, ResourceHandle,
@@ -13,18 +14,21 @@ use dashmap::DashMap;
 
 pub struct SystemService {
     tasks: Arc<Mutex<HashMap<String, TaskState>>>,
-    resources: Arc<ResourceManager>,
+    arena: Arc<Arena>,
+    gpu: Arc<GpuService>,
     configs: Arc<DashMap<u32, HashMap<String, serde_json::Value>>>,
 }
 
 impl SystemService {
     pub fn new(
-        resources: Arc<ResourceManager>, 
+        arena: Arc<Arena>,
+        gpu: Arc<GpuService>,
         tasks: Arc<Mutex<HashMap<String, TaskState>>>
     ) -> Self {
         Self {
             tasks,
-            resources,
+            arena,
+            gpu,
             configs: Arc::new(DashMap::new()),
         }
     }
@@ -59,17 +63,16 @@ impl NativeService for SystemService {
             }
             "get_resource" => {
                 let req = GetResourceRequest::decode(&payload[..])?;
-                if let Some(id) = self.resources.get_named_resource(&req.name) {
-                    if let Some(res) = self.resources.get_resource(id, requestor_id) {
+                if let Some(id) = self.gpu.get_named_resource(&req.name) {
+                    if let Some(res) = self.gpu.get_resource(id, requestor_id) {
                         let mut handle = ResourceHandle { id, ..Default::default() };
                         match res {
                             Resource::Data(region_id) => {
-                                // Get size from arena backing
-                                if let Some((_, w, h, _)) = self.resources.get_texture_info(region_id) {
+                                if let Some((_, w, h, _)) = self.gpu.get_texture_info(region_id) {
                                     handle.size = (w * h * 4) as u64;
-                                } else if let Some(buf) = self.resources.get_buffer(region_id) {
+                                } else if let Some(buf) = self.gpu.get_buffer(region_id) {
                                     handle.size = buf.size();
-                                } else if let Some(data) = self.resources.arena().get_cpu_data(region_id) {
+                                } else if let Some(data) = self.arena.get_cpu_data(region_id) {
                                     handle.size = data.len() as u64;
                                 }
                             }
@@ -85,7 +88,7 @@ impl NativeService for SystemService {
             }
             "create_data" => {
                 let req = CreateDataRequest::decode(&payload[..])?;
-                let id = self.resources.arena().alloc_cpu(vec![0u8; req.size as usize], requestor_id);
+                let id = self.arena.alloc_cpu(vec![0u8; req.size as usize], requestor_id);
                 let handle = ResourceHandle {
                     id,
                     size: req.size,
