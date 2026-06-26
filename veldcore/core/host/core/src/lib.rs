@@ -1,6 +1,7 @@
 #![recursion_limit = "512"]
 use std::sync::Arc;
 
+pub mod arena;
 pub mod config_module;
 pub mod plugin_module;
 pub mod abi;

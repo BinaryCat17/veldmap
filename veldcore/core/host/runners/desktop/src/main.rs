@@ -445,7 +445,7 @@ async fn main() -> anyhow::Result<()> {
                             // SURFACE_ID (0) означает, что UI сервис ещё не готов
                             // Не очищаем bind_group, просто запрашиваем redraw
                         } else if Some(id) != app_texture_id {
-                            if let Some(veldmap_host_core::resources::Resource::Texture { texture, .. }) = resources.get_resource(id, 0) {
+                            if let Some(texture) = resources.get_texture(id) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let bind_group = compositor.create_bind_group(&device_arc, &view);
                                 app_texture_id = Some(id);
@@ -522,8 +522,9 @@ async fn main() -> anyhow::Result<()> {
                 {
                     let mut ops = veldmap_host_core::PENDING_OPS.lock().unwrap();
                     for op in ops.drain(..) {
-                        if let Some(veldmap_host_core::resources::Resource::TextureView(target_view)) = 
-                            resources.get_resource(op.target_view_id, op.instance_id) 
+                        if let Some(veldmap_host_core::resources::Resource::GpuObj(
+                            veldmap_host_core::resources::GpuObject::TextureView(target_view)
+                        )) = resources.get_resource(op.target_view_id, op.instance_id)
                         {
                             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                                 label: Some("Plugin Render Pass"),

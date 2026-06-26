@@ -63,9 +63,16 @@ impl NativeService for SystemService {
                     if let Some(res) = self.resources.get_resource(id, requestor_id) {
                         let mut handle = ResourceHandle { id, ..Default::default() };
                         match res {
-                            Resource::Data(v) => { handle.size = v.len() as u64; }
-                            Resource::Buffer(b) => { handle.size = b.size(); }
-                            Resource::Texture { width, height, .. } => { handle.size = (width * height * 4) as u64; }
+                            Resource::Data(region_id) => {
+                                // Get size from arena backing
+                                if let Some((_, w, h, _)) = self.resources.get_texture_info(region_id) {
+                                    handle.size = (w * h * 4) as u64;
+                                } else if let Some(buf) = self.resources.get_buffer(region_id) {
+                                    handle.size = buf.size();
+                                } else if let Some(data) = self.resources.arena().get_cpu_data(region_id) {
+                                    handle.size = data.len() as u64;
+                                }
+                            }
                             _ => {}
                         }
                         Ok(GetResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())

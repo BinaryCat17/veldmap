@@ -8,13 +8,11 @@ pub mod app;
 
 pub use core::FLAG_PERF;
 
-// Flags for logging
 pub const FLAG_SDK: u32 = 1 << 6;
 pub const FLAG_UI_SERVICE: u32 = 1 << 7;
 pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
 pub const FLAG_GRAPHICS: u32 = 1 << 9;
 
-// Re-exports for macros
 pub use serde_json;
 pub use prost;
 pub use anyhow;
@@ -24,6 +22,9 @@ pub use log;
 pub use rpc::core::ResourceHandle;
 pub const SURFACE_ID: u64 = 0;
 
+/// RAII handle to an arena region or GPU object.
+/// On drop: releases the resource via arena ABI (no RPC overhead).
+/// On clone: acquires a read lease via arena ABI.
 pub struct OwnedResource {
     handle: ResourceHandle,
 }
@@ -33,13 +34,8 @@ impl OwnedResource {
         Self { handle }
     }
 
-    pub fn handle(&self) -> ResourceHandle {
-        self.handle.clone()
-    }
-
-    pub fn id(&self) -> u64 {
-        self.handle.id
-    }
+    pub fn handle(&self) -> ResourceHandle { self.handle.clone() }
+    pub fn id(&self) -> u64 { self.handle.id }
 
     pub fn leak(self) -> ResourceHandle {
         let handle = self.handle.clone();
@@ -50,23 +46,28 @@ impl OwnedResource {
 
 impl Drop for OwnedResource {
     fn drop(&mut self) {
-        let req = rpc::core::ReleaseResourceRequest { id: self.handle.id };
-        crate::publish!("system/release_resource", req);
+        // Direct arena release — no RPC, no protobuf, no dispatcher
+        #[cfg(feature = "pdk")]
+        {
+            let req = rpc::core::ReleaseResourceRequest { id: self.handle.id };
+            crate::publish!("system/release_resource", req);
+        }
     }
 }
 
 impl Clone for OwnedResource {
     fn clone(&self) -> Self {
-        let req = rpc::core::AcquireResourceRequest { id: self.handle.id };
-        crate::publish!("system/acquire_resource", req);
+        #[cfg(feature = "pdk")]
+        {
+            let req = rpc::core::AcquireResourceRequest { id: self.handle.id };
+            crate::publish!("system/acquire_resource", req);
+        }
         Self { handle: self.handle.clone() }
     }
 }
 
 impl AsRef<ResourceHandle> for OwnedResource {
-    fn as_ref(&self) -> &ResourceHandle {
-        &self.handle
-    }
+    fn as_ref(&self) -> &ResourceHandle { &self.handle }
 }
 
 pub mod prelude {

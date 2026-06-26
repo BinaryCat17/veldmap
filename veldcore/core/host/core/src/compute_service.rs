@@ -1,4 +1,4 @@
-use crate::resources::{ResourceManager, Resource};
+use crate::resources::{ResourceManager, Resource, GpuObject};
 use crate::core::ResourceHandle;
 use crate::compute::{
     ComputeResourceRequest, ComputeResourceResponse, Submit, CommandBuffer,
@@ -10,7 +10,6 @@ use image::GenericImageView;
 use prost::Message;
 use std::sync::{Arc, Mutex};
 
-// Global pending render ops queue - main thread will execute these
 pub static PENDING_OPS: Mutex<Vec<PendingRenderOp>> = Mutex::new(Vec::new());
 
 pub struct PendingRenderOp {
@@ -19,37 +18,34 @@ pub struct PendingRenderOp {
     pub instance_id: u32,
 }
 
-pub fn get_ui_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+fn get_ui_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("VeldMap UI BGL"),
         entries: &[
-            wgpu::BindGroupLayoutEntry { 
-                binding: 0, 
-                visibility: wgpu::ShaderStages::FRAGMENT, 
-                ty: wgpu::BindingType::Texture { 
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true }, 
-                    view_dimension: wgpu::TextureViewDimension::D2, 
-                    multisampled: false 
-                }, 
-                count: None 
+            wgpu::BindGroupLayoutEntry {
+                binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                },
+                count: None,
             },
-            wgpu::BindGroupLayoutEntry { 
-                binding: 1, 
-                visibility: wgpu::ShaderStages::FRAGMENT, 
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), 
-                count: None 
+            wgpu::BindGroupLayoutEntry {
+                binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
             },
         ],
     })
 }
 
-pub fn get_ui_sampler(device: &wgpu::Device) -> wgpu::Sampler {
-    device.create_sampler(&wgpu::SamplerDescriptor { 
-        address_mode_u: wgpu::AddressMode::ClampToEdge, 
-        address_mode_v: wgpu::AddressMode::ClampToEdge, 
-        mag_filter: wgpu::FilterMode::Linear, 
-        min_filter: wgpu::FilterMode::Linear, 
-        ..Default::default() 
+fn get_ui_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
     })
 }
 
@@ -62,48 +58,44 @@ pub fn execute_render_commands<'a>(
     requestor_id: u32,
 ) -> anyhow::Result<()> {
     for wgpu_cmd in &command_buffer.commands {
-        let cmd = match &wgpu_cmd.command {
-            Some(c) => c,
-            None => continue,
-        };
-
+        let cmd = match &wgpu_cmd.command { Some(c) => c, None => continue };
         match cmd {
             WgpuCommand::SetPipeline(p) => {
-                if let Some(Resource::RenderPipeline(pipeline)) = resources.get_resource(p.pipeline_id, requestor_id) {
+                if let Some(Resource::GpuObj(GpuObject::RenderPipeline(pipeline))) = resources.get_resource(p.pipeline_id, requestor_id) {
                     rp.set_pipeline(pipeline.as_ref());
                 }
             }
             WgpuCommand::SetBindGroup(bg) => {
-                if let Some(Resource::BindGroup(bind_group)) = resources.get_resource(bg.bind_group_id, requestor_id) {
+                if let Some(Resource::GpuObj(GpuObject::BindGroup(bind_group))) = resources.get_resource(bg.bind_group_id, requestor_id) {
                     rp.set_bind_group(bg.index, bind_group.as_ref(), &bg.dynamic_offsets);
-                } else {
-                    if let Some(Resource::Texture { texture, .. }) = resources.get_resource(bg.bind_group_id, requestor_id) {
+                } else if let Some(Resource::Data(region_id)) = resources.get_resource(bg.bind_group_id, requestor_id) {
+                    // Fallback: texture region → create ad-hoc bind group
+                    if let Some((texture, _, _, _)) = resources.get_texture_info(region_id) {
                         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                         let bgl = get_ui_layout(&resources.get_device());
                         let sampler = get_ui_sampler(&resources.get_device());
-                        let bg_res = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor { 
-                            label: Some("Proxy Fallback BG"), 
-                            layout: &bgl, 
+                        let bg_res = resources.get_device().create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Proxy Fallback BG"), layout: &bgl,
                             entries: &[
-                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, 
-                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) }
-                            ] 
+                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                            ],
                         });
                         rp.set_bind_group(bg.index, &bg_res, &[]);
                     }
                 }
             }
             WgpuCommand::SetVertexBuffer(vb) => {
-                if let Some(Resource::Buffer(buf)) = resources.get_resource(vb.buffer_id, requestor_id) {
-                    let end = if vb.size > 0 { (vb.offset + vb.size).min(buf.size()) } else { buf.size() };
-                    rp.set_vertex_buffer(vb.slot, buf.slice(vb.offset..end));
+                if let Some(buffer) = resources.get_buffer(vb.buffer_id) {
+                    let end = if vb.size > 0 { (vb.offset + vb.size).min(buffer.size()) } else { buffer.size() };
+                    rp.set_vertex_buffer(vb.slot, buffer.slice(vb.offset..end));
                 }
             }
             WgpuCommand::SetIndexBuffer(ib) => {
                 let format = if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
-                if let Some(Resource::Buffer(buf)) = resources.get_resource(ib.buffer_id, requestor_id) {
-                    let end = if ib.size > 0 { (ib.offset + ib.size).min(buf.size()) } else { buf.size() };
-                    rp.set_index_buffer(buf.slice(ib.offset..end), format);
+                if let Some(buffer) = resources.get_buffer(ib.buffer_id) {
+                    let end = if ib.size > 0 { (ib.offset + ib.size).min(buffer.size()) } else { buffer.size() };
+                    rp.set_index_buffer(buffer.slice(ib.offset..end), format);
                 }
             }
             WgpuCommand::Draw(d) => {
@@ -117,9 +109,7 @@ pub fn execute_render_commands<'a>(
                 let y = v.y.clamp(0.0, target_height as f32);
                 let w = v.width.min(target_width as f32 - x);
                 let h = v.height.min(target_height as f32 - y);
-                if w > 0.0 && h > 0.0 {
-                    rp.set_viewport(x, y, w, h, v.min_depth, v.max_depth);
-                }
+                if w > 0.0 && h > 0.0 { rp.set_viewport(x, y, w, h, v.min_depth, v.max_depth); }
             }
             WgpuCommand::SetScissorRect(s) => {
                 let x = s.x.min(target_width.saturating_sub(1));
@@ -139,153 +129,118 @@ pub struct ComputeService {
 }
 
 impl ComputeService {
-    pub fn new(resources: Arc<ResourceManager>) -> Self {
-        Self { resources }
-    }
+    pub fn new(resources: Arc<ResourceManager>) -> Self { Self { resources } }
 
-    /// Build command encoder for execution (must be submitted by caller from main thread)
     pub fn build_encoder(&self, req: Submit, requestor_id: u32) -> anyhow::Result<wgpu::CommandEncoder> {
         let device = self.resources.get_device();
-        
-        let target_view = self.resources.get_resource(req.target_texture_view_id, requestor_id)
-            .ok_or_else(|| anyhow::anyhow!("Target texture view {} not found", req.target_texture_view_id))?;
-        
-        let view = match target_view {
-            Resource::TextureView(view) => view,
-            _ => return Err(anyhow::anyhow!("Resource {} is not a texture view", req.target_texture_view_id)),
+        let view = match self.resources.get_resource(req.target_texture_view_id, requestor_id) {
+            Some(Resource::GpuObj(GpuObject::TextureView(v))) => v,
+            _ => return Err(anyhow::anyhow!("Target view {} not found", req.target_texture_view_id)),
         };
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { 
-            label: Some("Compute Execute") 
-        });
-
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compute Execute") });
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Compute Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
+                    view: &view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                     depth_slice: None,
                 })],
-                depth_stencil_attachment: None,
-                multiview_mask: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
+                depth_stencil_attachment: None, multiview_mask: None, timestamp_writes: None, occlusion_query_set: None,
             });
-
             if let Some(cb) = &req.command_buffer {
                 let _ = execute_render_commands(&mut rp, cb, &self.resources, 2048, 2048, requestor_id);
             }
         }
-
         Ok(encoder)
     }
 
     pub fn create_resource(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         let req = ComputeResourceRequest::decode(&payload[..])?;
         let mut handle = ResourceHandle::default();
-        let instance_id = requestor_id;
 
         match req.command {
             Some(ComputeCommand::CreateTexture(t)) => {
-                handle.id = self.resources.create_texture(t.width, t.height, t.format as i32, t.usage, t.readonly, instance_id);
-                handle.size = (t.width * t.height * 4) as u64; 
+                handle.id = self.resources.create_texture(t.width, t.height, t.format as i32, t.usage, t.readonly, requestor_id);
+                handle.size = (t.width * t.height * 4) as u64;
             }
             Some(ComputeCommand::CreateBuffer(b)) => {
-                handle.id = self.resources.create_buffer_ext(b.size, b.usage, b.mapped_at_creation, b.readonly, instance_id);
+                handle.id = self.resources.create_buffer_ext(b.size, b.usage, b.mapped_at_creation, b.readonly, requestor_id);
                 handle.size = b.size;
             }
             Some(ComputeCommand::CreateShader(s)) => {
-                handle.id = self.resources.create_shader(&s.source, Some(&s.label), instance_id);
+                handle.id = self.resources.create_shader(&s.source, Some(&s.label), requestor_id);
             }
             Some(ComputeCommand::CreatePipeline(p)) => {
-                handle.id = self.resources.create_pipeline(&p, instance_id)?;
+                handle.id = self.resources.create_pipeline(&p, requestor_id)?;
             }
             Some(ComputeCommand::CreateSampler(s)) => {
-                handle.id = self.resources.create_sampler(s.mag_filter as i32, s.min_filter as i32, instance_id);
+                handle.id = self.resources.create_sampler(s.mag_filter as i32, s.min_filter as i32, requestor_id);
             }
             Some(ComputeCommand::CreateTextureView(tv)) => {
-                crate::vtrace!(crate::logging::FLAG_COMPUTE, "[COMPUTE] Creating texture view for texture_id={}", tv.texture_id);
-                handle.id = self.resources.create_texture_view(tv.texture_id, instance_id)?;
-                crate::vtrace!(crate::logging::FLAG_COMPUTE, "[COMPUTE] Created texture view: id={}", handle.id);
+                handle.id = self.resources.create_texture_view(tv.texture_id, requestor_id)?;
             }
             Some(ComputeCommand::CreateBindGroupLayout(bgl)) => {
-                let mut entries = Vec::new();
-                for e in bgl.entries {
+                let entries: Vec<wgpu::BindGroupLayoutEntry> = bgl.entries.iter().map(|e| {
                     let visibility = wgpu::ShaderStages::from_bits_truncate(e.visibility);
-                    let ty = match e.ty {
-                        Some(Ty::Buffer(b)) => {
-                            wgpu::BindingType::Buffer {
-                                ty: match b.r#type {
-                                    1 => wgpu::BufferBindingType::Uniform,
-                                    2 => wgpu::BufferBindingType::Storage { read_only: false },
-                                    3 => wgpu::BufferBindingType::Storage { read_only: true },
-                                    _ => wgpu::BufferBindingType::Uniform,
-                                },
-                                has_dynamic_offset: b.has_dynamic_offset,
-                                min_binding_size: None,
-                            }
-                        }
-                        Some(Ty::Sampler(s)) => {
-                            wgpu::BindingType::Sampler(match s.r#type {
-                                1 => wgpu::SamplerBindingType::Filtering,
-                                2 => wgpu::SamplerBindingType::NonFiltering,
-                                3 => wgpu::SamplerBindingType::Comparison,
-                                _ => wgpu::SamplerBindingType::Filtering,
-                            })
-                        }
-                        Some(Ty::Texture(t)) => {
-                            wgpu::BindingType::Texture {
-                                sample_type: match t.sample_type {
-                                    1 => wgpu::TextureSampleType::Float { filterable: true },
-                                    2 => wgpu::TextureSampleType::Float { filterable: false },
-                                    3 => wgpu::TextureSampleType::Depth,
-                                    4 => wgpu::TextureSampleType::Uint,
-                                    5 => wgpu::TextureSampleType::Sint,
-                                    _ => wgpu::TextureSampleType::Float { filterable: true },
-                                },
-                                view_dimension: match t.view_dimension {
-                                    1 => wgpu::TextureViewDimension::D1,
-                                    2 => wgpu::TextureViewDimension::D2,
-                                    3 => wgpu::TextureViewDimension::D2Array,
-                                    4 => wgpu::TextureViewDimension::Cube,
-                                    5 => wgpu::TextureViewDimension::CubeArray,
-                                    6 => wgpu::TextureViewDimension::D3,
-                                    _ => wgpu::TextureViewDimension::D2,
-                                },
-                                multisampled: t.multisampled,
-                            }
-                        }
-                        None => return Err(anyhow::anyhow!("Binding type missing")),
+                    let ty = match &e.ty {
+                        Some(Ty::Buffer(b)) => wgpu::BindingType::Buffer {
+                            ty: match b.r#type {
+                                1 => wgpu::BufferBindingType::Uniform,
+                                2 => wgpu::BufferBindingType::Storage { read_only: false },
+                                3 => wgpu::BufferBindingType::Storage { read_only: true },
+                                _ => wgpu::BufferBindingType::Uniform,
+                            },
+                            has_dynamic_offset: b.has_dynamic_offset, min_binding_size: None,
+                        },
+                        Some(Ty::Sampler(s)) => wgpu::BindingType::Sampler(match s.r#type {
+                            1 => wgpu::SamplerBindingType::Filtering,
+                            2 => wgpu::SamplerBindingType::NonFiltering,
+                            3 => wgpu::SamplerBindingType::Comparison,
+                            _ => wgpu::SamplerBindingType::Filtering,
+                        }),
+                        Some(Ty::Texture(t)) => wgpu::BindingType::Texture {
+                            sample_type: match t.sample_type {
+                                1 => wgpu::TextureSampleType::Float { filterable: true },
+                                2 => wgpu::TextureSampleType::Float { filterable: false },
+                                3 => wgpu::TextureSampleType::Depth,
+                                4 => wgpu::TextureSampleType::Uint,
+                                5 => wgpu::TextureSampleType::Sint,
+                                _ => wgpu::TextureSampleType::Float { filterable: true },
+                            },
+                            view_dimension: match t.view_dimension {
+                                1 => wgpu::TextureViewDimension::D1,
+                                2 => wgpu::TextureViewDimension::D2,
+                                3 => wgpu::TextureViewDimension::D2Array,
+                                4 => wgpu::TextureViewDimension::Cube,
+                                5 => wgpu::TextureViewDimension::CubeArray,
+                                6 => wgpu::TextureViewDimension::D3,
+                                _ => wgpu::TextureViewDimension::D2,
+                            },
+                            multisampled: t.multisampled,
+                        },
+                        None => wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None,
+                        },
                     };
-                    entries.push(wgpu::BindGroupLayoutEntry {
-                        binding: e.binding,
-                        visibility,
-                        ty,
-                        count: None,
-                    });
-                }
-                handle.id = self.resources.create_bind_group_layout(&entries, instance_id);
+                    wgpu::BindGroupLayoutEntry { binding: e.binding, visibility, ty, count: None }
+                }).collect();
+                handle.id = self.resources.create_bind_group_layout(&entries, requestor_id);
             }
             Some(ComputeCommand::CreateBindGroup(bg)) => {
-                handle.id = self.resources.create_bind_group(bg.layout_id, &bg.entries, instance_id)?;
+                handle.id = self.resources.create_bind_group(bg.layout_id, &bg.entries, requestor_id)?;
             }
             Some(ComputeCommand::FsReadToBuffer(req_fs)) => {
                 let data = std::fs::read(&req_fs.path)?;
-                handle.id = self.resources.create_buffer_with_data(&data, req_fs.usage, true, instance_id);
                 handle.size = data.len() as u64;
+                handle.id = self.resources.create_buffer_with_data(&data, req_fs.usage, true, requestor_id);
             }
             Some(ComputeCommand::ImageLoadToTexture(req_img)) => {
                 let img = image::open(&req_img.path)?;
                 let (w, h) = img.dimensions();
                 let rgba = img.to_rgba8();
-                
-                handle.id = self.resources.create_texture(w, h, 0, req_img.usage, true, instance_id);
-                self.resources.write_resource(handle.id, 0, &rgba, instance_id)?;
+                handle.id = self.resources.create_texture(w, h, 0, req_img.usage, true, requestor_id);
+                self.resources.write_resource(handle.id, 0, &rgba, requestor_id)?;
                 handle.size = (w * h * 4) as u64;
             }
             _ => return Err(anyhow::anyhow!("Unsupported resource command")),
@@ -297,11 +252,7 @@ impl ComputeService {
         let req = Submit::decode(&payload[..])?;
         if let Some(cb) = req.command_buffer {
             let mut ops = PENDING_OPS.lock().unwrap();
-            ops.push(PendingRenderOp {
-                target_view_id: req.target_texture_view_id,
-                command_buffer: cb,
-                instance_id: requestor_id,
-            });
+            ops.push(PendingRenderOp { target_view_id: req.target_texture_view_id, command_buffer: cb, instance_id: requestor_id });
         }
         Ok(Vec::new())
     }

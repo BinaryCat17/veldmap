@@ -22,3 +22,4 @@ project_context.txt
 generated
 .venv
 runtime/data
+.qwen
