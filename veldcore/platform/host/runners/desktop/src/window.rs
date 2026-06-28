@@ -77,7 +77,7 @@ impl Default for PluginWindowConfig {
 }
 
 /// Parse window config from plugin's JSON config
-pub fn parse_window_config(config: &serde_json::Value) -> Option<PluginWindowConfig> {
+pub fn parse_window_config(config: &std::collections::HashMap<String, serde_json::Value>) -> Option<PluginWindowConfig> {
     config.get("window").and_then(|w| {
         serde_json::from_value(w.clone()).ok()
     })
@@ -114,42 +114,16 @@ impl PluginWindows {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct ServiceEntry {
-    location: String,
-    #[allow(dead_code)]
-    node_id: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct ServicesManifest {
-    services: std::collections::HashMap<String, ServiceEntry>,
-}
-
-/// Scan plugin configs for window preferences
-pub fn scan_window_configs(config_dir: &str) -> anyhow::Result<PluginWindows> {
-    let manifest_path = std::path::Path::new(config_dir).join("services.json");
-    if !manifest_path.exists() {
-        log::warn!("Manifest not found at {:?}", manifest_path);
-        return Ok(PluginWindows::new());
-    }
-
-    let manifest: ServicesManifest = veldmap_host_core::config::load_config_with_path(&manifest_path)?;
-    
+pub fn extract_window_configs(config: &veldmap_host_core::config::HostConfig) -> PluginWindows {
     let mut windows = PluginWindows::new();
 
-    for (name, entry) in manifest.services {
-        if entry.location == "local" {
-            let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
-            if let Ok(config) = veldmap_host_core::config::load_config_with_path::<serde_json::Value, _>(&service_config_path) {
-                if let Some(window_config) = parse_window_config(&config) {
-                        log::info!("Plugin '{}' requests window: {}x{} (scale: {})", 
-                            name, window_config.width, window_config.height, window_config.ui_scale);
-                        windows.add(name, window_config);
-                }
-            }
+    for (name, plugin_config) in &config.plugin_configs {
+        if let Some(window_config) = parse_window_config(plugin_config) {
+            log::info!("Plugin '{}' requests window: {}x{} (scale: {})", 
+                name, window_config.width, window_config.height, window_config.ui_scale);
+            windows.add(name.clone(), window_config);
         }
     }
     
-    Ok(windows)
+    windows
 }

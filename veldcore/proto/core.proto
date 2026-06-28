@@ -250,6 +250,11 @@ message GetConfigResponse {
   string value = 1;
 }
 
+message RegisterConfigRequest {
+  uint32 key = 1;
+  string value_json = 2;
+}
+
 message GenerateUuidRequest {
 }
 

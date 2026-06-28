@@ -40,8 +40,7 @@ impl NativeService for AppService {
     }
 }
 
-pub fn register_services(ctx: std::sync::Arc<veldmap_host_core::setup::HostContext>, proxy: EventLoopProxy<AppCommand>) -> std::sync::Arc<AppService> {
+pub fn register_services(ctx: std::sync::Arc<veldmap_host_core::setup::HostContext>, proxy: EventLoopProxy<AppCommand>) {
     let app_service = std::sync::Arc::new(AppService::new(proxy));
-    ctx.dispatcher.register_service("app".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(app_service.clone()));
-    app_service
+    ctx.dispatcher.register_service("app".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(app_service));
 }

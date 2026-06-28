@@ -44,6 +44,13 @@ impl SystemService {
 impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
+            "register_config" => {
+                let req = veldmap_host_core::core::RegisterConfigRequest::decode(&payload[..])?;
+                if let Ok(config_map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&req.value_json) {
+                    self.register_config(req.key, config_map);
+                }
+                Ok(Vec::new())
+            }
             "get_config" => {
                 let req = GetConfigRequest::decode(&payload[..])?;
                 let value = if let Some(config) = self.configs.get(&requestor_id) {
@@ -167,8 +174,7 @@ impl NativeService for SystemService {
     }
 }
 
-pub fn register_services(ctx: Arc<veldmap_host_core::setup::HostContext>) -> Arc<SystemService> {
+pub fn register_services(ctx: Arc<veldmap_host_core::setup::HostContext>) {
     let service = Arc::new(SystemService::new(ctx.clone()));
-    ctx.dispatcher.register_service("system".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(service.clone()));
-    service
+    ctx.dispatcher.register_service("system".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(service));
 }

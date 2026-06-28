@@ -30,11 +30,12 @@ async fn main() -> anyhow::Result<()> {
         .cloned()
         .unwrap_or_else(|| "config".to_string());
 
-    // --- 1. ИНИЦИАЛИЗАЦИЯ ЛОГИРОВАНИЯ ---
-    veldmap_host_core::setup::init_logging(&config_dir)?;
+    // --- 1. ИНИЦИАЛИЗАЦИЯ КОНФИГУРАЦИЙ И ЛОГИРОВАНИЯ ---
+    let host_config = Arc::new(veldmap_host_core::config::load_host_config(&config_dir)?);
+    veldmap_host_core::setup::init_logging(&config_dir, &host_config)?;
 
     // --- 2. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
-    let mut plugin_windows = window::scan_window_configs(&config_dir)?;
+    let plugin_windows = window::extract_window_configs(&host_config);
     
     let (window_width, window_height, window_title, _ui_scale) = plugin_windows
         .first()
@@ -68,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         veldmap_host_core::setup::init_wgpu(&instance, &surface, window.inner_size().width, window.inner_size().height).await?;
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
-    let core_services = veldmap_host_core::setup::init_core_services(device_arc.clone(), queue_arc.clone(), surface_format).await?;
+    let core_services = veldmap_host_core::setup::init_core_services(device_arc.clone(), queue_arc.clone(), surface_format, host_config).await?;
     let ctx = core_services;
     let memory = ctx.memory.clone();
     let dispatcher = ctx.dispatcher.clone();
@@ -84,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
     let last_frame_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
-    let system_service = veldmap_host_system::register_services(ctx.clone());
+    veldmap_host_system::register_services(ctx.clone());
 
     // Register Modular Services
     #[cfg(target_os = "linux")]
@@ -93,15 +94,10 @@ async fn main() -> anyhow::Result<()> {
     veldmap_host_network::register_services(ctx.clone());
     
     let proxy = event_loop.create_proxy();
-    let _app_service = app_service::register_services(ctx.clone(), proxy);
+    app_service::register_services(ctx.clone(), proxy);
 
-    let sys_clone = system_service.clone();
     veldmap_host_core::plugins::load_services(
         ctx.clone(),
-        &config_dir,
-        move |id, cfg| {
-            sys_clone.register_config(id, cfg);
-        },
     ).await?;
 
     // Отправляем фейковое событие изменения окна, чтобы инициализировать UI

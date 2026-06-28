@@ -5,21 +5,14 @@ use crate::memory::MemoryManager;
 use crate::graphics::GraphicsDevice;
 use std::io::Write;
 
-/// Initializes logging and reads configurations from `config_dir`
-pub fn init_logging(config_dir: &str) -> anyhow::Result<()> {
+pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -> anyhow::Result<()> {
     let mut log_path = std::path::PathBuf::from("logs/host.log");
     
-    let services_manifest_path = std::path::Path::new(config_dir).join("services.json");
-    if let Ok(content) = std::fs::read_to_string(&services_manifest_path) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(logs) = json.get("logs").and_then(|v| v.as_str()) {
-                log_path = std::path::PathBuf::from(logs);
-            }
-        }
+    if let Some(logs) = &host_config.manifest.logs {
+        log_path = std::path::PathBuf::from(logs);
     }
 
-    let project_root = std::path::Path::new(config_dir).parent().unwrap_or(std::path::Path::new("."));
-    let final_log_path = project_root.join(log_path);
+    let final_log_path = host_config.project_root.join(log_path);
 
     if let Some(parent) = final_log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -158,13 +151,14 @@ pub struct HostContext {
     pub memory: Arc<MemoryManager>,
     pub graphics: Arc<GraphicsDevice>,
     pub endpoint: iroh::Endpoint,
+    pub config: Arc<crate::config::HostConfig>,
 }
 
-/// Initializes fundamental core services: Iroh, Registry, Memory, Graphics
 pub async fn init_core_services(
     device: Arc<wgpu::Device>,
     queue: Arc<Mutex<wgpu::Queue>>,
     surface_format: wgpu::TextureFormat,
+    config: Arc<crate::config::HostConfig>,
 ) -> anyhow::Result<Arc<HostContext>> {
     let registry = Arc::new(ResourceRegistry::new());
     let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone()));
@@ -187,5 +181,6 @@ pub async fn init_core_services(
         memory,
         graphics,
         endpoint,
+        config,
     }))
 }

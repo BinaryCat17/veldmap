@@ -11,17 +11,7 @@ use crate::registry::ResourceRegistry;
 use crate::memory::MemoryManager;
 use crate::graphics::GraphicsDevice;
 
-#[derive(Deserialize)]
-struct ServiceEntry {
-    location: String,
-    path: Option<String>,
-    node_id: Option<String>,
-}
 
-#[derive(Deserialize)]
-struct ServicesManifest {
-    services: HashMap<String, ServiceEntry>,
-}
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -31,27 +21,17 @@ static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(100); // Local plugins start
 
 pub async fn load_services(
     ctx: Arc<crate::setup::HostContext>,
-    config_dir: &str,
 ) -> anyhow::Result<()>
 {
-    let manifest_path = std::path::Path::new(config_dir).join("services.json");
-    if !manifest_path.exists() {
-        log::warn!("Manifest not found at {:?}", manifest_path);
-        return Ok(());
-    }
-
-    let manifest: ServicesManifest = crate::config::load_config_with_path(&manifest_path)?;
-    let project_root = std::path::Path::new(config_dir).parent().unwrap_or(std::path::Path::new("."));
-
     let mut config = Config::new();
     config.async_support(true);
     let engine = Engine::new(&config)?;
 
-    for (name, entry) in manifest.services {
+    for (name, entry) in &ctx.config.manifest.services {
         match entry.location.as_str() {
             "local" => {
-                let rel_wasm_path = entry.path.ok_or_else(|| anyhow::anyhow!("Missing path for local service {}", name))?;
-                let wasm_path = project_root.join(&rel_wasm_path);
+                let rel_wasm_path = entry.path.as_ref().ok_or_else(|| anyhow::anyhow!("Missing path for local service {}", name))?;
+                let wasm_path = ctx.config.project_root.join(rel_wasm_path);
                 
                 if !wasm_path.exists() {
                     log::error!("WASM file not found: {:?} (resolved from {})", wasm_path, rel_wasm_path);
@@ -61,11 +41,13 @@ pub async fn load_services(
                 let wasm_bytes = fs::read(&wasm_path)?;
                 let module = Module::from_binary(&engine, &wasm_bytes)?;
                 
-                let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
-                let service_config_str = crate::config::read_config_string(&service_config_path)
-                    .unwrap_or_else(|_| "{}".to_string());
+                let service_config_str = ctx.config.plugin_raw_configs.get(name)
+                    .cloned()
+                    .unwrap_or_else(|| "{}".to_string());
 
-                let mut config_map: HashMap<String, serde_json::Value> = serde_json::from_str(&service_config_str)?;
+                let mut config_map = ctx.config.plugin_configs.get(name)
+                    .cloned()
+                    .unwrap_or_default();
                 
                 // Window parsing moved to desktop runner
                 config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
@@ -234,9 +216,9 @@ pub async fn load_services(
                 }
             }
             "remote" => {
-                let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
+                let node_id_str = entry.node_id.as_ref().ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
                 let node_id: iroh::EndpointId = node_id_str.parse()?;
-                ctx.dispatcher.register_service(name, ServiceLocation::RemoteIroh(node_id));
+                ctx.dispatcher.register_service(name.clone(), ServiceLocation::RemoteIroh(node_id));
             }
             _ => {}
         }
