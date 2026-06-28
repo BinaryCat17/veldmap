@@ -1,7 +1,6 @@
 #![recursion_limit = "512"]
 use veldmap_host_core::{
-    dispatcher::{Dispatcher, ServiceLocation},
-    plugin_module,
+    dispatcher::ServiceLocation,
 };
 use veldmap_host_system::SystemService;
 
@@ -13,9 +12,8 @@ use winit::{
     event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::io::Write;
 use prost::Message;
 
 mod app_service;
@@ -30,90 +28,12 @@ async fn main() -> anyhow::Result<()> {
         .cloned()
         .unwrap_or_else(|| "config".to_string());
 
-    let mut log_path = std::path::PathBuf::from("logs/host.log");
-    
-    // Пытаемся прочитать путь к логам из services.json
-    let services_manifest_path = std::path::Path::new(&config_dir).join("services.json");
-    if let Ok(content) = std::fs::read_to_string(&services_manifest_path) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(logs) = json.get("logs").and_then(|v| v.as_str()) {
-                log_path = std::path::PathBuf::from(logs);
-            }
-        }
-    }
-
-    // Разрешаем путь относительно родителя папки config (то есть папки runtime)
-    let project_root = std::path::Path::new(&config_dir).parent().unwrap_or(std::path::Path::new("."));
-    let final_log_path = project_root.join(log_path);
-
     // --- 1. ИНИЦИАЛИЗАЦИЯ ЛОГИРОВАНИЯ ---
-    // Очищаем лог файл при старте
-    if let Some(parent) = final_log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::remove_file(&final_log_path);
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&final_log_path)
-        .ok();
-    let log_file: Option<Arc<Mutex<std::fs::File>>> = log_file.map(|f| Arc::new(Mutex::new(f)));
+    veldmap_host_core::setup::init_logging(&config_dir)?;
 
-    // Настраиваем логирование
-    // В файл пишем ВСЁ (trace и выше)
-    // В консоль только veldmap info+ и warn/error от других
-    let file_log = log_file.clone();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,veldmap_vlog=trace,info"))
-        .format(move |buf, record| {
-            let log_line = format!(
-                "[{}] <{}> {}\n",
-                chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
-                record.target(),
-                record.args()
-            );
-
-            // Пишем в файл всё
-            if let Some(file) = &file_log {
-                if let Ok(mut f) = file.lock() {
-                    let _ = f.write_all(log_line.as_bytes());
-                }
-            }
-
-            // В консоль: veldmap info и warn/error от других крейтов
-            // Debug/trace только в файл
-            let is_veldmap = record.target().starts_with("veldmap");
-            let is_info = record.level() == log::Level::Info;
-            let is_warn_or_error = record.level() == log::Level::Warn || record.level() == log::Level::Error;
-            
-            if (is_veldmap && is_info) || is_warn_or_error {
-                write!(buf, "{}", log_line)
-            } else {
-                Ok(())
-            }
-        })
-        .init();
-
-    // --- 2. ЗАГРУЗКА КОНФИГА CORE ---
+    // --- 2. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
+    let mut plugin_windows = veldmap_host_core::plugins::scan_window_configs(&config_dir)?;
     
-    // Загружаем core.json для получения флагов логирования
-    let core_config: veldmap_host_core::CoreConfig = 
-        veldmap_host_core::load_config_with_path::<veldmap_host_core::CoreConfig, _>(&format!("{}/core.json", config_dir))
-            .unwrap_or_default();
-    
-    // Инициализируем флаги логирования
-    veldmap_host_core::logging::init_logging(core_config.log_flags);
-    // Инициализируем rate limiting (минимальный интервал между одинаковыми логами)
-    veldmap_host_core::logging::init_rate_limiting(core_config.log_rate_limit_ms);
-    
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "VeldMap GUI Host starting...");
-    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Log flags: 0b{:b}", core_config.log_flags);
-    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Log rate limit: {}ms", core_config.log_rate_limit_ms);
-
-    // --- 4. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
-    // Сканируем конфиги плагинов до создания окна
-    let mut plugin_windows = veldmap_host_core::plugin_module::scan_window_configs(&config_dir)?;
-    
-    // Получаем параметры окна из первого плагина с window config
     let (window_width, window_height, window_title, _ui_scale) = plugin_windows
         .first()
         .map(|(name, cfg)| {
@@ -131,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
         .build(&event_loop)?);
 
+    // --- 3. ИНИЦИАЛИЗАЦИЯ WGPU ---
     veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Creating wgpu instance (Vulkan only)...");
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -141,86 +62,16 @@ async fn main() -> anyhow::Result<()> {
     veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Creating surface...");
     let surface = instance.create_surface(window.clone())?;
     
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Enumerating Vulkan adapters...");
-    let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN).await;
-    for (i, adapter) in adapters.iter().enumerate() {
-        let info = adapter.get_info();
-        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
-            i, info.name, info.vendor, info.device);
-    }
-    
-    // Выбираем реальный GPU (не llvmpipe/software)
-    let mut adapter = None;
-    for a in adapters {
-        let info = a.get_info();
-        // Исключаем llvmpipe и software renderers
-        if !info.name.to_lowercase().contains("llvmpipe") && 
-           !info.name.to_lowercase().contains("software") &&
-           info.vendor != 0x1414 { // Microsoft (software adapters)
-            adapter = Some(a);
-            break;
-        }
-    }
-    
-    // Fallback: если не нашли дискретный GPU, пробуем request_adapter
-    let adapter = match adapter {
-        Some(a) => a,
-        None => {
-            veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "No discrete GPU found, trying fallback...");
-            instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: true,
-            }).await.map_err(|e| anyhow::anyhow!("Adapter error: {}", e))?
-        }
-    };
-
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Selected GPU: {:?}", adapter.get_info().name);
-
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Requesting device...");
-    let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
-        label: None,
-        required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::default(),
-        memory_hints: wgpu::MemoryHints::default(),
-        ..Default::default()
-    }).await?;
-
-    let device_arc = Arc::new(device);
-    let queue_arc = Arc::new(Mutex::new(queue));
-
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Getting surface capabilities...");
-    let caps = surface.get_capabilities(&adapter);
-    let surface_format = caps.formats.iter()
-        .copied()
-        .find(|f| f.is_srgb())
-        .unwrap_or(caps.formats[0]);
-
-    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Available Present Modes: {:?}", caps.present_modes);
-    let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-        wgpu::PresentMode::Mailbox
-    } else {
-        wgpu::PresentMode::Fifo
-    };
-    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Selected Present Mode: {:?}", present_mode);
-
-    let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: surface_format,
-        width: window.inner_size().width,
-        height: window.inner_size().height,
-        present_mode,
-        alpha_mode: caps.alpha_modes[0],
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-    };
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Initial surface configure: {}x{}", config.width, config.height);
-    surface.configure(&device_arc, &config);
+    let (_adapter, device_arc, queue_arc, mut config, surface_format) = 
+        veldmap_host_core::setup::init_wgpu(&instance, &surface, window.inner_size().width, window.inner_size().height).await?;
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
-    let registry = Arc::new(veldmap_host_core::registry::ResourceRegistry::new());
-    let memory = Arc::new(veldmap_host_core::memory::MemoryManager::new(registry.clone(), device_arc.clone(), queue_arc.clone()));
-    let graphics = Arc::new(veldmap_host_core::graphics::GraphicsDevice::new(registry.clone(), memory.clone(), device_arc.clone(), queue_arc.clone(), surface_format));
+    let core_services = veldmap_host_core::setup::init_core_services(device_arc.clone(), queue_arc.clone(), surface_format).await?;
+    let registry = core_services.registry;
+    let memory = core_services.memory;
+    let graphics = core_services.graphics;
+    let dispatcher = core_services.dispatcher;
+    let endpoint = core_services.endpoint;
     
     // Initialize compositor for final UI composition
     let compositor = Arc::new(Compositor::new(&device_arc, surface_format));
@@ -230,23 +81,11 @@ async fn main() -> anyhow::Result<()> {
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut last_cursor_sent_time = std::time::Instant::now();
 
-    // Iroh Node Setup
-    let mut rng = rand::rng();
-    
-    let secret_key = iroh::SecretKey::generate(&mut rng);
-    let endpoint = iroh::Endpoint::builder()
-        .secret_key(secret_key)
-        .alpns(vec![b"veldmap/rpc/1".to_vec()])
-        .bind()
-        .await?;
-    let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
-
     let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
     let system_service = Arc::new(SystemService::new(registry.clone(), memory.clone(), graphics.clone()));
 
-    dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
 
     // Register Modular Services
@@ -281,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     let running = Arc::new(AtomicBool::new(true));
 
     let sys_clone = system_service.clone();
-    plugin_module::load_services(
+    veldmap_host_core::plugins::load_services(
         dispatcher.clone(),
         registry.clone(),
         memory.clone(),

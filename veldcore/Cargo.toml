@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "core/host/core", "core/host/modules/fs", "core/host/modules/network", "core/host/modules/system",
-    "core/host/runners/desktop",
+    "platform/host/core", "platform/host/modules/fs", "platform/host/modules/network", "platform/host/modules/system",
+    "platform/host/runners/desktop",
     "sdk/rust",
 ]
 resolver = "2"

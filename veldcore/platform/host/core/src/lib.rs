@@ -4,8 +4,9 @@ use std::sync::Arc;
 pub mod registry;
 pub mod memory;
 pub mod graphics;
-pub mod config_module;
-pub mod plugin_module;
+pub mod config;
+pub mod plugins;
+pub mod setup;
 pub mod abi;
 pub mod dispatcher;
 pub mod node;
@@ -58,8 +59,9 @@ pub struct WasmModule {
     pub instance: wasmtime::Instance,
 }
 
-pub use config_module::*;
-pub use plugin_module::*;
+pub use config::*;
+pub use plugins::*;
+pub use setup::*;
 pub use dispatcher::*;
 pub use node::*;
 pub use graphics::*;
