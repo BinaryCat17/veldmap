@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
-use crate::arena::{Arena, RegionId, proto_to_wgpu_format, surface_format_to_proto};
+use crate::memory::{MemoryManager, proto_to_wgpu_format, surface_format_to_proto};
+use crate::registry::{ResourceRegistry, ResourceId, ResourceBackend, Access};
 use crate::core::ResourceHandle;
 use crate::compute::{
     ComputeResourceRequest, ComputeResourceResponse, Submit, CommandBuffer,
@@ -18,8 +18,8 @@ use prost::Message;
 
 #[derive(Clone)]
 pub enum Resource {
-    /// Data-bearing: bytes live in the Arena (CPU, GPU buffer, or GPU texture)
-    Data(RegionId),
+    /// Data-bearing: bytes live in MemoryManager
+    Data(ResourceId),
     /// Opaque GPU objects: no shareable bytes, just Arc-wrapped wgpu handles
     GpuObj(GpuObject),
 }
@@ -50,92 +50,103 @@ pub struct PendingRenderOp {
     pub instance_id: u32,
 }
 
-// ── GpuService ─────────────────────────────────────────────────
+// ── GraphicsDevice ─────────────────────────────────────────────
 
-pub struct GpuService {
-    arena: Arc<Arena>,
-    gpu_objects: DashMap<u64, GpuEntry>,
-    named_resources: DashMap<String, u64>,
-    next_gpu_id: AtomicU64,
+pub struct GraphicsDevice {
+    registry: Arc<ResourceRegistry>,
+    memory: Arc<MemoryManager>,
+    gpu_objects: DashMap<ResourceId, GpuEntry>,
     device: Arc<wgpu::Device>,
     queue: Arc<std::sync::Mutex<wgpu::Queue>>,
     surface_format: wgpu::TextureFormat,
 }
 
-impl GpuService {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>, surface_format: wgpu::TextureFormat, arena: Arc<Arena>) -> Self {
+impl GraphicsDevice {
+    pub fn new(
+        registry: Arc<ResourceRegistry>,
+        memory: Arc<MemoryManager>,
+        device: Arc<wgpu::Device>,
+        queue: Arc<std::sync::Mutex<wgpu::Queue>>,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
         Self {
-            arena,
+            registry,
+            memory,
             gpu_objects: DashMap::new(),
-            named_resources: DashMap::new(),
-            next_gpu_id: AtomicU64::new(1_000_000),
             device,
             queue,
             surface_format,
         }
     }
 
-    pub fn arena(&self) -> &Arc<Arena> { &self.arena }
+    pub fn registry(&self) -> &Arc<ResourceRegistry> { &self.registry }
+    pub fn memory(&self) -> &Arc<MemoryManager> { &self.memory }
     pub fn get_device(&self) -> Arc<wgpu::Device> { self.device.clone() }
     pub fn get_queue(&self) -> Arc<std::sync::Mutex<wgpu::Queue>> { self.queue.clone() }
     pub fn get_surface_format_proto(&self) -> i32 { surface_format_to_proto(self.surface_format) }
 
-    // ── Named resources ──────────────────────────────────────
-
-    pub fn register_named_resource(&self, name: &str, id: u64) {
-        self.named_resources.insert(name.to_string(), id);
-    }
-
-    pub fn get_named_resource(&self, name: &str) -> Option<u64> {
-        self.named_resources.get(name).map(|r| *r.value())
-    }
-
     // ── GPU object helpers ────────────────────────────────────
 
-    fn insert_gpu(&self, obj: GpuObject) -> u64 {
-        let id = self.next_gpu_id.fetch_add(1, Ordering::SeqCst);
+    fn insert_gpu(&self, obj: GpuObject, owner_id: u32, name: Option<String>) -> ResourceId {
+        let id = self.registry.register(ResourceBackend::GpuState, owner_id, name);
         self.gpu_objects.insert(id, GpuEntry { obj });
         id
     }
 
-    fn get_gpu(&self, id: u64) -> Option<GpuObject> {
-        self.gpu_objects.get(&id).map(|e| e.obj.clone())
+    fn get_gpu(&self, id: ResourceId, requestor_id: u32) -> anyhow::Result<GpuObject> {
+        if !self.registry.check_access(id, requestor_id, Access::Read) {
+            return Err(anyhow::anyhow!("Access denied to GPU object {}", id));
+        }
+        self.gpu_objects.get(&id)
+            .map(|e| e.obj.clone())
+            .ok_or_else(|| anyhow::anyhow!("GPU object {} not found", id))
     }
 
     // ── Unified lookup ────────────────────────────────────────
 
-    pub fn get_resource(&self, id: u64, _requestor_id: u32) -> Option<Resource> {
-        if let Some(entry) = self.gpu_objects.get(&id) {
-            return Some(Resource::GpuObj(entry.obj.clone()));
+    pub fn get_resource(&self, id: ResourceId, requestor_id: u32) -> Option<Resource> {
+        if !self.registry.check_access(id, requestor_id, Access::Read) {
+            return None;
         }
-        if self.arena.exists(id) {
-            return Some(Resource::Data(id));
+        let backend = self.registry.get_backend(id)?;
+        match backend {
+            ResourceBackend::GpuState => {
+                self.gpu_objects.get(&id).map(|e| Resource::GpuObj(e.obj.clone()))
+            }
+            ResourceBackend::Memory => {
+                if self.memory.exists(id) {
+                    Some(Resource::Data(id))
+                } else {
+                    None
+                }
+            }
         }
-        None
     }
 
-    pub fn get_buffer(&self, id: u64) -> Option<Arc<wgpu::Buffer>> {
-        self.arena.get_buffer(id)
+    pub fn get_buffer(&self, id: ResourceId, requestor_id: u32) -> Option<Arc<wgpu::Buffer>> {
+        if !self.registry.check_access(id, requestor_id, Access::Read) {
+            return None;
+        }
+        self.memory.get_buffer(id)
     }
 
-    pub fn get_texture(&self, id: u64) -> Option<Arc<wgpu::Texture>> {
-        self.arena.get_texture(id).map(|(t, _, _, _)| t)
-    }
-
-    pub fn get_texture_info(&self, id: u64) -> Option<(Arc<wgpu::Texture>, u32, u32, i32)> {
-        self.arena.get_texture(id)
+    pub fn get_texture_info(&self, id: ResourceId, requestor_id: u32) -> Option<(Arc<wgpu::Texture>, u32, u32, i32)> {
+        if !self.registry.check_access(id, requestor_id, Access::Read) {
+            return None;
+        }
+        self.memory.get_texture(id)
     }
 
     // ── GPU object creation ───────────────────────────────────
 
-    pub fn create_texture_view(&self, texture_id: u64, _owner_id: u32) -> anyhow::Result<u64> {
-        let (texture, _, _, _) = self.arena.get_texture(texture_id)
-            .ok_or_else(|| anyhow::anyhow!("Texture region {} not found", texture_id))?;
+    pub fn create_texture_view(&self, texture_id: ResourceId, owner_id: u32) -> anyhow::Result<ResourceId> {
+        let (texture, _, _, _) = self.get_texture_info(texture_id, owner_id)
+            .ok_or_else(|| anyhow::anyhow!("Texture region {} not found or access denied", texture_id))?;
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Ok(self.insert_gpu(GpuObject::TextureView(Arc::new(view))))
+        Ok(self.insert_gpu(GpuObject::TextureView(Arc::new(view)), owner_id, None))
     }
 
-    pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, _owner_id: u32) -> u64 {
+    pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, owner_id: u32) -> ResourceId {
         let mag = match FilterMode::try_from(mag_proto).unwrap_or(FilterMode::FiltLinear) {
             FilterMode::FiltNearest => wgpu::FilterMode::Nearest,
             FilterMode::FiltLinear => wgpu::FilterMode::Linear,
@@ -147,27 +158,27 @@ impl GpuService {
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: mag, min_filter: min, ..Default::default()
         });
-        self.insert_gpu(GpuObject::Sampler(Arc::new(sampler)))
+        self.insert_gpu(GpuObject::Sampler(Arc::new(sampler)), owner_id, None)
     }
 
-    pub fn create_bind_group_layout(&self, entries: &[wgpu::BindGroupLayoutEntry], _owner_id: u32) -> u64 {
+    pub fn create_bind_group_layout(&self, entries: &[wgpu::BindGroupLayoutEntry], owner_id: u32) -> ResourceId {
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None, entries,
         });
-        self.insert_gpu(GpuObject::BindGroupLayout(Arc::new(layout)))
+        self.insert_gpu(GpuObject::BindGroupLayout(Arc::new(layout)), owner_id, None)
     }
 
-    pub fn create_shader(&self, source: &str, label: Option<&str>, _owner_id: u32) -> u64 {
+    pub fn create_shader(&self, source: &str, label: Option<&str>, owner_id: u32) -> ResourceId {
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label, source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)))
+        self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)), owner_id, None)
     }
 
-    pub fn create_bind_group(&self, layout_id: u64, entries_proto: &[crate::compute::BindGroupEntry], _owner_id: u32) -> anyhow::Result<u64> {
-        let layout = match self.get_gpu(layout_id) {
-            Some(GpuObject::BindGroupLayout(l)) => l,
-            _ => return Err(anyhow::anyhow!("BGL {} not found", layout_id)),
+    pub fn create_bind_group(&self, layout_id: ResourceId, entries_proto: &[crate::compute::BindGroupEntry], owner_id: u32) -> anyhow::Result<ResourceId> {
+        let layout = match self.get_gpu(layout_id, owner_id)? {
+            GpuObject::BindGroupLayout(l) => l,
+            _ => return Err(anyhow::anyhow!("Object {} is not a BGL", layout_id)),
         };
 
         let mut keep_buffers: Vec<(u32, Arc<wgpu::Buffer>)> = Vec::new();
@@ -177,32 +188,32 @@ impl GpuService {
         for e in entries_proto {
             match &e.resource {
                 Some(crate::compute::bind_group_entry::Resource::BufferId(bid)) => {
-                    let b = self.arena.get_buffer(*bid)
-                        .ok_or_else(|| anyhow::anyhow!("Buffer {} not found", bid))?;
+                    let b = self.get_buffer(*bid, owner_id)
+                        .ok_or_else(|| anyhow::anyhow!("Buffer {} not found or access denied", bid))?;
                     keep_buffers.push((e.binding, b));
                 }
                 Some(crate::compute::bind_group_entry::Resource::BufferBinding(bb)) => {
-                    let b = self.arena.get_buffer(bb.buffer_id)
-                        .ok_or_else(|| anyhow::anyhow!("Buffer {} not found", bb.buffer_id))?;
+                    let b = self.get_buffer(bb.buffer_id, owner_id)
+                        .ok_or_else(|| anyhow::anyhow!("Buffer {} not found or access denied", bb.buffer_id))?;
                     keep_buffers.push((e.binding, b));
                 }
                 Some(crate::compute::bind_group_entry::Resource::TextureViewId(tvid)) => {
-                    match self.get_gpu(*tvid) {
-                        Some(GpuObject::TextureView(tv)) => { keep_views.push((e.binding, tv)); }
+                    match self.get_gpu(*tvid, owner_id) {
+                        Ok(GpuObject::TextureView(tv)) => { keep_views.push((e.binding, tv)); }
                         _ => {
-                            if let Some((tex, _, _, _)) = self.arena.get_texture(*tvid) {
+                            if let Some((tex, _, _, _)) = self.get_texture_info(*tvid, owner_id) {
                                 let v = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor::default()));
                                 keep_views.push((e.binding, v));
                             } else {
-                                return Err(anyhow::anyhow!("TextureView {} not found", tvid));
+                                return Err(anyhow::anyhow!("TextureView {} not found or access denied", tvid));
                             }
                         }
                     }
                 }
                 Some(crate::compute::bind_group_entry::Resource::SamplerId(sid)) => {
-                    let s = match self.get_gpu(*sid) {
-                        Some(GpuObject::Sampler(s)) => s,
-                        _ => return Err(anyhow::anyhow!("Sampler {} not found", sid)),
+                    let s = match self.get_gpu(*sid, owner_id)? {
+                        GpuObject::Sampler(s) => s,
+                        _ => return Err(anyhow::anyhow!("Object {} is not a Sampler", sid)),
                     };
                     keep_samplers.push((e.binding, s));
                 }
@@ -239,22 +250,22 @@ impl GpuService {
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None, layout: &layout, entries: &entries,
         });
-        Ok(self.insert_gpu(GpuObject::BindGroup(Arc::new(bg))))
+        Ok(self.insert_gpu(GpuObject::BindGroup(Arc::new(bg)), owner_id, None))
     }
 
-    pub fn create_pipeline(&self, req: &crate::compute::CreateRenderPipeline, _owner_id: u32) -> anyhow::Result<u64> {
-        let shader = match self.get_gpu(req.shader_id) {
-            Some(GpuObject::ShaderModule(s)) => s,
-            _ => return Err(anyhow::anyhow!("Shader {} not found", req.shader_id)),
+    pub fn create_pipeline(&self, req: &crate::compute::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<ResourceId> {
+        let shader = match self.get_gpu(req.shader_id, owner_id)? {
+            GpuObject::ShaderModule(s) => s,
+            _ => return Err(anyhow::anyhow!("Object {} is not a Shader", req.shader_id)),
         };
 
         let target_format = proto_to_wgpu_format(req.target_format);
 
         let mut bgl_refs = Vec::new();
         for &id in &req.bind_group_layout_ids {
-            match self.get_gpu(id) {
-                Some(GpuObject::BindGroupLayout(l)) => bgl_refs.push(l),
-                _ => return Err(anyhow::anyhow!("BGL {} not found", id)),
+            match self.get_gpu(id, owner_id)? {
+                GpuObject::BindGroupLayout(l) => bgl_refs.push(l),
+                _ => return Err(anyhow::anyhow!("Object {} is not a BGL", id)),
             }
         }
 
@@ -370,7 +381,7 @@ impl GpuService {
             cache: None,
         });
 
-        Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline))))
+        Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline)), owner_id, None))
     }
 
     // ── Compute: create resource (protobuf dispatch) ──────────
@@ -381,7 +392,11 @@ impl GpuService {
 
         match req.command {
             Some(ComputeCommand::CreateShader(s)) => {
-                handle.id = self.create_shader(&s.source, Some(&s.label), requestor_id);
+                let name = if s.label.is_empty() { None } else { Some(s.label.clone()) };
+                let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: name.as_deref(), source: wgpu::ShaderSource::Wgsl(s.source.into()),
+                });
+                handle.id = self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)), requestor_id, name);
             }
             Some(ComputeCommand::CreatePipeline(p)) => {
                 handle.id = self.create_pipeline(&p, requestor_id)?;
@@ -451,6 +466,11 @@ impl GpuService {
 
     pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         let req = Submit::decode(&payload[..])?;
+        // Check write access to the target view before adding to PENDING_OPS
+        if !self.registry.check_access(req.target_texture_view_id, requestor_id, Access::Write) {
+            return Err(anyhow::anyhow!("Access denied to target view {}", req.target_texture_view_id));
+        }
+
         if let Some(cb) = req.command_buffer {
             let mut ops = PENDING_OPS.lock().unwrap();
             ops.push(PendingRenderOp { target_view_id: req.target_texture_view_id, command_buffer: cb, instance_id: requestor_id });
@@ -464,7 +484,7 @@ impl GpuService {
         let device = self.get_device();
         let view = match self.get_resource(req.target_texture_view_id, requestor_id) {
             Some(Resource::GpuObj(GpuObject::TextureView(v))) => v,
-            _ => return Err(anyhow::anyhow!("Target view {} not found", req.target_texture_view_id)),
+            _ => return Err(anyhow::anyhow!("Target view {} not found or access denied", req.target_texture_view_id)),
         };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compute Execute") });
         {
@@ -522,7 +542,7 @@ fn get_ui_sampler(device: &wgpu::Device) -> wgpu::Sampler {
 pub fn execute_render_commands<'a>(
     rp: &mut wgpu::RenderPass<'a>,
     command_buffer: &'a CommandBuffer,
-    gpu: &'a GpuService,
+    gpu: &'a GraphicsDevice,
     target_width: u32,
     target_height: u32,
     requestor_id: u32,
@@ -539,7 +559,7 @@ pub fn execute_render_commands<'a>(
                 if let Some(Resource::GpuObj(GpuObject::BindGroup(bind_group))) = gpu.get_resource(bg.bind_group_id, requestor_id) {
                     rp.set_bind_group(bg.index, bind_group.as_ref(), &bg.dynamic_offsets);
                 } else if let Some(Resource::Data(region_id)) = gpu.get_resource(bg.bind_group_id, requestor_id) {
-                    if let Some((texture, _, _, _)) = gpu.get_texture_info(region_id) {
+                    if let Some((texture, _, _, _)) = gpu.get_texture_info(region_id, requestor_id) {
                         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                         let bgl = get_ui_layout(&gpu.get_device());
                         let sampler = get_ui_sampler(&gpu.get_device());
@@ -555,14 +575,14 @@ pub fn execute_render_commands<'a>(
                 }
             }
             WgpuCommand::SetVertexBuffer(vb) => {
-                if let Some(buffer) = gpu.get_buffer(vb.buffer_id) {
+                if let Some(buffer) = gpu.get_buffer(vb.buffer_id, requestor_id) {
                     let end = if vb.size > 0 { (vb.offset + vb.size).min(buffer.size()) } else { buffer.size() };
                     rp.set_vertex_buffer(vb.slot, buffer.slice(vb.offset..end));
                 }
             }
             WgpuCommand::SetIndexBuffer(ib) => {
                 let format = if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
-                if let Some(buffer) = gpu.get_buffer(ib.buffer_id) {
+                if let Some(buffer) = gpu.get_buffer(ib.buffer_id, requestor_id) {
                     let end = if ib.size > 0 { (ib.offset + ib.size).min(buffer.size()) } else { buffer.size() };
                     rp.set_index_buffer(buffer.slice(ib.offset..end), format);
                 }

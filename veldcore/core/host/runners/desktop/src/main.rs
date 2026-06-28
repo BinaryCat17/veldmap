@@ -218,8 +218,9 @@ async fn main() -> anyhow::Result<()> {
     surface.configure(&device_arc, &config);
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
-    let arena = Arc::new(veldmap_host_core::arena::Arena::new(device_arc.clone(), queue_arc.clone()));
-    let gpu = Arc::new(veldmap_host_core::gpu::GpuService::new(device_arc.clone(), queue_arc.clone(), surface_format, arena.clone()));
+    let registry = Arc::new(veldmap_host_core::registry::ResourceRegistry::new());
+    let memory = Arc::new(veldmap_host_core::memory::MemoryManager::new(registry.clone(), device_arc.clone(), queue_arc.clone()));
+    let graphics = Arc::new(veldmap_host_core::graphics::GraphicsDevice::new(registry.clone(), memory.clone(), device_arc.clone(), queue_arc.clone(), surface_format));
     
     // Initialize compositor for final UI composition
     let compositor = Arc::new(Compositor::new(&device_arc, surface_format));
@@ -243,12 +244,12 @@ async fn main() -> anyhow::Result<()> {
     let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
-    let system_service = Arc::new(SystemService::new(arena.clone(), gpu.clone(), dispatcher.tasks.clone()));
+    let system_service = Arc::new(SystemService::new(registry.clone(), memory.clone(), graphics.clone(), dispatcher.tasks.clone()));
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
 
     // Register Modular Services
-    let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), arena.clone()));
+    let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), registry.clone(), memory.clone()));
     dispatcher.register_subscription("fs/read".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
     dispatcher.register_subscription("fs/write".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
     dispatcher.register_subscription("fs/list".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
@@ -281,8 +282,9 @@ async fn main() -> anyhow::Result<()> {
     let sys_clone = system_service.clone();
     plugin_module::load_services(
         dispatcher.clone(),
-        arena.clone(),
-        gpu.clone(),
+        registry.clone(),
+        memory.clone(),
+        graphics.clone(),
         &config_dir,
         move |id, cfg| {
             sys_clone.register_config(id, cfg);
@@ -440,7 +442,7 @@ async fn main() -> anyhow::Result<()> {
                             // SURFACE_ID (0) означает, что UI сервис ещё не готов
                             // Не очищаем bind_group, просто запрашиваем redraw
                         } else if Some(id) != app_texture_id {
-                            if let Some(texture) = arena.get_texture(id).map(|(t, _, _, _)| t) {
+                            if let Some(texture) = memory.get_texture(id).map(|(t, _, _, _)| t) {
                                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                                 let bind_group = compositor.create_bind_group(&device_arc, &view);
                                 app_texture_id = Some(id);
@@ -517,29 +519,29 @@ async fn main() -> anyhow::Result<()> {
                 {
                     let mut ops = veldmap_host_core::PENDING_OPS.lock().unwrap();
                     for op in ops.drain(..) {
-                        if let Some(veldmap_host_core::gpu::Resource::GpuObj(
-                            veldmap_host_core::gpu::GpuObject::TextureView(target_view)
-                        )) = gpu.get_resource(op.target_view_id, op.instance_id)
-                        {
-                            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("Plugin Render Pass"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &target_view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations { 
-                                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
-                                        store: wgpu::StoreOp::Store 
-                                    },
-                                    depth_slice: None,
-                                })],
-                                depth_stencil_attachment: None,
-                                multiview_mask: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                            });
+                        if let Some(veldmap_host_core::graphics::Resource::GpuObj(
+                            veldmap_host_core::graphics::GpuObject::TextureView(target_view)
+                        )) = graphics.get_resource(op.target_view_id, op.instance_id)
+                            {
+                                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                    label: Some("Plugin Render Pass"),
+                                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                        view: &target_view,
+                                        resolve_target: None,
+                                        ops: wgpu::Operations { 
+                                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
+                                            store: wgpu::StoreOp::Store 
+                                        },
+                                        depth_slice: None,
+                                    })],
+                                    depth_stencil_attachment: None,
+                                    multiview_mask: None,
+                                    timestamp_writes: None,
+                                    occlusion_query_set: None,
+                                });
 
-                            let _ = veldmap_host_core::gpu::execute_render_commands(
-                                &mut rp, &op.command_buffer, &gpu, 2048, 2048, op.instance_id
+                            let _ = veldmap_host_core::graphics::execute_render_commands(
+                                &mut rp, &op.command_buffer, &graphics, 2048, 2048, op.instance_id
                             );
                         }
                     }

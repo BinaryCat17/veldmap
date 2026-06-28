@@ -1,6 +1,7 @@
 use veldmap_host_core::dispatcher::{NativeService, TaskState};
-use veldmap_host_core::arena::Arena;
-use veldmap_host_core::gpu::{GpuService, Resource};
+use veldmap_host_core::registry::{ResourceRegistry, Access, ResourceBackend};
+use veldmap_host_core::memory::MemoryManager;
+use veldmap_host_core::graphics::GraphicsDevice;
 use veldmap_host_core::core::{
     TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest, ResourceHandle,
@@ -14,21 +15,22 @@ use dashmap::DashMap;
 
 pub struct SystemService {
     tasks: Arc<Mutex<HashMap<String, TaskState>>>,
-    arena: Arc<Arena>,
-    gpu: Arc<GpuService>,
+    registry: Arc<ResourceRegistry>,
+    memory: Arc<MemoryManager>,
     configs: Arc<DashMap<u32, HashMap<String, serde_json::Value>>>,
 }
 
 impl SystemService {
     pub fn new(
-        arena: Arc<Arena>,
-        gpu: Arc<GpuService>,
+        registry: Arc<ResourceRegistry>,
+        memory: Arc<MemoryManager>,
+        _graphics: Arc<GraphicsDevice>,
         tasks: Arc<Mutex<HashMap<String, TaskState>>>
     ) -> Self {
         Self {
             tasks,
-            arena,
-            gpu,
+            registry,
+            memory,
             configs: Arc::new(DashMap::new()),
         }
     }
@@ -63,24 +65,17 @@ impl NativeService for SystemService {
             }
             "get_resource" => {
                 let req = GetResourceRequest::decode(&payload[..])?;
-                if let Some(id) = self.gpu.get_named_resource(&req.name) {
-                    if let Some(res) = self.gpu.get_resource(id, requestor_id) {
+                if let Some(id) = self.registry.get_named_id(&req.name) {
+                    if self.registry.check_access(id, requestor_id, Access::Read) {
                         let mut handle = ResourceHandle { id, ..Default::default() };
-                        match res {
-                            Resource::Data(region_id) => {
-                                if let Some((_, w, h, _)) = self.gpu.get_texture_info(region_id) {
-                                    handle.size = (w * h * 4) as u64;
-                                } else if let Some(buf) = self.gpu.get_buffer(region_id) {
-                                    handle.size = buf.size();
-                                } else if let Some(data) = self.arena.get_cpu_data(region_id) {
-                                    handle.size = data.len() as u64;
-                                }
-                            }
-                            _ => {}
+                        if let Some(ResourceBackend::Memory) = self.registry.get_backend(id) {
+                            handle.size = self.memory.get_size(id);
+                        } else {
+                            handle.size = 0;
                         }
                         Ok(GetResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
                     } else {
-                        Ok(GetResourceResponse { handle: None, error: "Resource found in registry but not in storage or unauthorized".into() }.encode_to_vec())
+                        Ok(GetResourceResponse { handle: None, error: "Access Denied".into() }.encode_to_vec())
                     }
                 } else {
                     Ok(GetResourceResponse { handle: None, error: format!("Resource '{}' not found", req.name) }.encode_to_vec())
@@ -88,7 +83,7 @@ impl NativeService for SystemService {
             }
             "create_data" => {
                 let req = CreateDataRequest::decode(&payload[..])?;
-                let id = self.arena.alloc_cpu(vec![0u8; req.size as usize], requestor_id);
+                let id = self.memory.alloc_cpu(vec![0u8; req.size as usize], requestor_id);
                 let handle = ResourceHandle {
                     id,
                     size: req.size,

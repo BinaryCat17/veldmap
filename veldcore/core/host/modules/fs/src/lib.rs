@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
-use veldmap_host_core::arena::Arena;
+use veldmap_host_core::memory::MemoryManager;
+use veldmap_host_core::registry::{ResourceRegistry, Access};
 use veldmap_host_core::core::{
     FsReadRequest, FsReadResult, FsWriteRequest, FsWriteResult,
     FsListRequest, FsListResult, ResourceHandle
@@ -12,12 +13,13 @@ use std::fs;
 
 pub struct FsService {
     dispatcher: Arc<Dispatcher>,
-    arena: Arc<Arena>,
+    registry: Arc<ResourceRegistry>,
+    memory: Arc<MemoryManager>,
 }
 
 impl FsService {
-    pub fn new(dispatcher: Arc<Dispatcher>, arena: Arc<Arena>) -> Self {
-        Self { dispatcher, arena }
+    pub fn new(dispatcher: Arc<Dispatcher>, registry: Arc<ResourceRegistry>, memory: Arc<MemoryManager>) -> Self {
+        Self { dispatcher, registry, memory }
     }
 
     fn is_path_safe(path: &str) -> bool {
@@ -45,11 +47,11 @@ impl FsService {
             match fs::read(&req.path) {
                 Ok(data) => {
                     let size = data.len() as u64;
-                    let id = self.arena.alloc_cpu(data, requestor_id);
+                    let id = self.memory.alloc_cpu(data, requestor_id);
                     let handle = ResourceHandle {
                         id,
                         size,
-                        content_hash: self.arena.compute_hash(id, requestor_id).unwrap_or_default(),
+                        content_hash: self.memory.compute_hash(id).unwrap_or_default(),
                     };
                     FsReadResult { handle: Some(handle), error: String::new(), correlation_id }
                 }
@@ -82,8 +84,10 @@ impl FsService {
             
             let data = if handle.id == 0 {
                 FsWriteResult { error: "Handle ID 0 not supported for fs_write yet".into(), correlation_id }
+            } else if !self.registry.check_access(handle.id, requestor_id, Access::Read) {
+                FsWriteResult { error: "Access denied to resource".into(), correlation_id }
             } else {
-                match self.arena.read(handle.id, 0, handle.size, requestor_id) {
+                match self.memory.read(handle.id, 0, handle.size) {
                     Ok(data) => {
                         if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
                         match fs::write(&req.path, &data) {

@@ -1,8 +1,9 @@
 #![recursion_limit = "512"]
 use std::sync::Arc;
 
-pub mod arena;
-pub mod gpu;
+pub mod registry;
+pub mod memory;
+pub mod graphics;
 pub mod config_module;
 pub mod plugin_module;
 pub mod abi;
@@ -41,8 +42,9 @@ impl CallContext {
 
 pub struct HostState {
     pub dispatcher: Arc<Dispatcher>,
-    pub arena: Arc<crate::arena::Arena>,
-    pub gpu: Arc<crate::gpu::GpuService>,
+    pub registry: Arc<crate::registry::ResourceRegistry>,
+    pub memory: Arc<crate::memory::MemoryManager>,
+    pub graphics: Arc<crate::graphics::GraphicsDevice>,
     pub plugin_name: String,
     pub instance_id: u32,
     pub config: std::collections::HashMap<String, serde_json::Value>,
@@ -60,7 +62,9 @@ pub use config_module::*;
 pub use plugin_module::*;
 pub use dispatcher::*;
 pub use node::*;
-pub use gpu::*;
+pub use graphics::*;
+pub use memory::*;
+pub use registry::*;
 
 /// Конфигурация core модуля
 #[derive(serde::Deserialize, Debug)]

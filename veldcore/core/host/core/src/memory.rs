@@ -1,10 +1,7 @@
 use std::sync::Arc;
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 use crate::compute::TextureFormat;
-
-pub type RegionId = u64;
+use crate::registry::{ResourceRegistry, ResourceId, ResourceBackend};
 
 // ── Format helpers (self-contained) ────────────────────────────
 
@@ -86,96 +83,49 @@ impl DataBacking {
     }
 }
 
-/// A data-bearing region in the arena
+/// A data-bearing region
 pub struct Region {
     pub backing: DataBacking,
     pub readonly: bool,
-    pub owner_id: u32,
 }
 
-/// Access lease for a region
-pub struct Lease {
-    pub owner_id: u32,
-    pub readers: Vec<u32>,
-    pub expires_at: Option<Instant>,
-}
-
-impl Lease {
-    pub fn new(owner_id: u32) -> Self {
-        Self { owner_id, readers: Vec::new(), expires_at: None }
-    }
-
-    pub fn can_read(&self, module_id: u32) -> bool {
-        self.owner_id == module_id
-            || module_id == 0
-            || self.readers.contains(&module_id)
-    }
-
-    pub fn can_write(&self, module_id: u32) -> bool {
-        (self.owner_id == module_id || module_id == 0)
-            && self.expires_at.map_or(true, |e| e > Instant::now())
-    }
-
-    pub fn add_reader(&mut self, module_id: u32) {
-        if !self.readers.contains(&module_id) && module_id != self.owner_id {
-            self.readers.push(module_id);
-        }
-    }
-
-    pub fn remove_reader(&mut self, module_id: u32) {
-        self.readers.retain(|&r| r != module_id);
-    }
-
-    pub fn revoke_all(&mut self) {
-        self.readers.clear();
-        self.expires_at = Some(Instant::now());
-    }
-}
-
-/// Host-managed shared arena: allocator + lease table
-pub struct Arena {
-    regions: DashMap<RegionId, Region>,
-    leases: DashMap<RegionId, Lease>,
-    next_id: AtomicU64,
+/// Host-managed shared memory manager: raw allocator
+pub struct MemoryManager {
+    regions: DashMap<ResourceId, Region>,
+    registry: Arc<ResourceRegistry>,
     device: Arc<wgpu::Device>,
     queue: Arc<std::sync::Mutex<wgpu::Queue>>,
 }
 
-impl Arena {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>) -> Self {
+impl MemoryManager {
+    pub fn new(registry: Arc<ResourceRegistry>, device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>) -> Self {
         Self {
             regions: DashMap::new(),
-            leases: DashMap::new(),
-            next_id: AtomicU64::new(1),
+            registry,
             device,
             queue,
         }
     }
 
-    fn next_region_id(&self) -> RegionId {
-        self.next_id.fetch_add(1, Ordering::SeqCst)
-    }
-
     // ── Allocation ────────────────────────────────────────────
 
-    pub fn alloc(&self, backing: DataBacking, readonly: bool, owner_id: u32) -> RegionId {
-        let id = self.next_region_id();
-        self.regions.insert(id, Region { backing, readonly, owner_id });
-        self.leases.insert(id, Lease::new(owner_id));
+    pub fn alloc(&self, backing: DataBacking, readonly: bool, owner_id: u32) -> ResourceId {
+        let id = self.registry.register(ResourceBackend::Memory, owner_id, None);
+        self.regions.insert(id, Region { backing, readonly });
         id
     }
 
-    pub fn alloc_cpu(&self, data: Vec<u8>, owner_id: u32) -> RegionId {
+    pub fn alloc_cpu(&self, data: Vec<u8>, owner_id: u32) -> ResourceId {
         self.alloc(DataBacking::Cpu(data), false, owner_id)
     }
 
-    pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, readonly: bool, owner_id: u32) -> RegionId {
+    pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, readonly: bool, owner_id: u32) -> ResourceId {
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !mapped { final_usage |= wgpu::BufferUsages::COPY_DST; }
         if mapped { final_usage |= wgpu::BufferUsages::MAP_WRITE; }
         let aligned = (size + 3) & !3;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("arena-buf-{}", self.next_id.load(Ordering::Relaxed))),
+            label: Some("memory-buf"), // We don't have the ID yet before registering
             size: aligned,
             usage: final_usage,
             mapped_at_creation: mapped,
@@ -188,10 +138,10 @@ impl Arena {
         self.alloc(backing, readonly, owner_id)
     }
 
-    pub fn alloc_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool, owner_id: u32) -> RegionId {
+    pub fn alloc_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool, owner_id: u32) -> ResourceId {
         let format = proto_to_wgpu_format(format_proto);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(&format!("arena-tex-{}", self.next_id.load(Ordering::Relaxed))),
+            label: Some("memory-tex"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -209,12 +159,12 @@ impl Arena {
         )
     }
 
-    pub fn alloc_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool, owner_id: u32) -> RegionId {
+    pub fn alloc_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool, owner_id: u32) -> ResourceId {
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !readonly { final_usage |= wgpu::BufferUsages::COPY_DST; }
         let aligned = ((data.len() as u64) + 3) & !3;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(&format!("arena-buf-data-{}", self.next_id.load(Ordering::Relaxed))),
+            label: Some("memory-buf-data"),
             size: aligned,
             usage: final_usage,
             mapped_at_creation: true,
@@ -227,67 +177,14 @@ impl Arena {
         self.alloc(DataBacking::Buffer(Arc::new(buffer)), readonly, owner_id)
     }
 
-    // ── Lease management ──────────────────────────────────────
-
-    pub fn grant_read(&self, region_id: RegionId, target_module: u32, owner_id: u32) -> bool {
-        if let Some(mut lease) = self.leases.get_mut(&region_id) {
-            if lease.can_write(owner_id) {
-                lease.add_reader(target_module);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    pub fn revoke_access(&self, region_id: RegionId, owner_id: u32) -> bool {
-        if let Some(mut lease) = self.leases.get_mut(&region_id) {
-            if lease.owner_id == owner_id || owner_id == 0 {
-                lease.revoke_all();
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
-    pub fn transfer(&self, region_id: RegionId, new_owner: u32, current_owner: u32) -> bool {
-        if let Some(mut lease) = self.leases.get_mut(&region_id) {
-            if lease.owner_id == current_owner || current_owner == 0 {
-                lease.owner_id = new_owner;
-                lease.readers.clear();
-                if let Some(mut region) = self.regions.get_mut(&region_id) {
-                    region.owner_id = new_owner;
-                }
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
     // ── Data access ───────────────────────────────────────────
+    // Note: Security checks are performed by the caller using ResourceRegistry.
+    // This is just a raw byte store.
 
-    pub fn write(&self, region_id: RegionId, offset: u64, data: &[u8], requestor_id: u32) -> anyhow::Result<()> {
-        let lease = self.leases.get(&region_id)
-            .ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?;
-        if !lease.can_write(requestor_id) {
-            return Err(anyhow::anyhow!("Unauthorized write to region {} by {}", region_id, requestor_id));
-        }
-        drop(lease);
-
+    pub fn write(&self, region_id: ResourceId, offset: u64, data: &[u8]) -> anyhow::Result<()> {
         let mut region = self.regions.get_mut(&region_id)
             .ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?;
-        if region.readonly && requestor_id != 0 {
-            return Err(anyhow::anyhow!("Region {} is readonly", region_id));
-        }
-
+        
         match &mut region.backing {
             DataBacking::Cpu(ref mut vec) => {
                 let end = offset as usize + data.len();
@@ -328,15 +225,8 @@ impl Arena {
         Ok(())
     }
 
-    pub fn read(&self, region_id: RegionId, offset: u64, size: u64, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+    pub fn read(&self, region_id: ResourceId, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
         if size == 0 { return Ok(Vec::new()); }
-
-        let lease = self.leases.get(&region_id)
-            .ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?;
-        if !lease.can_read(requestor_id) {
-            return Err(anyhow::anyhow!("Unauthorized read of region {} by {}", region_id, requestor_id));
-        }
-        drop(lease);
 
         let region = self.regions.get(&region_id)
             .ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?;
@@ -371,7 +261,7 @@ impl Arena {
                     Ok(data)
                 } else {
                     let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("Arena-Staging-Read"),
+                        label: Some("Memory-Staging-Read"),
                         size: aligned_size,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
@@ -402,20 +292,28 @@ impl Arena {
         }
     }
 
-    pub fn exists(&self, region_id: RegionId) -> bool {
+    pub fn exists(&self, region_id: ResourceId) -> bool {
         self.regions.contains_key(&region_id)
     }
 
-    // ── Lookup helpers (for GpuService / main.rs) ────────────
+    pub fn get_size(&self, region_id: ResourceId) -> u64 {
+        if let Some(r) = self.regions.get(&region_id) {
+            r.backing.byte_len()
+        } else {
+            0
+        }
+    }
 
-    pub fn get_buffer(&self, region_id: RegionId) -> Option<Arc<wgpu::Buffer>> {
+    // ── Lookup helpers ────────────
+
+    pub fn get_buffer(&self, region_id: ResourceId) -> Option<Arc<wgpu::Buffer>> {
         self.regions.get(&region_id).and_then(|r| match &r.backing {
             DataBacking::Buffer(b) | DataBacking::Mapped(b) => Some(b.clone()),
             _ => None,
         })
     }
 
-    pub fn get_texture(&self, region_id: RegionId) -> Option<(Arc<wgpu::Texture>, u32, u32, i32)> {
+    pub fn get_texture(&self, region_id: ResourceId) -> Option<(Arc<wgpu::Texture>, u32, u32, i32)> {
         self.regions.get(&region_id).and_then(|r| match &r.backing {
             DataBacking::Texture { texture, width, height, format } => {
                 Some((texture.clone(), *width, *height, *format))
@@ -424,40 +322,37 @@ impl Arena {
         })
     }
 
-    pub fn get_cpu_data(&self, region_id: RegionId) -> Option<Vec<u8>> {
+    pub fn get_cpu_data(&self, region_id: ResourceId) -> Option<Vec<u8>> {
         self.regions.get(&region_id).and_then(|r| match &r.backing {
             DataBacking::Cpu(v) => Some(v.clone()),
             _ => None,
         })
     }
 
+    pub fn is_readonly(&self, region_id: ResourceId) -> bool {
+        self.regions.get(&region_id).map(|r| r.readonly).unwrap_or(false)
+    }
+
     // ── Lifecycle ─────────────────────────────────────────────
 
-    pub fn free(&self, region_id: RegionId, requestor_id: u32) -> bool {
-        let can_free = self.leases.get(&region_id)
-            .map(|l| l.owner_id == requestor_id || requestor_id == 0)
-            .unwrap_or(false);
-        if can_free {
-            self.regions.remove(&region_id);
-            self.leases.remove(&region_id);
+    pub fn free(&self, region_id: ResourceId) -> bool {
+        // Validation happens in the caller (System or host module)
+        if self.regions.remove(&region_id).is_some() {
+            self.registry.unregister(region_id);
             true
         } else {
             false
         }
     }
 
-    pub fn compute_hash(&self, region_id: RegionId, requestor_id: u32) -> Option<Vec<u8>> {
-        let lease = self.leases.get(&region_id)?;
-        if !lease.can_read(requestor_id) { return None; }
-        drop(lease);
-
+    pub fn compute_hash(&self, region_id: ResourceId) -> Option<Vec<u8>> {
         let region = self.regions.get(&region_id)?;
         match &region.backing {
             DataBacking::Cpu(v) => Some(blake3::hash(v).as_bytes().to_vec()),
             DataBacking::Buffer(_) | DataBacking::Mapped(_) => {
                 let size = region.backing.byte_len();
                 drop(region);
-                self.read(region_id, 0, size, requestor_id).ok()
+                self.read(region_id, 0, size).ok()
                     .map(|data| blake3::hash(&data).as_bytes().to_vec())
             }
             _ => None,
