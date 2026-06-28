@@ -244,7 +244,8 @@ async fn main() -> anyhow::Result<()> {
     let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
     let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
-    let system_service = Arc::new(SystemService::new(registry.clone(), memory.clone(), graphics.clone(), dispatcher.tasks.clone()));
+    let system_service = Arc::new(SystemService::new(registry.clone(), memory.clone(), graphics.clone()));
+
     dispatcher.register_service("core".to_string(), ServiceLocation::Native(Arc::new(veldmap_host_core::dispatcher::CoreService)));
     dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
 
@@ -254,7 +255,7 @@ async fn main() -> anyhow::Result<()> {
     dispatcher.register_subscription("fs/write".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
     dispatcher.register_subscription("fs/list".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
 
-    let network_service = Arc::new(veldmap_host_network::NetworkService::new(dispatcher.clone(), dispatcher.tasks.clone()));
+    let network_service = Arc::new(veldmap_host_network::NetworkService::new(dispatcher.clone(), system_service.get_tasks()));
     dispatcher.register_subscription("network/fs_download".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
     dispatcher.register_subscription("network/http".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
 
@@ -292,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
         &mut plugin_windows,
     ).await?;
 
-    let d_clone = dispatcher.clone();
+    let sys_clone_for_polling = system_service.clone();
     let is_visible_clone = is_visible.clone();
     let running_polling = running.clone();
     let frame_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -304,8 +305,7 @@ async fn main() -> anyhow::Result<()> {
         while running_polling.load(Ordering::Relaxed) {
             veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop iteration");
             let has_tasks = {
-                let tasks = d_clone.tasks.lock().unwrap();
-                let has = !tasks.is_empty();
+                let has = sys_clone_for_polling.has_tasks();
                 veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: has_tasks={}", has);
                 has
             };
@@ -318,8 +318,6 @@ async fn main() -> anyhow::Result<()> {
             let needs_frame = has_tasks || is_visible;
             
             if needs_frame {
-                let _ = d_clone.poll_all_tasks().await;
-                
                 if !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
                     frame_pending_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                     veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop notifying render thread (has_tasks={}, is_visible={})", has_tasks, is_visible);
@@ -329,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             } else {
                 veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: sleeping (no tasks, not visible)");
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         }
         veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Polling loop exiting...");

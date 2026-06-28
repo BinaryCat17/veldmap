@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as AsyncMutex;
-use crate::WasmModule;
+
 use anyhow::Result;
 use iroh::Endpoint;
 use crate::core::{RpcRequest, RpcResponse};
@@ -27,9 +26,24 @@ impl NativeService for CoreService {
     }
 }
 
+pub enum RpcCommand {
+    Call {
+        service_name: String,
+        method: String,
+        payload: Vec<u8>,
+        requestor_id: u32,
+        reply: tokio::sync::oneshot::Sender<Result<Vec<u8>>>,
+    },
+    Notify {
+        service_name: String,
+        method: String,
+        payload: Vec<u8>,
+    },
+}
+
 #[derive(Clone)]
 pub enum ServiceLocation {
-    LocalWasm(Arc<AsyncMutex<WasmModule>>),
+    LocalWasm(tokio::sync::mpsc::Sender<RpcCommand>),
     RemoteIroh(iroh::EndpointId),
     Native(Arc<dyn NativeService>),
     NativeAsync(Arc<dyn AsyncNativeService>),
@@ -49,7 +63,6 @@ pub struct Dispatcher {
     endpoint: Endpoint,
     services: Mutex<HashMap<String, ServiceLocation>>,
     subscriptions: Mutex<HashMap<String, Vec<ServiceLocation>>>,
-    pub tasks: Arc<Mutex<HashMap<String, TaskState>>>,
     stats: Arc<Mutex<HashMap<String, (u64, u128, u128, u128, u128, std::time::Instant)>>>,
 }
 
@@ -59,7 +72,6 @@ impl Dispatcher {
             endpoint,
             services: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
-            tasks: Arc::new(Mutex::new(HashMap::new())),
             stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -107,21 +119,12 @@ impl Dispatcher {
                 service.handle(method, payload, 0).await;
                 Ok(Vec::new())
             }
-            ServiceLocation::LocalWasm(wasm_module) => {
-                let request = RpcRequest {
-                    service: service_name.to_string(),
+            ServiceLocation::LocalWasm(sender) => {
+                let _ = sender.send(RpcCommand::Notify {
+                    service_name: service_name.to_string(),
                     method: method.to_string(),
                     payload,
-                    sync: None,
-                    instance_id: 0,
-                };
-                let req_buf = request.encode_to_vec();
-                let mut module = wasm_module.lock().await;
-                let ctx = crate::CallContext::new(req_buf);
-                module.store.data_mut().call_context = Some(ctx.clone());
-                let instance = module.instance;
-                let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
-                let _ = handle_rpc.call_async(&mut module.store, ()).await;
+                }).await;
                 Ok(Vec::new())
             }
             ServiceLocation::RemoteIroh(_) => {
@@ -136,32 +139,6 @@ impl Dispatcher {
         services.insert(name, location);
     }
 
-    pub async fn poll_all_tasks(&self) -> Result<()> {
-        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks START");
-        let locations: Vec<(String, ServiceLocation)> = {
-            let services = self.services.lock().unwrap();
-            services.iter().map(|(n, l)| (n.clone(), l.clone())).collect()
-        };
-        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: {} services", locations.len());
-
-        for (name, location) in locations {
-            if let ServiceLocation::LocalWasm(wasm_module) = location {
-                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: acquiring lock for {}", name);
-                let mut module = wasm_module.lock().await;
-                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: lock acquired for {}", name);
-                let instance = module.instance;
-                if let Ok(poll_tasks) = instance.get_typed_func::<(), i32>(&mut module.store, "poll_tasks") {
-                    crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: calling poll_tasks for {}", name);
-                    if let Err(e) = poll_tasks.call_async(&mut module.store, ()).await {
-                        crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_tasks failed for {}: {}", name, e);
-                    }
-                    crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks: poll_tasks done for {}", name);
-                }
-            }
-        }
-        crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] poll_all_tasks END");
-        Ok(())
-    }
 
     pub async fn call(&self, service_name: &str, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>> {
         let location = {
@@ -178,58 +155,35 @@ impl Dispatcher {
             ServiceLocation::NativeAsync(_) => {
                 Err(anyhow::anyhow!("Async services cannot be called via sync RPC (use publish instead)"))
             }
-            ServiceLocation::LocalWasm(wasm_module) => {
+            ServiceLocation::LocalWasm(sender) => {
                 let start_total = std::time::Instant::now();
-                let request = RpcRequest {
-                    service: service_name.to_string(),
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                
+                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Sending RPC call to WASM actor: {}::{}", service_name, method);
+                
+                if let Err(e) = sender.send(RpcCommand::Call {
+                    service_name: service_name.to_string(),
                     method: method.to_string(),
                     payload,
-                    sync: None,
-                    instance_id: requestor_id,
-                };
-                let ser_start = std::time::Instant::now();
-                let req_buf = request.encode_to_vec();
-                let ser_time = ser_start.elapsed();
-
-                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Acquiring lock for {}::{}", service_name, method);
-                let mut module = wasm_module.lock().await;
-                crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Lock acquired for {}::{}", service_name, method);
-                
-                // Set the call context in the HostState
-                let ctx = crate::CallContext::new(req_buf);
-                module.store.data_mut().call_context = Some(ctx.clone());
-
-                let instance = module.instance;
-                let handle_rpc = instance.get_typed_func::<(), i32>(&mut module.store, "handle_rpc")?;
-                
-                crate::vdebug!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] >>> CALLING WASM handle_rpc: {}::{}", service_name, method);
-                
-                let wasm_start = std::time::Instant::now();
-                let result = handle_rpc.call_async(&mut module.store, ()).await;
-                let wasm_time = wasm_start.elapsed();
-                
-                match &result {
-                    Ok(_) => crate::vdebug!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] <<< WASM handle_rpc RETURNED OK: {}::{}", service_name, method),
-                    Err(e) => crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] <<< WASM handle_rpc FAILED: {}::{} - {:?}", service_name, method, e),
+                    requestor_id,
+                    reply: tx,
+                }).await {
+                    crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Failed to send RPC to WASM actor: {}", e);
+                    return Err(anyhow::anyhow!("WASM actor dropped"));
                 }
                 
-                // Extract output from shared context
-                let res_buf = {
-                    let inner = ctx.0.lock().unwrap();
-                    inner.output.clone()
+                let res_buf = match rx.await {
+                    Ok(Ok(res)) => res,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => return Err(anyhow::anyhow!("WASM actor panicked or dropped reply channel")),
                 };
                 
-                let deser_start = std::time::Instant::now();
-                let response = match RpcResponse::decode(&res_buf[..]) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Failed to decode RpcResponse from WASM: {}. Raw size: {} bytes", e, res_buf.len());
-                        return Err(anyhow::anyhow!("Decode error: {}", e));
-                    }
-                };
-                let deser_time = deser_start.elapsed();
-
                 let total_time = start_total.elapsed();
+                
+                // Add dummy stats for the keys (since we no longer track internal ser/deser from dispatcher side easily)
+                let wasm_time = std::time::Duration::from_secs(0);
+                let ser_time = std::time::Duration::from_secs(0);
+                let deser_time = std::time::Duration::from_secs(0);
                 
                 let key = format!("{}::{}", service_name, method);
                 {
@@ -254,6 +208,11 @@ impl Dispatcher {
                     }
                 }
 
+                let response = match RpcResponse::decode(&res_buf[..]) {
+                    Ok(r) => r,
+                    Err(e) => return Err(anyhow::anyhow!("Decode error: {}", e)),
+                };
+                
                 if !response.error.is_empty() {
                     return Err(anyhow::anyhow!(response.error));
                 }

@@ -25,10 +25,9 @@ impl SystemService {
         registry: Arc<ResourceRegistry>,
         memory: Arc<MemoryManager>,
         _graphics: Arc<GraphicsDevice>,
-        tasks: Arc<Mutex<HashMap<String, TaskState>>>
     ) -> Self {
         Self {
-            tasks,
+            tasks: Arc::new(Mutex::new(HashMap::new())),
             registry,
             memory,
             configs: Arc::new(DashMap::new()),
@@ -41,6 +40,14 @@ impl SystemService {
 
     pub fn unregister_config(&self, instance_id: u32) {
         self.configs.remove(&instance_id);
+    }
+
+    pub fn has_tasks(&self) -> bool {
+        !self.tasks.lock().unwrap().is_empty()
+    }
+
+    pub fn get_tasks(&self) -> Arc<Mutex<HashMap<String, TaskState>>> {
+        self.tasks.clone()
     }
 }
 

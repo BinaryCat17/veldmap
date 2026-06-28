@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
+
 use serde::Deserialize;
 use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
@@ -198,10 +198,52 @@ where
                     wasm_module.store.data_mut().call_context = None;
                 }
 
-                let wasm_arc = Arc::new(AsyncMutex::new(wasm_module));
-                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(Arc::clone(&wasm_arc)));
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::dispatcher::RpcCommand>(100);
+                
+                let plugin_name_clone = name.clone();
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
+                    loop {
+                        tokio::select! {
+                            cmd = rx.recv() => {
+                                match cmd {
+                                    Some(crate::dispatcher::RpcCommand::Call { method: _, payload, reply, .. }) => {
+                                        let ctx = CallContext::new(payload);
+                                        wasm_module.store.data_mut().call_context = Some(ctx.clone());
+                                        if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
+                                            let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;
+                                        }
+                                        let out = {
+                                            let inner = ctx.0.lock().unwrap();
+                                            inner.output.clone()
+                                        };
+                                        let _ = reply.send(Ok(out));
+                                    }
+                                    Some(crate::dispatcher::RpcCommand::Notify { payload, .. }) => {
+                                        let ctx = CallContext::new(payload);
+                                        wasm_module.store.data_mut().call_context = Some(ctx.clone());
+                                        if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
+                                            let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;
+                                        }
+                                    }
+                                    None => {
+                                        log::info!("Plugin '{}' actor channel closed, shutting down.", plugin_name_clone);
+                                        break;
+                                    }
+                                }
+                            }
+                            _ = interval.tick() => {
+                                if let Ok(poll_tasks) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "poll_tasks") {
+                                    let _ = poll_tasks.call_async(&mut wasm_module.store, ()).await;
+                                }
+                            }
+                        }
+                    }
+                });
+
+                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(tx.clone()));
                 for topic in subs {
-                    dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(Arc::clone(&wasm_arc)));
+                    dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(tx.clone()));
                 }
             }
             "remote" => {
