@@ -63,10 +63,10 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // ── Arena data access ─────────────────────────────────────
+    // ── Memory data access ────────────────────────────────────
 
-    // veld_arena_write — write data into an arena region
-    linker.func_wrap("env", "veld_arena_write", |mut caller: Caller<'_, HostState>, id: u64, offset: u64, ptr: u64, len: u64| {
+    // veld_memory_write — write data into a memory region
+    linker.func_wrap("env", "veld_memory_write", |mut caller: Caller<'_, HostState>, id: u64, offset: u64, ptr: u64, len: u64| {
         let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return };
         let instance_id = caller.data().instance_id;
         if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
@@ -78,8 +78,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // veld_arena_read — read data from an arena region
-    linker.func_wrap_async("env", "veld_arena_read", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
+    // veld_memory_read — read data from a memory region
+    linker.func_wrap_async("env", "veld_memory_read", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
         Box::new(async move {
             let memory = caller.data().memory.clone();
             let registry = caller.data().registry.clone();
@@ -98,31 +98,31 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // ── Arena management ──────────────────────────────────────
+    // ── Memory management ─────────────────────────────────────
 
-    // veld_arena_alloc(size) → region_id
-    linker.func_wrap("env", "veld_arena_alloc", |caller: Caller<'_, HostState>, size: u64| -> u64 {
+    // veld_memory_alloc(size) → region_id
+    linker.func_wrap("env", "veld_memory_alloc", |caller: Caller<'_, HostState>, size: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
         memory.alloc_cpu(vec![0u8; size as usize], owner_id)
     })?;
 
-    // veld_arena_alloc_buffer(size, usage, mapped) → region_id
-    linker.func_wrap("env", "veld_arena_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {
+    // veld_memory_alloc_buffer(size, usage, mapped) → region_id
+    linker.func_wrap("env", "veld_memory_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
         memory.alloc_buffer(size, usage as u32, mapped != 0, false, owner_id)
     })?;
 
-    // veld_arena_alloc_texture(width, height, format, usage) → region_id
-    linker.func_wrap("env", "veld_arena_alloc_texture", |caller: Caller<'_, HostState>, width: u64, height: u64, format: u64, usage: u64| -> u64 {
+    // veld_memory_alloc_texture(width, height, format, usage) → region_id
+    linker.func_wrap("env", "veld_memory_alloc_texture", |caller: Caller<'_, HostState>, width: u64, height: u64, format: u64, usage: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
         memory.alloc_texture(width as u32, height as u32, format as i32, usage as u32, false, owner_id)
     })?;
 
-    // veld_arena_transfer(region_id, target_module) → bool
-    linker.func_wrap("env", "veld_arena_transfer", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
+    // veld_memory_transfer(region_id, target_module) → bool
+    linker.func_wrap("env", "veld_memory_transfer", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
         let mut ok = false;
@@ -136,8 +136,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         if ok { 1 } else { 0 }
     })?;
 
-    // veld_arena_grant_read(region_id, target_module) → bool
-    linker.func_wrap("env", "veld_arena_grant_read", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
+    // veld_memory_grant_read(region_id, target_module) → bool
+    linker.func_wrap("env", "veld_memory_grant_read", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
         let mut ok = false;
@@ -150,8 +150,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         if ok { 1 } else { 0 }
     })?;
 
-    // veld_arena_revoke(region_id) → bool
-    linker.func_wrap("env", "veld_arena_revoke", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
+    // veld_memory_revoke(region_id) → bool
+    linker.func_wrap("env", "veld_memory_revoke", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
         let mut ok = false;
@@ -164,8 +164,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         if ok { 1 } else { 0 }
     })?;
 
-    // veld_arena_free(region_id) → bool
-    linker.func_wrap("env", "veld_arena_free", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
+    // veld_memory_free(region_id) → bool
+    linker.func_wrap("env", "veld_memory_free", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
         let registry = caller.data().registry.clone();
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
@@ -206,9 +206,9 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // ── Compute (unchanged ABI surface, routes through arena internally) ──
+    // ── Graphics (formerly compute) ───────────────────────────
 
-    linker.func_wrap_async("env", "veld_compute_create_resource", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
+    linker.func_wrap_async("env", "veld_graphics_create_resource", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(0u64) };
             let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
@@ -222,7 +222,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    linker.func_wrap_async("env", "veld_compute_execute", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
+    linker.func_wrap_async("env", "veld_graphics_execute", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(0u64) };
             let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());

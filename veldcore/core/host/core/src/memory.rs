@@ -109,7 +109,7 @@ impl MemoryManager {
 
     // ── Allocation ────────────────────────────────────────────
 
-    pub fn alloc(&self, backing: DataBacking, readonly: bool, owner_id: u32) -> ResourceId {
+    fn alloc(&self, backing: DataBacking, readonly: bool, owner_id: u32) -> ResourceId {
         let id = self.registry.register(ResourceBackend::Memory, owner_id, None);
         self.regions.insert(id, Region { backing, readonly });
         id

@@ -10,19 +10,19 @@ extern "C" {
     fn veld_host_publish(ptr: u64, len: u64);
     fn veld_host_log(level: u64, flags: u64, ptr: u64, len: u64);
     fn veld_host_call(ptr: u64, len: u64) -> u64;
-    fn veld_compute_create_resource(ptr: u64, len: u64) -> u64;
-    fn veld_compute_execute(ptr: u64, len: u64) -> u64;
+    fn veld_graphics_create_resource(ptr: u64, len: u64) -> u64;
+    fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
 
-    fn veld_arena_write(id: u64, offset: u64, ptr: u64, len: u64);
-    fn veld_arena_read(id: u64, offset: u64, ptr: u64, len: u64);
+    fn veld_memory_write(id: u64, offset: u64, ptr: u64, len: u64);
+    fn veld_memory_read(id: u64, offset: u64, ptr: u64, len: u64);
 
-    fn veld_arena_alloc(size: u64) -> u64;
-    fn veld_arena_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
-    fn veld_arena_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
-    fn veld_arena_transfer(region_id: u64, target_module: u64) -> u64;
-    fn veld_arena_grant_read(region_id: u64, target_module: u64) -> u64;
-    fn veld_arena_revoke(region_id: u64) -> u64;
-    fn veld_arena_free(region_id: u64) -> u64;
+    fn veld_memory_alloc(size: u64) -> u64;
+    fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
+    fn veld_memory_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
+    fn veld_memory_transfer(region_id: u64, target_module: u64) -> u64;
+    fn veld_memory_grant_read(region_id: u64, target_module: u64) -> u64;
+    fn veld_memory_revoke(region_id: u64) -> u64;
+    fn veld_memory_free(region_id: u64) -> u64;
 
     fn veld_input_len() -> u64;
     fn veld_input_copy(p: u64, n: u64);
@@ -70,9 +70,9 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
 }
 
 #[cfg(feature = "pdk")]
-pub fn compute_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+pub fn graphics_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     unsafe {
-        let res_combined = veld_compute_create_resource(payload.as_ptr() as u64, payload.len() as u64);
+        let res_combined = veld_graphics_create_resource(payload.as_ptr() as u64, payload.len() as u64);
         if res_combined == 0 { return Err(anyhow::anyhow!("Compute create_resource failed")); }
         let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
         let len = (res_combined >> 32) as usize;
@@ -84,9 +84,9 @@ pub fn compute_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
 }
 
 #[cfg(feature = "pdk")]
-pub fn compute_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+pub fn graphics_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     unsafe {
-        let res_combined = veld_compute_execute(payload.as_ptr() as u64, payload.len() as u64);
+        let res_combined = veld_graphics_execute(payload.as_ptr() as u64, payload.len() as u64);
         if res_combined == 0 { return Err(anyhow::anyhow!("Compute execute failed")); }
         let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
         let len = (res_combined >> 32) as usize;
@@ -97,69 +97,69 @@ pub fn compute_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     }
 }
 
-// ── Arena data access ──────────────────────────────────────────
+// ── Memory data access ─────────────────────────────────────────
 
-/// Write data into an arena region
+/// Write data into a memory region
 #[cfg(feature = "pdk")]
 pub fn arena_write(id: u64, offset: u64, data: &[u8]) {
-    unsafe { veld_arena_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
+    unsafe { veld_memory_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
 }
 
-/// Read data from an arena region
+/// Read data from a memory region
 #[cfg(feature = "pdk")]
 pub fn arena_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
     unsafe {
         let mut buf = vec![0u8; size as usize];
-        veld_arena_read(id, offset, buf.as_mut_ptr() as u64, size);
+        veld_memory_read(id, offset, buf.as_mut_ptr() as u64, size);
         Ok(buf)
     }
 }
 
-// ── Arena management ───────────────────────────────────────────
+// ── Memory management ──────────────────────────────────────────
 
-/// Allocate a CPU data region in the arena
+/// Allocate a CPU data region in the resource registry
 #[cfg(feature = "pdk")]
 pub fn arena_alloc(size: u64) -> Option<u64> {
-    let id = unsafe { veld_arena_alloc(size) };
+    let id = unsafe { veld_memory_alloc(size) };
     if id == 0 { None } else { Some(id) }
 }
 
-/// Allocate a GPU buffer region in the arena
+/// Allocate a GPU buffer region in the resource registry
 #[cfg(feature = "pdk")]
 pub fn arena_alloc_buffer(size: u64, usage: u32, mapped: bool) -> Option<u64> {
-    let id = unsafe { veld_arena_alloc_buffer(size, usage as u64, mapped as u64) };
+    let id = unsafe { veld_memory_alloc_buffer(size, usage as u64, mapped as u64) };
     if id == 0 { None } else { Some(id) }
 }
 
-/// Allocate a GPU texture region in the arena
+/// Allocate a GPU texture region in the resource registry
 #[cfg(feature = "pdk")]
 pub fn arena_alloc_texture(width: u32, height: u32, format: i32, usage: u32) -> Option<u64> {
-    let id = unsafe { veld_arena_alloc_texture(width as u64, height as u64, format as u64, usage as u64) };
+    let id = unsafe { veld_memory_alloc_texture(width as u64, height as u64, format as u64, usage as u64) };
     if id == 0 { None } else { Some(id) }
 }
 
 /// Transfer ownership of a region to another module (zero-copy)
 #[cfg(feature = "pdk")]
 pub fn arena_transfer(region_id: u64, target_module: u32) -> bool {
-    unsafe { veld_arena_transfer(region_id, target_module as u64) != 0 }
+    unsafe { veld_memory_transfer(region_id, target_module as u64) != 0 }
 }
 
 /// Grant read access to another module
 #[cfg(feature = "pdk")]
 pub fn arena_grant_read(region_id: u64, target_module: u32) -> bool {
-    unsafe { veld_arena_grant_read(region_id, target_module as u64) != 0 }
+    unsafe { veld_memory_grant_read(region_id, target_module as u64) != 0 }
 }
 
 /// Revoke all external access to a region
 #[cfg(feature = "pdk")]
 pub fn arena_revoke(region_id: u64) -> bool {
-    unsafe { veld_arena_revoke(region_id) != 0 }
+    unsafe { veld_memory_revoke(region_id) != 0 }
 }
 
-/// Free an arena region
+/// Free a resource region
 #[cfg(feature = "pdk")]
 pub fn arena_free(region_id: u64) -> bool {
-    unsafe { veld_arena_free(region_id) != 0 }
+    unsafe { veld_memory_free(region_id) != 0 }
 }
 
 // ── Logging ────────────────────────────────────────────────────

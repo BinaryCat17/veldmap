@@ -22,9 +22,9 @@ pub use log;
 pub use rpc::core::ResourceHandle;
 pub const SURFACE_ID: u64 = 0;
 
-/// RAII handle to an arena region or GPU object.
-/// On drop: releases the resource via arena ABI (no RPC overhead).
-/// On clone: acquires a read lease via arena ABI.
+/// RAII handle to a memory region or graphics object.
+/// On drop: releases the resource via memory ABI (no RPC overhead).
+/// On clone: acquires a read lease via memory ABI.
 pub struct OwnedResource {
     handle: ResourceHandle,
 }
