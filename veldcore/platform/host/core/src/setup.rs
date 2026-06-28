@@ -152,7 +152,7 @@ pub async fn init_wgpu<'a>(
     Ok((adapter, device_arc, queue_arc, config, surface_format))
 }
 
-pub struct CoreServices {
+pub struct HostContext {
     pub dispatcher: Arc<Dispatcher>,
     pub registry: Arc<ResourceRegistry>,
     pub memory: Arc<MemoryManager>,
@@ -165,7 +165,7 @@ pub async fn init_core_services(
     device: Arc<wgpu::Device>,
     queue: Arc<Mutex<wgpu::Queue>>,
     surface_format: wgpu::TextureFormat,
-) -> anyhow::Result<CoreServices> {
+) -> anyhow::Result<Arc<HostContext>> {
     let registry = Arc::new(ResourceRegistry::new());
     let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone()));
     let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), queue.clone(), surface_format));
@@ -181,11 +181,11 @@ pub async fn init_core_services(
     
     dispatcher.register_service("core".to_string(), crate::dispatcher::ServiceLocation::Native(Arc::new(crate::dispatcher::CoreService)));
 
-    Ok(CoreServices {
+    Ok(Arc::new(HostContext {
         dispatcher,
         registry,
         memory,
         graphics,
         endpoint,
-    })
+    }))
 }

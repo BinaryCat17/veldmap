@@ -54,7 +54,6 @@ pub struct TaskState {
     pub progress: f32,
     pub completed: bool,
     pub error: String,
-    pub abort_handle: Option<tokio::task::AbortHandle>,
     pub result_handle: Option<crate::core::ResourceHandle>,
     pub payload: Vec<u8>,
 }

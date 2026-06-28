@@ -10,7 +10,6 @@ use crate::{HostState, WasmModule, CallContext};
 use crate::registry::ResourceRegistry;
 use crate::memory::MemoryManager;
 use crate::graphics::GraphicsDevice;
-use crate::window::parse_window_config;
 
 #[derive(Deserialize)]
 struct ServiceEntry {
@@ -28,48 +27,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(100); // Local plugins start from 100
 
-/// Scan plugin configs for window preferences without loading WASM modules
-pub fn scan_window_configs(config_dir: &str) -> anyhow::Result<crate::window::PluginWindows> {
-    let manifest_path = std::path::Path::new(config_dir).join("services.json");
-    if !manifest_path.exists() {
-        log::warn!("Manifest not found at {:?}", manifest_path);
-        return Ok(crate::window::PluginWindows::new());
-    }
 
-    let content = fs::read_to_string(&manifest_path)?;
-    let manifest: ServicesManifest = serde_json::from_str(&content)?;
-    
-    let mut windows = crate::window::PluginWindows::new();
 
-    for (name, entry) in manifest.services {
-        if entry.location == "local" {
-            let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
-            if let Ok(config_str) = fs::read_to_string(&service_config_path) {
-                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_str) {
-                    if let Some(window_config) = parse_window_config(&config) {
-                        log::info!("Plugin '{}' requests window: {}x{} (scale: {})", 
-                            name, window_config.width, window_config.height, window_config.ui_scale);
-                        windows.add(name, window_config);
-                    }
-                }
-            }
-        }
-    }
-    
-    Ok(windows)
-}
-
-pub async fn load_services<F>(
-    dispatcher: Arc<Dispatcher>,
-    registry: Arc<ResourceRegistry>,
-    memory: Arc<MemoryManager>,
-    graphics: Arc<GraphicsDevice>,
+pub async fn load_services(
+    ctx: Arc<crate::setup::HostContext>,
     config_dir: &str,
-    mut register_config: F,
-    windows: &mut crate::window::PluginWindows,
 ) -> anyhow::Result<()>
-where
-    F: FnMut(u32, HashMap<String, serde_json::Value>),
 {
     let manifest_path = std::path::Path::new(config_dir).join("services.json");
     if !manifest_path.exists() {
@@ -77,8 +40,7 @@ where
         return Ok(());
     }
 
-    let content = fs::read_to_string(&manifest_path)?;
-    let manifest: ServicesManifest = serde_json::from_str(&content)?;
+    let manifest: ServicesManifest = crate::config::load_config_with_path(&manifest_path)?;
     let project_root = std::path::Path::new(config_dir).parent().unwrap_or(std::path::Path::new("."));
 
     let mut config = Config::new();
@@ -100,30 +62,25 @@ where
                 let module = Module::from_binary(&engine, &wasm_bytes)?;
                 
                 let service_config_path = std::path::Path::new(config_dir).join(format!("{}.json", name));
-                let mut service_config_str = fs::read_to_string(&service_config_path)
-                    .map_err(|e| anyhow::anyhow!("Configuration file not found for service '{}' at {:?}: {}", name, service_config_path, e))?;
-                
-                for (key, value) in std::env::vars() {
-                    let placeholder = format!("${{{}}}", key);
-                    service_config_str = service_config_str.replace(&placeholder, &value);
-                }
+                let service_config_str = crate::config::read_config_string(&service_config_path)
+                    .unwrap_or_else(|_| "{}".to_string());
 
                 let mut config_map: HashMap<String, serde_json::Value> = serde_json::from_str(&service_config_str)?;
                 
-                // Parse window config if present
-                let raw_config: serde_json::Value = serde_json::from_str(&service_config_str)?;
-                if let Some(window_config) = parse_window_config(&raw_config) {
-                    log::info!("Plugin '{}' requests window: {}x{} (scale: {})", 
-                        name, window_config.width, window_config.height, window_config.ui_scale);
-                    windows.add(name.clone(), window_config);
-                }
-                
+                // Window parsing moved to desktop runner
                 config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
                 config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
-                config_map.insert("surface_format".to_string(), serde_json::Value::Number(graphics.get_surface_format_proto().into()));
+                config_map.insert("surface_format".to_string(), serde_json::Value::Number(ctx.graphics.get_surface_format_proto().into()));
                 
                 let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::SeqCst);
-                register_config(instance_id, config_map.clone());
+                
+                // Register config via RPC
+                let reg_req = crate::core::RegisterConfigRequest {
+                    key: instance_id,
+                    value_json: serde_json::to_string(&config_map).unwrap_or_else(|_| "{}".to_string()),
+                };
+                let _ = ctx.dispatcher.call("system", "register_config", prost::Message::encode_to_vec(&reg_req), instance_id);
+                
                 log::trace!("Loading service '{}' with instance_id {}", name, instance_id);
                 
                 let mut linker = Linker::new(&engine);
@@ -136,10 +93,10 @@ where
                     .build_p1();
 
                 let state = HostState {
-                    dispatcher: dispatcher.clone(),
-                    registry: registry.clone(),
-                    memory: memory.clone(),
-                    graphics: graphics.clone(),
+                    dispatcher: ctx.dispatcher.clone(),
+                    registry: ctx.registry.clone(),
+                    memory: ctx.memory.clone(),
+                    graphics: ctx.graphics.clone(),
                     plugin_name: name.clone(),
                     instance_id,
                     config: config_map,
@@ -149,6 +106,36 @@ where
                 };
 
                 let mut store = Store::new(&engine, state);
+                
+                let registry_clone = ctx.registry.clone();
+                linker.func_wrap("host", "check_access", move |_caller: Caller<'_, HostState>, id: u64, flags: i32| -> i32 {
+                    let access = if flags == 1 { crate::registry::Access::Write } else { crate::registry::Access::Read };
+                    if registry_clone.check_access(id, instance_id, access) { 1 } else { 0 }
+                })?;
+
+                let mem_clone = ctx.memory.clone();
+                linker.func_wrap("host", "read_memory", move |mut caller: Caller<'_, HostState>, id: u64, offset: i64, size: i64, out_ptr: i32| -> i32 {
+                    let wasm_mem = match caller.get_export("memory") {
+                        Some(Extern::Memory(mem)) => mem,
+                        _ => return -1,
+                    };
+                    
+                    if let Ok(data) = mem_clone.read(id, offset as u64, size as u64) {
+                        if wasm_mem.write(&mut caller, out_ptr as usize, &data).is_ok() { 0 } else { -1 }
+                    } else { -1 }
+                })?;
+
+                let mem_write_clone = ctx.memory.clone();
+                linker.func_wrap("host", "write_memory", move |mut caller: Caller<'_, HostState>, id: u64, offset: i64, in_ptr: i32, size: i32| -> i32 {
+                    let wasm_mem = match caller.get_export("memory") {
+                        Some(Extern::Memory(mem)) => mem,
+                        _ => return -1,
+                    };
+                    let mem_data = wasm_mem.data(&caller);
+                    let data = &mem_data[in_ptr as usize..(in_ptr + size) as usize];
+                    if mem_write_clone.write(id, offset as u64, data).is_ok() { 0 } else { -1 }
+                })?;
+
                 linker.define_unknown_imports_as_traps(&module)?;
                 let instance = linker.instantiate_async(&mut store, &module).await?;
 
@@ -157,8 +144,8 @@ where
                     log::trace!("Calling init for plugin '{}'...", name);
                     
                     let init_input = service_config_str.as_bytes().to_vec();
-                    let ctx = CallContext::new(init_input);
-                    store.data_mut().call_context = Some(ctx);
+                    let call_ctx = CallContext::new(init_input);
+                    store.data_mut().call_context = Some(call_ctx);
 
                     match init_func.call_async(&mut store, ()).await {
                         Ok(0) => log::info!("Plugin '{}' initialized successfully.", name),
@@ -180,12 +167,12 @@ where
                 // Extract subscriptions
                 let mut subs: Vec<String> = Vec::new();
                 if let Ok(get_subs) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "get_subscriptions") {
-                    let ctx = CallContext::new(Vec::new());
-                    wasm_module.store.data_mut().call_context = Some(ctx.clone());
+                    let call_ctx = CallContext::new(Vec::new());
+                    wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
                     match get_subs.call_async(&mut wasm_module.store, ()).await {
                         Ok(0) => {
                             let out = {
-                                let inner = ctx.0.lock().unwrap();
+                                let inner = call_ctx.0.lock().unwrap();
                                 inner.output.clone()
                             };
                             if let Ok(topics) = serde_json::from_slice::<Vec<String>>(&out) {
@@ -208,20 +195,20 @@ where
                             cmd = rx.recv() => {
                                 match cmd {
                                     Some(crate::dispatcher::RpcCommand::Call { method: _, payload, reply, .. }) => {
-                                        let ctx = CallContext::new(payload);
-                                        wasm_module.store.data_mut().call_context = Some(ctx.clone());
+                                        let call_ctx = CallContext::new(payload);
+                                        wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
                                         if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
                                             let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;
                                         }
                                         let out = {
-                                            let inner = ctx.0.lock().unwrap();
+                                            let inner = call_ctx.0.lock().unwrap();
                                             inner.output.clone()
                                         };
                                         let _ = reply.send(Ok(out));
                                     }
                                     Some(crate::dispatcher::RpcCommand::Notify { payload, .. }) => {
-                                        let ctx = CallContext::new(payload);
-                                        wasm_module.store.data_mut().call_context = Some(ctx.clone());
+                                        let call_ctx = CallContext::new(payload);
+                                        wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
                                         if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
                                             let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;
                                         }
@@ -241,15 +228,15 @@ where
                     }
                 });
 
-                dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(tx.clone()));
+                ctx.dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(tx.clone()));
                 for topic in subs {
-                    dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(tx.clone()));
+                    ctx.dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(tx.clone()));
                 }
             }
             "remote" => {
                 let node_id_str = entry.node_id.ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
                 let node_id: iroh::EndpointId = node_id_str.parse()?;
-                dispatcher.register_service(name.clone(), ServiceLocation::RemoteIroh(node_id));
+                ctx.dispatcher.register_service(name, ServiceLocation::RemoteIroh(node_id));
             }
             _ => {}
         }

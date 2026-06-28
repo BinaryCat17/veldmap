@@ -227,6 +227,7 @@ message TaskCancelRequest {
 }
 
 message TaskCreateRequest {
+  string task_id = 1;
 }
 
 message TaskCreateResponse {

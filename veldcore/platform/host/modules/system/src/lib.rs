@@ -14,22 +14,16 @@ use std::collections::HashMap;
 use dashmap::DashMap;
 
 pub struct SystemService {
+    ctx: Arc<veldmap_host_core::setup::HostContext>,
     tasks: Arc<Mutex<HashMap<String, TaskState>>>,
-    registry: Arc<ResourceRegistry>,
-    memory: Arc<MemoryManager>,
     configs: Arc<DashMap<u32, HashMap<String, serde_json::Value>>>,
 }
 
 impl SystemService {
-    pub fn new(
-        registry: Arc<ResourceRegistry>,
-        memory: Arc<MemoryManager>,
-        _graphics: Arc<GraphicsDevice>,
-    ) -> Self {
+    pub fn new(ctx: Arc<veldmap_host_core::setup::HostContext>) -> Self {
         Self {
+            ctx,
             tasks: Arc::new(Mutex::new(HashMap::new())),
-            registry,
-            memory,
             configs: Arc::new(DashMap::new()),
         }
     }
@@ -44,10 +38,6 @@ impl SystemService {
 
     pub fn has_tasks(&self) -> bool {
         !self.tasks.lock().unwrap().is_empty()
-    }
-
-    pub fn get_tasks(&self) -> Arc<Mutex<HashMap<String, TaskState>>> {
-        self.tasks.clone()
     }
 }
 
@@ -72,11 +62,11 @@ impl NativeService for SystemService {
             }
             "get_resource" => {
                 let req = GetResourceRequest::decode(&payload[..])?;
-                if let Some(id) = self.registry.get_named_id(&req.name) {
-                    if self.registry.check_access(id, requestor_id, Access::Read) {
+                if let Some(id) = self.ctx.registry.get_named_id(&req.name) {
+                    if self.ctx.registry.check_access(id, requestor_id, Access::Read) {
                         let mut handle = ResourceHandle { id, ..Default::default() };
-                        if let Some(ResourceBackend::Memory) = self.registry.get_backend(id) {
-                            handle.size = self.memory.get_size(id);
+                        if let Some(ResourceBackend::Memory) = self.ctx.registry.get_backend(id) {
+                            handle.size = self.ctx.memory.get_size(id);
                         } else {
                             handle.size = 0;
                         }
@@ -90,7 +80,7 @@ impl NativeService for SystemService {
             }
             "create_data" => {
                 let req = CreateDataRequest::decode(&payload[..])?;
-                let id = self.memory.alloc_cpu(vec![0u8; req.size as usize], requestor_id);
+                let id = self.ctx.memory.alloc_cpu(vec![0u8; req.size as usize], requestor_id);
                 let handle = ResourceHandle {
                     id,
                     size: req.size,
@@ -99,14 +89,17 @@ impl NativeService for SystemService {
                 Ok(CreateDataResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
             }
             "task_create" => {
-                let _req = TaskCreateRequest::decode(&payload[..])?;
-                let task_id = uuid::Uuid::new_v4().to_string();
+                let req = TaskCreateRequest::decode(&payload[..])?;
+                let task_id = if req.task_id.is_empty() {
+                    uuid::Uuid::new_v4().to_string()
+                } else {
+                    req.task_id.clone()
+                };
                 let mut tasks = self.tasks.lock().unwrap();
                 tasks.insert(task_id.clone(), TaskState {
                     progress: 0.0,
                     completed: false,
                     error: String::new(),
-                    abort_handle: None,
                     result_handle: None,
                     payload: Vec::new(),
                 });
@@ -156,11 +149,12 @@ impl NativeService for SystemService {
             }
             "task_cancel" => {
                 let req = TaskCancelRequest::decode(&payload[..])?;
+                
+                // Broadcast cancellation to all services
+                self.ctx.dispatcher.publish("system/task_cancel_broadcast", payload);
+
                 let mut tasks = self.tasks.lock().unwrap();
                 if let Some(task) = tasks.get_mut(&req.task_id) {
-                    if let Some(handle) = task.abort_handle.take() {
-                        handle.abort();
-                    }
                     task.completed = true;
                     task.error = "Cancelled by user".to_string();
                     Ok(Vec::new())
@@ -171,4 +165,10 @@ impl NativeService for SystemService {
             _ => Err(anyhow::anyhow!("Unknown system method")),
         }
     }
+}
+
+pub fn register_services(ctx: Arc<veldmap_host_core::setup::HostContext>) -> Arc<SystemService> {
+    let service = Arc::new(SystemService::new(ctx.clone()));
+    ctx.dispatcher.register_service("system".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(service.clone()));
+    service
 }

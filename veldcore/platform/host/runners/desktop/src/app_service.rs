@@ -1,10 +1,6 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use veldmap_host_core::dispatcher::NativeService;
 use veldmap_host_core::app::AppDisplayCommand;
 use prost::Message;
-use tokio::sync::mpsc;
 use winit::event_loop::EventLoopProxy;
 
 #[allow(dead_code)]
@@ -13,22 +9,12 @@ pub enum AppCommand {
 }
 
 pub struct AppService {
-    tx: mpsc::UnboundedSender<AppCommand>,
-    proxy: EventLoopProxy<()>,
-    is_visible: Arc<AtomicBool>,
-    last_render_time: Arc<Mutex<std::time::Instant>>,
-    frame_wake: Arc<tokio::sync::Notify>,
+    proxy: EventLoopProxy<AppCommand>,
 }
 
 impl AppService {
-    pub fn new(
-        tx: mpsc::UnboundedSender<AppCommand>,
-        proxy: EventLoopProxy<()>,
-        is_visible: Arc<AtomicBool>,
-        last_render_time: Arc<Mutex<std::time::Instant>>,
-        frame_wake: Arc<tokio::sync::Notify>,
-    ) -> Self {
-        Self { tx, proxy, is_visible, last_render_time, frame_wake }
+    pub fn new(proxy: EventLoopProxy<AppCommand>) -> Self {
+        Self { proxy }
     }
 }
 
@@ -40,29 +26,10 @@ impl NativeService for AppService {
                 match cmd.command {
                     Some(veldmap_host_core::app::app_display_command::Command::DrawFrame(draw_frame)) => {
                         let texture_id = draw_frame.texture_id;
+                        let target_id = if texture_id == 0 { veldmap_host_core::SURFACE_ID } else { texture_id };
                         
-                        // Обновляем время отрисовки СРАЗУ, чтобы цикл Frame не уходил в idle
-                        if let Ok(mut last) = self.last_render_time.lock() {
-                            *last = std::time::Instant::now();
-                        }
-
-                        // Любая отрисовка должна будить цикл из спячки
-                        self.frame_wake.notify_one();
-
-                        // Если texture_id == 0 - используем SURFACE_ID (UI не готов)
-                        // Иначе используем texture_id (UI отрисовал в offscreen текстуру)
-                        let target_id = if texture_id == 0 { 
-                            veldmap_host_core::SURFACE_ID 
-                        } else { 
-                            texture_id 
-                        };
+                        let _ = self.proxy.send_event(AppCommand::Draw(target_id));
                         
-                        let _ = self.tx.send(AppCommand::Draw(target_id));
-                        
-                        if self.is_visible.load(Ordering::SeqCst) {
-                            let _ = self.proxy.send_event(());
-                        }
-
                         Ok(Vec::new())
                     }
                     _ => Err(anyhow::anyhow!("Unsupported display command")),
@@ -71,4 +38,10 @@ impl NativeService for AppService {
             _ => Err(anyhow::anyhow!("Unknown app method: {}", method)),
         }
     }
+}
+
+pub fn register_services(ctx: std::sync::Arc<veldmap_host_core::setup::HostContext>, proxy: EventLoopProxy<AppCommand>) -> std::sync::Arc<AppService> {
+    let app_service = std::sync::Arc::new(AppService::new(proxy));
+    ctx.dispatcher.register_service("app".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(app_service.clone()));
+    app_service
 }

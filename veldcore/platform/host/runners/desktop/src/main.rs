@@ -4,20 +4,22 @@ use veldmap_host_core::{
 };
 use veldmap_host_system::SystemService;
 
+mod compositor;
 use compositor::Compositor;
 
 use crate::app_service::{AppCommand, AppService};
+mod app_service;
+
+mod window;
+
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
     window::WindowBuilder,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use prost::Message;
-
-mod app_service;
-mod compositor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     veldmap_host_core::setup::init_logging(&config_dir)?;
 
     // --- 2. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
-    let mut plugin_windows = veldmap_host_core::plugins::scan_window_configs(&config_dir)?;
+    let mut plugin_windows = window::scan_window_configs(&config_dir)?;
     
     let (window_width, window_height, window_title, _ui_scale) = plugin_windows
         .first()
@@ -45,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
             (1024.0, 768.0, "VeldMap".to_string(), 1.0f32)
         });
 
-    let event_loop = EventLoopBuilder::<()>::with_user_event().build()?;
+    let event_loop = EventLoopBuilder::<AppCommand>::with_user_event().build()?;
     let window = Arc::new(WindowBuilder::new()
         .with_title(window_title)
         .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
@@ -67,196 +69,53 @@ async fn main() -> anyhow::Result<()> {
 
     // --- 4. ИНИЦИАЛИЗАЦИЯ ЯДРА И СЕРВИСОВ ---
     let core_services = veldmap_host_core::setup::init_core_services(device_arc.clone(), queue_arc.clone(), surface_format).await?;
-    let registry = core_services.registry;
-    let memory = core_services.memory;
-    let graphics = core_services.graphics;
-    let dispatcher = core_services.dispatcher;
-    let endpoint = core_services.endpoint;
-    
+    let ctx = core_services;
+    let memory = ctx.memory.clone();
+    let dispatcher = ctx.dispatcher.clone();
+    let graphics = ctx.graphics.clone();
+
     // Initialize compositor for final UI composition
     let compositor = Arc::new(Compositor::new(&device_arc, surface_format));
 
     let mut app_bind_group: Option<wgpu::BindGroup> = None;
     let mut app_texture_id: Option<u64> = None;
     let mut cursor_pos = (0.0f32, 0.0f32);
-    let mut last_cursor_sent_time = std::time::Instant::now();
 
     let actual_fps = Arc::new(std::sync::Mutex::new(60.0f32));
-    let last_render_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let last_frame_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
 
-    let system_service = Arc::new(SystemService::new(registry.clone(), memory.clone(), graphics.clone()));
-
-    dispatcher.register_service("system".to_string(), ServiceLocation::Native(system_service.clone()));
+    let system_service = veldmap_host_system::register_services(ctx.clone());
 
     // Register Modular Services
-    let fs_service = Arc::new(veldmap_host_fs::FsService::new(dispatcher.clone(), registry.clone(), memory.clone()));
-    dispatcher.register_subscription("fs/read".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
-    dispatcher.register_subscription("fs/write".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
-    dispatcher.register_subscription("fs/list".to_string(), ServiceLocation::NativeAsync(fs_service.clone()));
-
-    let network_service = Arc::new(veldmap_host_network::NetworkService::new(dispatcher.clone(), system_service.get_tasks()));
-    dispatcher.register_subscription("network/fs_download".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
-    dispatcher.register_subscription("network/http".to_string(), ServiceLocation::NativeAsync(network_service.clone()));
-
-    let is_visible = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppCommand>();
-    let proxy = event_loop.create_proxy();
-    let frame_wake = Arc::new(tokio::sync::Notify::new());
-
-    let app_service = Arc::new(AppService::new(
-        tx,
-        proxy.clone(),
-        is_visible.clone(),
-        last_render_time.clone(),
-        frame_wake.clone(),
-    ));
-    dispatcher.register_service("app".to_string(), ServiceLocation::Native(app_service.clone()));
-    dispatcher.register_subscription("app/display".to_string(), ServiceLocation::Native(app_service));
-
-    let last_interaction_time = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-    let event_queue = Arc::new(std::sync::Mutex::new(Vec::<veldmap_host_core::app::UiEvent>::new()));
+    #[cfg(target_os = "linux")]
+    veldmap_host_fs::register_services(ctx.clone());
     
-    // Флаг для graceful shutdown
-    let running = Arc::new(AtomicBool::new(true));
+    veldmap_host_network::register_services(ctx.clone());
+    
+    let proxy = event_loop.create_proxy();
+    let _app_service = app_service::register_services(ctx.clone(), proxy);
 
     let sys_clone = system_service.clone();
     veldmap_host_core::plugins::load_services(
-        dispatcher.clone(),
-        registry.clone(),
-        memory.clone(),
-        graphics.clone(),
+        ctx.clone(),
         &config_dir,
         move |id, cfg| {
             sys_clone.register_config(id, cfg);
         },
-        &mut plugin_windows,
     ).await?;
 
-    let sys_clone_for_polling = system_service.clone();
-    let is_visible_clone = is_visible.clone();
-    let running_polling = running.clone();
-    let frame_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let frame_pending_clone = frame_pending.clone();
-    let frame_wake_clone = frame_wake.clone();
-
-    // 1. ЦИКЛ ОБРАБОТКИ ЗАДАЧ (POLLING)
-    tokio::spawn(async move {
-        while running_polling.load(Ordering::Relaxed) {
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop iteration");
-            let has_tasks = {
-                let has = sys_clone_for_polling.has_tasks();
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: has_tasks={}", has);
-                has
-            };
-            
-            let is_visible = is_visible_clone.load(std::sync::atomic::Ordering::Relaxed);
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: is_visible={}", is_visible);
-
-            // Запрашиваем кадр если есть задачи или интерактивность
-            // НЕ используем event_queue здесь чтобы избежать deadlock с render loop
-            let needs_frame = has_tasks || is_visible;
-            
-            if needs_frame {
-                if !frame_pending_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                    frame_pending_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-                    veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling loop notifying render thread (has_tasks={}, is_visible={})", has_tasks, is_visible);
-                    frame_wake_clone.notify_one();
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            } else {
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST] Polling: sleeping (no tasks, not visible)");
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-        }
-        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Polling loop exiting...");
-    });
-
-    // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
-    let mut last_render_finish = std::time::Instant::now();
-    let frame_wake_render = frame_wake.clone();
-    let window_render = window.clone();
-    let frame_pending_render = frame_pending.clone();
-    let running_render = running.clone();
-    
-    let dispatcher_render = dispatcher.clone();
-    let event_queue_render = event_queue.clone();
-    let actual_fps_render = actual_fps.clone();
-
-    // 2. ЦИКЛ ОТРИСОВКИ (FRAME PACING)
-    tokio::spawn(async move {
-        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Render loop started");
-        while running_render.load(Ordering::Relaxed) {
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Waiting for frame notification...");
-            frame_wake_render.notified().await;
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Got frame notification");
-            
-            let start_redraw = std::time::Instant::now();
-            let mut events = {
-                let mut eq = event_queue_render.lock().unwrap();
-                std::mem::take(&mut *eq)
-            };
-
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Acquiring locks for frame event...");
-            let dt = start_redraw.duration_since(last_render_finish).as_secs_f32();
-            let fps = *actual_fps_render.lock().unwrap();
-            
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Building frame event...");
-            events.push(veldmap_host_core::app::UiEvent {
-                event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent {
-                    dt,
-                    actual_fps: fps,
-                    monitor_fps: 60,
-                    surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: 0, size: 0, content_hash: Vec::new() }),
-                })),
-                ..Default::default()
-            });
-
-            for (idx, ev) in events.iter().enumerate() {
-                let payload = ev.encode_to_vec();
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Publishing ui-service/handle_ui_event event #{}", idx);
-                dispatcher_render.publish("ui-service/handle_ui_event", payload);
-            }
-
-            window_render.request_redraw();
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Resetting frame_pending");
-            frame_pending_render.store(false, std::sync::atomic::Ordering::SeqCst);
-            veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-RENDER] Frame done, last_render_finish updated");
-            last_render_finish = std::time::Instant::now();
-        }
-        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Render loop exiting...");
-    });
-
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Core ready. Render loop started...");
-    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Veldmap Iroh Node listening. Node ID: {}", endpoint.id());
-
-    // Начальная инициализация: проверяем актуальные размеры окна
-    let actual_size = window.inner_size();
-    
-    // Если размеры изменились - переконфигурируем surface
-    if actual_size.width != config.width || actual_size.height != config.height {
-        config.width = actual_size.width.max(1);
-        config.height = actual_size.height.max(1);
-        surface.configure(&device_arc, &config);
-    }
-
-    // Начальная инициализация: отправляем Resize событие для инициализации UI
+    // Отправляем фейковое событие изменения окна, чтобы инициализировать UI
     let initial_ev = veldmap_host_core::app::UiEvent {
-        event: Some(veldmap_host_core::app::ui_event::Event::Resize(
-            veldmap_host_core::app::ResizeEvent {
-                width: config.width,
-                height: config.height,
-                scale_factor: window.scale_factor() as f32,
-                surface_handle: Some(veldmap_host_core::core::ResourceHandle {
-                    id: 0,
-                    size: 0,
-                    content_hash: Vec::new(),
-                }),
-            }
-        )),
+        event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent {
+            width: config.width,
+            height: config.height,
+            scale_factor: 1.0,
+            surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: 0, size: 0, content_hash: Vec::new() }),
+        })),
         ..Default::default()
     };
-    event_queue.lock().unwrap().push(initial_ev);
+    
+    dispatcher.publish("ui-service/handle_ui_event", initial_ev.encode_to_vec());
     
     // Принудительная первая отрисовка
     window.request_redraw();
@@ -268,91 +127,71 @@ async fn main() -> anyhow::Result<()> {
         window_target.set_control_flow(ControlFlow::Wait);
 
         match event {
-            Event::UserEvent(()) => {
-                let mut last_draw_cmd = None;
-                while let Ok(cmd) = rx.try_recv() {
-                    last_draw_cmd = Some(cmd);
-                }
-                if let Some(AppCommand::Draw(id)) = last_draw_cmd {
-                    if is_visible.load(std::sync::atomic::Ordering::SeqCst) {
-                        if id == veldmap_host_core::SURFACE_ID {
-                            // SURFACE_ID (0) означает, что UI сервис ещё не готов
-                            // Не очищаем bind_group, просто запрашиваем redraw
-                        } else if Some(id) != app_texture_id {
-                            if let Some(texture) = memory.get_texture(id).map(|(t, _, _, _)| t) {
-                                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                                let bind_group = compositor.create_bind_group(&device_arc, &view);
-                                app_texture_id = Some(id);
-                                app_bind_group = Some(bind_group);
-                            } else {
-                                veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Failed to get texture resource for id {}", id);
-                            }
+            Event::UserEvent(cmd) => {
+                if let AppCommand::Draw(id) = cmd {
+                    if id != veldmap_host_core::SURFACE_ID && Some(id) != app_texture_id {
+                        if let Some(texture) = memory.get_texture(id).map(|(t, _, _, _)| t) {
+                            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                            let bind_group = compositor.create_bind_group(&device_arc, &view);
+                            app_texture_id = Some(id);
+                            app_bind_group = Some(bind_group);
                         }
-                        window.request_redraw();
                     }
+                    window.request_redraw();
                 }
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Close requested, shutting down...");
-                running.store(false, Ordering::Relaxed);
-                frame_wake.notify_one(); // Wake up render loop to exit
                 window_target.exit();
             }
             Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
                 let new_width = size.width.max(1);
                 let new_height = size.height.max(1);
-                veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Resized event: new={}x{}, current={}x{}", new_width, new_height, config.width, config.height);
-                // Переконфигурируем только если размеры реально изменились
                 if new_width != config.width || new_height != config.height {
-                    let count = surface_config_count.fetch_add(1, Ordering::Relaxed) + 1;
                     config.width = new_width;
                     config.height = new_height;
-                    veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface reconfigure #{}: {}x{}", count, config.width, config.height);
                     surface.configure(&device_arc, &config);
-                } else {
-                    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Skipping reconfigure - same size");
                 }
                 window.request_redraw();
                 let ev = veldmap_host_core::app::UiEvent {
                     event: Some(veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent {
-                        width: config.width,
-                        height: config.height,
-                        scale_factor: window.scale_factor() as f32,
-                        surface_handle: Some(veldmap_host_core::core::ResourceHandle {
-                            id: 0,
-                            size: 0,
-                            content_hash: Vec::new(),
-                        }),
+                        width: new_width,
+                        height: new_height,
+                        scale_factor: 1.0,
+                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: 0, size: 0, content_hash: Vec::new() }),
                     })),
                     ..Default::default()
                 };
-                event_queue.lock().unwrap().push(ev);
+                dispatcher.publish("ui-service/handle_ui_event", ev.encode_to_vec());
             }
             Event::WindowEvent { event: WindowEvent::RedrawRequested, .. } => {
-                veldmap_host_core::vtrace!(veldmap_host_core::logging::FLAG_HOST_RENDER, "[HOST-EVENT] RedrawRequested received");
-                let start_redraw = std::time::Instant::now();
+                let now = std::time::Instant::now();
+                let dt = now.duration_since(*last_frame_time.lock().unwrap()).as_secs_f32();
+                *last_frame_time.lock().unwrap() = now;
+                let fps = *actual_fps.lock().unwrap();
+
+                let ev = veldmap_host_core::app::UiEvent {
+                    event: Some(veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent { 
+                        dt, 
+                        actual_fps: fps,
+                        monitor_fps: 60,
+                        surface_handle: Some(veldmap_host_core::core::ResourceHandle { id: 0, size: 0, content_hash: Vec::new() }),
+                    })),
+                    ..Default::default()
+                };
+                dispatcher.publish("ui-service/handle_ui_event", ev.encode_to_vec());
+
                 let frame = match surface.get_current_texture() {
                     Ok(f) => f,
                     Err(wgpu::SurfaceError::Lost) => {
-                        veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface lost, reconfiguring...");
                         surface.configure(&device_arc, &config);
                         window.request_redraw();
                         return;
                     }
-                    Err(wgpu::SurfaceError::Outdated) => {
-                        veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface outdated, requesting redraw...");
-                        window.request_redraw();
-                        return;
-                    }
-                    Err(e) => { 
-                        veldmap_host_core::verror!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface error: {}", e); 
-                        return; 
-                    }
+                    Err(_) => return,
                 };
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let mut encoder = device_arc.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-                // Execute pending plugin render ops (queued by compute service)
                 {
                     let mut ops = veldmap_host_core::PENDING_OPS.lock().unwrap();
                     for op in ops.drain(..) {
@@ -365,36 +204,24 @@ async fn main() -> anyhow::Result<()> {
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                         view: &target_view,
                                         resolve_target: None,
-                                        ops: wgpu::Operations { 
-                                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), 
-                                            store: wgpu::StoreOp::Store 
-                                        },
+                                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
                                         depth_slice: None,
                                     })],
                                     depth_stencil_attachment: None,
-                                    multiview_mask: None,
-                                    timestamp_writes: None,
-                                    occlusion_query_set: None,
+                                    ..Default::default()
                                 });
-
-                            let _ = veldmap_host_core::graphics::execute_render_commands(
-                                &mut rp, &op.command_buffer, &graphics, 2048, 2048, op.instance_id
-                            );
+                            let _ = veldmap_host_core::graphics::execute_render_commands(&mut rp, &op.command_buffer, &graphics, 2048, 2048, op.instance_id);
                         }
                     }
                 }
 
-                // Compose final frame: clear + blit UI
                 {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Compositor Pass"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &view,
                             resolve_target: None,
-                            ops: wgpu::Operations { 
-                                load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.03, a: 1.0 }), 
-                                store: wgpu::StoreOp::Store 
-                            },
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.03, a: 1.0 }), store: wgpu::StoreOp::Store },
                             depth_slice: None,
                         })],
                         depth_stencil_attachment: None,
@@ -408,33 +235,16 @@ async fn main() -> anyhow::Result<()> {
 
                 queue_arc.lock().unwrap().submit(Some(encoder.finish()));
                 frame.present();
-
-                let total_time = start_redraw.elapsed();
-                if total_time.as_micros() > 0 {
-                    let mut fps_lock = actual_fps.lock().unwrap();
-                    *fps_lock = 1.0 / total_time.as_secs_f32();
-                }
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
-                let mut last_int = last_interaction_time.lock().unwrap();
-                *last_int = std::time::Instant::now();
-                
                 cursor_pos = (position.x as f32, position.y as f32);
-                if last_cursor_sent_time.elapsed().as_millis() > 16 {
-                    let ev = veldmap_host_core::app::UiEvent { 
-                        event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })),
-                        ..Default::default()
-                    };
-                    event_queue.lock().unwrap().push(ev);
-                    last_cursor_sent_time = std::time::Instant::now();
-                    frame_wake.notify_one();
-                }
+                let ev = veldmap_host_core::app::UiEvent { 
+                    event: Some(veldmap_host_core::app::ui_event::Event::CursorMoved(veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 })),
+                    ..Default::default()
+                };
+                dispatcher.publish("ui-service/handle_ui_event", ev.encode_to_vec());
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
-                let mut last_int = last_interaction_time.lock().unwrap();
-                *last_int = std::time::Instant::now();
-                frame_wake.notify_one();
-
                 let b_idx = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
                 let ev = veldmap_host_core::app::UiEvent { 
                     event: Some(veldmap_host_core::app::ui_event::Event::Click(veldmap_host_core::app::ClickEvent { 
@@ -445,18 +255,29 @@ async fn main() -> anyhow::Result<()> {
                     })),
                     ..Default::default()
                 };
-                event_queue.lock().unwrap().push(ev);
+                dispatcher.publish("ui-service/handle_ui_event", ev.encode_to_vec());
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
-                let mut last_int = last_interaction_time.lock().unwrap();
-                *last_int = std::time::Instant::now();
-                frame_wake.notify_one();
-                let (pdx, pdy) = match delta { winit::event::MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0), winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.x as f32, pos.y as f32) };
                 let ev = veldmap_host_core::app::UiEvent { 
-                    event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { delta_x: pdx, delta_y: pdy })),
+                    event: Some(veldmap_host_core::app::ui_event::Event::Scroll(veldmap_host_core::app::ScrollEvent { 
+                        delta_x: match delta { winit::event::MouseScrollDelta::LineDelta(x, _) => x * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.x as f32 },
+                        delta_y: match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 }
+                    })),
                     ..Default::default()
                 };
-                event_queue.lock().unwrap().push(ev);
+                dispatcher.publish("ui-service/handle_ui_event", ev.encode_to_vec());
+            }
+            Event::WindowEvent { event: WindowEvent::KeyboardInput { event: input, .. }, .. } => {
+                if let winit::keyboard::PhysicalKey::Code(kc) = input.physical_key {
+                    let ev = veldmap_host_core::app::UiEvent { 
+                        event: Some(veldmap_host_core::app::ui_event::Event::Key(veldmap_host_core::app::KeyEvent { 
+                            key_code: kc as u32,
+                            pressed: input.state == winit::event::ElementState::Pressed
+                        })),
+                        ..Default::default()
+                    };
+                    dispatcher.publish("ui-service/handle_ui_event", ev.encode_to_vec());
+                }
             }
             _ => (),
         }

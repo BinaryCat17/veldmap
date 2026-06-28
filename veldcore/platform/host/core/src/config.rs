@@ -10,7 +10,7 @@ pub fn load_config<T: DeserializeOwned>(crate_name: &str) -> anyhow::Result<T> {
     load_config_with_path(path)
 }
 
-pub fn load_config_with_path<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> anyhow::Result<T> {
+pub fn read_config_string<P: AsRef<Path>>(path: P) -> anyhow::Result<String> {
     let path = path.as_ref();
     
     if !path.exists() {
@@ -21,7 +21,11 @@ pub fn load_config_with_path<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> an
     
     // Заменяем ${VAR} на значение из окружения
     let expanded = expand_env_vars(&content);
-    
+    Ok(expanded)
+}
+
+pub fn load_config_with_path<T: DeserializeOwned, P: AsRef<Path>>(path: P) -> anyhow::Result<T> {
+    let expanded = read_config_string(path)?;
     let config: T = serde_json::from_str(&expanded)?;
     Ok(config)
 }

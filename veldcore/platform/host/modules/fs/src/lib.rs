@@ -11,15 +11,15 @@ use std::sync::Arc;
 use std::path::Path;
 use std::fs;
 
+use veldmap_host_core::setup::HostContext;
+
 pub struct FsService {
-    dispatcher: Arc<Dispatcher>,
-    registry: Arc<ResourceRegistry>,
-    memory: Arc<MemoryManager>,
+    ctx: Arc<HostContext>,
 }
 
 impl FsService {
-    pub fn new(dispatcher: Arc<Dispatcher>, registry: Arc<ResourceRegistry>, memory: Arc<MemoryManager>) -> Self {
-        Self { dispatcher, registry, memory }
+    pub fn new(ctx: Arc<HostContext>) -> Self {
+        Self { ctx }
     }
 
     fn is_path_safe(path: &str) -> bool {
@@ -47,18 +47,18 @@ impl FsService {
             match fs::read(&req.path) {
                 Ok(data) => {
                     let size = data.len() as u64;
-                    let id = self.memory.alloc_cpu(data, requestor_id);
+                    let id = self.ctx.memory.alloc_cpu(data, requestor_id);
                     let handle = ResourceHandle {
                         id,
                         size,
-                        content_hash: self.memory.compute_hash(id).unwrap_or_default(),
+                        content_hash: self.ctx.memory.compute_hash(id).unwrap_or_default(),
                     };
                     FsReadResult { handle: Some(handle), error: String::new(), correlation_id }
                 }
                 Err(e) => FsReadResult { handle: None, error: e.to_string(), correlation_id },
             }
         };
-        self.dispatcher.publish("fs/read_result", result.encode_to_vec());
+        self.ctx.dispatcher.publish("fs/read_result", result.encode_to_vec());
     }
 
     async fn handle_fs_write(&self, payload: Vec<u8>, requestor_id: u32) {
@@ -77,17 +77,17 @@ impl FsService {
             let handle = match req.handle {
                 Some(h) => h,
                 None => {
-                    self.dispatcher.publish("fs/write_result", FsWriteResult { error: "Missing handle".into(), correlation_id }.encode_to_vec());
+                    self.ctx.dispatcher.publish("fs/write_result", FsWriteResult { error: "Missing handle".into(), correlation_id }.encode_to_vec());
                     return;
                 }
             };
             
             let data = if handle.id == 0 {
                 FsWriteResult { error: "Handle ID 0 not supported for fs_write yet".into(), correlation_id }
-            } else if !self.registry.check_access(handle.id, requestor_id, Access::Read) {
+            } else if !self.ctx.registry.check_access(handle.id, requestor_id, Access::Read) {
                 FsWriteResult { error: "Access denied to resource".into(), correlation_id }
             } else {
-                match self.memory.read(handle.id, 0, handle.size) {
+                match self.ctx.memory.read(handle.id, 0, handle.size) {
                     Ok(data) => {
                         if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
                         match fs::write(&req.path, &data) {
@@ -100,7 +100,7 @@ impl FsService {
             };
             data
         };
-        self.dispatcher.publish("fs/write_result", result.encode_to_vec());
+        self.ctx.dispatcher.publish("fs/write_result", result.encode_to_vec());
     }
 
     async fn handle_fs_list(&self, payload: Vec<u8>) {
@@ -133,7 +133,7 @@ impl FsService {
                 FsListResult { entries: vec![], error: String::new(), correlation_id }
             }
         };
-        self.dispatcher.publish("fs/list_result", result.encode_to_vec());
+        self.ctx.dispatcher.publish("fs/list_result", result.encode_to_vec());
     }
 }
 
@@ -147,4 +147,11 @@ impl AsyncNativeService for FsService {
             _ => log::warn!(target: "host", "Unknown fs topic: {}", topic),
         }
     }
+}
+
+pub fn register_services(ctx: Arc<HostContext>) {
+    let fs_service = Arc::new(FsService::new(ctx.clone()));
+    ctx.dispatcher.register_subscription("fs/read".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(fs_service.clone()));
+    ctx.dispatcher.register_subscription("fs/write".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(fs_service.clone()));
+    ctx.dispatcher.register_subscription("fs/list".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(fs_service));
 }
