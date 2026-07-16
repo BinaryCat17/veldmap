@@ -1,7 +1,5 @@
 use veldmap_host_core::dispatcher::{NativeService, TaskState};
-use veldmap_host_core::registry::{ResourceRegistry, Access, ResourceBackend};
-use veldmap_host_core::memory::MemoryManager;
-use veldmap_host_core::graphics::GraphicsDevice;
+use veldmap_host_core::registry::{Access, ResourceBackend};
 use veldmap_host_core::core::{
     TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest, ResourceHandle,

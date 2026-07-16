@@ -1,15 +1,10 @@
-use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
 
-use serde::Deserialize;
 use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
-use crate::dispatcher::{Dispatcher, ServiceLocation};
+use crate::dispatcher::ServiceLocation;
 use crate::{HostState, WasmModule, CallContext};
-use crate::registry::ResourceRegistry;
-use crate::memory::MemoryManager;
-use crate::graphics::GraphicsDevice;
 
 
 

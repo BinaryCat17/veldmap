@@ -1,13 +1,9 @@
 #![recursion_limit = "512"]
-use veldmap_host_core::{
-    dispatcher::ServiceLocation,
-};
-use veldmap_host_system::SystemService;
 
 mod compositor;
 use compositor::Compositor;
 
-use crate::app_service::{AppCommand, AppService};
+use crate::app_service::AppCommand;
 mod app_service;
 
 mod window;
@@ -36,22 +32,32 @@ async fn main() -> anyhow::Result<()> {
 
     // --- 2. СКАНИРОВАНИЕ КОНФИГОВ ПЛАГИНОВ ---
     let plugin_windows = window::extract_window_configs(&host_config);
-    
-    let (window_width, window_height, window_title, _ui_scale) = plugin_windows
+
+    if plugin_windows.has_windows() {
+        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Found plugin window configs, selecting first one");
+    }
+
+    let (window_width, window_height, window_title, _ui_scale, window_resizable, window_fullscreen) = plugin_windows
         .first()
-        .map(|(name, cfg)| {
+        .map(|(name, _)| {
+            let cfg = plugin_windows.get(name).expect("window config exists for plugin returned by first()");
             veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Using window config from plugin '{}'", name);
-            (cfg.width as f64, cfg.height as f64, cfg.title.clone(), cfg.ui_scale)
+            if let Some(pos) = &cfg.position {
+                veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Requested window position: ({}, {})", pos.x, pos.y);
+            }
+            (cfg.width as f64, cfg.height as f64, cfg.title.clone(), cfg.ui_scale, cfg.resizable, cfg.fullscreen)
         })
         .unwrap_or_else(|| {
             veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "No plugin window config found, using defaults");
-            (1024.0, 768.0, "VeldMap".to_string(), 1.0f32)
+            (1024.0, 768.0, "VeldMap".to_string(), 1.0f32, true, false)
         });
 
     let event_loop = EventLoopBuilder::<AppCommand>::with_user_event().build()?;
     let window = Arc::new(WindowBuilder::new()
         .with_title(window_title)
         .with_inner_size(winit::dpi::LogicalSize::new(window_width, window_height))
+        .with_resizable(window_resizable)
+        .with_fullscreen(window_fullscreen.then_some(winit::window::Fullscreen::Borderless(None)))
         .build(&event_loop)?);
 
     // --- 3. ИНИЦИАЛИЗАЦИЯ WGPU ---
@@ -124,17 +130,16 @@ async fn main() -> anyhow::Result<()> {
 
         match event {
             Event::UserEvent(cmd) => {
-                if let AppCommand::Draw(id) = cmd {
-                    if id != veldmap_host_core::SURFACE_ID && Some(id) != app_texture_id {
-                        if let Some(texture) = memory.get_texture(id).map(|(t, _, _, _)| t) {
-                            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                            let bind_group = compositor.create_bind_group(&device_arc, &view);
-                            app_texture_id = Some(id);
-                            app_bind_group = Some(bind_group);
-                        }
+                let AppCommand::Draw(id) = cmd;
+                if id != veldmap_host_core::SURFACE_ID && Some(id) != app_texture_id {
+                    if let Some(texture) = memory.get_texture(id).map(|(t, _, _, _)| t) {
+                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        let bind_group = compositor.create_bind_group(&device_arc, &view);
+                        app_texture_id = Some(id);
+                        app_bind_group = Some(bind_group);
                     }
-                    window.request_redraw();
                 }
+                window.request_redraw();
             }
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 window_target.exit();
@@ -146,6 +151,8 @@ async fn main() -> anyhow::Result<()> {
                     config.width = new_width;
                     config.height = new_height;
                     surface.configure(&device_arc, &config);
+                    let count = surface_config_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface reconfigured (count: {})", count);
                 }
                 window.request_redraw();
                 let ev = veldmap_host_core::app::UiEvent {
@@ -180,6 +187,8 @@ async fn main() -> anyhow::Result<()> {
                     Ok(f) => f,
                     Err(wgpu::SurfaceError::Lost) => {
                         surface.configure(&device_arc, &config);
+                        let count = surface_config_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        veldmap_host_core::vdebug!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Surface reconfigured after loss (count: {})", count);
                         window.request_redraw();
                         return;
                     }

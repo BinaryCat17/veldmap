@@ -1,5 +1,5 @@
 #![recursion_limit = "256"]
-use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
+use veldmap_host_core::dispatcher::AsyncNativeService;
 use veldmap_host_core::core::{
     FsDownloadRequest, HttpTaskRequest, HttpTaskResponse,
     FsDownloadResponse, TaskResponse, TaskCreateRequest, TaskUpdateRequest
