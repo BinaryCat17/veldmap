@@ -10,7 +10,7 @@ pub fn view(state: &State) -> Element<()> {
     if preview.is_loading {
         return column![
             text("Loading preview...").size(20.0),
-            button(text("Back")).on_press_tag("data-browser/nav_downloaded")
+            button(text("Back")).on_press("nav_downloaded")
         ]
         .spacing(20.0)
         .padding(Padding::new(20.0))
@@ -21,7 +21,7 @@ pub fn view(state: &State) -> Element<()> {
     if let Some(handle) = &preview.current_image {
         column![
             row![
-                button(text("Back")).on_press_tag("data-browser/nav_downloaded"),
+                button(text("Back")).on_press("nav_downloaded"),
                 text(format!("Preview: {}", preview.current_path)).size(18.0),
             ].spacing(20.0).align_items(Alignment::Center),
 
@@ -42,7 +42,7 @@ pub fn view(state: &State) -> Element<()> {
     } else {
         column![
             text("Failed to load image or no image selected.").size(18.0),
-            button(text("Back")).on_press_tag("data-browser/nav_downloaded")
+            button(text("Back")).on_press("nav_downloaded")
         ]
         .spacing(20.0)
         .align_items(Alignment::Center)

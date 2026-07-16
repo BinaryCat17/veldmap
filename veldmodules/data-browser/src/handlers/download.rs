@@ -14,7 +14,7 @@ pub fn on_input_download_pressed(
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
     
     if !s3_key.is_empty() {
-        veldsdk::call!("data-provider/download", DownloadRequest {
+        crate::calls::data_provider::download(&DownloadRequest {
             identifier: s3_key,
             destination: format!("data/dem/source/{}", filename),
         });
@@ -34,7 +34,7 @@ pub fn on_input_view_pressed(
     state.preview.is_loading = true;
     
     // Запрашиваем загрузку изображения у хоста
-    veldsdk::output!("image/load", veldsdk::rpc::core::ImageLoadRequest {
+    crate::calls::image::load(&veldsdk::rpc::core::ImageLoadRequest {
         path: value,
         target_width: 2048,
         target_height: 2048,

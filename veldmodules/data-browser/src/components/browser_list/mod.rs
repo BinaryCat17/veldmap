@@ -1,6 +1,6 @@
 pub mod view;
 
-pub use view::{render_item, render_list};
+pub use view::{render_item, render_list, ItemActions};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BrowserItem {

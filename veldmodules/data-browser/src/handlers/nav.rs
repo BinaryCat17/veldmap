@@ -14,7 +14,7 @@ pub fn on_input_nav_downloaded(state: &mut State, _event: UiEventResponse) {
     state.current_screen = Screen::Downloaded;
     
     // Запрашиваем список файлов при переходе на экран
-    veldsdk::call!("fs/list", FsListRequest {
+    crate::calls::fs::list(&FsListRequest {
         path: "data/dem/source".to_string(),
         correlation_id: veldsdk::generate_id!(),
     });

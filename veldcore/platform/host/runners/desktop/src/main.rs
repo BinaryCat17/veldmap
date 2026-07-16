@@ -118,7 +118,10 @@ async fn main() -> anyhow::Result<()> {
     };
     
     dispatcher.publish("ui-service/handle_ui_event", initial_ev.encode_to_vec());
-    
+
+    // Все сервисы загружены и размер окна разослан: UI-модули могут слать первый view.
+    dispatcher.publish("app/ready", Vec::new());
+
     // Принудительная первая отрисовка
     window.request_redraw();
 

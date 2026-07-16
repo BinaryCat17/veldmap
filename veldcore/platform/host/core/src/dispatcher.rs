@@ -43,7 +43,9 @@ pub enum RpcCommand {
 
 #[derive(Clone)]
 pub enum ServiceLocation {
-    LocalWasm(tokio::sync::mpsc::Sender<RpcCommand>),
+    // Unbounded so publish can enqueue synchronously: this keeps event order
+    // (CursorMoved before Click, press before release) per receiving actor.
+    LocalWasm(tokio::sync::mpsc::UnboundedSender<RpcCommand>),
     RemoteIroh(iroh::EndpointId),
     Native(Arc<dyn NativeService>),
     NativeAsync(Arc<dyn AsyncNativeService>),
@@ -81,58 +83,54 @@ impl Dispatcher {
         subscriptions.entry(topic).or_default().push(location);
     }
 
+    /// Fire-and-forget delivery to every subscriber of the topic.
+    /// Delivery is synchronous into each subscriber's queue, so events published
+    /// from one thread arrive at each subscriber in publish order.
     pub fn publish(&self, topic: &str, payload: Vec<u8>) {
+        let parts: Vec<&str> = topic.splitn(2, '/').collect();
+        if parts.len() != 2 {
+            crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Invalid publish topic: {}", topic);
+            return;
+        }
+        let (service_name, method) = (parts[0], parts[1]);
+
         let subs = {
             let subscriptions = self.subscriptions.lock().unwrap();
             subscriptions.get(topic).cloned().unwrap_or_default()
         };
 
         if subs.is_empty() {
-            crate::vdebug!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Publish to '{}' dropped: no subscribers", topic);
+            // A published message with no receiver is almost always a wiring bug.
+            crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Publish to '{}' dropped: no subscribers", topic);
             return;
         }
 
-        let parts: Vec<&str> = topic.splitn(2, '/').collect();
-        if parts.len() != 2 {
-            crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Invalid publish topic: {}", topic);
-            return;
-        }
-        let service_name = parts[0].to_string();
-        let method = parts[1].to_string();
-
-        let locations = subs;
-
-        for location in locations {
-            let payload = payload.clone();
-            let service_name = service_name.clone();
-            let method = method.clone();
-            tokio::spawn(async move {
-                if let Err(e) = Self::notify(location, &service_name, &method, payload).await {
-                    crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Publish notify failed for {}: {}", service_name, e);
+        for location in subs {
+            match location {
+                ServiceLocation::LocalWasm(sender) => {
+                    if sender.send(RpcCommand::Notify {
+                        service_name: service_name.to_string(),
+                        method: method.to_string(),
+                        payload: payload.clone(),
+                    }).is_err() {
+                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
+                    }
                 }
-            });
-        }
-    }
-
-    async fn notify(location: ServiceLocation, service_name: &str, method: &str, payload: Vec<u8>) -> Result<Vec<u8>> {
-        match location {
-            ServiceLocation::Native(service) => {
-                service.call(method, payload, 0)
-            }
-            ServiceLocation::NativeAsync(service) => {
-                service.handle(method, payload, 0).await;
-                Ok(Vec::new())
-            }
-            ServiceLocation::LocalWasm(sender) => {
-                let _ = sender.send(RpcCommand::Notify {
-                    service_name: service_name.to_string(),
-                    method: method.to_string(),
-                    payload,
-                }).await;
-                Ok(Vec::new())
-            }
-            ServiceLocation::RemoteIroh(_) => {
-                Err(anyhow::anyhow!("Remote publish not supported"))
+                ServiceLocation::Native(service) => {
+                    if let Err(e) = service.call(method, payload.clone(), 0) {
+                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Native subscriber for '{}' failed: {}", topic, e);
+                    }
+                }
+                ServiceLocation::NativeAsync(service) => {
+                    let payload = payload.clone();
+                    let method = method.to_string();
+                    tokio::spawn(async move {
+                        service.handle(&method, payload, 0).await;
+                    });
+                }
+                ServiceLocation::RemoteIroh(_) => {
+                    crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Remote publish not supported (topic '{}')", topic);
+                }
             }
         }
     }
@@ -164,14 +162,14 @@ impl Dispatcher {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 
                 crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Sending RPC call to WASM actor: {}::{}", service_name, method);
-                
+
                 if let Err(e) = sender.send(RpcCommand::Call {
                     service_name: service_name.to_string(),
                     method: method.to_string(),
                     payload,
                     requestor_id,
                     reply: tx,
-                }).await {
+                }) {
                     crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Failed to send RPC to WASM actor: {}", e);
                     return Err(anyhow::anyhow!("WASM actor dropped"));
                 }

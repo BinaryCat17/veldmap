@@ -23,6 +23,42 @@ pub mod proto {
 #[path = "../../src/module.rs"]
 pub mod module;
 
+/// Typed topic stubs for this module's declared outputs (interface.outputs).
+/// The schema is the single source of truth: an undeclared output does not exist.
+pub mod emit {
+    {% for output in emits %}
+    pub fn {{ output }}(msg: &impl veldsdk::prost::Message) {
+        veldsdk::rpc::host::publish("{{ service_name }}/{{ output }}", msg.encode_to_vec());
+    }
+    {% endfor %}
+}
+
+/// Typed topic stubs for declared dependency calls (dependencies.*.calls).
+pub mod calls {
+    {% for dep in dep_calls %}
+    pub mod {{ dep.snake }} {
+        {% for method in dep.methods %}
+        pub fn {{ method }}(msg: &impl veldsdk::prost::Message) {
+            veldsdk::rpc::host::publish("{{ dep.service }}/{{ method }}", msg.encode_to_vec());
+        }
+        {% endfor %}
+    }
+    {% endfor %}
+}
+{% if view_wrap_crate %}
+
+// ── Elm-style view loop ──────────────────────────────────────────────────────
+// After every handled message the view is rebuilt and shipped to the renderer
+// declared in schema.yaml (`view:`). Unchanged layouts are skipped by hash.
+
+static LAST_UI_HASH: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
+fn render_ui(state: &{{ rust.state }}) {
+    let root = crate::module::view(state);
+    {{ view_wrap_crate }}::render::render("{{ service_name }}", root, &mut LAST_UI_HASH.lock().unwrap());
+}
+{% endif %}
+
 #[no_mangle]
 pub extern "C" fn init() -> i32 {
     let _ = veldsdk::core::init();
@@ -87,15 +123,26 @@ pub extern "C" fn handle_rpc() -> i32 {
 
         let mut app_state = service.state.lock().unwrap();
 
-        match topic.as_str() {
+        let handled = match topic.as_str() {
             {% for topic, handler in handlers.items() %}
             "{{ topic }}" => {
                 veldsdk::rpc::call_handler({{ handler }}, &mut *app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {{ topic }}: {}", e))?;
                 Ok(())
             }
             {% endfor %}
+            {% if view_wrap_crate %}
+            // Lifecycle signal from the host: all services are loaded,
+            // the unconditional render below ships the initial view.
+            "app/ready" => Ok(()),
+            {% endif %}
             _ => Err(format!("Unknown topic: {}", topic)),
+        };
+        {% if view_wrap_crate %}
+        if handled.is_ok() {
+            render_ui(&*app_state);
         }
+        {% endif %}
+        handled
     }));
 
     match res {
@@ -137,6 +184,9 @@ pub extern "C" fn get_subscriptions() -> i32 {
         {% for topic in handlers.keys() %}
         "{{ topic }}",
         {% endfor %}
+        {% if view_wrap_crate %}
+        "app/ready",
+        {% endif %}
     ];
     let out = serde_json::to_vec(&SUBS).unwrap_or_default();
     veldsdk::rpc::host::store_output(out);

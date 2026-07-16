@@ -3,7 +3,7 @@
 use veld_ui_service_wrap::column;
 use crate::proto::ui::{text, button, scrollable, Element, Length};
 use crate::module::state::State;
-use crate::module::components::browser_list::render_list;
+use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
 
 pub fn view(state: &State) -> Element<()> {
@@ -21,19 +21,16 @@ pub fn view(state: &State) -> Element<()> {
             exists_locally: false,
         }).collect();
         
-        render_list(
-            &items,
-            task_manager,
-            &browse_state.current_path,
-            |_| String::new(),
-            |_| String::new(),
-            |_| String::new(),
-        )
+        render_list(&items, task_manager, ItemActions {
+            browse: Some("browse"),
+            view: Some("view_pressed"),
+            download: Some("download_pressed"),
+        })
     };
     
     column![
         text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-        button(text("⬆ Up")).on_press_tag("data-browser/browse_up"),
+        button(text("⬆ Up")).on_press("browse_up"),
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)

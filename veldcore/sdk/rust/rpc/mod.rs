@@ -26,25 +26,9 @@ pub struct ServiceState<S> {
     pub state: std::sync::Arc<std::sync::Mutex<S>>,
 }
 
-/// Вызов зависимости (запрос к declared dependency через dependencies.*.calls)
-#[macro_export]
-macro_rules! call {
-    ($topic:expr, $msg:expr) => {{
-        use $crate::prost::Message;
-        let payload = $msg.encode_to_vec();
-        let _ = $crate::rpc::host::publish($topic, payload);
-    }};
-}
-
-/// Публикация исходящего события (declared output через interface.outputs)
-#[macro_export]
-macro_rules! output {
-    ($topic:expr, $msg:expr) => {{
-        use $crate::prost::Message;
-        let payload = $msg.encode_to_vec();
-        let _ = $crate::rpc::host::publish($topic, payload);
-    }};
-}
+// Топики сообщений объявляются только в schema.yaml: кодоген создаёт
+// типизированные стабы crate::emit::* (interface.outputs) и crate::calls::*
+// (dependencies.*.calls). Строковые топики в коде модулей запрещены.
 
 /// Генерация UUID
 #[macro_export]

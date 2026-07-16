@@ -21,7 +21,7 @@ pub fn on_input_browse(
     }
     
     // Публикуем запрос к data-provider
-    veldsdk::call!("data-provider/list_path", crate::proto::dataprovider::ListPathRequest {
+    crate::calls::data_provider::list_path(&crate::proto::dataprovider::ListPathRequest {
         path: target_path,
         token: String::new(),
     });
@@ -45,7 +45,7 @@ pub fn on_input_browse_up(
     state.browse.current_path = path.clone();
     state.browse.is_loading = true;
     
-    veldsdk::call!("data-provider/list_path", crate::proto::dataprovider::ListPathRequest {
+    crate::calls::data_provider::list_path(&crate::proto::dataprovider::ListPathRequest {
         path,
         token: String::new(),
     });

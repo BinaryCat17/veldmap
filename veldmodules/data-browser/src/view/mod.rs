@@ -21,9 +21,9 @@ pub fn build_root(state: &State) -> Element<()> {
     
     // Header navigation
     let header = row![
-        button(text("Browse")).on_press_tag("data-browser/nav_browse"),
-        button(text("Search")).on_press_tag("data-browser/nav_search"),
-        button(text("Downloaded")).on_press_tag("data-browser/nav_downloaded")
+        button(text("Browse")).on_press("nav_browse"),
+        button(text("Search")).on_press("nav_search"),
+        button(text("Downloaded")).on_press("nav_downloaded")
     ].spacing(10.0).padding(Padding::new(10.0));
     
     let status_bar = row![

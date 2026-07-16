@@ -3,7 +3,7 @@
 use veld_ui_service_wrap::column;
 use crate::proto::ui::{text, scrollable, Element, Length, Padding};
 use crate::module::state::State;
-use crate::module::components::browser_list::{render_list, BrowserItem};
+use crate::module::components::browser_list::{render_list, BrowserItem, ItemActions};
 
 pub fn view(state: &State) -> Element<()> {
     let downloaded = &state.downloaded;
@@ -20,14 +20,11 @@ pub fn view(state: &State) -> Element<()> {
     let file_list = if items.is_empty() {
         column![text("No downloaded files found").size(16.0)].into()
     } else {
-        render_list(
-            &items,
-            task_manager,
-            "downloaded",
-            |_| "data-browser/nav_browse".to_string(), // Не используется здесь
-            |path| format!("data-browser/view_pressed|{}", path),
-            |path| format!("data-browser/download_pressed|{}", path), // Для перезакачки
-        )
+        render_list(&items, task_manager, ItemActions {
+            browse: None,
+            view: Some("view_pressed"),
+            download: Some("download_pressed"), // Для перезакачки
+        })
     };
 
     column![

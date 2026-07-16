@@ -3,7 +3,7 @@
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui::{text, text_input, button, scrollable, Element, Length};
 use crate::module::state::State;
-use crate::module::components::browser_list::render_list;
+use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
 
 pub fn view(state: &State) -> Element<()> {
@@ -28,14 +28,11 @@ pub fn view(state: &State) -> Element<()> {
             exists_locally: false,
         }).collect();
         
-        render_list(
-            &items,
-            task_manager,
-            "search_results",
-            |_| String::new(), // Папки не поддерживаются
-            |_| String::new(),
-            |_| String::new(),
-        )
+        render_list(&items, task_manager, ItemActions {
+            browse: None, // Папки не поддерживаются
+            view: None,
+            download: Some("download_pressed"),
+        })
     };
     
     column![
@@ -43,9 +40,9 @@ pub fn view(state: &State) -> Element<()> {
         
         row![
             text_input("Search query...", &search_state.query)
-                .on_input_tag("data-browser/search_input")
-                .on_submit_tag("data-browser/search"),
-            button(text("Search")).on_press_tag("data-browser/search")
+                .on_input("search_input")
+                .on_submit("search"),
+            button(text("Search")).on_press("search")
         ]
         .spacing(10.0)
         .width(Length::Fill),

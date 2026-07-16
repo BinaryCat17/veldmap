@@ -5,7 +5,7 @@ use iced_core::{Element, Theme, Length, Color, alignment, Size};
 
 #[derive(Clone, Debug)]
 pub struct UiMessage {
-    pub tag: String,
+    pub method: String,
     pub value: String,
 }
 
@@ -78,8 +78,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .padding(convert_padding(&b.padding));
             
             if !b.disabled {
-                let tag = b.on_press.clone();
-                btn = btn.on_press(UiMessage { tag, value: String::new() });
+                if let Some(h) = &b.on_press {
+                    if !h.method.is_empty() {
+                        btn = btn.on_press(UiMessage { method: h.method.clone(), value: h.value.clone() });
+                    }
+                }
             }
 
             match &b.style_variant {
@@ -130,14 +133,18 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .padding(convert_padding(&t.padding))
                 .size(size);
             
-            if !t.on_input.is_empty() {
-                let tag = t.on_input.clone();
-                input = input.on_input(move |v| UiMessage { tag: tag.clone(), value: v });
+            if let Some(h) = &t.on_input {
+                if !h.method.is_empty() {
+                    let method = h.method.clone();
+                    // The typed text replaces the handler's value at runtime.
+                    input = input.on_input(move |v| UiMessage { method: method.clone(), value: v });
+                }
             }
-            
-            if !t.on_submit.is_empty() {
-                let tag = t.on_submit.clone();
-                input = input.on_submit(UiMessage { tag, value: String::new() });
+
+            if let Some(h) = &t.on_submit {
+                if !h.method.is_empty() {
+                    input = input.on_submit(UiMessage { method: h.method.clone(), value: h.value.clone() });
+                }
             }
 
             input.into()

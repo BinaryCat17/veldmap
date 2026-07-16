@@ -9,7 +9,7 @@ use crate::module::renderer::GpuRenderer;
 /// Response message waiting to be dispatched to plugin
 #[derive(Clone)]
 pub struct PendingMessage {
-    pub message_tag: String,
+    pub method: String,
     pub value: String,
 }
 

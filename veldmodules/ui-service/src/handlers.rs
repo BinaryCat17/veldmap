@@ -22,53 +22,17 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
         p
     });
     
-    // 1. Dispatch pending messages for this plugin BEFORE rendering
-    // This ensures the plugin has processed all UI events before we render
-    let pending = plugin.pending_messages.borrow_mut().drain(..).collect::<Vec<_>>();
-    for msg in pending {
-        let resp = UiEventResponse {
-            plugin_id: plugin_id.clone(),
-            message_tag: msg.message_tag,
-            value: msg.value,
-        };
-        let _ = dispatch_event(resp);
+    // Store the module's current view; rendering happens below and on frame ticks.
+    if let Some(layout) = req.layout {
+        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-VIEW] '{}'", plugin_id);
+        plugin.layout = layout;
+        *plugin.is_layout_dirty.borrow_mut() = true;
+        *plugin.needs_redrawing.borrow_mut() = true;
     }
-    
-    // 2. Update layout
-    match &req.update {
-        Some(set_view_request::Update::FullLayout(_)) =>
-            veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-VIEW] '{}': full layout", plugin_id),
-        Some(set_view_request::Update::Patch(p)) =>
-            veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-VIEW] '{}': patch with {} updates", plugin_id, p.updates.len()),
-        None => {}
-    }
-    match req.update {
-        Some(set_view_request::Update::FullLayout(l)) => {
-            plugin.layout = l;
-            *plugin.is_layout_dirty.borrow_mut() = true;
-            *plugin.needs_redrawing.borrow_mut() = true;
-        }
-        Some(set_view_request::Update::Patch(patch)) => {
-            if let Some(ref mut root) = plugin.layout.root {
-                for update in patch.updates {
-                    if let Some(new_widget) = update.new_widget {
-                        apply_widget_update(root, update.widget_id, new_widget);
-                    }
-                }
-                plugin.layout.width = patch.width;
-                plugin.layout.height = patch.height;
-                plugin.layout.hash = patch.new_hash;
-                *plugin.is_layout_dirty.borrow_mut() = true;
-                *plugin.needs_redrawing.borrow_mut() = true;
-            }
-        }
-        None => {}
-    }
-    
+
     // plugin borrow ends here before rendering
     let _ = plugin;
 
-    // 3. Render if needed
     render_plugin_if_needed(state, &plugin_id, surface_format);
 }
 
@@ -100,32 +64,12 @@ fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i
     let plugin = state.plugins.get(plugin_id).unwrap();
     let pending = plugin.pending_messages.borrow_mut().drain(..).collect::<Vec<_>>();
     for msg in pending {
-        let resp = UiEventResponse {
+        dispatch_event(UiEventResponse {
             plugin_id: plugin_id.to_string(),
-            message_tag: msg.message_tag,
+            method: msg.method,
             value: msg.value,
-        };
-        let _ = dispatch_event(resp);
+        });
     }
-}
-
-fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
-    if current.id == id {
-        *current = new_w;
-        return true;
-    }
-
-    match &mut current.r#type {
-        Some(widget::Type::Column(c)) => { for child in &mut c.children { if apply_widget_update(child, id, new_w.clone()) { return true; } } }
-        Some(widget::Type::Row(r)) => { for child in &mut r.children { if apply_widget_update(child, id, new_w.clone()) { return true; } } }
-        Some(widget::Type::Stack(s)) => { for child in &mut s.children { if apply_widget_update(child, id, new_w.clone()) { return true; } } }
-        Some(widget::Type::Container(c)) => { if let Some(child) = &mut c.child { return apply_widget_update(child, id, new_w); } }
-        Some(widget::Type::Scrollable(s)) => { if let Some(child) = &mut s.content { return apply_widget_update(child, id, new_w); } }
-        Some(widget::Type::Tooltip(t)) => { if let Some(child) = &mut t.content { return apply_widget_update(child, id, new_w); } }
-        Some(widget::Type::Button(b)) => { if let Some(child) = &mut b.child { return apply_widget_update(child, id, new_w); } }
-        _ => {}
-    }
-    false
 }
 
 pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
@@ -151,22 +95,9 @@ pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
         }
     }
 
-    // Publish frame event unconditionally (independent of whether any plugin has
-    // registered yet) so that the first plugin can bootstrap itself.
+    // On each frame tick render plugins with pending changes: input-driven redraws
+    // and animation (scroll inertia) are the renderer's own responsibility.
     if is_frame {
-        let (width, height) = state.canvas_size;
-        if width > 0 && height > 0 {
-            let dt = match &event_proto.event {
-                Some(app_proto::ui_event::Event::Frame(f)) => f.dt,
-                _ => 0.0,
-            };
-            let frame_event = crate::proto::ui::FrameEvent { width, height, dt };
-            veldsdk::output!("ui-service/frame", frame_event);
-        }
-
-        // Render plugins with pending changes: set_view only arrives on layout
-        // diffs, so redraws driven by input events (or the very first frame after
-        // registration) have to happen on the frame tick.
         let surface_format = state.surface_format;
         let plugin_ids: Vec<String> = state.plugins.keys().cloned().collect();
         for plugin_id in plugin_ids {
@@ -268,21 +199,16 @@ fn process_iced_events(plugin: &PluginUiState, plugin_id: &str, _surface_handle:
     Ok(())
 }
 
-/// Внутренняя функция для диспетчеризации событий плагину.
-/// Вызывается после рендера, когда iced захватил сообщения от виджетов.
-fn dispatch_event(mut event: UiEventResponse) -> anyhow::Result<()> {
-    // Widget tags are stored JSON-encoded by the SDK wrap (serde_json::to_string),
-    // so a plain "service/method" tag arrives wrapped in quotes - decode it first,
-    // otherwise the topic won't match any subscription.
-    let topic = serde_json::from_str::<String>(&event.message_tag)
-        .unwrap_or_else(|_| event.message_tag.clone());
-    if topic.is_empty() {
-        return Ok(());
+/// Диспетчеризация захваченного виджет-события владельцу:
+/// адрес — входной метод модуля, `{plugin_id}/{method}`.
+fn dispatch_event(event: UiEventResponse) {
+    use veldsdk::prost::Message;
+    if event.method.is_empty() {
+        return;
     }
-    event.message_tag = topic.clone();
+    let topic = format!("{}/{}", event.plugin_id, event.method);
     veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[DISPATCH] UI message -> '{}' (value: '{}')", topic, event.value);
-    veldsdk::output!(&topic, event);
-    Ok(())
+    veldsdk::rpc::host::publish(&topic, event.encode_to_vec());
 }
 
 fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
@@ -355,7 +281,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         let cmd = veldsdk::rpc::app::AppDisplayCommand {
             command: Some(veldsdk::rpc::app::app_display_command::Command::DrawFrame(veldsdk::rpc::app::DrawFrame { texture_id }))
         };
-        let _ = veldsdk::call!("app/display", cmd);
+        crate::calls::app::display(&cmd);
 
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();
@@ -372,7 +298,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     }
     for msg in captured_messages {
         plugin.pending_messages.borrow_mut().push(PendingMessage {
-            message_tag: msg.tag,
+            method: msg.method,
             value: msg.value,
         });
     }

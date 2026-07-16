@@ -11,7 +11,7 @@ pub fn on_input_search(state: &mut State, _event: UiEventResponse) {
     
     if !query.is_empty() {
         state.search.is_loading = true;
-        veldsdk::call!("data-provider/search", crate::proto::dataprovider::SearchRequest {
+        crate::calls::data_provider::search(&crate::proto::dataprovider::SearchRequest {
             query,
             filters: vec![],
         });

@@ -3,17 +3,12 @@ syntax = "proto3";
 package veldmap.ui;
 
 import "core.proto";
-import "app.proto";
 
 message Layout {
     Widget root = 1;
-    uint32 width = 2;
-    uint32 height = 3;
-    uint64 hash = 4;
 }
 
 message Widget {
-    uint64 id = 100; // Уникальный (хеш) идентификатор виджета для диффинга
     oneof type {
         Column column = 1;
         Row row = 2;
@@ -28,7 +23,14 @@ message Widget {
         Stack stack = 11;
         Tooltip tooltip = 12;
     }
-    uint64 key = 15;
+}
+
+// A widget event handler: identifies the input method of the owning module
+// that the event is dispatched to, plus an optional payload set at view time
+// (for TextInput the runtime replaces value with the typed text).
+message Handler {
+    string method = 1;
+    string value = 2;
 }
 
 message Stack {
@@ -139,7 +141,7 @@ message ButtonStyle {
 
 message Button {
     Widget child = 1;
-    string on_press = 2; // Message tag
+    Handler on_press = 2;
     bool disabled = 3;
     Length width = 4;
     Length height = 5;
@@ -153,8 +155,8 @@ message Button {
 message TextInput {
     string value = 1;
     string placeholder = 2;
-    string on_input = 3; // Message tag
-    string on_submit = 4; // Message tag
+    Handler on_input = 3;
+    Handler on_submit = 4;
     string style = 5;
     Length width = 6;
     Padding padding = 7;
@@ -214,45 +216,17 @@ message Color {
     float a = 4;
 }
 
-// RPC messages for ui-service
+// RPC messages for ui-service.
+// SetView is fire-and-forget: the module ships its full current view; the
+// renderer owns change detection and frame pacing.
 message SetViewRequest {
     string plugin_id = 1;
-    oneof update {
-        Layout full_layout = 2;
-        LayoutPatch patch = 3;
-    }
+    Layout layout = 2;
 }
 
-message LayoutPatch {
-    repeated WidgetUpdate updates = 1;
-    uint32 width = 2;
-    uint32 height = 3;
-    uint64 new_hash = 4;
-}
-
-message WidgetUpdate {
-    uint64 widget_id = 1;
-    Widget new_widget = 2;
-}
-
-// SetView is fire-and-forget, no response needed
-
-message HandleUiEventRequest {
-    string plugin_id = 1;
-    veldmap.app.UIEvent event = 2;
-}
-
-// HandleUiEvent is fire-and-forget, responses are dispatched via set_view flow
-
+// A UI event captured by the renderer, dispatched to `{plugin_id}/{method}`.
 message UiEventResponse {
     string plugin_id = 1;
-    string message_tag = 2;
+    string method = 2;
     string value = 3; // For TextInput or similar
-}
-
-// Frame event for ui-service/frame topic
-message FrameEvent {
-    uint32 width = 1;
-    uint32 height = 2;
-    float dt = 3;
 }

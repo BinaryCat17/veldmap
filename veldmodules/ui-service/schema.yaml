@@ -4,17 +4,9 @@ version: 0.1.0
 interface:
   inputs:
     set_view:
-      type: veld-ui/SetViewRequest
+      type: ui/SetViewRequest
     handle_ui_event:
       type: app/UiEvent
-  
-  outputs:
-    frame:
-      called_by: module/handle_ui_event
-      type: veld-ui/FrameEvent
-    set_view:
-      called_by: wrap/render
-      type: veld-ui/SetViewRequest
 
 dependencies:
   app:

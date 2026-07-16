@@ -51,7 +51,7 @@ pub fn on_input_download(
     let identifier = request.identifier.clone();
     
     // Publish started immediately
-    veldsdk::output!("data-provider/download_started", DownloadStarted {
+    crate::emit::download_started(&DownloadStarted {
         task_id: task_id.clone(),
         identifier: identifier.clone(),
         destination: destination.clone(),
@@ -69,7 +69,7 @@ pub fn on_input_download(
     };
 
     state.pending_downloads.insert(task_id);
-    veldsdk::call!("network/fs_download", req_task);
+    crate::calls::network::fs_download(&req_task);
 }
 
 pub fn on_input_list_path(
@@ -121,7 +121,7 @@ pub fn on_input_list_path(
     info!("Requesting S3 list: {}", req_task.url);
 
     state.pending_http.insert(correlation_id.clone(), request.path);
-    veldsdk::call!("network/http", req_task);
+    crate::calls::network::http(&req_task);
 }
 
 // subs ---------------------------------------------------------------------------------------------------------------------------
@@ -143,7 +143,7 @@ pub fn on_sub_http_result(
         }
     };
 
-    veldsdk::output!("data-provider/list_path_result", list_response);
+    crate::emit::list_path_result(&list_response);
 }
 
 pub fn on_sub_fs_download_result(
@@ -156,7 +156,7 @@ pub fn on_sub_fs_download_result(
     }
 
     let success = response.error.is_empty();
-    veldsdk::output!("data-provider/downloaded", Downloaded {
+    crate::emit::downloaded(&Downloaded {
         task_id: correlation_id,
         success,
         error: response.error,

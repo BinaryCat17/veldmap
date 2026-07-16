@@ -94,8 +94,33 @@ def main():
         handlers[f"{name}/{input_name}"] = f"crate::module::on_input_{input_name}"
 
     for dep_name, dep_data in schema.get("dependencies", {}).items():
-        for sub_name in dep_data.get("subs", {}):
+        for sub_name in (dep_data or {}).get("subs", {}) or {}:
             handlers[f"{dep_name}/{sub_name}"] = f"crate::module::on_sub_{sub_name}"
+
+    # ── Typed emit/call stubs (schema is the source of truth for topics) ─────
+    # interface.outputs  → crate::emit::<name>(msg)
+    # dependencies.*.calls → crate::calls::<dep_snake>::<name>(msg)
+    emits = list(schema.get("interface", {}).get("outputs", {}) or {})
+
+    dep_calls = []
+    for dep_name, dep_data in schema.get("dependencies", {}).items():
+        calls = list((dep_data or {}).get("calls", {}) or {})
+        if calls:
+            dep_calls.append({
+                "service": dep_name,
+                "snake": dep_name.replace("-", "_"),
+                "methods": calls,
+            })
+
+    # ── View module (Elm-style view loop) ────────────────────────────────────
+    # `view: <dependency>` in schema.yaml names the dependency that renders this
+    # module's UI. The generated runner re-renders the module's view after init
+    # and after every handled message, shipping the layout to that dependency's
+    # wrap crate (which must expose `render::render`). The module must export
+    # `pub fn view(&State) -> Element<()>`.
+    view_dep = schema.get("view")
+    if view_dep and view_dep not in schema.get("dependencies", {}):
+        raise SystemExit(f"Schema '{name}': view renderer '{view_dep}' is not declared in dependencies")
 
     # ── Detect local proto / wraps ───────────────────────────────────────────
     has_local_proto = os.path.exists(os.path.join(schema_dir, "types.proto"))
@@ -133,6 +158,7 @@ def main():
         cargo_dependencies[dep_name] = yaml_dep_to_toml(dep_val)
         
     # 2. Add schema-inferred internal dependencies
+    view_wrap_crate = None
     schema_deps = schema.get("dependencies", {})
     for dep_name in schema_deps.keys():
         dep_dir = os.path.normpath(os.path.join(schema_dir, "..", dep_name))
@@ -146,7 +172,9 @@ def main():
                     
             api_crate_name = f"{dep_pkg_name}-wrap"
             api_crate_snake = api_crate_name.replace("-", "_")
-            
+            if dep_name == view_dep:
+                view_wrap_crate = api_crate_snake
+
             # Dependency on the generated wrap crate
             cargo_dependencies[api_crate_name] = f'{{ path = "../../{dep_name}/generated/wraps/rust" }}'
             
@@ -175,9 +203,13 @@ def main():
     # ── Template context ─────────────────────────────────────────────────────
     module_name_snake = package_name.replace("-", "_")
 
+    if view_dep and not view_wrap_crate:
+        raise SystemExit(f"Schema '{name}': could not resolve wrap crate for view renderer '{view_dep}'")
+
     template_data = {
         "module_name":        package_name,
         "module_name_snake":  module_name_snake,
+        "service_name":       name,
         "version":            version,
         "sdk_path":           sdk_path,
         "sdk_features":       config_data.get("sdk_features", []),
@@ -188,6 +220,9 @@ def main():
             "init":   "crate::module::init",
         },
         "handlers":           handlers,
+        "emits":              emits,
+        "dep_calls":          dep_calls,
+        "view_wrap_crate":    view_wrap_crate,
         "has_local_proto":    has_local_proto,
         "local_proto_package": local_proto_package,
         "local_proto_path":   local_proto_path,

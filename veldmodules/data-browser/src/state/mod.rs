@@ -8,7 +8,6 @@ pub struct State {
     pub downloaded: downloaded::DownloadedState,
     pub preview: preview::PreviewState,
     pub global: types::GlobalState,
-    pub last_layout: Option<crate::proto::ui::proto::Layout>,
 }
 
 impl State {
@@ -25,7 +24,6 @@ impl State {
                 task_manager: crate::module::components::task_manager::TaskManager::default(),
                 has_rendered: false,
             },
-            last_layout: None,
         })
     }
 }

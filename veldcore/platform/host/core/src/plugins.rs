@@ -162,7 +162,7 @@ pub async fn load_services(
                     wasm_module.store.data_mut().call_context = None;
                 }
 
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::dispatcher::RpcCommand>(100);
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::dispatcher::RpcCommand>();
                 
                 let plugin_name_clone = name.clone();
                 tokio::spawn(async move {

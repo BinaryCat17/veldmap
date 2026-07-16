@@ -30,6 +30,9 @@ message RpcResponse {
   SyncMetadata sync = 3;
 }
 
+// An intentionally empty payload (lifecycle signals etc.)
+message Empty {}
+
 // SYSTEM SERVICE MESSAGES
 
 enum LogLevel {
