@@ -87,6 +87,11 @@ impl Dispatcher {
             subscriptions.get(topic).cloned().unwrap_or_default()
         };
 
+        if subs.is_empty() {
+            crate::vdebug!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Publish to '{}' dropped: no subscribers", topic);
+            return;
+        }
+
         let parts: Vec<&str> = topic.splitn(2, '/').collect();
         if parts.len() != 2 {
             crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Invalid publish topic: {}", topic);

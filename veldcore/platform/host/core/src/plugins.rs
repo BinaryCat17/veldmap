@@ -171,8 +171,14 @@ pub async fn load_services(
                         tokio::select! {
                             cmd = rx.recv() => {
                                 match cmd {
-                                    Some(crate::dispatcher::RpcCommand::Call { method: _, payload, reply, .. }) => {
-                                        let call_ctx = CallContext::new(payload);
+                                    Some(crate::dispatcher::RpcCommand::Call { service_name, method, payload, reply, .. }) => {
+                                        // handle_rpc() decodes its input as an RpcRequest to recover the
+                                        // "{service}/{method}" topic, so it must be re-wrapped here - the
+                                        // dispatcher only carries the bare inner payload internally.
+                                        let req = crate::core::RpcRequest {
+                                            service: service_name, method, payload, sync: None, instance_id: 0,
+                                        };
+                                        let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
                                         if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
                                             let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;
@@ -183,8 +189,11 @@ pub async fn load_services(
                                         };
                                         let _ = reply.send(Ok(out));
                                     }
-                                    Some(crate::dispatcher::RpcCommand::Notify { payload, .. }) => {
-                                        let call_ctx = CallContext::new(payload);
+                                    Some(crate::dispatcher::RpcCommand::Notify { service_name, method, payload }) => {
+                                        let req = crate::core::RpcRequest {
+                                            service: service_name, method, payload, sync: None, instance_id: 0,
+                                        };
+                                        let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
                                         if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
                                             let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;

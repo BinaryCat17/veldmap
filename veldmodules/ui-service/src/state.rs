@@ -62,6 +62,12 @@ pub struct State {
     pub plugins: HashMap<String, PluginUiState>,
     pub renderer: GpuRenderer,
     pub surface_format: i32,
+    /// Size of the single OS window/surface shared by all plugins.
+    /// Tracked independently of any plugin's registration so that the very
+    /// first `frame` tick can be published before any plugin has rendered
+    /// (a plugin only appears in `plugins` once it has sent its first
+    /// `set_view`, which itself is triggered by receiving a `frame` tick).
+    pub canvas_size: (u32, u32),
 }
 
 unsafe impl Send for State {}
@@ -79,6 +85,7 @@ impl State {
                 ("JetBrains Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
             ]),
             surface_format: sf,
+            canvas_size: (0, 0),
         }
     }
 }

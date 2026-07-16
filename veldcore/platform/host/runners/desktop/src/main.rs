@@ -135,8 +135,11 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(texture) = memory.get_texture(id).map(|(t, _, _, _)| t) {
                         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                         let bind_group = compositor.create_bind_group(&device_arc, &view);
+                        veldmap_host_core::vinfo!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Compositor bound app texture {}", id);
                         app_texture_id = Some(id);
                         app_bind_group = Some(bind_group);
+                    } else {
+                        veldmap_host_core::vwarn!(veldmap_host_core::logging::FLAG_HOST_RENDER, "Draw command for unknown texture {}", id);
                     }
                 }
                 window.request_redraw();
@@ -240,6 +243,11 @@ async fn main() -> anyhow::Result<()> {
 
                 queue_arc.lock().unwrap().submit(Some(encoder.finish()));
                 frame.present();
+
+                // Keep the frame loop alive: plugins render in response to Frame
+                // events published above, so redraws must not depend on plugins
+                // sending Draw commands first (paced by present_mode vsync).
+                window.request_redraw();
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);

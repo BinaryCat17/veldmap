@@ -4,7 +4,8 @@ use veldmap_host_core::core::{
     TaskStatusRequest, TaskStatusResponse,
     TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest, ResourceHandle,
     GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse,
-    GetConfigRequest, GetConfigResponse, GenerateUuidRequest, GenerateUuidResponse
+    GetConfigRequest, GetConfigResponse, GenerateUuidRequest, GenerateUuidResponse,
+    LogRequest, LogLevel
 };
 use prost::Message;
 use std::sync::{Arc, Mutex};
@@ -42,6 +43,20 @@ impl SystemService {
 impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
+            "log" => {
+                let req = LogRequest::decode(&payload[..])?;
+                let level = match LogLevel::try_from(req.level).unwrap_or(LogLevel::Trace) {
+                    LogLevel::Error => veldmap_host_core::logging::Level::Error,
+                    LogLevel::Warn => veldmap_host_core::logging::Level::Warn,
+                    LogLevel::Info => veldmap_host_core::logging::Level::Info,
+                    LogLevel::Debug => veldmap_host_core::logging::Level::Debug,
+                    LogLevel::Trace => veldmap_host_core::logging::Level::Trace,
+                };
+                let plugin_name = self.configs.get(&requestor_id)
+                    .and_then(|c| c.get("plugin_name").and_then(|v| v.as_str().map(str::to_string)));
+                veldmap_host_core::logging::veld_log(level, req.flags, plugin_name.as_deref(), &req.message);
+                Ok(Vec::new())
+            }
             "register_config" => {
                 let req = veldmap_host_core::core::RegisterConfigRequest::decode(&payload[..])?;
                 if let Ok(config_map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&req.value_json) {

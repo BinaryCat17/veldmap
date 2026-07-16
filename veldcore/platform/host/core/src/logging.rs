@@ -43,15 +43,15 @@ fn is_rate_limited(message: &str) -> bool {
     let mut limiter = RATE_LIMIT.lock().unwrap();
     if let Some(ref mut limiter) = *limiter {
         let now = Instant::now();
-        // Use first 50 chars of message as key for rate limiting
-        let key = if message.len() > 50 { &message[..50] } else { message };
-        
-        if let Some(last_time) = limiter.last_log.get(key) {
+        // Dedup on the full message: a fixed-length prefix falsely collapses distinct
+        // messages that share a long common prefix (e.g. "Registering subscription:
+        // data-browser/..." for every topic of the same plugin).
+        if let Some(last_time) = limiter.last_log.get(message) {
             if now.duration_since(*last_time) < limiter.min_interval {
                 return true; // Skip this log
             }
         }
-        limiter.last_log.insert(key.to_string(), now);
+        limiter.last_log.insert(message.to_string(), now);
     }
     false
 }

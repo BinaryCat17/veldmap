@@ -42,5 +42,8 @@ impl NativeService for AppService {
 
 pub fn register_services(ctx: std::sync::Arc<veldmap_host_core::setup::HostContext>, proxy: EventLoopProxy<AppCommand>) {
     let app_service = std::sync::Arc::new(AppService::new(proxy));
-    ctx.dispatcher.register_service("app".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(app_service));
+    ctx.dispatcher.register_service("app".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(app_service.clone()));
+    // Plugins deliver display commands via publish (fire-and-forget), which routes
+    // through subscriptions, not the service registry - so subscribe explicitly.
+    ctx.dispatcher.register_subscription("app/display".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(app_service));
 }

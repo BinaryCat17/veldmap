@@ -10,9 +10,17 @@ use iced_graphics::Viewport;
 pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     let plugin_id = req.plugin_id.clone();
     let surface_format = state.surface_format;
-    
-    // Get or create plugin
-    let plugin = state.plugins.entry(plugin_id.clone()).or_insert_with(PluginUiState::new);
+    let canvas_size = state.canvas_size;
+
+    // Get or create plugin. Seed its canvas size from the shared window size so
+    // the very first render doesn't use PluginUiState::new()'s placeholder size.
+    let plugin = state.plugins.entry(plugin_id.clone()).or_insert_with(|| {
+        let p = PluginUiState::new();
+        if canvas_size.0 > 0 && canvas_size.1 > 0 {
+            *p.canvas_size.borrow_mut() = canvas_size;
+        }
+        p
+    });
     
     // 1. Dispatch pending messages for this plugin BEFORE rendering
     // This ensures the plugin has processed all UI events before we render
@@ -27,6 +35,13 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     }
     
     // 2. Update layout
+    match &req.update {
+        Some(set_view_request::Update::FullLayout(_)) =>
+            veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-VIEW] '{}': full layout", plugin_id),
+        Some(set_view_request::Update::Patch(p)) =>
+            veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-VIEW] '{}': patch with {} updates", plugin_id, p.updates.len()),
+        None => {}
+    }
     match req.update {
         Some(set_view_request::Update::FullLayout(l)) => {
             plugin.layout = l;
@@ -50,27 +65,48 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
         None => {}
     }
     
-    // 3. Check if we need to render
-    let needs_render = *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow();
-    let surface_handle = *plugin.surface_handle.borrow();
-    
     // plugin borrow ends here before rendering
     let _ = plugin;
-    
-    // 4. Render via iced if we have surface handle and need to render
+
+    // 3. Render if needed
+    render_plugin_if_needed(state, &plugin_id, surface_format);
+}
+
+/// Render a plugin if it has pending changes and a surface handle.
+/// Shared by handle_set_view (layout updates) and handle_ui_event (frame ticks):
+/// a static layout produces no set_view diffs, so frame ticks must also be able
+/// to trigger rendering or a never-changing UI would never be drawn.
+fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i32) {
+    let Some(plugin) = state.plugins.get(plugin_id) else { return };
+    let needs_render = *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow();
+    let surface_handle = *plugin.surface_handle.borrow();
+
     if let Some(handle) = surface_handle {
         if needs_render {
             // Get plugin and renderer separately to avoid borrow issues
-            let plugin_ref = state.plugins.get_mut(&plugin_id).unwrap() as *mut PluginUiState;
+            let plugin_ref = state.plugins.get_mut(plugin_id).unwrap() as *mut PluginUiState;
             let renderer_ref = &mut state.renderer as *mut GpuRenderer;
             unsafe {
-                if let Err(e) = render_plugin(&mut *plugin_ref, &mut *renderer_ref, &plugin_id, surface_format, handle) {
-                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[handle_set_view] render_plugin failed: {}", e);
+                if let Err(e) = render_plugin(&mut *plugin_ref, &mut *renderer_ref, plugin_id, surface_format, handle) {
+                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[render_plugin_if_needed] render_plugin failed: {}", e);
                 }
             }
         }
     }
-    
+
+    // Dispatch messages captured by iced during this render (button presses etc.)
+    // immediately: deferring them to the next set_view would deadlock, because the
+    // plugin only sends set_view after reacting to these very messages.
+    let plugin = state.plugins.get(plugin_id).unwrap();
+    let pending = plugin.pending_messages.borrow_mut().drain(..).collect::<Vec<_>>();
+    for msg in pending {
+        let resp = UiEventResponse {
+            plugin_id: plugin_id.to_string(),
+            message_tag: msg.message_tag,
+            value: msg.value,
+        };
+        let _ = dispatch_event(resp);
+    }
 }
 
 fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
@@ -94,39 +130,50 @@ fn apply_widget_update(current: &mut Widget, id: u64, new_w: Widget) -> bool {
 
 pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (via publish)");
-    
+
+    // Track the shared window size independently of plugin registration: a plugin
+    // only gets added to `state.plugins` via `set_view`, which a plugin only sends
+    // in response to a `frame` tick - so `frame` must not depend on a plugin
+    // already being registered, or nothing would ever bootstrap.
+    if let Some(app_proto::ui_event::Event::Resize(r)) = &event_proto.event {
+        state.canvas_size = (r.width, r.height);
+    }
+
     let is_frame = matches!(event_proto.event, Some(app_proto::ui_event::Event::Frame(_)));
-    
+
     // Process event for ALL plugins - we don't know which one it's for
     // ui-service stores layouts of all plugins.
     let plugin_ids: Vec<String> = state.plugins.keys().cloned().collect();
-    
+
     for plugin_id in plugin_ids {
         if let Err(e) = process_ui_event(state, &plugin_id, event_proto.clone()) {
             veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event failed for {}: {}", plugin_id, e);
         }
     }
-    
-    // Publish frame event to all subscribers after processing all plugins
+
+    // Publish frame event unconditionally (independent of whether any plugin has
+    // registered yet) so that the first plugin can bootstrap itself.
     if is_frame {
-        let mut frame_event = crate::proto::ui::FrameEvent { width: 0, height: 0, dt: 0.0 };
-        if let Some(app_proto::ui_event::Event::Frame(f)) = event_proto.event {
-            frame_event.dt = f.dt;
-        }
-        // Use dimensions from the first plugin with a valid canvas size
-        for plugin in state.plugins.values() {
-            let (w, h) = *plugin.canvas_size.borrow();
-            if w > 0 && h > 0 {
-                frame_event.width = w;
-                frame_event.height = h;
-                break;
-            }
-        }
-        if frame_event.width > 0 && frame_event.height > 0 {
+        let (width, height) = state.canvas_size;
+        if width > 0 && height > 0 {
+            let dt = match &event_proto.event {
+                Some(app_proto::ui_event::Event::Frame(f)) => f.dt,
+                _ => 0.0,
+            };
+            let frame_event = crate::proto::ui::FrameEvent { width, height, dt };
             veldsdk::output!("ui-service/frame", frame_event);
         }
+
+        // Render plugins with pending changes: set_view only arrives on layout
+        // diffs, so redraws driven by input events (or the very first frame after
+        // registration) have to happen on the frame tick.
+        let surface_format = state.surface_format;
+        let plugin_ids: Vec<String> = state.plugins.keys().cloned().collect();
+        for plugin_id in plugin_ids {
+            render_plugin_if_needed(state, &plugin_id, surface_format);
+        }
     }
-    
+
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
 }
 
@@ -207,27 +254,33 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
     Ok(())
 }
 
-/// Process iced events and capture messages to pending_messages
+/// Mark the plugin for redraw when there is pending input.
+/// The events themselves stay in `pending_events`: render_plugin drains them and
+/// feeds them to iced's ui.update(), which is what actually produces messages.
 fn process_iced_events(plugin: &PluginUiState, plugin_id: &str, _surface_handle: u64) -> anyhow::Result<()> {
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[PROCESS-ICED] START for {}", plugin_id);
-    
-    let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
-    if events.is_empty() && !*plugin.is_layout_dirty.borrow() {
+    if plugin.pending_events.borrow().is_empty() && !*plugin.is_layout_dirty.borrow() {
         return Ok(());
     }
-    
-    // For now, we don't have access to renderer here - just store that we need processing
-    // The actual rendering happens in handle_set_view when plugin calls render()
+
     *plugin.needs_redrawing.borrow_mut() = true;
-    
+
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[PROCESS-ICED] Events queued for {}", plugin_id);
     Ok(())
 }
 
 /// Внутренняя функция для диспетчеризации событий плагину.
-/// Вызывается в handle_set_view перед рендерингом.
-fn dispatch_event(event: UiEventResponse) -> anyhow::Result<()> {
-    let topic = event.message_tag.clone();
+/// Вызывается после рендера, когда iced захватил сообщения от виджетов.
+fn dispatch_event(mut event: UiEventResponse) -> anyhow::Result<()> {
+    // Widget tags are stored JSON-encoded by the SDK wrap (serde_json::to_string),
+    // so a plain "service/method" tag arrives wrapped in quotes - decode it first,
+    // otherwise the topic won't match any subscription.
+    let topic = serde_json::from_str::<String>(&event.message_tag)
+        .unwrap_or_else(|_| event.message_tag.clone());
+    if topic.is_empty() {
+        return Ok(());
+    }
+    event.message_tag = topic.clone();
+    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[DISPATCH] UI message -> '{}' (value: '{}')", topic, event.value);
     veldsdk::output!(&topic, event);
     Ok(())
 }
@@ -313,7 +366,10 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Caching UI");
     plugin.interface_cache.replace(ui.into_cache());
 
-    // Store captured messages for dispatch on next set_view
+    // Store captured messages; dispatched right after render in render_plugin_if_needed
+    if !captured_messages.is_empty() {
+        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Captured {} UI messages", captured_messages.len());
+    }
     for msg in captured_messages {
         plugin.pending_messages.borrow_mut().push(PendingMessage {
             message_tag: msg.tag,
