@@ -35,7 +35,7 @@ pub struct PluginUiState {
     pub external_bind_groups: RefCell<HashMap<u64, u64>>,
 
     /// Кэш view render-таргета: (texture_id, view_id).
-    /// Инвалидируется сменой texture_id (хост пересоздаёт таргет при resize).
+    /// Инвалидируется сменой texture_id (владелец аллоцирует новый при resize).
     pub target_view: RefCell<Option<(u64, u64)>>,
 
     // Performance Stats
@@ -53,7 +53,7 @@ pub struct PluginUiState {
     
     /// Messages captured from iced UI events, waiting to be dispatched
     pub pending_messages: RefCell<Vec<PendingMessage>>,
-    /// Surface handle for rendering (set from Frame event)
+    /// Render-таргет, делегированный владельцем окна через set_surface.
     pub surface_handle: RefCell<Option<u64>>,
 }
 

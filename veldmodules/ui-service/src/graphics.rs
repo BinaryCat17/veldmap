@@ -12,9 +12,9 @@ use veldsdk::OwnedResource;
 
 use anyhow::anyhow;
 
-/// Renders UI into the render target provided by the host (the window's
-/// target texture, write-leased to this module). The view is cached per
-/// texture id: the host recreates the target on resize, changing the id.
+/// Renders UI into the render target delegated by the window's owner (its
+/// texture, write-leased to this module). The view is cached per texture id:
+/// the owner allocates a new target on resize, changing the id.
 pub fn render_ui(
     plugin: &PluginUiState,
     renderer: &mut GpuRenderer,

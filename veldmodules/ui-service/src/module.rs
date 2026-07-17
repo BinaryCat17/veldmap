@@ -15,4 +15,7 @@ pub fn init(_config: Config) -> anyhow::Result<State> {
 }
 
 // -- Input handlers --
-pub use handlers::{handle_set_view as on_input_set_view, handle_ui_event as on_input_handle_ui_event};
+pub use handlers::{handle_set_view as on_input_set_view, handle_set_surface as on_input_set_surface};
+
+// -- Platform subscriptions --
+pub use handlers::handle_ui_event as on_sub_ui_event;

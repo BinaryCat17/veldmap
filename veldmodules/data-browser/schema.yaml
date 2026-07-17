@@ -26,6 +26,11 @@ interface:
       type: ui/UiEventResponse
 
 dependencies:
+  # Платформенный контракт: хост просит владельца окна выделить поверхность.
+  app:
+    subs:
+      window_resized:
+        type: app/WindowResized
   ui-service: {}
   data-provider:
     subs:

@@ -10,65 +10,80 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use prost::Message;
 
+use veldmap_host_core::app;
+use veldmap_host_core::dispatcher::{Dispatcher, NativeService, ServiceLocation};
 use veldmap_host_core::logging::FLAG_HOST_RENDER;
+use veldmap_host_core::registry::{Access, ResourceRegistry};
 use veldmap_host_core::{vinfo, vwarn, vdebug};
 
-/// Well-known имя интерфейса UI-рендерера (как `fs`, `network`, `system`).
-/// Реализация подменяется в services.json — любой модуль под этим именем,
-/// реализующий set_view/handle_ui_event, исполняет окна десктоп-раннера.
-const UI_SERVICE: &str = "ui-service";
-
-/// Окно, созданное по декларации модуля, и его render-target.
-/// Владелец текстуры — задекларировавший модуль; писатель — его рендерер.
+/// Окно, созданное по декларации модуля-владельца.
+/// Хост не знает, кто рендерит: владелец аллоцирует текстуру сам, делегирует её
+/// рендереру write-lease'ом и аттачит хосту через app/set_surface.
 struct HostWindow {
     owner: String,
-    renderer: String,
-    texture_id: u64,
-    bind_group: wgpu::BindGroup,
     size: (u32, u32),
+    /// Композитируемая поверхность: (texture_id, bind group для блита).
+    /// None до первого set_surface — окно рисует фоновый цвет.
+    surface: Option<(u64, wgpu::BindGroup)>,
 }
 
-/// Публикация UI-события в input-метод рендерера окна.
-fn publish_ui_event(
-    dispatcher: &veldmap_host_core::dispatcher::Dispatcher,
-    hw: &HostWindow,
-    event: veldmap_host_core::app::ui_event::Event,
-) {
-    let ev = veldmap_host_core::app::UiEvent {
-        plugin_id: hw.owner.clone(),
+/// Native-подписчик топика app/set_surface: принимает поверхности от владельцев
+/// окон. Свап делает кадровый цикл — здесь только авторизация и очередь.
+struct SurfaceSink {
+    dispatcher: Arc<Dispatcher>,
+    registry: Arc<ResourceRegistry>,
+    /// Ожидающие аттачи: владелец окна → texture_id.
+    pending: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+impl NativeService for SurfaceSink {
+    fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+        if method != "set_surface" {
+            anyhow::bail!("Unknown app method: {}", method);
+        }
+        let msg = app::SetSurface::decode(&payload[..])?;
+        let surface = msg.surface.ok_or_else(|| anyhow::anyhow!("SetSurface without a surface handle"))?;
+
+        // Capability-проверка: аттачить можно только своё окно и только текстуру,
+        // в которую отправитель имеет право писать (0 = сам хост).
+        if requestor_id != 0 {
+            if self.dispatcher.instance_of(&msg.plugin_id) != Some(requestor_id) {
+                anyhow::bail!("'{}' is not the window owner '{}'", requestor_id, msg.plugin_id);
+            }
+            if !self.registry.check_access(surface.id, requestor_id, Access::Write) {
+                anyhow::bail!("No write access to texture {}", surface.id);
+            }
+        }
+
+        self.pending.lock().unwrap().insert(msg.plugin_id, surface.id);
+        Ok(Vec::new())
+    }
+}
+
+/// Публикация UI-события в нейтральный топик app/ui_event.
+/// Адресация — в данных: plugin_id называет владельца окна.
+fn publish_ui_event(dispatcher: &Dispatcher, owner: &str, event: app::ui_event::Event) {
+    let ev = app::UiEvent {
+        plugin_id: owner.to_string(),
         event: Some(event),
-        ..Default::default()
     };
-    dispatcher.publish(&format!("{}/handle_ui_event", hw.renderer), ev.encode_to_vec());
+    dispatcher.publish("app/ui_event", ev.encode_to_vec());
 }
 
-fn target_handle(texture_id: u64) -> Option<veldmap_host_core::core::ResourceHandle> {
-    Some(veldmap_host_core::core::ResourceHandle { id: texture_id, size: 0, content_hash: Vec::new() })
-}
-
-/// Создаёт render-target текстуру окна: владелец — модуль окна,
-/// write-lease — рендереру. Возвращает id текстуры и bind group для блита.
-fn create_window_target(
-    ctx: &veldmap_host_core::setup::HostContext,
-    compositor: &Compositor,
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-    owner_instance: u32,
-    renderer_instance: u32,
-) -> (u64, wgpu::BindGroup) {
-    let format_proto = ctx.graphics.get_surface_format_proto();
-    // COPY_DST | TEXTURE_BINDING | RENDER_ATTACHMENT
-    let texture_id = ctx.memory.alloc_texture(width, height, format_proto, 2 | 4 | 16, false, owner_instance);
-    ctx.registry.update_lease(texture_id, |lease| lease.add_writer(renderer_instance));
-
-    let (texture, _, _, _) = ctx.memory.get_texture(texture_id).expect("freshly created window texture exists");
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let bind_group = compositor.create_bind_group(device, &view);
-    (texture_id, bind_group)
+/// Сообщает владельцу окна размер и формат требуемой поверхности.
+fn publish_window_resized(dispatcher: &Dispatcher, owner: &str, width: u32, height: u32, scale_factor: f32, format: i32) {
+    let ev = app::WindowResized {
+        plugin_id: owner.to_string(),
+        width,
+        height,
+        scale_factor,
+        format,
+    };
+    dispatcher.publish("app/window_resized", ev.encode_to_vec());
 }
 
 #[tokio::main]
@@ -90,16 +105,18 @@ async fn main() -> anyhow::Result<()> {
         0 => anyhow::bail!("No module declares a window; the desktop runner has nothing to present"),
         n => anyhow::bail!("{} modules declare windows, but the desktop runner supports exactly one for now", n),
     };
-    let renderer_name = UI_SERVICE.to_string();
-    vinfo!(FLAG_HOST_RENDER, "Window '{}': owner '{}', renderer '{}'", win_cfg.title, owner_name, renderer_name);
+    vinfo!(FLAG_HOST_RENDER, "Window '{}': owner '{}'", win_cfg.title, owner_name);
 
     let event_loop = EventLoop::new()?;
-    let winit_window = Arc::new(WindowBuilder::new()
+    let mut builder = WindowBuilder::new()
         .with_title(win_cfg.title.clone())
         .with_inner_size(winit::dpi::LogicalSize::new(win_cfg.width as f64, win_cfg.height as f64))
         .with_resizable(win_cfg.resizable)
-        .with_fullscreen(win_cfg.fullscreen.then_some(winit::window::Fullscreen::Borderless(None)))
-        .build(&event_loop)?);
+        .with_fullscreen(win_cfg.fullscreen.then_some(winit::window::Fullscreen::Borderless(None)));
+    if let Some(pos) = &win_cfg.position {
+        builder = builder.with_position(winit::dpi::LogicalPosition::new(pos.x as f64, pos.y as f64));
+    }
+    let winit_window = Arc::new(builder.build(&event_loop)?);
 
     // ── 2. GPU ──────────────────────────────────────────────────────────────
     vinfo!(FLAG_HOST_RENDER, "Creating wgpu instance (Vulkan only)...");
@@ -122,43 +139,38 @@ async fn main() -> anyhow::Result<()> {
     veldmap_host_fs::register_services(ctx.clone());
     veldmap_host_network::register_services(ctx.clone());
 
-    let instance_ids = veldmap_host_core::plugins::load_services(ctx.clone()).await?;
+    // Приём поверхностей от владельцев окон.
+    let pending_surfaces: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    dispatcher.register_subscription("app/set_surface".to_string(), ServiceLocation::Native(Arc::new(SurfaceSink {
+        dispatcher: dispatcher.clone(),
+        registry: ctx.registry.clone(),
+        pending: pending_surfaces.clone(),
+    })));
 
-    // ── 4. Render-target окна ──────────────────────────────────────────────
-    let owner_instance = *instance_ids.get(&owner_name)
-        .ok_or_else(|| anyhow::anyhow!("Window owner '{}' is not a loaded service", owner_name))?;
-    let renderer_instance = *instance_ids.get(&renderer_name)
-        .ok_or_else(|| anyhow::anyhow!(
-            "No '{}' service loaded: the desktop runner needs a UI renderer to present windows (add one to services.json)",
-            renderer_name,
-        ))?;
+    let instance_ids = veldmap_host_core::plugins::load_services(ctx.clone()).await?;
+    if !instance_ids.contains_key(&owner_name) {
+        anyhow::bail!("Window owner '{}' is not a loaded service", owner_name);
+    }
 
     let compositor = Compositor::new(&device_arc, surface_format);
     let size = winit_window.inner_size();
-    let (texture_id, bind_group) = create_window_target(
-        &ctx, &compositor, &device_arc, size.width, size.height, owner_instance, renderer_instance,
-    );
     let mut hw = HostWindow {
         owner: owner_name,
-        renderer: renderer_name,
-        texture_id,
-        bind_group,
         size: (size.width, size.height),
+        surface: None,
     };
-    vinfo!(FLAG_HOST_RENDER, "Window target texture {} ({}x{})", hw.texture_id, hw.size.0, hw.size.1);
 
-    // ── 5. Детерминированный bootstrap: размер → готовность ────────────────
-    publish_ui_event(&dispatcher, &hw, veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent {
-        width: hw.size.0,
-        height: hw.size.1,
-        scale_factor: 1.0,
-        surface_handle: target_handle(hw.texture_id),
-    }));
+    // ── 4. Детерминированный bootstrap: размер → готовность ────────────────
+    // Владелец в ответ аллоцирует текстуру, делегирует её рендереру и аттачит
+    // сюда через app/set_surface; до этого окно рисует фоновый цвет.
+    let format_proto = graphics.get_surface_format_proto();
+    let ui_scale = win_cfg.ui_scale;
+    publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, ui_scale, format_proto);
     dispatcher.publish("app/ready", Vec::new());
 
     winit_window.request_redraw();
 
-    // ── 6. Кадровый цикл ────────────────────────────────────────────────────
+    // ── 5. Кадровый цикл ────────────────────────────────────────────────────
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut last_frame_time = std::time::Instant::now();
 
@@ -176,23 +188,11 @@ async fn main() -> anyhow::Result<()> {
                     config.width = width;
                     config.height = height;
                     surface.configure(&device_arc, &config);
-
-                    // Пересоздаём render-target под новый размер; владение и lease
-                    // восстанавливаются, старая текстура освобождается.
-                    let old = hw.texture_id;
-                    let (tex, bg) = create_window_target(&ctx, &compositor, &device_arc, width, height, owner_instance, renderer_instance);
-                    hw.texture_id = tex;
-                    hw.bind_group = bg;
                     hw.size = (width, height);
-                    ctx.memory.free(old);
-                    vdebug!(FLAG_HOST_RENDER, "Window target recreated: {} ({}x{})", hw.texture_id, width, height);
 
-                    publish_ui_event(&dispatcher, &hw, veldmap_host_core::app::ui_event::Event::Resize(veldmap_host_core::app::ResizeEvent {
-                        width,
-                        height,
-                        scale_factor: 1.0,
-                        surface_handle: target_handle(hw.texture_id),
-                    }));
+                    // Старая поверхность блитится растянутой, пока владелец
+                    // не приаттачит новую нужного размера.
+                    publish_window_resized(&dispatcher, &hw.owner, width, height, ui_scale, format_proto);
                 }
                 winit_window.request_redraw();
             }
@@ -201,12 +201,24 @@ async fn main() -> anyhow::Result<()> {
                 let dt = now.duration_since(last_frame_time).as_secs_f32();
                 last_frame_time = now;
 
-                publish_ui_event(&dispatcher, &hw, veldmap_host_core::app::ui_event::Event::Frame(veldmap_host_core::app::FrameEvent {
+                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Frame(app::FrameEvent {
                     dt,
                     actual_fps: if dt > 0.0 { 1.0 / dt } else { 0.0 },
                     monitor_fps: 60,
-                    surface_handle: target_handle(hw.texture_id),
                 }));
+
+                // Атомарный свап поверхности, если владелец приаттачил новую.
+                if let Some(texture_id) = pending_surfaces.lock().unwrap().remove(&hw.owner) {
+                    match ctx.memory.get_texture(texture_id) {
+                        Some((texture, _, _, _)) => {
+                            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                            let bind_group = compositor.create_bind_group(&device_arc, &view);
+                            hw.surface = Some((texture_id, bind_group));
+                            vdebug!(FLAG_HOST_RENDER, "Window '{}' surface attached: texture {}", hw.owner, texture_id);
+                        }
+                        None => vwarn!(FLAG_HOST_RENDER, "set_surface for '{}' names unknown texture {}", hw.owner, texture_id),
+                    }
+                }
 
                 let frame = match surface.get_current_texture() {
                     Ok(f) => f,
@@ -246,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // 2) Блит текстуры окна в свопчейн.
+                // 2) Блит приаттаченной поверхности в свопчейн.
                 {
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Compositor Pass"),
@@ -259,7 +271,9 @@ async fn main() -> anyhow::Result<()> {
                         depth_stencil_attachment: None,
                         ..Default::default()
                     });
-                    compositor.blit_ui(&mut rp, &hw.bind_group);
+                    if let Some((_, bind_group)) = &hw.surface {
+                        compositor.blit_ui(&mut rp, bind_group);
+                    }
                 }
 
                 queue_arc.lock().unwrap().submit(Some(encoder.finish()));
@@ -271,14 +285,14 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
-                publish_ui_event(&dispatcher, &hw, veldmap_host_core::app::ui_event::Event::CursorMoved(
-                    veldmap_host_core::app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 },
+                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::CursorMoved(
+                    app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 },
                 ));
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
                 let b_idx = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
-                publish_ui_event(&dispatcher, &hw, veldmap_host_core::app::ui_event::Event::Click(
-                    veldmap_host_core::app::ClickEvent {
+                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Click(
+                    app::ClickEvent {
                         button: b_idx,
                         pressed: button_state == winit::event::ElementState::Pressed,
                         x: cursor_pos.0,
@@ -287,8 +301,8 @@ async fn main() -> anyhow::Result<()> {
                 ));
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
-                publish_ui_event(&dispatcher, &hw, veldmap_host_core::app::ui_event::Event::Scroll(
-                    veldmap_host_core::app::ScrollEvent {
+                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Scroll(
+                    app::ScrollEvent {
                         delta_x: match delta { winit::event::MouseScrollDelta::LineDelta(x, _) => x * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.x as f32 },
                         delta_y: match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 },
                     },
@@ -296,8 +310,8 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::KeyboardInput { event: input, .. }, .. } => {
                 if let winit::keyboard::PhysicalKey::Code(kc) = input.physical_key {
-                    publish_ui_event(&dispatcher, &hw, veldmap_host_core::app::ui_event::Event::Key(
-                        veldmap_host_core::app::KeyEvent {
+                    publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Key(
+                        app::KeyEvent {
                             key_code: kc as u32,
                             pressed: input.state == winit::event::ElementState::Pressed,
                         },

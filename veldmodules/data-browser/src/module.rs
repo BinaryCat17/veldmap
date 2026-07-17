@@ -27,3 +27,4 @@ pub use handlers::download::{on_sub_download_started, on_sub_download_progress, 
 pub use handlers::search::on_sub_search_result;
 pub use handlers::browse::on_sub_list_path_result;
 pub use handlers::nav::on_sub_list_result;
+pub use handlers::window::on_sub_window_resized;

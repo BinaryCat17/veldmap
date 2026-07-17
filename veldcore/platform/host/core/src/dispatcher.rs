@@ -53,7 +53,9 @@ pub struct Dispatcher {
     endpoint: Endpoint,
     services: Mutex<HashMap<String, ServiceLocation>>,
     subscriptions: Mutex<HashMap<String, Vec<ServiceLocation>>>,
-    stats: Arc<Mutex<HashMap<String, (u64, u128, u128, u128, u128, std::time::Instant)>>>,
+    /// Instance id каждого локального wasm-сервиса: адресат для lease-грантов.
+    instances: Mutex<HashMap<String, u32>>,
+    stats: Arc<Mutex<HashMap<String, (u64, u128, std::time::Instant)>>>,
 }
 
 impl Dispatcher {
@@ -62,8 +64,17 @@ impl Dispatcher {
             endpoint,
             services: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
+            instances: Mutex::new(HashMap::new()),
             stats: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn register_instance(&self, name: String, instance_id: u32) {
+        self.instances.lock().unwrap().insert(name, instance_id);
+    }
+
+    pub fn instance_of(&self, name: &str) -> Option<u32> {
+        self.instances.lock().unwrap().get(name).copied()
     }
 
     pub fn register_subscription(&self, topic: String, location: ServiceLocation) {
@@ -76,6 +87,12 @@ impl Dispatcher {
     /// Delivery is synchronous into each subscriber's queue, so events published
     /// from one thread arrive at each subscriber in publish order.
     pub fn publish(&self, topic: &str, payload: Vec<u8>) {
+        self.publish_from(topic, payload, 0);
+    }
+
+    /// Like `publish`, carrying the publisher's instance id. Native subscribers
+    /// receive it as requestor_id and can authorize commands (0 = host itself).
+    pub fn publish_from(&self, topic: &str, payload: Vec<u8>, publisher: u32) {
         let parts: Vec<&str> = topic.splitn(2, '/').collect();
         if parts.len() != 2 {
             crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Invalid publish topic: {}", topic);
@@ -106,7 +123,7 @@ impl Dispatcher {
                     }
                 }
                 ServiceLocation::Native(service) => {
-                    if let Err(e) = service.call(method, payload.clone(), 0) {
+                    if let Err(e) = service.call(method, payload.clone(), publisher) {
                         crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Native subscriber for '{}' failed: {}", topic, e);
                     }
                 }
@@ -114,7 +131,7 @@ impl Dispatcher {
                     let payload = payload.clone();
                     let method = method.to_string();
                     tokio::spawn(async move {
-                        service.handle(&method, payload, 0).await;
+                        service.handle(&method, payload, publisher).await;
                     });
                 }
                 ServiceLocation::RemoteIroh(_) => {
@@ -170,32 +187,20 @@ impl Dispatcher {
                 };
                 
                 let total_time = start_total.elapsed();
-                
-                // Add dummy stats for the keys (since we no longer track internal ser/deser from dispatcher side easily)
-                let wasm_time = std::time::Duration::from_secs(0);
-                let ser_time = std::time::Duration::from_secs(0);
-                let deser_time = std::time::Duration::from_secs(0);
-                
+
                 let key = format!("{}::{}", service_name, method);
                 {
                     let mut s = self.stats.lock().unwrap();
-                    let entry = s.entry(key.clone()).or_insert((0, 0, 0, 0, 0, std::time::Instant::now()));
+                    let entry = s.entry(key.clone()).or_insert((0, 0, std::time::Instant::now()));
                     entry.0 += 1;
                     entry.1 += total_time.as_micros();
-                    entry.2 += wasm_time.as_micros();
-                    entry.3 += ser_time.as_micros();
-                    entry.4 += deser_time.as_micros();
-                    
-                    if entry.5.elapsed() >= std::time::Duration::from_secs(5) {
-                         if entry.0 > 0 {
-                             let avg_tot = entry.1 as f64 / 1000.0 / entry.0 as f64;
-                             let avg_wasm = entry.2 as f64 / 1000.0 / entry.0 as f64;
-                             let avg_ser = entry.3 as f64 / 1000.0 / entry.0 as f64;
-                             let avg_deser = entry.4 as f64 / 1000.0 / entry.0 as f64;
-                             crate::vinfo!(crate::logging::FLAG_DISPATCHER, "[P] Dispatcher (5s avg) {}: count={}, total={:.2}ms, wasm={:.2}ms, ser={:.2}ms, deser={:.2}ms", 
-                                 key, entry.0, avg_tot, avg_wasm, avg_ser, avg_deser);
-                         }
-                         *entry = (0, 0, 0, 0, 0, std::time::Instant::now());
+
+                    if entry.2.elapsed() >= std::time::Duration::from_secs(5) {
+                        if entry.0 > 0 {
+                            let avg = entry.1 as f64 / 1000.0 / entry.0 as f64;
+                            crate::vinfo!(crate::logging::FLAG_DISPATCHER, "[P] Dispatcher (5s avg) {}: count={}, avg={:.2}ms", key, entry.0, avg);
+                        }
+                        *entry = (0, 0, std::time::Instant::now());
                     }
                 }
 

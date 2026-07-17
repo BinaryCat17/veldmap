@@ -224,6 +224,17 @@ message SetViewRequest {
     Layout layout = 2;
 }
 
+// Делегирование render-таргета: владелец окна аллоцировал текстуру, выдал
+// ui-service write-lease и передаёт её сюда вместе с размером холста.
+// Пока модуль не делегировал поверхность, его события ввода игнорируются.
+message SetSurfaceRequest {
+    string plugin_id = 1;
+    veldmap.core.ResourceHandle surface = 2;
+    uint32 width = 3;
+    uint32 height = 4;
+    float scale_factor = 5;
+}
+
 // A UI event captured by the renderer, dispatched to `{plugin_id}/{method}`.
 message UiEventResponse {
     string plugin_id = 1;

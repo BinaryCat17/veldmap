@@ -20,7 +20,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 Err(e) => { crate::verror!(crate::logging::FLAG_ABI, "[{}] publish decode error: {}", caller.data().plugin_name, e); return Ok(()); }
             };
             let topic = format!("{}/{}", request.service, request.method);
-            caller.data().dispatcher.clone().publish(&topic, request.payload);
+            let publisher = caller.data().instance_id;
+            caller.data().dispatcher.clone().publish_from(&topic, request.payload, publisher);
             Ok(())
         })
     })?;
@@ -121,29 +122,51 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         memory.alloc_texture(width as u32, height as u32, format as i32, usage as u32, false, owner_id)
     })?;
 
-    // veld_memory_transfer(region_id, target_module) → bool
-    linker.func_wrap("env", "veld_memory_transfer", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
+    // Гранты адресуются по имени сервиса — модули нигде не оперируют числовыми
+    // instance id. Право выдаёт только владелец ресурса (или хост).
+
+    // veld_memory_transfer(region_id, name_ptr, name_len) → bool
+    linker.func_wrap("env", "veld_memory_transfer", |mut caller: Caller<'_, HostState>, region_id: u64, name_ptr: u64, name_len: u64| -> u64 {
+        let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
         let mut ok = false;
         registry.update_lease(region_id, |lease| {
             if lease.owner_id == owner_id || owner_id == 0 {
-                lease.owner_id = target_module as u32;
+                lease.owner_id = target;
                 lease.readers.clear();
+                lease.writers.clear();
                 ok = true;
             }
         });
         if ok { 1 } else { 0 }
     })?;
 
-    // veld_memory_grant_read(region_id, target_module) → bool
-    linker.func_wrap("env", "veld_memory_grant_read", |caller: Caller<'_, HostState>, region_id: u64, target_module: u64| -> u64 {
+    // veld_memory_grant_read(region_id, name_ptr, name_len) → bool
+    linker.func_wrap("env", "veld_memory_grant_read", |mut caller: Caller<'_, HostState>, region_id: u64, name_ptr: u64, name_len: u64| -> u64 {
+        let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
         let mut ok = false;
         registry.update_lease(region_id, |lease| {
-            if lease.can_write(owner_id) {
-                lease.add_reader(target_module as u32);
+            if lease.owner_id == owner_id || owner_id == 0 {
+                lease.add_reader(target);
+                ok = true;
+            }
+        });
+        if ok { 1 } else { 0 }
+    })?;
+
+    // veld_memory_grant_write(region_id, name_ptr, name_len) → bool
+    // Делегирование записи: так владелец окна назначает рендерера своей текстуры.
+    linker.func_wrap("env", "veld_memory_grant_write", |mut caller: Caller<'_, HostState>, region_id: u64, name_ptr: u64, name_len: u64| -> u64 {
+        let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
+        let registry = caller.data().registry.clone();
+        let owner_id = caller.data().instance_id;
+        let mut ok = false;
+        registry.update_lease(region_id, |lease| {
+            if lease.owner_id == owner_id || owner_id == 0 {
+                lease.add_writer(target);
                 ok = true;
             }
         });
@@ -242,6 +265,19 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_throw", |_: u32, _: u32| {})?;
 
     Ok(())
+}
+
+/// Helper: read a service name from WASM memory and resolve its instance id.
+fn resolve_service_arg(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<u32> {
+    let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return None };
+    let name = mem.data(&mut *caller).get(ptr as usize..(ptr + len) as usize)
+        .and_then(|s| std::str::from_utf8(s).ok())?
+        .to_string();
+    let resolved = caller.data().dispatcher.instance_of(&name);
+    if resolved.is_none() {
+        crate::vwarn!(crate::logging::FLAG_ABI, "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);
+    }
+    resolved
 }
 
 /// Helper: write response back to WASM via veld_alloc

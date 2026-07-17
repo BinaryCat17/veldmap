@@ -8,6 +8,9 @@ pub struct State {
     pub downloaded: downloaded::DownloadedState,
     pub preview: preview::PreviewState,
     pub global: types::GlobalState,
+    /// Render-таргет нашего окна: аллоцируется в ответ на app/window_resized
+    /// и делегируется рендереру (см. handlers::window).
+    pub window_surface: Option<u64>,
 }
 
 impl State {
@@ -18,6 +21,7 @@ impl State {
             browse: browse::BrowseState::default(),
             downloaded: downloaded::DownloadedState::default(),
             preview: preview::PreviewState::default(),
+            window_surface: None,
             global: types::GlobalState {
                 status_message: "VeldMap Data Browser".to_string(),
                 error_message: None,

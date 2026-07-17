@@ -23,6 +23,10 @@ pub mod proto {
 #[path = "../../src/module.rs"]
 pub mod module;
 
+/// Имя этого сервиса в шине: под ним модуль адресуется в топиках и
+/// в plugin_id событий его окна.
+pub const SERVICE_NAME: &str = "{{ service_name }}";
+
 /// Typed topic stubs for this module's declared outputs (interface.outputs).
 /// The schema is the single source of truth: an undeclared output does not exist.
 pub mod emit {

@@ -19,8 +19,9 @@ extern "C" {
     fn veld_memory_alloc(size: u64) -> u64;
     fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
     fn veld_memory_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
-    fn veld_memory_transfer(region_id: u64, target_module: u64) -> u64;
-    fn veld_memory_grant_read(region_id: u64, target_module: u64) -> u64;
+    fn veld_memory_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+    fn veld_memory_grant_read(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+    fn veld_memory_grant_write(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
     fn veld_memory_revoke(region_id: u64) -> u64;
     fn veld_memory_free(region_id: u64) -> u64;
 
@@ -138,16 +139,23 @@ pub fn arena_alloc_texture(width: u32, height: u32, format: i32, usage: u32) -> 
     if id == 0 { None } else { Some(id) }
 }
 
-/// Transfer ownership of a region to another module (zero-copy)
+/// Transfer ownership of a region to another service (zero-copy)
 #[cfg(feature = "pdk")]
-pub fn arena_transfer(region_id: u64, target_module: u32) -> bool {
-    unsafe { veld_memory_transfer(region_id, target_module as u64) != 0 }
+pub fn arena_transfer(region_id: u64, service: &str) -> bool {
+    unsafe { veld_memory_transfer(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
-/// Grant read access to another module
+/// Grant read access to another service (owner only)
 #[cfg(feature = "pdk")]
-pub fn arena_grant_read(region_id: u64, target_module: u32) -> bool {
-    unsafe { veld_memory_grant_read(region_id, target_module as u64) != 0 }
+pub fn arena_grant_read(region_id: u64, service: &str) -> bool {
+    unsafe { veld_memory_grant_read(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
+}
+
+/// Grant write access to another service (owner only).
+/// This is how a window owner delegates its render target to a renderer.
+#[cfg(feature = "pdk")]
+pub fn arena_grant_write(region_id: u64, service: &str) -> bool {
+    unsafe { veld_memory_grant_write(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
 /// Revoke all external access to a region

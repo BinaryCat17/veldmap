@@ -2,26 +2,37 @@ syntax = "proto3";
 
 package veldmap.app;
 
+import "core.proto";
+
+// ── Контракт «приложение ↔ платформа» ────────────────────────────────────────
+//
+// Хост ничего не знает о рендерерах. Он публикует события в нейтральные топики
+// и принимает команды от модулей:
+//
+//   app/ui_event       (UIEvent)       хост → подписчики: ввод и кадровые тики
+//   app/window_resized (WindowResized) хост → подписчики: окну нужна поверхность
+//   app/set_surface    (SetSurface)    владелец окна → хост: композить эту текстуру
+//   app/ready          (пусто)         хост → подписчики: все сервисы загружены
+//
+// Владелец окна отвечает на window_resized выделением текстуры и делегированием
+// её своему рендереру (write-lease) — capability вместо конфигурации.
+
 message UIEvent {
     // Логический адресат: имя модуля-владельца окна, породившего событие.
     string plugin_id = 1;
     oneof event {
         ClickEvent click = 2;
         KeyEvent key = 3;
-        ResizeEvent resize = 4;
-        InitEvent init = 5;
-        ScrollEvent scroll = 6;
-        CursorMovedEvent cursor_moved = 7;
-        FrameEvent frame = 8;
+        ScrollEvent scroll = 4;
+        CursorMovedEvent cursor_moved = 5;
+        FrameEvent frame = 6;
     }
-    repeated UIEvent sub_events = 9;
 }
 
 message FrameEvent {
     float dt = 1;
     uint32 monitor_fps = 2;
     float actual_fps = 3;
-    veldmap.core.ResourceHandle surface_handle = 4;
 }
 
 message ClickEvent {
@@ -46,13 +57,22 @@ message KeyEvent {
     bool pressed = 2;
 }
 
-message ResizeEvent {
-    uint32 width = 1;
-    uint32 height = 2;
-    float scale_factor = 3;
-    veldmap.core.ResourceHandle surface_handle = 4;
+// Окно модуля создано или изменило размер: владельцу нужно выделить
+// render-target указанного размера и формата и приаттачить его (SetSurface).
+message WindowResized {
+    string plugin_id = 1;
+    uint32 width = 2;
+    uint32 height = 3;
+    float scale_factor = 4;
+    // Требуемый формат текстуры (veldmap.compute.TextureFormat).
+    int32 format = 5;
 }
 
-message InitEvent {}
-
-import "core.proto";
+// Команда хосту: композить эту текстуру в окно модуля plugin_id.
+// Отправитель должен владеть окном (plugin_id — его имя) и текстурой.
+// Свап атомарный: до первого SetSurface окно рисует фон, при ресайзе
+// старая текстура показывается, пока не приаттачена новая.
+message SetSurface {
+    string plugin_id = 1;
+    veldmap.core.ResourceHandle surface = 2;
+}

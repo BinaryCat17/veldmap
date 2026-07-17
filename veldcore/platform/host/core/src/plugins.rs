@@ -47,7 +47,6 @@ pub async fn load_services(
                     .cloned()
                     .unwrap_or_default();
                 
-                // Window parsing moved to desktop runner
                 config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
                 config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
                 config_map.insert("surface_format".to_string(), serde_json::Value::Number(ctx.graphics.get_surface_format_proto().into()));
@@ -220,6 +219,7 @@ pub async fn load_services(
                 });
 
                 ctx.dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(tx.clone()));
+                ctx.dispatcher.register_instance(name.clone(), instance_id);
                 for topic in subs {
                     ctx.dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(tx.clone()));
                 }

@@ -11,9 +11,9 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     let plugin_id = req.plugin_id.clone();
     let surface_format = state.surface_format;
 
-    // The host sends a Resize (with the target texture handle) for the plugin's
-    // window before app/ready, so by the time a module ships its first view the
-    // plugin state normally already exists with a real canvas size.
+    // Владелец окна делегирует поверхность (set_surface) в ответ на
+    // app/window_resized ещё до app/ready, так что к первому set_view его
+    // состояние обычно уже существует с реальным размером холста.
     let plugin = state.plugins.entry(plugin_id.clone()).or_insert_with(PluginUiState::new);
 
     // Store the module's current view; rendering happens below and on frame ticks.
@@ -66,12 +66,32 @@ fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i
     }
 }
 
+/// Делегирование render-таргета владельцем окна: с этого момента ui-service
+/// принимает события модуля и рендерит его view в переданную текстуру.
+pub fn handle_set_surface(state: &mut State, req: SetSurfaceRequest) {
+    let Some(surface) = req.surface else {
+        veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "[SET-SURFACE] '{}' without a surface handle", req.plugin_id);
+        return;
+    };
+    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-SURFACE] '{}': texture {} ({}x{})", req.plugin_id, surface.id, req.width, req.height);
+
+    let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
+    *plugin.canvas_size.borrow_mut() = (req.width, req.height);
+    *plugin.scale_factor.borrow_mut() = if req.scale_factor > 0.0 { req.scale_factor } else { 1.0 };
+    *plugin.surface_handle.borrow_mut() = Some(surface.id);
+    // Кэш view привязан к texture_id и инвалидируется его сменой.
+    *plugin.needs_redrawing.borrow_mut() = true;
+
+    let surface_format = state.surface_format;
+    render_plugin_if_needed(state, &req.plugin_id, surface_format);
+}
+
 pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
-    // Events arrive addressed: plugin_id names the module owning the window
-    // that produced the event (filled by the host from the window's declaration).
+    // app/ui_event — broadcast: адресат назван в данных. События модулей,
+    // не делегировавших нам поверхность, не наши — молча пропускаем,
+    // иначе их ввод копился бы в pending_events без потребителя.
     let plugin_id = event_proto.plugin_id.clone();
-    if plugin_id.is_empty() {
-        veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] UI event without plugin_id dropped");
+    if !state.plugins.contains_key(&plugin_id) {
         return;
     }
 
@@ -90,19 +110,10 @@ pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
 }
 
 fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<()> {
-    let plugin = state.plugins.entry(plugin_id.to_string()).or_insert_with(PluginUiState::new);
+    let plugin = state.plugins.get(plugin_id).expect("checked by caller");
 
     if let Some(ev) = req_event.event {
         match ev {
-            app_proto::ui_event::Event::Resize(r) => {
-                *plugin.canvas_size.borrow_mut() = (r.width, r.height);
-                *plugin.scale_factor.borrow_mut() = r.scale_factor;
-                // The host recreates the window target on resize: new handle.
-                if let Some(handle) = r.surface_handle {
-                    *plugin.surface_handle.borrow_mut() = Some(handle.id);
-                }
-                *plugin.needs_redrawing.borrow_mut() = true;
-            }
             app_proto::ui_event::Event::Scroll(s) => {
                 let mut vel = plugin.scroll_velocity.borrow_mut();
                 if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
@@ -119,11 +130,6 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
                 vel.y = vel.y.clamp(-3000.0, 3000.0);
             }
             app_proto::ui_event::Event::Frame(f) => {
-                // Save surface handle for rendering (extract id from ResourceHandle)
-                if let Some(handle) = f.surface_handle {
-                    *plugin.surface_handle.borrow_mut() = Some(handle.id);
-                }
-                
                 *plugin.monitor_fps.borrow_mut() = f.monitor_fps;
                 *plugin.actual_fps.borrow_mut() = f.actual_fps;
 
@@ -150,11 +156,10 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
                     }
                 }
 
-                // Process events with iced to capture messages
+                // Скопившийся ввод обрабатывается рендером этого же кадра:
+                // render_plugin скармливает pending_events iced'у в ui.update().
                 if !plugin.pending_events.borrow().is_empty() || *plugin.is_layout_dirty.borrow() {
-                    if let Some(handle) = *plugin.surface_handle.borrow() {
-                        let _ = process_iced_events(plugin, plugin_id, handle)?;
-                    }
+                    *plugin.needs_redrawing.borrow_mut() = true;
                 }
             }
             _ => {
@@ -167,20 +172,6 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
         }
     }
 
-    Ok(())
-}
-
-/// Mark the plugin for redraw when there is pending input.
-/// The events themselves stay in `pending_events`: render_plugin drains them and
-/// feeds them to iced's ui.update(), which is what actually produces messages.
-fn process_iced_events(plugin: &PluginUiState, plugin_id: &str, _surface_handle: u64) -> anyhow::Result<()> {
-    if plugin.pending_events.borrow().is_empty() && !*plugin.is_layout_dirty.borrow() {
-        return Ok(());
-    }
-
-    *plugin.needs_redrawing.borrow_mut() = true;
-
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[PROCESS-ICED] Events queued for {}", plugin_id);
     Ok(())
 }
 
