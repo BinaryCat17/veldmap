@@ -3,16 +3,23 @@ use std::sync::Mutex;
 use dashmap::DashMap;
 use crate::memory::{MemoryManager, proto_to_wgpu_format, surface_format_to_proto};
 use crate::registry::{ResourceRegistry, ResourceId, ResourceBackend, Access};
-use crate::core::ResourceHandle;
-use crate::compute::{
-    ComputeResourceRequest, ComputeResourceResponse, Submit, CommandBuffer,
-    compute_resource_request::Command as ComputeCommand,
-    wgpu_command::Command as WgpuCommand,
-    bind_group_layout_entry::Ty,
-    VertexFormat, StepMode, FilterMode,
-    PrimitiveTopology, BlendFactor, BlendOperation, FrontFace, CullMode,
-};
 use prost::Message;
+
+/// Сгенерированные prost-типы протокола `veldmap.graphics`.
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.graphics.rs"));
+}
+
+use proto::{
+    ResourceRequest, CreateResourceResponse, Submit, CommandBuffer,
+    resource_request::Command as ResourceCommand,
+    render_command::Command as RenderCommand,
+    bind_group_layout_entry::Ty,
+    VertexFormat, StepMode, FilterMode, PrimitiveTopology,
+    BlendFactor, BlendOperation, FrontFace, CullMode,
+    BufferBindingType, SamplerBindingType, TextureSampleType, TextureViewDimension,
+    IndexFormat,
+};
 
 // ── Unified Resource Enum ──────────────────────────────────────
 
@@ -108,6 +115,17 @@ impl GraphicsDevice {
             .ok_or_else(|| anyhow::anyhow!("GPU object {} not found", id))
     }
 
+    /// Free an opaque GPU object. Access validation happens in the caller,
+    /// mirroring MemoryManager::free.
+    pub fn free_gpu(&self, id: ResourceId) -> bool {
+        if self.gpu_objects.remove(&id).is_some() {
+            self.registry.unregister(id);
+            true
+        } else {
+            false
+        }
+    }
+
     // ── Unified lookup ────────────────────────────────────────
 
     pub fn get_resource(&self, id: ResourceId, requestor_id: u32) -> Option<Resource> {
@@ -153,16 +171,12 @@ impl GraphicsDevice {
     }
 
     pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, owner_id: u32) -> ResourceId {
-        let mag = match FilterMode::try_from(mag_proto).unwrap_or(FilterMode::FiltLinear) {
-            FilterMode::FiltNearest => wgpu::FilterMode::Nearest,
-            FilterMode::FiltLinear => wgpu::FilterMode::Linear,
-        };
-        let min = match FilterMode::try_from(min_proto).unwrap_or(FilterMode::FiltLinear) {
+        let map = |proto: i32| match FilterMode::try_from(proto).unwrap_or(FilterMode::FiltLinear) {
             FilterMode::FiltNearest => wgpu::FilterMode::Nearest,
             FilterMode::FiltLinear => wgpu::FilterMode::Linear,
         };
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: mag, min_filter: min, ..Default::default()
+            mag_filter: map(mag_proto), min_filter: map(min_proto), ..Default::default()
         });
         self.insert_gpu(GpuObject::Sampler(Arc::new(sampler)), owner_id, None)
     }
@@ -181,7 +195,7 @@ impl GraphicsDevice {
         self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)), owner_id, None)
     }
 
-    pub fn create_bind_group(&self, layout_id: ResourceId, entries_proto: &[crate::compute::BindGroupEntry], owner_id: u32) -> anyhow::Result<ResourceId> {
+    pub fn create_bind_group(&self, layout_id: ResourceId, entries_proto: &[proto::BindGroupEntry], owner_id: u32) -> anyhow::Result<ResourceId> {
         let layout = match self.get_gpu(layout_id, owner_id)? {
             GpuObject::BindGroupLayout(l) => l,
             _ => return Err(anyhow::anyhow!("Object {} is not a BGL", layout_id)),
@@ -193,17 +207,12 @@ impl GraphicsDevice {
 
         for e in entries_proto {
             match &e.resource {
-                Some(crate::compute::bind_group_entry::Resource::BufferId(bid)) => {
+                Some(proto::bind_group_entry::Resource::BufferId(bid)) => {
                     let b = self.get_buffer(*bid, owner_id)
                         .ok_or_else(|| anyhow::anyhow!("Buffer {} not found or access denied", bid))?;
                     keep_buffers.push((e.binding, b));
                 }
-                Some(crate::compute::bind_group_entry::Resource::BufferBinding(bb)) => {
-                    let b = self.get_buffer(bb.buffer_id, owner_id)
-                        .ok_or_else(|| anyhow::anyhow!("Buffer {} not found or access denied", bb.buffer_id))?;
-                    keep_buffers.push((e.binding, b));
-                }
-                Some(crate::compute::bind_group_entry::Resource::TextureViewId(tvid)) => {
+                Some(proto::bind_group_entry::Resource::TextureViewId(tvid)) => {
                     match self.get_gpu(*tvid, owner_id) {
                         Ok(GpuObject::TextureView(tv)) => { keep_views.push((e.binding, tv)); }
                         _ => {
@@ -216,7 +225,7 @@ impl GraphicsDevice {
                         }
                     }
                 }
-                Some(crate::compute::bind_group_entry::Resource::SamplerId(sid)) => {
+                Some(proto::bind_group_entry::Resource::SamplerId(sid)) => {
                     let s = match self.get_gpu(*sid, owner_id)? {
                         GpuObject::Sampler(s) => s,
                         _ => return Err(anyhow::anyhow!("Object {} is not a Sampler", sid)),
@@ -230,21 +239,15 @@ impl GraphicsDevice {
         let mut entries = Vec::new();
         for e in entries_proto {
             let resource = match &e.resource {
-                Some(crate::compute::bind_group_entry::Resource::BufferId(_)) => {
+                Some(proto::bind_group_entry::Resource::BufferId(_)) => {
                     let b = &keep_buffers.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
                     wgpu::BindingResource::Buffer(b.as_entire_buffer_binding())
                 }
-                Some(crate::compute::bind_group_entry::Resource::BufferBinding(bb)) => {
-                    let b = &keep_buffers.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
-                    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: b, offset: bb.offset, size: std::num::NonZeroU64::new(bb.size),
-                    })
-                }
-                Some(crate::compute::bind_group_entry::Resource::TextureViewId(_)) => {
+                Some(proto::bind_group_entry::Resource::TextureViewId(_)) => {
                     let tv = &keep_views.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
                     wgpu::BindingResource::TextureView(tv)
                 }
-                Some(crate::compute::bind_group_entry::Resource::SamplerId(_)) => {
+                Some(proto::bind_group_entry::Resource::SamplerId(_)) => {
                     let s = &keep_samplers.iter().find(|(binding, _)| *binding == e.binding).unwrap().1;
                     wgpu::BindingResource::Sampler(s)
                 }
@@ -259,7 +262,7 @@ impl GraphicsDevice {
         Ok(self.insert_gpu(GpuObject::BindGroup(Arc::new(bg)), owner_id, None))
     }
 
-    pub fn create_pipeline(&self, req: &crate::compute::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<ResourceId> {
+    pub fn create_pipeline(&self, req: &proto::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<ResourceId> {
         let shader = match self.get_gpu(req.shader_id, owner_id)? {
             GpuObject::ShaderModule(s) => s,
             _ => return Err(anyhow::anyhow!("Object {} is not a Shader", req.shader_id)),
@@ -365,9 +368,9 @@ impl GraphicsDevice {
                 strip_index_format: if req.primitive_topology == PrimitiveTopology::TopologyTriangleStrip as i32
                     || req.primitive_topology == PrimitiveTopology::TopologyLineStrip as i32
                 {
-                    match crate::compute::IndexFormat::try_from(req.strip_index_format).unwrap_or(crate::compute::IndexFormat::IdxUint16) {
-                        crate::compute::IndexFormat::IdxUint16 => Some(wgpu::IndexFormat::Uint16),
-                        crate::compute::IndexFormat::IdxUint32 => Some(wgpu::IndexFormat::Uint32),
+                    match IndexFormat::try_from(req.strip_index_format).unwrap_or(IndexFormat::IdxUint16) {
+                        IndexFormat::IdxUint16 => Some(wgpu::IndexFormat::Uint16),
+                        IndexFormat::IdxUint32 => Some(wgpu::IndexFormat::Uint32),
                     }
                 } else { None },
                 front_face: match FrontFace::try_from(req.front_face).unwrap_or(FrontFace::Ccw) {
@@ -390,65 +393,59 @@ impl GraphicsDevice {
         Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline)), owner_id, None))
     }
 
-    // ── Compute: create resource (protobuf dispatch) ──────────
+    // ── Create resource (protobuf dispatch) ───────────────────
 
     pub fn create_resource(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
-        let req = ComputeResourceRequest::decode(&payload[..])?;
-        let mut handle = ResourceHandle::default();
+        let req = ResourceRequest::decode(&payload[..])?;
 
-        match req.command {
-            Some(ComputeCommand::CreateShader(s)) => {
-                let name = if s.label.is_empty() { None } else { Some(s.label.clone()) };
-                let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: name.as_deref(), source: wgpu::ShaderSource::Wgsl(s.source.into()),
-                });
-                handle.id = self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)), requestor_id, name);
+        let id = match req.command {
+            Some(ResourceCommand::CreateShader(s)) => {
+                let label = if s.label.is_empty() { None } else { Some(s.label.as_str()) };
+                self.create_shader(&s.source, label, requestor_id)
             }
-            Some(ComputeCommand::CreatePipeline(p)) => {
-                handle.id = self.create_pipeline(&p, requestor_id)?;
+            Some(ResourceCommand::CreatePipeline(p)) => {
+                self.create_pipeline(&p, requestor_id)?
             }
-            Some(ComputeCommand::CreateSampler(s)) => {
-                handle.id = self.create_sampler(s.mag_filter as i32, s.min_filter as i32, requestor_id);
+            Some(ResourceCommand::CreateSampler(s)) => {
+                self.create_sampler(s.mag_filter, s.min_filter, requestor_id)
             }
-            Some(ComputeCommand::CreateTextureView(tv)) => {
-                handle.id = self.create_texture_view(tv.texture_id, requestor_id)?;
+            Some(ResourceCommand::CreateTextureView(tv)) => {
+                self.create_texture_view(tv.texture_id, requestor_id)?
             }
-            Some(ComputeCommand::CreateBindGroupLayout(bgl)) => {
+            Some(ResourceCommand::CreateBindGroupLayout(bgl)) => {
                 let entries: Vec<wgpu::BindGroupLayoutEntry> = bgl.entries.iter().map(|e| {
                     let visibility = wgpu::ShaderStages::from_bits_truncate(e.visibility);
                     let ty = match &e.ty {
                         Some(Ty::Buffer(b)) => wgpu::BindingType::Buffer {
-                            ty: match b.r#type {
-                                1 => wgpu::BufferBindingType::Uniform,
-                                2 => wgpu::BufferBindingType::Storage { read_only: false },
-                                3 => wgpu::BufferBindingType::Storage { read_only: true },
-                                _ => wgpu::BufferBindingType::Uniform,
+                            ty: match BufferBindingType::try_from(b.r#type).unwrap_or(BufferBindingType::BufUniform) {
+                                BufferBindingType::BufUniform => wgpu::BufferBindingType::Uniform,
+                                BufferBindingType::BufStorage => wgpu::BufferBindingType::Storage { read_only: false },
+                                BufferBindingType::BufStorageReadonly => wgpu::BufferBindingType::Storage { read_only: true },
                             },
                             has_dynamic_offset: b.has_dynamic_offset, min_binding_size: None,
                         },
-                        Some(Ty::Sampler(s)) => wgpu::BindingType::Sampler(match s.r#type {
-                            1 => wgpu::SamplerBindingType::Filtering,
-                            2 => wgpu::SamplerBindingType::NonFiltering,
-                            3 => wgpu::SamplerBindingType::Comparison,
-                            _ => wgpu::SamplerBindingType::Filtering,
-                        }),
+                        Some(Ty::Sampler(s)) => wgpu::BindingType::Sampler(
+                            match SamplerBindingType::try_from(s.r#type).unwrap_or(SamplerBindingType::SampFiltering) {
+                                SamplerBindingType::SampFiltering => wgpu::SamplerBindingType::Filtering,
+                                SamplerBindingType::SampNonFiltering => wgpu::SamplerBindingType::NonFiltering,
+                                SamplerBindingType::SampComparison => wgpu::SamplerBindingType::Comparison,
+                            }
+                        ),
                         Some(Ty::Texture(t)) => wgpu::BindingType::Texture {
-                            sample_type: match t.sample_type {
-                                1 => wgpu::TextureSampleType::Float { filterable: true },
-                                2 => wgpu::TextureSampleType::Float { filterable: false },
-                                3 => wgpu::TextureSampleType::Depth,
-                                4 => wgpu::TextureSampleType::Uint,
-                                5 => wgpu::TextureSampleType::Sint,
-                                _ => wgpu::TextureSampleType::Float { filterable: true },
+                            sample_type: match TextureSampleType::try_from(t.sample_type).unwrap_or(TextureSampleType::SampleFloat) {
+                                TextureSampleType::SampleFloat => wgpu::TextureSampleType::Float { filterable: true },
+                                TextureSampleType::SampleUnfilterableFloat => wgpu::TextureSampleType::Float { filterable: false },
+                                TextureSampleType::SampleDepth => wgpu::TextureSampleType::Depth,
+                                TextureSampleType::SampleUint => wgpu::TextureSampleType::Uint,
+                                TextureSampleType::SampleSint => wgpu::TextureSampleType::Sint,
                             },
-                            view_dimension: match t.view_dimension {
-                                1 => wgpu::TextureViewDimension::D1,
-                                2 => wgpu::TextureViewDimension::D2,
-                                3 => wgpu::TextureViewDimension::D2Array,
-                                4 => wgpu::TextureViewDimension::Cube,
-                                5 => wgpu::TextureViewDimension::CubeArray,
-                                6 => wgpu::TextureViewDimension::D3,
-                                _ => wgpu::TextureViewDimension::D2,
+                            view_dimension: match TextureViewDimension::try_from(t.view_dimension).unwrap_or(TextureViewDimension::ViewD2) {
+                                TextureViewDimension::ViewD1 => wgpu::TextureViewDimension::D1,
+                                TextureViewDimension::ViewD2 => wgpu::TextureViewDimension::D2,
+                                TextureViewDimension::ViewD2Array => wgpu::TextureViewDimension::D2Array,
+                                TextureViewDimension::ViewCube => wgpu::TextureViewDimension::Cube,
+                                TextureViewDimension::ViewCubeArray => wgpu::TextureViewDimension::CubeArray,
+                                TextureViewDimension::ViewD3 => wgpu::TextureViewDimension::D3,
                             },
                             multisampled: t.multisampled,
                         },
@@ -458,17 +455,17 @@ impl GraphicsDevice {
                     };
                     wgpu::BindGroupLayoutEntry { binding: e.binding, visibility, ty, count: None }
                 }).collect();
-                handle.id = self.create_bind_group_layout(&entries, requestor_id);
+                self.create_bind_group_layout(&entries, requestor_id)
             }
-            Some(ComputeCommand::CreateBindGroup(bg)) => {
-                handle.id = self.create_bind_group(bg.layout_id, &bg.entries, requestor_id)?;
+            Some(ResourceCommand::CreateBindGroup(bg)) => {
+                self.create_bind_group(bg.layout_id, &bg.entries, requestor_id)?
             }
-            _ => return Err(anyhow::anyhow!("Unsupported resource command")),
-        }
-        Ok(ComputeResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
+            None => return Err(anyhow::anyhow!("Empty resource request")),
+        };
+        Ok(CreateResourceResponse { id }.encode_to_vec())
     }
 
-    // ── Compute: execute (record render commands) ─────────────
+    // ── Execute (queue render commands for the frame loop) ────
 
     pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         let req = Submit::decode(&payload[..])?;
@@ -486,33 +483,6 @@ impl GraphicsDevice {
         }
         Ok(Vec::new())
     }
-
-    // ── Compute: build encoder from pending op ────────────────
-
-    pub fn build_encoder(&self, req: Submit, requestor_id: u32) -> anyhow::Result<wgpu::CommandEncoder> {
-        let device = self.get_device();
-        let view = match self.get_resource(req.target_texture_view_id, requestor_id) {
-            Some(Resource::GpuObj(GpuObject::TextureView(v))) => v,
-            _ => return Err(anyhow::anyhow!("Target view {} not found or access denied", req.target_texture_view_id)),
-        };
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Compute Execute") });
-        {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Compute Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view, resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None, multiview_mask: None, timestamp_writes: None, occlusion_query_set: None,
-            });
-            if let Some(cb) = &req.command_buffer {
-                let _ = execute_render_commands(&mut rp, cb, self, 2048, 2048, requestor_id);
-            }
-        }
-        Ok(encoder)
-    }
-
 }
 
 // ── Render command execution ───────────────────────────────────
@@ -556,17 +526,17 @@ pub fn execute_render_commands<'a>(
     target_height: u32,
     requestor_id: u32,
 ) -> anyhow::Result<()> {
-    for wgpu_cmd in &command_buffer.commands {
-        let cmd = match &wgpu_cmd.command { Some(c) => c, None => continue };
+    for render_cmd in &command_buffer.commands {
+        let cmd = match &render_cmd.command { Some(c) => c, None => continue };
         match cmd {
-            WgpuCommand::SetPipeline(p) => {
+            RenderCommand::SetPipeline(p) => {
                 if let Some(Resource::GpuObj(GpuObject::RenderPipeline(pipeline))) = gpu.get_resource(p.pipeline_id, requestor_id) {
                     rp.set_pipeline(pipeline.as_ref());
                 }
             }
-            WgpuCommand::SetBindGroup(bg) => {
+            RenderCommand::SetBindGroup(bg) => {
                 if let Some(Resource::GpuObj(GpuObject::BindGroup(bind_group))) = gpu.get_resource(bg.bind_group_id, requestor_id) {
-                    rp.set_bind_group(bg.index, bind_group.as_ref(), &bg.dynamic_offsets);
+                    rp.set_bind_group(bg.index, bind_group.as_ref(), &[]);
                 } else if let Some(Resource::Data(region_id)) = gpu.get_resource(bg.bind_group_id, requestor_id) {
                     if let Some((texture, _, _, _)) = gpu.get_texture_info(region_id, requestor_id) {
                         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -583,33 +553,33 @@ pub fn execute_render_commands<'a>(
                     }
                 }
             }
-            WgpuCommand::SetVertexBuffer(vb) => {
+            RenderCommand::SetVertexBuffer(vb) => {
                 if let Some(buffer) = gpu.get_buffer(vb.buffer_id, requestor_id) {
                     let end = if vb.size > 0 { (vb.offset + vb.size).min(buffer.size()) } else { buffer.size() };
                     rp.set_vertex_buffer(vb.slot, buffer.slice(vb.offset..end));
                 }
             }
-            WgpuCommand::SetIndexBuffer(ib) => {
+            RenderCommand::SetIndexBuffer(ib) => {
                 let format = if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
                 if let Some(buffer) = gpu.get_buffer(ib.buffer_id, requestor_id) {
                     let end = if ib.size > 0 { (ib.offset + ib.size).min(buffer.size()) } else { buffer.size() };
                     rp.set_index_buffer(buffer.slice(ib.offset..end), format);
                 }
             }
-            WgpuCommand::Draw(d) => {
+            RenderCommand::Draw(d) => {
                 rp.draw(d.first_vertex..(d.first_vertex + d.vertex_count), d.first_instance..(d.first_instance + d.instance_count));
             }
-            WgpuCommand::DrawIndexed(di) => {
+            RenderCommand::DrawIndexed(di) => {
                 rp.draw_indexed(di.first_index..(di.first_index + di.index_count), di.base_vertex, di.first_instance..(di.first_instance + di.instance_count));
             }
-            WgpuCommand::SetViewport(v) => {
+            RenderCommand::SetViewport(v) => {
                 let x = v.x.clamp(0.0, target_width as f32);
                 let y = v.y.clamp(0.0, target_height as f32);
                 let w = v.width.min(target_width as f32 - x);
                 let h = v.height.min(target_height as f32 - y);
                 if w > 0.0 && h > 0.0 { rp.set_viewport(x, y, w, h, v.min_depth, v.max_depth); }
             }
-            WgpuCommand::SetScissorRect(s) => {
+            RenderCommand::SetScissorRect(s) => {
                 let x = s.x.min(target_width.saturating_sub(1));
                 let y = s.y.min(target_height.saturating_sub(1));
                 let w = s.width.min(target_width - x).max(1);

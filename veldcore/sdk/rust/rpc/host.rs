@@ -1,11 +1,8 @@
-#[cfg(feature = "pdk")]
 use crate::rpc::core::{RpcRequest, RpcResponse};
-#[cfg(feature = "pdk")]
 use prost::Message;
 
 // ── VELD MICROKERNEL ABI ───────────────────────────────────────
 
-#[cfg(feature = "pdk")]
 extern "C" {
     fn veld_host_publish(ptr: u64, len: u64);
     fn veld_host_log(level: u64, flags: u64, ptr: u64, len: u64);
@@ -47,7 +44,23 @@ pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
 
 // ── RPC ────────────────────────────────────────────────────────
 
-#[cfg(feature = "pdk")]
+/// Распаковывает ответ хоста: (len << 32 | ptr) → payload из RpcResponse.
+/// Память под ответ хост выделил через veld_alloc; здесь она освобождается.
+unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
+    if packed == 0 {
+        return Err(anyhow::anyhow!("{} failed", what));
+    }
+    let ptr = (packed & 0xFFFF_FFFF) as *mut u8;
+    let len = (packed >> 32) as usize;
+    let response = RpcResponse::decode(std::slice::from_raw_parts(ptr, len));
+    veld_free_wasm(ptr as u64, len as u64);
+    let response = response?;
+    if !response.error.is_empty() {
+        return Err(anyhow::anyhow!(response.error));
+    }
+    Ok(response.payload)
+}
+
 pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
     let request = RpcRequest {
@@ -56,55 +69,33 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
     };
     let req_buf = request.encode_to_vec();
     unsafe {
-        let res_combined = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
-        if res_combined == 0 { return Err(anyhow::anyhow!("Host call failed")); }
-        let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
-        let len = (res_combined >> 32) as usize;
-        let response = RpcResponse::decode(std::slice::from_raw_parts(ptr, len))?;
-        veld_free_wasm(ptr as u64, len as u64);
-        if !response.error.is_empty() { return Err(anyhow::anyhow!(response.error)); }
-        Ok(response.payload)
+        let packed = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
+        take_host_response(packed, "Host call")
     }
 }
 
-#[cfg(feature = "pdk")]
 pub fn graphics_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     unsafe {
-        let res_combined = veld_graphics_create_resource(payload.as_ptr() as u64, payload.len() as u64);
-        if res_combined == 0 { return Err(anyhow::anyhow!("Compute create_resource failed")); }
-        let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
-        let len = (res_combined >> 32) as usize;
-        let response = RpcResponse::decode(std::slice::from_raw_parts(ptr, len))?;
-        veld_free_wasm(ptr as u64, len as u64);
-        if !response.error.is_empty() { return Err(anyhow::anyhow!(response.error)); }
-        Ok(response.payload)
+        let packed = veld_graphics_create_resource(payload.as_ptr() as u64, payload.len() as u64);
+        take_host_response(packed, "Graphics create_resource")
     }
 }
 
-#[cfg(feature = "pdk")]
 pub fn graphics_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     unsafe {
-        let res_combined = veld_graphics_execute(payload.as_ptr() as u64, payload.len() as u64);
-        if res_combined == 0 { return Err(anyhow::anyhow!("Compute execute failed")); }
-        let ptr = (res_combined & 0xFFFFFFFF) as *mut u8;
-        let len = (res_combined >> 32) as usize;
-        let response = RpcResponse::decode(std::slice::from_raw_parts(ptr, len))?;
-        veld_free_wasm(ptr as u64, len as u64);
-        if !response.error.is_empty() { return Err(anyhow::anyhow!(response.error)); }
-        Ok(response.payload)
+        let packed = veld_graphics_execute(payload.as_ptr() as u64, payload.len() as u64);
+        take_host_response(packed, "Graphics execute")
     }
 }
 
 // ── Memory data access ─────────────────────────────────────────
 
 /// Write data into a memory region
-#[cfg(feature = "pdk")]
 pub fn arena_write(id: u64, offset: u64, data: &[u8]) {
     unsafe { veld_memory_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
 }
 
 /// Read data from a memory region
-#[cfg(feature = "pdk")]
 pub fn arena_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
     unsafe {
         let mut buf = vec![0u8; size as usize];
@@ -116,60 +107,51 @@ pub fn arena_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
 // ── Memory management ──────────────────────────────────────────
 
 /// Allocate a CPU data region in the resource registry
-#[cfg(feature = "pdk")]
 pub fn arena_alloc(size: u64) -> Option<u64> {
     let id = unsafe { veld_memory_alloc(size) };
     if id == 0 { None } else { Some(id) }
 }
 
 /// Allocate a GPU buffer region in the resource registry
-#[cfg(feature = "pdk")]
 pub fn arena_alloc_buffer(size: u64, usage: u32, mapped: bool) -> Option<u64> {
     let id = unsafe { veld_memory_alloc_buffer(size, usage as u64, mapped as u64) };
     if id == 0 { None } else { Some(id) }
 }
 
 /// Allocate a GPU texture region in the resource registry
-#[cfg(feature = "pdk")]
 pub fn arena_alloc_texture(width: u32, height: u32, format: i32, usage: u32) -> Option<u64> {
     let id = unsafe { veld_memory_alloc_texture(width as u64, height as u64, format as u64, usage as u64) };
     if id == 0 { None } else { Some(id) }
 }
 
 /// Transfer ownership of a region to another service (zero-copy)
-#[cfg(feature = "pdk")]
 pub fn arena_transfer(region_id: u64, service: &str) -> bool {
     unsafe { veld_memory_transfer(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
 /// Grant read access to another service (owner only)
-#[cfg(feature = "pdk")]
 pub fn arena_grant_read(region_id: u64, service: &str) -> bool {
     unsafe { veld_memory_grant_read(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
 /// Grant write access to another service (owner only).
 /// This is how a window owner delegates its render target to a renderer.
-#[cfg(feature = "pdk")]
 pub fn arena_grant_write(region_id: u64, service: &str) -> bool {
     unsafe { veld_memory_grant_write(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
 /// Revoke all external access to a region
-#[cfg(feature = "pdk")]
 pub fn arena_revoke(region_id: u64) -> bool {
     unsafe { veld_memory_revoke(region_id) != 0 }
 }
 
 /// Free a resource region
-#[cfg(feature = "pdk")]
 pub fn arena_free(region_id: u64) -> bool {
     unsafe { veld_memory_free(region_id) != 0 }
 }
 
 // ── Logging ────────────────────────────────────────────────────
 
-#[cfg(feature = "pdk")]
 pub fn log(level: log::Level, flags: u32, message: &str) {
     let level_u64 = match level {
         log::Level::Error => 4u64, log::Level::Warn => 3u64, log::Level::Info => 2u64,
@@ -180,12 +162,21 @@ pub fn log(level: log::Level, flags: u32, message: &str) {
 
 // ── System helpers ─────────────────────────────────────────────
 
-#[cfg(feature = "pdk")]
 pub fn get_config(key: &str) -> Option<String> {
     use crate::rpc::core::{GetConfigRequest, GetConfigResponse};
     let req = GetConfigRequest { key: key.to_string() };
     call_service("system", "get_config", req.encode_to_vec())
         .ok().and_then(|res| GetConfigResponse::decode(&res[..]).ok()).map(|r| r.value)
+}
+
+/// UUID от system-сервиса; при недоступности — деградация в id по времени.
+pub fn generate_id() -> String {
+    use crate::rpc::core::GenerateUuidResponse;
+    let fallback = || format!("id_{}", std::time::SystemTime::now().elapsed().map(|d| d.as_nanos()).unwrap_or(0));
+    match call_service("system", "generate_uuid", Vec::new()) {
+        Ok(res) => GenerateUuidResponse::decode(&res[..]).map(|r| r.uuid).unwrap_or_else(|_| fallback()),
+        Err(_) => fallback(),
+    }
 }
 
 // ── Call context ───────────────────────────────────────────────
@@ -206,7 +197,6 @@ pub fn store_output(data: Vec<u8>) {
 
 // ── Pub/Sub ────────────────────────────────────────────────────
 
-#[cfg(feature = "pdk")]
 pub fn publish(topic: &str, payload: Vec<u8>) {
     let parts: Vec<&str> = topic.splitn(2, '/').collect();
     if parts.len() != 2 {

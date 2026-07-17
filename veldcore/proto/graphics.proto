@@ -1,0 +1,308 @@
+syntax = "proto3";
+
+package veldmap.graphics;
+
+// Графический сервис хоста.
+//
+// Буферы и текстуры выделяются через memory ABI (veld_memory_alloc_*) и
+// адресуются region id. Здесь создаются только непрозрачные GPU-объекты
+// (шейдеры, пайплайны, texture view, сэмплеры, bind group'ы) и передаются
+// render-команды. Идентичность запрашивающего модуля хост берёт из
+// ABI-вызова, а не из полей сообщения — подделать её нельзя.
+
+// ── Enums ──────────────────────────────────────────────────────
+
+enum TextureFormat {
+    TEX_RGBA8_UNORM = 0;
+    TEX_RGBA8_UNORM_SRGB = 1;
+    TEX_BGRA8_UNORM_SRGB = 2;
+    TEX_R8_UNORM = 3;
+    TEX_R32_FLOAT = 4;
+    TEX_RGBA16_FLOAT = 5;
+    TEX_RGBA32_FLOAT = 6;
+}
+
+enum VertexFormat {
+    VTX_FLOAT32 = 0;
+    VTX_FLOAT32X2 = 1;
+    VTX_FLOAT32X3 = 2;
+    VTX_FLOAT32X4 = 3;
+    VTX_UINT32 = 4;
+}
+
+enum IndexFormat {
+    IDX_UINT16 = 0;
+    IDX_UINT32 = 1;
+}
+
+enum FilterMode {
+    FILT_NEAREST = 0;
+    FILT_LINEAR = 1;
+}
+
+enum StepMode {
+    STEP_VERTEX = 0;
+    STEP_INSTANCE = 1;
+}
+
+enum PrimitiveTopology {
+    TOPOLOGY_TRIANGLE_LIST = 0;
+    TOPOLOGY_TRIANGLE_STRIP = 1;
+    TOPOLOGY_POINT_LIST = 2;
+    TOPOLOGY_LINE_LIST = 3;
+    TOPOLOGY_LINE_STRIP = 4;
+}
+
+enum BlendFactor {
+    ZERO = 0;
+    ONE = 1;
+    SRC = 2;
+    ONE_MINUS_SRC = 3;
+    SRC_ALPHA = 4;
+    ONE_MINUS_SRC_ALPHA = 5;
+    DST = 6;
+    ONE_MINUS_DST = 7;
+    DST_ALPHA = 8;
+    ONE_MINUS_DST_ALPHA = 9;
+}
+
+enum BlendOperation {
+    ADD = 0;
+    SUBTRACT = 1;
+    REVERSE_SUBTRACT = 2;
+    MIN = 3;
+    MAX = 4;
+}
+
+enum FrontFace {
+    CCW = 0;
+    CW = 1;
+}
+
+enum CullMode {
+    NONE = 0;
+    FRONT = 1;
+    BACK = 2;
+}
+
+enum BufferBindingType {
+    BUF_UNIFORM = 0;
+    BUF_STORAGE = 1;
+    BUF_STORAGE_READONLY = 2;
+}
+
+enum SamplerBindingType {
+    SAMP_FILTERING = 0;
+    SAMP_NON_FILTERING = 1;
+    SAMP_COMPARISON = 2;
+}
+
+enum TextureSampleType {
+    SAMPLE_FLOAT = 0;
+    SAMPLE_UNFILTERABLE_FLOAT = 1;
+    SAMPLE_DEPTH = 2;
+    SAMPLE_UINT = 3;
+    SAMPLE_SINT = 4;
+}
+
+enum TextureViewDimension {
+    VIEW_D2 = 0;
+    VIEW_D1 = 1;
+    VIEW_D2_ARRAY = 2;
+    VIEW_CUBE = 3;
+    VIEW_CUBE_ARRAY = 4;
+    VIEW_D3 = 5;
+}
+
+// ── Resource creation ──────────────────────────────────────────
+
+message CreateShaderModule {
+    string source = 1; // WGSL
+    string label = 2;
+}
+
+message CreateSampler {
+    FilterMode mag_filter = 1;
+    FilterMode min_filter = 2;
+}
+
+message CreateTextureView {
+    uint64 texture_id = 1; // region id текстуры из memory ABI
+}
+
+message BufferBindingLayout {
+    BufferBindingType type = 1;
+    bool has_dynamic_offset = 2;
+}
+
+message SamplerBindingLayout {
+    SamplerBindingType type = 1;
+}
+
+message TextureBindingLayout {
+    TextureSampleType sample_type = 1;
+    TextureViewDimension view_dimension = 2;
+    bool multisampled = 3;
+}
+
+message BindGroupLayoutEntry {
+    uint32 binding = 1;
+    uint32 visibility = 2; // битовая маска: 1 = Vertex, 2 = Fragment, 4 = Compute
+    oneof ty {
+        BufferBindingLayout buffer = 3;
+        SamplerBindingLayout sampler = 4;
+        TextureBindingLayout texture = 5;
+    }
+}
+
+message CreateBindGroupLayout {
+    repeated BindGroupLayoutEntry entries = 1;
+    string label = 2;
+}
+
+message BindGroupEntry {
+    uint32 binding = 1;
+    oneof resource {
+        uint64 buffer_id = 2;       // region id буфера из memory ABI
+        uint64 texture_view_id = 3; // id объекта CreateTextureView
+        uint64 sampler_id = 4;      // id объекта CreateSampler
+    }
+}
+
+message CreateBindGroup {
+    uint64 layout_id = 1;
+    repeated BindGroupEntry entries = 2;
+    string label = 3;
+}
+
+message VertexAttribute {
+    VertexFormat format = 1;
+    uint64 offset = 2;
+    uint32 shader_location = 3;
+}
+
+message VertexBufferLayout {
+    uint64 array_stride = 1;
+    StepMode step_mode = 2;
+    repeated VertexAttribute attributes = 3;
+}
+
+message BlendComponent {
+    BlendFactor src_factor = 1;
+    BlendFactor dst_factor = 2;
+    BlendOperation operation = 3;
+}
+
+message BlendState {
+    BlendComponent color = 1;
+    BlendComponent alpha = 2;
+}
+
+message CreateRenderPipeline {
+    uint64 shader_id = 1;
+    string vertex_entry = 2;
+    string fragment_entry = 3;
+    repeated VertexBufferLayout vertex_layouts = 4;
+    repeated uint64 bind_group_layout_ids = 5;
+    PrimitiveTopology primitive_topology = 6;
+    IndexFormat strip_index_format = 7;
+    FrontFace front_face = 8;
+    CullMode cull_mode = 9;
+    TextureFormat target_format = 10;
+    BlendState blend = 11; // не задан — альфа-блендинг по умолчанию
+    string label = 12;
+}
+
+message ResourceRequest {
+    oneof command {
+        CreateShaderModule create_shader = 1;
+        CreateRenderPipeline create_pipeline = 2;
+        CreateSampler create_sampler = 3;
+        CreateTextureView create_texture_view = 4;
+        CreateBindGroupLayout create_bind_group_layout = 5;
+        CreateBindGroup create_bind_group = 6;
+    }
+}
+
+message CreateResourceResponse {
+    uint64 id = 1;
+}
+
+// ── Render commands ────────────────────────────────────────────
+
+message SetPipeline {
+    uint64 pipeline_id = 1;
+}
+
+message SetBindGroup {
+    uint32 index = 1;
+    uint64 bind_group_id = 2;
+}
+
+message SetVertexBuffer {
+    uint32 slot = 1;
+    uint64 buffer_id = 2;
+    uint64 offset = 3;
+    uint64 size = 4; // 0 — до конца буфера
+}
+
+message SetIndexBuffer {
+    uint64 buffer_id = 1;
+    IndexFormat index_format = 2;
+    uint64 offset = 3;
+    uint64 size = 4; // 0 — до конца буфера
+}
+
+message Draw {
+    uint32 vertex_count = 1;
+    uint32 instance_count = 2;
+    uint32 first_vertex = 3;
+    uint32 first_instance = 4;
+}
+
+message DrawIndexed {
+    uint32 index_count = 1;
+    uint32 instance_count = 2;
+    uint32 first_index = 3;
+    int32 base_vertex = 4;
+    uint32 first_instance = 5;
+}
+
+message SetViewport {
+    float x = 1;
+    float y = 2;
+    float width = 3;
+    float height = 4;
+    float min_depth = 5;
+    float max_depth = 6;
+}
+
+message SetScissorRect {
+    uint32 x = 1;
+    uint32 y = 2;
+    uint32 width = 3;
+    uint32 height = 4;
+}
+
+message RenderCommand {
+    oneof command {
+        SetPipeline set_pipeline = 1;
+        SetBindGroup set_bind_group = 2;
+        SetVertexBuffer set_vertex_buffer = 3;
+        SetIndexBuffer set_index_buffer = 4;
+        Draw draw = 5;
+        DrawIndexed draw_indexed = 6;
+        SetViewport set_viewport = 7;
+        SetScissorRect set_scissor_rect = 8;
+    }
+}
+
+message CommandBuffer {
+    repeated RenderCommand commands = 1;
+}
+
+// Кадр команд, исполняемый хостовым циклом кадра в указанный texture view.
+message Submit {
+    uint64 target_texture_view_id = 1;
+    CommandBuffer command_buffer = 2;
+}

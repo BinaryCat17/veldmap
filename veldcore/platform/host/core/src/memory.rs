@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use dashmap::DashMap;
-use crate::compute::TextureFormat;
+use crate::graphics::proto::TextureFormat;
 use crate::registry::{ResourceRegistry, ResourceId, ResourceBackend};
 
 // ── Format helpers (self-contained) ────────────────────────────

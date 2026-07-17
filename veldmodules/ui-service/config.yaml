@@ -1,6 +1,5 @@
 package: veld-ui-service
 language: rust
-sdk_features: ["compute"]
 rust:
   dependencies:
     prost: "0.14"

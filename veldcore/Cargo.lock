@@ -5418,10 +5418,8 @@ name = "veldsdk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "futures-channel",
  "log",
  "once_cell",
- "paste",
  "prost",
  "prost-build",
  "serde",

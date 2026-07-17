@@ -64,7 +64,7 @@ message WindowResized {
     uint32 width = 2;
     uint32 height = 3;
     float scale_factor = 4;
-    // Требуемый формат текстуры (veldmap.compute.TextureFormat).
+    // Требуемый формат текстуры (veldmap.graphics.TextureFormat).
     int32 format = 5;
 }
 

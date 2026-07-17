@@ -212,7 +212,6 @@ def main():
         "service_name":       name,
         "version":            version,
         "sdk_path":           sdk_path,
-        "sdk_features":       config_data.get("sdk_features", []),
         "dependencies":       cargo_dependencies,
         "rust": {
             "config": "crate::module::Config",

@@ -1,11 +1,8 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Регистрация фич для подавления ворнингов unexpected_cfgs в зависимых крейтах
-    println!("cargo:rustc-check-cfg=cfg(feature, values(\"pdk\", \"compute\", \"app\", \"client\"))");
-
     let proto_files = &[
         "../../proto/core.proto",
         "../../proto/app.proto",
-        "../../proto/compute.proto"
+        "../../proto/graphics.proto"
     ];
 
     for proto in proto_files {

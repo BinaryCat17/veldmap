@@ -1,5 +1,6 @@
 use crate::proto::ui as proto;
 use veldsdk::OwnedResource;
+use veldsdk::graphics::{BindGroupId, BindGroupLayoutId, PipelineId, TextureViewId};
 use std::collections::HashMap;
 use std::cell::RefCell;
 use iced_core::{Point, Event};
@@ -25,17 +26,18 @@ pub struct PluginUiState {
     pub pending_events: RefCell<Vec<Event>>,
     pub vertex_buffer: RefCell<Option<OwnedResource>>,
     pub index_buffer: RefCell<Option<OwnedResource>>,
-    pub uniform_buffer: RefCell<Option<OwnedResource>>,
-    pub uniform_buffer_id: RefCell<Option<u64>>,
-    pub uniform_layout_id: RefCell<Option<u64>>,
-    pub ui_pipeline: RefCell<Option<u64>>,
+    /// Region id uniform-буфера (memory ABI).
+    pub uniform_buffer_region: RefCell<Option<u64>>,
+    pub uniform_bind_group: RefCell<Option<BindGroupId>>,
+    pub uniform_layout: RefCell<Option<BindGroupLayoutId>>,
+    pub ui_pipeline: RefCell<Option<PipelineId>>,
     pub last_vertices: RefCell<Vec<crate::module::renderer::Vertex>>,
     pub last_draw_commands: RefCell<Vec<crate::module::renderer::DrawCmd>>,
-    pub external_bind_groups: RefCell<HashMap<u64, u64>>,
+    pub external_bind_groups: RefCell<HashMap<u64, BindGroupId>>,
 
-    /// Кэш view render-таргета: (texture_id, view_id).
+    /// Кэш view render-таргета: (texture_id, view).
     /// Инвалидируется сменой texture_id (владелец аллоцирует новый при resize).
-    pub target_view: RefCell<Option<(u64, u64)>>,
+    pub target_view: RefCell<Option<(u64, TextureViewId)>>,
 
     pub monitor_fps: RefCell<u32>,
     /// FPS-счётчик: (кадры, накопленные секунды) с последнего отчёта.
@@ -88,9 +90,9 @@ impl PluginUiState {
             pending_events: RefCell::new(Vec::new()),
             vertex_buffer: RefCell::new(None),
             index_buffer: RefCell::new(None),
-            uniform_buffer: RefCell::new(None),
-            uniform_buffer_id: RefCell::new(None),
-            uniform_layout_id: RefCell::new(None),
+            uniform_buffer_region: RefCell::new(None),
+            uniform_bind_group: RefCell::new(None),
+            uniform_layout: RefCell::new(None),
             ui_pipeline: RefCell::new(None),
             last_vertices: RefCell::new(Vec::new()),
             last_draw_commands: RefCell::new(Vec::new()),

@@ -20,10 +20,6 @@ pub mod app {
     include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
 }
 
-pub mod compute {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.compute.rs"));
-}
-
 pub struct CallContextInner {
     pub input: Vec<u8>,
     pub output: Vec<u8>,
@@ -105,7 +101,6 @@ where
             "DISPATCHER" => crate::logging::FLAG_DISPATCHER,
             "ABI" => crate::logging::FLAG_ABI,
             "HOST_RENDER" => crate::logging::FLAG_HOST_RENDER,
-            "COMPUTE" => crate::logging::FLAG_COMPUTE,
             "SDK" => crate::logging::FLAG_SDK,
             "UI_SERVICE" => crate::logging::FLAG_UI_SERVICE,
             "UI_HANDLERS" => crate::logging::FLAG_UI_HANDLERS,

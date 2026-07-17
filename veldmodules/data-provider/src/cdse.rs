@@ -45,7 +45,7 @@ pub fn on_input_download(
     state: &mut State, 
     request: DownloadRequest
 ) {
-    let task_id = veldsdk::generate_id!();
+    let task_id = veldsdk::generate_id();
     let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     let destination = request.destination.clone();
     let identifier = request.identifier.clone();
@@ -77,7 +77,7 @@ pub fn on_input_list_path(
     request: ListPathRequest
 ) {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-    let correlation_id = veldsdk::generate_id!();
+    let correlation_id = veldsdk::generate_id();
     
     let mut query_params = vec![
         ("delimiter", "/"),
