@@ -34,10 +34,6 @@ pub struct PluginWindowConfig {
 
     /// Window position (None = center on screen)
     pub position: Option<WindowPosition>,
-
-    /// Module that renders into this window's target texture and receives its
-    /// input events (via `{renderer}/handle_ui_event`). Defaults to the owner.
-    pub renderer: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -76,7 +72,6 @@ impl Default for PluginWindowConfig {
             resizable: default_resizable(),
             fullscreen: false,
             position: None,
-            renderer: None,
         }
     }
 }

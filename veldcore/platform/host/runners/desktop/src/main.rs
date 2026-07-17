@@ -16,6 +16,11 @@ use prost::Message;
 use veldmap_host_core::logging::FLAG_HOST_RENDER;
 use veldmap_host_core::{vinfo, vwarn, vdebug};
 
+/// Well-known имя интерфейса UI-рендерера (как `fs`, `network`, `system`).
+/// Реализация подменяется в services.json — любой модуль под этим именем,
+/// реализующий set_view/handle_ui_event, исполняет окна десктоп-раннера.
+const UI_SERVICE: &str = "ui-service";
+
 /// Окно, созданное по декларации модуля, и его render-target.
 /// Владелец текстуры — задекларировавший модуль; писатель — его рендерер.
 struct HostWindow {
@@ -85,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
         0 => anyhow::bail!("No module declares a window; the desktop runner has nothing to present"),
         n => anyhow::bail!("{} modules declare windows, but the desktop runner supports exactly one for now", n),
     };
-    let renderer_name = win_cfg.renderer.clone().unwrap_or_else(|| owner_name.clone());
+    let renderer_name = UI_SERVICE.to_string();
     vinfo!(FLAG_HOST_RENDER, "Window '{}': owner '{}', renderer '{}'", win_cfg.title, owner_name, renderer_name);
 
     let event_loop = EventLoop::new()?;
@@ -123,7 +128,10 @@ async fn main() -> anyhow::Result<()> {
     let owner_instance = *instance_ids.get(&owner_name)
         .ok_or_else(|| anyhow::anyhow!("Window owner '{}' is not a loaded service", owner_name))?;
     let renderer_instance = *instance_ids.get(&renderer_name)
-        .ok_or_else(|| anyhow::anyhow!("Window renderer '{}' is not a loaded service", renderer_name))?;
+        .ok_or_else(|| anyhow::anyhow!(
+            "No '{}' service loaded: the desktop runner needs a UI renderer to present windows (add one to services.json)",
+            renderer_name,
+        ))?;
 
     let compositor = Compositor::new(&device_arc, surface_format);
     let size = winit_window.inner_size();
