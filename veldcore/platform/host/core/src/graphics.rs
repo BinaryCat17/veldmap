@@ -42,8 +42,6 @@ struct GpuEntry {
 
 // ── Render command queue ───────────────────────────────────────
 
-pub static PENDING_OPS: Mutex<Vec<PendingRenderOp>> = Mutex::new(Vec::new());
-
 pub struct PendingRenderOp {
     pub target_view_id: u64,
     pub command_buffer: CommandBuffer,
@@ -59,6 +57,8 @@ pub struct GraphicsDevice {
     device: Arc<wgpu::Device>,
     queue: Arc<std::sync::Mutex<wgpu::Queue>>,
     surface_format: wgpu::TextureFormat,
+    /// Render ops submitted by modules, drained by the runner's frame loop.
+    pending_ops: Mutex<Vec<PendingRenderOp>>,
 }
 
 impl GraphicsDevice {
@@ -76,7 +76,13 @@ impl GraphicsDevice {
             device,
             queue,
             surface_format,
+            pending_ops: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Drain render ops queued by modules since the last frame.
+    pub fn take_pending_ops(&self) -> Vec<PendingRenderOp> {
+        std::mem::take(&mut *self.pending_ops.lock().unwrap())
     }
 
     pub fn registry(&self) -> &Arc<ResourceRegistry> { &self.registry }
@@ -466,14 +472,17 @@ impl GraphicsDevice {
 
     pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         let req = Submit::decode(&payload[..])?;
-        // Check write access to the target view before adding to PENDING_OPS
+        // Check write access to the target view before queueing
         if !self.registry.check_access(req.target_texture_view_id, requestor_id, Access::Write) {
             return Err(anyhow::anyhow!("Access denied to target view {}", req.target_texture_view_id));
         }
 
         if let Some(cb) = req.command_buffer {
-            let mut ops = PENDING_OPS.lock().unwrap();
-            ops.push(PendingRenderOp { target_view_id: req.target_texture_view_id, command_buffer: cb, instance_id: requestor_id });
+            self.pending_ops.lock().unwrap().push(PendingRenderOp {
+                target_view_id: req.target_texture_view_id,
+                command_buffer: cb,
+                instance_id: requestor_id,
+            });
         }
         Ok(Vec::new())
     }

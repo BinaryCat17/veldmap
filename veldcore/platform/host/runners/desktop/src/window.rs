@@ -31,9 +31,13 @@ pub struct PluginWindowConfig {
     /// Whether window should be fullscreen
     #[serde(default)]
     pub fullscreen: bool,
-    
+
     /// Window position (None = center on screen)
     pub position: Option<WindowPosition>,
+
+    /// Module that renders into this window's target texture and receives its
+    /// input events (via `{renderer}/handle_ui_event`). Defaults to the owner.
+    pub renderer: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -72,58 +76,28 @@ impl Default for PluginWindowConfig {
             resizable: default_resizable(),
             fullscreen: false,
             position: None,
+            renderer: None,
         }
     }
 }
 
-/// Parse window config from plugin's JSON config
-pub fn parse_window_config(config: &std::collections::HashMap<String, serde_json::Value>) -> Option<PluginWindowConfig> {
-    config.get("window").and_then(|w| {
-        serde_json::from_value(w.clone()).ok()
-    })
-}
-
-/// Collection of window configs for all plugins
-#[derive(Default)]
-pub struct PluginWindows {
-    configs: std::collections::HashMap<String, PluginWindowConfig>,
-}
-
-impl PluginWindows {
-    pub fn new() -> Self {
-        Self {
-            configs: std::collections::HashMap::new(),
-        }
-    }
-    
-    pub fn add(&mut self, plugin_name: String, config: PluginWindowConfig) {
-        self.configs.insert(plugin_name, config);
-    }
-    
-    pub fn get(&self, plugin_name: &str) -> Option<&PluginWindowConfig> {
-        self.configs.get(plugin_name)
-    }
-    
-    pub fn has_windows(&self) -> bool {
-        !self.configs.is_empty()
-    }
-    
-    /// Get the first window config (for single-window mode)
-    pub fn first(&self) -> Option<(&String, &PluginWindowConfig)> {
-        self.configs.iter().next()
-    }
-}
-
-pub fn extract_window_configs(config: &veldmap_host_core::config::HostConfig) -> PluginWindows {
-    let mut windows = PluginWindows::new();
+/// Collect window declarations from module configs: each module may declare
+/// its own window under the "window" key. Returned as (owner, config) pairs.
+pub fn extract_window_configs(config: &veldmap_host_core::config::HostConfig) -> Vec<(String, PluginWindowConfig)> {
+    let mut windows = Vec::new();
 
     for (name, plugin_config) in &config.plugin_configs {
-        if let Some(window_config) = parse_window_config(plugin_config) {
-            log::info!("Plugin '{}' requests window: {}x{} (scale: {})", 
-                name, window_config.width, window_config.height, window_config.ui_scale);
-            windows.add(name.clone(), window_config);
+        if let Some(value) = plugin_config.get("window") {
+            match serde_json::from_value::<PluginWindowConfig>(value.clone()) {
+                Ok(window_config) => {
+                    log::info!("Module '{}' declares window: {}x{}", name, window_config.width, window_config.height);
+                    windows.push((name.clone(), window_config));
+                }
+                Err(e) => log::error!("Module '{}' has an invalid window declaration: {}", name, e),
+            }
         }
     }
-    
+
+    windows.sort_by(|a, b| a.0.cmp(&b.0));
     windows
 }

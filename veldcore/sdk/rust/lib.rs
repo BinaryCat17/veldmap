@@ -20,7 +20,6 @@ pub use paste;
 pub use log;
 
 pub use rpc::core::ResourceHandle;
-pub const SURFACE_ID: u64 = 0;
 
 /// RAII handle to a memory region or graphics object.
 /// On drop: releases the resource via memory ABI (no RPC overhead).

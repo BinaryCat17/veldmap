@@ -3,6 +3,8 @@ syntax = "proto3";
 package veldmap.app;
 
 message UIEvent {
+    // Логический адресат: имя модуля-владельца окна, породившего событие.
+    string plugin_id = 1;
     oneof event {
         ClickEvent click = 2;
         KeyEvent key = 3;
@@ -54,16 +56,3 @@ message ResizeEvent {
 message InitEvent {}
 
 import "core.proto";
-
-// Описание того, что Хост должен сделать с окном
-message AppDisplayCommand {
-    oneof command {
-        DrawFrame draw_frame = 1;
-    }
-}
-
-message DrawFrame {
-    uint64 texture_id = 1;
-}
-
-message AppDisplayResponse {}

@@ -14,13 +14,16 @@ static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(100); // Local plugins start
 
 
 
+/// Loads all services from the manifest.
+/// Returns the instance id assigned to each local WASM service, keyed by name.
 pub async fn load_services(
     ctx: Arc<crate::setup::HostContext>,
-) -> anyhow::Result<()>
+) -> anyhow::Result<std::collections::HashMap<String, u32>>
 {
     let mut config = Config::new();
     config.async_support(true);
     let engine = Engine::new(&config)?;
+    let mut instance_ids = std::collections::HashMap::new();
 
     for (name, entry) in &ctx.config.manifest.services {
         match entry.location.as_str() {
@@ -56,7 +59,9 @@ pub async fn load_services(
                     key: instance_id,
                     value_json: serde_json::to_string(&config_map).unwrap_or_else(|_| "{}".to_string()),
                 };
-                let _ = ctx.dispatcher.call("system", "register_config", prost::Message::encode_to_vec(&reg_req), instance_id);
+                if let Err(e) = ctx.dispatcher.call("system", "register_config", prost::Message::encode_to_vec(&reg_req), instance_id).await {
+                    log::error!("Failed to register config for '{}': {}", name, e);
+                }
                 
                 log::trace!("Loading service '{}' with instance_id {}", name, instance_id);
                 
@@ -218,6 +223,7 @@ pub async fn load_services(
                 for topic in subs {
                     ctx.dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(tx.clone()));
                 }
+                instance_ids.insert(name.clone(), instance_id);
             }
             "remote" => {
                 let node_id_str = entry.node_id.as_ref().ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
@@ -227,5 +233,5 @@ pub async fn load_services(
             _ => {}
         }
     }
-    Ok(())
+    Ok(instance_ids)
 }

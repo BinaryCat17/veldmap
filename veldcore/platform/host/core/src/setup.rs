@@ -172,8 +172,6 @@ pub async fn init_core_services(
         .bind()
         .await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
-    
-    dispatcher.register_service("core".to_string(), crate::dispatcher::ServiceLocation::Native(Arc::new(crate::dispatcher::CoreService)));
 
     Ok(Arc::new(HostContext {
         dispatcher,

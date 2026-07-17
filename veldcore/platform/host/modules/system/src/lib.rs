@@ -1,9 +1,7 @@
 use veldmap_host_core::dispatcher::{NativeService, TaskState};
-use veldmap_host_core::registry::{Access, ResourceBackend};
 use veldmap_host_core::core::{
     TaskStatusRequest, TaskStatusResponse,
-    TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest, ResourceHandle,
-    GetResourceRequest, GetResourceResponse, CreateDataRequest, CreateDataResponse,
+    TaskCancelRequest, TaskCreateRequest, TaskCreateResponse, TaskUpdateRequest,
     GetConfigRequest, GetConfigResponse, GenerateUuidRequest, GenerateUuidResponse,
     LogRequest, LogLevel
 };
@@ -79,34 +77,6 @@ impl NativeService for SystemService {
                 let _req = GenerateUuidRequest::decode(&payload[..])?;
                 let uuid = uuid::Uuid::new_v4().to_string();
                 Ok(GenerateUuidResponse { uuid }.encode_to_vec())
-            }
-            "get_resource" => {
-                let req = GetResourceRequest::decode(&payload[..])?;
-                if let Some(id) = self.ctx.registry.get_named_id(&req.name) {
-                    if self.ctx.registry.check_access(id, requestor_id, Access::Read) {
-                        let mut handle = ResourceHandle { id, ..Default::default() };
-                        if let Some(ResourceBackend::Memory) = self.ctx.registry.get_backend(id) {
-                            handle.size = self.ctx.memory.get_size(id);
-                        } else {
-                            handle.size = 0;
-                        }
-                        Ok(GetResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
-                    } else {
-                        Ok(GetResourceResponse { handle: None, error: "Access Denied".into() }.encode_to_vec())
-                    }
-                } else {
-                    Ok(GetResourceResponse { handle: None, error: format!("Resource '{}' not found", req.name) }.encode_to_vec())
-                }
-            }
-            "create_data" => {
-                let req = CreateDataRequest::decode(&payload[..])?;
-                let id = self.ctx.memory.alloc_cpu(vec![0u8; req.size as usize], requestor_id);
-                let handle = ResourceHandle {
-                    id,
-                    size: req.size,
-                    content_hash: Vec::new(),
-                };
-                Ok(CreateDataResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
             }
             "task_create" => {
                 let req = TaskCreateRequest::decode(&payload[..])?;

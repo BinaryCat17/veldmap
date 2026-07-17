@@ -20,20 +20,26 @@ pub enum ResourceBackend {
 pub struct Lease {
     pub owner_id: u32,
     pub readers: Vec<u32>,
+    /// Modules granted write access by the owner (e.g. a renderer writing into
+    /// a window target texture owned by the window's module). Writers can read.
+    pub writers: Vec<u32>,
     pub expires_at: Option<Instant>,
 }
 
 impl Lease {
     pub fn new(owner_id: u32) -> Self {
-        Self { owner_id, readers: Vec::new(), expires_at: None }
+        Self { owner_id, readers: Vec::new(), writers: Vec::new(), expires_at: None }
     }
 
     pub fn can_read(&self, module_id: u32) -> bool {
-        self.owner_id == module_id || module_id == 0 || self.readers.contains(&module_id)
+        self.owner_id == module_id
+            || module_id == 0
+            || self.readers.contains(&module_id)
+            || self.writers.contains(&module_id)
     }
 
     pub fn can_write(&self, module_id: u32) -> bool {
-        (self.owner_id == module_id || module_id == 0)
+        (self.owner_id == module_id || module_id == 0 || self.writers.contains(&module_id))
             && self.expires_at.map_or(true, |e| e > Instant::now())
     }
 
@@ -43,12 +49,19 @@ impl Lease {
         }
     }
 
+    pub fn add_writer(&mut self, module_id: u32) {
+        if !self.writers.contains(&module_id) && module_id != self.owner_id {
+            self.writers.push(module_id);
+        }
+    }
+
     pub fn remove_reader(&mut self, module_id: u32) {
         self.readers.retain(|&r| r != module_id);
     }
 
     pub fn revoke_all(&mut self) {
         self.readers.clear();
+        self.writers.clear();
         self.expires_at = Some(Instant::now());
     }
 }
@@ -68,7 +81,7 @@ pub struct ResourceRegistry {
 impl ResourceRegistry {
     pub fn new() -> Self {
         Self {
-            // Start from 1, so 0 can be used for special cases (like SURFACE_ID)
+            // Id 0 обозначает хост (суперпользователь в lease-проверках)
             next_id: AtomicU64::new(1),
             entries: DashMap::new(),
             named_resources: DashMap::new(),

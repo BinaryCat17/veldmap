@@ -12,47 +12,32 @@ use veldsdk::OwnedResource;
 
 use anyhow::anyhow;
 
-/// Renders UI to an offscreen texture and returns its ID
-/// Uses cached texture if size matches, otherwise creates new one
+/// Renders UI into the render target provided by the host (the window's
+/// target texture, write-leased to this module). The view is cached per
+/// texture id: the host recreates the target on resize, changing the id.
 pub fn render_ui(
     plugin: &PluginUiState,
     renderer: &mut GpuRenderer,
+    target_texture: u64,
     width: u32,
     height: u32,
     scale_factor: f32,
     surface_format: i32,
-) -> anyhow::Result<u64> {
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] START {}x{}", width, height);
-    
-    // Check if we can reuse cached texture
-    let cached_size = *plugin.offscreen_texture_size.borrow();
-    let needs_new_texture = plugin.offscreen_texture.borrow().is_none() || cached_size != (width, height);
-    
-    let (texture_id, view_id) = if needs_new_texture {
-        veldsdk::vdebug!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Creating new offscreen texture (cached={:?}, size={:?})", 
-            plugin.offscreen_texture.borrow().is_some(), cached_size);
-        // Create offscreen texture
-        let texture_id = create_offscreen_texture(width, height, surface_format)?;
-        let view_id = create_texture_view(texture_id, surface_format)?;
-        
-        // Update cache
-        *plugin.offscreen_texture.borrow_mut() = Some(OwnedResource::new(ResourceHandle { 
-            id: texture_id, 
-            content_hash: vec![], 
-            size: 0 
-        }));
-        *plugin.offscreen_view.borrow_mut() = Some(view_id);
-        *plugin.offscreen_texture_size.borrow_mut() = (width, height);
-        
-        (texture_id, view_id)
-    } else {
-        // Reuse cached texture
-        let texture_id = plugin.offscreen_texture.borrow().as_ref().unwrap().id();
-        let view_id = plugin.offscreen_view.borrow().unwrap();
-        veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Reusing cached texture_id={}", texture_id);
-        (texture_id, view_id)
+) -> anyhow::Result<()> {
+    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] START {}x{} into texture {}", width, height, target_texture);
+
+    let view_id = {
+        let cached = *plugin.target_view.borrow();
+        match cached {
+            Some((tex, view)) if tex == target_texture => view,
+            _ => {
+                let view = create_texture_view(target_texture, surface_format)?;
+                *plugin.target_view.borrow_mut() = Some((target_texture, view));
+                view
+            }
+        }
     };
-    
+
     // Ensure all GPU resources are ready
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Ensuring resources");
     ensure_resources(plugin, renderer, surface_format)?;
@@ -85,20 +70,11 @@ pub fn render_ui(
         render_geometry(plugin, renderer, &mut recorder, width, height)?;
     }
 
-    // Execute immediately to the offscreen texture
+    // Submit render ops for the host frame loop to execute into the target
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Executing recorder to view_id={}", view_id);
     let _ = recorder.execute(view_id)?;
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] END, returning texture_id={}", texture_id);
-    Ok(texture_id)
-}
-
-/// Create offscreen texture for UI rendering
-fn create_offscreen_texture(width: u32, height: u32, surface_format: i32) -> anyhow::Result<u64> {
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-TEXTURE] START {}x{}", width, height);
-    let texture_id = arena_alloc_texture(width, height, surface_format, 2 | 4 | 16)
-        .ok_or_else(|| anyhow!("Failed to allocate offscreen texture"))?;
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-TEXTURE] END, texture_id={}", texture_id);
-    Ok(texture_id)
+    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] END");
+    Ok(())
 }
 
 /// Create texture view for rendering

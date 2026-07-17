@@ -15,17 +15,6 @@ pub trait AsyncNativeService: Send + Sync {
     async fn handle(&self, topic: &str, payload: Vec<u8>, requestor_id: u32);
 }
 
-pub struct CoreService;
-
-impl NativeService for CoreService {
-    fn call(&self, method: &str, _payload: Vec<u8>, _requestor_id: u32) -> Result<Vec<u8>> {
-        match method {
-            "status" => Ok(Vec::new()),
-            _ => Err(anyhow::anyhow!("Method {} not found in core", method)),
-        }
-    }
-}
-
 pub enum RpcCommand {
     Call {
         service_name: String,

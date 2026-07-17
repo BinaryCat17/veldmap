@@ -7,9 +7,3 @@ interface:
       type: ui/SetViewRequest
     handle_ui_event:
       type: app/UiEvent
-
-dependencies:
-  app:
-    calls:
-      display:
-        type: app/AppDisplayCommand

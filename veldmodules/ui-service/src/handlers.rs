@@ -10,18 +10,12 @@ use iced_graphics::Viewport;
 pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     let plugin_id = req.plugin_id.clone();
     let surface_format = state.surface_format;
-    let canvas_size = state.canvas_size;
 
-    // Get or create plugin. Seed its canvas size from the shared window size so
-    // the very first render doesn't use PluginUiState::new()'s placeholder size.
-    let plugin = state.plugins.entry(plugin_id.clone()).or_insert_with(|| {
-        let p = PluginUiState::new();
-        if canvas_size.0 > 0 && canvas_size.1 > 0 {
-            *p.canvas_size.borrow_mut() = canvas_size;
-        }
-        p
-    });
-    
+    // The host sends a Resize (with the target texture handle) for the plugin's
+    // window before app/ready, so by the time a module ships its first view the
+    // plugin state normally already exists with a real canvas size.
+    let plugin = state.plugins.entry(plugin_id.clone()).or_insert_with(PluginUiState::new);
+
     // Store the module's current view; rendering happens below and on frame ticks.
     if let Some(layout) = req.layout {
         veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-VIEW] '{}'", plugin_id);
@@ -73,39 +67,26 @@ fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i
 }
 
 pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event START (via publish)");
-
-    // Track the shared window size independently of plugin registration: a plugin
-    // only gets added to `state.plugins` via `set_view`, which a plugin only sends
-    // in response to a `frame` tick - so `frame` must not depend on a plugin
-    // already being registered, or nothing would ever bootstrap.
-    if let Some(app_proto::ui_event::Event::Resize(r)) = &event_proto.event {
-        state.canvas_size = (r.width, r.height);
+    // Events arrive addressed: plugin_id names the module owning the window
+    // that produced the event (filled by the host from the window's declaration).
+    let plugin_id = event_proto.plugin_id.clone();
+    if plugin_id.is_empty() {
+        veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] UI event without plugin_id dropped");
+        return;
     }
 
     let is_frame = matches!(event_proto.event, Some(app_proto::ui_event::Event::Frame(_)));
 
-    // Process event for ALL plugins - we don't know which one it's for
-    // ui-service stores layouts of all plugins.
-    let plugin_ids: Vec<String> = state.plugins.keys().cloned().collect();
-
-    for plugin_id in plugin_ids {
-        if let Err(e) = process_ui_event(state, &plugin_id, event_proto.clone()) {
-            veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event failed for {}: {}", plugin_id, e);
-        }
+    if let Err(e) = process_ui_event(state, &plugin_id, event_proto) {
+        veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event failed for {}: {}", plugin_id, e);
     }
 
-    // On each frame tick render plugins with pending changes: input-driven redraws
-    // and animation (scroll inertia) are the renderer's own responsibility.
+    // On each frame tick render the plugin if it has pending changes: input-driven
+    // redraws and animation (scroll inertia) are the renderer's own responsibility.
     if is_frame {
         let surface_format = state.surface_format;
-        let plugin_ids: Vec<String> = state.plugins.keys().cloned().collect();
-        for plugin_id in plugin_ids {
-            render_plugin_if_needed(state, &plugin_id, surface_format);
-        }
+        render_plugin_if_needed(state, &plugin_id, surface_format);
     }
-
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] handle_ui_event END");
 }
 
 fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::UiEvent) -> anyhow::Result<()> {
@@ -116,6 +97,10 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
             app_proto::ui_event::Event::Resize(r) => {
                 *plugin.canvas_size.borrow_mut() = (r.width, r.height);
                 *plugin.scale_factor.borrow_mut() = r.scale_factor;
+                // The host recreates the window target on resize: new handle.
+                if let Some(handle) = r.surface_handle {
+                    *plugin.surface_handle.borrow_mut() = Some(handle.id);
+                }
                 *plugin.needs_redrawing.borrow_mut() = true;
             }
             app_proto::ui_event::Event::Scroll(s) => {
@@ -223,7 +208,7 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
     }
 }
 
-fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, _surface_handle: u64) -> anyhow::Result<()> {
+fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, target_texture: u64) -> anyhow::Result<()> {
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] START for {}", plugin_id);
     let (width, height) = *plugin.canvas_size.borrow();
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] canvas size: {}x{}", width, height);
@@ -274,14 +259,8 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] commands_changed={}, is_layout_dirty={}", commands_changed, *is_layout_dirty);
 
     if commands_changed || *is_layout_dirty {
-        veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Calling render_ui");
-        let texture_id = crate::module::graphics::render_ui(plugin, renderer, width, height, sf, surface_format)?;
-        veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] display_frame with texture_id={}", texture_id);
-
-        let cmd = veldsdk::rpc::app::AppDisplayCommand {
-            command: Some(veldsdk::rpc::app::app_display_command::Command::DrawFrame(veldsdk::rpc::app::DrawFrame { texture_id }))
-        };
-        crate::calls::app::display(&cmd);
+        veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Rendering into target texture {}", target_texture);
+        crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf, surface_format)?;
 
         *last_cmds = renderer.draw_commands.clone();
         *last_verts = renderer.vertices.clone();

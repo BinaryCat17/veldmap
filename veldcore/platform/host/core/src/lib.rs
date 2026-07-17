@@ -24,8 +24,6 @@ pub mod compute {
     include!(concat!(env!("OUT_DIR"), "/veldmap.compute.rs"));
 }
 
-pub const SURFACE_ID: u64 = 0;
-
 pub struct CallContextInner {
     pub input: Vec<u8>,
     pub output: Vec<u8>,

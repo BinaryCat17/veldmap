@@ -189,24 +189,6 @@ message FsListResult {
 
 // --- DYNAMIC RESOURCE DISCOVERY ---
 
-message GetResourceRequest {
-  string name = 1;
-}
-
-message GetResourceResponse {
-  ResourceHandle handle = 1;
-  string error = 2;
-}
-
-message CreateDataRequest {
-  uint64 size = 1;
-}
-
-message CreateDataResponse {
-  ResourceHandle handle = 1;
-  string error = 2;
-}
-
 // --- ASYNC TASKS ---
 
 message TaskResponse {
