@@ -2,12 +2,6 @@ syntax = "proto3";
 
 package veldmap.core;
 
-// Metadata for CRDT and P2P synchronization
-message SyncMetadata {
-  string origin_id = 1;      // Device/Node ID that created this message
-  uint64 lamport_clock = 2; // Logic clock for ordering
-}
-
 // UNIVERSAL RESOURCE HANDLE
 message ResourceHandle {
   uint64 id = 1;           // Local session ID
@@ -16,40 +10,23 @@ message ResourceHandle {
 }
 
 // UNIVERSAL RPC CONTAINER
+//
+// Идентичность вызывающего (instance_id для проверок доступа) хост берёт из
+// ABI-вызова (локально) или назначает соединению сам (для удалённых пиров) —
+// в сообщении её нет, чтобы её нельзя было подделать.
 message RpcRequest {
   string service = 1;
   string method = 2;
   bytes payload = 3;
-  SyncMetadata sync = 4;
-  uint32 instance_id = 5; // Added for resource isolation and ownership
 }
 
 message RpcResponse {
   bytes payload = 1;
   string error = 2;
-  SyncMetadata sync = 3;
 }
 
 // An intentionally empty payload (lifecycle signals etc.)
 message Empty {}
-
-// --- RESOURCE LIFECYCLE ---
-
-message AcquireResourceRequest {
-  uint64 id = 1;
-}
-
-message ReleaseResourceRequest {
-  uint64 id = 1;
-}
-
-message FreezeResourceRequest {
-  uint64 id = 1;
-}
-
-message DestroyResourceRequest {
-  uint64 id = 1;
-}
 
 // --- FILESYSTEM API ---
 
@@ -77,10 +54,6 @@ message FsListRequest {
 message FsListResponse {
   repeated string entries = 1;
   string correlation_id = 2;
-}
-
-message FsDeleteRequest {
-  string path = 1;
 }
 
 message FsDownloadRequest {
@@ -114,19 +87,6 @@ message HttpTaskResponse {
 
 // --- IMAGE API ---
 
-message ImageInfoRequest {
-  string path = 1;
-  string correlation_id = 2;
-}
-
-message ImageInfoResponse {
-  uint32 width = 1;
-  uint32 height = 2;
-  uint32 channels = 3;
-  string error = 4;
-  string correlation_id = 5;
-}
-
 message ImageLoadRequest {
   string path = 1;
   uint32 target_width = 2;  // 0 means original
@@ -144,14 +104,6 @@ message ImageLoadResult {
   ResourceHandle handle = 1;
   string error = 2;
   string correlation_id = 3;
-}
-
-message ImageInfoResult {
-  uint32 width = 1;
-  uint32 height = 2;
-  uint32 channels = 3;
-  string error = 4;
-  string correlation_id = 5;
 }
 
 message FsReadResult {

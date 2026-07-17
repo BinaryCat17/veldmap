@@ -68,16 +68,14 @@ async fn handle_connection(incoming: iroh::endpoint::Incoming, dispatcher: Arc<D
                         Err(_) => return,
                     };
 
-                    let (payload, error) = match dispatcher.call(&request.service, &request.method, request.payload, request.instance_id).await {
+                    // Идентичность пира не доверяем: вызов исполняется под
+                    // фиксированным непривилегированным instance_id.
+                    let (payload, error) = match dispatcher.call(&request.service, &request.method, request.payload, crate::registry::REMOTE_INSTANCE_ID).await {
                         Ok(p) => (p, String::new()),
                         Err(e) => (Vec::new(), e.to_string()),
                     };
 
-                    let response = RpcResponse {
-                        payload,
-                        error,
-                        sync: None,
-                    };
+                    let response = RpcResponse { payload, error };
 
                     let mut out_buf = Vec::new();
                     if response.encode(&mut out_buf).is_ok() {

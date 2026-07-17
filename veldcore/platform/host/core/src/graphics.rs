@@ -487,37 +487,6 @@ impl GraphicsDevice {
 
 // ── Render command execution ───────────────────────────────────
 
-fn get_ui_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("VeldMap UI BGL"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0, visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1, visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    })
-}
-
-fn get_ui_sampler(device: &wgpu::Device) -> wgpu::Sampler {
-    device.create_sampler(&wgpu::SamplerDescriptor {
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    })
-}
-
 pub fn execute_render_commands<'a>(
     rp: &mut wgpu::RenderPass<'a>,
     command_buffer: &'a CommandBuffer,
@@ -537,20 +506,6 @@ pub fn execute_render_commands<'a>(
             RenderCommand::SetBindGroup(bg) => {
                 if let Some(Resource::GpuObj(GpuObject::BindGroup(bind_group))) = gpu.get_resource(bg.bind_group_id, requestor_id) {
                     rp.set_bind_group(bg.index, bind_group.as_ref(), &[]);
-                } else if let Some(Resource::Data(region_id)) = gpu.get_resource(bg.bind_group_id, requestor_id) {
-                    if let Some((texture, _, _, _)) = gpu.get_texture_info(region_id, requestor_id) {
-                        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                        let bgl = get_ui_layout(&gpu.get_device());
-                        let sampler = get_ui_sampler(&gpu.get_device());
-                        let bg_res = gpu.get_device().create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("Proxy Fallback BG"), layout: &bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
-                            ],
-                        });
-                        rp.set_bind_group(bg.index, &bg_res, &[]);
-                    }
                 }
             }
             RenderCommand::SetVertexBuffer(vb) => {

@@ -65,7 +65,7 @@ fn render_ui(state: &{{ rust.state }}) {
 
 #[no_mangle]
 pub extern "C" fn init() -> i32 {
-    let _ = veldsdk::core::init();
+    let _ = veldsdk::logging::init();
     let input = veldsdk::rpc::host::load_input();
 
     let config_json = if input.is_empty() {
@@ -154,7 +154,6 @@ pub extern "C" fn handle_rpc() -> i32 {
             let response = RpcResponse {
                 payload: Vec::new(),
                 error: String::new(),
-                sync: None,
             };
             veldsdk::rpc::host::store_output(response.encode_to_vec());
             0
@@ -164,7 +163,6 @@ pub extern "C" fn handle_rpc() -> i32 {
             let response = RpcResponse {
                 payload: Vec::new(),
                 error: e,
-                sync: None,
             };
             veldsdk::rpc::host::store_output(response.encode_to_vec());
             0
@@ -174,7 +172,6 @@ pub extern "C" fn handle_rpc() -> i32 {
             let response = RpcResponse {
                 payload: Vec::new(),
                 error: "Module panicked".to_string(),
-                sync: None,
             };
             veldsdk::rpc::host::store_output(response.encode_to_vec());
             0

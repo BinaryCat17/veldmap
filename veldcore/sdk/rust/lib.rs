@@ -1,8 +1,8 @@
 pub mod rpc;
-pub mod core;
+pub mod logging;
 pub mod graphics;
 
-pub use core::FLAG_PERF;
+pub use logging::FLAG_PERF;
 
 pub const FLAG_SDK: u32 = 1 << 6;
 pub const FLAG_UI_SERVICE: u32 = 1 << 7;

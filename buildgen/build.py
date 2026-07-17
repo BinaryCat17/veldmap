@@ -128,17 +128,12 @@ def _topo_sort(modules: list[dict]) -> list[dict]:
         except Exception:
             pass
 
-    # Kahn's algorithm
+    # Kahn's algorithm: in_degree[name] = число зависимостей, которые должны
+    # собраться раньше name.
     in_degree = {name: 0 for name in by_name}
-    for name, dep_set in deps.items():
-        for dep in dep_set:
-            in_degree[name] = in_degree.get(name, 0)
-            # name depends on dep → dep must come first → name's in_degree++
-    # Recompute properly
-    in_degree = {name: 0 for name in by_name}
-    for name, dep_set in deps.items():
-        for dep in dep_set:
-            in_degree[name] += 1
+    for _name, dep_set in deps.items():
+        for _dep in dep_set:
+            in_degree[_name] += 1
 
     queue  = [n for n in by_name if in_degree[n] == 0]
     result = []

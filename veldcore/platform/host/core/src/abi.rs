@@ -59,7 +59,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 Ok(p) => (p, String::new()),
                 Err(e) => (Vec::new(), e.to_string()),
             };
-            let res_buf = RpcResponse { payload, error, sync: None }.encode_to_vec();
+            let res_buf = RpcResponse { payload, error }.encode_to_vec();
             write_response_back(&mut caller, &res_buf).await
         })
     })?;
@@ -203,7 +203,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let graphics = caller.data().graphics.clone();
             let result = graphics.create_resource(payload, instance_id);
             let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
-            let res_buf = RpcResponse { payload: res_payload, error, sync: None }.encode_to_vec();
+            let res_buf = RpcResponse { payload: res_payload, error }.encode_to_vec();
             write_response_back(&mut caller, &res_buf).await
         })
     })?;
@@ -217,7 +217,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let graphics = caller.data().graphics.clone();
             let result = graphics.execute(payload, instance_id);
             let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
-            let res_buf = RpcResponse { payload: res_payload, error, sync: None }.encode_to_vec();
+            let res_buf = RpcResponse { payload: res_payload, error }.encode_to_vec();
             write_response_back(&mut caller, &res_buf).await
         })
     })?;

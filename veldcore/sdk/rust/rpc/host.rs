@@ -64,8 +64,7 @@ unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>>
 pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
     let request = RpcRequest {
-        service: service.to_string(), method: method.to_string(),
-        payload, sync: None, instance_id: 0,
+        service: service.to_string(), method: method.to_string(), payload,
     };
     let req_buf = request.encode_to_vec();
     unsafe {
@@ -172,7 +171,11 @@ pub fn get_config(key: &str) -> Option<String> {
 /// UUID от system-сервиса; при недоступности — деградация в id по времени.
 pub fn generate_id() -> String {
     use crate::rpc::core::GenerateUuidResponse;
-    let fallback = || format!("id_{}", std::time::SystemTime::now().elapsed().map(|d| d.as_nanos()).unwrap_or(0));
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let fallback = || {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        format!("id_{}", nanos)
+    };
     match call_service("system", "generate_uuid", Vec::new()) {
         Ok(res) => GenerateUuidResponse::decode(&res[..]).map(|r| r.uuid).unwrap_or_else(|_| fallback()),
         Err(_) => fallback(),
@@ -204,8 +207,7 @@ pub fn publish(topic: &str, payload: Vec<u8>) {
         return;
     }
     let request = RpcRequest {
-        service: parts[0].to_string(), method: parts[1].to_string(),
-        payload, sync: None, instance_id: 0,
+        service: parts[0].to_string(), method: parts[1].to_string(), payload,
     };
     let req_buf = request.encode_to_vec();
     unsafe { veld_host_publish(req_buf.as_ptr() as u64, req_buf.len() as u64); }

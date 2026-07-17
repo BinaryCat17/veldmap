@@ -222,7 +222,9 @@ impl Dispatcher {
         }
     }
 
-    async fn call_remote(&self, node_id: iroh::EndpointId, service: &str, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>> {
+    // Локальный requestor_id не пересекает границу машины: удалённый хост
+    // назначит вызову свой собственный instance_id (см. node::handle_connection).
+    async fn call_remote(&self, node_id: iroh::EndpointId, service: &str, method: &str, payload: Vec<u8>, _requestor_id: u32) -> Result<Vec<u8>> {
         // В Iroh 0.96 connect возвращает Connection напрямую
         let conn = self.endpoint.connect(node_id, b"veldmap/rpc/1").await?;
         let (mut send, mut recv) = conn.open_bi().await?;
@@ -231,8 +233,6 @@ impl Dispatcher {
             service: service.to_string(),
             method: method.to_string(),
             payload,
-            sync: None,
-            instance_id: requestor_id,
         };
 
         let mut buf = Vec::new();
