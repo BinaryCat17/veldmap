@@ -1,6 +1,5 @@
 pub use crate::rpc::core::*;
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
-use prost::Message;
 
 pub const FLAG_PERF: u32 = 1 << 0;
 
@@ -58,34 +57,14 @@ pub struct HostLogger;
 impl Log for HostLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool { true }
     fn log(&self, record: &Record) {
-        
-        let level = match record.level() {
-            log::Level::Error => LogLevel::Error,
-            log::Level::Warn => LogLevel::Warn,
-            log::Level::Info => LogLevel::Info,
-            log::Level::Debug => LogLevel::Debug,
-            log::Level::Trace => LogLevel::Trace,
-        };
-        
         let mut flags = 0;
         let target = record.target();
-        if target.starts_with("veldmap_vlog:") {
-            if let Some(flags_str) = target.split(':').nth(1) {
-                if let Ok(f) = flags_str.parse::<u32>() {
-                    flags = f;
-                }
-            }
-        } else if target == "veldmap_perf" {
-            flags |= FLAG_PERF;
+        if let Some(flags_str) = target.strip_prefix("veldmap_vlog:") {
+            flags = flags_str.parse::<u32>().unwrap_or(0);
         }
 
-        // Direct sync call for logging (exception to fire-and-forget rule)
-        let req = LogRequest { 
-            level: level as i32, 
-            message: format!("{}", record.args()),
-            flags,
-        };
-        let _ = crate::rpc::host::call_service("system", "log", req.encode_to_vec());
+        // Прямой ABI-вызов: без RPC-хопа через диспетчер и system-сервис.
+        crate::rpc::host::log(record.level(), flags, &format!("{}", record.args()));
     }
     fn flush(&self) {}
 }

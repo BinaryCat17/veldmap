@@ -33,22 +33,6 @@ message RpcResponse {
 // An intentionally empty payload (lifecycle signals etc.)
 message Empty {}
 
-// SYSTEM SERVICE MESSAGES
-
-enum LogLevel {
-  TRACE = 0;
-  DEBUG = 1;
-  INFO = 2;
-  WARN = 3;
-  ERROR = 4;
-}
-
-message LogRequest {
-  LogLevel level = 1;
-  string message = 2;
-  uint32 flags = 3;
-}
-
 // --- RESOURCE LIFECYCLE ---
 
 message AcquireResourceRequest {

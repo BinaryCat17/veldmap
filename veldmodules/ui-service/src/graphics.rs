@@ -81,8 +81,6 @@ pub fn render_ui(
 fn create_texture_view(texture_id: u64, surface_format: i32) -> anyhow::Result<u64> {
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[CREATE-VIEW] START texture_id={}", texture_id);
     let view_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-        instance_id: 0,
         command: Some(compute_resource_request::Command::CreateTextureView(CreateTextureView {
             texture_id, 
             format: surface_format, 
@@ -190,8 +188,6 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
     }
 
     let view_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-        instance_id: 0,
         command: Some(compute_resource_request::Command::CreateTextureView(CreateTextureView {
             texture_id, format: TextureFormat::TexRgba8Unorm as i32, dimension: 0, aspect: 1, ..Default::default()
         }))
@@ -200,8 +196,6 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
     let view_id = view_res.handle.ok_or_else(|| anyhow!("Failed to create texture view"))?.id;
 
     let sampler_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-        instance_id: 0,
         command: Some(compute_resource_request::Command::CreateSampler(CreateSampler { 
             mag_filter: FilterMode::FiltLinear as i32, 
             min_filter: FilterMode::FiltLinear as i32, 
@@ -212,8 +206,6 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
     let sampler_id = sampler_res.handle.ok_or_else(|| anyhow!("Failed to create sampler"))?.id;
 
     let bg_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-        instance_id: 0,
         command: Some(compute_resource_request::Command::CreateBindGroup(CreateBindGroup {
             layout_id: renderer.bgl_id.ok_or_else(|| anyhow!("No BGL"))?,
             entries: vec![
@@ -245,8 +237,6 @@ pub fn ensure_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surf
 fn ensure_atlas_bind_group_layout(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     if renderer.bgl_id.is_none() {
         let req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
             command: Some(compute_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
                 label: "Iced Atlas BGL".into(),
                 entries: vec![
@@ -266,8 +256,6 @@ fn ensure_uniform_bind_group_layout(plugin: &PluginUiState) -> anyhow::Result<()
     let mut uniform_layout_id = plugin.uniform_layout_id.borrow_mut();
     if uniform_layout_id.is_none() {
         let bgl_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
             command: Some(compute_resource_request::Command::CreateBindGroupLayout(CreateBindGroupLayout {
                 label: "UI Uniform BGL".into(),
                 entries: vec![BindGroupLayoutEntry {
@@ -286,8 +274,6 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
     if ui_pipeline.is_none() {
         let shader_source = include_str!("shaders.wgsl");
         let sh_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
             command: Some(compute_resource_request::Command::CreateShader(CreateShaderModule {
                 source: shader_source.into(), label: "UI Shader".into()
             }))
@@ -299,8 +285,6 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
             if let Some(id) = *plugin.uniform_layout_id.borrow() { bgl_ids.push(id); }
 
             let pip_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-                instance_id: 0,
                 command: Some(compute_resource_request::Command::CreatePipeline(CreateRenderPipeline {
                     shader_id: sh.id, label: "UI Pipeline".into(), 
                     vertex_entry: "vs_main".into(), fragment_entry: "fs_main".into(),
@@ -341,8 +325,6 @@ fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
         if let Some(buf_id) = arena_alloc_buffer(16, 64, false) {
             *uniform_buffer_id = Some(buf_id);
             let bg_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-                instance_id: 0,
                 command: Some(compute_resource_request::Command::CreateBindGroup(CreateBindGroup {
                     layout_id: plugin.uniform_layout_id.borrow().unwrap(), 
                     entries: vec![BindGroupEntry { binding: 0, resource: Some(bind_group_entry::Resource::BufferId(buf_id)) }], 
@@ -370,8 +352,6 @@ fn ensure_atlas_texture(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
 fn ensure_atlas_bind_group(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     if renderer.atlas_bind_group_id.is_none() && renderer.atlas_texture_id.is_some() && renderer.bgl_id.is_some() {
         let sampler_req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
             command: Some(compute_resource_request::Command::CreateSampler(CreateSampler { 
                 mag_filter: FilterMode::FiltLinear as i32, 
                 min_filter: FilterMode::FiltLinear as i32, 
@@ -382,8 +362,6 @@ fn ensure_atlas_bind_group(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
             .ok().and_then(|r| r.handle).map(|h| h.id).unwrap_or(0);
         
         let req = ComputeResourceRequest {
-        correlation_id: veldsdk::generate_id!(),
-            instance_id: 0,
             command: Some(compute_resource_request::Command::CreateBindGroup(CreateBindGroup {
                 layout_id: renderer.bgl_id.unwrap(), 
                 entries: vec![

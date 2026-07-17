@@ -14,16 +14,12 @@ static NEXT_INSTANCE_ID: AtomicU32 = AtomicU32::new(100); // Local plugins start
 
 
 
-/// Loads all services from the manifest.
-/// Returns the instance id assigned to each local WASM service, keyed by name.
-pub async fn load_services(
-    ctx: Arc<crate::setup::HostContext>,
-) -> anyhow::Result<std::collections::HashMap<String, u32>>
-{
+/// Loads all services from the manifest. Instance ids локальных wasm-сервисов
+/// регистрируются в диспетчере (`Dispatcher::instance_of`).
+pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Result<()> {
     let mut config = Config::new();
     config.async_support(true);
     let engine = Engine::new(&config)?;
-    let mut instance_ids = std::collections::HashMap::new();
 
     for (name, entry) in &ctx.config.manifest.services {
         match entry.location.as_str() {
@@ -175,12 +171,12 @@ pub async fn load_services(
                         tokio::select! {
                             cmd = rx.recv() => {
                                 match cmd {
-                                    Some(crate::dispatcher::RpcCommand::Call { service_name, method, payload, reply, .. }) => {
+                                    Some(crate::dispatcher::RpcCommand::Call { service_name, method, payload, requestor_id, reply }) => {
                                         // handle_rpc() decodes its input as an RpcRequest to recover the
                                         // "{service}/{method}" topic, so it must be re-wrapped here - the
                                         // dispatcher only carries the bare inner payload internally.
                                         let req = crate::core::RpcRequest {
-                                            service: service_name, method, payload, sync: None, instance_id: 0,
+                                            service: service_name, method, payload, sync: None, instance_id: requestor_id,
                                         };
                                         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
@@ -193,9 +189,9 @@ pub async fn load_services(
                                         };
                                         let _ = reply.send(Ok(out));
                                     }
-                                    Some(crate::dispatcher::RpcCommand::Notify { service_name, method, payload }) => {
+                                    Some(crate::dispatcher::RpcCommand::Notify { service_name, method, payload, publisher }) => {
                                         let req = crate::core::RpcRequest {
-                                            service: service_name, method, payload, sync: None, instance_id: 0,
+                                            service: service_name, method, payload, sync: None, instance_id: publisher,
                                         };
                                         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
@@ -223,7 +219,6 @@ pub async fn load_services(
                 for topic in subs {
                     ctx.dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(tx.clone()));
                 }
-                instance_ids.insert(name.clone(), instance_id);
             }
             "remote" => {
                 let node_id_str = entry.node_id.as_ref().ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
@@ -233,5 +228,5 @@ pub async fn load_services(
             _ => {}
         }
     }
-    Ok(instance_ids)
+    Ok(())
 }

@@ -27,6 +27,7 @@ pub enum RpcCommand {
         service_name: String,
         method: String,
         payload: Vec<u8>,
+        publisher: u32,
     },
 }
 
@@ -118,6 +119,7 @@ impl Dispatcher {
                         service_name: service_name.to_string(),
                         method: method.to_string(),
                         payload: payload.clone(),
+                        publisher,
                     }).is_err() {
                         crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
                     }

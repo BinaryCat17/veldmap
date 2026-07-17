@@ -35,27 +35,20 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
 /// a static layout produces no set_view diffs, so frame ticks must also be able
 /// to trigger rendering or a never-changing UI would never be drawn.
 fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i32) {
+    // plugins и renderer — разные поля State, заимствуются одновременно.
     let Some(plugin) = state.plugins.get(plugin_id) else { return };
     let needs_render = *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow();
     let surface_handle = *plugin.surface_handle.borrow();
 
-    if let Some(handle) = surface_handle {
-        if needs_render {
-            // Get plugin and renderer separately to avoid borrow issues
-            let plugin_ref = state.plugins.get_mut(plugin_id).unwrap() as *mut PluginUiState;
-            let renderer_ref = &mut state.renderer as *mut GpuRenderer;
-            unsafe {
-                if let Err(e) = render_plugin(&mut *plugin_ref, &mut *renderer_ref, plugin_id, surface_format, handle) {
-                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[render_plugin_if_needed] render_plugin failed: {}", e);
-                }
-            }
+    if let (Some(handle), true) = (surface_handle, needs_render) {
+        if let Err(e) = render_plugin(plugin, &mut state.renderer, plugin_id, surface_format, handle) {
+            veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[render_plugin_if_needed] render_plugin failed: {}", e);
         }
     }
 
     // Dispatch messages captured by iced during this render (button presses etc.)
     // immediately: deferring them to the next set_view would deadlock, because the
     // plugin only sends set_view after reacting to these very messages.
-    let plugin = state.plugins.get(plugin_id).unwrap();
     let pending = plugin.pending_messages.borrow_mut().drain(..).collect::<Vec<_>>();
     for msg in pending {
         dispatch_event(UiEventResponse {
@@ -131,7 +124,17 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
             }
             app_proto::ui_event::Event::Frame(f) => {
                 *plugin.monitor_fps.borrow_mut() = f.monitor_fps;
-                *plugin.actual_fps.borrow_mut() = f.actual_fps;
+
+                // FPS-счётчик: копим кадры и раз в 5 секунд отчитываемся.
+                {
+                    let mut fps = plugin.fps_window.borrow_mut();
+                    fps.0 += 1;
+                    fps.1 += f.dt;
+                    if fps.1 >= 5.0 {
+                        veldsdk::vinfo!(veldsdk::FLAG_PERF, "[FPS] {}: {:.1} avg over {:.1}s", plugin_id, fps.0 as f32 / fps.1, fps.1);
+                        *fps = (0, 0.0);
+                    }
+                }
 
                 // Process scroll inertia
                 {

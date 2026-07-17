@@ -122,56 +122,16 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         memory.alloc_texture(width as u32, height as u32, format as i32, usage as u32, false, owner_id)
     })?;
 
-    // Гранты адресуются по имени сервиса — модули нигде не оперируют числовыми
-    // instance id. Право выдаёт только владелец ресурса (или хост).
-
-    // veld_memory_transfer(region_id, name_ptr, name_len) → bool
-    linker.func_wrap("env", "veld_memory_transfer", |mut caller: Caller<'_, HostState>, region_id: u64, name_ptr: u64, name_len: u64| -> u64 {
-        let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
-        let registry = caller.data().registry.clone();
-        let owner_id = caller.data().instance_id;
-        let mut ok = false;
-        registry.update_lease(region_id, |lease| {
-            if lease.owner_id == owner_id || owner_id == 0 {
-                lease.owner_id = target;
-                lease.readers.clear();
-                lease.writers.clear();
-                ok = true;
-            }
-        });
-        if ok { 1 } else { 0 }
+    // Lease-операции адресуются по имени сервиса — модули нигде не оперируют
+    // числовыми instance id. Право менять lease имеет только владелец (или хост).
+    // grant_write — делегирование: так владелец окна назначает рендерера текстуры.
+    lease_op(linker, "veld_memory_transfer", |lease, target| {
+        lease.owner_id = target;
+        lease.readers.clear();
+        lease.writers.clear();
     })?;
-
-    // veld_memory_grant_read(region_id, name_ptr, name_len) → bool
-    linker.func_wrap("env", "veld_memory_grant_read", |mut caller: Caller<'_, HostState>, region_id: u64, name_ptr: u64, name_len: u64| -> u64 {
-        let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
-        let registry = caller.data().registry.clone();
-        let owner_id = caller.data().instance_id;
-        let mut ok = false;
-        registry.update_lease(region_id, |lease| {
-            if lease.owner_id == owner_id || owner_id == 0 {
-                lease.add_reader(target);
-                ok = true;
-            }
-        });
-        if ok { 1 } else { 0 }
-    })?;
-
-    // veld_memory_grant_write(region_id, name_ptr, name_len) → bool
-    // Делегирование записи: так владелец окна назначает рендерера своей текстуры.
-    linker.func_wrap("env", "veld_memory_grant_write", |mut caller: Caller<'_, HostState>, region_id: u64, name_ptr: u64, name_len: u64| -> u64 {
-        let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
-        let registry = caller.data().registry.clone();
-        let owner_id = caller.data().instance_id;
-        let mut ok = false;
-        registry.update_lease(region_id, |lease| {
-            if lease.owner_id == owner_id || owner_id == 0 {
-                lease.add_writer(target);
-                ok = true;
-            }
-        });
-        if ok { 1 } else { 0 }
-    })?;
+    lease_op(linker, "veld_memory_grant_read", |lease, target| lease.add_reader(target))?;
+    lease_op(linker, "veld_memory_grant_write", |lease, target| lease.add_writer(target))?;
 
     // veld_memory_revoke(region_id) → bool
     linker.func_wrap("env", "veld_memory_revoke", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
@@ -264,6 +224,29 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_describe", |_: u32| {})?;
     linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_throw", |_: u32, _: u32| {})?;
 
+    Ok(())
+}
+
+/// Регистрирует ABI-функцию вида `(region_id, name_ptr, name_len) → bool`,
+/// меняющую lease ресурса. Проверка владельца — общая для всех операций.
+fn lease_op(
+    linker: &mut Linker<HostState>,
+    name: &'static str,
+    apply: impl Fn(&mut crate::registry::Lease, u32) + Send + Sync + Copy + 'static,
+) -> anyhow::Result<()> {
+    linker.func_wrap("env", name, move |mut caller: Caller<'_, HostState>, region_id: u64, name_ptr: u64, name_len: u64| -> u64 {
+        let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
+        let registry = caller.data().registry.clone();
+        let owner_id = caller.data().instance_id;
+        let mut ok = false;
+        registry.update_lease(region_id, |lease| {
+            if lease.owner_id == owner_id || owner_id == 0 {
+                apply(lease, target);
+                ok = true;
+            }
+        });
+        if ok { 1 } else { 0 }
+    })?;
     Ok(())
 }
 

@@ -24,6 +24,5 @@ prost-build = "0.14"
 [features]
 default = ["pdk"]
 compute = []
-app = []
 pdk = []
 client = []

@@ -465,7 +465,7 @@ impl GraphicsDevice {
             }
             _ => return Err(anyhow::anyhow!("Unsupported resource command")),
         }
-        Ok(ComputeResourceResponse { handle: Some(handle), error: String::new(), correlation_id: String::new() }.encode_to_vec())
+        Ok(ComputeResourceResponse { handle: Some(handle), error: String::new() }.encode_to_vec())
     }
 
     // ── Compute: execute (record render commands) ─────────────

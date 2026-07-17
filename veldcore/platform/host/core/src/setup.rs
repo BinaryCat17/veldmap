@@ -26,7 +26,9 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
     let log_file: Option<Arc<Mutex<std::fs::File>>> = log_file.map(|f| Arc::new(Mutex::new(f)));
 
     let file_log = log_file.clone();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,veldmap_vlog=trace,info"))
+    // Свои логи — целиком (фильтрует veld_log по флагам), чужие крейты — только warn+.
+    // netlink_packet_route: warn «ядро новее крейта» при каждом старте, бесполезен.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,netlink_packet_route=error,warn"))
         .format(move |buf, record| {
             let log_line = format!(
                 "[{}] <{}> {}\n",
@@ -166,11 +168,17 @@ pub async fn init_core_services(
     
     let mut rng = rand::rng();
     let secret_key = iroh::SecretKey::generate(&mut rng);
-    let endpoint = iroh::Endpoint::builder()
+
+    // Relay и discovery iroh нужны только remote-сервисам (NAT traversal,
+    // публикация адреса). Без них не ходим в сеть и не шумим в логи.
+    let has_remote = config.manifest.services.values().any(|s| s.location == "remote");
+    let mut builder = iroh::Endpoint::builder()
         .secret_key(secret_key)
-        .alpns(vec![b"veldmap/rpc/1".to_vec()])
-        .bind()
-        .await?;
+        .alpns(vec![b"veldmap/rpc/1".to_vec()]);
+    if !has_remote {
+        builder = builder.relay_mode(iroh::RelayMode::Disabled).clear_address_lookup();
+    }
+    let endpoint = builder.bind().await?;
     let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
 
     Ok(Arc::new(HostContext {

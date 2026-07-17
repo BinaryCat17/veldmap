@@ -120,9 +120,13 @@ async fn main() -> anyhow::Result<()> {
 
     // ── 2. GPU ──────────────────────────────────────────────────────────────
     vinfo!(FLAG_HOST_RENDER, "Creating wgpu instance (Vulkan only)...");
+    // Валидация Vulkan — только по запросу через env (WGPU_VALIDATION=1 и т.п.):
+    // InstanceFlags::all() в релизе включал полный validation layer и тормозил.
+    // ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER обязателен: Dozen (Vulkan поверх
+    // DX12 в WSL) — non-conformant драйвер, без флага остаётся только llvmpipe.
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
-        flags: wgpu::InstanceFlags::all(),
+        flags: (wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER).with_env(),
         ..Default::default()
     });
     let surface = instance.create_surface(winit_window.clone())?;
@@ -147,8 +151,8 @@ async fn main() -> anyhow::Result<()> {
         pending: pending_surfaces.clone(),
     })));
 
-    let instance_ids = veldmap_host_core::plugins::load_services(ctx.clone()).await?;
-    if !instance_ids.contains_key(&owner_name) {
+    veldmap_host_core::plugins::load_services(ctx.clone()).await?;
+    if dispatcher.instance_of(&owner_name).is_none() {
         anyhow::bail!("Window owner '{}' is not a loaded service", owner_name);
     }
 

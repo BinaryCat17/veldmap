@@ -83,11 +83,9 @@ impl ComputeRecorder {
         };
         
         let submit_req = Submit {
-            instance_id: 0,
             target_texture_view_id,
             clear_color: None,
             command_buffer: Some(cmd_buffer),
-            correlation_id: crate::generate_id!(),
         };
         
         graphics_execute(submit_req.encode_to_vec())?;

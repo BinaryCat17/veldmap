@@ -3,8 +3,6 @@ pub mod core;
 
 #[cfg(feature = "compute")]
 pub mod compute;
-#[cfg(feature = "app")]
-pub mod app;
 
 pub use core::FLAG_PERF;
 
@@ -23,7 +21,7 @@ pub use rpc::core::ResourceHandle;
 
 /// RAII handle to a memory region or graphics object.
 /// On drop: releases the resource via memory ABI (no RPC overhead).
-/// On clone: acquires a read lease via memory ABI.
+/// Deliberately not Clone: exactly one owner frees the resource.
 pub struct OwnedResource {
     handle: ResourceHandle,
 }
@@ -35,12 +33,6 @@ impl OwnedResource {
 
     pub fn handle(&self) -> ResourceHandle { self.handle.clone() }
     pub fn id(&self) -> u64 { self.handle.id }
-
-    pub fn leak(self) -> ResourceHandle {
-        let handle = self.handle.clone();
-        std::mem::forget(self);
-        handle
-    }
 }
 
 impl Drop for OwnedResource {
@@ -49,12 +41,6 @@ impl Drop for OwnedResource {
         {
             rpc::host::arena_free(self.handle.id);
         }
-    }
-}
-
-impl Clone for OwnedResource {
-    fn clone(&self) -> Self {
-        Self { handle: self.handle.clone() }
     }
 }
 

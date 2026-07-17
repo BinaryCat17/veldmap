@@ -107,6 +107,7 @@ where
             "HOST_RENDER" => crate::logging::FLAG_HOST_RENDER,
             "COMPUTE" => crate::logging::FLAG_COMPUTE,
             "SDK" => crate::logging::FLAG_SDK,
+            "UI_SERVICE" => crate::logging::FLAG_UI_SERVICE,
             "UI_HANDLERS" => crate::logging::FLAG_UI_HANDLERS,
             "GRAPHICS" => crate::logging::FLAG_GRAPHICS,
             _ => {

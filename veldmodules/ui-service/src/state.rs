@@ -13,7 +13,6 @@ pub struct PendingMessage {
     pub value: String,
 }
 
-#[allow(dead_code)]
 pub struct PluginUiState {
     pub layout: proto::Layout,
     pub is_layout_dirty: RefCell<bool>,
@@ -38,19 +37,12 @@ pub struct PluginUiState {
     /// Инвалидируется сменой texture_id (владелец аллоцирует новый при resize).
     pub target_view: RefCell<Option<(u64, u64)>>,
 
-    // Performance Stats
-    pub perf_count: RefCell<u64>,
-    pub perf_total: RefCell<u128>,
-    pub perf_conv: RefCell<u128>,
-    pub perf_build: RefCell<u128>,
-    pub perf_update: RefCell<u128>,
-    pub perf_draw: RefCell<u128>,
-    pub perf_gpu: RefCell<u128>,
-    pub perf_last_log: RefCell<Option<std::time::Instant>>,
-
     pub monitor_fps: RefCell<u32>,
-    pub actual_fps: RefCell<f32>,
-    
+    /// FPS-счётчик: (кадры, накопленные секунды) с последнего отчёта.
+    /// Раз в 5 секунд средний FPS уходит в лог с флагом PERF.
+    pub fps_window: RefCell<(u32, f32)>,
+
+
     /// Messages captured from iced UI events, waiting to be dispatched
     pub pending_messages: RefCell<Vec<PendingMessage>>,
     /// Render-таргет, делегированный владельцем окна через set_surface.
@@ -104,18 +96,8 @@ impl PluginUiState {
             last_draw_commands: RefCell::new(Vec::new()),
             external_bind_groups: RefCell::new(HashMap::new()),
             target_view: RefCell::new(None),
-            
-            perf_count: RefCell::new(0),
-            perf_total: RefCell::new(0),
-            perf_conv: RefCell::new(0),
-            perf_build: RefCell::new(0),
-            perf_update: RefCell::new(0),
-            perf_draw: RefCell::new(0),
-            perf_gpu: RefCell::new(0),
-            perf_last_log: RefCell::new(Some(std::time::Instant::now())),
-            
             monitor_fps: RefCell::new(60),
-            actual_fps: RefCell::new(60.0),
+            fps_window: RefCell::new((0, 0.0)),
             pending_messages: RefCell::new(Vec::new()),
             surface_handle: RefCell::new(None),
         }

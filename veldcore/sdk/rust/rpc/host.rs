@@ -49,10 +49,7 @@ pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
 
 #[cfg(feature = "pdk")]
 pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    let is_log_call = service == "system" && method == "log";
-    if !is_log_call {
-        crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
-    }
+    crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
     let request = RpcRequest {
         service: service.to_string(), method: method.to_string(),
         payload, sync: None, instance_id: 0,

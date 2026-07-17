@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::time::{Instant, Duration};
 pub use log::Level;
 
+// Единое битовое пространство флагов. Должно совпадать со списком в
+// veldcore/sdk/rust/lib.rs — модули шлют эти же биты через ABI.
 pub const FLAG_PERF: u32 = 1 << 0;
 pub const FLAG_WASM: u32 = 1 << 1;
 pub const FLAG_DISPATCHER: u32 = 1 << 2;
@@ -11,8 +13,9 @@ pub const FLAG_ABI: u32 = 1 << 3;
 pub const FLAG_HOST_RENDER: u32 = 1 << 4;
 pub const FLAG_COMPUTE: u32 = 1 << 5;
 pub const FLAG_SDK: u32 = 1 << 6;
-pub const FLAG_UI_HANDLERS: u32 = 1 << 7;
-pub const FLAG_GRAPHICS: u32 = 1 << 8;
+pub const FLAG_UI_SERVICE: u32 = 1 << 7;
+pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
+pub const FLAG_GRAPHICS: u32 = 1 << 9;
 
 static ENABLED_FLAGS: AtomicU32 = AtomicU32::new(0);
 static RATE_LIMIT: Mutex<Option<RateLimiter>> = Mutex::new(None);
@@ -61,29 +64,27 @@ pub fn is_flag_enabled(flag: u32) -> bool {
 }
 
 pub fn veld_log(level: Level, flags: u32, plugin_name: Option<&str>, message: &str) {
-    // 1. Формируем имя источника (если None - значит хост)
     let source_name = plugin_name.unwrap_or("host");
     let is_host = plugin_name.is_none();
-    
-    // 2. Глобальная фильтрация по флагам ТОЛЬКО для хостовских логов
-    // Для плагинов флаги не используются - они логируют всегда
-    if is_host && flags != 0 {
+
+    // Warn/Error проходят всегда; остальное фильтруется флагами — одинаково
+    // для хоста и модулей (у них общее битовое пространство).
+    let important = level <= Level::Warn;
+    if !important && flags != 0 {
         let enabled = ENABLED_FLAGS.load(Ordering::Relaxed);
         if (flags & enabled) == 0 {
-            // Ни один из запрошенных флагов не включен - пропускаем лог
             return;
         }
     }
 
-    // 3. Rate limiting только для хостовских логов
+    // Rate limiting только для хостовских логов
     if is_host && is_rate_limited(message) {
         return;
     }
 
-    // 4. Формируем префикс производительности (только для хоста)
-    let p_tag = if is_host && (flags & FLAG_PERF) != 0 && is_flag_enabled(FLAG_PERF) { "[P]" } else { "" };
+    let p_tag = if (flags & FLAG_PERF) != 0 { "[P]" } else { "" };
 
-    // 5. Используем ЕДИНЫЙ таргет для всех системных логов
+    // Единый таргет для всех системных логов
     log::log!(target: "veldmap", level, "{}[{}] {}", p_tag, source_name, message);
 }
 
