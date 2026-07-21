@@ -105,7 +105,7 @@ pub extern "C" fn init() -> i32 {
 #[no_mangle]
 pub extern "C" fn handle_rpc() -> i32 {
     use prost::Message;
-    use veldsdk::rpc::core::{RpcRequest, RpcResponse};
+    use veldsdk::rpc::core::RpcRequest;
 
     let input = veldsdk::rpc::host::load_input();
     let request = match RpcRequest::decode(&input[..]) {
@@ -152,32 +152,16 @@ pub extern "C" fn handle_rpc() -> i32 {
         handled
     }));
 
+    // Шина fire-and-forget: ответ событию не полагается, ошибки — в лог.
     match res {
-        Ok(Ok(_)) => {
-            let response = RpcResponse {
-                payload: Vec::new(),
-                error: String::new(),
-            };
-            veldsdk::rpc::host::store_output(response.encode_to_vec());
-            0
-        }
+        Ok(Ok(_)) => 0,
         Ok(Err(e)) => {
             veldsdk::log::error!("{}", e);
-            let response = RpcResponse {
-                payload: Vec::new(),
-                error: e,
-            };
-            veldsdk::rpc::host::store_output(response.encode_to_vec());
-            0
+            1
         }
         Err(_) => {
             veldsdk::log::error!("Module panicked during RPC handling");
-            let response = RpcResponse {
-                payload: Vec::new(),
-                error: "Module panicked".to_string(),
-            };
-            veldsdk::rpc::host::store_output(response.encode_to_vec());
-            0
+            1
         }
     }
 }

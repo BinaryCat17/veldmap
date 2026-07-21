@@ -152,7 +152,6 @@ pub struct HostContext {
     pub registry: Arc<ResourceRegistry>,
     pub memory: Arc<MemoryManager>,
     pub graphics: Arc<GraphicsDevice>,
-    pub endpoint: iroh::Endpoint,
     pub config: Arc<crate::config::HostConfig>,
 }
 
@@ -166,27 +165,13 @@ pub async fn init_core_services(
     let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone()));
     let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), queue.clone(), surface_format));
     
-    let mut rng = rand::rng();
-    let secret_key = iroh::SecretKey::generate(&mut rng);
-
-    // Relay и discovery iroh нужны только remote-сервисам (NAT traversal,
-    // публикация адреса). Без них не ходим в сеть и не шумим в логи.
-    let has_remote = config.manifest.services.values().any(|s| s.location == "remote");
-    let mut builder = iroh::Endpoint::builder()
-        .secret_key(secret_key)
-        .alpns(vec![b"veldmap/rpc/1".to_vec()]);
-    if !has_remote {
-        builder = builder.relay_mode(iroh::RelayMode::Disabled).clear_address_lookup();
-    }
-    let endpoint = builder.bind().await?;
-    let dispatcher = Arc::new(Dispatcher::new(endpoint.clone()));
+    let dispatcher = Arc::new(Dispatcher::new());
 
     Ok(Arc::new(HostContext {
         dispatcher,
         registry,
         memory,
         graphics,
-        endpoint,
         config,
     }))
 }

@@ -6,8 +6,6 @@ edition = "2021"
 [dependencies]
 wasmtime = "41.0"
 wasmtime-wasi = "41.0"
-iroh = "0.96"
-iroh-gossip = "0.96"
 tokio = { version = "1.49", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -16,7 +14,6 @@ anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
 regex = "1.10"
-futures-util = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 wgpu = "28.0"
 dashmap = "6.0"

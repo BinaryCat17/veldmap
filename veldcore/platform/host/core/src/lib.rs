@@ -9,7 +9,6 @@ pub mod plugins;
 pub mod setup;
 pub mod abi;
 pub mod dispatcher;
-pub mod node;
 pub mod logging;
 
 pub mod core {
@@ -56,7 +55,6 @@ pub use config::*;
 pub use plugins::*;
 pub use setup::*;
 pub use dispatcher::*;
-pub use node::*;
 pub use graphics::*;
 pub use memory::*;
 pub use registry::*;

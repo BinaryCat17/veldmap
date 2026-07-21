@@ -6,7 +6,6 @@ use prost::Message;
 extern "C" {
     fn veld_host_publish(ptr: u64, len: u64);
     fn veld_host_log(level: u64, flags: u64, ptr: u64, len: u64);
-    fn veld_host_call(ptr: u64, len: u64) -> u64;
     fn veld_get_config(ptr: u64, len: u64) -> u64;
     fn veld_random_bytes(ptr: u64, len: u64);
     fn veld_graphics_create_resource(ptr: u64, len: u64) -> u64;
@@ -67,19 +66,6 @@ unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>>
         return Err(anyhow::anyhow!(response.error));
     }
     Ok(response.payload)
-}
-
-pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-    crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
-    let request = RpcRequest {
-        service: service.to_string(), method: method.to_string(), payload,
-        publisher: String::new(),
-    };
-    let req_buf = request.encode_to_vec();
-    unsafe {
-        let packed = veld_host_call(req_buf.as_ptr() as u64, req_buf.len() as u64);
-        take_host_response(packed, "Host call")
-    }
 }
 
 pub fn graphics_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {

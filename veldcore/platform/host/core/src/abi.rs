@@ -40,30 +40,6 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // veld_host_call — main Message Bus
-    linker.func_wrap_async("env", "veld_host_call", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
-        Box::new(async move {
-            let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(0u64) };
-            let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
-            let req_buf = match data_bytes { Some(b) => b, None => return Ok(0u64) };
-            let request = match RpcRequest::decode(&req_buf[..]) {
-                Ok(r) => r,
-                Err(e) => { crate::verror!(crate::logging::FLAG_ABI, "[{}] call decode error: {}", caller.data().plugin_name, e); return Ok(0u64); }
-            };
-            let plugin_name = caller.data().plugin_name.clone();
-            let dispatcher = caller.data().dispatcher.clone();
-            let instance_id = caller.data().instance_id;
-            crate::vdebug!(crate::logging::FLAG_ABI, "[ABI] [{}] Call: {}::{} (ID: {})", plugin_name, request.service, request.method, instance_id);
-            let result = dispatcher.call(&request.service, &request.method, request.payload, instance_id).await;
-            let (payload, error): (Vec<u8>, String) = match result {
-                Ok(p) => (p, String::new()),
-                Err(e) => (Vec::new(), e.to_string()),
-            };
-            let res_buf = RpcResponse { payload, error }.encode_to_vec();
-            write_response_back(&mut caller, &res_buf).await
-        })
-    })?;
-
     // ── System ────────────────────────────────────────────────
 
     // veld_get_config(key_ptr, key_len) → (len << 32 | ptr), 0 если ключа нет.

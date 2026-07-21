@@ -17,11 +17,9 @@ message ResourceHandle {
   uint64 size = 3;         // Data size
 }
 
-// UNIVERSAL RPC CONTAINER
-//
-// Идентичность вызывающего (instance_id для проверок доступа) хост берёт из
-// ABI-вызова (локально) или назначает соединению сам (для удалённых пиров) —
-// подделать её через это сообщение нельзя.
+// Конверт события шины (fire-and-forget): publish и доставка подписчику.
+// Идентичность вызывающего (instance_id для проверок доступа) хост берёт
+// из ABI-вызова — подделать её через это сообщение нельзя.
 message RpcRequest {
   string service = 1;
   string method = 2;
@@ -33,6 +31,7 @@ message RpcRequest {
   string publisher = 4;
 }
 
+// Конверт ответа синхронных ABI-вызовов (graphics и пр.).
 message RpcResponse {
   bytes payload = 1;
   string error = 2;

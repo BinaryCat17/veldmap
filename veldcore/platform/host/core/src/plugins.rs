@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
-use crate::dispatcher::{ServiceLocation, Subscriber};
+use crate::dispatcher::Event;
 use crate::{HostState, WasmModule, CallContext};
 
 
@@ -155,7 +155,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                     wasm_module.store.data_mut().call_context = None;
                 }
 
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::dispatcher::RpcCommand>();
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
 
                 let plugin_name_clone = name.clone();
                 let dispatcher_for_actor = ctx.dispatcher.clone();
@@ -163,33 +163,16 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                     let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
                     loop {
                         tokio::select! {
-                            cmd = rx.recv() => {
-                                match cmd {
-                                    Some(crate::dispatcher::RpcCommand::Call { service_name, method, payload, requestor_id, reply }) => {
+                            ev = rx.recv() => {
+                                match ev {
+                                    Some(ev) => {
                                         // handle_rpc() decodes its input as an RpcRequest to recover the
-                                        // "{service}/{method}" topic, so it must be re-wrapped here - the
-                                        // dispatcher only carries the bare inner payload internally.
-                                        // Конверт кодирует хост, поэтому publisher здесь достоверен:
+                                        // "{service}/{method}" topic, so the event is wrapped here.
+                                        // Конверт кодирует хост, поэтому publisher достоверен:
                                         // модуль может авторизовать отправителя по имени.
                                         let req = crate::core::RpcRequest {
-                                            service: service_name, method, payload,
-                                            publisher: dispatcher_for_actor.name_of(requestor_id).unwrap_or_default(),
-                                        };
-                                        let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
-                                        wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
-                                        if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
-                                            let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;
-                                        }
-                                        let out = {
-                                            let inner = call_ctx.0.lock().unwrap();
-                                            inner.output.clone()
-                                        };
-                                        let _ = reply.send(Ok(out));
-                                    }
-                                    Some(crate::dispatcher::RpcCommand::Notify { service_name, method, payload, publisher }) => {
-                                        let req = crate::core::RpcRequest {
-                                            service: service_name, method, payload,
-                                            publisher: dispatcher_for_actor.name_of(publisher).unwrap_or_default(),
+                                            service: ev.service, method: ev.method, payload: ev.payload,
+                                            publisher: dispatcher_for_actor.name_of(ev.publisher).unwrap_or_default(),
                                         };
                                         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
@@ -212,16 +195,15 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                     }
                 });
 
-                ctx.dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(tx.clone()));
                 ctx.dispatcher.register_instance(name.clone(), instance_id);
                 for topic in subs {
-                    ctx.dispatcher.register_subscription(topic, Subscriber::Wasm(tx.clone()));
+                    ctx.dispatcher.register_subscription(topic, tx.clone());
                 }
             }
             "remote" => {
-                let node_id_str = entry.node_id.as_ref().ok_or_else(|| anyhow::anyhow!("Missing node_id for remote service {}", name))?;
-                let node_id: iroh::EndpointId = node_id_str.parse()?;
-                ctx.dispatcher.register_service(name.clone(), ServiceLocation::RemoteIroh(node_id));
+                // Распределённость вернётся как мост событий (remote-топики
+                // поверх iroh), а не как sync-RPC. См. git-историю: node.rs.
+                log::warn!("Remote services are not supported yet, skipping '{}'", name);
             }
             _ => {}
         }
