@@ -41,15 +41,6 @@ pub enum ServiceLocation {
     NativeAsync(Arc<dyn AsyncNativeService>),
 }
 
-#[derive(Clone)]
-pub struct TaskState {
-    pub progress: f32,
-    pub completed: bool,
-    pub error: String,
-    pub result_handle: Option<crate::core::ResourceHandle>,
-    pub payload: Vec<u8>,
-}
-
 pub struct Dispatcher {
     endpoint: Endpoint,
     services: Mutex<HashMap<String, ServiceLocation>>,

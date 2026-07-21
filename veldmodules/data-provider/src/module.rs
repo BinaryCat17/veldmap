@@ -21,10 +21,12 @@ pub use cdse::{
     
     // calls
     on_input_download,
+    on_input_cancel_download,
     on_input_list_path,
     on_input_search,
 
     // subs
     on_sub_fs_download_result,
+    on_sub_fs_download_progress,
     on_sub_http_result,
 };

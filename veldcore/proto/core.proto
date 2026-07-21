@@ -69,6 +69,12 @@ message FsDownloadResponse {
   string error = 3;
 }
 
+// Событие прогресса скачивания (топик network/fs_download_progress).
+message FsDownloadProgress {
+  string correlation_id = 1;
+  float progress = 2;  // 0.0 to 1.0
+}
+
 // --- HTTP API ---
 
 message HttpTaskRequest {
@@ -126,41 +132,16 @@ message FsListResult {
 // --- DYNAMIC RESOURCE DISCOVERY ---
 
 // --- ASYNC TASKS ---
+// Реестра задач на хосте нет: прогресс и результаты текучих событиями
+// (pub/sub), а отмена — доменным событием сервиса (напр. network/cancel_download).
 
 message TaskResponse {
   string task_id = 1;
 }
 
-message TaskStatusRequest {
-  string task_id = 1;
-}
-
-message TaskStatusResponse {
-  float progress = 1;
-  bool completed = 2;
-  string error = 3;
-  ResourceHandle result_handle = 4;
-  bytes payload = 5;
-}
-
+// Payload события отмены (напр. топик network/cancel_download).
 message TaskCancelRequest {
   string task_id = 1;
-}
-
-message TaskCreateRequest {
-  string task_id = 1;
-}
-
-message TaskCreateResponse {
-  string task_id = 1;
-}
-
-message TaskUpdateRequest {
-  string task_id = 1;
-  float progress = 2;
-  bool completed = 3;
-  string error = 4;
-  bytes payload = 5;
 }
 
 message GetConfigRequest {

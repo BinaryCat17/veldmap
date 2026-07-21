@@ -1,24 +1,34 @@
-use crate::proto::dataprovider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded};
+use crate::proto::dataprovider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded, CancelDownloadRequest};
 use crate::proto::ui::proto::UiEventResponse;
 
 use crate::module::state::{State, downloaded::DownloadStatus};
 use crate::module::components::task_manager::TaskKind;
 use veldsdk::rpc::core::ImageLoadResult;
 
-/// Пользователь нажал кнопку скачать
+/// Пользователь нажал кнопку скачать.
+/// Повторное нажатие на файл, который уже скачивается — отмена загрузки.
 pub fn on_input_download_pressed(
-    _state: &mut State,
+    state: &mut State,
     event: UiEventResponse,
 ) {
     let s3_key = event.value;
     let filename = s3_key.split('/').last().unwrap_or("file").to_string();
-    
-    if !s3_key.is_empty() {
-        crate::calls::data_provider::download(&DownloadRequest {
-            identifier: s3_key,
-            destination: format!("data/dem/source/{}", filename),
-        });
+
+    if s3_key.is_empty() { return; }
+
+    // Отмена активной загрузки: data-provider пришлёт Downloaded{success:false},
+    // и on_sub_downloaded снимет задачу с панели.
+    if let Some(dl) = state.downloaded.active_downloads.get(&s3_key) {
+        let task_id = dl.task_id.clone();
+        state.global.status_message = format!("Cancelling download: {}", filename);
+        crate::calls::data_provider::cancel_download(&CancelDownloadRequest { task_id });
+        return;
     }
+
+    crate::calls::data_provider::download(&DownloadRequest {
+        identifier: s3_key,
+        destination: format!("data/dem/source/{}", filename),
+    });
 }
 
 /// Пользователь нажал кнопку просмотра

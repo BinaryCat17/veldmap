@@ -65,3 +65,8 @@ message Downloaded {
   bool success = 2;
   string error = 3;
 }
+
+// Cancel download request
+message CancelDownloadRequest {
+  string task_id = 1;
+}

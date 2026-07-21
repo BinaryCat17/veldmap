@@ -1,5 +1,5 @@
 use crate::proto::dataprovider::{
-    DownloadRequest, DownloadStarted, Downloaded,
+    DownloadRequest, DownloadStarted, DownloadProgress, Downloaded, CancelDownloadRequest,
     ListPathRequest, ListPathResponse
 };
 use log::info;
@@ -70,6 +70,27 @@ pub fn on_input_download(
 
     state.pending_downloads.insert(task_id);
     crate::calls::network::fs_download(&req_task);
+}
+
+pub fn on_input_cancel_download(
+    state: &mut State,
+    request: CancelDownloadRequest
+) {
+    // Отменяем только задачи, которые этот модуль реально запустил.
+    if !state.pending_downloads.remove(&request.task_id) {
+        return;
+    }
+    // Доменное событие отмены для network: abort фоновой tokio-задачи.
+    // task_id этого модуля — это correlation_id для network (см. on_input_download).
+    crate::calls::network::cancel_download(&veldsdk::rpc::core::TaskCancelRequest {
+        task_id: request.task_id.clone(),
+    });
+    // Уведомляем подписчиков о завершении, чтобы UI снял задачу с панели.
+    crate::emit::downloaded(&Downloaded {
+        task_id: request.task_id,
+        success: false,
+        error: "Cancelled by user".to_string(),
+    });
 }
 
 pub fn on_input_list_path(
@@ -144,6 +165,20 @@ pub fn on_sub_http_result(
     };
 
     crate::emit::list_path_result(&list_response);
+}
+
+pub fn on_sub_fs_download_progress(
+    state: &mut State,
+    event: veldsdk::rpc::core::FsDownloadProgress,
+) {
+    // Транслируем прогресс только своих активных загрузок.
+    if !state.pending_downloads.contains(&event.correlation_id) {
+        return;
+    }
+    crate::emit::download_progress(&DownloadProgress {
+        task_id: event.correlation_id,
+        progress: event.progress,
+    });
 }
 
 pub fn on_sub_fs_download_result(
