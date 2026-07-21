@@ -1,9 +1,6 @@
 #![recursion_limit = "256"]
-//! Контракт сервиса — fs.proto этого модуля (компилируется build.rs).
+//! Контракт сервиса — veldcore/proto/fs.proto (компилируется build.rs).
 pub mod proto {
-    pub mod core {
-        include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
-    }
     pub mod fs {
         include!(concat!(env!("OUT_DIR"), "/veldmap.fs.rs"));
     }
@@ -14,7 +11,7 @@ use proto::fs::{
     FsReadRequest, FsReadResult, FsWriteRequest, FsWriteResult,
     FsListRequest, FsListResult,
 };
-use proto::core::ResourceHandle;
+use veldmap_host_util::core::ResourceHandle;
 use veldmap_host_util::path::is_path_safe;
 use veldmap_host_util::wire;
 use std::sync::Arc;

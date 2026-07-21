@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
-use crate::dispatcher::ServiceLocation;
+use crate::dispatcher::{ServiceLocation, Subscriber};
 use crate::{HostState, WasmModule, CallContext};
 
 
@@ -156,22 +156,24 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                 }
 
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<crate::dispatcher::RpcCommand>();
-                
+
                 let plugin_name_clone = name.clone();
+                let dispatcher_for_actor = ctx.dispatcher.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
                     loop {
                         tokio::select! {
                             cmd = rx.recv() => {
                                 match cmd {
-                                    Some(crate::dispatcher::RpcCommand::Call { service_name, method, payload, requestor_id: _, reply }) => {
+                                    Some(crate::dispatcher::RpcCommand::Call { service_name, method, payload, requestor_id, reply }) => {
                                         // handle_rpc() decodes its input as an RpcRequest to recover the
                                         // "{service}/{method}" topic, so it must be re-wrapped here - the
                                         // dispatcher only carries the bare inner payload internally.
-                                        // Идентичность вызывающего в конверт не кладём: модуль её не читает,
-                                        // а хост берёт её из ABI-вызова (HostState.instance_id).
+                                        // Конверт кодирует хост, поэтому publisher здесь достоверен:
+                                        // модуль может авторизовать отправителя по имени.
                                         let req = crate::core::RpcRequest {
                                             service: service_name, method, payload,
+                                            publisher: dispatcher_for_actor.name_of(requestor_id).unwrap_or_default(),
                                         };
                                         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
@@ -184,9 +186,10 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                                         };
                                         let _ = reply.send(Ok(out));
                                     }
-                                    Some(crate::dispatcher::RpcCommand::Notify { service_name, method, payload, publisher: _ }) => {
+                                    Some(crate::dispatcher::RpcCommand::Notify { service_name, method, payload, publisher }) => {
                                         let req = crate::core::RpcRequest {
                                             service: service_name, method, payload,
+                                            publisher: dispatcher_for_actor.name_of(publisher).unwrap_or_default(),
                                         };
                                         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
@@ -212,7 +215,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                 ctx.dispatcher.register_service(name.clone(), ServiceLocation::LocalWasm(tx.clone()));
                 ctx.dispatcher.register_instance(name.clone(), instance_id);
                 for topic in subs {
-                    ctx.dispatcher.register_subscription(topic, ServiceLocation::LocalWasm(tx.clone()));
+                    ctx.dispatcher.register_subscription(topic, Subscriber::Wasm(tx.clone()));
                 }
             }
             "remote" => {

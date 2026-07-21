@@ -3,15 +3,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/core.proto",
         "../../proto/app.proto",
         "../../proto/graphics.proto",
-        // Контракты нативных модулей хоста (владельцы — сами модули)
-        "../../platform/host/modules/fs/fs.proto",
-        "../../platform/host/modules/network/network.proto",
+        // Контракты платформенных сервисов (fs, network)
+        "../../proto/fs.proto",
+        "../../proto/network.proto",
     ];
-    let include_dirs = &[
-        "../../proto",
-        "../../platform/host/modules/fs",
-        "../../platform/host/modules/network",
-    ];
+    let include_dirs = &["../../proto"];
 
     for proto in proto_files {
         println!("cargo:rerun-if-changed={}", proto);

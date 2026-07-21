@@ -1,5 +1,5 @@
 #![recursion_limit = "256"]
-//! Контракт сервиса — network.proto этого модуля (компилируется build.rs).
+//! Контракт сервиса — veldcore/proto/network.proto (компилируется build.rs).
 pub mod proto {
     pub mod network {
         include!(concat!(env!("OUT_DIR"), "/veldmap.network.rs"));

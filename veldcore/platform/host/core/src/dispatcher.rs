@@ -35,24 +35,37 @@ pub enum RpcCommand {
     },
 }
 
+/// Адрес вызываемого сервиса — плоскость sync RPC (`call`).
 #[derive(Clone)]
 pub enum ServiceLocation {
-    // Unbounded so publish can enqueue synchronously: this keeps event order
-    // (CursorMoved before Click, press before release) per receiving actor.
     LocalWasm(tokio::sync::mpsc::UnboundedSender<RpcCommand>),
     RemoteIroh(iroh::EndpointId),
-    // Нативный подписчик — тоже актор со своей очередью (см. `subscribe`):
-    // publish кладёт событие синхронно, порядок доставки тот же, что у wasm.
-    NativeAsync(tokio::sync::mpsc::UnboundedSender<NativeEvent>),
 }
+
+/// Очередь подписчика — плоскость fire-and-forget (`publish`).
+/// Оба варианта — акторы: unbounded-канал позволяет publish класть событие
+/// синхронно, поэтому события от одного паблишера приходят в порядке
+/// публикации (CursorMoved раньше Click, press раньше release).
+#[derive(Clone)]
+pub enum Subscriber {
+    Wasm(tokio::sync::mpsc::UnboundedSender<RpcCommand>),
+    Native(tokio::sync::mpsc::UnboundedSender<NativeEvent>),
+}
+
+/// Предел ожидания sync-вызова: защита от зависшего модуля или молчащего
+/// пира. Не спасает от актор-дедлока (A→B→A) — sync-вызовы между локальными
+/// wasm-модулями блокируют актор вызывающего, используйте publish.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Dispatcher {
     endpoint: Endpoint,
     services: Mutex<HashMap<String, ServiceLocation>>,
-    subscriptions: Mutex<HashMap<String, Vec<ServiceLocation>>>,
+    subscriptions: Mutex<HashMap<String, Vec<Subscriber>>>,
     /// Instance id каждого локального wasm-сервиса: адресат для lease-грантов.
     instances: Mutex<HashMap<String, u32>>,
-    stats: Arc<Mutex<HashMap<String, (u64, u128, std::time::Instant)>>>,
+    /// Обратный индекс instance id → имя: им подписывается publisher событий.
+    names: Mutex<HashMap<u32, String>>,
+    stats: Mutex<HashMap<String, (u64, u128, std::time::Instant)>>,
 }
 
 impl Dispatcher {
@@ -62,22 +75,29 @@ impl Dispatcher {
             services: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
-            stats: Arc::new(Mutex::new(HashMap::new())),
+            names: Mutex::new(HashMap::new()),
+            stats: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn register_instance(&self, name: String, instance_id: u32) {
-        self.instances.lock().unwrap().insert(name, instance_id);
+        self.instances.lock().unwrap().insert(name.clone(), instance_id);
+        self.names.lock().unwrap().insert(instance_id, name);
     }
 
     pub fn instance_of(&self, name: &str) -> Option<u32> {
         self.instances.lock().unwrap().get(name).copied()
     }
 
-    pub fn register_subscription(&self, topic: String, location: ServiceLocation) {
+    /// Имя сервиса по instance id (0 и неизвестные id — None).
+    pub fn name_of(&self, instance_id: u32) -> Option<String> {
+        self.names.lock().unwrap().get(&instance_id).cloned()
+    }
+
+    pub fn register_subscription(&self, topic: String, subscriber: Subscriber) {
         crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Registering subscription: {}", topic);
         let mut subscriptions = self.subscriptions.lock().unwrap();
-        subscriptions.entry(topic).or_default().push(location);
+        subscriptions.entry(topic).or_default().push(subscriber);
     }
 
     /// Подписывает нативный сервис на его топики. Сервис получает одну
@@ -92,7 +112,7 @@ impl Dispatcher {
             }
         });
         for topic in topics {
-            self.register_subscription((*topic).to_string(), ServiceLocation::NativeAsync(tx.clone()));
+            self.register_subscription((*topic).to_string(), Subscriber::Native(tx.clone()));
         }
     }
 
@@ -124,30 +144,22 @@ impl Dispatcher {
             return;
         }
 
-        for location in subs {
-            match location {
-                ServiceLocation::LocalWasm(sender) => {
-                    if sender.send(RpcCommand::Notify {
-                        service_name: service_name.to_string(),
-                        method: method.to_string(),
-                        payload: payload.clone(),
-                        publisher,
-                    }).is_err() {
-                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
-                    }
-                }
-                ServiceLocation::NativeAsync(sender) => {
-                    if sender.send(NativeEvent {
-                        method: method.to_string(),
-                        payload: payload.clone(),
-                        publisher,
-                    }).is_err() {
-                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Native subscriber actor for '{}' is gone", topic);
-                    }
-                }
-                ServiceLocation::RemoteIroh(_) => {
-                    crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Remote publish not supported (topic '{}')", topic);
-                }
+        for subscriber in subs {
+            let delivered = match subscriber {
+                Subscriber::Wasm(sender) => sender.send(RpcCommand::Notify {
+                    service_name: service_name.to_string(),
+                    method: method.to_string(),
+                    payload: payload.clone(),
+                    publisher,
+                }).is_ok(),
+                Subscriber::Native(sender) => sender.send(NativeEvent {
+                    method: method.to_string(),
+                    payload: payload.clone(),
+                    publisher,
+                }).is_ok(),
+            };
+            if !delivered {
+                crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
             }
         }
     }
@@ -155,10 +167,14 @@ impl Dispatcher {
     pub fn register_service(&self, name: String, location: ServiceLocation) {
         crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Registering service: {}", name);
         let mut services = self.services.lock().unwrap();
-        services.insert(name, location);
+        if services.insert(name.clone(), location).is_some() {
+            crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Service '{}' re-registered: previous location replaced", name);
+        }
     }
 
-
+    /// Sync RPC. Вызов из wasm-модуля блокирует его актор до ответа, поэтому
+    /// цепочка sync-вызовов, возвращающаяся в вызывающего (A→B→A), — дедлок
+    /// до таймаута. Между локальными модулями предпочитайте publish.
     pub async fn call(&self, service_name: &str, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>> {
         let location = {
             let services = self.services.lock().unwrap();
@@ -168,9 +184,6 @@ impl Dispatcher {
         };
 
         match location {
-            ServiceLocation::NativeAsync(_) => {
-                Err(anyhow::anyhow!("Native subscribers cannot be called via sync RPC (use publish instead)"))
-            }
             ServiceLocation::LocalWasm(sender) => {
                 let start_total = std::time::Instant::now();
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -188,10 +201,11 @@ impl Dispatcher {
                     return Err(anyhow::anyhow!("WASM actor dropped"));
                 }
                 
-                let res_buf = match rx.await {
-                    Ok(Ok(res)) => res,
-                    Ok(Err(e)) => return Err(e),
-                    Err(_) => return Err(anyhow::anyhow!("WASM actor panicked or dropped reply channel")),
+                let res_buf = match tokio::time::timeout(CALL_TIMEOUT, rx).await {
+                    Ok(Ok(Ok(res))) => res,
+                    Ok(Ok(Err(e))) => return Err(e),
+                    Ok(Err(_)) => return Err(anyhow::anyhow!("WASM actor panicked or dropped reply channel")),
+                    Err(_) => return Err(anyhow::anyhow!("RPC {}::{} timed out after {:?}", service_name, method, CALL_TIMEOUT)),
                 };
                 
                 let total_time = start_total.elapsed();
@@ -230,7 +244,13 @@ impl Dispatcher {
 
     // Локальный requestor_id не пересекает границу машины: удалённый хост
     // назначит вызову свой собственный instance_id (см. node::handle_connection).
-    async fn call_remote(&self, node_id: iroh::EndpointId, service: &str, method: &str, payload: Vec<u8>, _requestor_id: u32) -> Result<Vec<u8>> {
+    async fn call_remote(&self, node_id: iroh::EndpointId, service: &str, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>> {
+        tokio::time::timeout(CALL_TIMEOUT, self.call_remote_inner(node_id, service, method, payload, requestor_id))
+            .await
+            .map_err(|_| anyhow::anyhow!("Remote call {}::{} timed out after {:?}", service, method, CALL_TIMEOUT))?
+    }
+
+    async fn call_remote_inner(&self, node_id: iroh::EndpointId, service: &str, method: &str, payload: Vec<u8>, _requestor_id: u32) -> Result<Vec<u8>> {
         // В Iroh 0.96 connect возвращает Connection напрямую
         let conn = self.endpoint.connect(node_id, b"veldmap/rpc/1").await?;
         let (mut send, mut recv) = conn.open_bi().await?;
@@ -239,6 +259,7 @@ impl Dispatcher {
             service: service.to_string(),
             method: method.to_string(),
             payload,
+            publisher: String::new(),
         };
 
         let mut buf = Vec::new();

@@ -73,6 +73,7 @@ pub fn call_service(service: &str, method: &str, payload: Vec<u8>) -> anyhow::Re
     crate::vtrace!(crate::FLAG_SDK, "[SDK-CALL] {}::{} ({} bytes)", service, method, payload.len());
     let request = RpcRequest {
         service: service.to_string(), method: method.to_string(), payload,
+        publisher: String::new(),
     };
     let req_buf = request.encode_to_vec();
     unsafe {
@@ -193,6 +194,21 @@ pub fn generate_id() -> String {
 
 // ── Call context ───────────────────────────────────────────────
 
+/// Паблишер обрабатываемого сейчас сообщения (заполняется handle_rpc из
+/// конверта, который кодирует хост, — полю можно доверять).
+/// Пустая строка — сам хост. Wasm однопоточный, поэтому простого Mutex хватает.
+static EVENT_PUBLISHER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn set_event_publisher(name: String) {
+    *EVENT_PUBLISHER.lock().unwrap() = name;
+}
+
+/// Имя сервиса, опубликовавшего текущее событие ("" — хост).
+/// Для авторизации: сравнивайте с ожидаемым отправителем.
+pub fn event_publisher() -> String {
+    EVENT_PUBLISHER.lock().unwrap().clone()
+}
+
 pub fn load_input() -> Vec<u8> {
     unsafe {
         let len = veld_input_len();
@@ -215,8 +231,11 @@ pub fn publish(topic: &str, payload: Vec<u8>) {
         crate::verror!(crate::FLAG_SDK, "[SDK] Invalid topic: {}", topic);
         return;
     }
+    // publisher не заполняется: хост игнорирует его во входящих сообщениях
+    // и подписывает события сам при доставке.
     let request = RpcRequest {
         service: parts[0].to_string(), method: parts[1].to_string(), payload,
+        publisher: String::new(),
     };
     let req_buf = request.encode_to_vec();
     unsafe { veld_host_publish(req_buf.as_ptr() as u64, req_buf.len() as u64); }

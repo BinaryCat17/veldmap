@@ -114,6 +114,9 @@ pub extern "C" fn handle_rpc() -> i32 {
     };
 
     let topic = format!("{}/{}", request.service, request.method);
+    // Конверт кодирует хост: publisher достоверен, модуль может авторизовать
+    // отправителя через veldsdk::event_publisher().
+    veldsdk::rpc::host::set_event_publisher(request.publisher);
 
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let state_arc = match veldsdk::rpc::MODULE_STATE.get() {

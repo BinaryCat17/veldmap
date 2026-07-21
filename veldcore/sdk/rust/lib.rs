@@ -16,6 +16,7 @@ pub use log;
 
 pub use rpc::core::ResourceHandle;
 pub use rpc::host::generate_id;
+pub use rpc::host::event_publisher;
 
 /// RAII handle to a memory region or graphics object.
 /// On drop: releases the resource via memory ABI (no RPC overhead).
