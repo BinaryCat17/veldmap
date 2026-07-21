@@ -9,8 +9,8 @@ use veldsdk::graphics::{
     TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat,
     VISIBILITY_FRAGMENT, VISIBILITY_VERTEX,
 };
-use veldsdk::rpc::host::{arena_write, arena_alloc_buffer, arena_alloc_texture};
-use veldsdk::rpc::core::ResourceHandle;
+use veldsdk::abi::{arena_write, arena_alloc_buffer, arena_alloc_texture};
+use veldsdk::proto::core::ResourceHandle;
 use veldsdk::OwnedResource;
 
 use anyhow::anyhow;

@@ -1,6 +1,6 @@
 //! Типизированная обёртка над графическим сервисом хоста.
 //!
-//! Буферы и текстуры выделяются через memory ABI (`rpc::host::arena_alloc_*`)
+//! Буферы и текстуры выделяются через memory ABI (`abi::arena_alloc_*`)
 //! и адресуются region id. Здесь создаются непрозрачные GPU-объекты
 //! (шейдеры, пайплайны, view, сэмплеры, bind group'ы) — каждый со своим
 //! типом идентификатора, чтобы их нельзя было перепутать, — и записываются
@@ -56,7 +56,7 @@ pub const VISIBILITY_VERTEX: u32 = 1;
 pub const VISIBILITY_FRAGMENT: u32 = 2;
 pub const VISIBILITY_COMPUTE: u32 = 4;
 
-/// Битовые флаги wgpu::BufferUsages для `rpc::host::arena_alloc_buffer`.
+/// Битовые флаги wgpu::BufferUsages для `abi::arena_alloc_buffer`.
 pub mod buffer_usage {
     pub const MAP_READ: u32 = 1 << 0;
     pub const MAP_WRITE: u32 = 1 << 1;
@@ -68,7 +68,7 @@ pub mod buffer_usage {
     pub const STORAGE: u32 = 1 << 7;
 }
 
-/// Битовые флаги wgpu::TextureUsages для `rpc::host::arena_alloc_texture`.
+/// Битовые флаги wgpu::TextureUsages для `abi::arena_alloc_texture`.
 pub mod texture_usage {
     pub const COPY_SRC: u32 = 1 << 0;
     pub const COPY_DST: u32 = 1 << 1;
@@ -81,7 +81,7 @@ pub mod texture_usage {
 
 fn create(command: resource_request::Command) -> anyhow::Result<u64> {
     let req = ResourceRequest { command: Some(command) };
-    let res_bytes = crate::rpc::host::graphics_create_resource(req.encode_to_vec())?;
+    let res_bytes = crate::abi::graphics_create_resource(req.encode_to_vec())?;
     Ok(CreateResourceResponse::decode(&res_bytes[..])?.id)
 }
 

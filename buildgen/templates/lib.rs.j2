@@ -15,8 +15,8 @@ pub mod proto {
         pub use {{ dep.api_crate }}::*;
     }
 {% endfor %}
-    pub use veldsdk::rpc::core;
-    pub use veldsdk::rpc::app;
+    pub use veldsdk::proto::core;
+    pub use veldsdk::proto::app;
 }
 
 // Подключаем бизнес-логику пользователя
@@ -32,7 +32,7 @@ pub const SERVICE_NAME: &str = "{{ service_name }}";
 pub mod emit {
     {% for output in emits %}
     pub fn {{ output }}(msg: &impl veldsdk::prost::Message) {
-        veldsdk::rpc::host::publish("{{ service_name }}/{{ output }}", msg.encode_to_vec());
+        veldsdk::abi::publish("{{ service_name }}/{{ output }}", msg.encode_to_vec());
     }
     {% endfor %}
 }
@@ -43,7 +43,7 @@ pub mod calls {
     pub mod {{ dep.snake }} {
         {% for method in dep.methods %}
         pub fn {{ method }}(msg: &impl veldsdk::prost::Message) {
-            veldsdk::rpc::host::publish("{{ dep.service }}/{{ method }}", msg.encode_to_vec());
+            veldsdk::abi::publish("{{ dep.service }}/{{ method }}", msg.encode_to_vec());
         }
         {% endfor %}
     }
@@ -66,10 +66,10 @@ fn render_ui(state: &{{ rust.state }}) {
 #[no_mangle]
 pub extern "C" fn init() -> i32 {
     let _ = veldsdk::logging::init();
-    let input = veldsdk::rpc::host::load_input();
+    let input = veldsdk::abi::load_input();
 
     let config_json = if input.is_empty() {
-        match veldsdk::rpc::host::get_config("config") {
+        match veldsdk::abi::get_config("config") {
             Some(c) => c,
             None => return 1,
         }
@@ -88,7 +88,7 @@ pub extern "C" fn init() -> i32 {
     let state_result = {{ rust.init }}(config);
     let boxed_state: anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>> = match state_result {
         Ok(s) => {
-            let service_state = veldsdk::rpc::ServiceState::<{{ rust.state }}> {
+            let service_state = veldsdk::runtime::ServiceState::<{{ rust.state }}> {
                 state: std::sync::Arc::new(std::sync::Mutex::new(s)),
             };
             Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(service_state))))
@@ -96,19 +96,19 @@ pub extern "C" fn init() -> i32 {
         Err(e) => Err(e),
     };
 
-    if veldsdk::rpc::MODULE_STATE.set(boxed_state).is_err() {
+    if veldsdk::runtime::MODULE_STATE.set(boxed_state).is_err() {
          return 3;
     }
     0
 }
 
 #[no_mangle]
-pub extern "C" fn handle_rpc() -> i32 {
+pub extern "C" fn handle_event() -> i32 {
     use prost::Message;
-    use veldsdk::rpc::core::RpcRequest;
+    use veldsdk::proto::core::EventEnvelope;
 
-    let input = veldsdk::rpc::host::load_input();
-    let request = match RpcRequest::decode(&input[..]) {
+    let input = veldsdk::abi::load_input();
+    let request = match EventEnvelope::decode(&input[..]) {
         Ok(r) => r,
         Err(_) => return 1,
     };
@@ -116,16 +116,16 @@ pub extern "C" fn handle_rpc() -> i32 {
     let topic = format!("{}/{}", request.service, request.method);
     // Конверт кодирует хост: publisher достоверен, модуль может авторизовать
     // отправителя через veldsdk::event_publisher().
-    veldsdk::rpc::host::set_event_publisher(request.publisher);
+    veldsdk::abi::set_event_publisher(request.publisher);
 
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let state_arc = match veldsdk::rpc::MODULE_STATE.get() {
+        let state_arc = match veldsdk::runtime::MODULE_STATE.get() {
             Some(Ok(s)) => s,
             Some(Err(e)) => return Err(format!("Module initialization failed: {}", e)),
             None => return Err("Module not initialized".to_string()),
         };
         let mut state_lock = state_arc.lock().unwrap();
-        let service = state_lock.downcast_mut::<veldsdk::rpc::ServiceState<{{ rust.state }}>>()
+        let service = state_lock.downcast_mut::<veldsdk::runtime::ServiceState<{{ rust.state }}>>()
             .expect("Failed to downcast state");
 
         let mut app_state = service.state.lock().unwrap();
@@ -133,7 +133,7 @@ pub extern "C" fn handle_rpc() -> i32 {
         let handled = match topic.as_str() {
             {% for topic, handler in handlers.items() %}
             "{{ topic }}" => {
-                veldsdk::rpc::call_handler({{ handler }}, &mut *app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {{ topic }}: {}", e))?;
+                veldsdk::runtime::call_handler({{ handler }}, &mut *app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {{ topic }}: {}", e))?;
                 Ok(())
             }
             {% endfor %}
@@ -160,7 +160,7 @@ pub extern "C" fn handle_rpc() -> i32 {
             1
         }
         Err(_) => {
-            veldsdk::log::error!("Module panicked during RPC handling");
+            veldsdk::log::error!("Module panicked while handling event");
             1
         }
     }
@@ -177,7 +177,7 @@ pub extern "C" fn get_subscriptions() -> i32 {
         {% endif %}
     ];
     let out = serde_json::to_vec(&SUBS).unwrap_or_default();
-    veldsdk::rpc::host::store_output(out);
+    veldsdk::abi::store_output(out);
     0
 }
 

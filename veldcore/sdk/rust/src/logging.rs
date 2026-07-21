@@ -62,8 +62,8 @@ impl Log for HostLogger {
             flags = flags_str.parse::<u32>().unwrap_or(0);
         }
 
-        // Прямой ABI-вызов: без RPC-хопа через диспетчер и system-сервис.
-        crate::rpc::host::log(record.level(), flags, &format!("{}", record.args()));
+        // Прямой ABI-вызов: минуя шину событий.
+        crate::abi::log(record.level(), flags, &format!("{}", record.args()));
     }
     fn flush(&self) {}
 }

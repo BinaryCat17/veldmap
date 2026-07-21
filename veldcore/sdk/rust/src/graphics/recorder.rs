@@ -76,7 +76,7 @@ impl RenderRecorder {
             target_texture_view_id: target.0,
             command_buffer: Some(CommandBuffer { commands: self.commands }),
         };
-        crate::rpc::host::graphics_execute(submit.encode_to_vec())?;
+        crate::abi::graphics_execute(submit.encode_to_vec())?;
         Ok(())
     }
 }

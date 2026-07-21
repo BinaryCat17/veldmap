@@ -20,7 +20,7 @@ message ResourceHandle {
 // Конверт события шины (fire-and-forget): publish и доставка подписчику.
 // Идентичность вызывающего (instance_id для проверок доступа) хост берёт
 // из ABI-вызова — подделать её через это сообщение нельзя.
-message RpcRequest {
+message EventEnvelope {
   string service = 1;
   string method = 2;
   bytes payload = 3;
@@ -32,7 +32,7 @@ message RpcRequest {
 }
 
 // Конверт ответа синхронных ABI-вызовов (graphics и пр.).
-message RpcResponse {
+message AbiResponse {
   bytes payload = 1;
   string error = 2;
 }

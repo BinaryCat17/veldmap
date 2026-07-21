@@ -62,7 +62,7 @@ unsafe impl Sync for State {}
 
 impl State {
     pub fn new() -> Self {
-        let sf = veldsdk::rpc::host::get_config("surface_format")
+        let sf = veldsdk::abi::get_config("surface_format")
             .and_then(|s| s.parse::<i32>().ok())
             .unwrap_or(0);
 

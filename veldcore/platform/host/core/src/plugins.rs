@@ -166,18 +166,18 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                             ev = rx.recv() => {
                                 match ev {
                                     Some(ev) => {
-                                        // handle_rpc() decodes its input as an RpcRequest to recover the
+                                        // handle_event() decodes its input as an EventEnvelope to recover the
                                         // "{service}/{method}" topic, so the event is wrapped here.
                                         // Конверт кодирует хост, поэтому publisher достоверен:
                                         // модуль может авторизовать отправителя по имени.
-                                        let req = crate::core::RpcRequest {
+                                        let req = crate::core::EventEnvelope {
                                             service: ev.service, method: ev.method, payload: ev.payload,
                                             publisher: dispatcher_for_actor.name_of(ev.publisher).unwrap_or_default(),
                                         };
                                         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                                         wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
-                                        if let Ok(handle_rpc) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_rpc") {
-                                            let _ = handle_rpc.call_async(&mut wasm_module.store, ()).await;
+                                        if let Ok(handle_event) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_event") {
+                                            let _ = handle_event.call_async(&mut wasm_module.store, ()).await;
                                         }
                                     }
                                     None => {

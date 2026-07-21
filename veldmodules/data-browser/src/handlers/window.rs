@@ -5,7 +5,7 @@
 //! и аттачим хосту. Весь ритуал — в ui-service-wrap `surface::delegate`.
 
 use crate::module::state::State;
-use veldsdk::rpc::app::WindowResized;
+use veldsdk::proto::app::WindowResized;
 
 pub fn on_sub_window_resized(state: &mut State, ev: WindowResized) {
     // Топик broadcast: событие могло быть адресовано окну другого модуля.

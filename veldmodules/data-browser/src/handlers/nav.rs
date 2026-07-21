@@ -1,5 +1,5 @@
 use crate::module::state::{State, Screen, downloaded::LocalFile};
-use veldsdk::rpc::fs::FsListRequest;
+use veldsdk::proto::fs::FsListRequest;
 use crate::proto::ui::proto::UiEventResponse;
 
 pub fn on_input_nav_browse(state: &mut State, _event: UiEventResponse) {
@@ -21,7 +21,7 @@ pub fn on_input_nav_downloaded(state: &mut State, _event: UiEventResponse) {
 }
 
 /// Обработчик результата сканирования ФС
-pub fn on_sub_list_result(state: &mut State, response: veldsdk::rpc::fs::FsListResult) {
+pub fn on_sub_list_result(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     if !response.error.is_empty() {
         state.global.error_message = Some(format!("Failed to list files: {}", response.error));
         return;

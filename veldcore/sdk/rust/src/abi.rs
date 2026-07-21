@@ -1,4 +1,8 @@
-use crate::rpc::core::{RpcRequest, RpcResponse};
+//! ABI-мост в хост: extern-декларации и safe-обёртки. Единственный
+//! синхронный слой SDK — вызовы в состояние хоста (память, graphics,
+//! конфиг, энтропия) и отправка событий в шину (fire-and-forget).
+
+use crate::proto::core::{EventEnvelope, AbiResponse};
 use prost::Message;
 
 // ── VELD MICROKERNEL ABI ───────────────────────────────────────
@@ -43,7 +47,7 @@ pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
     let _ = Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize);
 }
 
-// ── RPC ────────────────────────────────────────────────────────
+// ── Шина событий ───────────────────────────────────────────────
 
 /// Забирает сырой буфер хоста: (len << 32 | ptr) → байты, 0 → None.
 /// Память под ответ хост выделил через veld_alloc; здесь она освобождается.
@@ -58,10 +62,10 @@ unsafe fn take_host_bytes(packed: u64) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Распаковывает ответ хоста: (len << 32 | ptr) → payload из RpcResponse.
+/// Распаковывает ответ хоста: (len << 32 | ptr) → payload из AbiResponse.
 unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
     let buf = take_host_bytes(packed).ok_or_else(|| anyhow::anyhow!("{} failed", what))?;
-    let response = RpcResponse::decode(&buf[..])?;
+    let response = AbiResponse::decode(&buf[..])?;
     if !response.error.is_empty() {
         return Err(anyhow::anyhow!(response.error));
     }
@@ -180,7 +184,7 @@ pub fn generate_id() -> String {
 
 // ── Call context ───────────────────────────────────────────────
 
-/// Паблишер обрабатываемого сейчас сообщения (заполняется handle_rpc из
+/// Паблишер обрабатываемого сейчас сообщения (заполняется handle_event из
 /// конверта, который кодирует хост, — полю можно доверять).
 /// Пустая строка — сам хост. Wasm однопоточный, поэтому простого Mutex хватает.
 static EVENT_PUBLISHER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
@@ -219,7 +223,7 @@ pub fn publish(topic: &str, payload: Vec<u8>) {
     }
     // publisher не заполняется: хост игнорирует его во входящих сообщениях
     // и подписывает события сам при доставке.
-    let request = RpcRequest {
+    let request = EventEnvelope {
         service: parts[0].to_string(), method: parts[1].to_string(), payload,
         publisher: String::new(),
     };

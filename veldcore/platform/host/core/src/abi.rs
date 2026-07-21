@@ -1,10 +1,10 @@
 use wasmtime::*;
 use crate::HostState;
-use crate::core::{RpcRequest, RpcResponse};
+use crate::core::{EventEnvelope, AbiResponse};
 use prost::Message;
 
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
-    // ── RPC ───────────────────────────────────────────────────
+    // ── Шина событий ──────────────────────────────────────────
 
     // veld_host_publish — fire-and-forget
     linker.func_wrap_async("env", "veld_host_publish", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
@@ -15,7 +15,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             };
             let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
             let req_buf = match data_bytes { Some(b) => b, None => return Ok(()) };
-            let request = match RpcRequest::decode(&req_buf[..]) {
+            let request = match EventEnvelope::decode(&req_buf[..]) {
                 Ok(r) => r,
                 Err(e) => { crate::verror!(crate::logging::FLAG_ABI, "[{}] publish decode error: {}", caller.data().plugin_name, e); return Ok(()); }
             };
@@ -209,7 +209,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let graphics = caller.data().graphics.clone();
             let result = graphics.create_resource(payload, instance_id);
             let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
-            let res_buf = RpcResponse { payload: res_payload, error }.encode_to_vec();
+            let res_buf = AbiResponse { payload: res_payload, error }.encode_to_vec();
             write_response_back(&mut caller, &res_buf).await
         })
     })?;
@@ -223,7 +223,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let graphics = caller.data().graphics.clone();
             let result = graphics.execute(payload, instance_id);
             let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
-            let res_buf = RpcResponse { payload: res_payload, error }.encode_to_vec();
+            let res_buf = AbiResponse { payload: res_payload, error }.encode_to_vec();
             write_response_back(&mut caller, &res_buf).await
         })
     })?;

@@ -348,7 +348,7 @@ fn convert_shadow(s: &Option<proto::Shadow>) -> iced_core::Shadow {
 }
 
 struct WgpuImageWidget {
-    handle: veldsdk::rpc::core::ResourceHandle,
+    handle: veldsdk::proto::core::ResourceHandle,
     width: Length,
     height: Length,
 }

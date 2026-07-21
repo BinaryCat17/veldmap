@@ -1,4 +1,6 @@
-pub mod rpc;
+pub mod abi;
+pub mod proto;
+pub mod runtime;
 pub mod logging;
 pub mod graphics;
 
@@ -14,12 +16,12 @@ pub use prost;
 pub use anyhow;
 pub use log;
 
-pub use rpc::core::ResourceHandle;
-pub use rpc::host::generate_id;
-pub use rpc::host::event_publisher;
+pub use proto::core::ResourceHandle;
+pub use abi::generate_id;
+pub use abi::event_publisher;
 
 /// RAII handle to a memory region or graphics object.
-/// On drop: releases the resource via memory ABI (no RPC overhead).
+/// On drop: releases the resource via memory ABI.
 /// Deliberately not Clone: exactly one owner frees the resource.
 pub struct OwnedResource {
     handle: ResourceHandle,
@@ -36,7 +38,7 @@ impl OwnedResource {
 
 impl Drop for OwnedResource {
     fn drop(&mut self) {
-        rpc::host::arena_free(self.handle.id);
+        abi::arena_free(self.handle.id);
     }
 }
 
@@ -45,6 +47,6 @@ impl AsRef<ResourceHandle> for OwnedResource {
 }
 
 pub mod prelude {
-    pub use crate::rpc::core::*;
+    pub use crate::proto::core::*;
     pub use crate::OwnedResource;
 }

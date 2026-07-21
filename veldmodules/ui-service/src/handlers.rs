@@ -1,6 +1,6 @@
 use crate::proto::ui::*;
 use crate::module::state::{PluginUiState, State, PendingMessage};
-use veldsdk::rpc::app as app_proto;
+use veldsdk::proto::app as app_proto;
 use crate::module::renderer::GpuRenderer;
 use crate::module::converter;
 use iced_core::{Point, Event, Size, Theme};
@@ -190,7 +190,7 @@ fn dispatch_event(event: UiEventResponse) {
     // типизированный emit-стаб тут невозможен — топик собирается из данных события.
     let topic = format!("{}/{}", event.plugin_id, event.method);
     veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[DISPATCH] UI message -> '{}' (value: '{}')", topic, event.value);
-    veldsdk::rpc::host::publish(&topic, event.encode_to_vec());
+    veldsdk::abi::publish(&topic, event.encode_to_vec());
 }
 
 fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
