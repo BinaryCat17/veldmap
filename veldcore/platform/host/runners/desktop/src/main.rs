@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use prost::Message;
 
 use veldmap_host_core::app;
-use veldmap_host_core::dispatcher::{Dispatcher, NativeService, ServiceLocation};
+use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
 use veldmap_host_core::logging::FLAG_HOST_RENDER;
 use veldmap_host_core::registry::{Access, ResourceRegistry};
 use veldmap_host_core::{vinfo, vwarn, vdebug};
@@ -31,8 +31,9 @@ struct HostWindow {
     surface: Option<(u64, wgpu::BindGroup)>,
 }
 
-/// Native-подписчик топика app/set_surface: принимает поверхности от владельцев
+/// Подписчик топика app/set_surface: принимает поверхности от владельцев
 /// окон. Свап делает кадровый цикл — здесь только авторизация и очередь.
+/// Актор-очередь диспетчера гарантирует порядок аттачей от одного владельца.
 struct SurfaceSink {
     dispatcher: Arc<Dispatcher>,
     registry: Arc<ResourceRegistry>,
@@ -40,11 +41,8 @@ struct SurfaceSink {
     pending: Arc<Mutex<HashMap<String, u64>>>,
 }
 
-impl NativeService for SurfaceSink {
-    fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
-        if method != "set_surface" {
-            anyhow::bail!("Unknown app method: {}", method);
-        }
+impl SurfaceSink {
+    fn set_surface(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<()> {
         let msg = app::SetSurface::decode(&payload[..])?;
         let surface = msg.surface.ok_or_else(|| anyhow::anyhow!("SetSurface without a surface handle"))?;
 
@@ -60,7 +58,21 @@ impl NativeService for SurfaceSink {
         }
 
         self.pending.lock().unwrap().insert(msg.plugin_id, surface.id);
-        Ok(Vec::new())
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncNativeService for SurfaceSink {
+    async fn handle(&self, method: &str, payload: Vec<u8>, requestor_id: u32) {
+        match method {
+            "set_surface" => {
+                if let Err(e) = self.set_surface(payload, requestor_id) {
+                    vwarn!(FLAG_HOST_RENDER, "set_surface rejected: {}", e);
+                }
+            }
+            _ => vwarn!(FLAG_HOST_RENDER, "Unknown app topic: {}", method),
+        }
     }
 }
 
@@ -138,18 +150,17 @@ async fn main() -> anyhow::Result<()> {
     let dispatcher = ctx.dispatcher.clone();
     let graphics = ctx.graphics.clone();
 
-    veldmap_host_system::register_services(ctx.clone());
     #[cfg(target_os = "linux")]
     veldmap_host_fs::register_services(ctx.clone());
     veldmap_host_network::register_services(ctx.clone());
 
     // Приём поверхностей от владельцев окон.
     let pending_surfaces: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-    dispatcher.register_subscription("app/set_surface".to_string(), ServiceLocation::Native(Arc::new(SurfaceSink {
+    dispatcher.subscribe(Arc::new(SurfaceSink {
         dispatcher: dispatcher.clone(),
         registry: ctx.registry.clone(),
         pending: pending_surfaces.clone(),
-    })));
+    }), &["app/set_surface"]);
 
     veldmap_host_core::plugins::load_services(ctx.clone()).await?;
     if dispatcher.instance_of(&owner_name).is_none() {

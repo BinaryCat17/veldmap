@@ -48,16 +48,9 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                 config_map.insert("surface_format".to_string(), serde_json::Value::Number(ctx.graphics.get_surface_format_proto().into()));
                 
                 let instance_id = NEXT_INSTANCE_ID.fetch_add(1, Ordering::SeqCst);
-                
-                // Register config via RPC
-                let reg_req = crate::core::RegisterConfigRequest {
-                    key: instance_id,
-                    value_json: serde_json::to_string(&config_map).unwrap_or_else(|_| "{}".to_string()),
-                };
-                if let Err(e) = ctx.dispatcher.call("system", "register_config", prost::Message::encode_to_vec(&reg_req), instance_id).await {
-                    log::error!("Failed to register config for '{}': {}", name, e);
-                }
-                
+
+                // Конфиг уезжает в HostState ниже; модуль читает его через
+                // ABI-вызов veld_get_config — сервис-посредник не нужен.
                 log::trace!("Loading service '{}' with instance_id {}", name, instance_id);
                 
                 let mut linker = Linker::new(&engine);

@@ -6,13 +6,17 @@ use iroh::Endpoint;
 use crate::core::{RpcRequest, RpcResponse};
 use prost::Message;
 
-pub trait NativeService: Send + Sync {
-    fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> Result<Vec<u8>>;
-}
-
 #[async_trait::async_trait]
 pub trait AsyncNativeService: Send + Sync {
     async fn handle(&self, topic: &str, payload: Vec<u8>, requestor_id: u32);
+}
+
+/// Событие для нативного подписчика: метод топика, payload и идентичность
+/// паблишера (0 = сам хост).
+pub struct NativeEvent {
+    pub method: String,
+    pub payload: Vec<u8>,
+    pub publisher: u32,
 }
 
 pub enum RpcCommand {
@@ -37,8 +41,9 @@ pub enum ServiceLocation {
     // (CursorMoved before Click, press before release) per receiving actor.
     LocalWasm(tokio::sync::mpsc::UnboundedSender<RpcCommand>),
     RemoteIroh(iroh::EndpointId),
-    Native(Arc<dyn NativeService>),
-    NativeAsync(Arc<dyn AsyncNativeService>),
+    // Нативный подписчик — тоже актор со своей очередью (см. `subscribe`):
+    // publish кладёт событие синхронно, порядок доставки тот же, что у wasm.
+    NativeAsync(tokio::sync::mpsc::UnboundedSender<NativeEvent>),
 }
 
 pub struct Dispatcher {
@@ -73,6 +78,22 @@ impl Dispatcher {
         crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Registering subscription: {}", topic);
         let mut subscriptions = self.subscriptions.lock().unwrap();
         subscriptions.entry(topic).or_default().push(location);
+    }
+
+    /// Подписывает нативный сервис на его топики. Сервис получает одну
+    /// очередь и одну задачу-актор на все свои топики: события обрабатываются
+    /// последовательно, в порядке публикации — та же гарантия, что у
+    /// wasm-акторов, и без tokio::spawn на каждое событие.
+    pub fn subscribe(&self, service: Arc<dyn AsyncNativeService>, topics: &[&str]) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<NativeEvent>();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                service.handle(&ev.method, ev.payload, ev.publisher).await;
+            }
+        });
+        for topic in topics {
+            self.register_subscription((*topic).to_string(), ServiceLocation::NativeAsync(tx.clone()));
+        }
     }
 
     /// Fire-and-forget delivery to every subscriber of the topic.
@@ -115,17 +136,14 @@ impl Dispatcher {
                         crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
                     }
                 }
-                ServiceLocation::Native(service) => {
-                    if let Err(e) = service.call(method, payload.clone(), publisher) {
-                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Native subscriber for '{}' failed: {}", topic, e);
+                ServiceLocation::NativeAsync(sender) => {
+                    if sender.send(NativeEvent {
+                        method: method.to_string(),
+                        payload: payload.clone(),
+                        publisher,
+                    }).is_err() {
+                        crate::verror!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Native subscriber actor for '{}' is gone", topic);
                     }
-                }
-                ServiceLocation::NativeAsync(service) => {
-                    let payload = payload.clone();
-                    let method = method.to_string();
-                    tokio::spawn(async move {
-                        service.handle(&method, payload, publisher).await;
-                    });
                 }
                 ServiceLocation::RemoteIroh(_) => {
                     crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Remote publish not supported (topic '{}')", topic);
@@ -150,11 +168,8 @@ impl Dispatcher {
         };
 
         match location {
-            ServiceLocation::Native(service) => {
-                service.call(method, payload, requestor_id)
-            }
             ServiceLocation::NativeAsync(_) => {
-                Err(anyhow::anyhow!("Async services cannot be called via sync RPC (use publish instead)"))
+                Err(anyhow::anyhow!("Native subscribers cannot be called via sync RPC (use publish instead)"))
             }
             ServiceLocation::LocalWasm(sender) => {
                 let start_total = std::time::Instant::now();

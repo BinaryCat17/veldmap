@@ -10,11 +10,8 @@
 //! сюда не re-export'ируются никогда.
 
 // ── Трейты сервисов ─────────────────────────────────────────────────────────
-// Контракт, который реализует каждый нативный модуль, и локация для
-// регистрации в диспетчере.
-pub use veldmap_host_core::dispatcher::{
-    NativeService, AsyncNativeService, ServiceLocation, Dispatcher,
-};
+// Контракт, который реализует каждый нативный модуль.
+pub use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
 
 // ── Контекст хоста ──────────────────────────────────────────────────────────
 // Ручка на собранную платформу: dispatcher, memory, registry.
@@ -45,7 +42,7 @@ pub mod path {
 /// Сантехника protobuf-шины: единое место для decode/encode и регистрации,
 /// чтобы обработчики модулей содержали только бизнес-логику.
 pub mod wire {
-    use super::{AsyncNativeService, Dispatcher, HostContext, ServiceLocation};
+    use super::{AsyncNativeService, Dispatcher, HostContext};
     use prost::Message;
     use std::sync::Arc;
 
@@ -67,15 +64,12 @@ pub mod wire {
     }
 
     /// Подписывает один асинхронный сервис сразу на несколько его топиков.
+    /// События придут последовательно, в порядке публикации (актор-очередь
+    /// в диспетчере — одна на сервис).
     pub fn subscribe_async<S>(ctx: &HostContext, service: &Arc<S>, topics: &[&str])
     where
         S: AsyncNativeService + 'static,
     {
-        for topic in topics {
-            ctx.dispatcher.register_subscription(
-                topic.to_string(),
-                ServiceLocation::NativeAsync(service.clone()),
-            );
-        }
+        ctx.dispatcher.subscribe(service.clone(), topics);
     }
 }

@@ -6,13 +6,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Контракты нативных модулей хоста (владельцы — сами модули)
         "../../platform/host/modules/fs/fs.proto",
         "../../platform/host/modules/network/network.proto",
-        "../../platform/host/modules/system/system.proto",
     ];
     let include_dirs = &[
         "../../proto",
         "../../platform/host/modules/fs",
         "../../platform/host/modules/network",
-        "../../platform/host/modules/system",
     ];
 
     for proto in proto_files {

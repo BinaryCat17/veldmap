@@ -7,9 +7,8 @@ edition = "2021"
 veldmap-host-core = { path = "../../core" }
 veldmap-host-fs = { path = "../../modules/fs" }
 veldmap-host-network = { path = "../../modules/network" }
-veldmap-host-system = { path = "../../modules/system" }
 
-
+async-trait = "0.1"
 tokio = { version = "1.49", features = ["full"] }
 anyhow = "1.0"
 log = "0.4"

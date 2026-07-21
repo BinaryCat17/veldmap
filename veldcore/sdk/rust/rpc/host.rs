@@ -7,6 +7,8 @@ extern "C" {
     fn veld_host_publish(ptr: u64, len: u64);
     fn veld_host_log(level: u64, flags: u64, ptr: u64, len: u64);
     fn veld_host_call(ptr: u64, len: u64) -> u64;
+    fn veld_get_config(ptr: u64, len: u64) -> u64;
+    fn veld_random_bytes(ptr: u64, len: u64);
     fn veld_graphics_create_resource(ptr: u64, len: u64) -> u64;
     fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
 
@@ -44,17 +46,23 @@ pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
 
 // ── RPC ────────────────────────────────────────────────────────
 
-/// Распаковывает ответ хоста: (len << 32 | ptr) → payload из RpcResponse.
+/// Забирает сырой буфер хоста: (len << 32 | ptr) → байты, 0 → None.
 /// Память под ответ хост выделил через veld_alloc; здесь она освобождается.
-unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
+unsafe fn take_host_bytes(packed: u64) -> Option<Vec<u8>> {
     if packed == 0 {
-        return Err(anyhow::anyhow!("{} failed", what));
+        return None;
     }
     let ptr = (packed & 0xFFFF_FFFF) as *mut u8;
     let len = (packed >> 32) as usize;
-    let response = RpcResponse::decode(std::slice::from_raw_parts(ptr, len));
+    let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
     veld_free_wasm(ptr as u64, len as u64);
-    let response = response?;
+    Some(bytes)
+}
+
+/// Распаковывает ответ хоста: (len << 32 | ptr) → payload из RpcResponse.
+unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
+    let buf = take_host_bytes(packed).ok_or_else(|| anyhow::anyhow!("{} failed", what))?;
+    let response = RpcResponse::decode(&buf[..])?;
     if !response.error.is_empty() {
         return Err(anyhow::anyhow!(response.error));
     }
@@ -161,25 +169,26 @@ pub fn log(level: log::Level, flags: u32, message: &str) {
 
 // ── System helpers ─────────────────────────────────────────────
 
+/// Значение из конфига модуля (инжектирован хостом при загрузке).
+/// None — ключа нет.
 pub fn get_config(key: &str) -> Option<String> {
-    use crate::rpc::system::{GetConfigRequest, GetConfigResponse};
-    let req = GetConfigRequest { key: key.to_string() };
-    call_service("system", "get_config", req.encode_to_vec())
-        .ok().and_then(|res| GetConfigResponse::decode(&res[..]).ok()).map(|r| r.value)
+    unsafe {
+        let packed = veld_get_config(key.as_ptr() as u64, key.len() as u64);
+        take_host_bytes(packed).and_then(|b| String::from_utf8(b).ok())
+    }
 }
 
-/// UUID от system-сервиса; при недоступности — деградация в id по времени.
+/// UUID v4 из хостовой энтропии: у wasm нет своего источника случайности.
 pub fn generate_id() -> String {
-    use crate::rpc::system::GenerateUuidResponse;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let fallback = || {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        format!("id_{}", nanos)
-    };
-    match call_service("system", "generate_uuid", Vec::new()) {
-        Ok(res) => GenerateUuidResponse::decode(&res[..]).map(|r| r.uuid).unwrap_or_else(|_| fallback()),
-        Err(_) => fallback(),
-    }
+    let mut b = [0u8; 16];
+    unsafe { veld_random_bytes(b.as_mut_ptr() as u64, b.len() as u64) };
+    b[6] = (b[6] & 0x0f) | 0x40; // версия 4
+    b[8] = (b[8] & 0x3f) | 0x80; // вариант RFC 4122
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
 }
 
 // ── Call context ───────────────────────────────────────────────

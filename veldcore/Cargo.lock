@@ -5364,6 +5364,7 @@ name = "veldmap-host-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytemuck",
  "chrono",
  "env_logger",
@@ -5379,7 +5380,6 @@ dependencies = [
  "veldmap-host-core",
  "veldmap-host-fs",
  "veldmap-host-network",
- "veldmap-host-system",
  "wasmtime",
  "wgpu",
  "winit",
@@ -5397,21 +5397,6 @@ dependencies = [
  "prost-build",
  "reqwest",
  "tokio",
- "uuid",
- "veldmap-host-util",
-]
-
-[[package]]
-name = "veldmap-host-system"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dashmap",
- "log",
- "prost",
- "prost-build",
- "serde",
- "serde_json",
  "uuid",
  "veldmap-host-util",
 ]
