@@ -1,21 +1,5 @@
-pub mod core {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
-}
-
-pub mod app {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
-}
-
-// Контракты нативных модулей хоста (генерируются из их собственных proto).
-pub mod fs {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.fs.rs"));
-}
-
-pub mod network {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.network.rs"));
-}
-
-pub mod host;
+//! Рантайм модуля: хранение состояния между вызовами хоста и диспетчеризация
+//! обработчиков. Используется сгенерированным lib.rs модуля (buildgen).
 
 pub static MODULE_STATE: once_cell::sync::OnceCell<
     anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>,
