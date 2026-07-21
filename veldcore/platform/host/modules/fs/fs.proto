@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package veldmap.fs;
+
+import "core.proto";
+
+// --- FILESYSTEM API ---
+// Контракт нативного сервиса fs (чтение/запись через shared memory, листинг).
+
+message FsReadRequest {
+  string path = 1;
+  string correlation_id = 2;
+}
+
+message FsReadResult {
+  veldmap.core.ResourceHandle handle = 1;
+  string error = 2;
+  string correlation_id = 3;
+}
+
+message FsWriteRequest {
+  string path = 1;
+  veldmap.core.ResourceHandle handle = 2;
+  string correlation_id = 3;
+}
+
+message FsWriteResult {
+  string error = 1;
+  string correlation_id = 2;
+}
+
+message FsListRequest {
+  string path = 1;
+  string correlation_id = 2;
+}
+
+message FsListResult {
+  repeated string entries = 1;
+  string error = 2;
+  string correlation_id = 3;
+}

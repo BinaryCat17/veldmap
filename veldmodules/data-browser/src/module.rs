@@ -23,7 +23,7 @@ pub use handlers::search::{on_input_search, on_input_search_input};
 pub use handlers::download::{on_input_download_pressed, on_input_view_pressed};
 
 // -- Sub handlers --
-pub use handlers::download::{on_sub_download_started, on_sub_download_progress, on_sub_downloaded, on_sub_load_result};
+pub use handlers::download::{on_sub_download_started, on_sub_download_progress, on_sub_downloaded};
 pub use handlers::search::on_sub_search_result;
 pub use handlers::browse::on_sub_list_path_result;
 pub use handlers::nav::on_sub_list_result;

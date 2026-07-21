@@ -1,23 +1,39 @@
 #![recursion_limit = "256"]
-use veldmap_host_core::dispatcher::AsyncNativeService;
-use veldmap_host_core::core::{
+//! Контракт сервиса — network.proto этого модуля (компилируется build.rs).
+pub mod proto {
+    pub mod network {
+        include!(concat!(env!("OUT_DIR"), "/veldmap.network.rs"));
+    }
+}
+
+use veldmap_host_util::{AsyncNativeService, HostContext};
+use proto::network::{
     FsDownloadRequest, HttpTaskRequest, HttpTaskResponse,
-    FsDownloadResponse, FsDownloadProgress, TaskResponse, TaskCancelRequest
+    FsDownloadResponse, FsDownloadProgress, TaskCancelRequest
 };
-use prost::Message;
+use veldmap_host_util::path::is_path_safe;
+use veldmap_host_util::wire;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::path::Path;
 use std::fs;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
-use veldmap_host_core::setup::HostContext;
 
 pub struct NetworkService {
     ctx: Arc<HostContext>,
     /// AbortHandle'ы фоновых задач, ключ — correlation_id (id, известный инициатору),
-    /// чтобы событие отмены могло адресовать задачу без хост-реестра.
+    /// чтобы событие отмены могло адресовать задачу напрямую.
     local_tasks: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+}
+
+/// Логирует провал скачивания и уведомляет подписчиков fs_download_result.
+fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) {
+    log::warn!(target: "host", "Download {} failed: {}", correlation_id, error);
+    wire::publish(&ctx.dispatcher, "network/fs_download_result", &FsDownloadResponse {
+        error,
+        correlation_id: correlation_id.to_string(),
+    });
 }
 
 impl NetworkService {
@@ -25,44 +41,26 @@ impl NetworkService {
         Self { ctx, local_tasks: Arc::new(Mutex::new(HashMap::new())) }
     }
 
-    fn is_path_safe(path: &str) -> bool {
-        let path_obj = Path::new(path);
-        if path_obj.is_absolute() { return false; }
-        for component in path_obj.components() {
-            if matches!(component, std::path::Component::ParentDir) { return false; }
-        }
-        true
-    }
-
     async fn handle_fs_download(&self, payload: Vec<u8>) {
-        let req = match FsDownloadRequest::decode(&payload[..]) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!(target: "host", "Failed to decode FsDownloadRequest: {}", e);
-                return;
-            }
-        };
+        let Some(req) = wire::decode_or_log::<FsDownloadRequest>(&payload, "network/fs_download") else { return };
 
-        if !Self::is_path_safe(&req.path) {
-            let response = FsDownloadResponse {
+        if !is_path_safe(&req.path) {
+            wire::publish(&self.ctx.dispatcher, "network/fs_download_result", &FsDownloadResponse {
                 error: format!("Unsafe path: {}", req.path),
-                task: Some(TaskResponse { task_id: String::new() }),
                 correlation_id: req.correlation_id.clone(),
-            };
-            self.ctx.dispatcher.publish("network/fs_download_result", response.encode_to_vec());
+            });
             return;
         }
 
-        let task_id = uuid::Uuid::new_v4().to_string();
+        // Единый идентификатор операции — correlation_id (генерируем, если не задан).
         let correlation_id = if req.correlation_id.is_empty() {
-            task_id.clone()
+            uuid::Uuid::new_v4().to_string()
         } else {
             req.correlation_id.clone()
         };
-        let ctx_clone = self.ctx.clone();
+        let ctx = self.ctx.clone();
         if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
 
-        let task_id_inner = task_id.clone();
         let cancel_key = correlation_id.clone();
         let join_handle = tokio::spawn(async move {
             let client = reqwest::Client::new();
@@ -71,27 +69,11 @@ impl NetworkService {
 
             let res = match builder.send().await {
                 Ok(r) => r,
-                Err(e) => {
-                    log::warn!(target: "host", "Download task {} failed: {}", task_id_inner, e);
-                    let response = FsDownloadResponse {
-                        error: e.to_string(),
-                        task: Some(TaskResponse { task_id: task_id_inner.clone() }),
-                        correlation_id: correlation_id.clone(),
-                    };
-                    ctx_clone.dispatcher.publish("network/fs_download_result", response.encode_to_vec());
-                    return;
-                }
+                Err(e) => return fail_download(&ctx, &correlation_id, e.to_string()),
             };
 
             if !res.status().is_success() {
-                log::warn!(target: "host", "Download task {} failed: HTTP {}", task_id_inner, res.status());
-                let response = FsDownloadResponse {
-                    error: format!("HTTP {}", res.status()),
-                    task: Some(TaskResponse { task_id: task_id_inner.clone() }),
-                    correlation_id: correlation_id.clone(),
-                };
-                ctx_clone.dispatcher.publish("network/fs_download_result", response.encode_to_vec());
-                return;
+                return fail_download(&ctx, &correlation_id, format!("HTTP {}", res.status()));
             }
 
             let total_size = res.content_length().unwrap_or(0);
@@ -105,14 +87,7 @@ impl NetworkService {
                         match chunk_res {
                             Ok(chunk) => {
                                 if let Err(e) = async_file.write_all(&chunk).await {
-                                    log::warn!(target: "host", "Download task {} write error: {}", task_id_inner, e);
-                                    let response = FsDownloadResponse {
-                                        error: format!("Write error: {}", e),
-                                        task: Some(TaskResponse { task_id: task_id_inner.clone() }),
-                                        correlation_id: correlation_id.clone(),
-                                    };
-                                    ctx_clone.dispatcher.publish("network/fs_download_result", response.encode_to_vec());
-                                    return;
+                                    return fail_download(&ctx, &correlation_id, format!("Write error: {}", e));
                                 }
                                 downloaded += chunk.len() as u64;
                                 // Прогресс событием, с троттлингом по целым процентам.
@@ -120,71 +95,46 @@ impl NetworkService {
                                     let percent = (downloaded * 100 / total_size) as u32;
                                     if percent > last_percent {
                                         last_percent = percent;
-                                        let progress = FsDownloadProgress {
+                                        wire::publish(&ctx.dispatcher, "network/fs_download_progress", &FsDownloadProgress {
                                             correlation_id: correlation_id.clone(),
                                             progress: downloaded as f32 / total_size as f32,
-                                        };
-                                        ctx_clone.dispatcher.publish("network/fs_download_progress", progress.encode_to_vec());
+                                        });
                                     }
                                 }
                             }
-                            Err(e) => {
-                                log::warn!(target: "host", "Download task {} stream error: {}", task_id_inner, e);
-                                let response = FsDownloadResponse {
-                                    error: format!("Stream error: {}", e),
-                                    task: Some(TaskResponse { task_id: task_id_inner.clone() }),
-                                    correlation_id: correlation_id.clone(),
-                                };
-                                ctx_clone.dispatcher.publish("network/fs_download_result", response.encode_to_vec());
-                                return;
-                            }
+                            Err(e) => return fail_download(&ctx, &correlation_id, format!("Stream error: {}", e)),
                         }
                     }
                     let _ = async_file.flush().await;
                 }
-                Err(e) => {
-                    log::warn!(target: "host", "Download task {} file create error: {}", task_id_inner, e);
-                    let response = FsDownloadResponse {
-                        error: format!("File create error: {}", e),
-                        task: Some(TaskResponse { task_id: task_id_inner.clone() }),
-                        correlation_id: correlation_id.clone(),
-                    };
-                    ctx_clone.dispatcher.publish("network/fs_download_result", response.encode_to_vec());
-                    return;
-                }
+                Err(e) => return fail_download(&ctx, &correlation_id, format!("File create error: {}", e)),
             }
 
-            log::info!(target: "host", "Download task {} completed ({}/{} bytes)", task_id_inner, downloaded, total_size);
-            let response = FsDownloadResponse {
+            log::info!(target: "host", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
+            wire::publish(&ctx.dispatcher, "network/fs_download_result", &FsDownloadResponse {
                 error: String::new(),
-                task: Some(TaskResponse { task_id: task_id_inner.clone() }),
                 correlation_id: correlation_id.clone(),
-            };
-            ctx_clone.dispatcher.publish("network/fs_download_result", response.encode_to_vec());
+            });
         });
 
         self.local_tasks.lock().unwrap().insert(cancel_key, join_handle.abort_handle());
     }
 
     async fn handle_http(&self, payload: Vec<u8>) {
-        let req = match HttpTaskRequest::decode(&payload[..]) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!(target: "host", "Failed to decode HttpTaskRequest: {}", e);
-                return;
-            }
-        };
+        let Some(req) = wire::decode_or_log::<HttpTaskRequest>(&payload, "network/http") else { return };
 
-        let correlation_id = req.correlation_id.clone();
-        let task_id = uuid::Uuid::new_v4().to_string();
-        let ctx_clone = self.ctx.clone();
-        let task_id_inner = task_id.clone();
-        let cancel_key = if correlation_id.is_empty() { task_id.clone() } else { correlation_id.clone() };
+        let correlation_id = if req.correlation_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            req.correlation_id.clone()
+        };
+        let ctx = self.ctx.clone();
+        let cancel_key = correlation_id.clone();
 
         log::info!(target: "host", "Received HTTP request: {} {} (correlation_id: {})", req.method, req.url, correlation_id);
 
         let join_handle = tokio::spawn(async move {
-            log::info!(target: "host", "Executing HTTP task {}...", task_id_inner);
+            log::info!(target: "host", "Executing HTTP request {}...", correlation_id);
             let client = reqwest::Client::new();
             let method = match req.method.to_uppercase().as_str() {
                 "POST" => reqwest::Method::POST,
@@ -208,14 +158,12 @@ impl NetworkService {
 
             match result {
                 Ok((status, body)) => {
-                    log::info!(target: "host", "HTTP task {} finished with status {}", task_id_inner, status);
-                    let response = HttpTaskResponse { status, body, correlation_id: correlation_id.clone() };
-                    ctx_clone.dispatcher.publish("network/http_result", response.encode_to_vec());
+                    log::info!(target: "host", "HTTP request {} finished with status {}", correlation_id, status);
+                    wire::publish(&ctx.dispatcher, "network/http_result", &HttpTaskResponse { status, body, correlation_id: correlation_id.clone() });
                 }
                 Err(e) => {
-                    log::warn!(target: "host", "HTTP task {} failed: {}", task_id_inner, e);
-                    let response = HttpTaskResponse { status: 0, body: Vec::new(), correlation_id: correlation_id.clone() };
-                    ctx_clone.dispatcher.publish("network/http_result", response.encode_to_vec());
+                    log::warn!(target: "host", "HTTP request {} failed: {}", correlation_id, e);
+                    wire::publish(&ctx.dispatcher, "network/http_result", &HttpTaskResponse { status: 0, body: Vec::new(), correlation_id: correlation_id.clone() });
                 }
             }
         });
@@ -225,11 +173,10 @@ impl NetworkService {
 
     /// Событие `network/cancel_download`: отмена фоновой задачи по correlation_id.
     async fn handle_cancel_download(&self, payload: Vec<u8>) {
-        if let Ok(req) = TaskCancelRequest::decode(&payload[..]) {
-            if let Some(handle) = self.local_tasks.lock().unwrap().remove(&req.task_id) {
-                log::info!(target: "host", "NetworkService aborting task {}", req.task_id);
-                handle.abort();
-            }
+        let Some(req) = wire::decode_or_log::<TaskCancelRequest>(&payload, "network/cancel_download") else { return };
+        if let Some(handle) = self.local_tasks.lock().unwrap().remove(&req.task_id) {
+            log::info!(target: "host", "NetworkService aborting task {}", req.task_id);
+            handle.abort();
         }
     }
 }
@@ -248,7 +195,5 @@ impl AsyncNativeService for NetworkService {
 
 pub fn register_services(ctx: Arc<HostContext>) {
     let network_service = Arc::new(NetworkService::new(ctx.clone()));
-    ctx.dispatcher.register_subscription("network/fs_download".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(network_service.clone()));
-    ctx.dispatcher.register_subscription("network/http".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(network_service.clone()));
-    ctx.dispatcher.register_subscription("network/cancel_download".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(network_service));
+    wire::subscribe_async(&ctx, &network_service, &["network/fs_download", "network/http", "network/cancel_download"]);
 }

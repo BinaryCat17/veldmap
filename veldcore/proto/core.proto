@@ -2,6 +2,13 @@ syntax = "proto3";
 
 package veldmap.core;
 
+// Платформенный конверт и разделяемые примитивы хоста.
+// Контракты сервисов лежат рядом с их реализациями (как types.proto у wasm-модулей):
+//   platform/host/modules/fs/fs.proto
+//   platform/host/modules/network/network.proto
+//   platform/host/modules/system/system.proto
+// UI/окна/GPU: app.proto, graphics.proto.
+
 // UNIVERSAL RESOURCE HANDLE
 message ResourceHandle {
   uint64 id = 1;           // Local session ID
@@ -28,138 +35,8 @@ message RpcResponse {
 // An intentionally empty payload (lifecycle signals etc.)
 message Empty {}
 
-// --- FILESYSTEM API ---
-
-message FsReadRequest {
-  string path = 1;
-  string correlation_id = 2;
-}
-
-message FsReadResponse {
-  ResourceHandle handle = 1;
-  string correlation_id = 2;
-}
-
-message FsWriteRequest {
-  string path = 1;
-  ResourceHandle handle = 2;
-  string correlation_id = 3;
-}
-
-message FsListRequest {
-  string path = 1;
-  string correlation_id = 2;
-}
-
-message FsListResponse {
-  repeated string entries = 1;
-  string correlation_id = 2;
-}
-
-message FsDownloadRequest {
-  string url = 1;
-  string path = 2;
-  map<string, string> headers = 3;
-  string correlation_id = 4;
-}
-
-message FsDownloadResponse {
-  TaskResponse task = 1;
-  string correlation_id = 2;
-  string error = 3;
-}
-
-// Событие прогресса скачивания (топик network/fs_download_progress).
-message FsDownloadProgress {
-  string correlation_id = 1;
-  float progress = 2;  // 0.0 to 1.0
-}
-
-// --- HTTP API ---
-
-message HttpTaskRequest {
-  string url = 1;
-  string method = 2;
-  map<string, string> headers = 3;
-  bytes body = 4;
-  string correlation_id = 5;
-}
-
-message HttpTaskResponse {
-  uint32 status = 1;
-  bytes body = 2;
-  string correlation_id = 3;
-}
-
-// --- IMAGE API ---
-
-message ImageLoadRequest {
-  string path = 1;
-  uint32 target_width = 2;  // 0 means original
-  uint32 target_height = 3; // 0 means original
-  bool preserve_aspect = 4;
-  string correlation_id = 5;
-}
-
-message ImageLoadResponse {
-  TaskResponse task = 1;
-  string correlation_id = 2;
-}
-
-message ImageLoadResult {
-  ResourceHandle handle = 1;
-  string error = 2;
-  string correlation_id = 3;
-}
-
-message FsReadResult {
-  ResourceHandle handle = 1;
-  string error = 2;
-  string correlation_id = 3;
-}
-
-message FsWriteResult {
-  string error = 1;
-  string correlation_id = 2;
-}
-
-message FsListResult {
-  repeated string entries = 1;
-  string error = 2;
-  string correlation_id = 3;
-}
-
-// --- DYNAMIC RESOURCE DISCOVERY ---
-
-// --- ASYNC TASKS ---
-// Реестра задач на хосте нет: прогресс и результаты текучих событиями
-// (pub/sub), а отмена — доменным событием сервиса (напр. network/cancel_download).
-
-message TaskResponse {
-  string task_id = 1;
-}
-
-// Payload события отмены (напр. топик network/cancel_download).
-message TaskCancelRequest {
-  string task_id = 1;
-}
-
-message GetConfigRequest {
-  string key = 1;
-}
-
-message GetConfigResponse {
-  string value = 1;
-}
-
+// Инъекция конфигурации плагина при загрузке (загрузчик плагинов → сервис system).
 message RegisterConfigRequest {
   uint32 key = 1;
   string value_json = 2;
-}
-
-message GenerateUuidRequest {
-}
-
-message GenerateUuidResponse {
-  string uuid = 1;
 }

@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package veldmap.network;
+
+// --- NETWORK API ---
+// Контракт нативного сервиса network (HTTP-запросы и потоковые скачивания).
+// Идентификатор операции везде — correlation_id: прогресс и результаты
+// доставляются событиями, отмена — событием network/cancel_download.
+
+message FsDownloadRequest {
+  string url = 1;
+  string path = 2;
+  map<string, string> headers = 3;
+  string correlation_id = 4;
+}
+
+message FsDownloadResponse {
+  string correlation_id = 1;
+  string error = 2;
+}
+
+// Событие прогресса скачивания (топик network/fs_download_progress).
+message FsDownloadProgress {
+  string correlation_id = 1;
+  float progress = 2;  // 0.0 to 1.0
+}
+
+// Событие отмены фоновой задачи (топик network/cancel_download).
+message TaskCancelRequest {
+  string task_id = 1;
+}
+
+// --- HTTP API ---
+
+message HttpTaskRequest {
+  string url = 1;
+  string method = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+  string correlation_id = 5;
+}
+
+message HttpTaskResponse {
+  uint32 status = 1;
+  bytes body = 2;
+  string correlation_id = 3;
+}

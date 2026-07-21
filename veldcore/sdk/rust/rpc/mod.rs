@@ -6,6 +6,19 @@ pub mod app {
     include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
 }
 
+// Контракты нативных модулей хоста (генерируются из их собственных proto).
+pub mod fs {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.fs.rs"));
+}
+
+pub mod network {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.network.rs"));
+}
+
+pub mod system {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.system.rs"));
+}
+
 pub mod host;
 
 pub static MODULE_STATE: once_cell::sync::OnceCell<

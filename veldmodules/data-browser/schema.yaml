@@ -56,14 +56,7 @@ dependencies:
   fs:
     subs:
       list_result:
-        type: core/FsListResponse
+        type: fs/FsListResult
     calls:
       list:
-        type: core/FsListRequest
-  image:
-    subs:
-      load_result:
-        type: core/ImageLoadResult
-    calls:
-      load:
-        type: core/ImageLoadRequest
+        type: fs/FsListRequest

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-veldmap-host-core = { path = "../../core" }
+veldmap-host-util = { path = "../../util" }
 prost = "0.14"
 anyhow = "1.0"
 log = "0.4"
@@ -12,3 +12,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dashmap = "6.0"
 uuid = { version = "1.0", features = ["v4"] }
+
+[build-dependencies]
+prost-build = "0.14"

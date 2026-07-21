@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package veldmap.system;
+
+// --- SYSTEM API ---
+// Контракт нативного сервиса system: конфигурация плагинов и генерация id.
+// (RegisterConfigRequest — в core.proto: его кодирует загрузчик плагинов core.)
+
+message GetConfigRequest {
+  string key = 1;
+}
+
+message GetConfigResponse {
+  string value = 1;
+}
+
+message GenerateUuidRequest {
+}
+
+message GenerateUuidResponse {
+  string uuid = 1;
+}

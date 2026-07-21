@@ -1,16 +1,25 @@
 #![recursion_limit = "256"]
-use veldmap_host_core::dispatcher::AsyncNativeService;
-use veldmap_host_core::registry::Access;
-use veldmap_host_core::core::{
+//! Контракт сервиса — fs.proto этого модуля (компилируется build.rs).
+pub mod proto {
+    pub mod core {
+        include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
+    }
+    pub mod fs {
+        include!(concat!(env!("OUT_DIR"), "/veldmap.fs.rs"));
+    }
+}
+
+use veldmap_host_util::{AsyncNativeService, Access, HostContext};
+use proto::fs::{
     FsReadRequest, FsReadResult, FsWriteRequest, FsWriteResult,
-    FsListRequest, FsListResult, ResourceHandle
+    FsListRequest, FsListResult,
 };
-use prost::Message;
+use proto::core::ResourceHandle;
+use veldmap_host_util::path::is_path_safe;
+use veldmap_host_util::wire;
 use std::sync::Arc;
 use std::path::Path;
 use std::fs;
-
-use veldmap_host_core::setup::HostContext;
 
 pub struct FsService {
     ctx: Arc<HostContext>,
@@ -21,26 +30,11 @@ impl FsService {
         Self { ctx }
     }
 
-    fn is_path_safe(path: &str) -> bool {
-        let path_obj = Path::new(path);
-        if path_obj.is_absolute() { return false; }
-        for component in path_obj.components() {
-            if matches!(component, std::path::Component::ParentDir) { return false; }
-        }
-        true
-    }
-
     async fn handle_fs_read(&self, payload: Vec<u8>, requestor_id: u32) {
-        let req = match FsReadRequest::decode(&payload[..]) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!(target: "host", "Failed to decode FsReadRequest: {}", e);
-                return;
-            }
-        };
+        let Some(req) = wire::decode_or_log::<FsReadRequest>(&payload, "fs/read") else { return };
 
         let correlation_id = req.correlation_id.clone();
-        let result = if !Self::is_path_safe(&req.path) {
+        let result = if !is_path_safe(&req.path) {
             FsReadResult { handle: None, error: "Access denied".into(), correlation_id }
         } else {
             match fs::read(&req.path) {
@@ -57,30 +51,24 @@ impl FsService {
                 Err(e) => FsReadResult { handle: None, error: e.to_string(), correlation_id },
             }
         };
-        self.ctx.dispatcher.publish("fs/read_result", result.encode_to_vec());
+        wire::publish(&self.ctx.dispatcher, "fs/read_result", &result);
     }
 
     async fn handle_fs_write(&self, payload: Vec<u8>, requestor_id: u32) {
-        let req = match FsWriteRequest::decode(&payload[..]) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!(target: "host", "Failed to decode FsWriteRequest: {}", e);
-                return;
-            }
-        };
+        let Some(req) = wire::decode_or_log::<FsWriteRequest>(&payload, "fs/write") else { return };
 
         let correlation_id = req.correlation_id.clone();
-        let result = if !Self::is_path_safe(&req.path) {
+        let result = if !is_path_safe(&req.path) {
             FsWriteResult { error: "Access denied".into(), correlation_id }
         } else {
             let handle = match req.handle {
                 Some(h) => h,
                 None => {
-                    self.ctx.dispatcher.publish("fs/write_result", FsWriteResult { error: "Missing handle".into(), correlation_id }.encode_to_vec());
+                    wire::publish(&self.ctx.dispatcher, "fs/write_result", &FsWriteResult { error: "Missing handle".into(), correlation_id });
                     return;
                 }
             };
-            
+
             let data = if handle.id == 0 {
                 FsWriteResult { error: "Handle ID 0 not supported for fs_write yet".into(), correlation_id }
             } else if !self.ctx.registry.check_access(handle.id, requestor_id, Access::Read) {
@@ -99,20 +87,14 @@ impl FsService {
             };
             data
         };
-        self.ctx.dispatcher.publish("fs/write_result", result.encode_to_vec());
+        wire::publish(&self.ctx.dispatcher, "fs/write_result", &result);
     }
 
     async fn handle_fs_list(&self, payload: Vec<u8>) {
-        let req = match FsListRequest::decode(&payload[..]) {
-            Ok(r) => r,
-            Err(e) => {
-                log::error!(target: "host", "Failed to decode FsListRequest: {}", e);
-                return;
-            }
-        };
+        let Some(req) = wire::decode_or_log::<FsListRequest>(&payload, "fs/list") else { return };
 
         let correlation_id = req.correlation_id.clone();
-        let result = if !Self::is_path_safe(&req.path) {
+        let result = if !is_path_safe(&req.path) {
             FsListResult { entries: vec![], error: "Access denied".into(), correlation_id }
         } else {
             let mut entries = Vec::new();
@@ -132,7 +114,7 @@ impl FsService {
                 FsListResult { entries: vec![], error: String::new(), correlation_id }
             }
         };
-        self.ctx.dispatcher.publish("fs/list_result", result.encode_to_vec());
+        wire::publish(&self.ctx.dispatcher, "fs/list_result", &result);
     }
 }
 
@@ -150,7 +132,5 @@ impl AsyncNativeService for FsService {
 
 pub fn register_services(ctx: Arc<HostContext>) {
     let fs_service = Arc::new(FsService::new(ctx.clone()));
-    ctx.dispatcher.register_subscription("fs/read".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(fs_service.clone()));
-    ctx.dispatcher.register_subscription("fs/write".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(fs_service.clone()));
-    ctx.dispatcher.register_subscription("fs/list".to_string(), veldmap_host_core::dispatcher::ServiceLocation::NativeAsync(fs_service));
+    wire::subscribe_async(&ctx, &fs_service, &["fs/read", "fs/write", "fs/list"]);
 }

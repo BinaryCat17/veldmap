@@ -162,7 +162,7 @@ pub fn log(level: log::Level, flags: u32, message: &str) {
 // ── System helpers ─────────────────────────────────────────────
 
 pub fn get_config(key: &str) -> Option<String> {
-    use crate::rpc::core::{GetConfigRequest, GetConfigResponse};
+    use crate::rpc::system::{GetConfigRequest, GetConfigResponse};
     let req = GetConfigRequest { key: key.to_string() };
     call_service("system", "get_config", req.encode_to_vec())
         .ok().and_then(|res| GetConfigResponse::decode(&res[..]).ok()).map(|r| r.value)
@@ -170,7 +170,7 @@ pub fn get_config(key: &str) -> Option<String> {
 
 /// UUID от system-сервиса; при недоступности — деградация в id по времени.
 pub fn generate_id() -> String {
-    use crate::rpc::core::GenerateUuidResponse;
+    use crate::rpc::system::GenerateUuidResponse;
     use std::time::{SystemTime, UNIX_EPOCH};
     let fallback = || {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);

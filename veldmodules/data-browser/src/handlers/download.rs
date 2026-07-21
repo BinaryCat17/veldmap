@@ -3,7 +3,6 @@ use crate::proto::ui::proto::UiEventResponse;
 
 use crate::module::state::{State, downloaded::DownloadStatus};
 use crate::module::components::task_manager::TaskKind;
-use veldsdk::rpc::core::ImageLoadResult;
 
 /// Пользователь нажал кнопку скачать.
 /// Повторное нажатие на файл, который уже скачивается — отмена загрузки.
@@ -38,19 +37,12 @@ pub fn on_input_view_pressed(
 ) {
     let value = event.value;
     if value.is_empty() { return; }
-    
+
     state.current_screen = crate::module::state::Screen::Preview;
-    state.preview.current_path = value.clone();
-    state.preview.is_loading = true;
-    
-    // Запрашиваем загрузку изображения у хоста
-    crate::calls::image::load(&veldsdk::rpc::core::ImageLoadRequest {
-        path: value,
-        target_width: 2048,
-        target_height: 2048,
-        preserve_aspect: true,
-        correlation_id: String::new(),
-    });
+    state.preview.current_path = value;
+    state.preview.is_loading = false;
+    // TODO: wasm-модуль image ещё не реализован — загрузка превью появится вместе с ним.
+    state.global.error_message = Some("Image preview: модуль image ещё не реализован".to_string());
 }
 
 /// Data-provider сообщил что загрузка началась
@@ -119,20 +111,4 @@ pub fn on_sub_downloaded(
     // Рендер происходит автоматически в on_frame
 }
 
-pub fn on_sub_load_result(
-    state: &mut State,
-    result: ImageLoadResult,
-) {
-    state.preview.is_loading = false;
-    if result.error.is_empty() {
-        if let Some(handle) = result.handle {
-            state.preview.current_image = Some(handle.id);
-        } else {
-            state.preview.current_image = None;
-            state.global.error_message = Some("Image loaded but handle is missing".to_string());
-        }
-    } else {
-        state.preview.current_image = None;
-        state.global.error_message = Some(format!("Image load failed: {}", result.error));
-    }
-}
+

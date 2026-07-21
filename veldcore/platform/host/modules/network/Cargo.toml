@@ -4,12 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-veldmap-host-core = { path = "../../core" }
+veldmap-host-util = { path = "../../util" }
 tokio = { version = "1.49", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
-prost = "0.14"
 anyhow = "1.0"
 log = "0.4"
+prost = "0.14"
 uuid = { version = "1.0", features = ["v4"] }
 futures-util = "0.3"
 async-trait = "0.1"
+
+[build-dependencies]
+prost-build = "0.14"

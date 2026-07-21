@@ -61,7 +61,7 @@ pub fn on_input_download(
     let uri = format!("/eodata/{}", s3_key);
     let headers = get_s3_headers(state, "GET", &uri);
 
-    let req_task = veldsdk::rpc::core::FsDownloadRequest {
+    let req_task = veldsdk::rpc::network::FsDownloadRequest {
         url,
         path: destination,
         headers,
@@ -82,7 +82,7 @@ pub fn on_input_cancel_download(
     }
     // Доменное событие отмены для network: abort фоновой tokio-задачи.
     // task_id этого модуля — это correlation_id для network (см. on_input_download).
-    crate::calls::network::cancel_download(&veldsdk::rpc::core::TaskCancelRequest {
+    crate::calls::network::cancel_download(&veldsdk::rpc::network::TaskCancelRequest {
         task_id: request.task_id.clone(),
     });
     // Уведомляем подписчиков о завершении, чтобы UI снял задачу с панели.
@@ -131,7 +131,7 @@ pub fn on_input_list_path(
     
     let headers = get_s3_headers(state, "GET", &uri_with_query);
 
-    let req_task = veldsdk::rpc::core::HttpTaskRequest {
+    let req_task = veldsdk::rpc::network::HttpTaskRequest {
         url: full_url,
         method: "GET".to_string(),
         headers,
@@ -149,7 +149,7 @@ pub fn on_input_list_path(
 
 pub fn on_sub_http_result(
     state: &mut State,
-    response: veldsdk::rpc::core::HttpTaskResponse,
+    response: veldsdk::rpc::network::HttpTaskResponse,
 ) {
     let correlation_id = response.correlation_id;
     let filter_path = state.pending_http.remove(&correlation_id);
@@ -169,7 +169,7 @@ pub fn on_sub_http_result(
 
 pub fn on_sub_fs_download_progress(
     state: &mut State,
-    event: veldsdk::rpc::core::FsDownloadProgress,
+    event: veldsdk::rpc::network::FsDownloadProgress,
 ) {
     // Транслируем прогресс только своих активных загрузок.
     if !state.pending_downloads.contains(&event.correlation_id) {
@@ -183,7 +183,7 @@ pub fn on_sub_fs_download_progress(
 
 pub fn on_sub_fs_download_result(
     state: &mut State,
-    response: veldsdk::rpc::core::FsDownloadResponse,
+    response: veldsdk::rpc::network::FsDownloadResponse,
 ) {
     let correlation_id = response.correlation_id;
     if !state.pending_downloads.remove(&correlation_id) {

@@ -5355,7 +5355,8 @@ dependencies = [
  "async-trait",
  "log",
  "prost",
- "veldmap-host-core",
+ "prost-build",
+ "veldmap-host-util",
 ]
 
 [[package]]
@@ -5393,10 +5394,11 @@ dependencies = [
  "futures-util",
  "log",
  "prost",
+ "prost-build",
  "reqwest",
  "tokio",
  "uuid",
- "veldmap-host-core",
+ "veldmap-host-util",
 ]
 
 [[package]]
@@ -5407,9 +5409,19 @@ dependencies = [
  "dashmap",
  "log",
  "prost",
+ "prost-build",
  "serde",
  "serde_json",
  "uuid",
+ "veldmap-host-util",
+]
+
+[[package]]
+name = "veldmap-host-util"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "prost",
  "veldmap-host-core",
 ]
 

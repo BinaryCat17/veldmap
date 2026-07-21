@@ -1,0 +1,81 @@
+//! veldmap-host-util — публичный API для авторов нативных модулей хоста.
+//!
+//! Это фасад над `veldmap-host-core`: крейт-владелец реализации остаётся в core,
+//! а здесь — курируемый список того, что модулям разрешено использовать,
+//! плюс собственные хелперы. Нативные модули (host/modules/*) зависят ТОЛЬКО
+//! от этого крейта и не импортируют `veldmap-host-core` напрямую.
+//!
+//! Правило наполнения: сюда попадает только то, что понадобилось минимум
+//! одному модулю. Внутренности платформы (загрузчик плагинов, setup, stats)
+//! сюда не re-export'ируются никогда.
+
+// ── Трейты сервисов ─────────────────────────────────────────────────────────
+// Контракт, который реализует каждый нативный модуль, и локация для
+// регистрации в диспетчере.
+pub use veldmap_host_core::dispatcher::{
+    NativeService, AsyncNativeService, ServiceLocation, Dispatcher,
+};
+
+// ── Контекст хоста ──────────────────────────────────────────────────────────
+// Ручка на собранную платформу: dispatcher, memory, registry.
+// Передаётся в register_services() каждого модуля.
+pub use veldmap_host_core::setup::HostContext;
+
+// ── Права доступа к ресурсам ────────────────────────────────────────────────
+pub use veldmap_host_core::registry::Access;
+
+// ── Протокол ────────────────────────────────────────────────────────────────
+// Protobuf-типы шины (veldmap.core): запросы/ответы/события.
+pub use veldmap_host_core::core;
+
+// ── Хелперы ─────────────────────────────────────────────────────────────────
+pub mod path {
+    /// Проверяет, что относительный путь не выходит за пределы рабочей
+    /// директории: запрещает абсолютные пути и компоненты `..`.
+    pub fn is_path_safe(path: &str) -> bool {
+        let path_obj = std::path::Path::new(path);
+        if path_obj.is_absolute() { return false; }
+        for component in path_obj.components() {
+            if matches!(component, std::path::Component::ParentDir) { return false; }
+        }
+        true
+    }
+}
+
+/// Сантехника protobuf-шины: единое место для decode/encode и регистрации,
+/// чтобы обработчики модулей содержали только бизнес-логику.
+pub mod wire {
+    use super::{AsyncNativeService, Dispatcher, HostContext, ServiceLocation};
+    use prost::Message;
+    use std::sync::Arc;
+
+    /// Декодирует protobuf-payload события. При ошибке логирует и возвращает
+    /// None — обработчику остаётся `let Some(req) = ... else { return };`.
+    pub fn decode_or_log<T: Message + Default>(payload: &[u8], topic: &str) -> Option<T> {
+        match T::decode(payload) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                log::error!(target: "host", "Failed to decode {}: {}", topic, e);
+                None
+            }
+        }
+    }
+
+    /// Кодирует сообщение и публикует его в топик (fire-and-forget).
+    pub fn publish<M: Message>(dispatcher: &Dispatcher, topic: &str, msg: &M) {
+        dispatcher.publish(topic, msg.encode_to_vec());
+    }
+
+    /// Подписывает один асинхронный сервис сразу на несколько его топиков.
+    pub fn subscribe_async<S>(ctx: &HostContext, service: &Arc<S>, topics: &[&str])
+    where
+        S: AsyncNativeService + 'static,
+    {
+        for topic in topics {
+            ctx.dispatcher.register_subscription(
+                topic.to_string(),
+                ServiceLocation::NativeAsync(service.clone()),
+            );
+        }
+    }
+}

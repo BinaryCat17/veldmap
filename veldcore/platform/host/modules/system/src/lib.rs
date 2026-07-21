@@ -1,5 +1,13 @@
-use veldmap_host_core::dispatcher::NativeService;
-use veldmap_host_core::core::{
+//! Контракт сервиса — system.proto этого модуля (компилируется build.rs).
+pub mod proto {
+    pub mod system {
+        include!(concat!(env!("OUT_DIR"), "/veldmap.system.rs"));
+    }
+}
+
+use veldmap_host_util::{NativeService, HostContext, ServiceLocation};
+use veldmap_host_util::core::RegisterConfigRequest;
+use proto::system::{
     GetConfigRequest, GetConfigResponse, GenerateUuidRequest, GenerateUuidResponse,
 };
 use prost::Message;
@@ -12,7 +20,7 @@ pub struct SystemService {
 }
 
 impl SystemService {
-    pub fn new(_ctx: Arc<veldmap_host_core::setup::HostContext>) -> Self {
+    pub fn new(_ctx: Arc<HostContext>) -> Self {
         Self {
             configs: Arc::new(DashMap::new()),
         }
@@ -31,7 +39,7 @@ impl NativeService for SystemService {
     fn call(&self, method: &str, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
         match method {
             "register_config" => {
-                let req = veldmap_host_core::core::RegisterConfigRequest::decode(&payload[..])?;
+                let req = RegisterConfigRequest::decode(&payload[..])?;
                 if let Ok(config_map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&req.value_json) {
                     self.register_config(req.key, config_map);
                 }
@@ -58,7 +66,7 @@ impl NativeService for SystemService {
     }
 }
 
-pub fn register_services(ctx: Arc<veldmap_host_core::setup::HostContext>) {
+pub fn register_services(ctx: Arc<HostContext>) {
     let service = Arc::new(SystemService::new(ctx.clone()));
-    ctx.dispatcher.register_service("system".to_string(), veldmap_host_core::dispatcher::ServiceLocation::Native(service));
+    ctx.dispatcher.register_service("system".to_string(), ServiceLocation::Native(service));
 }
