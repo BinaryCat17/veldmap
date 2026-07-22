@@ -8,8 +8,15 @@ Reads schema.yaml + config.yaml for a module and generates:
   - generated/build.rs         (prost codegen)
   - generated/rust-toolchain.toml
   - generated/.cargo/config.toml
+
+Before rendering, the schema is validated: every `type:` must name an existing
+proto message, every sub/call must exist on the dependency's schema, and the
+declared types must match on both sides. The schema is the single source of
+truth — validation failures abort generation with the full error list, and the
+generated emit/call stubs are typed with the exact message from the schema.
 """
 import os
+import re
 import argparse
 import yaml
 from jinja2 import Environment, FileSystemLoader
@@ -43,20 +50,24 @@ def yaml_dep_to_toml(val) -> str:
     return str(val)
 
 
-def dep_path(val) -> str | None:
-    """Extract the 'path' field from a dependency value, or None."""
-    if isinstance(val, dict):
-        return val.get("path")
-    return None
+def collect_proto_info(proto_file: str) -> tuple[str | None, set[str]]:
+    """Read the package declaration and all message names from a .proto file."""
+    package = None
+    messages = set()
+    with open(proto_file) as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("package "):
+                package = stripped.split()[1].rstrip(";")
+            m = re.match(r"message\s+(\w+)", stripped)
+            if m:
+                messages.add(m.group(1))
+    return package, messages
 
 
 def read_proto_package(proto_file: str) -> str | None:
     """Read the 'package' declaration from a .proto file."""
-    with open(proto_file) as f:
-        for line in f:
-            if line.startswith("package "):
-                return line.split()[1].strip(";")
-    return None
+    return collect_proto_info(proto_file)[0]
 
 
 def rust_type_name(name: str) -> str:
@@ -65,7 +76,6 @@ def rust_type_name(name: str) -> str:
     prost-build applies heck::ToUpperCamelCase: UIEvent → UiEvent.
     Schema `type:` fields hold proto names, so the conversion must match.
     """
-    import re
     words = re.findall(r'[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+', name)
     return "".join(w[0].upper() + w[1:].lower() for w in words)
 
@@ -74,6 +84,203 @@ def schema_type_to_rust_path(type_str: str) -> str:
     """`app/UIEvent` → `app::UiEvent` (module path + prost type name)."""
     mod, _, name = type_str.partition("/")
     return f"{mod}::{rust_type_name(name)}" if name else ""
+
+
+# ── Schema validation ─────────────────────────────────────────────────────────
+#
+# The type universe maps a proto package alias (last segment of the proto
+# `package`) to its message names and its origin: "core" for veldcore/proto,
+# otherwise the directory name of the wasm module that owns types.proto.
+
+def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
+    universe = {}
+
+    def add(alias, messages, origin, source):
+        if alias in universe:
+            raise SystemExit(
+                f"Proto package alias collision: '{alias}' is defined by both "
+                f"{universe[alias]['source']} and {source}")
+        universe[alias] = {"messages": messages, "origin": origin, "source": source}
+
+    for f in sorted(os.listdir(proto_dir)):
+        if f.endswith(".proto"):
+            path = os.path.join(proto_dir, f)
+            pkg, messages = collect_proto_info(path)
+            if pkg:
+                add(pkg.split(".")[-1], messages, "core", path)
+
+    if modules_root and os.path.isdir(modules_root):
+        for name in sorted(os.listdir(modules_root)):
+            tp = os.path.join(modules_root, name, "types.proto")
+            if os.path.exists(tp):
+                pkg, messages = collect_proto_info(tp)
+                if pkg:
+                    add(pkg.split(".")[-1], messages, name, tp)
+
+    return universe
+
+
+def local_package_alias(module_dir: str) -> str | None:
+    """Alias of the module's own types.proto package, if any."""
+    tp = os.path.join(module_dir, "types.proto")
+    if os.path.exists(tp):
+        pkg = read_proto_package(tp)
+        if pkg:
+            return pkg.split(".")[-1]
+    return None
+
+
+def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
+                           universe: dict) -> tuple[list[str], dict]:
+    """Validate a module schema against the type universe and the schemas of
+    its dependencies. Returns (errors, resolved) where resolved maps every
+    type reference to its canonical 'alias/Message' form:
+        resolved["inputs"][name], resolved["outputs"][name],
+        resolved["subs"][(dep, sub)], resolved["calls"][(dep, call)]
+    """
+    errors = []
+    name = schema.get("name")
+    modules_root = os.path.dirname(schema_dir)
+    own_alias = local_package_alias(schema_dir)
+    iface = schema.get("interface") or {}
+    deps = schema.get("dependencies") or {}
+    resolved = {"inputs": {}, "outputs": {}, "subs": {}, "calls": {}}
+
+    dep_aliases = {a for a, info in universe.items() if info["origin"] in deps}
+
+    def err(where, msg):
+        errors.append(f"{where}: {msg}")
+
+    def check(where, type_str) -> str | None:
+        """Validate one type reference; return canonical 'alias/Message'."""
+        if not type_str:
+            err(where, "missing 'type'")
+            return None
+        alias, _, tname = type_str.partition("/")
+        if not tname:
+            err(where, f"malformed type '{type_str}' (expected '<package>/<Message>')")
+            return None
+        if alias == "module":
+            if not own_alias:
+                err(where, f"type '{type_str}' uses 'module/' but this module has no types.proto")
+                return None
+            alias = own_alias
+        info = universe.get(alias)
+        if info is None:
+            err(where, f"unknown proto package '{alias}' in '{type_str}' "
+                       f"(known: {', '.join(sorted(universe))})")
+            return None
+        if tname not in info["messages"]:
+            err(where, f"message '{tname}' not found in package '{alias}' "
+                       f"(has: {', '.join(sorted(info['messages']))})")
+            return None
+        if alias != own_alias and info["origin"] != "core" and alias not in dep_aliases:
+            err(where, f"type '{type_str}' belongs to module '{info['origin']}', "
+                       f"which is not declared in dependencies")
+            return None
+        return f"{alias}/{tname}"
+
+    def check_called_by(where, entry):
+        val = (entry or {}).get("called_by")
+        if not val:
+            return
+        svc, _, method = val.partition("/")
+        if svc == "module":
+            if method not in (iface.get("inputs") or {}):
+                err(where, f"called_by '{val}': no such input on this module")
+        elif svc in deps:
+            if method not in ((deps.get(svc) or {}).get("subs") or {}):
+                err(where, f"called_by '{val}': '{method}' is not a declared sub of '{svc}'")
+        else:
+            err(where, f"called_by '{val}': unknown service '{svc}'")
+
+    for input_name, entry in (iface.get("inputs") or {}).items():
+        c = check(f"interface.inputs.{input_name}", (entry or {}).get("type"))
+        if c:
+            resolved["inputs"][input_name] = c
+
+    for output_name, entry in (iface.get("outputs") or {}).items():
+        c = check(f"interface.outputs.{output_name}", (entry or {}).get("type"))
+        if c:
+            resolved["outputs"][output_name] = c
+        check_called_by(f"interface.outputs.{output_name}", entry)
+
+    def load_dep_schema(dep):
+        """A dependency is a sibling wasm module or a platform service."""
+        for p in (os.path.join(modules_root, dep, "schema.yaml"),
+                  os.path.join(proto_dir, f"{dep}.schema.yaml")):
+            if os.path.exists(p):
+                with open(p) as f:
+                    return yaml.safe_load(f) or {}
+        return None
+
+    for dep, dep_data in deps.items():
+        dep_data = dep_data or {}
+        dep_schema = load_dep_schema(dep)
+        if dep_schema is None:
+            err(f"dependencies.{dep}", "no schema found (neither a sibling module "
+                                       "nor a veldcore/proto/*.schema.yaml service)")
+            continue
+
+        # In the dependency's own schema 'module/' refers to *its* package.
+        dep_alias = local_package_alias(os.path.join(modules_root, dep)) or dep
+        dep_iface = dep_schema.get("interface") or {}
+        dep_outputs = dep_iface.get("outputs") or {}
+        dep_inputs = dep_iface.get("inputs") or {}
+
+        def cross_check(kind, declared, contract, contract_kind):
+            for topic, entry in declared.items():
+                where = f"dependencies.{dep}.{kind}.{topic}"
+                if topic not in contract:
+                    err(where, f"'{dep}' declares no {contract_kind} '{topic}' "
+                               f"({contract_kind}s: {', '.join(sorted(contract)) or '—'})")
+                    continue
+                mine = check(where, (entry or {}).get("type"))
+                theirs_raw = (contract[topic] or {}).get("type") or ""
+                alias, _, tname = theirs_raw.partition("/")
+                theirs = f"{dep_alias}/{tname}" if alias == "module" else theirs_raw
+                if mine and theirs and mine != theirs:
+                    err(where, f"declared type '{mine}' does not match '{dep}' "
+                               f"{contract_kind} type '{theirs}'")
+                if mine:
+                    resolved[kind][(dep, topic)] = mine
+
+        cross_check("subs", dep_data.get("subs") or {}, dep_outputs, "output")
+        cross_check("calls", dep_data.get("calls") or {}, dep_inputs, "input")
+        for call, entry in (dep_data.get("calls") or {}).items():
+            check_called_by(f"dependencies.{dep}.calls.{call}", entry)
+
+    return [f"schema '{name}': {e}" for e in errors], resolved
+
+
+def validate_core_schema(svc_schema: dict, universe: dict) -> list[str]:
+    """Validate a veldcore service schema: every type must resolve to a
+    veldcore proto message. Payload-less topics (`{}`) are allowed."""
+    errors = []
+    name = svc_schema.get("name")
+    iface = svc_schema.get("interface") or {}
+    for kind in ("inputs", "outputs"):
+        for topic, entry in (iface.get(kind) or {}).items():
+            type_str = (entry or {}).get("type")
+            if not type_str:
+                continue
+            alias, _, tname = type_str.partition("/")
+            info = universe.get(alias)
+            if info is None or info["origin"] != "core":
+                errors.append(f"schema '{name}': interface.{kind}.{topic}: unknown "
+                              f"veldcore proto package '{alias}' in '{type_str}'")
+            elif tname not in info["messages"]:
+                errors.append(f"schema '{name}': interface.{kind}.{topic}: message "
+                              f"'{tname}' not found in package '{alias}'")
+    return errors
+
+
+def fail_on(errors: list[str], schema_path: str):
+    if errors:
+        print(f"❌ Schema validation failed for {schema_path}:")
+        for e in errors:
+            print(f"   - {e}")
+        raise SystemExit(1)
 
 
 # ── Host bindings generation ─────────────────────────────────────────────────
@@ -86,6 +293,8 @@ def generate_host_bindings(args, script_dir: str):
     proto_dir = os.path.abspath(args.proto_dir)
     package   = args.package or "veldmap-host-bindings"
 
+    universe = build_type_universe(proto_dir, None)
+
     proto_files = sorted(f for f in os.listdir(proto_dir) if f.endswith(".proto"))
     proto_packages = []
     for f in proto_files:
@@ -96,8 +305,10 @@ def generate_host_bindings(args, script_dir: str):
     for f in sorted(os.listdir(proto_dir)):
         if not f.endswith(".schema.yaml"):
             continue
-        with open(os.path.join(proto_dir, f)) as sf:
+        schema_path = os.path.join(proto_dir, f)
+        with open(schema_path) as sf:
             svc_schema = yaml.safe_load(sf)
+        fail_on(validate_core_schema(svc_schema, universe), schema_path)
         iface = svc_schema.get("interface", {}) or {}
 
         def entries(kind):
@@ -186,7 +397,9 @@ def main():
     parser.add_argument("--package",       help="Package name (host-bindings mode)")
     args = parser.parse_args()
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir   = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.normpath(os.path.join(script_dir, ".."))
+    core_proto_dir = os.path.join(project_root, "veldcore", "proto")
 
     # ── Host bindings mode (--host-bindings) ─────────────────────────────────
     if args.host_bindings:
@@ -206,6 +419,8 @@ def main():
 
     # ── SDK platform stubs mode (--sdk-stubs) ────────────────────────────────
     if args.sdk_stubs:
+        fail_on(validate_core_schema(schema, build_type_universe(core_proto_dir, None)),
+                schema_path)
         out_path  = os.path.abspath(args.sdk_stubs)
         svc_name  = schema.get("name")
         pf_inputs = [
@@ -239,28 +454,46 @@ def main():
     version      = schema.get("version", "0.1.0")
     rust_config  = config_data.get("rust", {})
 
-    # ── Build handler dispatch table ─────────────────────────────────────────
-    handlers = {}
+    # ── Validate the schema before rendering anything ────────────────────────
+    universe = build_type_universe(core_proto_dir, os.path.dirname(schema_dir))
+    errors, resolved = validate_module_schema(schema, schema_dir, core_proto_dir, universe)
+    fail_on(errors, schema_path)
+
+    own_alias = local_package_alias(schema_dir)
+
+    def module_rust_path(canonical: str) -> str:
+        """Rust path of a canonical 'alias/Message' inside the module crate."""
+        alias, tname = canonical.split("/")
+        rust_name = rust_type_name(tname)
+        if universe[alias]["origin"] == "core":
+            return f"veldsdk::proto::{alias}::{rust_name}"
+        return f"crate::proto::{alias}::{rust_name}"
+
+    # ── Build handler dispatch table (topic → handler + payload type) ────────
+    handlers = []
 
     for input_name in schema.get("interface", {}).get("inputs", {}):
-        handlers[f"{name}/{input_name}"] = f"crate::module::on_input_{input_name}"
+        handlers.append({
+            "topic":     f"{name}/{input_name}",
+            "handler":   f"crate::module::on_input_{input_name}",
+            "rust_path": module_rust_path(resolved["inputs"][input_name]),
+        })
 
     for dep_name, dep_data in schema.get("dependencies", {}).items():
         for sub_name in (dep_data or {}).get("subs", {}) or {}:
-            handlers[f"{dep_name}/{sub_name}"] = f"crate::module::on_sub_{sub_name}"
+            handlers.append({
+                "topic":     f"{dep_name}/{sub_name}",
+                "handler":   f"crate::module::on_sub_{sub_name}",
+                "rust_path": module_rust_path(resolved["subs"][(dep_name, sub_name)]),
+            })
 
     # ── Typed emit/call stubs (schema is the source of truth for topics) ─────
-    # interface.outputs  → crate::emit::<name>(msg)
-    # dependencies.*.calls → crate::calls::<dep_snake>::<name>(msg)
-    emits = list(schema.get("interface", {}).get("outputs", {}) or {})
-
-    # interface.inputs → <service>-wrap::inputs::<name>(msg): стабы входных
-    # топиков для вызывающих (генерируются в wrap-крейт, см. wrap_lib.rs.j2).
-    inputs = [
-        {"name": n, "rust_type": rust_type_name(((d or {}).get("type") or "").split("/")[-1])}
-        for n, d in (schema.get("interface", {}).get("inputs", {}) or {}).items()
+    # interface.outputs  → crate::emit::<name>(&ExactMessage)
+    # dependencies.*.calls → crate::calls::<dep_snake>::<name>(&ExactMessage)
+    emits = [
+        {"name": n, "rust_path": module_rust_path(resolved["outputs"][n])}
+        for n in schema.get("interface", {}).get("outputs", {}) or {}
     ]
-    inputs = [i for i in inputs if i["rust_type"]]
 
     dep_calls = []
     for dep_name, dep_data in schema.get("dependencies", {}).items():
@@ -269,7 +502,10 @@ def main():
             dep_calls.append({
                 "service": dep_name,
                 "snake": dep_name.replace("-", "_"),
-                "methods": calls,
+                "methods": [
+                    {"name": c, "rust_path": module_rust_path(resolved["calls"][(dep_name, c)])}
+                    for c in calls
+                ],
             })
 
     # ── View module (Elm-style view loop) ────────────────────────────────────
@@ -287,7 +523,6 @@ def main():
     has_wrap        = os.path.exists(os.path.join(schema_dir, "wraps", "rust", "src", "wrap.rs"))
 
     # Relative path from output_dir to project root (used in build.rs paths)
-    project_root    = os.path.normpath(os.path.join(script_dir, ".."))
     workspace_root_rel = os.path.relpath(project_root, output_dir)
 
     include_dirs = [
@@ -301,10 +536,10 @@ def main():
     if os.path.exists(workspace_path):
         with open(workspace_path) as f:
             workspace_data = yaml.safe_load(f) or {}
-    
+
     sdk_base = workspace_data.get("workspace", {}).get("sdk", "veldcore/sdk")
     sdk_path = os.path.join(workspace_root_rel, sdk_base, "rust").replace("\\", "/")
-    
+
     wrap_sdk_path = os.path.join(os.path.relpath(project_root, os.path.join(output_dir, "wraps", "rust")), sdk_base, "rust").replace("\\", "/")
 
     # ── Discover dependent protos (from schema.yaml dependencies) ─────────────
@@ -312,13 +547,14 @@ def main():
     proto_paths = []
     dep_protos  = []
     cargo_dependencies = {}
-    
+
     # 1. Add explicitly defined third-party deps
     for dep_name, dep_val in raw_deps.items():
         cargo_dependencies[dep_name] = yaml_dep_to_toml(dep_val)
-        
+
     # 2. Add schema-inferred internal dependencies
     view_wrap_crate = None
+    dep_wrap_crates = {}   # package alias → (wrap crate snake name, dep dir name)
     schema_deps = schema.get("dependencies", {})
     for dep_name in schema_deps.keys():
         dep_dir = os.path.normpath(os.path.join(schema_dir, "..", dep_name))
@@ -329,7 +565,7 @@ def main():
                 with open(dep_config_path) as df:
                     dep_cfg = yaml.safe_load(df) or {}
                     dep_pkg_name = dep_cfg.get("package", dep_name)
-                    
+
             api_crate_name = f"{dep_pkg_name}-wrap"
             api_crate_snake = api_crate_name.replace("-", "_")
             if dep_name == view_dep:
@@ -337,7 +573,7 @@ def main():
 
             # Dependency on the generated wrap crate
             cargo_dependencies[api_crate_name] = f'{{ path = "../../{dep_name}/generated/wraps/rust" }}'
-            
+
             # Extract package name for aliasing
             proto_file = os.path.join(dep_dir, "types.proto")
             if os.path.exists(proto_file):
@@ -348,6 +584,29 @@ def main():
                         "snake": dep_snake,
                         "api_crate": api_crate_snake,
                     })
+                    dep_wrap_crates[dep_snake] = (api_crate_snake, api_crate_name, dep_name)
+
+    # ── Wrap-crate input stubs (typed against the exact message) ─────────────
+    # Inputs may be typed with another module's message (e.g. the renderer's
+    # UiEventResponse); the wrap crate then depends on that module's wrap.
+    wrap_dependencies = {}
+
+    def wrap_rust_path(canonical: str) -> str:
+        alias, tname = canonical.split("/")
+        rust_name = rust_type_name(tname)
+        if alias == own_alias:
+            return f"crate::proto::{rust_name}"
+        if universe[alias]["origin"] == "core":
+            return f"veldsdk::proto::{alias}::{rust_name}"
+        crate_snake, crate_name, dep_dir_name = dep_wrap_crates[alias]
+        wrap_dependencies[crate_name] = \
+            f'{{ path = "../../../../{dep_dir_name}/generated/wraps/rust" }}'
+        return f"{crate_snake}::{rust_name}"
+
+    inputs = [
+        {"name": n, "rust_path": wrap_rust_path(resolved["inputs"][n])}
+        for n in schema.get("interface", {}).get("inputs", {}) or {}
+    ]
 
     # ── Local proto metadata ─────────────────────────────────────────────────
     local_proto_package = None
@@ -357,8 +616,6 @@ def main():
         rel_to_ws        = os.path.relpath(lp, project_root)
         local_proto_path = os.path.join(workspace_root_rel, rel_to_ws)
         local_proto_package = read_proto_package(lp)
-
-
 
     # ── Template context ─────────────────────────────────────────────────────
     module_name_snake = package_name.replace("-", "_")
@@ -389,6 +646,7 @@ def main():
         "proto_paths":        proto_paths,
         "include_dirs":       include_dirs,
         "dep_protos":         dep_protos,
+        "wrap_dependencies":  wrap_dependencies,
     }
 
     # ── Render templates ─────────────────────────────────────────────────────
@@ -401,7 +659,7 @@ def main():
         os.path.join(output_dir, "rust-toolchain.toml"):          env.get_template("rust-toolchain.toml.j2"),
         os.path.join(output_dir, ".cargo", "config.toml"):        env.get_template("cargo-config.toml.j2"),
     }
-    
+
     # ── Render API Crate (Wrap) ──────────────────────────────────────────────
     if has_local_proto:
         wrap_dir = os.path.join(output_dir, "wraps", "rust")
@@ -411,7 +669,7 @@ def main():
             os.path.join(wrap_dir, "build.rs"):      env.get_template("wrap_build.rs.j2"),
         }
         renders.update(wrap_renders)
-        
+
         template_data["api_crate_name"] = f"{package_name}-wrap"
         template_data["proto_package"] = local_proto_package
         template_data["has_custom_wrap"] = has_wrap

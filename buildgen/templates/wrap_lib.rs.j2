@@ -20,7 +20,7 @@ pub mod inputs {
     {% for input in inputs %}
 
     /// `{{ service_name }}/{{ input.name }}`
-    pub fn {{ input.name }}(msg: &crate::proto::{{ input.rust_type }}) {
+    pub fn {{ input.name }}(msg: &{{ input.rust_path }}) {
         veldsdk::abi::publish("{{ service_name }}/{{ input.name }}", msg.encode_to_vec());
     }
     {% endfor %}

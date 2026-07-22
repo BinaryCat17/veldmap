@@ -28,11 +28,14 @@ pub mod module;
 pub const SERVICE_NAME: &str = "{{ service_name }}";
 
 /// Typed topic stubs for this module's declared outputs (interface.outputs).
-/// The schema is the single source of truth: an undeclared output does not exist.
+/// The schema is the single source of truth: an undeclared output does not
+/// exist, and each stub accepts exactly the message the schema declares.
 pub mod emit {
+    use veldsdk::prost::Message;
     {% for output in emits %}
-    pub fn {{ output }}(msg: &impl veldsdk::prost::Message) {
-        veldsdk::abi::publish("{{ service_name }}/{{ output }}", msg.encode_to_vec());
+    /// `{{ service_name }}/{{ output.name }}`
+    pub fn {{ output.name }}(msg: &{{ output.rust_path }}) {
+        veldsdk::abi::publish("{{ service_name }}/{{ output.name }}", msg.encode_to_vec());
     }
     {% endfor %}
 }
@@ -41,9 +44,11 @@ pub mod emit {
 pub mod calls {
     {% for dep in dep_calls %}
     pub mod {{ dep.snake }} {
+        use veldsdk::prost::Message;
         {% for method in dep.methods %}
-        pub fn {{ method }}(msg: &impl veldsdk::prost::Message) {
-            veldsdk::abi::publish("{{ dep.service }}/{{ method }}", msg.encode_to_vec());
+        /// `{{ dep.service }}/{{ method.name }}`
+        pub fn {{ method.name }}(msg: &{{ method.rust_path }}) {
+            veldsdk::abi::publish("{{ dep.service }}/{{ method.name }}", msg.encode_to_vec());
         }
         {% endfor %}
     }
@@ -109,9 +114,11 @@ pub extern "C" fn handle_event() -> i32 {
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         veldsdk::runtime::with_state(|app_state: &mut {{ rust.state }}| {
             let handled = match topic.as_str() {
-                {% for topic, handler in handlers.items() %}
-                "{{ topic }}" => {
-                    veldsdk::runtime::call_handler({{ handler }}, app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {{ topic }}: {}", e))?;
+                {% for h in handlers %}
+                // Тип payload закреплён схемой: несовпадение сигнатуры
+                // обработчика с schema.yaml — ошибка компиляции.
+                "{{ h.topic }}" => {
+                    veldsdk::runtime::call_handler::<{{ rust.state }}, {{ h.rust_path }}, _>({{ h.handler }}, app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {{ h.topic }}: {}", e))?;
                     Ok(())
                 }
                 {% endfor %}
@@ -148,8 +155,8 @@ pub extern "C" fn handle_event() -> i32 {
 #[no_mangle]
 pub extern "C" fn get_subscriptions() -> i32 {
     const SUBS: &[&str] = &[
-        {% for topic in handlers.keys() %}
-        "{{ topic }}",
+        {% for h in handlers %}
+        "{{ h.topic }}",
         {% endfor %}
         {% if view_wrap_crate %}
         "app/ready",

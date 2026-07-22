@@ -221,6 +221,15 @@ def build_rust_module(module: dict, profile: str, cargo_args: list):
          "--target", WASM_TARGET,
          ] + cargo_args)
 
+    # Wrap-крейт листового модуля ни от кого не зависит и без явной проверки
+    # никогда не компилируется — ошибки в его typed-стабах молчали бы.
+    wrap_manifest = os.path.join(generated_dir, "wraps", "rust", "Cargo.toml")
+    if os.path.exists(wrap_manifest):
+        run(["cargo", "check",
+             "--manifest-path", wrap_manifest,
+             "--target", WASM_TARGET,
+             ] + cargo_args)
+
     wasm_name   = package.replace("-", "_") + ".wasm"
     source_path = os.path.join(generated_dir, "target", WASM_TARGET, profile, wasm_name)
     dest_path   = os.path.join(PLUGINS_DIR, wasm_name)

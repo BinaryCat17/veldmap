@@ -15,26 +15,29 @@ interface:
   outputs:
     download_started:
       called_by: module/download
-      type: module/DownloadStartedEvent
+      type: module/DownloadStarted
     list_path_result:
       called_by: module/list_path
       type: module/ListPathResponse
+    search_result:
+      called_by: module/search
+      type: module/SearchResponse
     downloaded:
       called_by: network/fs_download_result
-      type: module/DownloadedEvent
+      type: module/Downloaded
     download_progress:
       called_by: network/fs_download_progress
-      type: module/DownloadProgressEvent
+      type: module/DownloadProgress
 
 dependencies:
   network:
     subs:
-      fs_download_result: 
-        type: network/FsResult
+      fs_download_result:
+        type: network/FsDownloadResponse
       fs_download_progress:
         type: network/FsDownloadProgress
       http_result:
-        type: network/HttpResult
+        type: network/HttpTaskResponse
     calls:
       fs_download:
         called_by: module/download
