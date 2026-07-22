@@ -14,38 +14,19 @@ interface:
 
   outputs:
     on_download_started:
-      called_by: module/on_download
       type: module/DownloadStarted
     on_list_path_result:
-      called_by: module/on_list_path
       type: module/ListPathResponse
     on_search_result:
-      called_by: module/on_search
       type: module/SearchResponse
     on_downloaded:
-      called_by: network/on_fs_download_result
       type: module/Downloaded
     on_download_progress:
-      called_by: network/on_fs_download_progress
       type: module/DownloadProgress
 
 dependencies:
   network:
-    subs:
-      on_fs_download_result:
-        type: network/FsDownloadResponse
-      on_fs_download_progress:
-        type: network/FsDownloadProgress
-      on_http_result:
-        type: network/HttpTaskResponse
-    calls:
-      on_fs_download:
-        called_by: module/on_download
-        type: network/FsDownloadRequest
-      on_http:
-        called_by: module/on_list_path
-        type: network/HttpTaskRequest
+    subs: [on_fs_download_result, on_fs_download_progress, on_http_result]
+    calls: [on_fs_download, on_http]
   tasks:
-    subs:
-      on_task_finished:
-        type: tasks/TaskFinished
+    subs: [on_task_finished]

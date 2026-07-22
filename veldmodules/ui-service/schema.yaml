@@ -13,6 +13,4 @@ interface:
 # поверхности игнорируются.
 dependencies:
   app:
-    subs:
-      on_ui_event:
-        type: app/UIEvent
+    subs: [on_ui_event]

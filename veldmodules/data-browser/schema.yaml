@@ -29,35 +29,11 @@ interface:
 dependencies:
   # Платформенный контракт: хост просит владельца окна выделить поверхность.
   app:
-    subs:
-      on_window_resized:
-        type: app/WindowResized
+    subs: [on_window_resized]
   ui-service: {}
   data-provider:
-    subs:
-      on_download_started:
-        type: data_provider/DownloadStarted
-      on_download_progress:
-        type: data_provider/DownloadProgress
-      on_downloaded:
-        type: data_provider/Downloaded
-      on_search_result:
-        type: data_provider/SearchResponse
-      on_list_path_result:
-        type: data_provider/ListPathResponse
-    calls:
-      on_list_path:
-        type: data_provider/ListPathRequest
-      on_download:
-        type: data_provider/DownloadRequest
-      on_cancel_download:
-        type: data_provider/CancelDownloadRequest
-      on_search:
-        type: data_provider/SearchRequest
+    subs: [on_download_started, on_download_progress, on_downloaded, on_search_result, on_list_path_result]
+    calls: [on_list_path, on_download, on_cancel_download, on_search]
   fs:
-    subs:
-      on_list_result:
-        type: fs/FsListResult
-    calls:
-      on_list:
-        type: fs/FsListRequest
+    subs: [on_list_result]
+    calls: [on_list]

@@ -151,6 +151,11 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
     type reference to its canonical 'alias/Message' form:
         resolved["inputs"][name], resolved["outputs"][name],
         resolved["subs"][(dep, sub)], resolved["calls"][(dep, call)]
+
+    A topic's payload type is declared exactly once, in the interface of the
+    module that owns it (interface.outputs / interface.inputs). dependencies.
+    *.subs and .calls just list the topic names consumed; their types are
+    derived here from the producer's own schema — never redeclared.
     """
     errors = []
     name = schema.get("name")
@@ -194,20 +199,6 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
             return None
         return f"{alias}/{tname}"
 
-    def check_called_by(where, entry):
-        val = (entry or {}).get("called_by")
-        if not val:
-            return
-        svc, _, method = val.partition("/")
-        if svc == "module":
-            if method not in (iface.get("inputs") or {}):
-                err(where, f"called_by '{val}': no such input on this module")
-        elif svc in deps:
-            if method not in ((deps.get(svc) or {}).get("subs") or {}):
-                err(where, f"called_by '{val}': '{method}' is not a declared sub of '{svc}'")
-        else:
-            err(where, f"called_by '{val}': unknown service '{svc}'")
-
     for input_name, entry in (iface.get("inputs") or {}).items():
         c = check(f"interface.inputs.{input_name}", (entry or {}).get("type"))
         if c:
@@ -217,7 +208,6 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
         c = check(f"interface.outputs.{output_name}", (entry or {}).get("type"))
         if c:
             resolved["outputs"][output_name] = c
-        check_called_by(f"interface.outputs.{output_name}", entry)
 
     def load_dep_schema(dep):
         """A dependency is a sibling wasm module or a platform service (either
@@ -244,27 +234,26 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
         dep_outputs = dep_iface.get("outputs") or {}
         dep_inputs = dep_iface.get("inputs") or {}
 
-        def cross_check(kind, declared, contract, contract_kind):
-            for topic, entry in declared.items():
+        def cross_check(kind, declared_topics, contract, contract_kind):
+            for topic in declared_topics:
                 where = f"dependencies.{dep}.{kind}.{topic}"
                 if topic not in contract:
                     err(where, f"'{dep}' declares no {contract_kind} '{topic}' "
                                f"({contract_kind}s: {', '.join(sorted(contract)) or '—'})")
                     continue
-                mine = check(where, (entry or {}).get("type"))
                 theirs_raw = (contract[topic] or {}).get("type") or ""
+                if not theirs_raw:
+                    err(where, f"'{dep}' {contract_kind} '{topic}' has no payload type "
+                               f"and cannot be used as a typed dependency {kind[:-1]}")
+                    continue
                 alias, _, tname = theirs_raw.partition("/")
                 theirs = f"{dep_alias}/{tname}" if alias == "module" else theirs_raw
-                if mine and theirs and mine != theirs:
-                    err(where, f"declared type '{mine}' does not match '{dep}' "
-                               f"{contract_kind} type '{theirs}'")
-                if mine:
-                    resolved[kind][(dep, topic)] = mine
+                c = check(where, theirs)
+                if c:
+                    resolved[kind][(dep, topic)] = c
 
-        cross_check("subs", dep_data.get("subs") or {}, dep_outputs, "output")
-        cross_check("calls", dep_data.get("calls") or {}, dep_inputs, "input")
-        for call, entry in (dep_data.get("calls") or {}).items():
-            check_called_by(f"dependencies.{dep}.calls.{call}", entry)
+        cross_check("subs", list(dep_data.get("subs") or []), dep_outputs, "output")
+        cross_check("calls", list(dep_data.get("calls") or []), dep_inputs, "input")
 
     return [f"schema '{name}': {e}" for e in errors], resolved
 
