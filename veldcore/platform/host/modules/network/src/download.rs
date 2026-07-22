@@ -5,7 +5,7 @@ use super::State;
 use veldmap_host_util::HostContext;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{
-    FsDownloadRequest, FsDownloadResponse, FsDownloadProgress,
+    FsDownloadRequest, FsDownloadResponse, FsDownloadProgress, TaskCancelRequest,
 };
 use veldmap_host_util::path::is_path_safe;
 use std::fs;
@@ -97,4 +97,12 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, _requestor_id
     });
 
     state.local_tasks.lock().unwrap().insert(cancel_key, join_handle.abort_handle());
+}
+
+/// Событие `network/cancel_download`: отмена фоновой задачи по correlation_id.
+pub fn on_input_cancel_download(state: &State, req: TaskCancelRequest, _requestor_id: u32) {
+    if let Some(handle) = state.local_tasks.lock().unwrap().remove(&req.task_id) {
+        log::info!(target: "host", "NetworkService aborting task {}", req.task_id);
+        handle.abort();
+    }
 }

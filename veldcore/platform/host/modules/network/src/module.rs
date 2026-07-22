@@ -12,7 +12,6 @@ mod http;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use veldmap_host_util::HostContext;
-use veldmap_host_util::bindings::proto::network::TaskCancelRequest;
 
 pub struct State {
     ctx: Arc<HostContext>,
@@ -26,13 +25,5 @@ pub fn init(ctx: Arc<HostContext>) -> State {
 }
 
 // -- Input handlers --
-pub use download::on_input_fs_download;
+pub use download::{on_input_cancel_download, on_input_fs_download};
 pub use http::on_input_http;
-
-/// Событие `network/cancel_download`: отмена фоновой задачи по correlation_id.
-pub fn on_input_cancel_download(state: &State, req: TaskCancelRequest, _requestor_id: u32) {
-    if let Some(handle) = state.local_tasks.lock().unwrap().remove(&req.task_id) {
-        log::info!(target: "host", "NetworkService aborting task {}", req.task_id);
-        handle.abort();
-    }
-}
