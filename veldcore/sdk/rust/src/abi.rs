@@ -16,9 +16,7 @@ extern "C" {
     fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
 
     fn veld_memory_write(id: u64, offset: u64, ptr: u64, len: u64);
-    fn veld_memory_read(id: u64, offset: u64, ptr: u64, len: u64);
 
-    fn veld_memory_alloc(size: u64) -> u64;
     fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
     fn veld_memory_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
     fn veld_memory_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
@@ -34,9 +32,13 @@ extern "C" {
 
 // ── WASM MEMORY EXPORTS ────────────────────────────────────────
 
+// Выделение/освобождение памяти wasm для ответов хоста: хост пишет
+// результаты синхронных ABI-вызовов через veld_alloc (см. host
+// write_response_back). vec![0u8; size] гарантирует capacity == size,
+// иначе from_raw_parts в veld_free_wasm был бы UB.
 #[no_mangle]
 pub extern "C" fn veld_alloc(size: u64) -> u64 {
-    let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+    let mut buf: Vec<u8> = vec![0u8; size as usize];
     let ptr = buf.as_mut_ptr();
     std::mem::forget(buf);
     ptr as u64
@@ -93,22 +95,7 @@ pub fn arena_write(id: u64, offset: u64, data: &[u8]) {
     unsafe { veld_memory_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
 }
 
-/// Read data from a memory region
-pub fn arena_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
-    unsafe {
-        let mut buf = vec![0u8; size as usize];
-        veld_memory_read(id, offset, buf.as_mut_ptr() as u64, size);
-        Ok(buf)
-    }
-}
-
 // ── Memory management ──────────────────────────────────────────
-
-/// Allocate a CPU data region in the resource registry
-pub fn arena_alloc(size: u64) -> Option<u64> {
-    let id = unsafe { veld_memory_alloc(size) };
-    if id == 0 { None } else { Some(id) }
-}
 
 /// Allocate a GPU buffer region in the resource registry
 pub fn arena_alloc_buffer(size: u64, usage: u32, mapped: bool) -> Option<u64> {

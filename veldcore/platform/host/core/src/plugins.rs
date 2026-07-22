@@ -160,39 +160,22 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                 let plugin_name_clone = name.clone();
                 let dispatcher_for_actor = ctx.dispatcher.clone();
                 tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(std::time::Duration::from_millis(16));
-                    loop {
-                        tokio::select! {
-                            ev = rx.recv() => {
-                                match ev {
-                                    Some(ev) => {
-                                        // handle_event() decodes its input as an EventEnvelope to recover the
-                                        // "{service}/{method}" topic, so the event is wrapped here.
-                                        // Конверт кодирует хост, поэтому publisher достоверен:
-                                        // модуль может авторизовать отправителя по имени.
-                                        let req = crate::core::EventEnvelope {
-                                            service: ev.service, method: ev.method, payload: ev.payload,
-                                            publisher: dispatcher_for_actor.name_of(ev.publisher).unwrap_or_default(),
-                                        };
-                                        let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
-                                        wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
-                                        if let Ok(handle_event) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_event") {
-                                            let _ = handle_event.call_async(&mut wasm_module.store, ()).await;
-                                        }
-                                    }
-                                    None => {
-                                        log::info!("Plugin '{}' actor channel closed, shutting down.", plugin_name_clone);
-                                        break;
-                                    }
-                                }
-                            }
-                            _ = interval.tick() => {
-                                if let Ok(poll_tasks) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "poll_tasks") {
-                                    let _ = poll_tasks.call_async(&mut wasm_module.store, ()).await;
-                                }
-                            }
+                    while let Some(ev) = rx.recv().await {
+                        // handle_event() decodes its input as an EventEnvelope to recover the
+                        // "{service}/{method}" topic, so the event is wrapped here.
+                        // Конверт кодирует хост, поэтому publisher достоверен:
+                        // модуль может авторизовать отправителя по имени.
+                        let req = crate::core::EventEnvelope {
+                            service: ev.service, method: ev.method, payload: ev.payload,
+                            publisher: dispatcher_for_actor.name_of(ev.publisher).unwrap_or_default(),
+                        };
+                        let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
+                        wasm_module.store.data_mut().call_context = Some(call_ctx);
+                        if let Ok(handle_event) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "handle_event") {
+                            let _ = handle_event.call_async(&mut wasm_module.store, ()).await;
                         }
                     }
+                    log::info!("Plugin '{}' actor channel closed, shutting down.", plugin_name_clone);
                 });
 
                 ctx.dispatcher.register_instance(name.clone(), instance_id);

@@ -85,34 +85,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // veld_memory_read — read data from a memory region
-    linker.func_wrap_async("env", "veld_memory_read", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
-        Box::new(async move {
-            let memory = caller.data().memory.clone();
-            let registry = caller.data().registry.clone();
-            let instance_id = caller.data().instance_id;
-            if registry.check_access(id, instance_id, crate::registry::Access::Read) {
-                let data = tokio::task::block_in_place(|| memory.read(id, offset, len));
-                if let Ok(data) = data {
-                    let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(()) };
-                    if let Some(target) = mem.data_mut(&mut caller).get_mut(ptr as usize..(ptr as usize + len as usize)) {
-                        let copy_len = data.len().min(len as usize);
-                        target[..copy_len].copy_from_slice(&data[..copy_len]);
-                    }
-                }
-            }
-            Ok(())
-        })
-    })?;
-
     // ── Memory management ─────────────────────────────────────
-
-    // veld_memory_alloc(size) → region_id
-    linker.func_wrap("env", "veld_memory_alloc", |caller: Caller<'_, HostState>, size: u64| -> u64 {
-        let memory = caller.data().memory.clone();
-        let owner_id = caller.data().instance_id;
-        memory.alloc_cpu(vec![0u8; size as usize], owner_id)
-    })?;
 
     // veld_memory_alloc_buffer(size, usage, mapped) → region_id
     linker.func_wrap("env", "veld_memory_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {

@@ -69,5 +69,7 @@ impl Log for HostLogger {
 }
 
 pub fn init() -> Result<(), SetLoggerError> {
-    log::set_logger(&HostLogger).map(|_| log::set_max_level(LevelFilter::Info))
+    // Уровень не ограничиваем: фильтрация — на хосте через RUST_LOG,
+    // иначе debug/trace из модулей терялись бы ещё в wasm.
+    log::set_logger(&HostLogger).map(|_| log::set_max_level(LevelFilter::Trace))
 }

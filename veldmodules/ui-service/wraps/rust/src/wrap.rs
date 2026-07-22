@@ -868,10 +868,24 @@ pub fn image<M>(handle: veldsdk::proto::core::ResourceHandle) -> Image<M> {
 
 // --- Window surface delegation ---
 
+/// Типизированные стабы входных топиков ui-service (interface.inputs из
+/// schema.yaml). Строки топиков существуют только здесь, дальше по коду
+/// ходят только эти функции.
+mod topics {
+    use veldsdk::prost::Message;
+
+    pub fn set_view(req: &super::SetViewRequest) {
+        veldsdk::abi::publish("ui-service/set_view", req.encode_to_vec());
+    }
+
+    pub fn set_surface(req: &super::SetSurfaceRequest) {
+        veldsdk::abi::publish("ui-service/set_surface", req.encode_to_vec());
+    }
+}
+
 /// Реакция владельца окна на app/window_resized: ритуал
 /// «alloc → grant_write → attach хосту → delegate рендереру» одной функцией.
 pub mod surface {
-    use veldsdk::prost::Message;
     use veldsdk::abi;
 
     // COPY_DST | TEXTURE_BINDING | RENDER_ATTACHMENT
@@ -891,18 +905,15 @@ pub mod surface {
 
         let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0, content_hash: Vec::new() };
 
-        abi::publish("ui-service/set_surface", super::SetSurfaceRequest {
+        super::topics::set_surface(&super::SetSurfaceRequest {
             plugin_id: ev.plugin_id.clone(),
             surface: Some(handle.clone()),
             width: ev.width,
             height: ev.height,
             scale_factor: ev.scale_factor,
-        }.encode_to_vec());
+        });
 
-        abi::publish("app/set_surface", veldsdk::proto::app::SetSurface {
-            plugin_id: ev.plugin_id.clone(),
-            surface: Some(handle),
-        }.encode_to_vec());
+        veldsdk::app::set_surface(&ev.plugin_id, handle);
 
         if let Some(old) = old_texture {
             abi::arena_free(old);
@@ -939,7 +950,7 @@ pub mod render {
             plugin_id: plugin_id.to_string(),
             layout: Some(layout),
         };
-        veldsdk::abi::publish("ui-service/set_view", request.encode_to_vec());
+        super::topics::set_view(&request);
     }
 }
 

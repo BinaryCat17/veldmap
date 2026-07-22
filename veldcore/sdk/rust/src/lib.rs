@@ -3,6 +3,7 @@ pub mod proto;
 pub mod runtime;
 pub mod logging;
 pub mod graphics;
+pub mod app;
 
 pub use logging::FLAG_PERF;
 
