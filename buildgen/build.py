@@ -191,6 +191,21 @@ def generate_code():
              "--schema",    app_schema,
              "--sdk-stubs", os.path.join(PROJECT_ROOT, "veldcore", "sdk", "rust", "src", "app.rs")])
 
+    # Хостовые биндинги (veldcore/platform/host/host.yaml → platform/host/generated)
+    host_dir  = os.path.join(PROJECT_ROOT, "veldcore", "platform", "host")
+    host_yaml = os.path.join(host_dir, "host.yaml")
+    if os.path.exists(host_yaml):
+        host_lang = _load_yaml_scalar(host_yaml, "language") or "rust"
+        host_pkg  = _load_yaml_scalar(host_yaml, "package") or "veldmap-host-bindings"
+        if host_lang == "rust":
+            print("  Generating host bindings ...")
+            run([venv_python, gen_script,
+                 "--host-bindings", os.path.join(host_dir, "generated"),
+                 "--proto-dir",     os.path.join(PROJECT_ROOT, "veldcore", "proto"),
+                 "--package",       host_pkg])
+        else:
+            print(f"  WARNING: no host bindings generator for language '{host_lang}', skipping")
+
 
 # ── Module builders (one per language) ────────────────────────────────────────
 
@@ -304,6 +319,8 @@ def clean():
 
     for module in discover_modules():
         targets.append(os.path.join(module["dir"], "generated", "target"))
+
+    targets.append(os.path.join(PROJECT_ROOT, "veldcore", "platform", "host", "generated", "target"))
 
     for folder in targets:
         if os.path.exists(folder):

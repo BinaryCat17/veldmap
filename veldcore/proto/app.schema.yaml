@@ -1,11 +1,18 @@
 # Платформенный псевдо-модуль: топики app/* (контракт app.proto).
-# buildgen генерирует из этого файла veldsdk::app::* — типизированные стабы
-# для топиков, которые модули публикуют в платформу. Топики хост → модули
-# (ui_event, window_resized, ready) здесь не объявлены: модули подписываются
-# на них через dependencies в своих schema.yaml.
+# buildgen генерирует из этого файла:
+#   - veldsdk::app::* — стабы inputs для wasm-модулей (что модули публикуют
+#     в платформу);
+#   - topics/emit в хостовых биндингах (platform/host/generated): topics —
+#     на что хост подписан (inputs), emit — что хост публикует (outputs).
 name: app
 version: 0.1.0
 interface:
   inputs:
     set_surface:
       type: app/SetSurface
+  outputs:
+    ui_event:
+      type: app/UIEvent
+    window_resized:
+      type: app/WindowResized
+    ready: {} # без payload

@@ -1,0 +1,19 @@
+# Контракт нативного сервиса fs (сообщения — veldcore/proto/fs.proto).
+# buildgen генерирует из этого файла хостовые биндинги (topics/emit).
+name: fs
+version: 0.1.0
+interface:
+  inputs:
+    read:
+      type: fs/FsReadRequest
+    write:
+      type: fs/FsWriteRequest
+    list:
+      type: fs/FsListRequest
+  outputs:
+    read_result:
+      type: fs/FsReadResult
+    write_result:
+      type: fs/FsWriteResult
+    list_result:
+      type: fs/FsListResult

@@ -25,6 +25,12 @@ pub use veldmap_host_core::registry::Access;
 // Protobuf-типы шины (veldmap.core): запросы/ответы/события.
 pub use veldmap_host_core::core;
 
+// ── Сгенерированные биндинги платформенных контрактов ───────────────────────
+// proto-типы и стабы топиков (topics::*/emit::*) из platform/host/generated
+// (buildgen, veldcore/proto/*.schema.yaml). Публикация выходов сервиса —
+// только через emit-стабы: bindings::fs::emit::read_result(&dispatcher, &msg).
+pub use veldmap_host_bindings as bindings;
+
 // ── Хелперы ─────────────────────────────────────────────────────────────────
 pub mod path {
     /// Проверяет, что относительный путь не выходит за пределы рабочей
@@ -39,10 +45,11 @@ pub mod path {
     }
 }
 
-/// Сантехника protobuf-шины: единое место для decode/encode и регистрации,
+/// Сантехника protobuf-шины: единое место для decode и регистрации,
 /// чтобы обработчики модулей содержали только бизнес-логику.
+/// Публикация — через сгенерированные emit-стабы (crate::bindings).
 pub mod wire {
-    use super::{AsyncNativeService, Dispatcher, HostContext};
+    use super::{AsyncNativeService, HostContext};
     use prost::Message;
     use std::sync::Arc;
 
@@ -56,11 +63,6 @@ pub mod wire {
                 None
             }
         }
-    }
-
-    /// Кодирует сообщение и публикует его в топик (fire-and-forget).
-    pub fn publish<M: Message>(dispatcher: &Dispatcher, topic: &str, msg: &M) {
-        dispatcher.publish(topic, msg.encode_to_vec());
     }
 
     /// Подписывает один асинхронный сервис сразу на несколько его топиков.

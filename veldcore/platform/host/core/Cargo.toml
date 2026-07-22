@@ -21,6 +21,4 @@ async-trait = "0.1"
 blake3 = "1.5"
 chrono = "0.4"
 rand = "0.9"
-
-[build-dependencies]
-prost-build = "0.14"
+veldmap-host-bindings = { path = "../generated" }

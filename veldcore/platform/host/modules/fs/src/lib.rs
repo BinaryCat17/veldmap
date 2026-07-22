@@ -1,13 +1,10 @@
 #![recursion_limit = "256"]
-//! Контракт сервиса — veldcore/proto/fs.proto (компилируется build.rs).
-pub mod proto {
-    pub mod fs {
-        include!(concat!(env!("OUT_DIR"), "/veldmap.fs.rs"));
-    }
-}
+//! Контракт сервиса — veldcore/proto/fs.proto + fs.schema.yaml; типы и стабы
+//! топиков — из сгенерированных биндингов (platform/host/generated).
 
 use veldmap_host_util::{AsyncNativeService, Access, HostContext};
-use proto::fs::{
+use veldmap_host_util::bindings::fs as bus;
+use veldmap_host_util::bindings::proto::fs::{
     FsReadRequest, FsReadResult, FsWriteRequest, FsWriteResult,
     FsListRequest, FsListResult,
 };
@@ -28,7 +25,7 @@ impl FsService {
     }
 
     async fn handle_fs_read(&self, payload: Vec<u8>, requestor_id: u32) {
-        let Some(req) = wire::decode_or_log::<FsReadRequest>(&payload, "fs/read") else { return };
+        let Some(req) = wire::decode_or_log::<FsReadRequest>(&payload, bus::topics::READ) else { return };
 
         let correlation_id = req.correlation_id.clone();
         let result = if !is_path_safe(&req.path) {
@@ -48,11 +45,11 @@ impl FsService {
                 Err(e) => FsReadResult { handle: None, error: e.to_string(), correlation_id },
             }
         };
-        wire::publish(&self.ctx.dispatcher, "fs/read_result", &result);
+        bus::emit::read_result(&*self.ctx.dispatcher, &result);
     }
 
     async fn handle_fs_write(&self, payload: Vec<u8>, requestor_id: u32) {
-        let Some(req) = wire::decode_or_log::<FsWriteRequest>(&payload, "fs/write") else { return };
+        let Some(req) = wire::decode_or_log::<FsWriteRequest>(&payload, bus::topics::WRITE) else { return };
 
         let correlation_id = req.correlation_id.clone();
         let result = if !is_path_safe(&req.path) {
@@ -61,7 +58,7 @@ impl FsService {
             let handle = match req.handle {
                 Some(h) => h,
                 None => {
-                    wire::publish(&self.ctx.dispatcher, "fs/write_result", &FsWriteResult { error: "Missing handle".into(), correlation_id });
+                    bus::emit::write_result(&*self.ctx.dispatcher, &FsWriteResult { error: "Missing handle".into(), correlation_id });
                     return;
                 }
             };
@@ -84,11 +81,11 @@ impl FsService {
             };
             data
         };
-        wire::publish(&self.ctx.dispatcher, "fs/write_result", &result);
+        bus::emit::write_result(&*self.ctx.dispatcher, &result);
     }
 
     async fn handle_fs_list(&self, payload: Vec<u8>) {
-        let Some(req) = wire::decode_or_log::<FsListRequest>(&payload, "fs/list") else { return };
+        let Some(req) = wire::decode_or_log::<FsListRequest>(&payload, bus::topics::LIST) else { return };
 
         let correlation_id = req.correlation_id.clone();
         let result = if !is_path_safe(&req.path) {
@@ -111,7 +108,7 @@ impl FsService {
                 FsListResult { entries: vec![], error: String::new(), correlation_id }
             }
         };
-        wire::publish(&self.ctx.dispatcher, "fs/list_result", &result);
+        bus::emit::list_result(&*self.ctx.dispatcher, &result);
     }
 }
 
@@ -129,5 +126,5 @@ impl AsyncNativeService for FsService {
 
 pub fn register_services(ctx: Arc<HostContext>) {
     let fs_service = Arc::new(FsService::new(ctx.clone()));
-    wire::subscribe_async(&ctx, &fs_service, &["fs/read", "fs/write", "fs/list"]);
+    wire::subscribe_async(&ctx, &fs_service, &[bus::topics::READ, bus::topics::WRITE, bus::topics::LIST]);
 }

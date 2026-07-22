@@ -1,0 +1,14 @@
+# Standalone workspace — prevents cargo from inheriting a parent workspace
+[workspace]
+
+[package]
+name = "{{ package }}"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+prost = "0.14"
+
+[build-dependencies]
+prost-build = "0.14"

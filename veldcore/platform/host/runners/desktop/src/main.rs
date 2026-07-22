@@ -19,6 +19,7 @@ use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
 use veldmap_host_core::logging::FLAG_HOST_RENDER;
 use veldmap_host_core::registry::{Access, ResourceRegistry};
 use veldmap_host_core::{vinfo, vwarn, vdebug};
+use veldmap_host_bindings::app as app_bus;
 
 /// Окно, созданное по декларации модуля-владельца.
 /// Хост не знает, кто рендерит: владелец аллоцирует текстуру сам, делегирует её
@@ -83,7 +84,7 @@ fn publish_ui_event(dispatcher: &Dispatcher, owner: &str, event: app::ui_event::
         plugin_id: owner.to_string(),
         event: Some(event),
     };
-    dispatcher.publish("app/ui_event", ev.encode_to_vec());
+    app_bus::emit::ui_event(dispatcher, &ev);
 }
 
 /// Сообщает владельцу окна размер и формат требуемой поверхности.
@@ -95,7 +96,7 @@ fn publish_window_resized(dispatcher: &Dispatcher, owner: &str, width: u32, heig
         scale_factor,
         format,
     };
-    dispatcher.publish("app/window_resized", ev.encode_to_vec());
+    app_bus::emit::window_resized(dispatcher, &ev);
 }
 
 #[tokio::main]
@@ -160,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         dispatcher: dispatcher.clone(),
         registry: ctx.registry.clone(),
         pending: pending_surfaces.clone(),
-    }), &["app/set_surface"]);
+    }), &[app_bus::topics::SET_SURFACE]);
 
     veldmap_host_core::plugins::load_services(ctx.clone()).await?;
     if dispatcher.instance_of(&owner_name).is_none() {
@@ -181,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
     let format_proto = graphics.get_surface_format_proto();
     let ui_scale = win_cfg.ui_scale;
     publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, ui_scale, format_proto);
-    dispatcher.publish("app/ready", Vec::new());
+    app_bus::emit::ready(&*dispatcher);
 
     winit_window.request_redraw();
 

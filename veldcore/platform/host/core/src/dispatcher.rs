@@ -113,3 +113,11 @@ impl Dispatcher {
         }
     }
 }
+
+/// Хостовый паблишер для сгенерированных emit-стабов
+/// (platform/host/generated): публикация от имени самого хоста.
+impl veldmap_host_bindings::Publisher for Dispatcher {
+    fn publish(&self, topic: &str, payload: Vec<u8>) {
+        Dispatcher::publish(self, topic, payload);
+    }
+}

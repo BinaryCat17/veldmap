@@ -1,0 +1,19 @@
+# Контракт нативного сервиса network (сообщения — veldcore/proto/network.proto).
+# buildgen генерирует из этого файла хостовые биндинги (topics/emit).
+name: network
+version: 0.1.0
+interface:
+  inputs:
+    fs_download:
+      type: network/FsDownloadRequest
+    http:
+      type: network/HttpTaskRequest
+    cancel_download:
+      type: network/TaskCancelRequest
+  outputs:
+    fs_download_result:
+      type: network/FsDownloadResponse
+    fs_download_progress:
+      type: network/FsDownloadProgress
+    http_result:
+      type: network/HttpTaskResponse

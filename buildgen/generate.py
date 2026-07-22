@@ -59,16 +59,112 @@ def read_proto_package(proto_file: str) -> str | None:
     return None
 
 
+def rust_type_name(name: str) -> str:
+    """Convert a proto message name to its prost-generated Rust name.
+
+    prost-build applies heck::ToUpperCamelCase: UIEvent → UiEvent.
+    Schema `type:` fields hold proto names, so the conversion must match.
+    """
+    import re
+    words = re.findall(r'[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+', name)
+    return "".join(w[0].upper() + w[1:].lower() for w in words)
+
+
+def schema_type_to_rust_path(type_str: str) -> str:
+    """`app/UIEvent` → `app::UiEvent` (module path + prost type name)."""
+    mod, _, name = type_str.partition("/")
+    return f"{mod}::{rust_type_name(name)}" if name else ""
+
+
+# ── Host bindings generation ─────────────────────────────────────────────────
+
+def generate_host_bindings(args, script_dir: str):
+    """Generate the host bindings crate (proto types + topic stubs) from
+    veldcore/proto/*.proto and *.schema.yaml. Used by the host implementation;
+    the crate itself depends only on prost (host implements Publisher)."""
+    out_dir   = os.path.abspath(args.host_bindings)
+    proto_dir = os.path.abspath(args.proto_dir)
+    package   = args.package or "veldmap-host-bindings"
+
+    proto_files = sorted(f for f in os.listdir(proto_dir) if f.endswith(".proto"))
+    proto_packages = []
+    for f in proto_files:
+        pkg_decl = read_proto_package(os.path.join(proto_dir, f))
+        proto_packages.append({"file": pkg_decl, "mod": pkg_decl.split(".")[-1]})
+
+    services = []
+    for f in sorted(os.listdir(proto_dir)):
+        if not f.endswith(".schema.yaml"):
+            continue
+        with open(os.path.join(proto_dir, f)) as sf:
+            svc_schema = yaml.safe_load(sf)
+        iface = svc_schema.get("interface", {}) or {}
+
+        def entries(kind):
+            return [
+                {
+                    "name":      n,
+                    "const":     n.upper(),
+                    "rust_path": schema_type_to_rust_path((d or {}).get("type") or ""),
+                }
+                for n, d in (iface.get(kind, {}) or {}).items()
+            ]
+
+        svc_name = svc_schema.get("name")
+        services.append({
+            "name":    svc_name,
+            "snake":   svc_name.replace("-", "_"),
+            "inputs":  entries("inputs"),
+            "outputs": entries("outputs"),
+        })
+
+    proto_dir_rel = os.path.relpath(proto_dir, out_dir).replace("\\", "/")
+    template_data = {
+        "package":        package,
+        "proto_files":    proto_files,
+        "proto_packages": proto_packages,
+        "proto_dir_rel":  proto_dir_rel,
+        "services":       services,
+    }
+
+    env = Environment(loader=FileSystemLoader(os.path.join(script_dir, "templates")))
+    renders = {
+        os.path.join(out_dir, "src", "lib.rs"): env.get_template("host_lib.rs.j2"),
+        os.path.join(out_dir, "Cargo.toml"):    env.get_template("host_Cargo.toml.j2"),
+        os.path.join(out_dir, "build.rs"):      env.get_template("host_build.rs.j2"),
+    }
+    for path, template in renders.items():
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(template.render(template_data))
+
+    print(f"✅ Generated host bindings at {out_dir}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Rust bindings from schema.yaml")
-    parser.add_argument("--schema",     required=True, help="Absolute path to schema.yaml")
-    parser.add_argument("--output-dir", help="Absolute path to output directory")
-    parser.add_argument("--sdk-stubs",  help="Generate SDK platform stubs to this path and exit")
+    parser.add_argument("--schema",        help="Absolute path to schema.yaml")
+    parser.add_argument("--output-dir",    help="Absolute path to output directory")
+    parser.add_argument("--sdk-stubs",     help="Generate SDK platform stubs to this path and exit")
+    parser.add_argument("--host-bindings", help="Generate host bindings crate to this dir and exit")
+    parser.add_argument("--proto-dir",     help="Dir with *.proto and *.schema.yaml (host-bindings mode)")
+    parser.add_argument("--package",       help="Package name (host-bindings mode)")
     args = parser.parse_args()
 
-    script_dir  = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # ── Host bindings mode (--host-bindings) ─────────────────────────────────
+    if args.host_bindings:
+        if not args.proto_dir:
+            parser.error("--proto-dir is required with --host-bindings")
+        generate_host_bindings(args, script_dir)
+        return
+
+    if not args.schema:
+        parser.error("--schema is required unless --host-bindings is given")
+
     schema_path = os.path.abspath(args.schema)
 
     # ── Load schema ──────────────────────────────────────────────────────────
@@ -80,7 +176,7 @@ def main():
         out_path  = os.path.abspath(args.sdk_stubs)
         svc_name  = schema.get("name")
         pf_inputs = [
-            {"name": n, "rust_type": ((d or {}).get("type") or "").split("/")[-1]}
+            {"name": n, "rust_type": rust_type_name(((d or {}).get("type") or "").split("/")[-1])}
             for n, d in (schema.get("interface", {}).get("inputs", {}) or {}).items()
         ]
         pf_inputs = [i for i in pf_inputs if i["rust_type"]]
@@ -128,7 +224,7 @@ def main():
     # interface.inputs → <service>-wrap::inputs::<name>(msg): стабы входных
     # топиков для вызывающих (генерируются в wrap-крейт, см. wrap_lib.rs.j2).
     inputs = [
-        {"name": n, "rust_type": ((d or {}).get("type") or "").split("/")[-1]}
+        {"name": n, "rust_type": rust_type_name(((d or {}).get("type") or "").split("/")[-1])}
         for n, d in (schema.get("interface", {}).get("inputs", {}) or {}).items()
     ]
     inputs = [i for i in inputs if i["rust_type"]]

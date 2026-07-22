@@ -11,13 +11,9 @@ pub mod abi;
 pub mod dispatcher;
 pub mod logging;
 
-pub mod core {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
-}
-
-pub mod app {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
-}
+// Protobuf-типы платформенных контрактов — из сгенерированного
+// биндинг-крейта (platform/host/generated, buildgen).
+pub use veldmap_host_bindings::proto::{app, core};
 
 pub struct CallContextInner {
     pub input: Vec<u8>,

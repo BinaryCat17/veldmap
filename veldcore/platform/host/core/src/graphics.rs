@@ -5,10 +5,9 @@ use crate::memory::{MemoryManager, proto_to_wgpu_format, surface_format_to_proto
 use crate::registry::{ResourceRegistry, ResourceId, ResourceBackend, Access};
 use prost::Message;
 
-/// Сгенерированные prost-типы протокола `veldmap.graphics`.
-pub mod proto {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.graphics.rs"));
-}
+/// Сгенерированные prost-типы протокола `veldmap.graphics`
+/// (platform/host/generated, buildgen).
+pub use veldmap_host_bindings::proto::graphics as proto;
 
 use proto::{
     ResourceRequest, CreateResourceResponse, Submit, CommandBuffer,

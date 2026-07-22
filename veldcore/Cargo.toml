@@ -4,6 +4,8 @@ members = [
     "platform/host/runners/desktop",
     "sdk/rust",
 ]
+# Сгенерированный buildgen'ом биндинг-крейт — standalone workspace.
+exclude = ["platform/host/generated"]
 resolver = "2"
 
 [profile.release]

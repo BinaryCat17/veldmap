@@ -1,13 +1,10 @@
 #![recursion_limit = "256"]
-//! Контракт сервиса — veldcore/proto/network.proto (компилируется build.rs).
-pub mod proto {
-    pub mod network {
-        include!(concat!(env!("OUT_DIR"), "/veldmap.network.rs"));
-    }
-}
+//! Контракт сервиса — veldcore/proto/network.proto + network.schema.yaml;
+//! типы и стабы топиков — из сгенерированных биндингов (platform/host/generated).
 
 use veldmap_host_util::{AsyncNativeService, HostContext};
-use proto::network::{
+use veldmap_host_util::bindings::network as bus;
+use veldmap_host_util::bindings::proto::network::{
     FsDownloadRequest, HttpTaskRequest, HttpTaskResponse,
     FsDownloadResponse, FsDownloadProgress, TaskCancelRequest
 };
@@ -30,7 +27,7 @@ pub struct NetworkService {
 /// Логирует провал скачивания и уведомляет подписчиков fs_download_result.
 fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) {
     log::warn!(target: "host", "Download {} failed: {}", correlation_id, error);
-    wire::publish(&ctx.dispatcher, "network/fs_download_result", &FsDownloadResponse {
+    bus::emit::fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
         error,
         correlation_id: correlation_id.to_string(),
     });
@@ -42,10 +39,10 @@ impl NetworkService {
     }
 
     async fn handle_fs_download(&self, payload: Vec<u8>) {
-        let Some(req) = wire::decode_or_log::<FsDownloadRequest>(&payload, "network/fs_download") else { return };
+        let Some(req) = wire::decode_or_log::<FsDownloadRequest>(&payload, bus::topics::FS_DOWNLOAD) else { return };
 
         if !is_path_safe(&req.path) {
-            wire::publish(&self.ctx.dispatcher, "network/fs_download_result", &FsDownloadResponse {
+            bus::emit::fs_download_result(&*self.ctx.dispatcher, &FsDownloadResponse {
                 error: format!("Unsafe path: {}", req.path),
                 correlation_id: req.correlation_id.clone(),
             });
@@ -95,7 +92,7 @@ impl NetworkService {
                                     let percent = (downloaded * 100 / total_size) as u32;
                                     if percent > last_percent {
                                         last_percent = percent;
-                                        wire::publish(&ctx.dispatcher, "network/fs_download_progress", &FsDownloadProgress {
+                                        bus::emit::fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
                                             correlation_id: correlation_id.clone(),
                                             progress: downloaded as f32 / total_size as f32,
                                         });
@@ -111,7 +108,7 @@ impl NetworkService {
             }
 
             log::info!(target: "host", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
-            wire::publish(&ctx.dispatcher, "network/fs_download_result", &FsDownloadResponse {
+            bus::emit::fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
                 error: String::new(),
                 correlation_id: correlation_id.clone(),
             });
@@ -121,7 +118,7 @@ impl NetworkService {
     }
 
     async fn handle_http(&self, payload: Vec<u8>) {
-        let Some(req) = wire::decode_or_log::<HttpTaskRequest>(&payload, "network/http") else { return };
+        let Some(req) = wire::decode_or_log::<HttpTaskRequest>(&payload, bus::topics::HTTP) else { return };
 
         let correlation_id = if req.correlation_id.is_empty() {
             uuid::Uuid::new_v4().to_string()
@@ -159,11 +156,11 @@ impl NetworkService {
             match result {
                 Ok((status, body)) => {
                     log::info!(target: "host", "HTTP request {} finished with status {}", correlation_id, status);
-                    wire::publish(&ctx.dispatcher, "network/http_result", &HttpTaskResponse { status, body, correlation_id: correlation_id.clone() });
+                    bus::emit::http_result(&*ctx.dispatcher, &HttpTaskResponse { status, body, correlation_id: correlation_id.clone() });
                 }
                 Err(e) => {
                     log::warn!(target: "host", "HTTP request {} failed: {}", correlation_id, e);
-                    wire::publish(&ctx.dispatcher, "network/http_result", &HttpTaskResponse { status: 0, body: Vec::new(), correlation_id: correlation_id.clone() });
+                    bus::emit::http_result(&*ctx.dispatcher, &HttpTaskResponse { status: 0, body: Vec::new(), correlation_id: correlation_id.clone() });
                 }
             }
         });
@@ -173,7 +170,7 @@ impl NetworkService {
 
     /// Событие `network/cancel_download`: отмена фоновой задачи по correlation_id.
     async fn handle_cancel_download(&self, payload: Vec<u8>) {
-        let Some(req) = wire::decode_or_log::<TaskCancelRequest>(&payload, "network/cancel_download") else { return };
+        let Some(req) = wire::decode_or_log::<TaskCancelRequest>(&payload, bus::topics::CANCEL_DOWNLOAD) else { return };
         if let Some(handle) = self.local_tasks.lock().unwrap().remove(&req.task_id) {
             log::info!(target: "host", "NetworkService aborting task {}", req.task_id);
             handle.abort();
@@ -195,5 +192,5 @@ impl AsyncNativeService for NetworkService {
 
 pub fn register_services(ctx: Arc<HostContext>) {
     let network_service = Arc::new(NetworkService::new(ctx.clone()));
-    wire::subscribe_async(&ctx, &network_service, &["network/fs_download", "network/http", "network/cancel_download"]);
+    wire::subscribe_async(&ctx, &network_service, &[bus::topics::FS_DOWNLOAD, bus::topics::HTTP, bus::topics::CANCEL_DOWNLOAD]);
 }
