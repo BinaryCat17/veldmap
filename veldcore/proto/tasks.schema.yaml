@@ -5,12 +5,12 @@ name: tasks
 version: 0.1.0
 interface:
   inputs:
-    cancel:
+    on_cancel:
       type: tasks/TaskCancelRequest
-    grant:
+    on_grant:
       type: tasks/TaskGrantRequest
   outputs:
-    task_started:
+    on_task_started:
       type: tasks/TaskStarted
-    task_finished:
+    on_task_finished:
       type: tasks/TaskFinished

@@ -5,8 +5,8 @@
 use prost::Message;
 
 
-/// `app/set_surface`
-pub fn set_surface(msg: &crate::proto::app::SetSurface) {
-    crate::abi::publish("app/set_surface", msg.encode_to_vec());
+/// `app/on_set_surface`
+pub fn on_set_surface(msg: &crate::proto::app::SetSurface) {
+    crate::abi::publish("app/on_set_surface", msg.encode_to_vec());
 }
 

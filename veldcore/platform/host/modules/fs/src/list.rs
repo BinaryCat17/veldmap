@@ -6,7 +6,7 @@ use veldmap_host_util::bindings::proto::fs::{FsListRequest, FsListResult};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
 use std::fs;
 
-pub fn on_input_list(state: &State, req: FsListRequest, _requestor_id: u32) {
+pub fn on_list(state: &State, req: FsListRequest, _requestor_id: u32) {
     let correlation_id = req.correlation_id.clone();
     let result = if !is_path_safe(&req.path) {
         FsListResult { entries: vec![], error: "Access denied".into(), correlation_id }
@@ -29,5 +29,5 @@ pub fn on_input_list(state: &State, req: FsListRequest, _requestor_id: u32) {
             FsListResult { entries: vec![], error: String::new(), correlation_id }
         }
     };
-    bus::emit::list_result(&*state.ctx.dispatcher, &result);
+    bus::emit::on_list_result(&*state.ctx.dispatcher, &result);
 }

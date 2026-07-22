@@ -67,7 +67,7 @@ impl SurfaceSink {
 impl AsyncNativeService for SurfaceSink {
     async fn handle(&self, method: &str, payload: Vec<u8>, requestor_id: u32) {
         match method {
-            "set_surface" => {
+            "on_set_surface" => {
                 if let Err(e) = self.set_surface(payload, requestor_id) {
                     vwarn!(FLAG_HOST_RENDER, "set_surface rejected: {}", e);
                 }
@@ -77,14 +77,14 @@ impl AsyncNativeService for SurfaceSink {
     }
 }
 
-/// Публикация UI-события в нейтральный топик app/ui_event.
+/// Публикация UI-события в нейтральный топик app/on_ui_event.
 /// Адресация — в данных: plugin_id называет владельца окна.
 fn publish_ui_event(dispatcher: &Dispatcher, owner: &str, event: app::ui_event::Event) {
     let ev = app::UiEvent {
         plugin_id: owner.to_string(),
         event: Some(event),
     };
-    app_bus::emit::ui_event(dispatcher, &ev);
+    app_bus::emit::on_ui_event(dispatcher, &ev);
 }
 
 /// Битовая маска модификаторов для KeyEvent: 1=Shift, 2=Ctrl, 4=Alt, 8=Super.
@@ -106,7 +106,7 @@ fn publish_window_resized(dispatcher: &Dispatcher, owner: &str, width: u32, heig
         scale_factor,
         format,
     };
-    app_bus::emit::window_resized(dispatcher, &ev);
+    app_bus::emit::on_window_resized(dispatcher, &ev);
 }
 
 #[tokio::main]
@@ -172,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         dispatcher: dispatcher.clone(),
         registry: ctx.registry.clone(),
         pending: pending_surfaces.clone(),
-    }), &[app_bus::topics::SET_SURFACE]);
+    }), &[app_bus::topics::ON_SET_SURFACE]);
 
     veldmap_host_core::plugins::load_services(ctx.clone()).await?;
     if dispatcher.instance_of(&owner_name).is_none() {
@@ -196,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
     // поэтому конфиг задаёт нижнюю границу.
     let effective_scale = move |w: &winit::window::Window| (w.scale_factor() as f32).max(win_cfg.ui_scale);
     publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, effective_scale(&winit_window), format_proto);
-    app_bus::emit::ready(&*dispatcher);
+    app_bus::emit::on_ready(&*dispatcher);
 
     winit_window.request_redraw();
 

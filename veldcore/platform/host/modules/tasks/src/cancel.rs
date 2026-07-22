@@ -6,6 +6,6 @@
 use super::State;
 use veldmap_host_util::bindings::proto::tasks::TaskCancelRequest;
 
-pub fn on_input_cancel(state: &State, req: TaskCancelRequest, requestor_id: u32) {
+pub fn on_cancel(state: &State, req: TaskCancelRequest, requestor_id: u32) {
     state.tasks.cancel(&req.task_id, requestor_id);
 }

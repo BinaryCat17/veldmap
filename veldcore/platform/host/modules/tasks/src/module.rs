@@ -1,5 +1,5 @@
 //! Реализация сервиса tasks (контракт — veldcore/proto/tasks.schema.yaml).
-//! Свободные обработчики on_input_* вызываются сгенерированным клеем
+//! Свободные обработчики on_* вызываются сгенерированным клеем
 //! (generated/, buildgen): State, init и сигнатуры — по конвенции,
 //! как в wasm-модулях (crate::module).
 //!
@@ -18,10 +18,10 @@ pub struct State {
     tasks: Tasks,
 }
 
-pub fn init(ctx: Arc<HostContext>) -> State {
+pub fn hook_init(ctx: Arc<HostContext>) -> State {
     State { tasks: Tasks::new(&ctx, "tasks") }
 }
 
 // -- Input handlers --
-pub use cancel::on_input_cancel;
-pub use grant::on_input_grant;
+pub use cancel::on_cancel;
+pub use grant::on_grant;

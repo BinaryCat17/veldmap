@@ -44,7 +44,7 @@ impl TaskTracker {
         if !self.pending.remove(task_id) {
             return false;
         }
-        crate::tasks::cancel(&crate::proto::tasks::TaskCancelRequest {
+        crate::tasks::on_cancel(&crate::proto::tasks::TaskCancelRequest {
             task_id: task_id.to_string(),
         });
         true

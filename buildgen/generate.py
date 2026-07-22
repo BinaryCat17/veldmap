@@ -472,10 +472,13 @@ def main():
     # ── Build handler dispatch table (topic → handler + payload type) ────────
     handlers = []
 
+    # Handler name = schema key, verbatim (no injected on_input_/on_sub_
+    # prefix): the schema is expected to already name it `on_*`, so the
+    # topic key and the Rust function it maps to are the same string.
     for input_name in schema.get("interface", {}).get("inputs", {}):
         handlers.append({
             "topic":     f"{name}/{input_name}",
-            "handler":   f"crate::module::on_input_{input_name}",
+            "handler":   f"crate::module::{input_name}",
             "rust_path": module_rust_path(resolved["inputs"][input_name]),
         })
 
@@ -483,7 +486,7 @@ def main():
         for sub_name in (dep_data or {}).get("subs", {}) or {}:
             handlers.append({
                 "topic":     f"{dep_name}/{sub_name}",
-                "handler":   f"crate::module::on_sub_{sub_name}",
+                "handler":   f"crate::module::{sub_name}",
                 "rust_path": module_rust_path(resolved["subs"][(dep_name, sub_name)]),
             })
 
@@ -508,15 +511,14 @@ def main():
                 ],
             })
 
-    # ── View module (Elm-style view loop) ────────────────────────────────────
-    # `view: <dependency>` in schema.yaml names the dependency that renders this
-    # module's UI. The generated runner re-renders the module's view after init
-    # and after every handled message, shipping the layout to that dependency's
-    # wrap crate (which must expose `render::render`). The module must export
-    # `pub fn view(&State) -> Element<()>`.
-    view_dep = schema.get("view")
-    if view_dep and view_dep not in schema.get("dependencies", {}):
-        raise SystemExit(f"Schema '{name}': view renderer '{view_dep}' is not declared in dependencies")
+    # ── Hooks (runtime lifecycle callbacks, not tied to a topic) ──────────────
+    # `hooks:` in schema.yaml lists which lifecycle hooks the module opts into.
+    # `hook_event` re-runs `crate::module::hook_event(state)` after every
+    # handled message (and once on `app/ready`); what it does — render a view,
+    # or anything else — is entirely up to that hand-written function. The
+    # generator does not need to know or resolve which dependency it talks to.
+    hooks = set(schema.get("hooks") or [])
+    hook_event = "hook_event" in hooks
 
     # ── Detect local proto / wraps ───────────────────────────────────────────
     has_local_proto = os.path.exists(os.path.join(schema_dir, "types.proto"))
@@ -553,7 +555,6 @@ def main():
         cargo_dependencies[dep_name] = yaml_dep_to_toml(dep_val)
 
     # 2. Add schema-inferred internal dependencies
-    view_wrap_crate = None
     dep_wrap_crates = {}   # package alias → (wrap crate snake name, dep dir name)
     schema_deps = schema.get("dependencies", {})
     for dep_name in schema_deps.keys():
@@ -568,8 +569,6 @@ def main():
 
             api_crate_name = f"{dep_pkg_name}-wrap"
             api_crate_snake = api_crate_name.replace("-", "_")
-            if dep_name == view_dep:
-                view_wrap_crate = api_crate_snake
 
             # Dependency on the generated wrap crate
             cargo_dependencies[api_crate_name] = f'{{ path = "../../{dep_name}/generated/wraps/rust" }}'
@@ -620,9 +619,6 @@ def main():
     # ── Template context ─────────────────────────────────────────────────────
     module_name_snake = package_name.replace("-", "_")
 
-    if view_dep and not view_wrap_crate:
-        raise SystemExit(f"Schema '{name}': could not resolve wrap crate for view renderer '{view_dep}'")
-
     template_data = {
         "module_name":        package_name,
         "module_name_snake":  module_name_snake,
@@ -633,13 +629,13 @@ def main():
         "rust": {
             "config": "crate::module::Config",
             "state":  "crate::module::State",
-            "init":   "crate::module::init",
+            "init":   "crate::module::hook_init",
         },
         "handlers":           handlers,
         "emits":              emits,
         "inputs":             inputs,
         "dep_calls":          dep_calls,
-        "view_wrap_crate":    view_wrap_crate,
+        "hook_event":         hook_event,
         "has_local_proto":    has_local_proto,
         "local_proto_package": local_proto_package,
         "local_proto_path":   local_proto_path,

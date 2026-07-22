@@ -1,5 +1,5 @@
 //! Реализация сервиса fs (контракт — veldcore/proto/fs.schema.yaml).
-//! Свободные обработчики on_input_* вызываются сгенерированным клеем
+//! Свободные обработчики on_* вызываются сгенерированным клеем
 //! (generated/, buildgen): State, init и сигнатуры — по конвенции,
 //! как в wasm-модулях (crate::module).
 //!
@@ -17,11 +17,11 @@ pub struct State {
     ctx: Arc<HostContext>,
 }
 
-pub fn init(ctx: Arc<HostContext>) -> State {
+pub fn hook_init(ctx: Arc<HostContext>) -> State {
     State { ctx }
 }
 
 // -- Input handlers --
-pub use list::on_input_list;
-pub use read::on_input_read;
-pub use write::on_input_write;
+pub use list::on_list;
+pub use read::on_read;
+pub use write::on_write;

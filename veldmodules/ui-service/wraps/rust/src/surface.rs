@@ -22,7 +22,7 @@ pub fn delegate(ev: &veldsdk::proto::app::WindowResized, old_texture: Option<u64
 
     let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0, content_hash: Vec::new() };
 
-    crate::inputs::set_surface(&crate::proto::SetSurfaceRequest {
+    crate::inputs::on_set_surface(&crate::proto::SetSurfaceRequest {
         plugin_id: ev.plugin_id.clone(),
         surface: Some(handle.clone()),
         width: ev.width,
@@ -30,7 +30,7 @@ pub fn delegate(ev: &veldsdk::proto::app::WindowResized, old_texture: Option<u64
         scale_factor: ev.scale_factor,
     });
 
-    veldsdk::app::set_surface(&veldsdk::proto::app::SetSurface {
+    veldsdk::app::on_set_surface(&veldsdk::proto::app::SetSurface {
         plugin_id: ev.plugin_id.clone(),
         surface: Some(handle),
     });

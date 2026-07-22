@@ -1,62 +1,63 @@
 name: data-browser
 version: 0.1.0
 
-# UI разметку этого модуля рендерит ui-service (Elm-цикл: view после каждого сообщения)
-view: ui-service
+# UI разметку этого модуля рендерит ui-service. hook_event пересобирает
+# view и шлёт её рендереру после каждого события (см. module.rs::hook_event).
+hooks: [hook_event]
 
 interface:
   inputs:
-    nav_browse:
+    on_nav_browse:
       type: ui/UiEventResponse
-    nav_search:
+    on_nav_search:
       type: ui/UiEventResponse
-    nav_downloaded:
+    on_nav_downloaded:
       type: ui/UiEventResponse
-    browse:
+    on_browse:
       type: ui/UiEventResponse
-    browse_up:
+    on_browse_up:
       type: ui/UiEventResponse
-    search:
+    on_search:
       type: ui/UiEventResponse
-    search_input:
+    on_search_input:
       type: ui/UiEventResponse
-    download_pressed:
+    on_download_pressed:
       type: ui/UiEventResponse
-    view_pressed:
+    on_view_pressed:
       type: ui/UiEventResponse
 
 dependencies:
   # Платформенный контракт: хост просит владельца окна выделить поверхность.
   app:
     subs:
-      window_resized:
+      on_window_resized:
         type: app/WindowResized
   ui-service: {}
   data-provider:
     subs:
-      download_started:
+      on_download_started:
         type: dataprovider/DownloadStarted
-      download_progress:
+      on_download_progress:
         type: dataprovider/DownloadProgress
-      downloaded:
+      on_downloaded:
         type: dataprovider/Downloaded
-      search_result:
+      on_search_result:
         type: dataprovider/SearchResponse
-      list_path_result:
+      on_list_path_result:
         type: dataprovider/ListPathResponse
     calls:
-      list_path:
+      on_list_path:
         type: dataprovider/ListPathRequest
-      download:
+      on_download:
         type: dataprovider/DownloadRequest
-      cancel_download:
+      on_cancel_download:
         type: dataprovider/CancelDownloadRequest
-      search:
+      on_search:
         type: dataprovider/SearchRequest
   fs:
     subs:
-      list_result:
+      on_list_result:
         type: fs/FsListResult
     calls:
-      list:
+      on_list:
         type: fs/FsListRequest

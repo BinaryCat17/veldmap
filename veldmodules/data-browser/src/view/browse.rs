@@ -24,9 +24,9 @@ pub fn view(state: &State) -> Element<()> {
         }).collect();
         
         render_list(&items, task_manager, ItemActions {
-            browse: Some("browse"),
-            view: Some("view_pressed"),
-            download: Some("download_pressed"),
+            browse: Some("on_browse"),
+            view: Some("on_view_pressed"),
+            download: Some("on_download_pressed"),
         })
     };
     
@@ -36,7 +36,7 @@ pub fn view(state: &State) -> Element<()> {
             row![text("\u{f062}").font_family("Icons"), text("Up")]
                 .spacing(6.0)
                 .align_items(Alignment::Center)
-        )).on_press("browse_up"),
+        )).on_press("on_browse_up"),
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)

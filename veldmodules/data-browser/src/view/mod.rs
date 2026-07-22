@@ -22,9 +22,9 @@ pub fn build_root(state: &State) -> Element<()> {
 
     // Header navigation
     let header = row![
-        styles::apply_nav(button(text("Browse"))).on_press("nav_browse"),
-        styles::apply_nav(button(text("Search"))).on_press("nav_search"),
-        styles::apply_nav(button(text("Downloaded"))).on_press("nav_downloaded")
+        styles::apply_nav(button(text("Browse"))).on_press("on_nav_browse"),
+        styles::apply_nav(button(text("Search"))).on_press("on_nav_search"),
+        styles::apply_nav(button(text("Downloaded"))).on_press("on_nav_downloaded")
     ].spacing(10.0).padding(Padding::new(10.0));
 
     let status_bar = row![

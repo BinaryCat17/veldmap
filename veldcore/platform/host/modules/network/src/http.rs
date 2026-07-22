@@ -5,7 +5,7 @@ use super::State;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{HttpTaskRequest, HttpTaskResponse};
 
-pub fn on_input_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
+pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
     let ctx = state.ctx.clone();
     let label = format!("{} {}", req.method, req.url);
 
@@ -30,20 +30,20 @@ pub fn on_input_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
                 let status = res.status().as_u16() as u32;
                 let body = res.bytes().await.unwrap_or_default().to_vec();
                 log::info!(target: "host", "HTTP request {} finished with status {}", correlation_id, status);
-                bus::emit::http_result(&*ctx.dispatcher, &HttpTaskResponse { status, body, correlation_id });
+                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status, body, correlation_id });
                 Ok(())
             }
             Err(e) => {
                 log::warn!(target: "host", "HTTP request {} failed: {}", correlation_id, e);
                 let error = e.to_string();
-                bus::emit::http_result(&*ctx.dispatcher, &HttpTaskResponse { status: 0, body: Vec::new(), correlation_id });
+                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status: 0, body: Vec::new(), correlation_id });
                 Err(error)
             }
         }
     });
 
     if let Err(dup) = spawned {
-        bus::emit::http_result(&*state.ctx.dispatcher, &HttpTaskResponse {
+        bus::emit::on_http_result(&*state.ctx.dispatcher, &HttpTaskResponse {
             status: 0,
             body: Vec::new(),
             correlation_id: dup.0,

@@ -8,7 +8,7 @@ use veldmap_host_util::core::ResourceHandle;
 use veldmap_host_util::path::{is_path_safe, resolve_path};
 use std::fs;
 
-pub fn on_input_read(state: &State, req: FsReadRequest, requestor_id: u32) {
+pub fn on_read(state: &State, req: FsReadRequest, requestor_id: u32) {
     let correlation_id = req.correlation_id.clone();
     let result = if !is_path_safe(&req.path) {
         FsReadResult { handle: None, error: "Access denied".into(), correlation_id }
@@ -27,5 +27,5 @@ pub fn on_input_read(state: &State, req: FsReadRequest, requestor_id: u32) {
             Err(e) => FsReadResult { handle: None, error: e.to_string(), correlation_id },
         }
     };
-    bus::emit::read_result(&*state.ctx.dispatcher, &result);
+    bus::emit::on_read_result(&*state.ctx.dispatcher, &result);
 }

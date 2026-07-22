@@ -33,7 +33,7 @@ pub fn view(state: &State) -> Element<()> {
         render_list(&items, task_manager, ItemActions {
             browse: None, // Папки не поддерживаются
             view: None,
-            download: Some("download_pressed"),
+            download: Some("on_download_pressed"),
         })
     };
     
@@ -45,9 +45,9 @@ pub fn view(state: &State) -> Element<()> {
                 text_input("Search query...", &search_state.query)
             )
                 .width(Length::Fill)
-                .on_input("search_input")
-                .on_submit("search"),
-            crate::module::styles::apply_primary(button(text("Search"))).on_press("search")
+                .on_input("on_search_input")
+                .on_submit("on_search"),
+            crate::module::styles::apply_primary(button(text("Search"))).on_press("on_search")
         ]
         .spacing(10.0)
         .width(Length::Fill),

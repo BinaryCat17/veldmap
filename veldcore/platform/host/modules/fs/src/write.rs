@@ -8,7 +8,7 @@ use veldmap_host_util::bindings::proto::fs::{FsWriteRequest, FsWriteResult};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
 use std::fs;
 
-pub fn on_input_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
+pub fn on_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
     let correlation_id = req.correlation_id.clone();
     let result = if !is_path_safe(&req.path) {
         FsWriteResult { error: "Access denied".into(), correlation_id }
@@ -16,7 +16,7 @@ pub fn on_input_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
         let handle = match req.handle {
             Some(h) => h,
             None => {
-                bus::emit::write_result(&*state.ctx.dispatcher, &FsWriteResult { error: "Missing handle".into(), correlation_id });
+                bus::emit::on_write_result(&*state.ctx.dispatcher, &FsWriteResult { error: "Missing handle".into(), correlation_id });
                 return;
             }
         };
@@ -40,5 +40,5 @@ pub fn on_input_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
         };
         data
     };
-    bus::emit::write_result(&*state.ctx.dispatcher, &result);
+    bus::emit::on_write_result(&*state.ctx.dispatcher, &result);
 }

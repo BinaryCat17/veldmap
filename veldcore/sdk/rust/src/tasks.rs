@@ -5,14 +5,14 @@
 use prost::Message;
 
 
-/// `tasks/cancel`
-pub fn cancel(msg: &crate::proto::tasks::TaskCancelRequest) {
-    crate::abi::publish("tasks/cancel", msg.encode_to_vec());
+/// `tasks/on_cancel`
+pub fn on_cancel(msg: &crate::proto::tasks::TaskCancelRequest) {
+    crate::abi::publish("tasks/on_cancel", msg.encode_to_vec());
 }
 
 
-/// `tasks/grant`
-pub fn grant(msg: &crate::proto::tasks::TaskGrantRequest) {
-    crate::abi::publish("tasks/grant", msg.encode_to_vec());
+/// `tasks/on_grant`
+pub fn on_grant(msg: &crate::proto::tasks::TaskGrantRequest) {
+    crate::abi::publish("tasks/on_grant", msg.encode_to_vec());
 }
 

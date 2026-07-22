@@ -4,14 +4,14 @@ name: network
 version: 0.1.0
 interface:
   inputs:
-    fs_download:
+    on_fs_download:
       type: network/FsDownloadRequest
-    http:
+    on_http:
       type: network/HttpTaskRequest
   outputs:
-    fs_download_result:
+    on_fs_download_result:
       type: network/FsDownloadResponse
-    fs_download_progress:
+    on_fs_download_progress:
       type: network/FsDownloadProgress
-    http_result:
+    on_http_result:
       type: network/HttpTaskResponse

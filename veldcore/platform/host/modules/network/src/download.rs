@@ -17,16 +17,16 @@ use tokio::io::AsyncWriteExt;
 /// и возвращает текст ошибки — он же попадёт в tasks/task_finished.error.
 fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> String {
     log::warn!(target: "host", "Download {} failed: {}", correlation_id, error);
-    bus::emit::fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
+    bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
         error: error.clone(),
         correlation_id: correlation_id.to_string(),
     });
     error
 }
 
-pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) {
+pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) {
     if !is_path_safe(&req.path) {
-        bus::emit::fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
+        bus::emit::on_fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
             error: format!("Unsafe path: {}", req.path),
             correlation_id: req.correlation_id.clone(),
         });
@@ -73,7 +73,7 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, requestor_id:
                                 let percent = (downloaded * 100 / total_size) as u32;
                                 if percent > last_percent {
                                     last_percent = percent;
-                                    bus::emit::fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
+                                    bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
                                         correlation_id: correlation_id.clone(),
                                         progress: downloaded as f32 / total_size as f32,
                                     });
@@ -89,7 +89,7 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, requestor_id:
         }
 
         log::info!(target: "host", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
-        bus::emit::fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
+        bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
             error: String::new(),
             correlation_id: correlation_id.clone(),
         });
@@ -97,7 +97,7 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, requestor_id:
     });
 
     if let Err(dup) = spawned {
-        bus::emit::fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
+        bus::emit::on_fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
             error: format!("Duplicate task id: {}", dup.0),
             correlation_id: dup.0,
         });

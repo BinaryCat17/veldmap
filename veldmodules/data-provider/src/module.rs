@@ -19,17 +19,17 @@ pub struct State {
 
 // Re-export handlers to match the expected names in generated code
 pub use cdse::{
-    module_init as init,
+    module_init as hook_init,
 
     // calls
-    on_input_download,
-    on_input_cancel_download,
-    on_input_list_path,
-    on_input_search,
+    on_download,
+    on_cancel_download,
+    on_list_path,
+    on_search,
 
     // subs
-    on_sub_fs_download_result,
-    on_sub_fs_download_progress,
-    on_sub_http_result,
-    on_sub_task_finished,
+    on_fs_download_result,
+    on_fs_download_progress,
+    on_http_result,
+    on_task_finished,
 };

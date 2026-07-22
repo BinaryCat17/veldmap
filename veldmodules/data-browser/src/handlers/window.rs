@@ -7,7 +7,7 @@
 use crate::module::state::State;
 use veldsdk::proto::app::WindowResized;
 
-pub fn on_sub_window_resized(state: &mut State, ev: WindowResized) {
+pub fn on_window_resized(state: &mut State, ev: WindowResized) {
     // Топик broadcast: событие могло быть адресовано окну другого модуля.
     if ev.plugin_id != crate::SERVICE_NAME {
         return;

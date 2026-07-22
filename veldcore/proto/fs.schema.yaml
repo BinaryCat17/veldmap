@@ -4,16 +4,16 @@ name: fs
 version: 0.1.0
 interface:
   inputs:
-    read:
+    on_read:
       type: fs/FsReadRequest
-    write:
+    on_write:
       type: fs/FsWriteRequest
-    list:
+    on_list:
       type: fs/FsListRequest
   outputs:
-    read_result:
+    on_read_result:
       type: fs/FsReadResult
-    write_result:
+    on_write_result:
       type: fs/FsWriteResult
-    list_result:
+    on_list_result:
       type: fs/FsListResult

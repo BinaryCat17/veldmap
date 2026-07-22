@@ -6,7 +6,7 @@ use crate::module::components::task_manager::TaskKind;
 
 /// Пользователь нажал кнопку скачать.
 /// Повторное нажатие на файл, который уже скачивается — отмена загрузки.
-pub fn on_input_download_pressed(
+pub fn on_download_pressed(
     state: &mut State,
     event: UiEventResponse,
 ) {
@@ -16,22 +16,22 @@ pub fn on_input_download_pressed(
     if s3_key.is_empty() { return; }
 
     // Отмена активной загрузки: data-provider пришлёт Downloaded{success:false},
-    // и on_sub_downloaded снимет задачу с панели.
+    // и on_downloaded снимет задачу с панели.
     if let Some(dl) = state.downloaded.active_downloads.get(&s3_key) {
         let task_id = dl.task_id.clone();
         state.global.status_message = format!("Cancelling download: {}", filename);
-        crate::calls::data_provider::cancel_download(&CancelDownloadRequest { task_id });
+        crate::calls::data_provider::on_cancel_download(&CancelDownloadRequest { task_id });
         return;
     }
 
-    crate::calls::data_provider::download(&DownloadRequest {
+    crate::calls::data_provider::on_download(&DownloadRequest {
         identifier: s3_key,
         destination: format!("data/dem/source/{}", filename),
     });
 }
 
 /// Пользователь нажал кнопку просмотра
-pub fn on_input_view_pressed(
+pub fn on_view_pressed(
     state: &mut State,
     event: UiEventResponse,
 ) {
@@ -46,7 +46,7 @@ pub fn on_input_view_pressed(
 }
 
 /// Data-provider сообщил что загрузка началась
-pub fn on_sub_download_started(
+pub fn on_download_started(
     state: &mut State,
     event: DownloadStarted,
 ) {
@@ -72,7 +72,7 @@ pub fn on_sub_download_started(
     // Рендер происходит автоматически в on_frame
 }
 
-pub fn on_sub_download_progress(
+pub fn on_download_progress(
     state: &mut State,
     event: DownloadProgress,
 ) {
@@ -87,7 +87,7 @@ pub fn on_sub_download_progress(
     // Рендер происходит автоматически в on_frame
 }
 
-pub fn on_sub_downloaded(
+pub fn on_downloaded(
     state: &mut State,
     event: Downloaded,
 ) {

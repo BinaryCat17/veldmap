@@ -5,6 +5,6 @@
 use super::State;
 use veldmap_host_util::bindings::proto::tasks::TaskGrantRequest;
 
-pub fn on_input_grant(state: &State, req: TaskGrantRequest, requestor_id: u32) {
+pub fn on_grant(state: &State, req: TaskGrantRequest, requestor_id: u32) {
     state.tasks.grant(&req.task_id, requestor_id, &req.service);
 }

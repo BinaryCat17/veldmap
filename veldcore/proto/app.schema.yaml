@@ -8,11 +8,11 @@ name: app
 version: 0.1.0
 interface:
   inputs:
-    set_surface:
+    on_set_surface:
       type: app/SetSurface
   outputs:
-    ui_event:
+    on_ui_event:
       type: app/UIEvent
-    window_resized:
+    on_window_resized:
       type: app/WindowResized
-    ready: {} # без payload
+    on_ready: {} # без payload

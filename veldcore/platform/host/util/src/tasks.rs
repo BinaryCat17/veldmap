@@ -49,7 +49,7 @@ impl Tasks {
             // Отменённая задача уже снята с учёта путём отмены, и
             // finished{cancelled} эмитирован там — не дублируем.
             if ctx.tasks.complete(&done_id) {
-                bus::emit::task_finished(&*ctx.dispatcher, &TaskFinished { task_id: done_id, error, cancelled: false });
+                bus::emit::on_task_finished(&*ctx.dispatcher, &TaskFinished { task_id: done_id, error, cancelled: false });
             }
         });
 
@@ -61,7 +61,7 @@ impl Tasks {
             return Ok(id);
         }
 
-        bus::emit::task_started(&*self.ctx.dispatcher, &TaskStarted {
+        bus::emit::on_task_started(&*self.ctx.dispatcher, &TaskStarted {
             task_id: id.clone(),
             label: label.to_string(),
             kind: kind.to_string(),
@@ -71,12 +71,12 @@ impl Tasks {
         Ok(id)
     }
 
-    /// Отмена по требованию (обработчик topics::CANCEL): права — в реестре.
+    /// Отмена по требованию (обработчик topics::ON_CANCEL): права — в реестре.
     pub fn cancel(&self, task_id: &str, requestor: u32) {
         match self.ctx.tasks.cancel(task_id, requestor) {
             CancelOutcome::Cancelled => {
                 log::info!(target: "host", "Task {} cancelled by requestor {}", task_id, requestor);
-                bus::emit::task_finished(&*self.ctx.dispatcher, &TaskFinished {
+                bus::emit::on_task_finished(&*self.ctx.dispatcher, &TaskFinished {
                     task_id: task_id.to_string(),
                     error: "Cancelled".to_string(),
                     cancelled: true,
@@ -91,7 +91,7 @@ impl Tasks {
         }
     }
 
-    /// Делегирование права отмены (обработчик topics::GRANT): владелец
+    /// Делегирование права отмены (обработчик topics::ON_GRANT): владелец
     /// разрешает другому сервису отменять задачу — как grant_write у ресурсов.
     pub fn grant(&self, task_id: &str, requestor: u32, service: &str) {
         let Some(target) = self.ctx.dispatcher.instance_of(service) else {

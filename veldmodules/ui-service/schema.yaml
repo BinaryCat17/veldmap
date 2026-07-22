@@ -3,16 +3,16 @@ version: 0.1.0
 
 interface:
   inputs:
-    set_view:
+    on_set_view:
       type: ui/SetViewRequest
-    set_surface:
+    on_set_surface:
       type: ui/SetSurfaceRequest
 
-# Платформенный контракт: хост публикует ввод и кадровые тики в app/ui_event.
+# Платформенный контракт: хост публикует ввод и кадровые тики в app/on_ui_event.
 # События адресуются plugin_id в данных; события модулей без делегированной
 # поверхности игнорируются.
 dependencies:
   app:
     subs:
-      ui_event:
+      on_ui_event:
         type: app/UIEvent

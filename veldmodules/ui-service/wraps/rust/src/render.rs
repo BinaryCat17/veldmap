@@ -26,5 +26,5 @@ pub fn render(plugin_id: &str, root: Element<()>, last_hash: &mut u64) {
         plugin_id: plugin_id.to_string(),
         layout: Some(layout),
     };
-    crate::inputs::set_view(&request);
+    crate::inputs::on_set_view(&request);
 }

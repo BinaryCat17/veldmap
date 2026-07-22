@@ -54,20 +54,6 @@ pub mod calls {
     }
     {% endfor %}
 }
-{% if view_wrap_crate %}
-
-// ── Elm-style view loop ──────────────────────────────────────────────────────
-// After every handled message the view is rebuilt and shipped to the renderer
-// declared in schema.yaml (`view:`). Unchanged layouts are skipped by hash.
-
-static LAST_UI_HASH: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
-
-fn render_ui(state: &{{ rust.state }}) {
-    let root = crate::module::view(state);
-    {{ view_wrap_crate }}::render::render("{{ service_name }}", root, &mut LAST_UI_HASH.lock().unwrap());
-}
-{% endif %}
-
 #[no_mangle]
 pub extern "C" fn init() -> i32 {
     let _ = veldsdk::logging::init();
@@ -122,16 +108,16 @@ pub extern "C" fn handle_event() -> i32 {
                     Ok(())
                 }
                 {% endfor %}
-                {% if view_wrap_crate %}
+                {% if hook_event %}
                 // Lifecycle signal from the host: all services are loaded,
-                // the unconditional render below ships the initial view.
-                "app/ready" => Ok(()),
+                // the unconditional hook_event below fires the first time.
+                "app/on_ready" => Ok(()),
                 {% endif %}
                 _ => Err(format!("Unknown topic: {}", topic)),
             };
-            {% if view_wrap_crate %}
+            {% if hook_event %}
             if handled.is_ok() {
-                render_ui(&*app_state);
+                crate::module::hook_event(&*app_state);
             }
             {% endif %}
             handled
@@ -158,8 +144,8 @@ pub extern "C" fn get_subscriptions() -> i32 {
         {% for h in handlers %}
         "{{ h.topic }}",
         {% endfor %}
-        {% if view_wrap_crate %}
-        "app/ready",
+        {% if hook_event %}
+        "app/on_ready",
         {% endif %}
     ];
     let out = serde_json::to_vec(&SUBS).unwrap_or_default();

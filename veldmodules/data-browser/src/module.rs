@@ -9,22 +9,29 @@ pub use handlers::Config;
 pub use state::State;
 
 // -- Init --
-pub fn init(config: Config) -> anyhow::Result<State> {
+pub fn hook_init(config: Config) -> anyhow::Result<State> {
     State::new(config)
 }
 
-// -- View (Elm-цикл: вызывается сгенерированным раннером после каждого сообщения) --
-pub use view::build_root as view;
+// -- Event hook (Elm-цикл: вызывается сгенерированным раннером после каждого
+// сообщения). Пересобирает view и шлёт в ui-service; неизменный layout не
+// уходит по сети — дедуп по хэшу внутри render(). --
+static LAST_UI_HASH: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
+pub fn hook_event(state: &State) {
+    let root = view::build_root(state);
+    veld_ui_service_wrap::render::render(crate::SERVICE_NAME, root, &mut LAST_UI_HASH.lock().unwrap());
+}
 
 // -- Input handlers --
-pub use handlers::nav::{on_input_nav_browse, on_input_nav_search, on_input_nav_downloaded};
-pub use handlers::browse::{on_input_browse, on_input_browse_up};
-pub use handlers::search::{on_input_search, on_input_search_input};
-pub use handlers::download::{on_input_download_pressed, on_input_view_pressed};
+pub use handlers::nav::{on_nav_browse, on_nav_search, on_nav_downloaded};
+pub use handlers::browse::{on_browse, on_browse_up};
+pub use handlers::search::{on_search, on_search_input};
+pub use handlers::download::{on_download_pressed, on_view_pressed};
 
 // -- Sub handlers --
-pub use handlers::download::{on_sub_download_started, on_sub_download_progress, on_sub_downloaded};
-pub use handlers::search::on_sub_search_result;
-pub use handlers::browse::on_sub_list_path_result;
-pub use handlers::nav::on_sub_list_result;
-pub use handlers::window::on_sub_window_resized;
+pub use handlers::download::{on_download_started, on_download_progress, on_downloaded};
+pub use handlers::search::on_search_result;
+pub use handlers::browse::on_list_path_result;
+pub use handlers::nav::on_list_result;
+pub use handlers::window::on_window_resized;

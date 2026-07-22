@@ -33,7 +33,7 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
 
 //  inputs ---------------------------------------------------------------------------------------------------------------------------
 
-pub fn on_input_search(
+pub fn on_search(
     _state: &mut State, 
     _request: crate::proto::dataprovider::SearchRequest
 ) {
@@ -41,7 +41,7 @@ pub fn on_input_search(
     info!("Search requested (not implemented)");
 }
 
-pub fn on_input_download(
+pub fn on_download(
     state: &mut State, 
     request: DownloadRequest
 ) {
@@ -51,7 +51,7 @@ pub fn on_input_download(
     let identifier = request.identifier.clone();
     
     // Publish started immediately
-    crate::emit::download_started(&DownloadStarted {
+    crate::emit::on_download_started(&DownloadStarted {
         task_id: task_id.clone(),
         identifier: identifier.clone(),
         destination: destination.clone(),
@@ -69,37 +69,37 @@ pub fn on_input_download(
     };
 
     state.tasks.track(task_id);
-    crate::calls::network::fs_download(&req_task);
+    crate::calls::network::on_fs_download(&req_task);
 }
 
-pub fn on_input_cancel_download(
+pub fn on_cancel_download(
     state: &mut State,
     request: CancelDownloadRequest
 ) {
     // Отменяем только задачи, которые этот модуль реально запустил.
     // Отмену выполнит платформа (топик tasks/cancel, проверка lease);
-    // доменное уведомление — в on_sub_task_finished, когда отмена случится.
+    // доменное уведомление — в on_task_finished, когда отмена случится.
     state.tasks.cancel(&request.task_id);
 }
 
 /// Терминальное событие платформы. Доменный результат (fs_download_result)
 /// приходит первым и снимает задачу с учёта; сюда доходят только отмены —
 /// при abort доменного результата не было, уведомляем подписчиков сами.
-pub fn on_sub_task_finished(
+pub fn on_task_finished(
     state: &mut State,
     event: veldsdk::proto::tasks::TaskFinished
 ) {
     if !event.cancelled || !state.tasks.finish(&event.task_id) {
         return;
     }
-    crate::emit::downloaded(&Downloaded {
+    crate::emit::on_downloaded(&Downloaded {
         task_id: event.task_id,
         success: false,
         error: "Cancelled by user".to_string(),
     });
 }
 
-pub fn on_input_list_path(
+pub fn on_list_path(
     state: &mut State, 
     request: ListPathRequest
 ) {
@@ -148,12 +148,12 @@ pub fn on_input_list_path(
     info!("Requesting S3 list: {}", req_task.url);
 
     state.pending_http.insert(correlation_id.clone(), request.path);
-    crate::calls::network::http(&req_task);
+    crate::calls::network::on_http(&req_task);
 }
 
 // subs ---------------------------------------------------------------------------------------------------------------------------
 
-pub fn on_sub_http_result(
+pub fn on_http_result(
     state: &mut State,
     response: veldsdk::proto::network::HttpTaskResponse,
 ) {
@@ -170,10 +170,10 @@ pub fn on_sub_http_result(
         }
     };
 
-    crate::emit::list_path_result(&list_response);
+    crate::emit::on_list_path_result(&list_response);
 }
 
-pub fn on_sub_fs_download_progress(
+pub fn on_fs_download_progress(
     state: &mut State,
     event: veldsdk::proto::network::FsDownloadProgress,
 ) {
@@ -181,13 +181,13 @@ pub fn on_sub_fs_download_progress(
     if !state.tasks.is_pending(&event.correlation_id) {
         return;
     }
-    crate::emit::download_progress(&DownloadProgress {
+    crate::emit::on_download_progress(&DownloadProgress {
         task_id: event.correlation_id,
         progress: event.progress,
     });
 }
 
-pub fn on_sub_fs_download_result(
+pub fn on_fs_download_result(
     state: &mut State,
     response: veldsdk::proto::network::FsDownloadResponse,
 ) {
@@ -197,7 +197,7 @@ pub fn on_sub_fs_download_result(
     }
 
     let success = response.error.is_empty();
-    crate::emit::downloaded(&Downloaded {
+    crate::emit::on_downloaded(&Downloaded {
         task_id: correlation_id,
         success,
         error: response.error,

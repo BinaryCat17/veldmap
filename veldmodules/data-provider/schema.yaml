@@ -3,49 +3,49 @@ version: 1.0.0
 
 interface:
   inputs:
-    download:
+    on_download:
       type: module/DownloadRequest
-    cancel_download:
+    on_cancel_download:
       type: module/CancelDownloadRequest
-    list_path:
+    on_list_path:
       type: module/ListPathRequest
-    search:
+    on_search:
       type: module/SearchRequest
 
   outputs:
-    download_started:
-      called_by: module/download
+    on_download_started:
+      called_by: module/on_download
       type: module/DownloadStarted
-    list_path_result:
-      called_by: module/list_path
+    on_list_path_result:
+      called_by: module/on_list_path
       type: module/ListPathResponse
-    search_result:
-      called_by: module/search
+    on_search_result:
+      called_by: module/on_search
       type: module/SearchResponse
-    downloaded:
-      called_by: network/fs_download_result
+    on_downloaded:
+      called_by: network/on_fs_download_result
       type: module/Downloaded
-    download_progress:
-      called_by: network/fs_download_progress
+    on_download_progress:
+      called_by: network/on_fs_download_progress
       type: module/DownloadProgress
 
 dependencies:
   network:
     subs:
-      fs_download_result:
+      on_fs_download_result:
         type: network/FsDownloadResponse
-      fs_download_progress:
+      on_fs_download_progress:
         type: network/FsDownloadProgress
-      http_result:
+      on_http_result:
         type: network/HttpTaskResponse
     calls:
-      fs_download:
-        called_by: module/download
+      on_fs_download:
+        called_by: module/on_download
         type: network/FsDownloadRequest
-      http:
-        called_by: module/list_path
+      on_http:
+        called_by: module/on_list_path
         type: network/HttpTaskRequest
   tasks:
     subs:
-      task_finished:
+      on_task_finished:
         type: tasks/TaskFinished

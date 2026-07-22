@@ -1,5 +1,5 @@
 //! Реализация сервиса network (контракт — veldcore/proto/network.schema.yaml).
-//! Свободные обработчики on_input_* вызываются сгенерированным клеем
+//! Свободные обработчики on_* вызываются сгенерированным клеем
 //! (generated/, buildgen): State, init и сигнатуры — по конвенции,
 //! как в wasm-модулях (crate::module).
 //!
@@ -19,10 +19,10 @@ pub struct State {
     tasks: Tasks,
 }
 
-pub fn init(ctx: Arc<HostContext>) -> State {
+pub fn hook_init(ctx: Arc<HostContext>) -> State {
     State { tasks: Tasks::new(&ctx, "network"), ctx }
 }
 
 // -- Input handlers --
-pub use download::on_input_fs_download;
-pub use http::on_input_http;
+pub use download::on_fs_download;
+pub use http::on_http;

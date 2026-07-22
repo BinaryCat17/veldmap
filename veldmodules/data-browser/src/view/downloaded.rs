@@ -22,8 +22,8 @@ pub fn view(state: &State) -> Element<()> {
     } else {
         render_list(&items, task_manager, ItemActions {
             browse: None,
-            view: Some("view_pressed"),
-            download: Some("download_pressed"), // Для перезакачки
+            view: Some("on_view_pressed"),
+            download: Some("on_download_pressed"), // Для перезакачки
         })
     };
 
