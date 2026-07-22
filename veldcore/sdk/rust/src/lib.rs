@@ -4,6 +4,8 @@ pub mod runtime;
 pub mod logging;
 pub mod graphics;
 pub mod app;
+pub mod tasks;
+pub mod tracker;
 
 pub use logging::FLAG_PERF;
 
@@ -20,6 +22,7 @@ pub use log;
 pub use proto::core::ResourceHandle;
 pub use abi::generate_id;
 pub use abi::event_publisher;
+pub use tracker::TaskTracker;
 
 /// RAII handle to a memory region or graphics object.
 /// On drop: releases the resource via memory ABI.

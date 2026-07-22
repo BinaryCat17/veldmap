@@ -5,7 +5,8 @@ package veldmap.network;
 // --- NETWORK API ---
 // Контракт нативного сервиса network (HTTP-запросы и потоковые скачивания).
 // Идентификатор операции везде — correlation_id: прогресс и результаты
-// доставляются событиями, отмена — событием network/cancel_download.
+// доставляются событиями, отмена — платформенным событием tasks/cancel
+// (veldcore/proto/tasks.proto).
 
 message FsDownloadRequest {
   string url = 1;
@@ -23,11 +24,6 @@ message FsDownloadResponse {
 message FsDownloadProgress {
   string correlation_id = 1;
   float progress = 2;  // 0.0 to 1.0
-}
-
-// Событие отмены фоновой задачи (топик network/cancel_download).
-message TaskCancelRequest {
-  string task_id = 1;
 }
 
 // --- HTTP API ---

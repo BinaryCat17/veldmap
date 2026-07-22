@@ -7,6 +7,7 @@ edition = "2021"
 veldmap-host-core = { path = "../../core" }
 veldmap-host-fs = { path = "../../modules/fs/generated" }
 veldmap-host-network = { path = "../../modules/network/generated" }
+veldmap-host-tasks = { path = "../../modules/tasks/generated" }
 veldmap-host-bindings = { path = "../../generated" }
 
 async-trait = "0.1"

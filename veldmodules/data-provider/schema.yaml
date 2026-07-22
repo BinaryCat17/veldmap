@@ -45,6 +45,7 @@ dependencies:
       http:
         called_by: module/list_path
         type: network/HttpTaskRequest
-      cancel_download:
-        called_by: module/cancel_download
-        type: network/TaskCancelRequest
+  tasks:
+    subs:
+      task_finished:
+        type: tasks/TaskFinished

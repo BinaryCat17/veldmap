@@ -1,0 +1,16 @@
+# Контракт платформенного сервиса tasks (сообщения — veldcore/proto/tasks.proto).
+# buildgen генерирует из этого файла хостовые биндинги (topics/emit) и
+# клей нативного модуля platform/host/modules/tasks.
+name: tasks
+version: 0.1.0
+interface:
+  inputs:
+    cancel:
+      type: tasks/TaskCancelRequest
+    grant:
+      type: tasks/TaskGrantRequest
+  outputs:
+    task_started:
+      type: tasks/TaskStarted
+    task_finished:
+      type: tasks/TaskFinished

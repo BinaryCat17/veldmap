@@ -26,7 +26,7 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
     
     Ok(State { 
         identity,
-        pending_downloads: std::collections::HashSet::new(),
+        tasks: veldsdk::TaskTracker::new(),
         pending_http: std::collections::HashMap::new(),
     })
 }
@@ -68,7 +68,7 @@ pub fn on_input_download(
         correlation_id: task_id.clone(),
     };
 
-    state.pending_downloads.insert(task_id);
+    state.tasks.track(task_id);
     crate::calls::network::fs_download(&req_task);
 }
 
@@ -77,17 +77,23 @@ pub fn on_input_cancel_download(
     request: CancelDownloadRequest
 ) {
     // Отменяем только задачи, которые этот модуль реально запустил.
-    if !state.pending_downloads.remove(&request.task_id) {
+    // Отмену выполнит платформа (топик tasks/cancel, проверка lease);
+    // доменное уведомление — в on_sub_task_finished, когда отмена случится.
+    state.tasks.cancel(&request.task_id);
+}
+
+/// Терминальное событие платформы. Доменный результат (fs_download_result)
+/// приходит первым и снимает задачу с учёта; сюда доходят только отмены —
+/// при abort доменного результата не было, уведомляем подписчиков сами.
+pub fn on_sub_task_finished(
+    state: &mut State,
+    event: veldsdk::proto::tasks::TaskFinished
+) {
+    if !event.cancelled || !state.tasks.finish(&event.task_id) {
         return;
     }
-    // Доменное событие отмены для network: abort фоновой tokio-задачи.
-    // task_id этого модуля — это correlation_id для network (см. on_input_download).
-    crate::calls::network::cancel_download(&veldsdk::proto::network::TaskCancelRequest {
-        task_id: request.task_id.clone(),
-    });
-    // Уведомляем подписчиков о завершении, чтобы UI снял задачу с панели.
     crate::emit::downloaded(&Downloaded {
-        task_id: request.task_id,
+        task_id: event.task_id,
         success: false,
         error: "Cancelled by user".to_string(),
     });
@@ -172,7 +178,7 @@ pub fn on_sub_fs_download_progress(
     event: veldsdk::proto::network::FsDownloadProgress,
 ) {
     // Транслируем прогресс только своих активных загрузок.
-    if !state.pending_downloads.contains(&event.correlation_id) {
+    if !state.tasks.is_pending(&event.correlation_id) {
         return;
     }
     crate::emit::download_progress(&DownloadProgress {
@@ -186,7 +192,7 @@ pub fn on_sub_fs_download_result(
     response: veldsdk::proto::network::FsDownloadResponse,
 ) {
     let correlation_id = response.correlation_id;
-    if !state.pending_downloads.remove(&correlation_id) {
+    if !state.tasks.finish(&correlation_id) {
         return;
     }
 

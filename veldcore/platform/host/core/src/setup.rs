@@ -152,6 +152,7 @@ pub struct HostContext {
     pub registry: Arc<ResourceRegistry>,
     pub memory: Arc<MemoryManager>,
     pub graphics: Arc<GraphicsDevice>,
+    pub tasks: Arc<crate::tasks::TaskRegistry>,
     pub config: Arc<crate::config::HostConfig>,
 }
 
@@ -164,7 +165,8 @@ pub async fn init_core_services(
     let registry = Arc::new(ResourceRegistry::new());
     let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone()));
     let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), queue.clone(), surface_format));
-    
+    let tasks = Arc::new(crate::tasks::TaskRegistry::new());
+
     let dispatcher = Arc::new(Dispatcher::new());
 
     Ok(Arc::new(HostContext {
@@ -172,6 +174,7 @@ pub async fn init_core_services(
         registry,
         memory,
         graphics,
+        tasks,
         config,
     }))
 }

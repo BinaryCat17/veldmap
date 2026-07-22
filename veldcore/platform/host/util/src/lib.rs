@@ -18,6 +18,12 @@ pub use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
 // Передаётся в register_services() каждого модуля.
 pub use veldmap_host_core::setup::HostContext;
 
+// ── Система фоновых задач ───────────────────────────────────────────────────
+// Фасад над реестром задач: spawn с lifecycle-событиями, отмена и
+// делегирование с проверкой lease. Модули собирают свой Tasks в init().
+mod tasks;
+pub use tasks::Tasks;
+
 // ── Права доступа к ресурсам ────────────────────────────────────────────────
 pub use veldmap_host_core::registry::Access;
 

@@ -17,3 +17,7 @@ pub mod fs {
 pub mod network {
     include!(concat!(env!("OUT_DIR"), "/veldmap.network.rs"));
 }
+
+pub mod tasks {
+    include!(concat!(env!("OUT_DIR"), "/veldmap.tasks.rs"));
+}

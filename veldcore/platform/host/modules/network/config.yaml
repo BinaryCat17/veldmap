@@ -6,5 +6,4 @@ rust:
   dependencies:
     tokio: { version: "1.49", features: ["full"] }
     reqwest: { version: "0.12", features: ["json", "stream"] }
-    uuid: { version: "1.0", features: ["v4"] }
     futures-util: "0.3"

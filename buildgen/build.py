@@ -191,6 +191,14 @@ def generate_code():
              "--schema",    app_schema,
              "--sdk-stubs", os.path.join(PROJECT_ROOT, "veldcore", "sdk", "rust", "src", "app.rs")])
 
+    # Платформенные стабы SDK системы задач (топики tasks/*)
+    tasks_schema = os.path.join(PROJECT_ROOT, "veldcore", "proto", "tasks.schema.yaml")
+    if os.path.exists(tasks_schema):
+        print("  Generating SDK platform stubs (tasks) ...")
+        run([venv_python, gen_script,
+             "--schema",    tasks_schema,
+             "--sdk-stubs", os.path.join(PROJECT_ROOT, "veldcore", "sdk", "rust", "src", "tasks.rs")])
+
     # Хостовые биндинги (veldcore/platform/host/host.yaml → platform/host/generated)
     host_dir  = os.path.join(PROJECT_ROOT, "veldcore", "platform", "host")
     host_yaml = os.path.join(host_dir, "host.yaml")

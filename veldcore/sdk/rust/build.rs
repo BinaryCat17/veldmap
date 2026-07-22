@@ -3,9 +3,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "../../proto/core.proto",
         "../../proto/app.proto",
         "../../proto/graphics.proto",
-        // Контракты платформенных сервисов (fs, network)
+        // Контракты платформенных сервисов (fs, network, tasks)
         "../../proto/fs.proto",
         "../../proto/network.proto",
+        "../../proto/tasks.proto",
     ];
     let include_dirs = &["../../proto"];
 

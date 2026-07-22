@@ -154,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     veldmap_host_fs::register_services(ctx.clone());
     veldmap_host_network::register_services(ctx.clone());
+    veldmap_host_tasks::register_services(ctx.clone());
 
     // Приём поверхностей от владельцев окон.
     let pending_surfaces: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));

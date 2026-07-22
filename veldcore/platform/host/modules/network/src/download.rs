@@ -1,11 +1,12 @@
 //! Потоковое скачивание файла (топик network/fs_download): прогресс и
-//! результат доставляются событиями, отмена — через реестр задач в State.
+//! результат доставляются событиями, жизненный цикл и отмена — через
+//! фасад Tasks (см. module.rs): started/finished эмитит платформа.
 
 use super::State;
 use veldmap_host_util::HostContext;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{
-    FsDownloadRequest, FsDownloadResponse, FsDownloadProgress, TaskCancelRequest,
+    FsDownloadRequest, FsDownloadResponse, FsDownloadProgress,
 };
 use veldmap_host_util::path::is_path_safe;
 use std::fs;
@@ -13,16 +14,18 @@ use std::path::Path;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 
-/// Логирует провал скачивания и уведомляет подписчиков fs_download_result.
-fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) {
+/// Логирует провал скачивания, уведомляет подписчиков fs_download_result
+/// и возвращает текст ошибки — он же попадёт в tasks/task_finished.error.
+fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> String {
     log::warn!(target: "host", "Download {} failed: {}", correlation_id, error);
     bus::emit::fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
-        error,
+        error: error.clone(),
         correlation_id: correlation_id.to_string(),
     });
+    error
 }
 
-pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, _requestor_id: u32) {
+pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) {
     if !is_path_safe(&req.path) {
         bus::emit::fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
             error: format!("Unsafe path: {}", req.path),
@@ -31,28 +34,24 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, _requestor_id
         return;
     }
 
-    // Единый идентификатор операции — correlation_id (генерируем, если не задан).
-    let correlation_id = if req.correlation_id.is_empty() {
-        uuid::Uuid::new_v4().to_string()
-    } else {
-        req.correlation_id.clone()
-    };
     let ctx = state.ctx.clone();
     if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
+    let label = req.path.clone();
 
-    let cancel_key = correlation_id.clone();
-    let join_handle = tokio::spawn(async move {
+    // owner = инициатор запроса: отменить скачивание может он, хост
+    // или сервис с его grant'ом (топик tasks/cancel).
+    let spawned = state.tasks.spawn(&req.correlation_id, requestor_id, "fs_download", &label, |correlation_id| async move {
         let client = reqwest::Client::new();
         let mut builder = client.get(&req.url);
         for (key, value) in req.headers { builder = builder.header(key, value); }
 
         let res = match builder.send().await {
             Ok(r) => r,
-            Err(e) => return fail_download(&ctx, &correlation_id, e.to_string()),
+            Err(e) => return Err(fail_download(&ctx, &correlation_id, e.to_string())),
         };
 
         if !res.status().is_success() {
-            return fail_download(&ctx, &correlation_id, format!("HTTP {}", res.status()));
+            return Err(fail_download(&ctx, &correlation_id, format!("HTTP {}", res.status())));
         }
 
         let total_size = res.content_length().unwrap_or(0);
@@ -66,7 +65,7 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, _requestor_id
                     match chunk_res {
                         Ok(chunk) => {
                             if let Err(e) = async_file.write_all(&chunk).await {
-                                return fail_download(&ctx, &correlation_id, format!("Write error: {}", e));
+                                return Err(fail_download(&ctx, &correlation_id, format!("Write error: {}", e)));
                             }
                             downloaded += chunk.len() as u64;
                             // Прогресс событием, с троттлингом по целым процентам.
@@ -81,12 +80,12 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, _requestor_id
                                 }
                             }
                         }
-                        Err(e) => return fail_download(&ctx, &correlation_id, format!("Stream error: {}", e)),
+                        Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("Stream error: {}", e))),
                     }
                 }
                 let _ = async_file.flush().await;
             }
-            Err(e) => return fail_download(&ctx, &correlation_id, format!("File create error: {}", e)),
+            Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("File create error: {}", e))),
         }
 
         log::info!(target: "host", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
@@ -94,15 +93,13 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, _requestor_id
             error: String::new(),
             correlation_id: correlation_id.clone(),
         });
+        Ok(())
     });
 
-    state.local_tasks.lock().unwrap().insert(cancel_key, join_handle.abort_handle());
-}
-
-/// Событие `network/cancel_download`: отмена фоновой задачи по correlation_id.
-pub fn on_input_cancel_download(state: &State, req: TaskCancelRequest, _requestor_id: u32) {
-    if let Some(handle) = state.local_tasks.lock().unwrap().remove(&req.task_id) {
-        log::info!(target: "host", "NetworkService aborting task {}", req.task_id);
-        handle.abort();
+    if let Err(dup) = spawned {
+        bus::emit::fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
+            error: format!("Duplicate task id: {}", dup.0),
+            correlation_id: dup.0,
+        });
     }
 }

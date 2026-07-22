@@ -11,14 +11,16 @@ pub struct Config {
 #[derive(Clone)]
 pub struct State {
     pub identity: Identity,
-    pub pending_downloads: std::collections::HashSet<String>,
+    /// Учёт запущенных модулем задач: фильтрация broadcast-событий
+    /// и отмена через платформенный протокол tasks/* (veldsdk).
+    pub tasks: veldsdk::TaskTracker,
     pub pending_http: std::collections::HashMap<String, String>,
 }
 
 // Re-export handlers to match the expected names in generated code
 pub use cdse::{
     module_init as init,
-    
+
     // calls
     on_input_download,
     on_input_cancel_download,
@@ -29,4 +31,5 @@ pub use cdse::{
     on_sub_fs_download_result,
     on_sub_fs_download_progress,
     on_sub_http_result,
+    on_sub_task_finished,
 };

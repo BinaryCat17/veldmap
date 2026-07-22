@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package veldmap.tasks;
+
+// --- TASKS API ---
+// Платформенный контракт системы фоновых задач. Идентификатор задачи —
+// correlation_id инициатора. Жизненный цикл доставляется событиями
+// tasks/task_started и tasks/task_finished; finished гарантируется
+// платформой для любой зарегистрированной задачи (успех, ошибка, отмена).
+// Права проверяются по lease, как у ресурсов: отменить задачу может
+// владелец (инициатор), сервис с grant'ом или сам хост (id 0).
+
+// Отмена фоновой задачи (топик tasks/cancel).
+message TaskCancelRequest {
+  string task_id = 1;
+}
+
+// Делегирование права отмены другому сервису (топик tasks/grant).
+// Менять lease может только владелец задачи — как у ресурсов.
+message TaskGrantRequest {
+  string task_id = 1;
+  string service = 2;  // имя сервиса-получателя права
+}
+
+// Задача зарегистрирована исполнителем (топик tasks/task_started).
+message TaskStarted {
+  string task_id = 1;
+  string label = 2;     // человекочитаемое описание (путь, url)
+  string kind = 3;      // тип операции ("fs_download", "http", ...)
+  string executor = 4;  // имя сервиса-исполнителя ("network", ...)
+  string owner = 5;     // имя сервиса-инициатора ("" — хост)
+}
+
+// Терминальное событие задачи (топик tasks/task_finished).
+// error пуст при успехе; cancelled=true при отмене через tasks/cancel.
+message TaskFinished {
+  string task_id = 1;
+  string error = 2;
+  bool cancelled = 3;
+}

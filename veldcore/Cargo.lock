@@ -3628,6 +3628,7 @@ dependencies = [
  "veldmap-host-core",
  "veldmap-host-fs",
  "veldmap-host-network",
+ "veldmap-host-tasks",
  "wasmtime",
  "wgpu",
  "winit",
@@ -3642,7 +3643,15 @@ dependencies = [
  "log",
  "reqwest",
  "tokio",
- "uuid",
+ "veldmap-host-util",
+]
+
+[[package]]
+name = "veldmap-host-tasks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "log",
  "veldmap-host-util",
 ]
 
@@ -3652,6 +3661,8 @@ version = "0.1.0"
 dependencies = [
  "log",
  "prost",
+ "tokio",
+ "uuid",
  "veldmap-host-bindings",
  "veldmap-host-core",
 ]

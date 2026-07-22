@@ -10,6 +10,7 @@ pub mod setup;
 pub mod abi;
 pub mod dispatcher;
 pub mod logging;
+pub mod tasks;
 
 // Protobuf-типы платформенных контрактов — из сгенерированного
 // биндинг-крейта (platform/host/generated, buildgen).
@@ -54,6 +55,7 @@ pub use dispatcher::*;
 pub use graphics::*;
 pub use memory::*;
 pub use registry::*;
+pub use tasks::*;
 
 /// Конфигурация core модуля
 #[derive(serde::Deserialize, Debug)]

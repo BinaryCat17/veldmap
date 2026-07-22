@@ -8,8 +8,6 @@ interface:
       type: network/FsDownloadRequest
     http:
       type: network/HttpTaskRequest
-    cancel_download:
-      type: network/TaskCancelRequest
   outputs:
     fs_download_result:
       type: network/FsDownloadResponse
