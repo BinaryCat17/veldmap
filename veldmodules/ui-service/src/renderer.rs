@@ -9,13 +9,17 @@ use std::ptr::NonNull;
 thread_local! {
     static FONT_SYSTEM: RefCell<Option<NonNull<FontSystem>>> = const { RefCell::new(None) };
     static SWASH_CACHE: RefCell<Option<NonNull<SwashCache>>> = const { RefCell::new(None) };
+    static FONT_MAP: RefCell<Option<NonNull<HashMap<String, String>>>> = const { RefCell::new(None) };
+    static DEFAULT_FAMILY: RefCell<Option<NonNull<String>>> = const { RefCell::new(None) };
 }
 
 pub struct ScopeGuard;
 impl ScopeGuard {
-    pub fn new(fs: &mut FontSystem, sc: &mut SwashCache) -> Self {
+    pub fn new(fs: &mut FontSystem, sc: &mut SwashCache, fm: &HashMap<String, String>, df: &String) -> Self {
         FONT_SYSTEM.with(|f| *f.borrow_mut() = Some(NonNull::from(fs)));
         SWASH_CACHE.with(|s| *s.borrow_mut() = Some(NonNull::from(sc)));
+        FONT_MAP.with(|m| *m.borrow_mut() = Some(NonNull::from(fm)));
+        DEFAULT_FAMILY.with(|d| *d.borrow_mut() = Some(NonNull::from(df)));
         Self
     }
 }
@@ -23,6 +27,33 @@ impl Drop for ScopeGuard {
     fn drop(&mut self) {
         FONT_SYSTEM.with(|f| *f.borrow_mut() = None);
         SWASH_CACHE.with(|s| *s.borrow_mut() = None);
+        FONT_MAP.with(|m| *m.borrow_mut() = None);
+        DEFAULT_FAMILY.with(|d| *d.borrow_mut() = None);
+    }
+}
+
+/// Переводит запрошенное iced-семейство в реальное семейство из fontdb.
+/// Логические имена (как при загрузке в `GpuRenderer::new`) идут через
+/// `font_map`, реальные имена семейств — напрямую, всё остальное с
+/// предупреждением заменяется на дефолтное семейство.
+fn resolve_family(
+    db: &cosmic_text::fontdb::Database,
+    font_map: &HashMap<String, String>,
+    default_family: &str,
+    family: &iced_core::font::Family,
+) -> String {
+    match family {
+        iced_core::font::Family::Name(name) => {
+            if let Some(mapped) = font_map.get(*name) {
+                mapped.clone()
+            } else if db.faces().any(|f| f.families.iter().any(|(n, _)| n.as_str() == *name)) {
+                name.to_string()
+            } else {
+                veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text: unknown font family '{}', falling back to '{}'", name, default_family);
+                default_family.to_string()
+            }
+        }
+        _ => default_family.to_string(),
     }
 }
 
@@ -88,6 +119,7 @@ pub struct GpuRenderer {
     atlas_dirty_y_min: u32,
     atlas_dirty_y_max: u32,
     font_map: HashMap<String, String>,
+    default_family: String,
     text_cache: HashMap<String, Buffer>,
     pub current_sf: f32,
     scissor_stack: Vec<iced_core::Rectangle>,
@@ -97,7 +129,7 @@ pub struct GpuRenderer {
 }
 
 impl GpuRenderer {
-    pub fn new(_default_font_name: &str, fonts: Vec<(&str, &[u8])>) -> Self {
+    pub fn new(default_font_name: &str, fonts: Vec<(&str, &[u8])>) -> Self {
         let mut font_map = HashMap::new();
         let mut font_system = FontSystem::new();
 
@@ -110,6 +142,14 @@ impl GpuRenderer {
                 }
             }
         }
+
+        let default_family = match font_map.get(default_font_name) {
+            Some(family) => family.clone(),
+            None => {
+                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Default font '{}' was not loaded; text rendering will fall back to the first available font", default_font_name);
+                font_map.values().next().cloned().unwrap_or_else(|| default_font_name.to_string())
+            }
+        };
 
         Self {
             vertices: Vec::with_capacity(8192),
@@ -142,6 +182,7 @@ impl GpuRenderer {
             atlas_dirty_y_min: 0,
             atlas_dirty_y_max: 2048,
             font_map,
+            default_family,
             text_cache: HashMap::new(),
             current_sf: 1.0,
             scissor_stack: Vec::new(),
@@ -149,6 +190,12 @@ impl GpuRenderer {
             current_width: 0,
             current_height: 0,
         }
+    }
+
+    /// Устанавливает thread-local контекст для `RealParagraph::with_text`
+    /// (шейпинг идёт через статический метод трейта без доступа к `self`).
+    pub fn scope_guard(&mut self) -> ScopeGuard {
+        ScopeGuard::new(&mut self.font_system, &mut self.swash_cache, &self.font_map, &self.default_family)
     }
 
     pub fn clear(&mut self) {
@@ -420,11 +467,22 @@ impl iced_core::text::Paragraph for RealParagraph {
                     buffer.set_size(font_system, Some(text.bounds.width), None);
                 }
 
-                let font_family = match &text.font.family {
-                    iced_core::font::Family::Name(name) => name,
-                    _ => "JetBrains Mono",
+                let font_family = FONT_MAP.with(|fm_cell| {
+                    DEFAULT_FAMILY.with(|df_cell| {
+                        match (*fm_cell.borrow(), *df_cell.borrow()) {
+                            (Some(fm), Some(df)) => unsafe {
+                                resolve_family(font_system.db(), fm.as_ref(), df.as_ref(), &text.font.family)
+                            },
+                            // Без ScopeGuard параграф не рендерится; семейство не важно.
+                            _ => String::new(),
+                        }
+                    })
+                });
+                let attrs = if font_family.is_empty() {
+                    cosmic_text::Attrs::new().family(cosmic_text::Family::SansSerif)
+                } else {
+                    cosmic_text::Attrs::new().family(cosmic_text::Family::Name(&font_family))
                 };
-                let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
                 buffer.set_text(font_system, text.content, attrs, Shaping::Advanced);
                 buffer.shape_until_scroll(font_system, false);
 
@@ -624,14 +682,7 @@ impl iced_core::text::Renderer for GpuRenderer {
             return;
         }
 
-        let font_family = match &text.font.family {
-            iced_core::font::Family::Name(name) => self
-                .font_map
-                .get(*name)
-                .map(|s| s.as_str())
-                .unwrap_or("JetBrains Mono"),
-            _ => "JetBrains Mono",
-        };
+        let font_family = resolve_family(self.font_system.db(), &self.font_map, &self.default_family, &text.font.family);
 
         let cache_key = format!(
             "{}_{}_{:?}_{:?}_{}",
@@ -664,7 +715,7 @@ impl iced_core::text::Renderer for GpuRenderer {
                 buffer.set_size(&mut self.font_system, Some(text.bounds.width), None);
             }
 
-            let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(font_family));
+            let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name(&font_family));
 
             let shaping_type = match text.shaping {
                 iced_core::text::Shaping::Basic => Shaping::Basic,

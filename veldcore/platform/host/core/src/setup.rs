@@ -13,31 +13,42 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
     }
 
     let final_log_path = host_config.project_root.join(log_path);
+    // Полный нефильтрованный поток логов — рядом с основным файлом.
+    let trace_log_path = final_log_path.with_file_name("trace.log");
 
     if let Some(parent) = final_log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::remove_file(&final_log_path);
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&final_log_path)
-        .ok();
-    let log_file: Option<Arc<Mutex<std::fs::File>>> = log_file.map(|f| Arc::new(Mutex::new(f)));
+    let _ = std::fs::remove_file(&trace_log_path);
 
-    let file_log = log_file.clone();
+    let open_log = |path: &std::path::Path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(|f| Arc::new(Mutex::new(f)))
+    };
+    // host.log — только важное (то же, что идёт в консоль).
+    let host_log = open_log(&final_log_path);
+    // trace.log — вообще всё, включая debug/trace сторонних крейтов.
+    let trace_log = open_log(&trace_log_path);
+
     // Свои логи — целиком (фильтрует veld_log по флагам), чужие крейты — только warn+.
     // netlink_packet_route: warn «ядро новее крейта» при каждом старте, бесполезен.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,netlink_packet_route=error,warn"))
         .format(move |buf, record| {
             let log_line = format!(
-                "[{}] <{}> {}\n",
+                "[{}] <{}> {:5} {}\n",
                 chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
                 record.target(),
+                record.level(),
                 record.args()
             );
 
-            if let Some(file) = &file_log {
+            // trace.log получает всё без фильтрации.
+            if let Some(file) = &trace_log {
                 if let Ok(mut f) = file.lock() {
                     let _ = f.write_all(log_line.as_bytes());
                 }
@@ -46,8 +57,14 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
             let is_veldmap = record.target().starts_with("veldmap");
             let is_info = record.level() == log::Level::Info;
             let is_warn_or_error = record.level() == log::Level::Warn || record.level() == log::Level::Error;
-            
-            if (is_veldmap && is_info) || is_warn_or_error {
+            let important = (is_veldmap && is_info) || is_warn_or_error;
+
+            if important {
+                if let Some(file) = &host_log {
+                    if let Ok(mut f) = file.lock() {
+                        let _ = f.write_all(log_line.as_bytes());
+                    }
+                }
                 write!(buf, "{}", log_line)
             } else {
                 Ok(())

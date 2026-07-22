@@ -11,5 +11,5 @@
     "UI_HANDLERS",
     "GRAPHICS"
   ],
-  "log_rate_limit_ms": 1000
+  "log_rate_limit_ms": 3000
 }

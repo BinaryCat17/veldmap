@@ -244,7 +244,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
 
     veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Building UI");
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
-    let _guard = crate::module::renderer::ScopeGuard::new(&mut renderer.font_system, &mut renderer.swash_cache);
+    let _guard = renderer.scope_guard();
 
     let mut ui = UserInterface::build(
         element,

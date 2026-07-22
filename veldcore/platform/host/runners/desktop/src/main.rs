@@ -191,15 +191,21 @@ async fn main() -> anyhow::Result<()> {
     // Владелец в ответ аллоцирует текстуру, делегирует её рендереру и аттачит
     // сюда через app/set_surface; до этого окно рисует фоновый цвет.
     let format_proto = graphics.get_surface_format_proto();
-    // Реальный DPI монитора из winit; win_cfg.ui_scale остаётся в конфиге
-    // для обратной совместимости, но здесь не используется.
-    publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, winit_window.scale_factor() as f32, format_proto);
+    // Эффективный масштаб: реальный DPI из winit, но не ниже win_cfg.ui_scale.
+    // На X11/WSLg winit часто репортит 1.0 даже на HiDPI (Xft.dpi не задан),
+    // поэтому конфиг задаёт нижнюю границу.
+    let effective_scale = move |w: &winit::window::Window| (w.scale_factor() as f32).max(win_cfg.ui_scale);
+    publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, effective_scale(&winit_window), format_proto);
     app_bus::emit::ready(&*dispatcher);
 
     winit_window.request_redraw();
 
     // ── 5. Кадровый цикл ────────────────────────────────────────────────────
     let mut cursor_pos = (0.0f32, 0.0f32);
+    // CursorMoved коалесцируется до одного события на кадр: каждый move — это
+    // отдельный вызов wasm-актера ui-service, и поток движений мыши (40-125/с)
+    // раньше создавал бэклог очереди с секундной задержкой кликов.
+    let mut cursor_dirty = false;
     let mut last_frame_time = std::time::Instant::now();
     // Состояние модификаторов: winit шлёт его отдельно от KeyboardInput,
     // поэтому трекаем здесь и прикладываем к каждому KeyEvent.
@@ -223,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // Старая поверхность блитится растянутой, пока владелец
                     // не приаттачит новую нужного размера.
-                    publish_window_resized(&dispatcher, &hw.owner, width, height, winit_window.scale_factor() as f32, format_proto);
+                    publish_window_resized(&dispatcher, &hw.owner, width, height, effective_scale(&winit_window), format_proto);
                 }
                 winit_window.request_redraw();
             }
@@ -231,6 +237,14 @@ async fn main() -> anyhow::Result<()> {
                 let now = std::time::Instant::now();
                 let dt = now.duration_since(last_frame_time).as_secs_f32();
                 last_frame_time = now;
+
+                // Коалесцированный курсор — не чаще одного события на кадр.
+                if cursor_dirty {
+                    cursor_dirty = false;
+                    publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::CursorMoved(
+                        app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 },
+                    ));
+                }
 
                 publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Frame(app::FrameEvent {
                     dt,
@@ -316,9 +330,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
                 cursor_pos = (position.x as f32, position.y as f32);
-                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::CursorMoved(
-                    app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 },
-                ));
+                cursor_dirty = true;
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
                 let b_idx = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };

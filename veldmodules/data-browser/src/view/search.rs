@@ -44,6 +44,7 @@ pub fn view(state: &State) -> Element<()> {
             crate::module::styles::apply_search_input(
                 text_input("Search query...", &search_state.query)
             )
+                .width(Length::Fill)
                 .on_input("search_input")
                 .on_submit("search"),
             crate::module::styles::apply_primary(button(text("Search"))).on_press("search")
