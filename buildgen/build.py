@@ -183,6 +183,14 @@ def generate_code():
              "--schema",     schema_path,
              "--output-dir", generated_dir])
 
+    # Платформенные стабы SDK (топики app/*) из veldcore/proto/app.schema.yaml
+    app_schema = os.path.join(PROJECT_ROOT, "veldcore", "proto", "app.schema.yaml")
+    if os.path.exists(app_schema):
+        print("  Generating SDK platform stubs (app) ...")
+        run([venv_python, gen_script,
+             "--schema",    app_schema,
+             "--sdk-stubs", os.path.join(PROJECT_ROOT, "veldcore", "sdk", "rust", "src", "app.rs")])
+
 
 # ── Module builders (one per language) ────────────────────────────────────────
 

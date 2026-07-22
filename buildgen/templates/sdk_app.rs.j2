@@ -4,9 +4,10 @@
 
 use prost::Message;
 
-
-/// `app/set_surface`
-pub fn set_surface(msg: &crate::proto::app::SetSurface) {
-    crate::abi::publish("app/set_surface", msg.encode_to_vec());
+{% for input in inputs %}
+/// `{{ service_name }}/{{ input.name }}`
+pub fn {{ input.name }}(msg: &crate::proto::{{ service_name }}::{{ input.rust_type }}) {
+    crate::abi::publish("{{ service_name }}/{{ input.name }}", msg.encode_to_vec());
 }
 
+{% endfor %}

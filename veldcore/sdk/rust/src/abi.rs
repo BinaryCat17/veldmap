@@ -202,6 +202,12 @@ pub fn store_output(data: Vec<u8>) {
 
 // ── Pub/Sub ────────────────────────────────────────────────────
 
+/// Единственная форма общения между сервисами: fire-and-forget событие в
+/// шину. Не часть публичного API: прикладные модули используют
+/// сгенерированные стабы (crate::emit::*, crate::calls::*, inputs::* в
+/// wrap-крейтах, veldsdk::app::*). Строковый топик здесь — это нормально:
+/// он существует только внутри стабов.
+#[doc(hidden)]
 pub fn publish(topic: &str, payload: Vec<u8>) {
     let parts: Vec<&str> = topic.splitn(2, '/').collect();
     if parts.len() != 2 {
@@ -216,4 +222,11 @@ pub fn publish(topic: &str, payload: Vec<u8>) {
     };
     let req_buf = request.encode_to_vec();
     unsafe { veld_host_publish(req_buf.as_ptr() as u64, req_buf.len() as u64); }
+}
+
+/// Маршрутизация с адресатом, известным только в рантайме: роутеры вроде
+/// ui-service, рассылающие UI-события владельцам окон (`{plugin_id}/{method}`).
+/// Прикладным модулям не нужна — их топики статичны и объявлены в schema.yaml.
+pub fn publish_dynamic(service: &str, method: &str, payload: Vec<u8>) {
+    publish(&format!("{}/{}", service, method), payload);
 }

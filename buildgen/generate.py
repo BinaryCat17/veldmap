@@ -64,17 +64,40 @@ def read_proto_package(proto_file: str) -> str | None:
 def main():
     parser = argparse.ArgumentParser(description="Generate Rust bindings from schema.yaml")
     parser.add_argument("--schema",     required=True, help="Absolute path to schema.yaml")
-    parser.add_argument("--output-dir", required=True, help="Absolute path to output directory")
+    parser.add_argument("--output-dir", help="Absolute path to output directory")
+    parser.add_argument("--sdk-stubs",  help="Generate SDK platform stubs to this path and exit")
     args = parser.parse_args()
 
     script_dir  = os.path.dirname(os.path.abspath(__file__))
     schema_path = os.path.abspath(args.schema)
-    output_dir  = os.path.abspath(args.output_dir)
-    schema_dir  = os.path.dirname(schema_path)
 
-    # ── Load schema + config ─────────────────────────────────────────────────
+    # ── Load schema ──────────────────────────────────────────────────────────
     with open(schema_path) as f:
         schema = yaml.safe_load(f)
+
+    # ── SDK platform stubs mode (--sdk-stubs) ────────────────────────────────
+    if args.sdk_stubs:
+        out_path  = os.path.abspath(args.sdk_stubs)
+        svc_name  = schema.get("name")
+        pf_inputs = [
+            {"name": n, "rust_type": ((d or {}).get("type") or "").split("/")[-1]}
+            for n, d in (schema.get("interface", {}).get("inputs", {}) or {}).items()
+        ]
+        pf_inputs = [i for i in pf_inputs if i["rust_type"]]
+
+        env      = Environment(loader=FileSystemLoader(os.path.join(script_dir, "templates")))
+        template = env.get_template("sdk_app.rs.j2")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "w") as f:
+            f.write(template.render({"service_name": svc_name, "inputs": pf_inputs}))
+        print(f"✅ Generated SDK platform stubs at {out_path}")
+        return
+
+    if not args.output_dir:
+        parser.error("--output-dir is required unless --sdk-stubs is given")
+
+    output_dir  = os.path.abspath(args.output_dir)
+    schema_dir  = os.path.dirname(schema_path)
 
     config_data = {}
     config_path = os.path.join(schema_dir, "config.yaml")
@@ -101,6 +124,14 @@ def main():
     # interface.outputs  → crate::emit::<name>(msg)
     # dependencies.*.calls → crate::calls::<dep_snake>::<name>(msg)
     emits = list(schema.get("interface", {}).get("outputs", {}) or {})
+
+    # interface.inputs → <service>-wrap::inputs::<name>(msg): стабы входных
+    # топиков для вызывающих (генерируются в wrap-крейт, см. wrap_lib.rs.j2).
+    inputs = [
+        {"name": n, "rust_type": ((d or {}).get("type") or "").split("/")[-1]}
+        for n, d in (schema.get("interface", {}).get("inputs", {}) or {}).items()
+    ]
+    inputs = [i for i in inputs if i["rust_type"]]
 
     dep_calls = []
     for dep_name, dep_data in schema.get("dependencies", {}).items():
@@ -220,6 +251,7 @@ def main():
         },
         "handlers":           handlers,
         "emits":              emits,
+        "inputs":             inputs,
         "dep_calls":          dep_calls,
         "view_wrap_crate":    view_wrap_crate,
         "has_local_proto":    has_local_proto,

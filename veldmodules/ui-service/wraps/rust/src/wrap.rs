@@ -868,21 +868,6 @@ pub fn image<M>(handle: veldsdk::proto::core::ResourceHandle) -> Image<M> {
 
 // --- Window surface delegation ---
 
-/// Типизированные стабы входных топиков ui-service (interface.inputs из
-/// schema.yaml). Строки топиков существуют только здесь, дальше по коду
-/// ходят только эти функции.
-mod topics {
-    use veldsdk::prost::Message;
-
-    pub fn set_view(req: &super::SetViewRequest) {
-        veldsdk::abi::publish("ui-service/set_view", req.encode_to_vec());
-    }
-
-    pub fn set_surface(req: &super::SetSurfaceRequest) {
-        veldsdk::abi::publish("ui-service/set_surface", req.encode_to_vec());
-    }
-}
-
 /// Реакция владельца окна на app/window_resized: ритуал
 /// «alloc → grant_write → attach хосту → delegate рендереру» одной функцией.
 pub mod surface {
@@ -905,7 +890,7 @@ pub mod surface {
 
         let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0, content_hash: Vec::new() };
 
-        super::topics::set_surface(&super::SetSurfaceRequest {
+        crate::inputs::set_surface(&super::SetSurfaceRequest {
             plugin_id: ev.plugin_id.clone(),
             surface: Some(handle.clone()),
             width: ev.width,
@@ -913,7 +898,10 @@ pub mod surface {
             scale_factor: ev.scale_factor,
         });
 
-        veldsdk::app::set_surface(&ev.plugin_id, handle);
+        veldsdk::app::set_surface(&veldsdk::proto::app::SetSurface {
+            plugin_id: ev.plugin_id.clone(),
+            surface: Some(handle),
+        });
 
         if let Some(old) = old_texture {
             abi::arena_free(old);
@@ -950,7 +938,7 @@ pub mod render {
             plugin_id: plugin_id.to_string(),
             layout: Some(layout),
         };
-        super::topics::set_view(&request);
+        crate::inputs::set_view(&request);
     }
 }
 

@@ -187,10 +187,9 @@ fn dispatch_event(event: UiEventResponse) {
     }
     // Единственный легитимный динамический топик: адресат UI-события неизвестен
     // на этапе кодогена (это плагин-владелец окна, назначаемый в рантайме), поэтому
-    // типизированный emit-стаб тут невозможен — топик собирается из данных события.
-    let topic = format!("{}/{}", event.plugin_id, event.method);
-    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[DISPATCH] UI message -> '{}' (value: '{}')", topic, event.value);
-    veldsdk::abi::publish(&topic, event.encode_to_vec());
+    // publish_dynamic вместо сгенерированного стаба.
+    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[DISPATCH] UI message -> '{}/{}' (value: '{}')", event.plugin_id, event.method, event.value);
+    veldsdk::abi::publish_dynamic(&event.plugin_id, &event.method, event.encode_to_vec());
 }
 
 fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {

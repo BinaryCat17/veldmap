@@ -11,3 +11,18 @@ pub use proto::*;
 
 pub use veldsdk::proto::core;
 pub use veldsdk::proto::app;
+{% if inputs %}
+
+/// Типизированные стабы входных топиков сервиса (interface.inputs из
+/// schema.yaml). Строки топиков существуют только здесь.
+pub mod inputs {
+    use veldsdk::prost::Message;
+    {% for input in inputs %}
+
+    /// `{{ service_name }}/{{ input.name }}`
+    pub fn {{ input.name }}(msg: &crate::proto::{{ input.rust_type }}) {
+        veldsdk::abi::publish("{{ service_name }}/{{ input.name }}", msg.encode_to_vec());
+    }
+    {% endfor %}
+}
+{% endif %}
