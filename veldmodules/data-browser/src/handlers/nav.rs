@@ -4,6 +4,14 @@ use crate::proto::ui::proto::UiEventResponse;
 
 pub fn on_input_nav_browse(state: &mut State, _event: UiEventResponse) {
     state.current_screen = Screen::Browse;
+
+    // Запрашиваем листинг текущего пути при входе на экран
+    state.browse.is_loading = true;
+    state.browse.error = None;
+    crate::calls::data_provider::list_path(&crate::proto::dataprovider::ListPathRequest {
+        path: state.browse.current_path.clone(),
+        token: String::new(),
+    });
 }
 
 pub fn on_input_nav_search(state: &mut State, _event: UiEventResponse) {

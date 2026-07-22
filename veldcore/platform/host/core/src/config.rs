@@ -90,6 +90,10 @@ fn expand_env_vars(text: &str) -> String {
     let re = Regex::new(r"\$\{([A-Za-z0-9_]+)\}").unwrap();
     re.replace_all(text, |caps: &regex::Captures| {
         let var_name = &caps[1];
-        std::env::var(var_name).unwrap_or_else(|_| String::new())
+        std::env::var(var_name).unwrap_or_else(|_| {
+            // Конфиг грузится до init_logging, поэтому предупреждение — в stderr.
+            eprintln!("Warning: environment variable '{}' is not set, substituting empty string", var_name);
+            String::new()
+        })
     }).to_string()
 }

@@ -17,8 +17,10 @@ pub fn on_input_browse(
     
     if target_path != state.browse.current_path {
         state.browse.current_path = target_path.clone();
-        state.browse.is_loading = true;
     }
+
+    state.browse.is_loading = true;
+    state.browse.error = None;
     
     // Публикуем запрос к data-provider
     crate::calls::data_provider::list_path(&crate::proto::dataprovider::ListPathRequest {
@@ -44,6 +46,7 @@ pub fn on_input_browse_up(
     
     state.browse.current_path = path.clone();
     state.browse.is_loading = true;
+    state.browse.error = None;
     
     crate::calls::data_provider::list_path(&crate::proto::dataprovider::ListPathRequest {
         path,
@@ -56,6 +59,14 @@ pub fn on_sub_list_path_result(
     response: crate::proto::dataprovider::ListPathResponse,
 ) {
     state.browse.is_loading = false;
+
+    if !response.error.is_empty() {
+        state.browse.error = Some(response.error);
+        state.browse.items = Vec::new();
+        return;
+    }
+    state.browse.error = None;
+
     state.browse.items = response.items.into_iter().map(|s| {
         let is_folder = s.ends_with('/');
         crate::module::state::browse::BrowseItem {

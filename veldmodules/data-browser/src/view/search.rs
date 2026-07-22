@@ -10,7 +10,9 @@ pub fn view(state: &State) -> Element<()> {
     let search_state = &state.search;
     let task_manager = &state.global.task_manager;
     
-    let results_list = if search_state.is_loading {
+    let results_list = if let Some(err) = &search_state.error {
+        column![text(format!("Error: {}", err)).size(16.0)].into()
+    } else if search_state.is_loading {
         column![text("Searching...").size(16.0)].into()
     } else if search_state.results.is_empty() {
         let msg = if search_state.query.is_empty() {
@@ -39,10 +41,12 @@ pub fn view(state: &State) -> Element<()> {
         text("Search Copernicus Data Space").size(20.0),
         
         row![
-            text_input("Search query...", &search_state.query)
+            crate::module::styles::apply_search_input(
+                text_input("Search query...", &search_state.query)
+            )
                 .on_input("search_input")
                 .on_submit("search"),
-            button(text("Search")).on_press("search")
+            crate::module::styles::apply_primary(button(text("Search"))).on_press("search")
         ]
         .spacing(10.0)
         .width(Length::Fill),

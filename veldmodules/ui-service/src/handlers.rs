@@ -165,6 +165,21 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
                     *plugin.needs_redrawing.borrow_mut() = true;
                 }
             }
+            app_proto::ui_event::Event::Key(k) => {
+                let mods = crate::module::keyboard::modifiers_from_bits(k.modifiers);
+                // text_input хранит modifiers в собственном состоянии и обновляет
+                // их только по ModifiersChanged — шлём его при смене маски.
+                {
+                    let mut last = plugin.keyboard_modifiers.borrow_mut();
+                    if *last != mods {
+                        *last = mods;
+                        plugin.pending_events.borrow_mut()
+                            .push(Event::Keyboard(iced_core::keyboard::Event::ModifiersChanged(mods)));
+                    }
+                }
+                plugin.pending_events.borrow_mut()
+                    .push(Event::Keyboard(crate::module::keyboard::convert_key_event(&k, mods)));
+            }
             _ => {
                 let iced_ev = convert_event(ev, *plugin.scale_factor.borrow());
                 if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = iced_ev {

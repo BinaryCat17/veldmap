@@ -10,7 +10,9 @@ pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;
     let task_manager = &state.global.task_manager;
     
-    let list = if browse_state.items.is_empty() {
+    let list = if let Some(err) = &browse_state.error {
+        column![text(format!("Error: {}", err)).size(16.0)].into()
+    } else if browse_state.items.is_empty() {
         column![text("No items found").size(16.0)].into()
     } else {
         let items: Vec<BrowserItem> = browse_state.items.iter().map(|i| BrowserItem {
@@ -30,7 +32,7 @@ pub fn view(state: &State) -> Element<()> {
     
     column![
         text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-        button(text("⬆ Up")).on_press("browse_up"),
+        crate::module::styles::apply_primary(button(text("⬆ Up"))).on_press("browse_up"),
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)

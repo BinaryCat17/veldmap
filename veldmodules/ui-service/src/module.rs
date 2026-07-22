@@ -5,6 +5,7 @@ mod handlers;
 mod renderer;
 mod converter;
 mod graphics;
+mod keyboard;
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {}

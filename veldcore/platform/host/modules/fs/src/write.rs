@@ -5,9 +5,8 @@ use super::State;
 use veldmap_host_util::Access;
 use veldmap_host_util::bindings::fs as bus;
 use veldmap_host_util::bindings::proto::fs::{FsWriteRequest, FsWriteResult};
-use veldmap_host_util::path::is_path_safe;
+use veldmap_host_util::path::{is_path_safe, resolve_path};
 use std::fs;
-use std::path::Path;
 
 pub fn on_input_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
     let correlation_id = req.correlation_id.clone();
@@ -29,8 +28,9 @@ pub fn on_input_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
         } else {
             match state.ctx.memory.read(handle.id, 0, handle.size) {
                 Ok(data) => {
-                    if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
-                    match fs::write(&req.path, &data) {
+                    let path = resolve_path(&state.ctx, &req.path);
+                    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+                    match fs::write(&path, &data) {
                         Ok(()) => FsWriteResult { error: String::new(), correlation_id },
                         Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
                     }

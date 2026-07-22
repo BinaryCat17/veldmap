@@ -4,6 +4,28 @@ import os
 import sys
 import argparse
 
+def load_dotenv(path):
+    """Простой парсер .env (KEY=VALUE), без зависимостей.
+
+    Возвращает dict; комментарии (#) и пустые строки игнорируются.
+    """
+    values = {}
+    if not os.path.exists(path):
+        return values
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key:
+                values[key] = value
+    return values
+
 def main():
     parser = argparse.ArgumentParser(description="VeldMap Run Script")
     parser.add_argument("--debug", action="store_true", help="Run debug build")
@@ -23,6 +45,12 @@ def main():
     print(f"-> Launching VeldMap Host ({profile_name})...")
     
     env = os.environ.copy()
+
+    # Подхватываем .env из корня проекта (секреты для подстановки ${VAR}
+    # в конфигах). Уже заданные переменные окружения не переопределяются.
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for key, value in load_dotenv(os.path.join(project_root, ".env")).items():
+        env.setdefault(key, value)
     
     # Use Vulkan backend (with dzn support)
     if args.backend:

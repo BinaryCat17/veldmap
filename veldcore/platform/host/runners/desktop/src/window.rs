@@ -20,8 +20,10 @@ pub struct PluginWindowConfig {
     #[serde(default = "default_height")]
     pub height: u32,
     
-    /// UI scale factor (DPI scaling)
+    /// UI scale factor (DPI scaling). Хранится для обратной совместимости
+    /// конфигов: хост шлёт модулям реальный `window.scale_factor()` из winit.
     #[serde(default = "default_scale")]
+    #[allow(dead_code)]
     pub ui_scale: f32,
     
     /// Whether window should be resizable

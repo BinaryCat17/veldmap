@@ -49,6 +49,13 @@ pub mod path {
         }
         true
     }
+
+    /// Резолвит путь из запроса модуля: относительный — от project_root
+    /// хоста (каталог runtime/), абсолютный возвращается как есть.
+    pub fn resolve_path(ctx: &crate::HostContext, path: &str) -> std::path::PathBuf {
+        let path_obj = std::path::Path::new(path);
+        if path_obj.is_absolute() { path_obj.to_path_buf() } else { ctx.config.project_root.join(path_obj) }
+    }
 }
 
 /// Сантехника protobuf-шины: единое место для decode и регистрации,

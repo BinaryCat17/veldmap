@@ -24,6 +24,9 @@ pub struct PluginUiState {
     pub cursor_position: RefCell<Point>,
     pub scroll_velocity: RefCell<Point>,
     pub pending_events: RefCell<Vec<Event>>,
+    /// Последнее отправленное в iced состояние модификаторов: text_input
+    /// хранит modifiers у себя и обновляет их только по ModifiersChanged.
+    pub keyboard_modifiers: RefCell<iced_core::keyboard::Modifiers>,
     pub vertex_buffer: RefCell<Option<OwnedResource>>,
     pub index_buffer: RefCell<Option<OwnedResource>>,
     /// Region id uniform-буфера (memory ABI).
@@ -88,6 +91,7 @@ impl PluginUiState {
             cursor_position: RefCell::new(Point::ORIGIN),
             scroll_velocity: RefCell::new(Point::ORIGIN),
             pending_events: RefCell::new(Vec::new()),
+            keyboard_modifiers: RefCell::new(iced_core::keyboard::Modifiers::empty()),
             vertex_buffer: RefCell::new(None),
             index_buffer: RefCell::new(None),
             uniform_buffer_region: RefCell::new(None),

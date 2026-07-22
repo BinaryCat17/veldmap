@@ -5,7 +5,7 @@ use super::State;
 use veldmap_host_util::bindings::fs as bus;
 use veldmap_host_util::bindings::proto::fs::{FsReadRequest, FsReadResult};
 use veldmap_host_util::core::ResourceHandle;
-use veldmap_host_util::path::is_path_safe;
+use veldmap_host_util::path::{is_path_safe, resolve_path};
 use std::fs;
 
 pub fn on_input_read(state: &State, req: FsReadRequest, requestor_id: u32) {
@@ -13,7 +13,7 @@ pub fn on_input_read(state: &State, req: FsReadRequest, requestor_id: u32) {
     let result = if !is_path_safe(&req.path) {
         FsReadResult { handle: None, error: "Access denied".into(), correlation_id }
     } else {
-        match fs::read(&req.path) {
+        match fs::read(resolve_path(&state.ctx, &req.path)) {
             Ok(data) => {
                 let size = data.len() as u64;
                 let id = state.ctx.memory.alloc_cpu(data, requestor_id);

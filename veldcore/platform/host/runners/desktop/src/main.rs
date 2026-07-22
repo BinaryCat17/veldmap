@@ -87,6 +87,16 @@ fn publish_ui_event(dispatcher: &Dispatcher, owner: &str, event: app::ui_event::
     app_bus::emit::ui_event(dispatcher, &ev);
 }
 
+/// Битовая маска модификаторов для KeyEvent: 1=Shift, 2=Ctrl, 4=Alt, 8=Super.
+fn modifiers_bits(m: winit::keyboard::ModifiersState) -> u32 {
+    let mut bits = 0;
+    if m.shift_key() { bits |= 1; }
+    if m.control_key() { bits |= 2; }
+    if m.alt_key() { bits |= 4; }
+    if m.super_key() { bits |= 8; }
+    bits
+}
+
 /// Сообщает владельцу окна размер и формат требуемой поверхности.
 fn publish_window_resized(dispatcher: &Dispatcher, owner: &str, width: u32, height: u32, scale_factor: f32, format: i32) {
     let ev = app::WindowResized {
@@ -181,8 +191,9 @@ async fn main() -> anyhow::Result<()> {
     // Владелец в ответ аллоцирует текстуру, делегирует её рендереру и аттачит
     // сюда через app/set_surface; до этого окно рисует фоновый цвет.
     let format_proto = graphics.get_surface_format_proto();
-    let ui_scale = win_cfg.ui_scale;
-    publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, ui_scale, format_proto);
+    // Реальный DPI монитора из winit; win_cfg.ui_scale остаётся в конфиге
+    // для обратной совместимости, но здесь не используется.
+    publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, winit_window.scale_factor() as f32, format_proto);
     app_bus::emit::ready(&*dispatcher);
 
     winit_window.request_redraw();
@@ -190,6 +201,9 @@ async fn main() -> anyhow::Result<()> {
     // ── 5. Кадровый цикл ────────────────────────────────────────────────────
     let mut cursor_pos = (0.0f32, 0.0f32);
     let mut last_frame_time = std::time::Instant::now();
+    // Состояние модификаторов: winit шлёт его отдельно от KeyboardInput,
+    // поэтому трекаем здесь и прикладываем к каждому KeyEvent.
+    let mut key_modifiers = winit::keyboard::ModifiersState::empty();
 
     event_loop.run(move |event, window_target| {
         window_target.set_control_flow(ControlFlow::Wait);
@@ -209,7 +223,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // Старая поверхность блитится растянутой, пока владелец
                     // не приаттачит новую нужного размера.
-                    publish_window_resized(&dispatcher, &hw.owner, width, height, ui_scale, format_proto);
+                    publish_window_resized(&dispatcher, &hw.owner, width, height, winit_window.scale_factor() as f32, format_proto);
                 }
                 winit_window.request_redraw();
             }
@@ -325,12 +339,19 @@ async fn main() -> anyhow::Result<()> {
                     },
                 ));
             }
+            Event::WindowEvent { event: WindowEvent::ModifiersChanged(m), .. } => {
+                key_modifiers = m.state();
+            }
             Event::WindowEvent { event: WindowEvent::KeyboardInput { event: input, .. }, .. } => {
                 if let winit::keyboard::PhysicalKey::Code(kc) = input.physical_key {
+                    let pressed = input.state == winit::event::ElementState::Pressed;
                     publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Key(
                         app::KeyEvent {
                             key_code: kc as u32,
-                            pressed: input.state == winit::event::ElementState::Pressed,
+                            pressed,
+                            // Текст есть только у нажатий печатных клавиш.
+                            text: if pressed { input.text.as_ref().map(|t| t.to_string()).unwrap_or_default() } else { String::new() },
+                            modifiers: modifiers_bits(key_modifiers),
                         },
                     ));
                 }

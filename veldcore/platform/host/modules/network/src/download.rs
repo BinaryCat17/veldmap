@@ -8,9 +8,8 @@ use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{
     FsDownloadRequest, FsDownloadResponse, FsDownloadProgress,
 };
-use veldmap_host_util::path::is_path_safe;
+use veldmap_host_util::path::{is_path_safe, resolve_path};
 use std::fs;
-use std::path::Path;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 
@@ -35,7 +34,8 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, requestor_id:
     }
 
     let ctx = state.ctx.clone();
-    if let Some(parent) = Path::new(&req.path).parent() { let _ = fs::create_dir_all(parent); }
+    let path = resolve_path(&ctx, &req.path);
+    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
     let label = req.path.clone();
 
     // owner = инициатор запроса: отменить скачивание может он, хост
@@ -59,7 +59,7 @@ pub fn on_input_fs_download(state: &State, req: FsDownloadRequest, requestor_id:
         let mut last_percent: u32 = 0;
         let mut stream = res.bytes_stream();
 
-        match tokio::fs::File::create(&req.path).await {
+        match tokio::fs::File::create(&path).await {
             Ok(mut async_file) => {
                 while let Some(chunk_res) = stream.next().await {
                     match chunk_res {
