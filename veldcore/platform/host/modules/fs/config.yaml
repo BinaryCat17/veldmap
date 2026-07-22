@@ -1,0 +1,6 @@
+# Конфиг нативного модуля fs: buildgen генерирует крейт в generated/
+# (Cargo.toml + клей диспетчеризации). Логика — src/module.rs.
+package: veldmap-host-fs
+language: rust
+rust:
+  dependencies: {}

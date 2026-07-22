@@ -3602,7 +3602,6 @@ dependencies = [
 name = "veldmap-host-fs"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "log",
  "veldmap-host-util",
@@ -3638,7 +3637,6 @@ dependencies = [
 name = "veldmap-host-network"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "futures-util",
  "log",

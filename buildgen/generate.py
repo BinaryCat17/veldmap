@@ -140,6 +140,39 @@ def generate_host_bindings(args, script_dir: str):
 
     print(f"✅ Generated host bindings at {out_dir}")
 
+    # ── Крейты нативных модулей хоста (modules/<svc>/generated) ─────────────
+    # Сервис с входами считается нативным модулем этой реализации хоста,
+    # если рядом с generated/ существует каталог modules/<svc> с config.yaml.
+    # Как и у wasm-модулей: generated — крейт, src/module.rs — гость через #[path].
+    modules_dir = os.path.join(os.path.dirname(out_dir), "modules")
+    for svc in services:
+        if not svc["inputs"]:
+            continue
+        module_dir = os.path.join(modules_dir, svc["name"])
+        config_path = os.path.join(module_dir, "config.yaml")
+        if not os.path.isdir(module_dir) or not os.path.exists(config_path):
+            continue
+
+        with open(config_path) as cf:
+            module_config = yaml.safe_load(cf) or {}
+        raw_deps = (module_config.get("rust", {}) or {}).get("dependencies", {}) or {}
+        module_data = dict(svc)
+        module_data["package"] = module_config.get("package", svc["name"])
+        module_data["dependencies"] = {
+            name: yaml_dep_to_toml(val) for name, val in raw_deps.items()
+        }
+
+        gen_dir = os.path.join(module_dir, "generated")
+        module_renders = {
+            os.path.join(gen_dir, "src", "lib.rs"): env.get_template("host_module_lib.rs.j2"),
+            os.path.join(gen_dir, "Cargo.toml"):    env.get_template("host_module_Cargo.toml.j2"),
+        }
+        for path, template in module_renders.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(template.render(module_data))
+        print(f"✅ Generated host module crate at {gen_dir}")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
