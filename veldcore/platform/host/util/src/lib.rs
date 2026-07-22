@@ -33,7 +33,7 @@ pub use veldmap_host_core::core;
 
 // ── Сгенерированные биндинги платформенных контрактов ───────────────────────
 // proto-типы и стабы топиков (topics::*/emit::*) из platform/host/generated
-// (buildgen, veldcore/proto/*.schema.yaml). Публикация выходов сервиса —
+// (buildgen, veldcore/interface *.schema.yaml). Публикация выходов сервиса —
 // только через emit-стабы: bindings::fs::emit::on_read_result(&dispatcher, &msg).
 pub use veldmap_host_bindings as bindings;
 

@@ -89,8 +89,24 @@ def schema_type_to_rust_path(type_str: str) -> str:
 # ── Schema validation ─────────────────────────────────────────────────────────
 #
 # The type universe maps a proto package alias (last segment of the proto
-# `package`) to its message names and its origin: "core" for veldcore/proto,
+# `package`) to its message names and its origin: "core" for veldcore/interface
+# (platform contracts at its root plus native services under interface/modules/),
 # otherwise the directory name of the wasm module that owns types.proto.
+
+def iter_core_proto_files(proto_dir: str):
+    """Yield every platform .proto file: root-level contracts (core, app,
+    graphics, ...) plus one per native service in modules/<name>/<name>.proto."""
+    for f in sorted(os.listdir(proto_dir)):
+        path = os.path.join(proto_dir, f)
+        if f.endswith(".proto") and os.path.isfile(path):
+            yield path
+    modules_dir = os.path.join(proto_dir, "modules")
+    if os.path.isdir(modules_dir):
+        for name in sorted(os.listdir(modules_dir)):
+            path = os.path.join(modules_dir, name, f"{name}.proto")
+            if os.path.exists(path):
+                yield path
+
 
 def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
     universe = {}
@@ -102,12 +118,10 @@ def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
                 f"{universe[alias]['source']} and {source}")
         universe[alias] = {"messages": messages, "origin": origin, "source": source}
 
-    for f in sorted(os.listdir(proto_dir)):
-        if f.endswith(".proto"):
-            path = os.path.join(proto_dir, f)
-            pkg, messages = collect_proto_info(path)
-            if pkg:
-                add(pkg.split(".")[-1], messages, "core", path)
+    for path in iter_core_proto_files(proto_dir):
+        pkg, messages = collect_proto_info(path)
+        if pkg:
+            add(pkg.split(".")[-1], messages, "core", path)
 
     if modules_root and os.path.isdir(modules_root):
         for name in sorted(os.listdir(modules_root)):
@@ -206,9 +220,11 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
         check_called_by(f"interface.outputs.{output_name}", entry)
 
     def load_dep_schema(dep):
-        """A dependency is a sibling wasm module or a platform service."""
+        """A dependency is a sibling wasm module or a platform service (either
+        a root-level contract or a native service under interface/modules/)."""
         for p in (os.path.join(modules_root, dep, "schema.yaml"),
-                  os.path.join(proto_dir, f"{dep}.schema.yaml")):
+                  os.path.join(proto_dir, f"{dep}.schema.yaml"),
+                  os.path.join(proto_dir, "modules", dep, f"{dep}.schema.yaml")):
             if os.path.exists(p):
                 with open(p) as f:
                     return yaml.safe_load(f) or {}
@@ -219,7 +235,7 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
         dep_schema = load_dep_schema(dep)
         if dep_schema is None:
             err(f"dependencies.{dep}", "no schema found (neither a sibling module "
-                                       "nor a veldcore/proto/*.schema.yaml service)")
+                                       "nor a veldcore/interface *.schema.yaml service)")
             continue
 
         # In the dependency's own schema 'module/' refers to *its* package.
@@ -287,25 +303,34 @@ def fail_on(errors: list[str], schema_path: str):
 
 def generate_host_bindings(args, script_dir: str):
     """Generate the host bindings crate (proto types + topic stubs) from
-    veldcore/proto/*.proto and *.schema.yaml. Used by the host implementation;
-    the crate itself depends only on prost (host implements Publisher)."""
+    veldcore/interface: root-level platform contracts (core.proto, app.proto, ...)
+    plus native services under interface/modules/<name>/. Used by the host
+    implementation; the crate itself depends only on prost (host implements
+    Publisher)."""
     out_dir   = os.path.abspath(args.host_bindings)
     proto_dir = os.path.abspath(args.proto_dir)
     package   = args.package or "veldmap-host-bindings"
 
     universe = build_type_universe(proto_dir, None)
 
-    proto_files = sorted(f for f in os.listdir(proto_dir) if f.endswith(".proto"))
+    proto_files = [os.path.relpath(p, proto_dir).replace("\\", "/")
+                   for p in iter_core_proto_files(proto_dir)]
     proto_packages = []
     for f in proto_files:
         pkg_decl = read_proto_package(os.path.join(proto_dir, f))
         proto_packages.append({"file": pkg_decl, "mod": pkg_decl.split(".")[-1]})
 
+    schema_files = [os.path.join(proto_dir, f)
+                     for f in sorted(os.listdir(proto_dir)) if f.endswith(".schema.yaml")]
+    modules_dir = os.path.join(proto_dir, "modules")
+    if os.path.isdir(modules_dir):
+        for name in sorted(os.listdir(modules_dir)):
+            p = os.path.join(modules_dir, name, f"{name}.schema.yaml")
+            if os.path.exists(p):
+                schema_files.append(p)
+
     services = []
-    for f in sorted(os.listdir(proto_dir)):
-        if not f.endswith(".schema.yaml"):
-            continue
-        schema_path = os.path.join(proto_dir, f)
+    for schema_path in schema_files:
         with open(schema_path) as sf:
             svc_schema = yaml.safe_load(sf)
         fail_on(validate_core_schema(svc_schema, universe), schema_path)
@@ -399,7 +424,7 @@ def main():
 
     script_dir   = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.normpath(os.path.join(script_dir, ".."))
-    core_proto_dir = os.path.join(project_root, "veldcore", "proto")
+    core_proto_dir = os.path.join(project_root, "veldcore", "interface")
 
     # ── Host bindings mode (--host-bindings) ─────────────────────────────────
     if args.host_bindings:
@@ -529,7 +554,7 @@ def main():
 
     include_dirs = [
         workspace_root_rel,
-        os.path.join(workspace_root_rel, "veldcore", "proto"),
+        os.path.join(workspace_root_rel, "veldcore", "interface"),
     ]
 
     # ── Workspace Config ─────────────────────────────────────────────────────
@@ -670,7 +695,7 @@ def main():
         template_data["proto_package"] = local_proto_package
         template_data["has_custom_wrap"] = has_wrap
         template_data["wrap_sdk_path"] = wrap_sdk_path
-        template_data["include_proto_dir"] = os.path.join(os.path.relpath(project_root, wrap_dir), "veldcore", "proto").replace("\\", "/")
+        template_data["include_proto_dir"] = os.path.join(os.path.relpath(project_root, wrap_dir), "veldcore", "interface").replace("\\", "/")
 
     for path, template in renders.items():
         os.makedirs(os.path.dirname(path), exist_ok=True)

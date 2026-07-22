@@ -1,4 +1,4 @@
-//! Реализация сервиса fs (контракт — veldcore/proto/fs.schema.yaml).
+//! Реализация сервиса fs (контракт — veldcore/interface/modules/fs/fs.schema.yaml).
 //! Свободные обработчики on_* вызываются сгенерированным клеем
 //! (generated/, buildgen): State, init и сигнатуры — по конвенции,
 //! как в wasm-модулях (crate::module).

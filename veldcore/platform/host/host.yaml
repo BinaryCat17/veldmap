@@ -1,4 +1,4 @@
-# Декларация реализации хоста для buildgen: из veldcore/proto/*.schema.yaml
+# Декларация реализации хоста для buildgen: из veldcore/interface *.schema.yaml
 # генерируются биндинги (proto-типы + стабы топиков) в platform/host/generated.
 # Другая реализация хоста (другой язык) — своя host.yaml и свой шаблон host_*.
 language: rust

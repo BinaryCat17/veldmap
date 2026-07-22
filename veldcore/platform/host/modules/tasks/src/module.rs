@@ -1,4 +1,4 @@
-//! Реализация сервиса tasks (контракт — veldcore/proto/tasks.schema.yaml).
+//! Реализация сервиса tasks (контракт — veldcore/interface/modules/tasks/tasks.schema.yaml).
 //! Свободные обработчики on_* вызываются сгенерированным клеем
 //! (generated/, buildgen): State, init и сигнатуры — по конвенции,
 //! как в wasm-модулях (crate::module).

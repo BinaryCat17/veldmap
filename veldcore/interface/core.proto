@@ -4,9 +4,10 @@ package veldmap.core;
 
 // Платформенный конверт и разделяемые примитивы.
 // Эта директория — публичный протокол платформы: общий интерфейс для любых
-// хостов и wasm-модулей. Рядом лежат контракты платформенных сервисов
-// (fs.proto, network.proto) и UI/окна/GPU (app.proto, graphics.proto).
-// Контракты wasm-модулей — types.proto рядом с их реализациями.
+// хостов и wasm-модулей. Рядом лежат контракты UI/окна/GPU (app.proto,
+// graphics.proto); контракты нативных сервисов (fs, network, tasks) — в
+// modules/<name>/<name>.proto. Контракты wasm-модулей — types.proto рядом
+// с их реализациями.
 // Системные примитивы (конфиг, энтропия) — не сервис, а ABI-вызовы:
 // veld_get_config, veld_random_bytes (см. host/core/src/abi.rs).
 

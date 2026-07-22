@@ -1,4 +1,4 @@
-//! Реализация сервиса network (контракт — veldcore/proto/network.schema.yaml).
+//! Реализация сервиса network (контракт — veldcore/interface/modules/network/network.schema.yaml).
 //! Свободные обработчики on_* вызываются сгенерированным клеем
 //! (generated/, buildgen): State, init и сигнатуры — по конвенции,
 //! как в wasm-модулях (crate::module).

@@ -183,8 +183,8 @@ def generate_code():
              "--schema",     schema_path,
              "--output-dir", generated_dir])
 
-    # Платформенные стабы SDK (топики app/*) из veldcore/proto/app.schema.yaml
-    app_schema = os.path.join(PROJECT_ROOT, "veldcore", "proto", "app.schema.yaml")
+    # Платформенные стабы SDK (топики app/*) из veldcore/interface/app.schema.yaml
+    app_schema = os.path.join(PROJECT_ROOT, "veldcore", "interface", "app.schema.yaml")
     if os.path.exists(app_schema):
         print("  Generating SDK platform stubs (app) ...")
         run([venv_python, gen_script,
@@ -192,7 +192,7 @@ def generate_code():
              "--sdk-stubs", os.path.join(PROJECT_ROOT, "veldcore", "sdk", "rust", "src", "app.rs")])
 
     # Платформенные стабы SDK системы задач (топики tasks/*)
-    tasks_schema = os.path.join(PROJECT_ROOT, "veldcore", "proto", "tasks.schema.yaml")
+    tasks_schema = os.path.join(PROJECT_ROOT, "veldcore", "interface", "modules", "tasks", "tasks.schema.yaml")
     if os.path.exists(tasks_schema):
         print("  Generating SDK platform stubs (tasks) ...")
         run([venv_python, gen_script,
@@ -209,7 +209,7 @@ def generate_code():
             print("  Generating host bindings ...")
             run([venv_python, gen_script,
                  "--host-bindings", os.path.join(host_dir, "generated"),
-                 "--proto-dir",     os.path.join(PROJECT_ROOT, "veldcore", "proto"),
+                 "--proto-dir",     os.path.join(PROJECT_ROOT, "veldcore", "interface"),
                  "--package",       host_pkg])
         else:
             print(f"  WARNING: no host bindings generator for language '{host_lang}', skipping")

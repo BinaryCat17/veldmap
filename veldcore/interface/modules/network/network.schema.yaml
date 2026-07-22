@@ -1,4 +1,4 @@
-# Контракт нативного сервиса network (сообщения — veldcore/proto/network.proto).
+# Контракт нативного сервиса network (сообщения — network.proto, рядом).
 # buildgen генерирует из этого файла хостовые биндинги (topics/emit).
 name: network
 version: 0.1.0

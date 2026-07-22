@@ -1,14 +1,14 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = &[
-        "../../proto/core.proto",
-        "../../proto/app.proto",
-        "../../proto/graphics.proto",
+        "../../interface/core.proto",
+        "../../interface/app.proto",
+        "../../interface/graphics.proto",
         // Контракты платформенных сервисов (fs, network, tasks)
-        "../../proto/fs.proto",
-        "../../proto/network.proto",
-        "../../proto/tasks.proto",
+        "../../interface/modules/fs/fs.proto",
+        "../../interface/modules/network/network.proto",
+        "../../interface/modules/tasks/tasks.proto",
     ];
-    let include_dirs = &["../../proto"];
+    let include_dirs = &["../../interface"];
 
     for proto in proto_files {
         println!("cargo:rerun-if-changed={}", proto);
