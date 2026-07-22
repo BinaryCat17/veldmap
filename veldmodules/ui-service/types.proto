@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package veldmap.ui;
+package veldmap.ui_service;
 
 import "core.proto";
 

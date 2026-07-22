@@ -1,4 +1,4 @@
-use crate::proto::dataprovider::{
+use crate::proto::data_provider::{
     DownloadRequest, DownloadStarted, DownloadProgress, Downloaded, CancelDownloadRequest,
     ListPathRequest, ListPathResponse
 };
@@ -35,7 +35,7 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
 
 pub fn on_search(
     _state: &mut State, 
-    _request: crate::proto::dataprovider::SearchRequest
+    _request: crate::proto::data_provider::SearchRequest
 ) {
     // TODO: Implement search via OData/OpenSearch
     info!("Search requested (not implemented)");

@@ -1,4 +1,4 @@
-use crate::proto::ui::proto::UiEventResponse;
+use crate::proto::ui_service::proto::UiEventResponse;
 use crate::module::state::State;
 
 /// Браузинг запрошен (через UI событие)
@@ -23,7 +23,7 @@ pub fn on_browse(
     state.browse.error = None;
     
     // Публикуем запрос к data-provider
-    crate::calls::data_provider::on_list_path(&crate::proto::dataprovider::ListPathRequest {
+    crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path: target_path,
         token: String::new(),
     });
@@ -48,7 +48,7 @@ pub fn on_browse_up(
     state.browse.is_loading = true;
     state.browse.error = None;
     
-    crate::calls::data_provider::on_list_path(&crate::proto::dataprovider::ListPathRequest {
+    crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path,
         token: String::new(),
     });
@@ -56,7 +56,7 @@ pub fn on_browse_up(
 
 pub fn on_list_path_result(
     state: &mut State,
-    response: crate::proto::dataprovider::ListPathResponse,
+    response: crate::proto::data_provider::ListPathResponse,
 ) {
     state.browse.is_loading = false;
 

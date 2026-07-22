@@ -8,23 +8,23 @@ hooks: [hook_event]
 interface:
   inputs:
     on_nav_browse:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_nav_search:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_nav_downloaded:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_browse:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_browse_up:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_search:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_search_input:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_download_pressed:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
     on_view_pressed:
-      type: ui/UiEventResponse
+      type: ui_service/UiEventResponse
 
 dependencies:
   # Платформенный контракт: хост просит владельца окна выделить поверхность.
@@ -36,24 +36,24 @@ dependencies:
   data-provider:
     subs:
       on_download_started:
-        type: dataprovider/DownloadStarted
+        type: data_provider/DownloadStarted
       on_download_progress:
-        type: dataprovider/DownloadProgress
+        type: data_provider/DownloadProgress
       on_downloaded:
-        type: dataprovider/Downloaded
+        type: data_provider/Downloaded
       on_search_result:
-        type: dataprovider/SearchResponse
+        type: data_provider/SearchResponse
       on_list_path_result:
-        type: dataprovider/ListPathResponse
+        type: data_provider/ListPathResponse
     calls:
       on_list_path:
-        type: dataprovider/ListPathRequest
+        type: data_provider/ListPathRequest
       on_download:
-        type: dataprovider/DownloadRequest
+        type: data_provider/DownloadRequest
       on_cancel_download:
-        type: dataprovider/CancelDownloadRequest
+        type: data_provider/CancelDownloadRequest
       on_search:
-        type: dataprovider/SearchRequest
+        type: data_provider/SearchRequest
   fs:
     subs:
       on_list_result:

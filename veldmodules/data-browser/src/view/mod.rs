@@ -10,7 +10,7 @@ pub mod preview;
 use crate::module::state::State;
 use crate::module::styles;
 use veld_ui_service_wrap::{column, row, container};
-use crate::proto::ui::{Element, text, button, Length, Padding, Color};
+use crate::proto::ui_service::{Element, text, button, Length, Padding, Color};
 
 pub fn build_root(state: &State) -> Element<()> {
     let main_content = match state.current_screen {

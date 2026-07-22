@@ -1,6 +1,6 @@
 use crate::module::state::{State, Screen, downloaded::LocalFile};
 use veldsdk::proto::fs::FsListRequest;
-use crate::proto::ui::proto::UiEventResponse;
+use crate::proto::ui_service::proto::UiEventResponse;
 
 pub fn on_nav_browse(state: &mut State, _event: UiEventResponse) {
     state.current_screen = Screen::Browse;
@@ -8,7 +8,7 @@ pub fn on_nav_browse(state: &mut State, _event: UiEventResponse) {
     // Запрашиваем листинг текущего пути при входе на экран
     state.browse.is_loading = true;
     state.browse.error = None;
-    crate::calls::data_provider::on_list_path(&crate::proto::dataprovider::ListPathRequest {
+    crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path: state.browse.current_path.clone(),
         token: String::new(),
     });

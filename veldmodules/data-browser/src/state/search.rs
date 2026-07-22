@@ -1,4 +1,4 @@
-use crate::proto::dataprovider::DataProduct;
+use crate::proto::data_provider::DataProduct;
 
 pub struct SearchState {
     pub query: String,

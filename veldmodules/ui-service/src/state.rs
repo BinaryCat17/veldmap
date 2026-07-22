@@ -1,4 +1,4 @@
-use crate::proto::ui as proto;
+use crate::proto::ui_service as proto;
 use veldsdk::OwnedResource;
 use veldsdk::graphics::{BindGroupId, BindGroupLayoutId, PipelineId, TextureViewId};
 use std::collections::HashMap;

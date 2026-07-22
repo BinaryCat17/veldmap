@@ -1,4 +1,4 @@
-use crate::proto::ui::*;
+use crate::proto::ui_service::*;
 use crate::module::state::{PluginUiState, State, PendingMessage};
 use veldsdk::proto::app as app_proto;
 use crate::module::renderer::GpuRenderer;
