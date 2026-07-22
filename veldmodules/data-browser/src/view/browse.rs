@@ -1,7 +1,7 @@
 //! View для экрана браузера
 
-use veld_ui_service_wrap::column;
-use crate::proto::ui::{text, button, scrollable, Element, Length};
+use veld_ui_service_wrap::{column, row};
+use crate::proto::ui::{text, button, scrollable, Element, Length, Alignment, Padding};
 use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
@@ -32,11 +32,18 @@ pub fn view(state: &State) -> Element<()> {
     
     column![
         text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-        crate::module::styles::apply_primary(button(text("⬆ Up"))).on_press("browse_up"),
+        crate::module::styles::apply_primary(button(
+            row![text("\u{f062}").font_family("Icons"), text("Up")]
+                .spacing(6.0)
+                .align_items(Alignment::Center)
+        )).on_press("browse_up"),
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)
     ]
     .spacing(15.0)
+    .padding(Padding::new(10.0))
+    .width(Length::Fill)
+    .height(Length::Fill)
     .into()
 }

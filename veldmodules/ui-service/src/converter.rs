@@ -1,12 +1,30 @@
 use crate::proto::ui as proto;
 use crate::module::renderer::GpuRenderer;
 use iced_widget::{column, row, text, button, container, scrollable, progress_bar, stack, tooltip, Space};
-use iced_core::{Element, Theme, Length, Color, alignment, Size};
+use iced_core::{Element, Theme, Length, Color, alignment, Size, Font, font::Family};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub struct UiMessage {
     pub method: String,
     pub value: String,
+}
+
+/// `iced_core::Font::family` требует `&'static str`, а логическое имя шрифта
+/// приходит рантаймовой строкой из proto (через wasm ABI). Каждое различное
+/// имя один раз "утекает" в статическую память и переиспользуется — набор
+/// имён на практике фиксирован (задан в коде плагинов), так что утечка ограничена.
+fn intern_font_family(name: &str) -> &'static str {
+    static INTERNED: Mutex<Option<HashMap<String, &'static str>>> = Mutex::new(None);
+    let mut guard = INTERNED.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    if let Some(existing) = map.get(name) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    map.insert(name.to_string(), leaked);
+    leaked
 }
 
 pub fn convert_layout(layout: &proto::Layout) -> Element<'static, UiMessage, Theme, GpuRenderer> {
@@ -49,7 +67,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Text widget has invalid size: {}. Resetting to 16.0", size);
                 size = 16.0;
             }
-            let txt = text(t.content.clone())
+            let mut txt = text(t.content.clone())
                 .size(size)
                 .color(convert_color(&t.color))
                 .width(convert_length(&t.width))
@@ -60,9 +78,12 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                     1 => iced_core::text::Shaping::Advanced,
                     _ => iced_core::text::Shaping::Basic,
                 });
-            
-            // TODO: Font family support
-            
+
+            if !t.font_family.is_empty() {
+                let family = intern_font_family(&t.font_family);
+                txt = txt.font(Font { family: Family::Name(family), ..Font::DEFAULT });
+            }
+
             txt.into()
         }
         Some(proto::widget::Type::Button(b)) => {

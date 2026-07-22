@@ -207,6 +207,12 @@ impl<M> Text<M> {
         self.widget.shaping = if advanced { 1 } else { 0 };
         self
     }
+    /// Логическое имя шрифта, как оно было зарегистрировано в `GpuRenderer::new`
+    /// на стороне ui-service (например "Icons"). Пусто — используется дефолтный шрифт.
+    pub fn font_family(mut self, name: impl Into<String>) -> Self {
+        self.widget.font_family = name.into();
+        self
+    }
 }
 
 impl<M> From<Text<M>> for Element<M> {

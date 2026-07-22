@@ -1,7 +1,7 @@
 //! View для экрана поиска
 
 use veld_ui_service_wrap::{column, row};
-use crate::proto::ui::{text, text_input, button, scrollable, Element, Length};
+use crate::proto::ui::{text, text_input, button, scrollable, Element, Length, Padding};
 use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
@@ -57,6 +57,7 @@ pub fn view(state: &State) -> Element<()> {
             .height(Length::Fill)
     ]
     .spacing(15.0)
+    .padding(Padding::new(10.0))
     .width(Length::Fill)
     .height(Length::Fill)
     .into()

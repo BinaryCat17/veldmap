@@ -17,44 +17,49 @@ pub struct ItemActions<'a> {
 }
 
 pub fn render_item(item: &BrowserItem, is_downloading: bool, actions: ItemActions) -> Element<()> {
-    let icon = if item.is_folder { "📁" } else { "📄" };
-    let title = format!("{} {}", icon, item.name);
+    // Иконка и имя — раздельные Text: у иконки свой шрифт (Icons), имя файла
+    // рисуется дефолтным — единая строка ломала бы одно из двух.
+    let icon_glyph = if item.is_folder { "\u{f07b}" } else { "\u{f016}" };
+    let title: Element<()> = row![
+        text(icon_glyph).font_family("Icons"),
+        text(item.name.clone()),
+    ].spacing(6.0).align_items(Alignment::Center).into();
 
     // Fill-ширина главной кнопки прижимает статус к правому краю строки
     let main_button: Element<()> = if item.is_folder {
         match actions.browse {
-            Some(method) => styles::apply_file(button(text(title)))
+            Some(method) => styles::apply_file(button(title))
                 .width(Length::Fill)
                 .on_press_with(method, item.s3_key.clone())
                 .into(),
-            None => text(title).into(),
+            None => title,
         }
     } else if item.exists_locally {
         match actions.view {
-            Some(method) => styles::apply_file(button(text(title)))
+            Some(method) => styles::apply_file(button(title))
                 .width(Length::Fill)
                 .on_press_with(method, item.s3_key.clone())
                 .into(),
-            None => text(title).into(),
+            None => title,
         }
     } else {
-        text(title).into()
+        title
     };
 
     let status: Element<()> = if is_downloading {
-        text("⏳").into()
+        text("\u{f254}").font_family("Icons").into()
     } else if item.exists_locally {
-        let mut r = row![text("✓")];
+        let mut r = row![text("\u{f00c}").font_family("Icons")];
         if let Some(method) = actions.view {
-            r = r.push(styles::apply_icon(button(text("👁")), styles::COLOR_PRIMARY).on_press_with(method, item.s3_key.clone()));
+            r = r.push(styles::apply_icon(button(text("\u{f06e}").font_family("Icons")), styles::COLOR_PRIMARY).on_press_with(method, item.s3_key.clone()));
         }
         if let Some(method) = actions.download {
-            r = r.push(styles::apply_icon(button(text("🔄")), styles::COLOR_RELOAD).on_press_with(method, item.s3_key.clone()));
+            r = r.push(styles::apply_icon(button(text("\u{f021}").font_family("Icons")), styles::COLOR_RELOAD).on_press_with(method, item.s3_key.clone()));
         }
-        r.spacing(5.0).into()
+        r.spacing(5.0).align_items(Alignment::Center).into()
     } else if !item.is_folder {
         match actions.download {
-            Some(method) => styles::apply_icon(button(text("⬇")), styles::COLOR_PRIMARY).on_press_with(method, item.s3_key.clone()).into(),
+            Some(method) => styles::apply_icon(button(text("\u{f019}").font_family("Icons")), styles::COLOR_PRIMARY).on_press_with(method, item.s3_key.clone()).into(),
             None => text("").into(),
         }
     } else {

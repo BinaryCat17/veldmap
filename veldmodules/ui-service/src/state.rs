@@ -73,6 +73,7 @@ impl State {
             plugins: HashMap::new(),
             renderer: GpuRenderer::new("JetBrains Mono", vec![
                 ("JetBrains Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
+                ("Icons", include_bytes!("../../../runtime/assets/SymbolsNerdFontMono-Regular.ttf")),
             ]),
             surface_format: sf,
         }
