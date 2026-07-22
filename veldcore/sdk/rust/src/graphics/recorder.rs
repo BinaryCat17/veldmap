@@ -22,12 +22,12 @@ impl RenderRecorder {
         self.commands.push(RenderCommand { command: Some(cmd) });
     }
 
-    pub fn set_pipeline(&mut self, pipeline: PipelineId) {
-        self.push(Command::SetPipeline(SetPipeline { pipeline_id: pipeline.0 }));
+    pub fn set_pipeline(&mut self, pipeline: &PipelineId) {
+        self.push(Command::SetPipeline(SetPipeline { pipeline_id: pipeline.id() }));
     }
 
-    pub fn set_bind_group(&mut self, index: u32, bind_group: BindGroupId) {
-        self.push(Command::SetBindGroup(SetBindGroup { index, bind_group_id: bind_group.0 }));
+    pub fn set_bind_group(&mut self, index: u32, bind_group: &BindGroupId) {
+        self.push(Command::SetBindGroup(SetBindGroup { index, bind_group_id: bind_group.id() }));
     }
 
     /// `buffer_region` — region id буфера из memory ABI; `size == 0` — до конца буфера.
@@ -71,9 +71,9 @@ impl RenderRecorder {
     }
 
     /// Отдаёт записанные команды хосту; исполнятся на следующем кадре.
-    pub fn submit(self, target: TextureViewId) -> anyhow::Result<()> {
+    pub fn submit(self, target: &TextureViewId) -> anyhow::Result<()> {
         let submit = Submit {
-            target_texture_view_id: target.0,
+            target_texture_view_id: target.id(),
             command_buffer: Some(CommandBuffer { commands: self.commands }),
         };
         crate::abi::graphics_execute(submit.encode_to_vec())?;

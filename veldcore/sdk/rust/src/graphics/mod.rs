@@ -27,11 +27,34 @@ use proto::{resource_request, ResourceRequest, CreateResourceResponse};
 
 // ── Типизированные идентификаторы GPU-объектов ─────────────────
 
+/// Сырой id GPU-объекта. Drop освобождает объект на хосте: тот же путь,
+/// что у memory-регионов (veld_memory_free умеет и то, и другое).
+/// Bind group/пайплайн на хосте держат wgpu-ссылки на свои ресурсы,
+/// поэтому раннее освобождение view/сэмплера/шейдера после создания
+/// bind group/пайплайна безопасно.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct RawGpuId(u64);
+
+impl Drop for RawGpuId {
+    fn drop(&mut self) {
+        crate::abi::arena_free(self.0);
+    }
+}
+
 macro_rules! gpu_id {
     ($(#[$doc:meta] $name:ident),+ $(,)?) => {$(
         #[$doc]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name(pub u64);
+        ///
+        /// Владение разделяемое (Arc): объект на хосте освобождается,
+        /// когда умирает последний владелец id.
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub struct $name(std::sync::Arc<RawGpuId>);
+
+        impl $name {
+            fn new(id: u64) -> Self { Self(std::sync::Arc::new(RawGpuId(id))) }
+            /// Сырой id объекта в реестре хоста.
+            pub fn id(&self) -> u64 { self.0.0 }
+        }
     )+};
 }
 
@@ -88,38 +111,38 @@ fn create(command: resource_request::Command) -> anyhow::Result<u64> {
 pub fn create_shader(source: &str, label: &str) -> anyhow::Result<ShaderId> {
     create(resource_request::Command::CreateShader(proto::CreateShaderModule {
         source: source.into(), label: label.into(),
-    })).map(ShaderId)
+    })).map(ShaderId::new)
 }
 
 pub fn create_sampler(mag_filter: FilterMode, min_filter: FilterMode) -> anyhow::Result<SamplerId> {
     create(resource_request::Command::CreateSampler(proto::CreateSampler {
         mag_filter: mag_filter as i32, min_filter: min_filter as i32,
-    })).map(SamplerId)
+    })).map(SamplerId::new)
 }
 
 /// View текстуры, выделенной через memory ABI (`texture_region` — region id).
 pub fn create_texture_view(texture_region: u64) -> anyhow::Result<TextureViewId> {
     create(resource_request::Command::CreateTextureView(proto::CreateTextureView {
         texture_id: texture_region,
-    })).map(TextureViewId)
+    })).map(TextureViewId::new)
 }
 
 pub fn create_bind_group_layout(label: &str, entries: Vec<BindGroupLayoutEntry>) -> anyhow::Result<BindGroupLayoutId> {
     create(resource_request::Command::CreateBindGroupLayout(proto::CreateBindGroupLayout {
         entries, label: label.into(),
-    })).map(BindGroupLayoutId)
+    })).map(BindGroupLayoutId::new)
 }
 
-pub fn create_bind_group(label: &str, layout: BindGroupLayoutId, entries: Vec<BindGroupEntry>) -> anyhow::Result<BindGroupId> {
+pub fn create_bind_group(label: &str, layout: &BindGroupLayoutId, entries: Vec<BindGroupEntry>) -> anyhow::Result<BindGroupId> {
     create(resource_request::Command::CreateBindGroup(proto::CreateBindGroup {
-        layout_id: layout.0, entries, label: label.into(),
-    })).map(BindGroupId)
+        layout_id: layout.id(), entries, label: label.into(),
+    })).map(BindGroupId::new)
 }
 
 /// `desc.shader_id` и `desc.bind_group_layout_ids` заполняются из
-/// соответствующих типизированных id (`ShaderId::0`, `BindGroupLayoutId::0`).
+/// соответствующих типизированных id (метод `id()`).
 pub fn create_render_pipeline(desc: CreateRenderPipeline) -> anyhow::Result<PipelineId> {
-    create(resource_request::Command::CreatePipeline(desc)).map(PipelineId)
+    create(resource_request::Command::CreatePipeline(desc)).map(PipelineId::new)
 }
 
 // ── Конструкторы записей bind group ────────────────────────────
@@ -128,12 +151,12 @@ pub fn buffer_entry(binding: u32, buffer_region: u64) -> BindGroupEntry {
     BindGroupEntry { binding, resource: Some(proto::bind_group_entry::Resource::BufferId(buffer_region)) }
 }
 
-pub fn texture_entry(binding: u32, view: TextureViewId) -> BindGroupEntry {
-    BindGroupEntry { binding, resource: Some(proto::bind_group_entry::Resource::TextureViewId(view.0)) }
+pub fn texture_entry(binding: u32, view: &TextureViewId) -> BindGroupEntry {
+    BindGroupEntry { binding, resource: Some(proto::bind_group_entry::Resource::TextureViewId(view.id())) }
 }
 
-pub fn sampler_entry(binding: u32, sampler: SamplerId) -> BindGroupEntry {
-    BindGroupEntry { binding, resource: Some(proto::bind_group_entry::Resource::SamplerId(sampler.0)) }
+pub fn sampler_entry(binding: u32, sampler: &SamplerId) -> BindGroupEntry {
+    BindGroupEntry { binding, resource: Some(proto::bind_group_entry::Resource::SamplerId(sampler.id())) }
 }
 
 // ── Конструкторы записей layout ────────────────────────────────

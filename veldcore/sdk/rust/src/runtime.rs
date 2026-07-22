@@ -1,13 +1,33 @@
 //! Рантайм модуля: хранение состояния между вызовами хоста и диспетчеризация
 //! обработчиков. Используется сгенерированным lib.rs модуля (buildgen).
+//!
+//! Wasm однопоточный: состояние живёт в thread_local RefCell — никаких
+//! Arc/Mutex и Send+Sync-ограничений на пользовательский State.
 
-pub static MODULE_STATE: once_cell::sync::OnceCell<
-    anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>>,
-> = once_cell::sync::OnceCell::new();
+use std::any::Any;
+use std::cell::RefCell;
 
-/// Состояние сервиса
-pub struct ServiceState<S> {
-    pub state: std::sync::Arc<std::sync::Mutex<S>>,
+thread_local! {
+    static MODULE_STATE: RefCell<Option<anyhow::Result<Box<dyn Any>>>> = RefCell::new(None);
+}
+
+/// Сохраняет состояние модуля (вызывается из init сгенерированного кода).
+/// Ошибка инициализации тоже сохраняется: handle_event сообщит о ней.
+pub fn set_state<S: 'static>(state: anyhow::Result<S>) {
+    MODULE_STATE.with(|slot| {
+        *slot.borrow_mut() = Some(state.map(|s| Box::new(s) as Box<dyn Any>));
+    });
+}
+
+/// Выполняет замыкание с &mut на состояние модуля.
+pub fn with_state<S: 'static, R>(f: impl FnOnce(&mut S) -> R) -> Result<R, String> {
+    MODULE_STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let cell = slot.as_mut().ok_or_else(|| "Module not initialized".to_string())?;
+        let boxed = cell.as_mut().map_err(|e| format!("Module initialization failed: {}", e))?;
+        let state = boxed.downcast_mut::<S>().expect("Failed to downcast state");
+        Ok(f(state))
+    })
 }
 
 // Топики сообщений объявляются только в schema.yaml: кодоген создаёт

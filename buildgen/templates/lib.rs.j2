@@ -85,20 +85,8 @@ pub extern "C" fn init() -> i32 {
         Err(_) => return 2,
     };
 
-    let state_result = {{ rust.init }}(config);
-    let boxed_state: anyhow::Result<std::sync::Arc<std::sync::Mutex<Box<dyn std::any::Any + Send + Sync>>>> = match state_result {
-        Ok(s) => {
-            let service_state = veldsdk::runtime::ServiceState::<{{ rust.state }}> {
-                state: std::sync::Arc::new(std::sync::Mutex::new(s)),
-            };
-            Ok(std::sync::Arc::new(std::sync::Mutex::new(Box::new(service_state))))
-        },
-        Err(e) => Err(e),
-    };
-
-    if veldsdk::runtime::MODULE_STATE.set(boxed_state).is_err() {
-         return 3;
-    }
+    // Ошибка инициализации тоже сохраняется: handle_event сообщит о ней.
+    veldsdk::runtime::set_state::<{{ rust.state }}>({{ rust.init }}(config));
     0
 }
 
@@ -119,37 +107,28 @@ pub extern "C" fn handle_event() -> i32 {
     veldsdk::abi::set_event_publisher(request.publisher);
 
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let state_arc = match veldsdk::runtime::MODULE_STATE.get() {
-            Some(Ok(s)) => s,
-            Some(Err(e)) => return Err(format!("Module initialization failed: {}", e)),
-            None => return Err("Module not initialized".to_string()),
-        };
-        let mut state_lock = state_arc.lock().unwrap();
-        let service = state_lock.downcast_mut::<veldsdk::runtime::ServiceState<{{ rust.state }}>>()
-            .expect("Failed to downcast state");
-
-        let mut app_state = service.state.lock().unwrap();
-
-        let handled = match topic.as_str() {
-            {% for topic, handler in handlers.items() %}
-            "{{ topic }}" => {
-                veldsdk::runtime::call_handler({{ handler }}, &mut *app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {{ topic }}: {}", e))?;
-                Ok(())
-            }
-            {% endfor %}
+        veldsdk::runtime::with_state(|app_state: &mut {{ rust.state }}| {
+            let handled = match topic.as_str() {
+                {% for topic, handler in handlers.items() %}
+                "{{ topic }}" => {
+                    veldsdk::runtime::call_handler({{ handler }}, app_state, &request.payload[..]).map_err(|e| format!("Failed to handle request for {{ topic }}: {}", e))?;
+                    Ok(())
+                }
+                {% endfor %}
+                {% if view_wrap_crate %}
+                // Lifecycle signal from the host: all services are loaded,
+                // the unconditional render below ships the initial view.
+                "app/ready" => Ok(()),
+                {% endif %}
+                _ => Err(format!("Unknown topic: {}", topic)),
+            };
             {% if view_wrap_crate %}
-            // Lifecycle signal from the host: all services are loaded,
-            // the unconditional render below ships the initial view.
-            "app/ready" => Ok(()),
+            if handled.is_ok() {
+                render_ui(&*app_state);
+            }
             {% endif %}
-            _ => Err(format!("Unknown topic: {}", topic)),
-        };
-        {% if view_wrap_crate %}
-        if handled.is_ok() {
-            render_ui(&*app_state);
-        }
-        {% endif %}
-        handled
+            handled
+        }).and_then(|h| h)
     }));
 
     // Шина fire-and-forget: ответ событию не полагается, ошибки — в лог.

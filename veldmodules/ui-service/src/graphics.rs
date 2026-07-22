@@ -20,7 +20,8 @@ const INDEX_BUFFER_SIZE: u64 = 2 * 1024 * 1024;
 
 /// Renders UI into the render target delegated by the window's owner (its
 /// texture, write-leased to this module). The view is cached per texture id:
-/// the owner allocates a new target on resize, changing the id.
+/// the owner allocates a new target on resize, changing the id; the stale
+/// view is freed on replacement.
 pub fn render_ui(
     plugin: &PluginUiState,
     renderer: &mut GpuRenderer,
@@ -32,17 +33,11 @@ pub fn render_ui(
 ) -> anyhow::Result<()> {
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] START {}x{} into texture {}", width, height, target_texture);
 
-    let view = {
-        let cached = *plugin.target_view.borrow();
-        match cached {
-            Some((tex, view)) if tex == target_texture => view,
-            _ => {
-                let view = gfx::create_texture_view(target_texture)?;
-                *plugin.target_view.borrow_mut() = Some((target_texture, view));
-                view
-            }
-        }
-    };
+    let fresh = matches!(&*plugin.target_view.borrow(), Some((tex, _)) if *tex == target_texture);
+    if !fresh {
+        let view = gfx::create_texture_view(target_texture)?;
+        *plugin.target_view.borrow_mut() = Some((target_texture, view));
+    }
 
     ensure_resources(plugin, renderer, surface_format)?;
 
@@ -74,7 +69,11 @@ pub fn render_ui(
     }
 
     // Submit render ops for the host frame loop to execute into the target
-    recorder.submit(view)?;
+    {
+        let target = plugin.target_view.borrow();
+        let view = &target.as_ref().expect("target view ensured above").1;
+        recorder.submit(view)?;
+    }
     veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] END");
     Ok(())
 }
@@ -115,8 +114,10 @@ fn render_geometry(
     }
 
     // Record draw commands if pipeline is ready
+    let ui_pipeline = plugin.ui_pipeline.borrow();
+    let uniform_bind_group = plugin.uniform_bind_group.borrow();
     if let (Some(pipeline), Some(ref v_h), Some(ref i_h), Some(uniform_bg)) =
-        (*plugin.ui_pipeline.borrow(), &*vertex_buffer, &*index_buffer, *plugin.uniform_bind_group.borrow())
+        (ui_pipeline.as_ref(), &*vertex_buffer, &*index_buffer, uniform_bind_group.as_ref())
     {
         recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
 
@@ -128,7 +129,7 @@ fn render_geometry(
                     recorder.set_vertex_buffer(0, v_h.id(), 0, (renderer.vertices.len() * vertex_size) as u64);
                     recorder.set_index_buffer(i_h.id(), IndexFormat::IdxUint16, 0, (renderer.indices.len() * 2) as u64);
                     recorder.set_bind_group(1, uniform_bg);
-                    if let Some(atlas_bg) = renderer.atlas_bind_group {
+                    if let Some(atlas_bg) = renderer.atlas_bind_group.as_ref() {
                         recorder.set_bind_group(0, atlas_bg);
                     }
                     recorder.draw_indexed(current_index_offset..(*count + current_index_offset), 0, 0..1);
@@ -140,10 +141,10 @@ fn render_geometry(
                 DrawCmd::ExternalImage { texture_id, index_count, .. } => {
                     match get_external_bind_group(plugin, renderer, *texture_id) {
                         Ok(bg) => {
-                            recorder.set_bind_group(0, bg);
+                            recorder.set_bind_group(0, &bg);
                             recorder.draw_indexed(current_index_offset..(current_index_offset + *index_count), 0, 0..1);
                             current_index_offset += *index_count;
-                            if let Some(atlas_bg) = renderer.atlas_bind_group {
+                            if let Some(atlas_bg) = renderer.atlas_bind_group.as_ref() {
                                 recorder.set_bind_group(0, atlas_bg);
                             }
                         }
@@ -166,20 +167,20 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
         return Err(anyhow!("Invalid texture_id: 0"));
     }
     let mut cache = plugin.external_bind_groups.borrow_mut();
-    if let Some(&bg) = cache.get(&texture_id) {
-        return Ok(bg);
+    if let Some(bg) = cache.get(&texture_id) {
+        return Ok(bg.clone());
     }
 
-    let layout = renderer.atlas_layout.ok_or_else(|| anyhow!("No atlas layout"))?;
+    let layout = renderer.atlas_layout.as_ref().ok_or_else(|| anyhow!("No atlas layout"))?;
     let view = gfx::create_texture_view(texture_id)?;
     let sampler = gfx::create_sampler(FilterMode::FiltLinear, FilterMode::FiltLinear)?;
     let bg = gfx::create_bind_group(
         &format!("External Image BG {}", texture_id),
         layout,
-        vec![gfx::texture_entry(0, view), gfx::sampler_entry(1, sampler)],
+        vec![gfx::texture_entry(0, &view), gfx::sampler_entry(1, &sampler)],
     )?;
 
-    cache.insert(texture_id, bg);
+    cache.insert(texture_id, bg.clone());
     veldsdk::vdebug!(veldsdk::FLAG_GRAPHICS, "Created external bind group {:?} for texture {}", bg, texture_id);
     Ok(bg)
 }
@@ -221,11 +222,11 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
         let shader = gfx::create_shader(include_str!("shaders.wgsl"), "UI Shader")?;
 
         let mut bgl_ids = Vec::new();
-        if let Some(layout) = renderer.atlas_layout { bgl_ids.push(layout.0); }
-        if let Some(layout) = *plugin.uniform_layout.borrow() { bgl_ids.push(layout.0); }
+        if let Some(layout) = renderer.atlas_layout.as_ref() { bgl_ids.push(layout.id()); }
+        if let Some(layout) = plugin.uniform_layout.borrow().as_ref() { bgl_ids.push(layout.id()); }
 
         let pipeline = gfx::create_render_pipeline(CreateRenderPipeline {
-            shader_id: shader.0,
+            shader_id: shader.id(),
             label: "UI Pipeline".into(),
             vertex_entry: "vs_main".into(),
             fragment_entry: "fs_main".into(),
@@ -258,9 +259,9 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
 
 fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
     let mut uniform_bind_group = plugin.uniform_bind_group.borrow_mut();
-    let layout = *plugin.uniform_layout.borrow();
+    let layout = plugin.uniform_layout.borrow();
     if uniform_bind_group.is_none() {
-        if let Some(layout) = layout {
+        if let Some(layout) = layout.as_ref() {
             let buf_region = arena_alloc_buffer(16, buffer_usage::UNIFORM, false)
                 .ok_or_else(|| anyhow!("Failed to allocate uniform buffer"))?;
             *plugin.uniform_buffer_region.borrow_mut() = Some(buf_region);
@@ -286,12 +287,12 @@ fn ensure_atlas_texture(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
 
 fn ensure_atlas_bind_group(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     if renderer.atlas_bind_group.is_none() {
-        if let (Some(atlas_texture), Some(layout)) = (renderer.atlas_texture_id, renderer.atlas_layout) {
+        if let (Some(atlas_texture), Some(layout)) = (renderer.atlas_texture_id, renderer.atlas_layout.as_ref()) {
             let view = gfx::create_texture_view(atlas_texture)?;
             let sampler = gfx::create_sampler(FilterMode::FiltLinear, FilterMode::FiltLinear)?;
             renderer.atlas_bind_group = Some(gfx::create_bind_group(
                 "Iced Atlas BG", layout,
-                vec![gfx::texture_entry(0, view), gfx::sampler_entry(1, sampler)],
+                vec![gfx::texture_entry(0, &view), gfx::sampler_entry(1, &sampler)],
             )?);
         }
     }
