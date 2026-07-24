@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Correlator<T> {
     pending: HashMap<String, T>,
 }
@@ -53,5 +53,26 @@ impl<T> Correlator<T> {
     /// Снимает id с учёта, не забирая контекст; true, если он был на учёте.
     pub fn remove(&mut self, correlation_id: &str) -> bool {
         self.pending.remove(correlation_id).is_some()
+    }
+
+    /// Контекст по id без снятия с учёта — для чтения состояния задачи.
+    pub fn get(&self, correlation_id: &str) -> Option<&T> {
+        self.pending.get(correlation_id)
+    }
+
+    /// Изменяемый доступ к контексту по id без снятия с учёта — для
+    /// обновления состояния "на месте" (например, прогресса задачи).
+    pub fn get_mut(&mut self, correlation_id: &str) -> Option<&mut T> {
+        self.pending.get_mut(correlation_id)
+    }
+
+    /// Все зарегистрированные контексты — для сводок вроде "активные задачи".
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.pending.values()
+    }
+
+    /// Изменяемый вариант `values` — для массовых обновлений на месте.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.pending.values_mut()
     }
 }

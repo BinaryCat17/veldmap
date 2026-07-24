@@ -10,6 +10,7 @@ use veldmap_host_util::bindings::proto::network::{
 };
 use veldmap_host_util::path::{is_path_safe, resolve_path};
 use std::fs;
+use std::path::PathBuf;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 
@@ -22,6 +23,36 @@ fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> Stri
         correlation_id: correlation_id.to_string(),
     });
     error
+}
+
+/// Владеет .part-файлом скачивания, пока оно не завершится. Drop удаляет
+/// файл, если downloading не закончилась явным `commit()` — так подчищается
+/// обрывок и при ошибке, и при отмене: `AbortHandle::abort()` (см.
+/// core::tasks::TaskRegistry::cancel) дропает future на месте, код после
+/// точки `.await` не выполняется вообще, и Drop живых локальных — единственный
+/// код, который платформа гарантированно исполнит. Тот же паттерн, что у
+/// `OwnedResource` в veldsdk, только с коммитом вместо безусловного free.
+struct PartFileGuard(Option<PathBuf>);
+
+impl PartFileGuard {
+    fn new(part_path: PathBuf) -> Self {
+        Self(Some(part_path))
+    }
+
+    /// Успех: снимает файл с учёта — Drop его больше не тронет, вызывающий
+    /// сам переименовывает .part в конечное имя.
+    fn commit(mut self) -> PathBuf {
+        self.0.take().expect("commit called twice")
+    }
+}
+
+impl Drop for PartFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            // Sync: Drop не умеет .await, а remove_file — лёгкая unlink-операция.
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) {
@@ -37,6 +68,13 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
     let path = resolve_path(&ctx, &req.path);
     if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
     let label = req.path.clone();
+    // Суффикс, а не замена расширения (set_extension) — иначе "foo.tif" и
+    // "foo.zip" в одной папке схлопнулись бы в один и тот же "foo.part".
+    let part_path: PathBuf = {
+        let mut s = path.clone().into_os_string();
+        s.push(".part");
+        s.into()
+    };
 
     // owner = инициатор запроса: отменить скачивание может он, хост
     // или сервис с его grant'ом (топик tasks/cancel).
@@ -59,7 +97,8 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
         let mut last_percent: u32 = 0;
         let mut stream = res.bytes_stream();
 
-        match tokio::fs::File::create(&path).await {
+        let guard = PartFileGuard::new(part_path.clone());
+        match tokio::fs::File::create(&part_path).await {
             Ok(mut async_file) => {
                 while let Some(chunk_res) = stream.next().await {
                     match chunk_res {
@@ -86,6 +125,15 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
                 let _ = async_file.flush().await;
             }
             Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("File create error: {}", e))),
+        }
+
+        // Атомарно проявляем файл под конечным именем только теперь: до
+        // этой строки на диске в любой ветке (успех кода ниже ещё не
+        // выполнился, ошибка, отмена) лежит только .part, а не файл под
+        // именем, которое fs/list отдаёт как "скачано".
+        let part_path = guard.commit();
+        if let Err(e) = tokio::fs::rename(&part_path, &path).await {
+            return Err(fail_download(&ctx, &correlation_id, format!("Rename error: {}", e)));
         }
 
         log::info!(target: "host", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
