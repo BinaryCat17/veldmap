@@ -90,6 +90,11 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
             res.content_length().unwrap_or(0)
         };
         let mut last_percent: u32 = if total_size > 0 { (downloaded * 100 / total_size) as u32 } else { 0 };
+        // Троттлинг для ответов без Content-Length: процента нет, поэтому
+        // считаем каждый мегабайт — иначе (total_size == 0) прогресс не
+        // репортился бы вовсе, а UI не увидел бы даже байтовый счётчик.
+        const BYTES_THROTTLE: u64 = 1 << 20;
+        let mut last_reported_bytes: u64 = downloaded;
         let mut stream = res.bytes_stream();
 
         let file_result = if resuming {
@@ -107,7 +112,8 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
                                 return Err(fail_download(&ctx, &correlation_id, format!("Write error: {}", e)));
                             }
                             downloaded += chunk.len() as u64;
-                            // Прогресс событием, с троттлингом по целым процентам.
+                            // Прогресс событием, с троттлингом: по целым процентам,
+                            // если известен total_size, иначе по мегабайтам.
                             if total_size > 0 {
                                 let percent = (downloaded * 100 / total_size) as u32;
                                 if percent > last_percent {
@@ -115,8 +121,18 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
                                     bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
                                         correlation_id: correlation_id.clone(),
                                         progress: downloaded as f32 / total_size as f32,
+                                        downloaded_bytes: downloaded,
+                                        total_bytes: total_size,
                                     });
                                 }
+                            } else if downloaded - last_reported_bytes >= BYTES_THROTTLE {
+                                last_reported_bytes = downloaded;
+                                bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
+                                    correlation_id: correlation_id.clone(),
+                                    progress: 0.0,
+                                    downloaded_bytes: downloaded,
+                                    total_bytes: 0,
+                                });
                             }
                         }
                         Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("Stream error: {}", e))),

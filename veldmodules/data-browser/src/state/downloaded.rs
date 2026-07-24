@@ -2,7 +2,13 @@ use std::collections::HashMap;
 
 pub struct DownloadedState {
     pub local_files: Vec<LocalFile>,
-    pub active_downloads: HashMap<String, DownloadProgress>,
+    /// task_id -> путь удаляемого файла: пользователь нажал корзину, пока
+    /// файл качается. Удалить `.part` поверх активной записи нельзя (host
+    /// держит файл открытым, см. network::download.rs) — сначала отменяем
+    /// закачку, сам delete срабатывает в on_downloaded по приходу отмены
+    /// (событие несёт тот же task_id, которым мы тут регистрируем intent —
+    /// см. Correlator::insert, обратный поиск по s3_key не нужен).
+    pub pending_delete_on_cancel: veldsdk::Correlator<String>,
     /// filename -> remote-ключ, из которого файл был скачан в этой сессии.
     /// fs/on_list не знает происхождения файла, поэтому источник истины для
     /// re-download — только эта таблица, а не пересканирование диска.
@@ -20,10 +26,9 @@ pub struct DownloadedState {
 }
 
 impl DownloadedState {
-    /// Путь уже полностью скачанного локального файла с данным именем.
-    /// Недокачанные (`is_partial`) не считаются — их некуда "просматривать".
-    pub fn local_path_for(&self, filename: &str) -> Option<String> {
-        self.local_files.iter().find(|f| f.name == filename && !f.is_partial).map(|f| f.path.clone())
+    /// Локальная запись (полная или недокачанная) с данным именем, если есть.
+    pub fn entry_for(&self, filename: &str) -> Option<&LocalFile> {
+        self.local_files.iter().find(|f| f.name == filename)
     }
 }
 
@@ -65,24 +70,11 @@ pub struct LocalFile {
     pub is_partial: bool,
 }
 
-pub struct DownloadProgress {
-    pub s3_key: String,
-    pub task_id: String,
-    pub progress: f32,
-    pub status: DownloadStatus,
-}
-
-pub enum DownloadStatus {
-    Downloading,
-    Completed,
-    Failed(String),
-}
-
 impl Default for DownloadedState {
     fn default() -> Self {
         Self {
             local_files: Vec::new(),
-            active_downloads: HashMap::new(),
+            pending_delete_on_cancel: veldsdk::Correlator::new(),
             known_origins: HashMap::new(),
             pending_list: veldsdk::Correlator::new(),
             pending_delete: veldsdk::Correlator::new(),

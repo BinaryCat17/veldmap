@@ -21,6 +21,7 @@ pub fn on_browse(
 
     state.browse.is_loading = true;
     state.browse.error = None;
+    state.global.status_message = format!("Loading /{}...", target_path);
 
     // Публикуем запрос к data-provider
     let correlation_id = state.browse.pending.begin(());
@@ -49,6 +50,7 @@ pub fn on_browse_up(
     state.browse.current_path = path.clone();
     state.browse.is_loading = true;
     state.browse.error = None;
+    state.global.status_message = format!("Loading /{}...", path);
 
     let correlation_id = state.browse.pending.begin(());
     crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
@@ -72,6 +74,7 @@ pub fn on_list_path_result(
     if !response.error.is_empty() {
         state.browse.error = Some(response.error);
         state.browse.items = Vec::new();
+        state.global.status_message = "Load failed".to_string();
         return;
     }
     state.browse.error = None;
@@ -84,5 +87,6 @@ pub fn on_list_path_result(
             is_folder,
         }
     }).collect();
+    state.global.status_message = format!("{} items", state.browse.items.len());
     // Рендер происходит автоматически в on_frame
 }

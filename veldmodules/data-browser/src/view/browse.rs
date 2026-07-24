@@ -1,53 +1,58 @@
 //! View для экрана браузера
 
 use veld_ui_service_wrap::{column, row};
-use crate::proto::ui_service::{text, button, scrollable, Element, Length, Alignment, Padding};
+use crate::proto::ui_service::{text, button, Element, Alignment};
 use crate::module::state::State;
-use crate::module::components::browser_list::{render_list, ItemActions};
+use crate::module::components::browser_list::{items_or_message, list_screen, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
-use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED};
+use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
 use crate::module::state::downloaded::filename_from_key;
 
 pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;
     let task_manager = &state.global.task_manager;
-    
-    let list = if let Some(err) = &browse_state.error {
+
+    let body: Element<()> = if let Some(err) = &browse_state.error {
         column![text(format!("Error: {}", err)).size(16.0)].into()
-    } else if browse_state.items.is_empty() {
-        column![text("No items found").size(16.0)].into()
     } else {
-        let items: Vec<BrowserItem> = browse_state.items.iter().map(|i| BrowserItem {
-            s3_key: i.s3_key.clone(),
-            name: i.name.clone(),
-            description: None,
-            is_folder: i.is_folder,
-            local_path: if i.is_folder { None } else {
-                state.downloaded.local_path_for(&filename_from_key(&i.s3_key))
-            },
+        let items: Vec<BrowserItem> = browse_state.items.iter().map(|i| {
+            // Папки нет смысла сверять с локальными файлами — это ключ
+            // remote-префикса, а не имя файла.
+            let entry = if i.is_folder { None } else { state.downloaded.entry_for(&filename_from_key(&i.s3_key)) };
+            BrowserItem {
+                s3_key: i.s3_key.clone(),
+                name: i.name.clone(),
+                description: None,
+                is_folder: i.is_folder,
+                local_path: entry.map(|f| f.path.clone()),
+                is_partial: entry.map(|f| f.is_partial).unwrap_or(false),
+                size: entry.map(|f| f.size).unwrap_or(0),
+            }
         }).collect();
-        
-        render_list(&items, task_manager, ItemActions {
+
+        items_or_message(&items, task_manager, ItemActions {
             browse: Some(ON_BROWSE),
             view: Some(ON_VIEW_PRESSED),
             download: Some(ON_DOWNLOAD_PRESSED),
-        })
+            delete: Some(ON_DELETE_PRESSED),
+        }, "No items found")
     };
-    
-    column![
-        text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-        crate::module::styles::apply_primary(button(
-            row![text("\u{f062}").font_family("Icons"), text("Up")]
-                .spacing(6.0)
-                .align_items(Alignment::Center)
-        )).on_press(ON_BROWSE_UP),
-        scrollable(list)
-            .width(Length::Fill)
-            .height(Length::Fill)
-    ]
-    .spacing(15.0)
-    .padding(Padding::new(10.0))
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+
+    let title_row: Element<()> = if browse_state.is_loading {
+        row![
+            text(format!("Browse: {}", browse_state.current_path)).size(20.0),
+            text("\u{f110}").font_family("Icons").color(crate::module::styles::COLOR_TEXT_DIM),
+            text("Loading...").size(14.0).color(crate::module::styles::COLOR_TEXT_DIM),
+        ].spacing(8.0).align_items(Alignment::Center).into()
+    } else {
+        text(format!("Browse: {}", browse_state.current_path)).size(20.0).into()
+    };
+
+    let up_button: Element<()> = crate::module::styles::apply_primary(button(
+        row![text("\u{f062}").font_family("Icons"), text("Up")]
+            .spacing(6.0)
+            .align_items(Alignment::Center)
+    )).on_press(ON_BROWSE_UP).into();
+
+    list_screen(vec![title_row, up_button], body)
 }

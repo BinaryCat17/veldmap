@@ -24,6 +24,8 @@ message FsDownloadResponse {
 message FsDownloadProgress {
   string correlation_id = 1;
   float progress = 2;  // 0.0 to 1.0
+  uint64 downloaded_bytes = 3;
+  uint64 total_bytes = 4;  // 0, если сервер не прислал Content-Length
 }
 
 // --- HTTP API ---

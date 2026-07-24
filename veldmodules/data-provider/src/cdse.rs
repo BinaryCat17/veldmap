@@ -184,11 +184,15 @@ pub fn on_fs_download_progress(
 ) {
     // Транслируем прогресс только своих активных загрузок.
     if !state.tasks.is_pending(&event.correlation_id) {
+        log::info!("[data-provider] on_fs_download_progress: dropping progress for unknown/finished task {}", event.correlation_id);
         return;
     }
+    log::info!("[data-provider] relaying progress task={} bytes={}/{}", event.correlation_id, event.downloaded_bytes, event.total_bytes);
     crate::emit::on_download_progress(&DownloadProgress {
         task_id: event.correlation_id,
         progress: event.progress,
+        downloaded_bytes: event.downloaded_bytes,
+        total_bytes: event.total_bytes,
     });
 }
 

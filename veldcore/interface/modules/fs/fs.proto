@@ -34,8 +34,13 @@ message FsListRequest {
   string correlation_id = 2;
 }
 
+message FsEntry {
+  string name = 1;
+  uint64 size = 2;
+}
+
 message FsListResult {
-  repeated string entries = 1;
+  repeated FsEntry entries = 1;
   string error = 2;
   string correlation_id = 3;
 }

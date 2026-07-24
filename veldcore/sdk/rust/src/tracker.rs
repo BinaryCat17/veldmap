@@ -32,13 +32,15 @@ impl TaskTracker {
         self.tasks.remove(task_id)
     }
 
-    /// Отмена: снимает задачу с учёта и публикует tasks/cancel. Отмену
+    /// Отмена: публикует tasks/cancel, не снимая задачу с учёта. Отмену
     /// выполнит платформа (права проверяются по lease: модуль — владелец
     /// своих задач). Терминальное событие придёт как tasks/task_finished
-    /// {cancelled} — доменную реакцию на отмену размещайте там, а не здесь.
+    /// {cancelled} — снятие с учёта и доменная реакция на отмену только
+    /// там (см. finish), иначе finish() на терминальном событии всегда
+    /// увидит задачу уже отсутствующей и молча проглотит его.
     /// false — задача не принадлежит модулю, событие не опубликовано.
     pub fn cancel(&mut self, task_id: &str) -> bool {
-        if !self.tasks.remove(task_id) {
+        if !self.tasks.contains(task_id) {
             return false;
         }
         crate::tasks::on_cancel(&crate::proto::tasks::TaskCancelRequest {

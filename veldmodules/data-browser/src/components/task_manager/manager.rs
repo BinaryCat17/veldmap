@@ -22,7 +22,7 @@ impl TaskKind {
         }
     }
     
-    /// Проверяет, относится ли задача к конкретному ключу (для проверки is_downloading)
+    /// Проверяет, относится ли задача к конкретному ключу (для active_download)
     pub fn matches_key(&self, key: &str) -> bool {
         match self {
             TaskKind::Download { s3_key, .. } => s3_key == key,
@@ -37,6 +37,12 @@ pub struct TaskInfo {
     pub id: String,
     pub kind: TaskKind,
     pub progress: f32,
+    /// Байтовый прогресс закачки — 0/0, пока событие ещё не пришло, или для
+    /// задач, у которых его нет в принципе (Browse/Search/ImageLoad).
+    pub bytes_downloaded: u64,
+    /// 0, если сервер не прислал Content-Length — UI показывает только
+    /// bytes_downloaded, без процента и без "из скольки".
+    pub total_bytes: u64,
     pub is_finished: bool,
     pub error: Option<String>,
 }
@@ -58,6 +64,8 @@ impl TaskManager {
             id: id.clone(),
             kind,
             progress: 0.0,
+            bytes_downloaded: 0,
+            total_bytes: 0,
             is_finished: false,
             error: None,
         };
@@ -66,10 +74,13 @@ impl TaskManager {
         id
     }
 
-    /// Обновляет прогресс задачи
-    pub fn update_progress(&mut self, id: &str, progress: f32) {
+    /// Обновляет прогресс закачки — доля и байты вместе, единым событием
+    /// (см. handlers::download::on_download_progress), чтобы не разъезжались.
+    pub fn update_download_progress(&mut self, id: &str, progress: f32, bytes_downloaded: u64, total_bytes: u64) {
         if let Some(task) = self.tasks.get_mut(id) {
             task.progress = progress.clamp(0.0, 1.0);
+            task.bytes_downloaded = bytes_downloaded;
+            task.total_bytes = total_bytes;
         }
     }
 
@@ -135,8 +146,9 @@ impl TaskManager {
         }
     }
 
-    /// Проверяет, скачивается ли файл с данным ключом
-    pub fn is_downloading(&self, key: &str) -> bool {
-        self.tasks.values().any(|t| !t.is_finished && t.kind.matches_key(key))
+    /// Активная (незавершённая) задача закачки данного s3_key, если есть —
+    /// источник и для флага "качается", и для прогресса/кнопок в browser_list.
+    pub fn active_download(&self, key: &str) -> Option<&TaskInfo> {
+        self.tasks.values().find(|t| !t.is_finished && t.kind.matches_key(key))
     }
 }

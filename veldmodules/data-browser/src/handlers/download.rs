@@ -1,7 +1,7 @@
 use crate::proto::data_provider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded, CancelDownloadRequest};
 use crate::proto::ui_service::proto::UiEventResponse;
 
-use crate::module::state::{State, downloaded::{DownloadStatus, OriginSidecar, PROVIDER_NAME, filename_from_key}};
+use crate::module::state::{State, downloaded::{OriginSidecar, PROVIDER_NAME, filename_from_key}};
 use crate::module::components::task_manager::TaskKind;
 
 /// Пользователь нажал кнопку скачать.
@@ -16,13 +16,16 @@ pub fn on_download_pressed(
     if s3_key.is_empty() { return; }
 
     // Отмена активной загрузки: data-provider пришлёт Downloaded{success:false},
-    // и on_downloaded снимет задачу с панели.
-    if let Some(dl) = state.downloaded.active_downloads.get(&s3_key) {
-        let task_id = dl.task_id.clone();
+    // и on_downloaded снимет задачу с панели. TaskManager — единственный
+    // источник "качается ли s3_key сейчас", отдельной таблицы не заводим.
+    if let Some(task) = state.global.task_manager.active_download(&s3_key) {
+        let task_id = task.id.clone();
+        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_download_pressed: cancelling task={} for s3_key={}", task_id, s3_key);
         state.global.status_message = format!("Cancelling download: {}", filename);
         crate::calls::data_provider::on_cancel_download(&CancelDownloadRequest { task_id });
         return;
     }
+    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_download_pressed: starting new download for s3_key={}", s3_key);
 
     // Origin — сразу, до ответа data-provider: даже если приложение упадёт
     // на первом байте, .part на диске уже будет знать, откуда он взялся.
@@ -45,11 +48,12 @@ fn write_origin_sidecar(state: &mut State, filename: &str, identifier: &str) {
 
     let Some(region_id) = veldsdk::abi::arena_alloc_cpu(json.len() as u64) else { return };
     veldsdk::abi::arena_write(region_id, 0, &json);
-    if !veldsdk::abi::arena_grant_read(region_id, "fs") {
-        veldsdk::abi::arena_free(region_id);
-        return;
-    }
 
+    // Гранта на "fs" не нужно (и он бы не сработал: fs — хостовый нативный
+    // модуль, не wasm-плагин, dispatcher.instance_of его не резолвит — эта
+    // таблица заполняется только для wasm-плагинов, см. plugins.rs). on_write
+    // проверяет доступ по requestor_id — паблишеру события, то есть нам же,
+    // а мы и так владелец региона: доступ есть по праву владения.
     let correlation_id = state.downloaded.pending_sidecar_writes.begin(region_id);
     crate::calls::fs::on_write(&veldsdk::proto::fs::FsWriteRequest {
         path: format!("data/dem/source/{}.origin", filename),
@@ -119,13 +123,20 @@ pub fn on_download_started(
         }
     );
     
-    state.downloaded.active_downloads.insert(event.identifier.clone(), crate::module::state::downloaded::DownloadProgress {
-        s3_key: event.identifier,
-        task_id: event.task_id,
-        progress: 0.0,
-        status: DownloadStatus::Downloading,
-    });
-    
+    // Строка в Downloaded — сразу, не дожидаясь ни следующего захода на экран
+    // (снимок fs/on_list берётся только при навигации), ни появления .part на
+    // диске (сетевой запрос к CDSE может занять секунды до первых байт) — всё
+    // нужное для строки уже известно из этого события.
+    if !state.downloaded.local_files.iter().any(|f| f.name == filename) {
+        state.downloaded.local_files.push(crate::module::state::downloaded::LocalFile {
+            path: format!("data/dem/source/{}.part", filename),
+            name: filename.clone(),
+            size: 0,
+            origin_key: Some(event.identifier),
+            is_partial: true,
+        });
+    }
+
     state.global.status_message = format!("Starting download: {}", filename);
     // Рендер происходит автоматически в on_frame
 }
@@ -134,14 +145,13 @@ pub fn on_download_progress(
     state: &mut State,
     event: DownloadProgress,
 ) {
-    state.global.task_manager.update_progress(&event.task_id, event.progress);
-    
-    for dl in state.downloaded.active_downloads.values_mut() {
-        if dl.task_id == event.task_id {
-            dl.progress = event.progress;
-            break;
-        }
-    }
+    // TODO(debug): временно, снять после диагностики "прогресс не виден
+    // в реальном времени" — проверяем, доходит ли событие вообще и с
+    // какими значениями.
+    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] download_progress task={} progress={} bytes={}/{}", event.task_id, event.progress, event.downloaded_bytes, event.total_bytes);
+    state.global.task_manager.update_download_progress(
+        &event.task_id, event.progress, event.downloaded_bytes, event.total_bytes,
+    );
     // Рендер происходит автоматически в on_frame
 }
 
@@ -149,31 +159,38 @@ pub fn on_downloaded(
     state: &mut State,
     event: Downloaded,
 ) {
-    let s3_key = state.downloaded.active_downloads
-        .iter()
-        .find(|(_, dl)| dl.task_id == event.task_id)
-        .map(|(k, _): (&String, &crate::module::state::downloaded::DownloadProgress)| k.clone());
-    
-    if let Some(key) = s3_key {
-        let filename = filename_from_key(&key);
-        state.downloaded.active_downloads.remove(&key);
-        state.global.task_manager.finish(&event.task_id);
+    // s3_key/filename этой задачи — только в TaskManager (TaskKind::Download),
+    // отдельной таблицы не держим.
+    let filename = match state.global.task_manager.get(&event.task_id).map(|t| t.kind.clone()) {
+        Some(TaskKind::Download { filename, .. }) => filename,
+        _ => return,
+    };
+    state.global.task_manager.finish(&event.task_id);
 
-        if event.success {
-            // known_origins для filename уже выставлен в write_origin_sidecar
-            // при старте закачки — здесь просто финальный статус.
-            state.global.status_message = format!("Downloaded: {}", filename);
-        } else {
-            state.global.error_message = Some(format!("Download failed: {}", event.error));
-            state.global.task_manager.fail(&event.task_id, event.error);
-        }
+    // Корзина нажималась во время закачки — тогда это не отмена ради отмены,
+    // а отложенный delete (см. on_delete_pressed): .part на диске остаётся
+    // ровно там, где abort его бросил (см. network::download.rs), теперь его
+    // можно безопасно удалить.
+    if let Some(path) = state.downloaded.pending_delete_on_cancel.take(&event.task_id) {
+        delete_local_file(state, path);
+        state.global.status_message = format!("Deleted: {}", filename);
+        return;
+    }
+
+    if event.success {
+        // known_origins для filename уже выставлен в write_origin_sidecar
+        // при старте закачки — здесь просто финальный статус.
+        state.global.status_message = format!("Downloaded: {}", filename);
+    } else {
+        state.global.error_message = Some(format!("Download failed: {}", event.error));
+        state.global.task_manager.fail(&event.task_id, event.error);
     }
     // Рендер происходит автоматически в on_frame
 }
 
-/// Пользователь нажал "удалить" на недокачанном файле (экран Downloaded).
-/// Полностью скачанные файлы удалять пока негде в UI — эта кнопка только
-/// для .part (см. browser_list рендер экрана Downloaded).
+/// Пользователь нажал "удалить" — на любом локальном файле (полном или
+/// недокачанном), на обоих экранах (Browse/Downloaded используют один и
+/// тот же browser_list-компонент, см. components::browser_list).
 pub fn on_delete_pressed(
     state: &mut State,
     event: UiEventResponse,
@@ -181,9 +198,31 @@ pub fn on_delete_pressed(
     let path = event.value;
     if path.is_empty() { return; }
 
-    // Sidecar живёт под "чистым" именем (без .part) — удаляем вместе с
-    // файлом, чтобы не копить сироты; результат не отслеживаем, отсутствие
-    // sidecar (например, файл скачан до этой фичи) — не ошибка.
+    // Файл прямо сейчас качается — host держит `.part` открытым на запись
+    // (см. network::download.rs), удалять поверх активной записи нельзя.
+    // Сначала отменяем закачку; сам delete сработает в on_downloaded, когда
+    // придёт подтверждение отмены.
+    let active = state.downloaded.local_files.iter()
+        .find(|f| f.path == path)
+        .and_then(|f| Some((f.name.clone(), f.origin_key.as_deref()?.to_string())))
+        .and_then(|(name, key)| state.global.task_manager.active_download(&key).map(|t| (name, t.id.clone())));
+
+    if let Some((filename, task_id)) = active {
+        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_delete_pressed: active download, cancelling task={} before delete of {}", task_id, path);
+        state.downloaded.pending_delete_on_cancel.insert(task_id.clone(), path);
+        state.global.status_message = format!("Cancelling download: {}", filename);
+        crate::calls::data_provider::on_cancel_download(&CancelDownloadRequest { task_id });
+        return;
+    }
+
+    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_delete_pressed: deleting {} immediately (no active download)", path);
+    delete_local_file(state, path);
+}
+
+/// Sidecar живёт под "чистым" именем (без .part) — удаляем вместе с
+/// файлом, чтобы не копить сироты; результат не отслеживаем, отсутствие
+/// sidecar (например, файл скачан до этой фичи) — не ошибка.
+fn delete_local_file(state: &mut State, path: String) {
     let base = path.strip_suffix(".part").unwrap_or(&path);
     crate::calls::fs::on_delete(&veldsdk::proto::fs::FsDeleteRequest {
         path: format!("{}.origin", base),
