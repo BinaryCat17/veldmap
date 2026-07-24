@@ -29,7 +29,11 @@ pub fn on_download_pressed(
 
     // Origin — сразу, до ответа data-provider: даже если приложение упадёт
     // на первом байте, .part на диске уже будет знать, откуда он взялся.
-    write_origin_sidecar(state, &filename, &s3_key);
+    // total_bytes — если он уже известен из прошлой попытки в этой же
+    // сессии (докачка после паузы), сразу пишем и его — не нужно ждать
+    // первого progress-события заново, чтобы узнать то, что уже знаем.
+    let known_total = state.downloaded.known_total_bytes.get(&filename).copied();
+    write_origin_sidecar(state, &filename, &s3_key, known_total);
 
     crate::calls::data_provider::on_download(&DownloadRequest {
         identifier: s3_key,
@@ -38,12 +42,15 @@ pub fn on_download_pressed(
 }
 
 /// Пишет origin-sidecar (`<имя>.origin`) через fs/on_write — durable-копия
-/// known_origins, переживающая рестарт приложения (см. handlers::nav —
-/// восстановление читает её обратно для файлов без known_origins в памяти).
-fn write_origin_sidecar(state: &mut State, filename: &str, identifier: &str) {
+/// known_origins и known_total_bytes, переживающая рестарт приложения (см.
+/// handlers::nav — восстановление читает её обратно для файлов без
+/// known_origins в памяти, и on_read_result ниже, который заодно поднимает
+/// total_bytes). `total_bytes: None` — Content-Length ещё не увиден в этой
+/// сессии (обычный случай при первом старте закачки).
+fn write_origin_sidecar(state: &mut State, filename: &str, identifier: &str, total_bytes: Option<u64>) {
     state.downloaded.known_origins.insert(filename.to_string(), identifier.to_string());
 
-    let sidecar = OriginSidecar { provider: PROVIDER_NAME.to_string(), identifier: identifier.to_string() };
+    let sidecar = OriginSidecar { provider: PROVIDER_NAME.to_string(), identifier: identifier.to_string(), total_bytes };
     let Ok(json) = serde_json::to_vec(&sidecar) else { return };
 
     let Some(region_id) = veldsdk::abi::arena_alloc_cpu(json.len() as u64) else { return };
@@ -87,6 +94,9 @@ pub fn on_read_result(state: &mut State, response: veldsdk::proto::fs::FsReadRes
     if sidecar.provider != PROVIDER_NAME { return; }
 
     state.downloaded.known_origins.insert(filename.clone(), sidecar.identifier.clone());
+    if let Some(total) = sidecar.total_bytes {
+        state.downloaded.known_total_bytes.insert(filename.clone(), total);
+    }
     if let Some(f) = state.downloaded.local_files.iter_mut().find(|f| f.name == filename) {
         f.origin_key = Some(sidecar.identifier);
     }
@@ -152,6 +162,29 @@ pub fn on_download_progress(
     state.global.task_manager.update_download_progress(
         &event.task_id, event.progress, event.downloaded_bytes, event.total_bytes,
     );
+
+    // Content-Length переживает паузу: TaskManager после отмены помечает
+    // задачу finished и активный прогресс из неё больше не читают (см.
+    // browser_list::view — Incomplete-строка не видит TaskInfo), а
+    // known_total_bytes — обычная карта по имени файла, живёт независимо
+    // от жизненного цикла задачи, так что "Incomplete" продолжит знать
+    // "из скольки", пока закачка на паузе. Пишем это и в sidecar (не при
+    // каждом событии — только когда узнали новое значение), иначе после
+    // рестарта приложения total снова неизвестен, пока не начнётся новая
+    // закачка в новой сессии: sidecar на диске это единственное, что
+    // переживает перезапуск, known_total_bytes — только память.
+    if event.total_bytes > 0 {
+        let target = state.global.task_manager.get(&event.task_id).and_then(|t| match &t.kind {
+            TaskKind::Download { s3_key, filename, .. } => Some((s3_key.clone(), filename.clone())),
+            _ => None,
+        });
+        if let Some((s3_key, filename)) = target {
+            if state.downloaded.known_total_bytes.get(&filename) != Some(&event.total_bytes) {
+                state.downloaded.known_total_bytes.insert(filename.clone(), event.total_bytes);
+                write_origin_sidecar(state, &filename, &s3_key, Some(event.total_bytes));
+            }
+        }
+    }
     // Рендер происходит автоматически в on_frame
 }
 
@@ -160,10 +193,15 @@ pub fn on_downloaded(
     event: Downloaded,
 ) {
     // s3_key/filename этой задачи — только в TaskManager (TaskKind::Download),
-    // отдельной таблицы не держим.
-    let filename = match state.global.task_manager.get(&event.task_id).map(|t| t.kind.clone()) {
-        Some(TaskKind::Download { filename, .. }) => filename,
-        _ => return,
+    // отдельной таблицы не держим. Байты снимаем тут же: после finish()
+    // задача остаётся в Correlator (до cleanup_completed), но нам нужен
+    // именно последний прогресс, а не гадать по нему после.
+    let (filename, bytes_downloaded, total_bytes) = match state.global.task_manager.get(&event.task_id) {
+        Some(task) => match &task.kind {
+            TaskKind::Download { filename, .. } => (filename.clone(), task.bytes_downloaded, task.total_bytes),
+            _ => return,
+        },
+        None => return,
     };
     state.global.task_manager.finish(&event.task_id);
 
@@ -179,7 +217,16 @@ pub fn on_downloaded(
 
     if event.success {
         // known_origins для filename уже выставлен в write_origin_sidecar
-        // при старте закачки — здесь просто финальный статус.
+        // при старте закачки — здесь просто финальный статус. Запись в
+        // local_files тоже правим сразу (не дожидаясь следующего захода на
+        // экран, симметрично оптимистичному push в on_download_started) —
+        // иначе .part-путь и is_partial:true висят в UI до следующего
+        // fs/on_list, хотя файл на диске уже переименован в конечное имя.
+        if let Some(f) = state.downloaded.local_files.iter_mut().find(|f| f.name == filename) {
+            f.path = format!("data/dem/source/{}", filename);
+            f.is_partial = false;
+            f.size = if total_bytes > 0 { total_bytes } else { bytes_downloaded };
+        }
         state.global.status_message = format!("Downloaded: {}", filename);
     } else {
         state.global.error_message = Some(format!("Download failed: {}", event.error));

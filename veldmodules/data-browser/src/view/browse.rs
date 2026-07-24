@@ -18,7 +18,8 @@ pub fn view(state: &State) -> Element<()> {
         let items: Vec<BrowserItem> = browse_state.items.iter().map(|i| {
             // Папки нет смысла сверять с локальными файлами — это ключ
             // remote-префикса, а не имя файла.
-            let entry = if i.is_folder { None } else { state.downloaded.entry_for(&filename_from_key(&i.s3_key)) };
+            let filename = (!i.is_folder).then(|| filename_from_key(&i.s3_key));
+            let entry = filename.as_deref().and_then(|f| state.downloaded.entry_for(f));
             BrowserItem {
                 s3_key: i.s3_key.clone(),
                 name: i.name.clone(),
@@ -27,6 +28,10 @@ pub fn view(state: &State) -> Element<()> {
                 local_path: entry.map(|f| f.path.clone()),
                 is_partial: entry.map(|f| f.is_partial).unwrap_or(false),
                 size: entry.map(|f| f.size).unwrap_or(0),
+                total_size: filename.as_deref()
+                    .and_then(|f| state.downloaded.known_total_bytes.get(f))
+                    .copied()
+                    .unwrap_or(0),
             }
         }).collect();
 

@@ -1,6 +1,6 @@
 //! styles.rs — стили приложения (обновлено под чистую архитектуру)
 
-use crate::proto::ui_service::{Style, ButtonStyle, WidgetStyle, Color, Border, Background, Button, Padding};
+use crate::proto::ui_service::{Style, ButtonStyle, WidgetStyle, Color, Border, Radius, Background, Button, Padding, Length, text, button, container};
 
 // --- Colors ---
 pub const COLOR_TEXT: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
@@ -15,6 +15,8 @@ pub const COLOR_FOLDER: Color = Color { r: 0.4, g: 0.6, b: 1.0, a: 1.0 };
 pub const COLOR_FILE: Color = Color { r: 0.7, g: 0.7, b: 0.7, a: 1.0 };
 pub const COLOR_RELOAD: Color = Color { r: 0.5, g: 0.5, b: 0.7, a: 1.0 };
 pub const COLOR_DANGER: Color = Color { r: 0.85, g: 0.3, b: 0.3, a: 1.0 };
+pub const COLOR_BORDER: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.12 };
+pub const COLOR_BORDER_HOVER: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.25 };
 
 // --- Button Styles ---
 
@@ -64,18 +66,35 @@ pub fn primary_style() -> Style {
     }.into()
 }
 
+/// Строка списка файлов (`browser_list::render_item`) — общий вид что для
+/// папки/готового файла (кликабельны, есть `on_press`), что для недокачанного
+/// или ещё не скачанного файла (просто карточка, `on_press` не навешан).
+/// Раньше кликабельные оборачивались в кнопку с заливкой, а некликабельные
+/// рендерились голым текстом без паддинга — отсюда и другая левая граница,
+/// и сам факт что это два разных виджета. Теперь это всегда одна и та же
+/// кнопка с лёгкой рамкой вместо заливки; `disabled` — тот же бордер, но
+/// приглушённый и без реакции на hover, ровно то что нужно для карточки без
+/// действия (см. `Button::on_press` — без него хост не должен отдавать
+/// hover/pressed стили, только disabled).
 pub fn file_button_style() -> Style {
     let base = WidgetStyle {
-        background: Some(Background::Color(Color::from_rgb(0.2, 0.2, 0.25))),
+        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.02))),
         text_color: Some(Color::WHITE),
-        border: Border::with_radius(4.0),
+        border: Border { color: COLOR_BORDER, width: 1.0, radius: Radius::new(4.0) },
         ..Default::default()
     };
-    
+
     let hovered = WidgetStyle {
         background: Some(Background::Color(COLOR_BG_HOVER)),
         text_color: Some(Color::WHITE),
-        border: Border::with_radius(4.0),
+        border: Border { color: COLOR_BORDER_HOVER, width: 1.0, radius: Radius::new(4.0) },
+        ..Default::default()
+    };
+
+    let disabled = WidgetStyle {
+        background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.02))),
+        text_color: Some(COLOR_TEXT_DIM),
+        border: Border { color: COLOR_BORDER, width: 1.0, radius: Radius::new(4.0) },
         ..Default::default()
     };
 
@@ -83,7 +102,7 @@ pub fn file_button_style() -> Style {
         active: base.clone(),
         hovered,
         pressed: base,
-        disabled: WidgetStyle::default(),
+        disabled,
     }.into()
 }
 
@@ -124,4 +143,27 @@ pub fn apply_icon<M>(btn: Button<M>, color: Color) -> Button<M> {
         pressed: base,
         disabled: WidgetStyle::default(),
     }).padding(6.0)
+}
+
+/// Сторона квадратной кнопки-иконки (play/pause/reload/eye/trash) в списке
+/// файлов — одна и та же для всех, независимо от конкретного глифа.
+const ICON_BUTTON_SIZE: f32 = 32.0;
+
+/// Кнопка-иконка фиксированного размера с глифом по центру. Без фиксации
+/// размер кнопки — это размер её текстового содержимого плюс паддинг, а у
+/// разных глифов Font Awesome разная метрика ширины (например, "play"
+/// заметно уже "pause" или "trash") — визуально кнопки в одной строке
+/// получались бы разного размера. Глиф оборачивается в `container` с
+/// `center_x/center_y`, а не кладётся в кнопку как есть — иначе при фикс.
+/// размере кнопки, большем чем сам глиф, он прижимался бы к левому краю
+/// паддинга вместо центра.
+pub fn icon_button<M>(glyph: impl Into<String>, color: Color) -> Button<M> {
+    let icon = container(text(glyph).font_family("Icons"))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x()
+        .center_y();
+    apply_icon(button(icon), color)
+        .width(Length::Fixed(ICON_BUTTON_SIZE))
+        .height(Length::Fixed(ICON_BUTTON_SIZE))
 }

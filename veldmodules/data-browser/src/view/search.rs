@@ -18,7 +18,8 @@ pub fn view(state: &State) -> Element<()> {
         column![text("Searching...").size(16.0)].into()
     } else {
         let items: Vec<BrowserItem> = search_state.results.iter().map(|p| {
-            let entry = state.downloaded.entry_for(&filename_from_key(&p.path));
+            let filename = filename_from_key(&p.path);
+            let entry = state.downloaded.entry_for(&filename);
             BrowserItem {
                 s3_key: p.path.clone(),
                 name: p.name.clone(),
@@ -27,6 +28,7 @@ pub fn view(state: &State) -> Element<()> {
                 local_path: entry.map(|f| f.path.clone()),
                 is_partial: entry.map(|f| f.is_partial).unwrap_or(false),
                 size: entry.map(|f| f.size).unwrap_or(0),
+                total_size: state.downloaded.known_total_bytes.get(&filename).copied().unwrap_or(0),
             }
         }).collect();
 

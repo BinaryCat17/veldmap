@@ -13,6 +13,15 @@ pub struct DownloadedState {
     /// fs/on_list не знает происхождения файла, поэтому источник истины для
     /// re-download — только эта таблица, а не пересканирование диска.
     pub known_origins: HashMap<String, String>,
+    /// filename -> Content-Length, увиденный в последнем progress-событии
+    /// закачки этого файла в этой сессии. fs/on_list знает только текущий
+    /// размер `.part` на диске, не сколько всего ждать. Заполняется и живым
+    /// progress-событием (handlers::download::on_download_progress), и
+    /// восстановлением из `.origin`-sidecar при старте приложения (см.
+    /// `OriginSidecar::total_bytes` и `on_read_result`) — без второго пути
+    /// "сколько всего" не было бы видно, пока файл на паузе с прошлого
+    /// запуска: карта пустая, пока не начнётся новая закачка в этой сессии.
+    pub known_total_bytes: HashMap<String, u64>,
     /// Ожидание ответа на fs/on_list — гасит устаревший/чужой FsListResult.
     pub pending_list: veldsdk::Correlator<()>,
     /// Ожидание ответа на fs/on_delete — контекст: путь удаляемого файла.
@@ -46,12 +55,16 @@ pub fn filename_from_key(key: &str) -> String {
 pub const PROVIDER_NAME: &str = "data-provider";
 
 /// Содержимое sidecar-файла `<имя>.origin` рядом со скачанным/недокачанным
-/// файлом — durable-резервная копия `known_origins`, переживающая рестарт
-/// приложения (сам `known_origins` — только в памяти сессии).
+/// файлом — durable-резервная копия `known_origins` и `known_total_bytes`,
+/// переживающая рестарт приложения (обе — только в памяти сессии).
+/// `#[serde(default)]` на `total_bytes` — sidecar'ы, записанные до появления
+/// этого поля, должны читаться как и раньше, просто без известного total.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct OriginSidecar {
     pub provider: String,
     pub identifier: String,
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
 }
 
 pub struct LocalFile {
@@ -76,6 +89,7 @@ impl Default for DownloadedState {
             local_files: Vec::new(),
             pending_delete_on_cancel: veldsdk::Correlator::new(),
             known_origins: HashMap::new(),
+            known_total_bytes: HashMap::new(),
             pending_list: veldsdk::Correlator::new(),
             pending_delete: veldsdk::Correlator::new(),
             pending_sidecar_writes: veldsdk::Correlator::new(),

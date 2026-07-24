@@ -95,6 +95,21 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
         // репортился бы вовсе, а UI не увидел бы даже байтовый счётчик.
         const BYTES_THROTTLE: u64 = 1 << 20;
         let mut last_reported_bytes: u64 = downloaded;
+
+        // Докачка стартует не с нуля: без этого события UI держит счётчик на
+        // 0/0 до первого нового процента (или мегабайта) — то есть не
+        // показывает byte-прогресс именно в момент, где докачка возобновилась,
+        // а первым что-то покажет только когда новых байт наберётся на шаг
+        // троттлинга ниже.
+        if resuming {
+            bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
+                correlation_id: correlation_id.clone(),
+                progress: if total_size > 0 { downloaded as f32 / total_size as f32 } else { 0.0 },
+                downloaded_bytes: downloaded,
+                total_bytes: total_size,
+            });
+        }
+
         let mut stream = res.bytes_stream();
 
         let file_result = if resuming {
