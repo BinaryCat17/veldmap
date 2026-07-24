@@ -6,6 +6,7 @@ use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
 use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
+use crate::module::state::downloaded::filename_from_key;
 
 pub fn view(state: &State) -> Element<()> {
     let search_state = &state.search;
@@ -28,7 +29,7 @@ pub fn view(state: &State) -> Element<()> {
             name: p.name.clone(),
             description: Some(p.timestamp.clone()),
             is_folder: false,
-            exists_locally: false,
+            local_path: state.downloaded.local_path_for(&filename_from_key(&p.path)),
         }).collect();
         
         render_list(&items, task_manager, ItemActions {

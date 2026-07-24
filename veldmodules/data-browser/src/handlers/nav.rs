@@ -42,10 +42,12 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
         return;
     }
     state.downloaded.local_files = response.entries.into_iter().map(|name| {
+        let origin_key = state.downloaded.known_origins.get(&name).cloned();
         LocalFile {
             path: format!("data/dem/source/{}", name),
             name,
             size: 0,
+            origin_key,
         }
     }).collect();
     // Рендер происходит автоматически в on_frame

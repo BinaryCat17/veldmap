@@ -34,11 +34,11 @@ pub fn render_item(item: &BrowserItem, is_downloading: bool, actions: ItemAction
                 .into(),
             None => title,
         }
-    } else if item.exists_locally {
+    } else if let Some(local_path) = &item.local_path {
         match actions.view {
             Some(method) => styles::apply_file(button(title))
                 .width(Length::Fill)
-                .on_press_with(method, item.s3_key.clone())
+                .on_press_with(method, local_path.clone())
                 .into(),
             None => title,
         }
@@ -46,15 +46,20 @@ pub fn render_item(item: &BrowserItem, is_downloading: bool, actions: ItemAction
         title
     };
 
+    // Просмотр всегда идёт с локального пути, re-download — с remote-ключа:
+    // это разные значения (см. BrowserItem::local_path), кнопка закачки
+    // скрыта, если remote-ключ для этого файла в сессии неизвестен.
     let status: Element<()> = if is_downloading {
         text("\u{f254}").font_family("Icons").into()
-    } else if item.exists_locally {
+    } else if let Some(local_path) = &item.local_path {
         let mut r = row![text("\u{f00c}").font_family("Icons")];
         if let Some(method) = actions.view {
-            r = r.push(styles::apply_icon(button(text("\u{f06e}").font_family("Icons")), styles::COLOR_PRIMARY).on_press_with(method, item.s3_key.clone()));
+            r = r.push(styles::apply_icon(button(text("\u{f06e}").font_family("Icons")), styles::COLOR_PRIMARY).on_press_with(method, local_path.clone()));
         }
-        if let Some(method) = actions.download {
-            r = r.push(styles::apply_icon(button(text("\u{f021}").font_family("Icons")), styles::COLOR_RELOAD).on_press_with(method, item.s3_key.clone()));
+        if !item.s3_key.is_empty() {
+            if let Some(method) = actions.download {
+                r = r.push(styles::apply_icon(button(text("\u{f021}").font_family("Icons")), styles::COLOR_RELOAD).on_press_with(method, item.s3_key.clone()));
+            }
         }
         r.spacing(5.0).align_items(Alignment::Center).into()
     } else if !item.is_folder {

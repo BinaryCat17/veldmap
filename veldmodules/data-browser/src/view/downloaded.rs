@@ -11,11 +11,13 @@ pub fn view(state: &State) -> Element<()> {
     let task_manager = &state.global.task_manager;
 
     let items: Vec<BrowserItem> = downloaded.local_files.iter().map(|f| BrowserItem {
-        s3_key: f.path.clone(),
+        // Пусто, если remote-ключ не известен в этой сессии — render_item
+        // скрывает кнопку re-download, а не шлёт заведомо неверный запрос.
+        s3_key: f.origin_key.clone().unwrap_or_default(),
         name: f.name.clone(),
         description: None,
         is_folder: false,
-        exists_locally: true,
+        local_path: Some(f.path.clone()),
     }).collect();
 
     let file_list = if items.is_empty() {

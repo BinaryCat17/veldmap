@@ -6,6 +6,7 @@ use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
 use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED};
+use crate::module::state::downloaded::filename_from_key;
 
 pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;
@@ -21,7 +22,9 @@ pub fn view(state: &State) -> Element<()> {
             name: i.name.clone(),
             description: None,
             is_folder: i.is_folder,
-            exists_locally: false,
+            local_path: if i.is_folder { None } else {
+                state.downloaded.local_path_for(&filename_from_key(&i.s3_key))
+            },
         }).collect();
         
         render_list(&items, task_manager, ItemActions {

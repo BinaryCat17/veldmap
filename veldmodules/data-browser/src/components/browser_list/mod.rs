@@ -8,5 +8,7 @@ pub struct BrowserItem {
     pub name: String,
     pub description: Option<String>,
     pub is_folder: bool,
-    pub exists_locally: bool,
+    /// `Some(path)` — файл уже скачан локально по этому пути (используется
+    /// кнопкой просмотра). `None` — не скачан или это папка.
+    pub local_path: Option<String>,
 }

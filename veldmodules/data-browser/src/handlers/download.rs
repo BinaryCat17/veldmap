@@ -1,7 +1,7 @@
 use crate::proto::data_provider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded, CancelDownloadRequest};
 use crate::proto::ui_service::proto::UiEventResponse;
 
-use crate::module::state::{State, downloaded::DownloadStatus};
+use crate::module::state::{State, downloaded::{DownloadStatus, filename_from_key}};
 use crate::module::components::task_manager::TaskKind;
 
 /// Пользователь нажал кнопку скачать.
@@ -11,7 +11,7 @@ pub fn on_download_pressed(
     event: UiEventResponse,
 ) {
     let s3_key = event.value;
-    let filename = s3_key.split('/').last().unwrap_or("file").to_string();
+    let filename = filename_from_key(&s3_key);
 
     if s3_key.is_empty() { return; }
 
@@ -50,8 +50,8 @@ pub fn on_download_started(
     state: &mut State,
     event: DownloadStarted,
 ) {
-    let filename = event.identifier.split('/').last().unwrap_or("file").to_string();
-    
+    let filename = filename_from_key(&event.identifier);
+
     state.global.task_manager.spawn(
         event.task_id.clone(),
         TaskKind::Download { 
@@ -97,11 +97,12 @@ pub fn on_downloaded(
         .map(|(k, _): (&String, &crate::module::state::downloaded::DownloadProgress)| k.clone());
     
     if let Some(key) = s3_key {
-        let filename = key.split('/').last().unwrap_or("file").to_string();
+        let filename = filename_from_key(&key);
         state.downloaded.active_downloads.remove(&key);
         state.global.task_manager.finish(&event.task_id);
-        
+
         if event.success {
+            state.downloaded.known_origins.insert(filename.clone(), key);
             state.global.status_message = format!("Downloaded: {}", filename);
         } else {
             state.global.error_message = Some(format!("Download failed: {}", event.error));
