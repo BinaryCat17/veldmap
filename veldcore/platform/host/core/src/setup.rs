@@ -8,7 +8,7 @@ use std::io::Write;
 pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -> anyhow::Result<()> {
     let mut log_path = std::path::PathBuf::from("logs/host.log");
     
-    if let Some(logs) = &host_config.manifest.logs {
+    if let Some(logs) = &host_config.logs {
         log_path = std::path::PathBuf::from(logs);
     }
 

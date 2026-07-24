@@ -159,3 +159,13 @@ pub extern "C" fn get_subscriptions() -> i32 {
     veldsdk::abi::store_output(out);
     0
 }
+
+/// Единственный источник истины об имени модуля на шине: хост читает его
+/// отсюда при загрузке плагина (см. `plugins::load_services`), а не из
+/// имени файла или манифеста — так имя не может разойтись между schema.yaml
+/// и конфигурацией хоста.
+#[no_mangle]
+pub extern "C" fn get_service_name() -> i32 {
+    veldsdk::abi::store_output(SERVICE_NAME.as_bytes().to_vec());
+    0
+}

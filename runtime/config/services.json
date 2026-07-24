@@ -1,17 +1,4 @@
 {
   "logs": "logs/host.log",
-  "services": {
-    "data-provider": {
-      "location": "local",
-      "path": "../build/plugins/veldmap_data_provider.wasm"
-    },
-    "ui-service": {
-      "location": "local",
-      "path": "../build/plugins/veld_ui_service.wasm"
-    },
-    "data-browser": {
-      "location": "local",
-      "path": "../build/plugins/veldmap_data_browser.wasm"
-    }
-  }
+  "plugins_dir": "../build/plugins"
 }

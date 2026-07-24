@@ -6,54 +6,70 @@ use std::path::Path;
 use regex::Regex;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ServiceEntry {
-    pub location: String,
-    pub path: Option<String>,
-    pub node_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServicesManifest {
-    pub services: HashMap<String, ServiceEntry>,
+    /// Каталог с *.wasm плагинами, относительно `project_root`. По умолчанию
+    /// `../build/plugins` (тот же путь, что раньше прописывался в
+    /// services.json для каждого сервиса вручную).
+    pub plugins_dir: Option<String>,
     pub logs: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HostConfig {
     pub project_root: std::path::PathBuf,
-    pub manifest: ServicesManifest,
+    pub config_dir: std::path::PathBuf,
+    pub plugins_dir: std::path::PathBuf,
+    pub logs: Option<String>,
     pub plugin_configs: HashMap<String, HashMap<String, serde_json::Value>>,
     pub plugin_raw_configs: HashMap<String, String>,
 }
 
+/// services.json больше не перечисляет модули по имени (не источник истины —
+/// см. `plugins::load_services`, где имя каждого плагина спрашивается у него
+/// самого через ABI). Конфиг конкретного плагина ищется по имени файла
+/// `<config_dir>/<имя>.json` в момент, когда имя уже известно; здесь же мы
+/// заранее читаем все такие файлы (кроме зарезервированных services/core),
+/// чтобы конфиги были доступны до загрузки wasm — они нужны, например, для
+/// раннего определения окна (`window::extract_window_configs`).
 pub fn load_host_config(config_dir: &str) -> anyhow::Result<HostConfig> {
-    let manifest_path = Path::new(config_dir).join("services.json");
-    let project_root = Path::new(config_dir).parent().unwrap_or(Path::new(".")).to_path_buf();
-    
+    let config_dir_path = Path::new(config_dir).to_path_buf();
+    let manifest_path = config_dir_path.join("services.json");
+    let project_root = config_dir_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
     let manifest: ServicesManifest = if manifest_path.exists() {
         load_config_with_path(&manifest_path)?
     } else {
-        ServicesManifest { services: HashMap::new(), logs: None }
+        ServicesManifest { plugins_dir: None, logs: None }
     };
-    
+
+    let plugins_dir = project_root.join(manifest.plugins_dir.as_deref().unwrap_or("../build/plugins"));
+
     let mut plugin_configs = HashMap::new();
     let mut plugin_raw_configs = HashMap::new();
-    
-    for (name, entry) in &manifest.services {
-        if entry.location == "local" {
-            let service_config_path = Path::new(config_dir).join(format!("{}.json", name));
-            let service_config_str = read_config_string(&service_config_path).unwrap_or_else(|_| "{}".to_string());
-            
-            if let Ok(config_map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&service_config_str) {
-                plugin_configs.insert(name.clone(), config_map);
+
+    if let Ok(entries) = fs::read_dir(&config_dir_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
             }
-            plugin_raw_configs.insert(name.clone(), service_config_str);
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            if stem == "services" || stem == "core" {
+                continue;
+            }
+            let service_config_str = read_config_string(&path).unwrap_or_else(|_| "{}".to_string());
+            if let Ok(config_map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&service_config_str) {
+                plugin_configs.insert(stem.to_string(), config_map);
+            }
+            plugin_raw_configs.insert(stem.to_string(), service_config_str);
         }
     }
-    
+
     Ok(HostConfig {
         project_root,
-        manifest,
+        config_dir: config_dir_path,
+        plugins_dir,
+        logs: manifest.logs,
         plugin_configs,
         plugin_raw_configs,
     })
