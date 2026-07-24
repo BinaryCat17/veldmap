@@ -41,23 +41,40 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
         state.global.error_message = Some(format!("Failed to list files: {}", response.error));
         return;
     }
-    state.downloaded.local_files = response.entries.into_iter().map(|entry_name| {
-        let is_partial = entry_name.ends_with(".part");
-        // Отображаемое имя без .part — под ним файл известен known_origins
-        // и под ним же появится после докачки.
-        let name = if is_partial {
-            entry_name.strip_suffix(".part").unwrap_or(&entry_name).to_string()
-        } else {
-            entry_name.clone()
-        };
-        let origin_key = state.downloaded.known_origins.get(&name).cloned();
-        LocalFile {
-            path: format!("data/dem/source/{}", entry_name),
-            name,
-            size: 0,
-            origin_key,
-            is_partial,
-        }
-    }).collect();
+    state.downloaded.local_files = response.entries.into_iter()
+        // .origin — служебный sidecar (см. handlers::download), не файл для показа.
+        .filter(|entry_name| !entry_name.ends_with(".origin"))
+        .map(|entry_name| {
+            let is_partial = entry_name.ends_with(".part");
+            // Отображаемое имя без .part — под ним файл известен known_origins
+            // и под ним же появится после докачки.
+            let name = if is_partial {
+                entry_name.strip_suffix(".part").unwrap_or(&entry_name).to_string()
+            } else {
+                entry_name.clone()
+            };
+            let origin_key = state.downloaded.known_origins.get(&name).cloned();
+            LocalFile {
+                path: format!("data/dem/source/{}", entry_name),
+                name,
+                size: 0,
+                origin_key,
+                is_partial,
+            }
+        }).collect();
+
+    // known_origins — только память сессии; для файлов, переживших рестарт,
+    // origin_key сейчас None — донабираем его с диска через sidecar-файлы.
+    let missing_origin: Vec<String> = state.downloaded.local_files.iter()
+        .filter(|f| f.origin_key.is_none())
+        .map(|f| f.name.clone())
+        .collect();
+    for name in missing_origin {
+        let correlation_id = state.downloaded.pending_origin_reads.begin(name.clone());
+        crate::calls::fs::on_read(&veldsdk::proto::fs::FsReadRequest {
+            path: format!("data/dem/source/{}.origin", name),
+            correlation_id,
+        });
+    }
     // Рендер происходит автоматически в on_frame
 }

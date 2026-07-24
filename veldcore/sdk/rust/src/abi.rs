@@ -16,8 +16,10 @@ extern "C" {
     fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
 
     fn veld_memory_write(id: u64, offset: u64, ptr: u64, len: u64);
+    fn veld_memory_read(id: u64, offset: u64, size: u64) -> u64;
 
     fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
+    fn veld_memory_alloc_cpu(size: u64) -> u64;
     fn veld_memory_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
     fn veld_memory_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
     fn veld_memory_grant_read(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
@@ -97,11 +99,31 @@ pub fn arena_write(id: u64, offset: u64, data: &[u8]) {
     unsafe { veld_memory_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
 }
 
+/// Read a byte range from a memory region into the caller's own wasm memory
+/// (not a raw pointer — enforces the access boundary, avoids data races).
+/// `None` — region not found, access denied, or read out of bounds.
+pub fn arena_read(id: u64, offset: u64, size: u64) -> Option<Vec<u8>> {
+    unsafe {
+        let packed = veld_memory_read(id, offset, size);
+        take_host_bytes(packed)
+    }
+}
+
 // ── Memory management ──────────────────────────────────────────
 
 /// Allocate a GPU buffer region in the resource registry
 pub fn arena_alloc_buffer(size: u64, usage: u32, mapped: bool) -> Option<u64> {
     let id = unsafe { veld_memory_alloc_buffer(size, usage as u64, mapped as u64) };
+    if id == 0 { None } else { Some(id) }
+}
+
+/// Allocate a plain CPU-backed memory region — not a GPU buffer. For moving
+/// bytes to the host that have nothing to do with rendering (e.g. a file
+/// through fs/on_write): `arena_alloc_buffer`'s usage/mapped params are wgpu
+/// semantics that don't apply here, so this is a sibling, not that function
+/// made more generic.
+pub fn arena_alloc_cpu(size: u64) -> Option<u64> {
+    let id = unsafe { veld_memory_alloc_cpu(size) };
     if id == 0 { None } else { Some(id) }
 }
 

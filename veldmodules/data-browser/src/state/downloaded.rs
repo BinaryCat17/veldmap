@@ -11,6 +11,12 @@ pub struct DownloadedState {
     pub pending_list: veldsdk::Correlator<()>,
     /// Ожидание ответа на fs/on_delete — контекст: путь удаляемого файла.
     pub pending_delete: veldsdk::Correlator<String>,
+    /// Ожидание ответа на fs/on_write при записи origin-sidecar'а — контекст:
+    /// id CPU-региона, который нужно освободить после того как хост его прочитал.
+    pub pending_sidecar_writes: veldsdk::Correlator<u64>,
+    /// Ожидание ответа на fs/on_read origin-sidecar'а — контекст: имя файла,
+    /// для которого восстанавливаем origin_key.
+    pub pending_origin_reads: veldsdk::Correlator<String>,
 }
 
 impl DownloadedState {
@@ -27,6 +33,20 @@ impl DownloadedState {
 /// так что оба места обязаны использовать один и тот же алгоритм.
 pub fn filename_from_key(key: &str) -> String {
     key.split('/').last().unwrap_or("file").to_string()
+}
+
+/// Провайдер, от которого получен `identifier` в `OriginSidecar` — на случай
+/// появления второго provider-модуля (не только CDSE): чтобы re-download знал,
+/// какому модулю адресовать запрос, а не только сам идентификатор.
+pub const PROVIDER_NAME: &str = "data-provider";
+
+/// Содержимое sidecar-файла `<имя>.origin` рядом со скачанным/недокачанным
+/// файлом — durable-резервная копия `known_origins`, переживающая рестарт
+/// приложения (сам `known_origins` — только в памяти сессии).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct OriginSidecar {
+    pub provider: String,
+    pub identifier: String,
 }
 
 pub struct LocalFile {
@@ -66,6 +86,8 @@ impl Default for DownloadedState {
             known_origins: HashMap::new(),
             pending_list: veldsdk::Correlator::new(),
             pending_delete: veldsdk::Correlator::new(),
+            pending_sidecar_writes: veldsdk::Correlator::new(),
+            pending_origin_reads: veldsdk::Correlator::new(),
         }
     }
 }

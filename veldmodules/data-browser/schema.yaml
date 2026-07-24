@@ -20,5 +20,5 @@ dependencies:
     subs: [on_download_started, on_download_progress, on_downloaded, on_search_result, on_list_path_result]
     calls: [on_list_path, on_download, on_cancel_download, on_search]
   fs:
-    subs: [on_list_result, on_delete_result]
-    calls: [on_list, on_delete]
+    subs: [on_list_result, on_delete_result, on_write_result, on_read_result]
+    calls: [on_list, on_delete, on_write, on_read]

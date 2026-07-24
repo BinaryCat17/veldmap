@@ -1,7 +1,7 @@
 use crate::proto::data_provider::{DownloadRequest, DownloadStarted, DownloadProgress, Downloaded, CancelDownloadRequest};
 use crate::proto::ui_service::proto::UiEventResponse;
 
-use crate::module::state::{State, downloaded::{DownloadStatus, filename_from_key}};
+use crate::module::state::{State, downloaded::{DownloadStatus, OriginSidecar, PROVIDER_NAME, filename_from_key}};
 use crate::module::components::task_manager::TaskKind;
 
 /// Пользователь нажал кнопку скачать.
@@ -24,10 +24,68 @@ pub fn on_download_pressed(
         return;
     }
 
+    // Origin — сразу, до ответа data-provider: даже если приложение упадёт
+    // на первом байте, .part на диске уже будет знать, откуда он взялся.
+    write_origin_sidecar(state, &filename, &s3_key);
+
     crate::calls::data_provider::on_download(&DownloadRequest {
         identifier: s3_key,
         destination: format!("data/dem/source/{}", filename),
     });
+}
+
+/// Пишет origin-sidecar (`<имя>.origin`) через fs/on_write — durable-копия
+/// known_origins, переживающая рестарт приложения (см. handlers::nav —
+/// восстановление читает её обратно для файлов без known_origins в памяти).
+fn write_origin_sidecar(state: &mut State, filename: &str, identifier: &str) {
+    state.downloaded.known_origins.insert(filename.to_string(), identifier.to_string());
+
+    let sidecar = OriginSidecar { provider: PROVIDER_NAME.to_string(), identifier: identifier.to_string() };
+    let Ok(json) = serde_json::to_vec(&sidecar) else { return };
+
+    let Some(region_id) = veldsdk::abi::arena_alloc_cpu(json.len() as u64) else { return };
+    veldsdk::abi::arena_write(region_id, 0, &json);
+    if !veldsdk::abi::arena_grant_read(region_id, "fs") {
+        veldsdk::abi::arena_free(region_id);
+        return;
+    }
+
+    let correlation_id = state.downloaded.pending_sidecar_writes.begin(region_id);
+    crate::calls::fs::on_write(&veldsdk::proto::fs::FsWriteRequest {
+        path: format!("data/dem/source/{}.origin", filename),
+        handle: Some(veldsdk::proto::core::ResourceHandle { id: region_id, size: json.len() as u64, content_hash: Vec::new() }),
+        correlation_id,
+    });
+}
+
+/// fs прочитал наш буфер (успешно или нет) — регион больше не нужен.
+pub fn on_write_result(state: &mut State, response: veldsdk::proto::fs::FsWriteResult) {
+    let Some(region_id) = state.downloaded.pending_sidecar_writes.take(&response.correlation_id) else { return; };
+    veldsdk::abi::arena_free(region_id);
+    if !response.error.is_empty() {
+        veldsdk::vwarn!(veldsdk::FLAG_SDK, "[data-browser] failed to persist origin sidecar: {}", response.error);
+    }
+}
+
+/// Ответ на fs/on_read origin-sidecar'а, запрошенный handlers::nav для файла
+/// без known_origins в памяти (переживший рестарт .part или скачанный файл).
+/// Отсутствие sidecar (файл скачан до появления этой фичи) — не ошибка,
+/// просто re-download/докачка для него останутся недоступны.
+pub fn on_read_result(state: &mut State, response: veldsdk::proto::fs::FsReadResult) {
+    let Some(filename) = state.downloaded.pending_origin_reads.take(&response.correlation_id) else { return; };
+    let Some(handle) = response.handle else { return; };
+
+    let bytes = veldsdk::abi::arena_read(handle.id, 0, handle.size);
+    veldsdk::abi::arena_free(handle.id);
+    let Some(bytes) = bytes else { return; };
+
+    let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return; };
+    if sidecar.provider != PROVIDER_NAME { return; }
+
+    state.downloaded.known_origins.insert(filename.clone(), sidecar.identifier.clone());
+    if let Some(f) = state.downloaded.local_files.iter_mut().find(|f| f.name == filename) {
+        f.origin_key = Some(sidecar.identifier);
+    }
 }
 
 /// Пользователь нажал кнопку просмотра
@@ -102,7 +160,8 @@ pub fn on_downloaded(
         state.global.task_manager.finish(&event.task_id);
 
         if event.success {
-            state.downloaded.known_origins.insert(filename.clone(), key);
+            // known_origins для filename уже выставлен в write_origin_sidecar
+            // при старте закачки — здесь просто финальный статус.
             state.global.status_message = format!("Downloaded: {}", filename);
         } else {
             state.global.error_message = Some(format!("Download failed: {}", event.error));
@@ -121,6 +180,15 @@ pub fn on_delete_pressed(
 ) {
     let path = event.value;
     if path.is_empty() { return; }
+
+    // Sidecar живёт под "чистым" именем (без .part) — удаляем вместе с
+    // файлом, чтобы не копить сироты; результат не отслеживаем, отсутствие
+    // sidecar (например, файл скачан до этой фичи) — не ошибка.
+    let base = path.strip_suffix(".part").unwrap_or(&path);
+    crate::calls::fs::on_delete(&veldsdk::proto::fs::FsDeleteRequest {
+        path: format!("{}.origin", base),
+        correlation_id: String::new(),
+    });
 
     let correlation_id = state.downloaded.pending_delete.begin(path.clone());
     crate::calls::fs::on_delete(&veldsdk::proto::fs::FsDeleteRequest { path, correlation_id });

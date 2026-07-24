@@ -85,6 +85,23 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
+    // veld_memory_read(id, offset, size) → (len << 32 | ptr), 0 — доступ
+    // запрещён, регион не найден или чтение вне границ. Копирует запрошенный
+    // диапазон в собственную память вызывающего (не сырой указатель) — та же
+    // граница доступа и защита от гонок, что и у veld_memory_write.
+    linker.func_wrap_async("env", "veld_memory_read", |mut caller: Caller<'_, HostState>, (id, offset, size): (u64, u64, u64)| {
+        Box::new(async move {
+            let instance_id = caller.data().instance_id;
+            let registry = caller.data().registry.clone();
+            if !registry.check_access(id, instance_id, crate::registry::Access::Read) {
+                return Ok(0u64);
+            }
+            let memory = caller.data().memory.clone();
+            let Ok(data) = memory.read(id, offset, size) else { return Ok(0u64) };
+            write_response_back(&mut caller, &data).await
+        })
+    })?;
+
     // ── Memory management ─────────────────────────────────────
 
     // veld_memory_alloc_buffer(size, usage, mapped) → region_id
@@ -92,6 +109,17 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
         memory.alloc_buffer(size, usage as u32, mapped != 0, false, owner_id)
+    })?;
+
+    // veld_memory_alloc_cpu(size) → region_id. Обычная CPU-память (Vec<u8>),
+    // не GPU-буфер — сосед veld_memory_alloc_buffer, не замена: для случаев,
+    // когда wasm-модулю нужно просто переслать байты хосту (например, файл
+    // через fs/on_write), а не wgpu usage/mapped-семантика, которая тут
+    // не имеет смысла.
+    linker.func_wrap("env", "veld_memory_alloc_cpu", |caller: Caller<'_, HostState>, size: u64| -> u64 {
+        let memory = caller.data().memory.clone();
+        let owner_id = caller.data().instance_id;
+        memory.alloc_cpu(vec![0u8; size as usize], owner_id)
     })?;
 
     // veld_memory_alloc_texture(width, height, format, usage) → region_id
