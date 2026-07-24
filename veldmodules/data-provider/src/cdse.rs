@@ -27,7 +27,7 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
     Ok(State { 
         identity,
         tasks: veldsdk::TaskTracker::new(),
-        pending_http: std::collections::HashMap::new(),
+        pending_http: veldsdk::Correlator::new(),
     })
 }
 
@@ -104,8 +104,7 @@ pub fn on_list_path(
     request: ListPathRequest
 ) {
     let prefix = request.path.trim_start_matches('/').trim_start_matches("eodata/").to_string();
-    let correlation_id = veldsdk::generate_id();
-    
+
     let mut query_params = vec![
         ("delimiter", "/"),
         ("list-type", "2"),
@@ -136,18 +135,18 @@ pub fn on_list_path(
     };
     
     let headers = get_s3_headers(state, "GET", &uri_with_query);
+    let correlation_id = state.pending_http.begin(request.path);
 
     let req_task = veldsdk::proto::network::HttpTaskRequest {
         url: full_url,
         method: "GET".to_string(),
         headers,
         body: Vec::new(),
-        correlation_id: correlation_id.clone(),
+        correlation_id,
     };
-    
+
     info!("Requesting S3 list: {}", req_task.url);
 
-    state.pending_http.insert(correlation_id.clone(), request.path);
     crate::calls::network::on_http(&req_task);
 }
 
@@ -157,8 +156,7 @@ pub fn on_http_result(
     state: &mut State,
     response: veldsdk::proto::network::HttpTaskResponse,
 ) {
-    let correlation_id = response.correlation_id;
-    let filter_path = state.pending_http.remove(&correlation_id);
+    let filter_path = state.pending_http.take(&response.correlation_id);
     
     let list_response = if response.status >= 200 && response.status < 300 {
         parse_s3_xml(response.body, filter_path.as_deref())

@@ -130,9 +130,16 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             continue;
         }
 
-        let service_config_str = ctx.config.plugin_raw_configs.get(&name)
-            .cloned()
-            .unwrap_or_else(|| "{}".to_string());
+        let service_config_str = match ctx.config.plugin_raw_configs.get(&name) {
+            Some(s) => s.clone(),
+            None => {
+                // Модуль назвал себя `name`, но в config_dir нет файла `<name>.json` —
+                // скорее всего схему переименовали, а конфиг забыли. Не падаем
+                // (конфиг может быть модулю и не нужен), но не молчим.
+                log::warn!("Plugin '{}' ({:?}): no '{}.json' in config dir, using empty config", name, wasm_path, name);
+                "{}".to_string()
+            }
+        };
 
         let mut config_map = ctx.config.plugin_configs.get(&name)
             .cloned()

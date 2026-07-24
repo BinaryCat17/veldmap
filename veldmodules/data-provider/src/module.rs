@@ -14,7 +14,9 @@ pub struct State {
     /// Учёт запущенных модулем задач: фильтрация broadcast-событий
     /// и отмена через платформенный протокол tasks/* (veldsdk).
     pub tasks: veldsdk::TaskTracker,
-    pub pending_http: std::collections::HashMap<String, String>,
+    /// path, ожидающий S3 list-ответа: id генерируется в on_list_path,
+    /// снимается в on_http_result по correlation_id из ответа.
+    pub pending_http: veldsdk::Correlator<String>,
 }
 
 // Re-export handlers to match the expected names in generated code

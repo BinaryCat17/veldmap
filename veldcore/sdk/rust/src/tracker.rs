@@ -1,16 +1,13 @@
 //! Учёт логических задач wasm-модуля — зеркало фасада Tasks (host-util)
 //! на стороне нативных модулей. Физического хендла у wasm-задачи нет
-//! (работу исполняют сервисы хоста), поэтому трекер — это фильтр своих
-//! задач плюс отмена через платформенный протокол tasks/*.
+//! (работу исполняют сервисы хоста), поэтому трекер — это Correlator<()>
+//! плюс отмена через платформенный протокол tasks/*.
 
-use std::collections::HashSet;
+use crate::correlator::Correlator;
 
-/// Ключ задачи — correlation_id, которым модуль адресует свои операции.
-/// Broadcast-события шины (task_finished, доменные result'ы) видят все
-/// подписчики, поэтому каждый модуль фильтрует их через трекер.
 #[derive(Clone, Default)]
 pub struct TaskTracker {
-    pending: HashSet<String>,
+    tasks: Correlator<()>,
 }
 
 impl TaskTracker {
@@ -20,19 +17,19 @@ impl TaskTracker {
 
     /// Регистрирует запущенную модулем задачу.
     pub fn track(&mut self, task_id: impl Into<String>) {
-        self.pending.insert(task_id.into());
+        self.tasks.insert(task_id, ());
     }
 
     /// true, если задача принадлежит модулю.
     pub fn is_pending(&self, task_id: &str) -> bool {
-        self.pending.contains(task_id)
+        self.tasks.contains(task_id)
     }
 
     /// Снимает задачу с учёта; true, если она была на учёте. Вызывается
     /// из обработчиков завершения — терминальное событие обрабатывается
     /// ровно один раз.
     pub fn finish(&mut self, task_id: &str) -> bool {
-        self.pending.remove(task_id)
+        self.tasks.remove(task_id)
     }
 
     /// Отмена: снимает задачу с учёта и публикует tasks/cancel. Отмену
@@ -41,7 +38,7 @@ impl TaskTracker {
     /// {cancelled} — доменную реакцию на отмену размещайте там, а не здесь.
     /// false — задача не принадлежит модулю, событие не опубликовано.
     pub fn cancel(&mut self, task_id: &str) -> bool {
-        if !self.pending.remove(task_id) {
+        if !self.tasks.remove(task_id) {
             return false;
         }
         crate::tasks::on_cancel(&crate::proto::tasks::TaskCancelRequest {
