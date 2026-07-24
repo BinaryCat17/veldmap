@@ -1,6 +1,14 @@
 //! Потоковое скачивание файла (топик network/fs_download): прогресс и
 //! результат доставляются событиями, жизненный цикл и отмена — через
 //! фасад Tasks (см. module.rs): started/finished эмитит платформа.
+//!
+//! Докачка: пишем в `<destination>.part`, переименовываем в конечное имя
+//! только по успешному завершению. Обрыв (ошибка, отмена — AbortHandle::abort()
+//! просто дропает future, ничего после точки .await не выполняется) оставляет
+//! .part на диске как есть — это осознанная пауза, а не мусор: следующий
+//! on_fs_download с тем же destination увидит его размер и допросит сервер
+//! Range-заголовком с этого места, а не начнёт с нуля. Явное удаление — на
+//! пользователе (fs/on_delete), не на этом обработчике.
 
 use super::State;
 use veldmap_host_util::HostContext;
@@ -23,36 +31,6 @@ fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> Stri
         correlation_id: correlation_id.to_string(),
     });
     error
-}
-
-/// Владеет .part-файлом скачивания, пока оно не завершится. Drop удаляет
-/// файл, если downloading не закончилась явным `commit()` — так подчищается
-/// обрывок и при ошибке, и при отмене: `AbortHandle::abort()` (см.
-/// core::tasks::TaskRegistry::cancel) дропает future на месте, код после
-/// точки `.await` не выполняется вообще, и Drop живых локальных — единственный
-/// код, который платформа гарантированно исполнит. Тот же паттерн, что у
-/// `OwnedResource` в veldsdk, только с коммитом вместо безусловного free.
-struct PartFileGuard(Option<PathBuf>);
-
-impl PartFileGuard {
-    fn new(part_path: PathBuf) -> Self {
-        Self(Some(part_path))
-    }
-
-    /// Успех: снимает файл с учёта — Drop его больше не тронет, вызывающий
-    /// сам переименовывает .part в конечное имя.
-    fn commit(mut self) -> PathBuf {
-        self.0.take().expect("commit called twice")
-    }
-}
-
-impl Drop for PartFileGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            // Sync: Drop не умеет .await, а remove_file — лёгкая unlink-операция.
-            let _ = std::fs::remove_file(path);
-        }
-    }
 }
 
 pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) {
@@ -79,9 +57,16 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
     // owner = инициатор запроса: отменить скачивание может он, хост
     // или сервис с его grant'ом (топик tasks/cancel).
     let spawned = state.tasks.spawn(&req.correlation_id, requestor_id, "fs_download", &label, |correlation_id| async move {
+        // Существующий .part с предыдущей попытки — точка возобновления:
+        // узнаём его размер ДО запроса, чтобы попросить сервер прислать хвост.
+        let resume_offset = tokio::fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0);
+
         let client = reqwest::Client::new();
         let mut builder = client.get(&req.url);
         for (key, value) in req.headers { builder = builder.header(key, value); }
+        if resume_offset > 0 {
+            builder = builder.header("Range", format!("bytes={}-", resume_offset));
+        }
 
         let res = match builder.send().await {
             Ok(r) => r,
@@ -92,13 +77,28 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
             return Err(fail_download(&ctx, &correlation_id, format!("HTTP {}", res.status())));
         }
 
-        let total_size = res.content_length().unwrap_or(0);
-        let mut downloaded: u64 = 0;
-        let mut last_percent: u32 = 0;
+        // Сервер мог проигнорировать Range и прислать 200 с телом целиком
+        // (не все раздачи это поддерживают) — тогда .part с предыдущей
+        // попытки несовместим с тем, что сейчас летит по проводу, и
+        // дописывать в него нельзя: начинаем файл заново.
+        let resuming = resume_offset > 0 && res.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let mut downloaded: u64 = if resuming { resume_offset } else { 0 };
+        // Для 206 Content-Length — длина хвоста, а не всего файла.
+        let total_size = if resuming {
+            res.content_length().map(|remaining| remaining + resume_offset).unwrap_or(0)
+        } else {
+            res.content_length().unwrap_or(0)
+        };
+        let mut last_percent: u32 = if total_size > 0 { (downloaded * 100 / total_size) as u32 } else { 0 };
         let mut stream = res.bytes_stream();
 
-        let guard = PartFileGuard::new(part_path.clone());
-        match tokio::fs::File::create(&part_path).await {
+        let file_result = if resuming {
+            tokio::fs::OpenOptions::new().append(true).open(&part_path).await
+        } else {
+            tokio::fs::File::create(&part_path).await
+        };
+
+        match file_result {
             Ok(mut async_file) => {
                 while let Some(chunk_res) = stream.next().await {
                     match chunk_res {
@@ -124,14 +124,12 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
                 }
                 let _ = async_file.flush().await;
             }
-            Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("File create error: {}", e))),
+            Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("File open error: {}", e))),
         }
 
         // Атомарно проявляем файл под конечным именем только теперь: до
-        // этой строки на диске в любой ветке (успех кода ниже ещё не
-        // выполнился, ошибка, отмена) лежит только .part, а не файл под
-        // именем, которое fs/list отдаёт как "скачано".
-        let part_path = guard.commit();
+        // этой строки на диске в любой прерванной ветке лежит только .part,
+        // а не файл под именем, которое fs/list отдаёт как "скачано".
         if let Err(e) = tokio::fs::rename(&part_path, &path).await {
             return Err(fail_download(&ctx, &correlation_id, format!("Rename error: {}", e)));
         }

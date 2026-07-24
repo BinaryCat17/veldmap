@@ -39,12 +39,13 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         ON_SEARCH_INPUT => handlers::search::on_search_input(state, event),
         ON_DOWNLOAD_PRESSED => handlers::download::on_download_pressed(state, event),
         ON_VIEW_PRESSED => handlers::download::on_view_pressed(state, event),
+        ON_DELETE_PRESSED => handlers::download::on_delete_pressed(state, event),
         other => veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] unknown UI method: {}", other),
     }
 }
 
 // -- Sub handlers --
-pub use handlers::download::{on_download_started, on_download_progress, on_downloaded};
+pub use handlers::download::{on_download_started, on_download_progress, on_downloaded, on_delete_result};
 pub use handlers::search::on_search_result;
 pub use handlers::browse::on_list_path_result;
 pub use handlers::nav::on_list_result;

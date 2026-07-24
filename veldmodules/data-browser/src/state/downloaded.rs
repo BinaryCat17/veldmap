@@ -9,12 +9,15 @@ pub struct DownloadedState {
     pub known_origins: HashMap<String, String>,
     /// Ожидание ответа на fs/on_list — гасит устаревший/чужой FsListResult.
     pub pending_list: veldsdk::Correlator<()>,
+    /// Ожидание ответа на fs/on_delete — контекст: путь удаляемого файла.
+    pub pending_delete: veldsdk::Correlator<String>,
 }
 
 impl DownloadedState {
-    /// Путь локального файла с данным именем, если он уже скачан.
+    /// Путь уже полностью скачанного локального файла с данным именем.
+    /// Недокачанные (`is_partial`) не считаются — их некуда "просматривать".
     pub fn local_path_for(&self, filename: &str) -> Option<String> {
-        self.local_files.iter().find(|f| f.name == filename).map(|f| f.path.clone())
+        self.local_files.iter().find(|f| f.name == filename && !f.is_partial).map(|f| f.path.clone())
     }
 }
 
@@ -27,13 +30,19 @@ pub fn filename_from_key(key: &str) -> String {
 }
 
 pub struct LocalFile {
+    /// Путь фактической записи на диске — включает суффикс `.part`, если
+    /// файл недокачан. Именно этот путь передаётся в fs/on_delete.
     pub path: String,
+    /// Отображаемое имя — без `.part`, то же самое что будет у файла после
+    /// докачки. Используется для сверки с known_origins и с browse/search.
     pub name: String,
     pub size: u64,
     /// Remote-ключ, если известен в этой сессии (см. `known_origins`).
     /// `None` — файл существовал на диске до старта или пришёл не через
-    /// download-flow; тогда re-download недоступен (см. browser_list::view).
+    /// download-flow; тогда re-download/докачка недоступны (см. browser_list::view).
     pub origin_key: Option<String>,
+    /// true — скачивание прервано (запись на диске оканчивается на `.part`).
+    pub is_partial: bool,
 }
 
 pub struct DownloadProgress {
@@ -56,6 +65,7 @@ impl Default for DownloadedState {
             active_downloads: HashMap::new(),
             known_origins: HashMap::new(),
             pending_list: veldsdk::Correlator::new(),
+            pending_delete: veldsdk::Correlator::new(),
         }
     }
 }

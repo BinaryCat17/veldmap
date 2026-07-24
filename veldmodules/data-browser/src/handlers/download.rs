@@ -112,4 +112,31 @@ pub fn on_downloaded(
     // Рендер происходит автоматически в on_frame
 }
 
+/// Пользователь нажал "удалить" на недокачанном файле (экран Downloaded).
+/// Полностью скачанные файлы удалять пока негде в UI — эта кнопка только
+/// для .part (см. browser_list рендер экрана Downloaded).
+pub fn on_delete_pressed(
+    state: &mut State,
+    event: UiEventResponse,
+) {
+    let path = event.value;
+    if path.is_empty() { return; }
 
+    let correlation_id = state.downloaded.pending_delete.begin(path.clone());
+    crate::calls::fs::on_delete(&veldsdk::proto::fs::FsDeleteRequest { path, correlation_id });
+}
+
+/// Broadcast-топик — сверяем correlation_id, чтобы не принять устаревший
+/// или чужой ответ.
+pub fn on_delete_result(
+    state: &mut State,
+    response: veldsdk::proto::fs::FsDeleteResult,
+) {
+    let Some(path) = state.downloaded.pending_delete.take(&response.correlation_id) else { return; };
+
+    if !response.error.is_empty() {
+        state.global.error_message = Some(format!("Failed to delete {}: {}", path, response.error));
+        return;
+    }
+    state.downloaded.local_files.retain(|f| f.path != path);
+}

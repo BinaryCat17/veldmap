@@ -4,8 +4,10 @@
 //! как в wasm-модулях (crate::module).
 //!
 //! module.rs — фасад: State, init и реэкспорты обработчиков.
-//! Логика — в read.rs (чтение), write.rs (запись) и list.rs (листинг).
+//! Логика — в read.rs (чтение), write.rs (запись), list.rs (листинг) и
+//! delete.rs (удаление).
 
+mod delete;
 mod list;
 mod read;
 mod write;
@@ -22,6 +24,7 @@ pub fn hook_init(ctx: Arc<HostContext>) -> State {
 }
 
 // -- Input handlers --
+pub use delete::on_delete;
 pub use list::on_list;
 pub use read::on_read;
 pub use write::on_write;

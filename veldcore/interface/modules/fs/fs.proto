@@ -39,3 +39,13 @@ message FsListResult {
   string error = 2;
   string correlation_id = 3;
 }
+
+message FsDeleteRequest {
+  string path = 1;
+  string correlation_id = 2;
+}
+
+message FsDeleteResult {
+  string error = 1;
+  string correlation_id = 2;
+}

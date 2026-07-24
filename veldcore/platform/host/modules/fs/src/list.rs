@@ -18,13 +18,10 @@ pub fn on_list(state: &State, req: FsListRequest, _requestor_id: u32) {
                 Ok(iter) => {
                     for entry in iter {
                         if let Ok(entry) = entry {
-                            if let Some(name) = entry.file_name().to_str() {
-                                // .part — недокачанный файл (см. network::download::PartFileGuard),
-                                // не готов считаться "скачанным".
-                                if !name.ends_with(".part") {
-                                    entries.push(name.to_string());
-                                }
-                            }
+                            // .part (см. network::download) отдаём как есть — вызывающая
+                            // сторона (data-browser) сама решает, как показать недокачанное;
+                            // здесь это просто ещё одно имя файла.
+                            if let Some(name) = entry.file_name().to_str() { entries.push(name.to_string()); }
                         }
                     }
                     FsListResult { entries, error: String::new(), correlation_id }

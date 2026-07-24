@@ -14,6 +14,7 @@ pub const COLOR_WARNING: Color = Color { r: 1.0, g: 0.7, b: 0.3, a: 1.0 };
 pub const COLOR_FOLDER: Color = Color { r: 0.4, g: 0.6, b: 1.0, a: 1.0 };
 pub const COLOR_FILE: Color = Color { r: 0.7, g: 0.7, b: 0.7, a: 1.0 };
 pub const COLOR_RELOAD: Color = Color { r: 0.5, g: 0.5, b: 0.7, a: 1.0 };
+pub const COLOR_DANGER: Color = Color { r: 0.85, g: 0.3, b: 0.3, a: 1.0 };
 
 // --- Button Styles ---
 

@@ -10,6 +10,8 @@ interface:
       type: fs/FsWriteRequest
     on_list:
       type: fs/FsListRequest
+    on_delete:
+      type: fs/FsDeleteRequest
   outputs:
     on_read_result:
       type: fs/FsReadResult
@@ -20,3 +22,6 @@ interface:
     on_list_result:
       type: fs/FsListResult
       replies_to: on_list
+    on_delete_result:
+      type: fs/FsDeleteResult
+      replies_to: on_delete
