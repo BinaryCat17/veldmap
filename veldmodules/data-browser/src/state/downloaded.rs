@@ -3,6 +3,8 @@ use std::collections::HashMap;
 pub struct DownloadedState {
     pub local_files: Vec<LocalFile>,
     pub active_downloads: HashMap<String, DownloadProgress>,
+    /// Ожидание ответа на fs/on_list — гасит устаревший/чужой FsListResult.
+    pub pending_list: veldsdk::Correlator<()>,
 }
 
 pub struct LocalFile {
@@ -29,6 +31,7 @@ impl Default for DownloadedState {
         Self {
             local_files: Vec::new(),
             active_downloads: HashMap::new(),
+            pending_list: veldsdk::Correlator::new(),
         }
     }
 }
