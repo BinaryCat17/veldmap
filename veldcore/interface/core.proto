@@ -39,9 +39,3 @@ message EventEnvelope {
   // адресовать событие только владелец топика, публикующий в него.
   string target = 5;
 }
-
-// Конверт ответа синхронных ABI-вызовов (graphics и пр.).
-message AbiResponse {
-  bytes payload = 1;
-  string error = 2;
-}

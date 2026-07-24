@@ -10,7 +10,7 @@ use prost::Message;
 pub use veldmap_host_bindings::proto::graphics as proto;
 
 use proto::{
-    ResourceRequest, CreateResourceResponse, Submit, CommandBuffer,
+    ResourceRequest, Submit, CommandBuffer,
     resource_request::Command as ResourceCommand,
     render_command::Command as RenderCommand,
     bind_group_layout_entry::Ty,
@@ -394,7 +394,7 @@ impl GraphicsDevice {
 
     // ── Create resource (protobuf dispatch) ───────────────────
 
-    pub fn create_resource(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+    pub fn create_resource(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<u64> {
         let req = ResourceRequest::decode(&payload[..])?;
 
         let id = match req.command {
@@ -461,12 +461,12 @@ impl GraphicsDevice {
             }
             None => return Err(anyhow::anyhow!("Empty resource request")),
         };
-        Ok(CreateResourceResponse { id }.encode_to_vec())
+        Ok(id)
     }
 
     // ── Execute (queue render commands for the frame loop) ────
 
-    pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<Vec<u8>> {
+    pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<()> {
         let req = Submit::decode(&payload[..])?;
         // Check write access to the target view before queueing
         if !self.registry.check_access(req.target_texture_view_id, requestor_id, Access::Write) {
@@ -480,7 +480,7 @@ impl GraphicsDevice {
                 instance_id: requestor_id,
             });
         }
-        Ok(Vec::new())
+        Ok(())
     }
 }
 

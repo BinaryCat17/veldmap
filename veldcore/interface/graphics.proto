@@ -224,10 +224,6 @@ message ResourceRequest {
     }
 }
 
-message CreateResourceResponse {
-    uint64 id = 1;
-}
-
 // ── Render commands ────────────────────────────────────────────
 
 message SetPipeline {

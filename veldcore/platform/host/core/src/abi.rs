@@ -1,6 +1,6 @@
 use wasmtime::*;
 use crate::HostState;
-use crate::core::{EventEnvelope, AbiResponse};
+use crate::core::EventEnvelope;
 use prost::Message;
 
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
@@ -180,9 +180,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let payload = match data_bytes { Some(b) => b, None => return Ok(0u64) };
             let instance_id = caller.data().instance_id;
             let graphics = caller.data().graphics.clone();
-            let result = graphics.create_resource(payload, instance_id);
-            let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
-            let res_buf = AbiResponse { payload: res_payload, error }.encode_to_vec();
+            let result = graphics.create_resource(payload, instance_id).map(|id| id.to_le_bytes().to_vec());
+            let res_buf = tagged_response(result);
             write_response_back(&mut caller, &res_buf).await
         })
     })?;
@@ -194,9 +193,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let payload = match data_bytes { Some(b) => b, None => return Ok(0u64) };
             let instance_id = caller.data().instance_id;
             let graphics = caller.data().graphics.clone();
-            let result = graphics.execute(payload, instance_id);
-            let (res_payload, error) = match result { Ok(p) => (p, String::new()), Err(e) => (Vec::new(), e.to_string()) };
-            let res_buf = AbiResponse { payload: res_payload, error }.encode_to_vec();
+            let result = graphics.execute(payload, instance_id).map(|()| Vec::new());
+            let res_buf = tagged_response(result);
             write_response_back(&mut caller, &res_buf).await
         })
     })?;
@@ -243,6 +241,27 @@ fn resolve_service_arg(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -
         crate::vwarn!(crate::logging::FLAG_ABI, "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);
     }
     resolved
+}
+
+/// Кодирует результат синхронного ABI-вызова без protobuf: первый байт —
+/// тег (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст).
+/// Разбирается на SDK-стороне (sdk/rust/src/abi.rs::take_host_response).
+fn tagged_response(result: anyhow::Result<Vec<u8>>) -> Vec<u8> {
+    match result {
+        Ok(payload) => {
+            let mut buf = Vec::with_capacity(1 + payload.len());
+            buf.push(0);
+            buf.extend_from_slice(&payload);
+            buf
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let mut buf = Vec::with_capacity(1 + msg.len());
+            buf.push(1);
+            buf.extend_from_slice(msg.as_bytes());
+            buf
+        }
+    }
 }
 
 /// Helper: write response back to WASM via veld_alloc

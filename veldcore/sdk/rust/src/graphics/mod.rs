@@ -23,7 +23,7 @@ pub use proto::{
 };
 
 use prost::Message;
-use proto::{resource_request, ResourceRequest, CreateResourceResponse};
+use proto::{resource_request, ResourceRequest};
 
 // ── Типизированные идентификаторы GPU-объектов ─────────────────
 
@@ -105,7 +105,9 @@ pub mod texture_usage {
 fn create(command: resource_request::Command) -> anyhow::Result<u64> {
     let req = ResourceRequest { command: Some(command) };
     let res_bytes = crate::abi::graphics_create_resource(req.encode_to_vec())?;
-    Ok(CreateResourceResponse::decode(&res_bytes[..])?.id)
+    let id_bytes: [u8; 8] = res_bytes.as_slice().try_into()
+        .map_err(|_| anyhow::anyhow!("graphics create_resource: malformed id ({} bytes)", res_bytes.len()))?;
+    Ok(u64::from_le_bytes(id_bytes))
 }
 
 pub fn create_shader(source: &str, label: &str) -> anyhow::Result<ShaderId> {

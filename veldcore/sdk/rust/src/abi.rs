@@ -2,7 +2,7 @@
 //! синхронный слой SDK — вызовы в состояние хоста (память, graphics,
 //! конфиг, энтропия) и отправка событий в шину (fire-and-forget).
 
-use crate::proto::core::{EventEnvelope, AbiResponse};
+use crate::proto::core::EventEnvelope;
 use prost::Message;
 
 // ── VELD MICROKERNEL ABI ───────────────────────────────────────
@@ -64,14 +64,16 @@ unsafe fn take_host_bytes(packed: u64) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// Распаковывает ответ хоста: (len << 32 | ptr) → payload из AbiResponse.
+/// Распаковывает ответ хоста: (len << 32 | ptr) → байты, первый байт —
+/// тег (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст),
+/// см. host-side `abi.rs::tagged_response`.
 unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
     let buf = take_host_bytes(packed).ok_or_else(|| anyhow::anyhow!("{} failed", what))?;
-    let response = AbiResponse::decode(&buf[..])?;
-    if !response.error.is_empty() {
-        return Err(anyhow::anyhow!(response.error));
+    match buf.split_first() {
+        Some((0, payload)) => Ok(payload.to_vec()),
+        Some((1, msg)) => Err(anyhow::anyhow!(String::from_utf8_lossy(msg).into_owned())),
+        _ => Err(anyhow::anyhow!("{}: malformed response", what)),
     }
-    Ok(response.payload)
 }
 
 pub fn graphics_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
