@@ -168,6 +168,9 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                         let req = crate::core::EventEnvelope {
                             service: ev.service, method: ev.method, payload: ev.payload,
                             publisher: dispatcher_for_actor.name_of(ev.publisher).unwrap_or_default(),
+                            // Адресат уже разрешён на стороне доставки (только целевой
+                            // подписчик получил это событие) — модулю его знать не нужно.
+                            target: String::new(),
                         };
                         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
                         wasm_module.store.data_mut().call_context = Some(call_ctx);
@@ -180,7 +183,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
 
                 ctx.dispatcher.register_instance(name.clone(), instance_id);
                 for topic in subs {
-                    ctx.dispatcher.register_subscription(topic, tx.clone());
+                    ctx.dispatcher.register_subscription(topic, Some(name.clone()), tx.clone());
                 }
             }
             "remote" => {

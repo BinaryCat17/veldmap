@@ -31,12 +31,19 @@ pub const SERVICE_NAME: &str = "{{ service_name }}";
 /// The schema is the single source of truth: an undeclared output does not
 /// exist, and each stub accepts exactly the message the schema declares.
 pub mod emit {
-    use veldsdk::prost::Message;
+    {% if emits %}use veldsdk::prost::Message;{% endif %}
     {% for output in emits %}
+    {%- if output.targeted %}
+    /// `{{ service_name }}/{{ output.name }}` (адресовано: доставляется только `target`)
+    pub fn {{ output.name }}(msg: &{{ output.rust_path }}, target: &str) {
+        veldsdk::abi::publish_targeted("{{ service_name }}/{{ output.name }}", msg.encode_to_vec(), target);
+    }
+    {%- else %}
     /// `{{ service_name }}/{{ output.name }}`
     pub fn {{ output.name }}(msg: &{{ output.rust_path }}) {
         veldsdk::abi::publish("{{ service_name }}/{{ output.name }}", msg.encode_to_vec());
     }
+    {%- endif %}
     {% endfor %}
 }
 

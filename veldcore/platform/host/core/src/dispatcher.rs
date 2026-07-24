@@ -23,9 +23,15 @@ pub struct Event {
 /// release). Обратная сторона — нет backpressure: обработчики обязаны успевать.
 pub type Subscriber = tokio::sync::mpsc::UnboundedSender<Event>;
 
+/// Регистрация подписчика: имя — None у нативных сервисов хоста (у них нет
+/// адресуемой идентичности модуля), Some(name) у wasm-акторов. Нужно, чтобы
+/// адресованный publish (target непустой) мог выбрать среди подписчиков
+/// топика ровно одного получателя, а не разослать всем.
+type Registration = (Option<String>, Subscriber);
+
 #[derive(Default)]
 pub struct Dispatcher {
-    subscriptions: Mutex<HashMap<String, Vec<Subscriber>>>,
+    subscriptions: Mutex<HashMap<String, Vec<Registration>>>,
     /// Instance id каждого локального wasm-сервиса: адресат для lease-грантов.
     instances: Mutex<HashMap<String, u32>>,
     /// Обратный индекс instance id → имя: им подписывается publisher событий.
@@ -51,10 +57,10 @@ impl Dispatcher {
         self.names.lock().unwrap().get(&instance_id).cloned()
     }
 
-    pub fn register_subscription(&self, topic: String, subscriber: Subscriber) {
+    pub fn register_subscription(&self, topic: String, name: Option<String>, subscriber: Subscriber) {
         crate::vtrace!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Registering subscription: {}", topic);
         let mut subscriptions = self.subscriptions.lock().unwrap();
-        subscriptions.entry(topic).or_default().push(subscriber);
+        subscriptions.entry(topic).or_default().push((name, subscriber));
     }
 
     /// Подписывает нативный сервис на его топики. Сервис получает одну
@@ -69,7 +75,9 @@ impl Dispatcher {
             }
         });
         for topic in topics {
-            self.register_subscription((*topic).to_string(), tx.clone());
+            // Нативные сервисы хоста не адресуются как target: у них нет
+            // отдельной модульной идентичности, только топики.
+            self.register_subscription((*topic).to_string(), None, tx.clone());
         }
     }
 
@@ -77,12 +85,18 @@ impl Dispatcher {
     /// Delivery is synchronous into each subscriber's queue, so events published
     /// from one thread arrive at each subscriber in publish order.
     pub fn publish(&self, topic: &str, payload: Vec<u8>) {
-        self.publish_from(topic, payload, 0);
+        self.publish_from(topic, payload, 0, "");
     }
 
     /// Like `publish`, carrying the publisher's instance id. Subscribers
     /// receive it as requestor_id and can authorize commands (0 = host itself).
-    pub fn publish_from(&self, topic: &str, payload: Vec<u8>, publisher: u32) {
+    ///
+    /// `target`: empty delivers to every subscriber of `topic` (broadcast,
+    /// the historical behavior). Non-empty delivers only to the subscriber
+    /// registered under that module name — every other subscriber of the same
+    /// topic doesn't see it. An addressed event with no matching subscriber is
+    /// dropped, same as an unsubscribed topic.
+    pub fn publish_from(&self, topic: &str, payload: Vec<u8>, publisher: u32, target: &str) {
         let parts: Vec<&str> = topic.splitn(2, '/').collect();
         if parts.len() != 2 {
             crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Invalid publish topic: {}", topic);
@@ -95,13 +109,22 @@ impl Dispatcher {
             subscriptions.get(topic).cloned().unwrap_or_default()
         };
 
-        if subs.is_empty() {
+        let recipients: Vec<Subscriber> = if target.is_empty() {
+            subs.into_iter().map(|(_, tx)| tx).collect()
+        } else {
+            subs.into_iter()
+                .filter(|(name, _)| name.as_deref() == Some(target))
+                .map(|(_, tx)| tx)
+                .collect()
+        };
+
+        if recipients.is_empty() {
             // A published message with no receiver is almost always a wiring bug.
-            crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Publish to '{}' dropped: no subscribers", topic);
+            crate::vwarn!(crate::logging::FLAG_DISPATCHER, "[DISPATCHER] Publish to '{}' (target '{}') dropped: no matching subscriber", topic, target);
             return;
         }
 
-        for subscriber in subs {
+        for subscriber in recipients {
             if subscriber.send(Event {
                 service: service_name.to_string(),
                 method: method.to_string(),
@@ -119,5 +142,9 @@ impl Dispatcher {
 impl veldmap_host_bindings::Publisher for Dispatcher {
     fn publish(&self, topic: &str, payload: Vec<u8>) {
         Dispatcher::publish(self, topic, payload);
+    }
+
+    fn publish_targeted(&self, topic: &str, payload: Vec<u8>, target: &str) {
+        self.publish_from(topic, payload, 0, target);
     }
 }

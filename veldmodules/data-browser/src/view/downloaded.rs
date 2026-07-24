@@ -4,6 +4,7 @@ use veld_ui_service_wrap::column;
 use crate::proto::ui_service::{text, scrollable, Element, Length, Padding};
 use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, BrowserItem, ItemActions};
+use crate::module::handlers::ui_methods::{ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED};
 
 pub fn view(state: &State) -> Element<()> {
     let downloaded = &state.downloaded;
@@ -22,8 +23,8 @@ pub fn view(state: &State) -> Element<()> {
     } else {
         render_list(&items, task_manager, ItemActions {
             browse: None,
-            view: Some("on_view_pressed"),
-            download: Some("on_download_pressed"), // Для перезакачки
+            view: Some(ON_VIEW_PRESSED),
+            download: Some(ON_DOWNLOAD_PRESSED), // Для перезакачки
         })
     };
 

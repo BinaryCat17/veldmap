@@ -21,7 +21,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             };
             let topic = format!("{}/{}", request.service, request.method);
             let publisher = caller.data().instance_id;
-            caller.data().dispatcher.clone().publish_from(&topic, request.payload, publisher);
+            caller.data().dispatcher.clone().publish_from(&topic, request.payload, publisher, &request.target);
             Ok(())
         })
     })?;

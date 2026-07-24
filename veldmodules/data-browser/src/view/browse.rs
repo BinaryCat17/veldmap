@@ -5,6 +5,7 @@ use crate::proto::ui_service::{text, button, scrollable, Element, Length, Alignm
 use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
+use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED};
 
 pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;
@@ -24,9 +25,9 @@ pub fn view(state: &State) -> Element<()> {
         }).collect();
         
         render_list(&items, task_manager, ItemActions {
-            browse: Some("on_browse"),
-            view: Some("on_view_pressed"),
-            download: Some("on_download_pressed"),
+            browse: Some(ON_BROWSE),
+            view: Some(ON_VIEW_PRESSED),
+            download: Some(ON_DOWNLOAD_PRESSED),
         })
     };
     
@@ -36,7 +37,7 @@ pub fn view(state: &State) -> Element<()> {
             row![text("\u{f062}").font_family("Icons"), text("Up")]
                 .spacing(6.0)
                 .align_items(Alignment::Center)
-        )).on_press("on_browse_up"),
+        )).on_press(ON_BROWSE_UP),
         scrollable(list)
             .width(Length::Fill)
             .height(Length::Fill)

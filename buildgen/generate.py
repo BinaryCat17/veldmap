@@ -331,6 +331,7 @@ def generate_host_bindings(args, script_dir: str):
                     "name":      n,
                     "const":     n.upper(),
                     "rust_path": schema_type_to_rust_path((d or {}).get("type") or ""),
+                    "targeted":  bool((d or {}).get("targeted", False)),
                 }
                 for n, d in (iface.get(kind, {}) or {}).items()
             ]
@@ -508,7 +509,11 @@ def main():
     # interface.outputs  → crate::emit::<name>(&ExactMessage)
     # dependencies.*.calls → crate::calls::<dep_snake>::<name>(&ExactMessage)
     emits = [
-        {"name": n, "rust_path": module_rust_path(resolved["outputs"][n])}
+        {
+            "name": n,
+            "rust_path": module_rust_path(resolved["outputs"][n]),
+            "targeted": bool((schema["interface"]["outputs"][n] or {}).get("targeted", False)),
+        }
         for n in schema.get("interface", {}).get("outputs", {}) or {}
     ]
 

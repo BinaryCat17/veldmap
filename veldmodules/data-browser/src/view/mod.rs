@@ -9,6 +9,7 @@ pub mod preview;
 
 use crate::module::state::State;
 use crate::module::styles;
+use crate::module::handlers::ui_methods::{ON_NAV_BROWSE, ON_NAV_SEARCH, ON_NAV_DOWNLOADED};
 use veld_ui_service_wrap::{column, row, container};
 use crate::proto::ui_service::{Element, text, button, Length, Padding, Color};
 
@@ -22,9 +23,9 @@ pub fn build_root(state: &State) -> Element<()> {
 
     // Header navigation
     let header = row![
-        styles::apply_nav(button(text("Browse"))).on_press("on_nav_browse"),
-        styles::apply_nav(button(text("Search"))).on_press("on_nav_search"),
-        styles::apply_nav(button(text("Downloaded"))).on_press("on_nav_downloaded")
+        styles::apply_nav(button(text("Browse"))).on_press(ON_NAV_BROWSE),
+        styles::apply_nav(button(text("Search"))).on_press(ON_NAV_SEARCH),
+        styles::apply_nav(button(text("Downloaded"))).on_press(ON_NAV_DOWNLOADED)
     ].spacing(10.0).padding(Padding::new(10.0));
 
     let status_bar = row![

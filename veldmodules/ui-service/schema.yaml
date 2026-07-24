@@ -7,6 +7,13 @@ interface:
       type: ui_service/SetViewRequest
     on_set_surface:
       type: ui_service/SetSurfaceRequest
+  outputs:
+    # Виджет-событие владельцу окна: адресат — плагин, назначаемый в
+    # рантайме (см. handlers.rs::dispatch_event), поэтому targeted вместо
+    # статичного топика на стороне потребителя.
+    on_ui_event:
+      type: module/UiEventResponse
+      targeted: true
 
 # Платформенный контракт: хост публикует ввод и кадровые тики в app/on_ui_event.
 # События адресуются plugin_id в данных; события модулей без делегированной

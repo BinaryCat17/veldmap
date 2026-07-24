@@ -5,6 +5,7 @@ use crate::proto::ui_service::{text, text_input, button, scrollable, Element, Le
 use crate::module::state::State;
 use crate::module::components::browser_list::{render_list, ItemActions};
 use crate::module::components::browser_list::BrowserItem;
+use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
 
 pub fn view(state: &State) -> Element<()> {
     let search_state = &state.search;
@@ -33,7 +34,7 @@ pub fn view(state: &State) -> Element<()> {
         render_list(&items, task_manager, ItemActions {
             browse: None, // Папки не поддерживаются
             view: None,
-            download: Some("on_download_pressed"),
+            download: Some(ON_DOWNLOAD_PRESSED),
         })
     };
     
@@ -45,9 +46,9 @@ pub fn view(state: &State) -> Element<()> {
                 text_input("Search query...", &search_state.query)
             )
                 .width(Length::Fill)
-                .on_input("on_search_input")
-                .on_submit("on_search"),
-            crate::module::styles::apply_primary(button(text("Search"))).on_press("on_search")
+                .on_input(ON_SEARCH_INPUT)
+                .on_submit(ON_SEARCH),
+            crate::module::styles::apply_primary(button(text("Search"))).on_press(ON_SEARCH)
         ]
         .spacing(10.0)
         .width(Length::Fill),

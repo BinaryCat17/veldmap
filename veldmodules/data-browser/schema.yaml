@@ -5,32 +5,17 @@ version: 0.1.0
 # view и шлёт её рендереру после каждого события (см. module.rs::hook_event).
 hooks: [hook_event]
 
-interface:
-  inputs:
-    on_nav_browse:
-      type: ui_service/UiEventResponse
-    on_nav_search:
-      type: ui_service/UiEventResponse
-    on_nav_downloaded:
-      type: ui_service/UiEventResponse
-    on_browse:
-      type: ui_service/UiEventResponse
-    on_browse_up:
-      type: ui_service/UiEventResponse
-    on_search:
-      type: ui_service/UiEventResponse
-    on_search_input:
-      type: ui_service/UiEventResponse
-    on_download_pressed:
-      type: ui_service/UiEventResponse
-    on_view_pressed:
-      type: ui_service/UiEventResponse
-
 dependencies:
   # Платформенный контракт: хост просит владельца окна выделить поверхность.
+  # Адресовано (target = имя владельца), поэтому не приходит другим модулям.
   app:
     subs: [on_window_resized]
-  ui-service: {}
+  # Виджет-события собственного UI: один топик на все методы, конкретная
+  # кнопка/поле — в UiEventResponse.method (см. handlers::ui_methods в
+  # module.rs). Адресовано ui-service'ом через target — другие модули с UI
+  # этот топик тоже слушают, но чужие события не получают.
+  ui-service:
+    subs: [on_ui_event]
   data-provider:
     subs: [on_download_started, on_download_progress, on_downloaded, on_search_result, on_list_path_result]
     calls: [on_list_path, on_download, on_cancel_download, on_search]

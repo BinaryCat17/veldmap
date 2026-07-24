@@ -106,7 +106,7 @@ fn publish_window_resized(dispatcher: &Dispatcher, owner: &str, width: u32, heig
         scale_factor,
         format,
     };
-    app_bus::emit::on_window_resized(dispatcher, &ev);
+    app_bus::emit::on_window_resized(dispatcher, &ev, owner);
 }
 
 #[tokio::main]

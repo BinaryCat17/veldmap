@@ -209,6 +209,16 @@ pub fn store_output(data: Vec<u8>) {
 /// он существует только внутри стабов.
 #[doc(hidden)]
 pub fn publish(topic: &str, payload: Vec<u8>) {
+    publish_targeted(topic, payload, "");
+}
+
+/// Как `publish`, но с адресатом: событие доставляется только подписчику с
+/// именем `target`, а не всем подписчикам топика. Пустой `target` — обычный
+/// broadcast (см. `publish`). Используется для output'ов, помеченных в схеме
+/// `targeted: true` (адресат известен только в рантайме — например,
+/// ui-service рассылает UI-события владельцам виджетов).
+#[doc(hidden)]
+pub fn publish_targeted(topic: &str, payload: Vec<u8>, target: &str) {
     let parts: Vec<&str> = topic.splitn(2, '/').collect();
     if parts.len() != 2 {
         crate::verror!(crate::FLAG_SDK, "[SDK] Invalid topic: {}", topic);
@@ -218,15 +228,8 @@ pub fn publish(topic: &str, payload: Vec<u8>) {
     // и подписывает события сам при доставке.
     let request = EventEnvelope {
         service: parts[0].to_string(), method: parts[1].to_string(), payload,
-        publisher: String::new(),
+        publisher: String::new(), target: target.to_string(),
     };
     let req_buf = request.encode_to_vec();
     unsafe { veld_host_publish(req_buf.as_ptr() as u64, req_buf.len() as u64); }
-}
-
-/// Маршрутизация с адресатом, известным только в рантайме: роутеры вроде
-/// ui-service, рассылающие UI-события владельцам окон (`{plugin_id}/{method}`).
-/// Прикладным модулям не нужна — их топики статичны и объявлены в schema.yaml.
-pub fn publish_dynamic(service: &str, method: &str, payload: Vec<u8>) {
-    publish(&format!("{}/{}", service, method), payload);
 }

@@ -193,18 +193,16 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
     Ok(())
 }
 
-/// Диспетчеризация захваченного виджет-события владельцу:
-/// адрес — входной метод модуля, `{plugin_id}/{method}`.
+/// Диспетчеризация захваченного виджет-события владельцу: рассылается через
+/// общий адресованный топик `ui-service/on_ui_event`, доставляется только
+/// плагину-владельцу (адресат известен лишь в рантайме — назначается при
+/// делегировании поверхности, см. `surface::delegate`).
 fn dispatch_event(event: UiEventResponse) {
-    use veldsdk::prost::Message;
     if event.method.is_empty() {
         return;
     }
-    // Единственный легитимный динамический топик: адресат UI-события неизвестен
-    // на этапе кодогена (это плагин-владелец окна, назначаемый в рантайме), поэтому
-    // publish_dynamic вместо сгенерированного стаба.
     veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[DISPATCH] UI message -> '{}/{}' (value: '{}')", event.plugin_id, event.method, event.value);
-    veldsdk::abi::publish_dynamic(&event.plugin_id, &event.method, event.encode_to_vec());
+    crate::emit::on_ui_event(&event, &event.plugin_id);
 }
 
 fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {

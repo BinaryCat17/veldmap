@@ -23,11 +23,25 @@ pub fn hook_event(state: &State) {
     veld_ui_service_wrap::render::render(crate::SERVICE_NAME, root, &mut LAST_UI_HASH.lock().unwrap());
 }
 
-// -- Input handlers --
-pub use handlers::nav::{on_nav_browse, on_nav_search, on_nav_downloaded};
-pub use handlers::browse::{on_browse, on_browse_up};
-pub use handlers::search::{on_search, on_search_input};
-pub use handlers::download::{on_download_pressed, on_view_pressed};
+// -- UI-события (ui-service/on_ui_event, адресовано нам через target) --
+// Один топик, много методов: ui-service возвращает нажатую кнопку эхом в
+// UiEventResponse.method, дальше это внутренняя проводка модуля, а не часть
+// bus-контракта — см. handlers::ui_methods.
+pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::UiEventResponse) {
+    use handlers::ui_methods::*;
+    match event.method.as_str() {
+        ON_NAV_BROWSE => handlers::nav::on_nav_browse(state, event),
+        ON_NAV_SEARCH => handlers::nav::on_nav_search(state, event),
+        ON_NAV_DOWNLOADED => handlers::nav::on_nav_downloaded(state, event),
+        ON_BROWSE => handlers::browse::on_browse(state, event),
+        ON_BROWSE_UP => handlers::browse::on_browse_up(state, event),
+        ON_SEARCH => handlers::search::on_search(state, event),
+        ON_SEARCH_INPUT => handlers::search::on_search_input(state, event),
+        ON_DOWNLOAD_PRESSED => handlers::download::on_download_pressed(state, event),
+        ON_VIEW_PRESSED => handlers::download::on_view_pressed(state, event),
+        other => veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] unknown UI method: {}", other),
+    }
+}
 
 // -- Sub handlers --
 pub use handlers::download::{on_download_started, on_download_progress, on_downloaded};
