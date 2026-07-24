@@ -11,7 +11,10 @@ interface:
   outputs:
     on_fs_download_result:
       type: network/FsDownloadResponse
+      replies_to: on_fs_download
     on_fs_download_progress:
       type: network/FsDownloadProgress
+      replies_to: on_fs_download
     on_http_result:
       type: network/HttpTaskResponse
+      replies_to: on_http

@@ -21,11 +21,13 @@ pub fn on_browse(
 
     state.browse.is_loading = true;
     state.browse.error = None;
-    
+
     // Публикуем запрос к data-provider
+    let correlation_id = state.browse.pending.begin(());
     crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path: target_path,
         token: String::new(),
+        correlation_id,
     });
 }
 
@@ -47,17 +49,24 @@ pub fn on_browse_up(
     state.browse.current_path = path.clone();
     state.browse.is_loading = true;
     state.browse.error = None;
-    
+
+    let correlation_id = state.browse.pending.begin(());
     crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path,
         token: String::new(),
+        correlation_id,
     });
 }
 
+/// Broadcast-топик — сверяем correlation_id, чтобы не принять устаревший
+/// или чужой ответ (например, от предыдущего on_browse_up).
 pub fn on_list_path_result(
     state: &mut State,
     response: crate::proto::data_provider::ListPathResponse,
 ) {
+    if state.browse.pending.take(&response.correlation_id).is_none() {
+        return;
+    }
     state.browse.is_loading = false;
 
     if !response.error.is_empty() {

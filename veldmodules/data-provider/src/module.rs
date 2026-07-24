@@ -14,9 +14,18 @@ pub struct State {
     /// Учёт запущенных модулем задач: фильтрация broadcast-событий
     /// и отмена через платформенный протокол tasks/* (veldsdk).
     pub tasks: veldsdk::TaskTracker,
-    /// path, ожидающий S3 list-ответа: id генерируется в on_list_path,
-    /// снимается в on_http_result по correlation_id из ответа.
-    pub pending_http: veldsdk::Correlator<String>,
+    /// Запрос листинга, ожидающий S3-ответа: id генерируется в on_list_path
+    /// для внутреннего вызова network, снимается в on_http_result.
+    pub pending_http: veldsdk::Correlator<PendingList>,
+}
+
+/// Контекст запроса на листинг: path — для дедупликации "самого себя" из
+/// S3-листинга, correlation_id — внешний id вызывающего (data-browser),
+/// эхом возвращается в ListPathResponse.
+#[derive(Clone)]
+pub struct PendingList {
+    pub path: String,
+    pub correlation_id: String,
 }
 
 // Re-export handlers to match the expected names in generated code

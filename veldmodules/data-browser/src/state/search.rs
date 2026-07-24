@@ -6,6 +6,8 @@ pub struct SearchState {
     pub is_loading: bool,
     /// Последняя ошибка search от data-provider (пусто, если запрос успешен)
     pub error: Option<String>,
+    /// Ожидание ответа на data-provider/on_search — гасит устаревший/чужой ответ.
+    pub pending: veldsdk::Correlator<()>,
 }
 
 impl Default for SearchState {
@@ -15,6 +17,7 @@ impl Default for SearchState {
             results: Vec::new(),
             is_loading: false,
             error: None,
+            pending: veldsdk::Correlator::new(),
         }
     }
 }

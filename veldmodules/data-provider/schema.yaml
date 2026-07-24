@@ -17,8 +17,10 @@ interface:
       type: module/DownloadStarted
     on_list_path_result:
       type: module/ListPathResponse
+      replies_to: on_list_path
     on_search_result:
       type: module/SearchResponse
+      replies_to: on_search
     on_downloaded:
       type: module/Downloaded
     on_download_progress:

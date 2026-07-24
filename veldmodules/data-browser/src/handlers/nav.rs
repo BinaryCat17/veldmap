@@ -8,9 +8,11 @@ pub fn on_nav_browse(state: &mut State, _event: UiEventResponse) {
     // Запрашиваем листинг текущего пути при входе на экран
     state.browse.is_loading = true;
     state.browse.error = None;
+    let correlation_id = state.browse.pending.begin(());
     crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path: state.browse.current_path.clone(),
         token: String::new(),
+        correlation_id,
     });
 }
 

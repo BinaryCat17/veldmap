@@ -65,6 +65,35 @@ def collect_proto_info(proto_file: str) -> tuple[str | None, set[str]]:
     return package, messages
 
 
+def collect_message_fields(proto_file: str) -> dict[str, set[str]]:
+    """Map each message name to the set of field names declared directly in
+    it. Regex-based like collect_proto_info; assumes flat (non-nested)
+    messages, which holds for every .proto in this repo today."""
+    fields: dict[str, set[str]] = {}
+    current = None
+    depth = 0
+    field_re = re.compile(r"^(?:repeated|optional)?\s*[\w.]+\s+(\w+)\s*=\s*\d+\s*;")
+    with open(proto_file) as f:
+        for raw in f:
+            line = raw.strip()
+            if current is None:
+                m = re.match(r"message\s+(\w+)", line)
+                if m:
+                    current = m.group(1)
+                    fields.setdefault(current, set())
+                    depth = line.count("{") - line.count("}")
+                continue
+            if depth == 1:
+                fm = field_re.match(line)
+                if fm:
+                    fields[current].add(fm.group(1))
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                current = None
+                depth = 0
+    return fields
+
+
 def read_proto_package(proto_file: str) -> str | None:
     """Read the 'package' declaration from a .proto file."""
     return collect_proto_info(proto_file)[0]
@@ -111,17 +140,17 @@ def iter_core_proto_files(proto_dir: str):
 def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
     universe = {}
 
-    def add(alias, messages, origin, source):
+    def add(alias, messages, fields, origin, source):
         if alias in universe:
             raise SystemExit(
                 f"Proto package alias collision: '{alias}' is defined by both "
                 f"{universe[alias]['source']} and {source}")
-        universe[alias] = {"messages": messages, "origin": origin, "source": source}
+        universe[alias] = {"messages": messages, "fields": fields, "origin": origin, "source": source}
 
     for path in iter_core_proto_files(proto_dir):
         pkg, messages = collect_proto_info(path)
         if pkg:
-            add(pkg.split(".")[-1], messages, "core", path)
+            add(pkg.split(".")[-1], messages, collect_message_fields(path), "core", path)
 
     if modules_root and os.path.isdir(modules_root):
         for name in sorted(os.listdir(modules_root)):
@@ -129,9 +158,20 @@ def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
             if os.path.exists(tp):
                 pkg, messages = collect_proto_info(tp)
                 if pkg:
-                    add(pkg.split(".")[-1], messages, name, tp)
+                    add(pkg.split(".")[-1], messages, collect_message_fields(tp), name, tp)
 
     return universe
+
+
+# A reply's payload must echo the request's correlation_id (see Correlator in
+# the SDK) so a caller can tell its own response apart from a broadcast one.
+# `replies_to` on an output declares that pairing; this is what's checked.
+CORRELATION_FIELD = "correlation_id"
+
+
+def has_field(universe: dict, canonical: str, field: str) -> bool:
+    alias, _, tname = canonical.partition("/")
+    return field in universe.get(alias, {}).get("fields", {}).get(tname, set())
 
 
 def local_package_alias(module_dir: str) -> str | None:
@@ -209,6 +249,23 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
         if c:
             resolved["outputs"][output_name] = c
 
+    for output_name, entry in (iface.get("outputs") or {}).items():
+        replies_to = (entry or {}).get("replies_to")
+        if not replies_to:
+            continue
+        where = f"interface.outputs.{output_name}.replies_to"
+        if replies_to not in (iface.get("inputs") or {}):
+            err(where, f"'{replies_to}' is not one of this module's interface.inputs")
+            continue
+        out_type = resolved["outputs"].get(output_name)
+        in_type = resolved["inputs"].get(replies_to)
+        if out_type is None or in_type is None:
+            continue  # already reported above as a type error
+        if not has_field(universe, in_type, CORRELATION_FIELD):
+            err(where, f"request '{replies_to}' ({in_type}) has no '{CORRELATION_FIELD}' field")
+        if not has_field(universe, out_type, CORRELATION_FIELD):
+            err(where, f"reply '{output_name}' ({out_type}) has no '{CORRELATION_FIELD}' field")
+
     def load_dep_schema(dep):
         """A dependency is a sibling wasm module or a platform service (either
         a root-level contract or a native service under interface/modules/)."""
@@ -277,6 +334,22 @@ def validate_core_schema(svc_schema: dict, universe: dict) -> list[str]:
             elif tname not in info["messages"]:
                 errors.append(f"schema '{name}': interface.{kind}.{topic}: message "
                               f"'{tname}' not found in package '{alias}'")
+
+    inputs = iface.get("inputs") or {}
+    for topic, entry in (iface.get("outputs") or {}).items():
+        replies_to = (entry or {}).get("replies_to")
+        if not replies_to:
+            continue
+        where = f"schema '{name}': interface.outputs.{topic}.replies_to"
+        in_entry = inputs.get(replies_to)
+        if in_entry is None:
+            errors.append(f"{where}: '{replies_to}' is not one of this service's interface.inputs")
+            continue
+        in_type = (in_entry or {}).get("type") or ""
+        out_type = (entry or {}).get("type") or ""
+        for label, t in (("request", in_type), ("reply", out_type)):
+            if not has_field(universe, t, CORRELATION_FIELD):
+                errors.append(f"{where}: {label} type '{t}' has no '{CORRELATION_FIELD}' field")
     return errors
 
 

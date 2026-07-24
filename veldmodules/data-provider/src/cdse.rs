@@ -10,7 +10,7 @@ use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
-use super::{Config, State};
+use super::{Config, PendingList, State};
 
 const S3_HOST: &str = "eodata.dataspace.copernicus.eu";
 const S3_REGION: &str = "default";
@@ -135,14 +135,17 @@ pub fn on_list_path(
     };
     
     let headers = get_s3_headers(state, "GET", &uri_with_query);
-    let correlation_id = state.pending_http.begin(request.path);
+    let internal_id = state.pending_http.begin(PendingList {
+        path: request.path,
+        correlation_id: request.correlation_id,
+    });
 
     let req_task = veldsdk::proto::network::HttpTaskRequest {
         url: full_url,
         method: "GET".to_string(),
         headers,
         body: Vec::new(),
-        correlation_id,
+        correlation_id: internal_id,
     };
 
     info!("Requesting S3 list: {}", req_task.url);
@@ -156,17 +159,21 @@ pub fn on_http_result(
     state: &mut State,
     response: veldsdk::proto::network::HttpTaskResponse,
 ) {
-    let filter_path = state.pending_http.take(&response.correlation_id);
-    
-    let list_response = if response.status >= 200 && response.status < 300 {
-        parse_s3_xml(response.body, filter_path.as_deref())
+    let Some(pending) = state.pending_http.take(&response.correlation_id) else {
+        return;
+    };
+
+    let mut list_response = if response.status >= 200 && response.status < 300 {
+        parse_s3_xml(response.body, Some(pending.path.as_str()))
     } else {
         ListPathResponse {
             items: vec![],
             next_token: "".into(),
             error: format!("HTTP error: {}", response.status),
+            correlation_id: String::new(),
         }
     };
+    list_response.correlation_id = pending.correlation_id;
 
     crate::emit::on_list_path_result(&list_response);
 }
@@ -279,11 +286,11 @@ fn parse_s3_xml(body: Vec<u8>, filter_path: Option<&str>) -> ListPathResponse {
                 current_tag.clear();
             }
             Ok(Event::Eof) => break,
-            Err(e) => return ListPathResponse { items: vec![], next_token: "".into(), error: format!("XML error: {}", e) },
+            Err(e) => return ListPathResponse { items: vec![], next_token: "".into(), error: format!("XML error: {}", e), correlation_id: String::new() },
             _ => {}
         }
         buf.clear();
     }
-    
-    ListPathResponse { items, next_token, error: String::new() }
+
+    ListPathResponse { items, next_token, error: String::new(), correlation_id: String::new() }
 }

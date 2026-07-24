@@ -13,7 +13,10 @@ interface:
   outputs:
     on_read_result:
       type: fs/FsReadResult
+      replies_to: on_read
     on_write_result:
       type: fs/FsWriteResult
+      replies_to: on_write
     on_list_result:
       type: fs/FsListResult
+      replies_to: on_list
