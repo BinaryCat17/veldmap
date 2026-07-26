@@ -61,24 +61,23 @@ def main():
     # Enable non-conformant Vulkan drivers (dzn)
     env["WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER"] = "1"
     
-    # Logging configuration: 
-    # Console: veldmap=info, остальное только error
-    # File: всё
-    env["RUST_LOG"] = "veldmap=trace,error"
-    
+    # Фильтр логов задаётся в runtime/config/core.json (log_filter) — здесь
+    # RUST_LOG намеренно не выставляется: заданная переменная перекрывает
+    # конфиг целиком, и правки core.json переставали действовать.
+    # Для разового переопределения: RUST_LOG=... python3 run-native.py
+    # (или строкой в .env).
+
     # Suppress GPU driver/MESA logs (всё равно лезут в stderr)
     env["EGL_LOG_LEVEL"] = "fatal"
     env["MESA_DEBUG"] = "silent"
-    
-    # Logging: в консоль только veldmap info+ и ошибки, в файл - всё
-    env["RUST_LOG"] = "veldmap=trace,error"
-    
+
     profile_name = "debug" if args.debug else "release"
     binary_path = f"veldcore/target/{profile_name}/veldmap-host-gui"
     
     cmd = [binary_path, "--config", args.config] + extra_args
     
-    print(f"Environment: RUST_LOG={env.get('RUST_LOG', 'not set')}")
+    rust_log = env.get("RUST_LOG")
+    print(f"Log filter: {'RUST_LOG=' + rust_log if rust_log else 'из runtime/config/core.json (log_filter)'}")
     
     # Проверяем, существует ли бинарник
     if not os.path.exists(binary_path):

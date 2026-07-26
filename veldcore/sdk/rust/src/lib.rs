@@ -1,9 +1,13 @@
 pub mod abi;
 pub mod proto;
-pub mod logging;
 pub mod graphics;
 pub mod tasks;
 pub mod correlator;
+
+/// Мост `log` → ABI хоста. Ставится сгенерированным клеем модуля; прикладной
+/// код пишет обычными макросами крейта `log` (реэкспортирован ниже).
+#[doc(hidden)]
+pub mod logging;
 
 /// Внутренности для сгенерированного клея модуля (buildgen, lib.rs.j2):
 /// хранение состояния между вызовами хоста и диспетчеризация обработчиков.
@@ -47,9 +51,4 @@ impl Drop for OwnedResource {
 
 impl AsRef<ResourceHandle> for OwnedResource {
     fn as_ref(&self) -> &ResourceHandle { &self.handle }
-}
-
-pub mod prelude {
-    pub use crate::proto::core::*;
-    pub use crate::OwnedResource;
 }

@@ -1,4 +1,4 @@
 {
-  "log_filter": "veldmap=trace,netlink_packet_route=error,warn",
+  "log_filter": "veldmap=trace,veldmap::ui-service::cosmic_text=error,error",
   "log_rate_limit_ms": 3000
 }

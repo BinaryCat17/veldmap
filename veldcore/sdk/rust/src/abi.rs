@@ -38,6 +38,7 @@ extern "C" {
 // результаты синхронных ABI-вызовов через veld_alloc (см. host
 // write_response_back). vec![0u8; size] гарантирует capacity == size,
 // иначе from_raw_parts в veld_free_wasm был бы UB.
+#[doc(hidden)]
 #[no_mangle]
 pub extern "C" fn veld_alloc(size: u64) -> u64 {
     let mut buf: Vec<u8> = vec![0u8; size as usize];
@@ -46,6 +47,7 @@ pub extern "C" fn veld_alloc(size: u64) -> u64 {
     ptr as u64
 }
 
+#[doc(hidden)]
 #[no_mangle]
 pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
     let _ = Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize);
@@ -161,8 +163,10 @@ pub fn arena_free(region_id: u64) -> bool {
 
 // ── Logging ────────────────────────────────────────────────────
 
-/// `target` — подсистема записи (таргет крейта `log`); хост дополнит его
-/// именем плагина и отфильтрует по своему env_logger-фильтру.
+/// Транспорт для HostLogger: прикладной код пишет макросами крейта `log`.
+/// `target` — подсистема записи; хост дополнит его именем плагина и
+/// отфильтрует по своему env_logger-фильтру.
+#[doc(hidden)]
 pub fn log(level: log::Level, target: &str, message: &str) {
     let level_u64 = match level {
         log::Level::Error => 4u64, log::Level::Warn => 3u64, log::Level::Info => 2u64,
@@ -208,6 +212,9 @@ pub fn generate_id() -> String {
 /// Пустая строка — сам хост. Wasm однопоточный, поэтому простого Mutex хватает.
 static EVENT_PUBLISHER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
+/// Заполняется handle_event сгенерированного клея — читается через
+/// [`event_publisher`].
+#[doc(hidden)]
 pub fn set_event_publisher(name: String) {
     *EVENT_PUBLISHER.lock().unwrap() = name;
 }
@@ -218,6 +225,9 @@ pub fn event_publisher() -> String {
     EVENT_PUBLISHER.lock().unwrap().clone()
 }
 
+/// Вход текущего вызова хоста (конверт события, конфиг при init).
+/// Читает сгенерированный клей — модуль получает уже разобранный аргумент.
+#[doc(hidden)]
 pub fn load_input() -> Vec<u8> {
     unsafe {
         let len = veld_input_len();
@@ -228,6 +238,9 @@ pub fn load_input() -> Vec<u8> {
     }
 }
 
+/// Результат текущего вызова хоста (например, список подписок).
+/// Пишет сгенерированный клей.
+#[doc(hidden)]
 pub fn store_output(data: Vec<u8>) {
     unsafe { veld_output_set(data.as_ptr() as u64, data.len() as u64); }
 }

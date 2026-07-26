@@ -8,7 +8,6 @@
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 
 /// Ставится сгенерированным клеем модуля (buildgen, lib.rs.j2).
-#[doc(hidden)]
 pub struct HostLogger;
 
 impl Log for HostLogger {
@@ -23,7 +22,6 @@ impl Log for HostLogger {
 }
 
 /// Вызывается из init() сгенерированного клея модуля.
-#[doc(hidden)]
 pub fn init() -> Result<(), SetLoggerError> {
     // Уровень не ограничиваем: фильтрует хост, иначе debug/trace из модулей
     // терялись бы ещё в wasm.
