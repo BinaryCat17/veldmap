@@ -1,5 +1,6 @@
 #![recursion_limit = "512"]
 use std::sync::Arc;
+use crate::dispatcher::Dispatcher;
 
 pub mod registry;
 pub mod memory;
@@ -49,15 +50,6 @@ pub struct WasmModule {
     pub instance: wasmtime::Instance,
 }
 
-pub use config::*;
-pub use plugins::*;
-pub use setup::*;
-pub use dispatcher::*;
-pub use graphics::*;
-pub use memory::*;
-pub use registry::*;
-pub use tasks::*;
-
 /// Конфигурация core модуля
 #[derive(serde::Deserialize, Debug)]
 pub struct CoreConfig {
@@ -99,7 +91,6 @@ where
             "ABI" => crate::logging::FLAG_ABI,
             "HOST_RENDER" => crate::logging::FLAG_HOST_RENDER,
             "SDK" => crate::logging::FLAG_SDK,
-            "UI_SERVICE" => crate::logging::FLAG_UI_SERVICE,
             "UI_HANDLERS" => crate::logging::FLAG_UI_HANDLERS,
             "GRAPHICS" => crate::logging::FLAG_GRAPHICS,
             _ => {

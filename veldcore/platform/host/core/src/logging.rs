@@ -6,13 +6,15 @@ pub use log::Level;
 
 // Единое битовое пространство флагов. Должно совпадать со списком в
 // veldcore/sdk/rust/lib.rs — модули шлют эти же биты через ABI.
+// Биты 5 и 7 свободны: там были COMPUTE и UI_SERVICE, ни одного использования.
 pub const FLAG_PERF: u32 = 1 << 0;
+/// Подмешивается хостом в каждый лог из wasm-модуля (см. abi.rs), поэтому
+/// без него логи модулей без собственного флага не проходят фильтр.
 pub const FLAG_WASM: u32 = 1 << 1;
 pub const FLAG_DISPATCHER: u32 = 1 << 2;
 pub const FLAG_ABI: u32 = 1 << 3;
 pub const FLAG_HOST_RENDER: u32 = 1 << 4;
 pub const FLAG_SDK: u32 = 1 << 6;
-pub const FLAG_UI_SERVICE: u32 = 1 << 7;
 pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
 pub const FLAG_GRAPHICS: u32 = 1 << 9;
 

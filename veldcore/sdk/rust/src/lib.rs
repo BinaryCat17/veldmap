@@ -2,7 +2,7 @@ pub mod abi;
 pub mod proto;
 pub mod logging;
 pub mod graphics;
-pub mod tracker;
+pub mod tasks;
 pub mod correlator;
 
 /// Внутренности для сгенерированного клея модуля (buildgen, lib.rs.j2):
@@ -15,7 +15,6 @@ pub mod runtime;
 pub use logging::FLAG_PERF;
 
 pub const FLAG_SDK: u32 = 1 << 6;
-pub const FLAG_UI_SERVICE: u32 = 1 << 7;
 pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
 pub const FLAG_GRAPHICS: u32 = 1 << 9;
 
@@ -27,8 +26,8 @@ pub use log;
 pub use proto::core::ResourceHandle;
 pub use abi::generate_id;
 pub use abi::event_publisher;
-pub use tracker::TaskTracker;
 pub use correlator::Correlator;
+pub use tasks::TaskTracker;
 
 /// RAII handle to a memory region or graphics object.
 /// On drop: releases the resource via memory ABI.
