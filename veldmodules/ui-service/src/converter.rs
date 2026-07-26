@@ -64,7 +64,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         Some(proto::widget::Type::Text(t)) => {
             let mut size = t.size;
             if size <= 0.0 {
-                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Text widget has invalid size: {}. Resetting to 16.0", size);
+                veldsdk::log::error!(target: "handlers", "Text widget has invalid size: {}. Resetting to 16.0", size);
                 size = 16.0;
             }
             let mut txt = text(t.content.clone())
@@ -146,7 +146,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         Some(proto::widget::Type::TextInput(t)) => {
             let mut size = t.size;
             if size <= 0.0 {
-                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "TextInput widget has invalid size: {}. Resetting to 16.0", size);
+                veldsdk::log::error!(target: "handlers", "TextInput widget has invalid size: {}. Resetting to 16.0", size);
                 size = 16.0;
             }
             let mut input = iced_widget::text_input(&t.placeholder, &t.value)
@@ -234,7 +234,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         }
         Some(proto::widget::Type::Image(img)) => {
             let handle = img.handle.clone().unwrap_or_default();
-            veldsdk::vdebug!(veldsdk::FLAG_UI_HANDLERS, "WgpuImage: handle.id = {}, handle.size = {}", handle.id, handle.size);
+            veldsdk::log::debug!(target: "handlers", "WgpuImage: handle.id = {}, handle.size = {}", handle.id, handle.size);
             WgpuImageWidget {
                 handle,
                 width: convert_length(&img.width),

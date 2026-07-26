@@ -6,6 +6,12 @@ use crate::graphics::GraphicsDevice;
 use std::io::Write;
 
 pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -> anyhow::Result<()> {
+    // Конфиг нужен до инициализации логгера: из него берётся фильтр.
+    let core_config: crate::CoreConfig =
+        crate::config::load_config_with_path::<crate::CoreConfig, _>(&format!("{}/core.json", config_dir))
+            .unwrap_or_default();
+    crate::logging::init_rate_limiting(core_config.log_rate_limit_ms);
+
     let mut log_path = std::path::PathBuf::from("logs/host.log");
     
     if let Some(logs) = &host_config.logs {
@@ -35,16 +41,27 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
     // trace.log — вообще всё, включая debug/trace сторонних крейтов.
     let trace_log = open_log(&trace_log_path);
 
-    // Свои логи — целиком (фильтрует veld_log по флагам), чужие крейты — только warn+.
-    // netlink_packet_route: warn «ядро новее крейта» при каждом старте, бесполезен.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("veldmap=trace,netlink_packet_route=error,warn"))
+    // Отбор по подсистемам — здесь: таргет записи называет подсистему
+    // (veldmap::host::render, veldmap::<plugin>::<target>). RUST_LOG
+    // переопределяет значение из core.json.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(core_config.log_filter.as_str()))
         .format(move |buf, record| {
+            let message = format!("{}", record.args());
+
+            // Дедуп повторов — только для логов самого хоста: у модулей
+            // повторяющиеся события (кадровые тики, прогресс) осмысленны.
+            if record.target().starts_with("veldmap::host")
+                && crate::logging::is_rate_limited(&message)
+            {
+                return Ok(());
+            }
+
             let log_line = format!(
                 "[{}] <{}> {:5} {}\n",
                 chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
                 record.target(),
                 record.level(),
-                record.args()
+                message
             );
 
             // trace.log получает всё без фильтрации.
@@ -72,15 +89,8 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
         })
         .init();
 
-    let core_config: crate::CoreConfig = 
-        crate::config::load_config_with_path::<crate::CoreConfig, _>(&format!("{}/core.json", config_dir))
-            .unwrap_or_default();
-    
-    crate::logging::init_logging(core_config.log_flags);
-    crate::logging::init_rate_limiting(core_config.log_rate_limit_ms);
-    
-    crate::vinfo!(crate::logging::FLAG_HOST_RENDER, "Log flags: 0b{:b}", core_config.log_flags);
-    crate::vinfo!(crate::logging::FLAG_HOST_RENDER, "Log rate limit: {}ms", core_config.log_rate_limit_ms);
+    log::info!(target: "veldmap::host", "Log filter: {}", core_config.log_filter);
+    log::info!(target: "veldmap::host", "Log rate limit: {}ms", core_config.log_rate_limit_ms);
 
     Ok(())
 }
@@ -92,11 +102,11 @@ pub async fn init_wgpu<'a>(
     window_width: u32,
     window_height: u32,
 ) -> anyhow::Result<(wgpu::Adapter, Arc<wgpu::Device>, Arc<Mutex<wgpu::Queue>>, wgpu::SurfaceConfiguration, wgpu::TextureFormat)> {
-    crate::vinfo!(crate::logging::FLAG_HOST_RENDER, "Enumerating Vulkan adapters...");
+    log::info!(target: "veldmap::host::render", "Enumerating Vulkan adapters...");
     let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN).await;
     for (i, adapter) in adapters.iter().enumerate() {
         let info = adapter.get_info();
-        crate::vinfo!(crate::logging::FLAG_HOST_RENDER, "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
+        log::info!(target: "veldmap::host::render", "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
             i, info.name, info.vendor, info.device);
     }
     
@@ -114,7 +124,7 @@ pub async fn init_wgpu<'a>(
     let adapter = match adapter {
         Some(a) => a,
         None => {
-            crate::vwarn!(crate::logging::FLAG_HOST_RENDER, "No discrete GPU found, trying fallback...");
+            log::warn!(target: "veldmap::host::render", "No discrete GPU found, trying fallback...");
             instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(surface),
@@ -123,7 +133,7 @@ pub async fn init_wgpu<'a>(
         }
     };
 
-    crate::vinfo!(crate::logging::FLAG_HOST_RENDER, "Selected GPU: {:?}", adapter.get_info().name);
+    log::info!(target: "veldmap::host::render", "Selected GPU: {:?}", adapter.get_info().name);
 
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,

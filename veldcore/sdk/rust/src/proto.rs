@@ -1,23 +1,12 @@
-//! Сгенерированные prost-типы протокола платформы (veldcore/interface).
-//! Словарь шины: конверты, разделяемые примитивы и контракты
-//! платформенных сервисов. Контракт graphics — в graphics::proto.
+//! Сгенерированные prost-типы протокола платформы (veldcore/interface):
+//! словарь шины, транспорт, контракты платформенных сервисов и ABI-графики.
+//!
+//! Дерево модулей собирает prost по пакетам .proto (`veldmap.<name>` →
+//! `proto::<name>`), поэтому список сервисов здесь не дублируется: что
+//! просканировал build.rs, то и появилось.
 
-pub mod core {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.core.rs"));
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/_protos.rs"));
 }
 
-pub mod app {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.app.rs"));
-}
-
-pub mod fs {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.fs.rs"));
-}
-
-pub mod network {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.network.rs"));
-}
-
-pub mod tasks {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.tasks.rs"));
-}
+pub use generated::veldmap::*;

@@ -25,7 +25,7 @@ pub fn delegate(
     let texture_id = abi::arena_alloc_texture(ev.width, ev.height, ev.format, RENDER_TARGET_USAGE)?;
 
     if !abi::arena_grant_write(texture_id, "ui-service") {
-        veldsdk::verror!(veldsdk::FLAG_SDK, "[SURFACE] grant_write to ui-service failed for texture {}", texture_id);
+        veldsdk::log::error!(target: "sdk", "[SURFACE] grant_write to ui-service failed for texture {}", texture_id);
         abi::arena_free(texture_id);
         return None;
     }

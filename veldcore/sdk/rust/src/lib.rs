@@ -12,12 +12,6 @@ pub mod correlator;
 #[doc(hidden)]
 pub mod runtime;
 
-pub use logging::FLAG_PERF;
-
-pub const FLAG_SDK: u32 = 1 << 6;
-pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
-pub const FLAG_GRAPHICS: u32 = 1 << 9;
-
 pub use serde_json;
 pub use prost;
 pub use anyhow;

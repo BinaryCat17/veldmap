@@ -1,13 +1,4 @@
 {
-  "log_flags": [
-    "PERF",
-    "WASM",
-    "DISPATCHER",
-    "ABI",
-    "HOST_RENDER",
-    "SDK",
-    "UI_HANDLERS",
-    "GRAPHICS"
-  ],
+  "log_filter": "veldmap=trace,netlink_packet_route=error,warn",
   "log_rate_limit_ms": 3000
 }

@@ -17,7 +17,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let req_buf = match data_bytes { Some(b) => b, None => return Ok(()) };
             let request = match EventEnvelope::decode(&req_buf[..]) {
                 Ok(r) => r,
-                Err(e) => { crate::verror!(crate::logging::FLAG_ABI, "[{}] publish decode error: {}", caller.data().plugin_name, e); return Ok(()); }
+                Err(e) => { log::error!(target: "veldmap::host::abi", "[{}] publish decode error: {}", caller.data().plugin_name, e); return Ok(()); }
             };
             let topic = format!("{}/{}", request.service, request.method);
             let publisher = caller.data().instance_id;
@@ -27,15 +27,27 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     })?;
 
     // veld_host_log — direct logging
-    linker.func_wrap_async("env", "veld_host_log", |mut caller: Caller<'_, HostState>, (level, flags, ptr, len): (u64, u64, u64, u64)| {
+    linker.func_wrap_async("env", "veld_host_log", |mut caller: Caller<'_, HostState>, (level, target_ptr, target_len, ptr, len): (u64, u64, u64, u64, u64)| {
         Box::new(async move {
-            use crate::logging::*;
             use log::Level;
             let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(()) };
-            let msg = mem.data(&caller).get(ptr as usize..(ptr + len) as usize)
-                .and_then(|s| std::str::from_utf8(s).ok()).unwrap_or("<invalid>");
+            let read = |p: u64, n: u64| mem.data(&caller).get(p as usize..(p + n) as usize)
+                .and_then(|s| std::str::from_utf8(s).ok());
+            let msg = read(ptr, len).unwrap_or("<invalid>").to_string();
+            let sub = read(target_ptr, target_len).unwrap_or_default().to_string();
             let log_level = match level { 4 => Level::Error, 3 => Level::Warn, 2 => Level::Info, 1 => Level::Debug, _ => Level::Trace };
-            veld_log(log_level, flags as u32 | FLAG_WASM, Some(&caller.data().plugin_name.clone()), msg);
+
+            // Таргет модуля дополняется его именем: подсистему модуль называет
+            // сам ("handlers"), а кто он такой — знает хост, и подделать это
+            // через ABI нельзя. Отсюда фильтры вида
+            // RUST_LOG=veldmap::ui-service::handlers=trace.
+            let plugin = &caller.data().plugin_name;
+            let target = if sub.is_empty() {
+                format!("veldmap::{}", plugin)
+            } else {
+                format!("veldmap::{}::{}", plugin, sub)
+            };
+            log::log!(target: &target, log_level, "{}", msg);
             Ok(())
         })
     })?;
@@ -266,7 +278,7 @@ fn resolve_service_arg(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -
         .to_string();
     let resolved = caller.data().dispatcher.instance_of(&name);
     if resolved.is_none() {
-        crate::vwarn!(crate::logging::FLAG_ABI, "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);
+        log::warn!(target: "veldmap::host::abi", "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);
     }
     resolved
 }

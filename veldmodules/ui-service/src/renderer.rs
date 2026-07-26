@@ -49,7 +49,7 @@ fn resolve_family(
             } else if db.faces().any(|f| f.families.iter().any(|(n, _)| n.as_str() == *name)) {
                 name.to_string()
             } else {
-                veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text: unknown font family '{}', falling back to '{}'", name, default_family);
+                veldsdk::log::warn!(target: "handlers", "Cosmic-text: unknown font family '{}', falling back to '{}'", name, default_family);
                 default_family.to_string()
             }
         }
@@ -146,7 +146,7 @@ impl GpuRenderer {
         let default_family = match font_map.get(default_font_name) {
             Some(family) => family.clone(),
             None => {
-                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Default font '{}' was not loaded; text rendering will fall back to the first available font", default_font_name);
+                veldsdk::log::error!(target: "handlers", "Default font '{}' was not loaded; text rendering will fall back to the first available font", default_font_name);
                 font_map.values().next().cloned().unwrap_or_else(|| default_font_name.to_string())
             }
         };
@@ -450,11 +450,11 @@ impl iced_core::text::Paragraph for RealParagraph {
                 let mut line_height = text.line_height.to_absolute(text.size).0;
 
                 if size <= 0.0 {
-                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text: invalid font size: {}. Resetting to 16.0", size);
+                    veldsdk::log::error!(target: "handlers", "Cosmic-text: invalid font size: {}. Resetting to 16.0", size);
                     size = 16.0;
                 }
                 if line_height <= 0.0 {
-                    veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
+                    veldsdk::log::error!(target: "handlers", "Cosmic-text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
                     line_height = size * 1.2;
                 }
 
@@ -698,11 +698,11 @@ impl iced_core::text::Renderer for GpuRenderer {
             let mut line_height = text.line_height.to_absolute(text.size).0;
 
             if size <= 0.0 {
-                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text fill_text: invalid font size: {}. Resetting to 16.0", size);
+                veldsdk::log::error!(target: "handlers", "Cosmic-text fill_text: invalid font size: {}. Resetting to 16.0", size);
                 size = 16.0;
             }
             if line_height <= 0.0 {
-                veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "Cosmic-text fill_text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
+                veldsdk::log::error!(target: "handlers", "Cosmic-text fill_text: invalid line height: {}. Resetting to {}", line_height, size * 1.2);
                 line_height = size * 1.2;
             }
 

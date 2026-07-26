@@ -9,10 +9,9 @@
 mod recorder;
 pub use recorder::RenderRecorder;
 
-/// Сгенерированные prost-типы протокола `veldmap.graphics`.
-pub mod proto {
-    include!(concat!(env!("OUT_DIR"), "/veldmap.graphics.rs"));
-}
+/// Контракт `veldmap.graphics` живёт в общем дереве протокола, здесь — только
+/// псевдоним: обёртки ниже адресуют свои типы как `proto::*`.
+pub use crate::proto::graphics as proto;
 
 pub use proto::{
     TextureFormat, VertexFormat, IndexFormat, FilterMode, StepMode,

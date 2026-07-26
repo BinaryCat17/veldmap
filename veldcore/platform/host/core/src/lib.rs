@@ -53,9 +53,11 @@ pub struct WasmModule {
 /// Конфигурация core модуля
 #[derive(serde::Deserialize, Debug)]
 pub struct CoreConfig {
-    /// Флаги логирования - массив строк, например: ["DISPATCHER", "ABI", "HOST_RENDER"]
-    #[serde(default, deserialize_with = "deserialize_log_flags")]
-    pub log_flags: u32,
+    /// Фильтр логов в синтаксисе env_logger, например
+    /// "veldmap=info,veldmap::host::render=debug,veldmap::ui-service::handlers=trace".
+    /// Подсистема — это таргет записи; RUST_LOG переопределяет значение отсюда.
+    #[serde(default = "default_log_filter")]
+    pub log_filter: String,
     /// Минимальный интервал между одинаковыми логами в миллисекундах (0 = без ограничения)
     #[serde(default = "default_log_rate_limit_ms")]
     pub log_rate_limit_ms: u64,
@@ -65,40 +67,17 @@ fn default_log_rate_limit_ms() -> u64 {
     1000 // По умолчанию 1 секунда
 }
 
+/// Свои логи целиком, чужие крейты — только warn+.
+/// netlink_packet_route на каждом старте пишет бесполезное «ядро новее крейта».
+fn default_log_filter() -> String {
+    "veldmap=trace,netlink_packet_route=error,warn".to_string()
+}
+
 impl Default for CoreConfig {
     fn default() -> Self {
         Self {
-            log_flags: 0,
+            log_filter: default_log_filter(),
             log_rate_limit_ms: default_log_rate_limit_ms(),
         }
     }
-}
-
-fn deserialize_log_flags<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    
-    let flags: Vec<String> = Vec::deserialize(deserializer)?;
-    let mut result: u32 = 0;
-    
-    for flag in flags {
-        result |= match flag.as_str() {
-            "PERF" => crate::logging::FLAG_PERF,
-            "WASM" => crate::logging::FLAG_WASM,
-            "DISPATCHER" => crate::logging::FLAG_DISPATCHER,
-            "ABI" => crate::logging::FLAG_ABI,
-            "HOST_RENDER" => crate::logging::FLAG_HOST_RENDER,
-            "SDK" => crate::logging::FLAG_SDK,
-            "UI_HANDLERS" => crate::logging::FLAG_UI_HANDLERS,
-            "GRAPHICS" => crate::logging::FLAG_GRAPHICS,
-            _ => {
-                eprintln!("Warning: unknown log flag '{}'", flag);
-                0
-            }
-        };
-    }
-    
-    Ok(result)
 }

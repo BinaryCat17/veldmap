@@ -1,24 +1,15 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+//! Ограничение частоты повторяющихся логов хоста.
+//!
+//! Отбора по подсистемам здесь нет и не должно быть: подсистема едет в таргете
+//! записи (`veldmap::host::render` у хоста, `veldmap::<plugin>::<target>` у
+//! wasm-модулей), а фильтрует стандартный env_logger — по `log_filter` из
+//! core.json, с переопределением через RUST_LOG. Раньше эту роль играла
+//! битовая маска флагов, продублированная в хосте, SDK и конфиге.
+
 use std::sync::Mutex;
 use std::collections::HashMap;
 use std::time::{Instant, Duration};
-pub use log::Level;
 
-// Единое битовое пространство флагов. Должно совпадать со списком в
-// veldcore/sdk/rust/lib.rs — модули шлют эти же биты через ABI.
-// Биты 5 и 7 свободны: там были COMPUTE и UI_SERVICE, ни одного использования.
-pub const FLAG_PERF: u32 = 1 << 0;
-/// Подмешивается хостом в каждый лог из wasm-модуля (см. abi.rs), поэтому
-/// без него логи модулей без собственного флага не проходят фильтр.
-pub const FLAG_WASM: u32 = 1 << 1;
-pub const FLAG_DISPATCHER: u32 = 1 << 2;
-pub const FLAG_ABI: u32 = 1 << 3;
-pub const FLAG_HOST_RENDER: u32 = 1 << 4;
-pub const FLAG_SDK: u32 = 1 << 6;
-pub const FLAG_UI_HANDLERS: u32 = 1 << 8;
-pub const FLAG_GRAPHICS: u32 = 1 << 9;
-
-static ENABLED_FLAGS: AtomicU32 = AtomicU32::new(0);
 static RATE_LIMIT: Mutex<Option<RateLimiter>> = Mutex::new(None);
 
 struct RateLimiter {
@@ -26,115 +17,29 @@ struct RateLimiter {
     last_log: HashMap<String, Instant>,
 }
 
-pub fn init_logging(flags: u32) {
-    ENABLED_FLAGS.store(flags, Ordering::SeqCst);
-}
-
-/// Initialize rate limiting with minimum interval between identical log messages
+/// Минимальный интервал между одинаковыми сообщениями; 0 — без ограничения.
 pub fn init_rate_limiting(min_interval_ms: u64) {
-    if min_interval_ms == 0 {
-        *RATE_LIMIT.lock().unwrap() = None;
-    } else {
-        *RATE_LIMIT.lock().unwrap() = Some(RateLimiter {
-            min_interval: Duration::from_millis(min_interval_ms),
-            last_log: HashMap::new(),
-        });
-    }
+    *RATE_LIMIT.lock().unwrap() = (min_interval_ms > 0).then(|| RateLimiter {
+        min_interval: Duration::from_millis(min_interval_ms),
+        last_log: HashMap::new(),
+    });
 }
 
-/// Check if this message should be rate limited (returns true if should skip)
-fn is_rate_limited(message: &str) -> bool {
+/// true — сообщение надо пропустить: такое же писали меньше интервала назад.
+///
+/// Дедуп по полному тексту: фиксированный префикс ошибочно схлопывал разные
+/// сообщения с длинным общим началом (например «Registering subscription:
+/// data-browser/...» для каждого топика одного плагина).
+pub fn is_rate_limited(message: &str) -> bool {
     let mut limiter = RATE_LIMIT.lock().unwrap();
-    if let Some(ref mut limiter) = *limiter {
-        let now = Instant::now();
-        // Dedup on the full message: a fixed-length prefix falsely collapses distinct
-        // messages that share a long common prefix (e.g. "Registering subscription:
-        // data-browser/..." for every topic of the same plugin).
-        if let Some(last_time) = limiter.last_log.get(message) {
-            if now.duration_since(*last_time) < limiter.min_interval {
-                return true; // Skip this log
-            }
+    let Some(limiter) = limiter.as_mut() else { return false };
+
+    let now = Instant::now();
+    if let Some(last) = limiter.last_log.get(message) {
+        if now.duration_since(*last) < limiter.min_interval {
+            return true;
         }
-        limiter.last_log.insert(message.to_string(), now);
     }
+    limiter.last_log.insert(message.to_string(), now);
     false
-}
-
-pub fn is_flag_enabled(flag: u32) -> bool {
-    (ENABLED_FLAGS.load(Ordering::Relaxed) & flag) != 0
-}
-
-pub fn veld_log(level: Level, flags: u32, plugin_name: Option<&str>, message: &str) {
-    let source_name = plugin_name.unwrap_or("host");
-    let is_host = plugin_name.is_none();
-
-    // Warn/Error проходят всегда; остальное фильтруется флагами — одинаково
-    // для хоста и модулей (у них общее битовое пространство).
-    let important = level <= Level::Warn;
-    if !important && flags != 0 {
-        let enabled = ENABLED_FLAGS.load(Ordering::Relaxed);
-        if (flags & enabled) == 0 {
-            return;
-        }
-    }
-
-    // Rate limiting только для хостовских логов
-    if is_host && is_rate_limited(message) {
-        return;
-    }
-
-    let p_tag = if (flags & FLAG_PERF) != 0 { "[P]" } else { "" };
-
-    // Единый таргет для всех системных логов
-    log::log!(target: "veldmap", level, "{}[{}] {}", p_tag, source_name, message);
-}
-
-#[macro_export]
-macro_rules! vinfo {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Info, $flags, None, &format!($($arg)+))
-    };
-    ($($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Info, 0, None, &format!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! vwarn {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Warn, $flags, None, &format!($($arg)+))
-    };
-    ($($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Warn, 0, None, &format!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! verror {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Error, $flags, None, &format!($($arg)+))
-    };
-    ($($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Error, 0, None, &format!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! vdebug {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Debug, $flags, None, &format!($($arg)+))
-    };
-    ($($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Debug, 0, None, &format!($($arg)+))
-    };
-}
-
-#[macro_export]
-macro_rules! vtrace {
-    ($flags:expr, $($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Trace, $flags, None, &format!($($arg)+))
-    };
-    ($($arg:tt)+) => {
-        $crate::logging::veld_log($crate::logging::Level::Trace, 0, None, &format!($($arg)+))
-    };
 }

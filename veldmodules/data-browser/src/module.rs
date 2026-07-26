@@ -40,7 +40,7 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         ON_DOWNLOAD_PRESSED => handlers::download::on_download_pressed(state, event),
         ON_VIEW_PRESSED => handlers::download::on_view_pressed(state, event),
         ON_DELETE_PRESSED => handlers::download::on_delete_pressed(state, event),
-        other => veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] unknown UI method: {}", other),
+        other => veldsdk::log::warn!(target: "handlers", "[data-browser] unknown UI method: {}", other),
     }
 }
 

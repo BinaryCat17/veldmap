@@ -9,7 +9,7 @@ use prost::Message;
 
 extern "C" {
     fn veld_host_publish(ptr: u64, len: u64);
-    fn veld_host_log(level: u64, flags: u64, ptr: u64, len: u64);
+    fn veld_host_log(level: u64, target_ptr: u64, target_len: u64, ptr: u64, len: u64);
     fn veld_get_config(ptr: u64, len: u64) -> u64;
     fn veld_random_bytes(ptr: u64, len: u64);
     fn veld_graphics_create_resource(ptr: u64, len: u64) -> u64;
@@ -161,12 +161,20 @@ pub fn arena_free(region_id: u64) -> bool {
 
 // ── Logging ────────────────────────────────────────────────────
 
-pub fn log(level: log::Level, flags: u32, message: &str) {
+/// `target` — подсистема записи (таргет крейта `log`); хост дополнит его
+/// именем плагина и отфильтрует по своему env_logger-фильтру.
+pub fn log(level: log::Level, target: &str, message: &str) {
     let level_u64 = match level {
         log::Level::Error => 4u64, log::Level::Warn => 3u64, log::Level::Info => 2u64,
         log::Level::Debug => 1u64, _ => 0u64,
     };
-    unsafe { veld_host_log(level_u64, flags as u64, message.as_ptr() as u64, message.len() as u64); }
+    unsafe {
+        veld_host_log(
+            level_u64,
+            target.as_ptr() as u64, target.len() as u64,
+            message.as_ptr() as u64, message.len() as u64,
+        );
+    }
 }
 
 // ── System helpers ─────────────────────────────────────────────
@@ -245,7 +253,7 @@ pub fn publish(topic: &str, payload: Vec<u8>) {
 pub fn publish_targeted(topic: &str, payload: Vec<u8>, target: &str) {
     let parts: Vec<&str> = topic.splitn(2, '/').collect();
     if parts.len() != 2 {
-        crate::verror!(crate::FLAG_SDK, "[SDK] Invalid topic: {}", topic);
+        log::error!(target: "sdk", "Invalid topic: {}", topic);
         return;
     }
     // publisher не заполняется: хост игнорирует его во входящих сообщениях

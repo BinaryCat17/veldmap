@@ -18,7 +18,7 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
 
     // Store the module's current view; rendering happens below and on frame ticks.
     if let Some(layout) = req.layout {
-        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-VIEW] '{}'", plugin_id);
+        veldsdk::log::info!(target: "handlers", "[SET-VIEW] '{}'", plugin_id);
         plugin.layout = layout;
         *plugin.is_layout_dirty.borrow_mut() = true;
         *plugin.needs_redrawing.borrow_mut() = true;
@@ -42,7 +42,7 @@ fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i
 
     if let (Some(handle), true) = (surface_handle, needs_render) {
         if let Err(e) = render_plugin(plugin, &mut state.renderer, plugin_id, surface_format, handle) {
-            veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[render_plugin_if_needed] render_plugin failed: {}", e);
+            veldsdk::log::error!(target: "handlers", "[render_plugin_if_needed] render_plugin failed: {}", e);
         }
     }
 
@@ -63,10 +63,10 @@ fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i
 /// принимает события модуля и рендерит его view в переданную текстуру.
 pub fn handle_set_surface(state: &mut State, req: SetSurfaceRequest) {
     let Some(surface) = req.surface else {
-        veldsdk::vwarn!(veldsdk::FLAG_UI_HANDLERS, "[SET-SURFACE] '{}' without a surface handle", req.plugin_id);
+        veldsdk::log::warn!(target: "handlers", "[SET-SURFACE] '{}' without a surface handle", req.plugin_id);
         return;
     };
-    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[SET-SURFACE] '{}': texture {} ({}x{})", req.plugin_id, surface.id, req.width, req.height);
+    veldsdk::log::info!(target: "handlers", "[SET-SURFACE] '{}': texture {} ({}x{})", req.plugin_id, surface.id, req.width, req.height);
 
     let plugin = state.plugins.entry(req.plugin_id.clone()).or_insert_with(PluginUiState::new);
     *plugin.canvas_size.borrow_mut() = (req.width, req.height);
@@ -91,7 +91,7 @@ pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
     let is_frame = matches!(event_proto.event, Some(app_proto::ui_event::Event::Frame(_)));
 
     if let Err(e) = process_ui_event(state, &plugin_id, event_proto) {
-        veldsdk::verror!(veldsdk::FLAG_UI_HANDLERS, "[MODULE-HANDLERS] process_ui_event failed for {}: {}", plugin_id, e);
+        veldsdk::log::error!(target: "handlers", "[MODULE-HANDLERS] process_ui_event failed for {}: {}", plugin_id, e);
     }
 
     // On each frame tick render the plugin if it has pending changes: input-driven
@@ -131,7 +131,7 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
                     fps.0 += 1;
                     fps.1 += f.dt;
                     if fps.1 >= 5.0 {
-                        veldsdk::vinfo!(veldsdk::FLAG_PERF, "[FPS] {}: {:.1} avg over {:.1}s", plugin_id, fps.0 as f32 / fps.1, fps.1);
+                        veldsdk::log::info!(target: "perf", "[FPS] {}: {:.1} avg over {:.1}s", plugin_id, fps.0 as f32 / fps.1, fps.1);
                         *fps = (0, 0.0);
                     }
                 }
@@ -201,7 +201,7 @@ fn dispatch_event(event: UiEventResponse) {
     if event.method.is_empty() {
         return;
     }
-    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[DISPATCH] UI message -> '{}/{}' (value: '{}')", event.plugin_id, event.method, event.value);
+    veldsdk::log::info!(target: "handlers", "[DISPATCH] UI message -> '{}/{}' (value: '{}')", event.plugin_id, event.method, event.value);
     crate::emit::on_ui_event(&event, &event.plugin_id);
 }
 
@@ -218,16 +218,16 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
 }
 
 fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, target_texture: u64) -> anyhow::Result<()> {
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] START for {}", plugin_id);
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] START for {}", plugin_id);
     let (width, height) = *plugin.canvas_size.borrow();
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] canvas size: {}x{}", width, height);
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] canvas size: {}x{}", width, height);
     if width == 0 || height == 0 {
-        veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Empty canvas, returning");
+        veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Empty canvas, returning");
         return Ok(());
     }
 
     let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Processing {} events", events.len());
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Processing {} events", events.len());
 
     let sf = *plugin.scale_factor.borrow();
     renderer.update_params(width, height, sf);
@@ -236,11 +236,11 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let viewport = Viewport::with_physical_size(Size::new(width, height), sf.into());
     let mut captured_messages = Vec::new();
 
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Clearing renderer and converting layout");
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Clearing renderer and converting layout");
     renderer.clear();
     let element = converter::convert_layout(&plugin.layout);
 
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Building UI");
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Building UI");
     let cache = plugin.interface_cache.replace(iced_runtime::user_interface::Cache::default());
     let _guard = renderer.scope_guard();
 
@@ -251,11 +251,11 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         renderer,
     );
 
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Updating UI with {} events", events.len());
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Updating UI with {} events", events.len());
     let mut clipboard = iced_core::clipboard::Null;
     let _ = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
 
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Drawing UI");
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Drawing UI");
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
 
     let mut last_cmds = plugin.last_draw_commands.borrow_mut();
@@ -265,10 +265,10 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let commands_changed = *last_cmds != renderer.draw_commands ||
                            *last_verts != renderer.vertices ||
                            renderer.is_atlas_dirty();
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] commands_changed={}, is_layout_dirty={}", commands_changed, *is_layout_dirty);
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] commands_changed={}, is_layout_dirty={}", commands_changed, *is_layout_dirty);
 
     if commands_changed || *is_layout_dirty {
-        veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Rendering into target texture {}", target_texture);
+        veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Rendering into target texture {}", target_texture);
         crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf, surface_format)?;
 
         *last_cmds = renderer.draw_commands.clone();
@@ -277,12 +277,12 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     }
 
     *plugin.needs_redrawing.borrow_mut() = false;
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Caching UI");
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Caching UI");
     plugin.interface_cache.replace(ui.into_cache());
 
     // Store captured messages; dispatched right after render in render_plugin_if_needed
     if !captured_messages.is_empty() {
-        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] Captured {} UI messages", captured_messages.len());
+        veldsdk::log::info!(target: "handlers", "[RENDER-PLUGIN] Captured {} UI messages", captured_messages.len());
     }
     for msg in captured_messages {
         plugin.pending_messages.borrow_mut().push(PendingMessage {
@@ -291,6 +291,6 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         });
     }
 
-    veldsdk::vtrace!(veldsdk::FLAG_UI_HANDLERS, "[RENDER-PLUGIN] END");
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] END");
     Ok(())
 }

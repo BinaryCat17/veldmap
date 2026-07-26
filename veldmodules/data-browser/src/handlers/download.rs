@@ -21,12 +21,12 @@ pub fn on_download_pressed(
     // "качается ли s3_key сейчас", отдельной таблицы не заводим.
     if let Some((task_id, _)) = state.downloaded.active_download(&s3_key) {
         let task_id = task_id.to_string();
-        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_download_pressed: cancelling task={} for s3_key={}", task_id, s3_key);
+        veldsdk::log::info!(target: "handlers", "[data-browser] on_download_pressed: cancelling task={} for s3_key={}", task_id, s3_key);
         state.global.status_message = format!("Cancelling download: {}", filename);
         crate::calls::data_provider::on_cancel_download(&CancelDownloadRequest { task_id });
         return;
     }
-    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_download_pressed: starting new download for s3_key={}", s3_key);
+    veldsdk::log::info!(target: "handlers", "[data-browser] on_download_pressed: starting new download for s3_key={}", s3_key);
 
     // Origin — сразу, до ответа data-provider: даже если приложение упадёт
     // на первом байте, `.origin` на диске уже будет знать, откуда он взялся,
@@ -79,7 +79,7 @@ pub fn on_write_result(state: &mut State, response: veldsdk::proto::fs::FsWriteR
     let Some(write) = state.downloaded.pending_sidecar_writes.take(&response.correlation_id) else { return; };
     veldsdk::abi::arena_free(write.region);
     if !response.error.is_empty() {
-        veldsdk::vwarn!(veldsdk::FLAG_SDK, "[data-browser] failed to persist origin sidecar: {}", response.error);
+        veldsdk::log::warn!(target: "sdk", "[data-browser] failed to persist origin sidecar: {}", response.error);
     }
 }
 
@@ -223,14 +223,14 @@ pub fn on_delete_pressed(
         .map(|(task_id, _)| task_id.to_string());
 
     if let Some(task_id) = active {
-        veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_delete_pressed: active download, cancelling task={} before delete of {}", task_id, path);
+        veldsdk::log::info!(target: "handlers", "[data-browser] on_delete_pressed: active download, cancelling task={} before delete of {}", task_id, path);
         state.downloaded.pending_delete_on_cancel.insert(task_id.clone(), path);
         state.global.status_message = format!("Cancelling download: {}", filename);
         crate::calls::data_provider::on_cancel_download(&CancelDownloadRequest { task_id });
         return;
     }
 
-    veldsdk::vinfo!(veldsdk::FLAG_UI_HANDLERS, "[data-browser] on_delete_pressed: deleting {} immediately (no active download)", path);
+    veldsdk::log::info!(target: "handlers", "[data-browser] on_delete_pressed: deleting {} immediately (no active download)", path);
     delete_local(state, path, &filename);
 }
 

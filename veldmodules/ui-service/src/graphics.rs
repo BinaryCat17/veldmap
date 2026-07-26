@@ -31,7 +31,7 @@ pub fn render_ui(
     scale_factor: f32,
     surface_format: i32,
 ) -> anyhow::Result<()> {
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] START {}x{} into texture {}", width, height, target_texture);
+    veldsdk::log::trace!(target: "graphics", "[RENDER-UI] START {}x{} into texture {}", width, height, target_texture);
 
     let fresh = matches!(&*plugin.target_view.borrow(), Some((tex, _)) if *tex == target_texture);
     if !fresh {
@@ -64,7 +64,7 @@ pub fn render_ui(
 
     // Render geometry if present
     if !renderer.vertices.is_empty() {
-        veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] Rendering {} vertices", renderer.vertices.len());
+        veldsdk::log::trace!(target: "graphics", "[RENDER-UI] Rendering {} vertices", renderer.vertices.len());
         render_geometry(plugin, renderer, &mut recorder, width, height)?;
     }
 
@@ -74,7 +74,7 @@ pub fn render_ui(
         let view = &target.as_ref().expect("target view ensured above").1;
         recorder.submit(view)?;
     }
-    veldsdk::vtrace!(veldsdk::FLAG_GRAPHICS, "[RENDER-UI] END");
+    veldsdk::log::trace!(target: "graphics", "[RENDER-UI] END");
     Ok(())
 }
 
@@ -149,7 +149,7 @@ fn render_geometry(
                             }
                         }
                         Err(e) => {
-                            veldsdk::verror!(veldsdk::FLAG_GRAPHICS, "Failed to create external bind group for texture {}: {}", texture_id, e);
+                            veldsdk::log::error!(target: "graphics", "Failed to create external bind group for texture {}: {}", texture_id, e);
                             current_index_offset += *index_count;
                         }
                     }
@@ -181,7 +181,7 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
     )?;
 
     cache.insert(texture_id, bg.clone());
-    veldsdk::vdebug!(veldsdk::FLAG_GRAPHICS, "Created external bind group {:?} for texture {}", bg, texture_id);
+    veldsdk::log::debug!(target: "graphics", "Created external bind group {:?} for texture {}", bg, texture_id);
     Ok(bg)
 }
 
