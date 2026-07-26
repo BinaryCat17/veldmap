@@ -11,7 +11,17 @@ const RENDER_TARGET_USAGE: u32 = 2 | 4 | 16;
 /// Выделяет render-таргет под окно, делегирует его ui-service и аттачит
 /// хосту. Старая текстура освобождается (хост блитит её до свапа — wgpu
 /// держит её живой через view в bind group). Возвращает id новой текстуры.
-pub fn delegate(ev: &veldsdk::proto::app::WindowResized, old_texture: Option<u64>) -> Option<u64> {
+///
+/// `attach` — стаб топика app/on_set_surface из кодогена вызывающего модуля:
+/// `surface::delegate(&ev, old, crate::calls::app::on_set_surface)`. Wrap-крейт
+/// не публикует туда сам, потому что аттачит окно не он, а его потребитель —
+/// владелец окна, и объявить `app: calls: [on_set_surface]` должна схема
+/// именно этого модуля.
+pub fn delegate(
+    ev: &veldsdk::proto::app::WindowResized,
+    old_texture: Option<u64>,
+    attach: impl FnOnce(&veldsdk::proto::app::SetSurface),
+) -> Option<u64> {
     let texture_id = abi::arena_alloc_texture(ev.width, ev.height, ev.format, RENDER_TARGET_USAGE)?;
 
     if !abi::arena_grant_write(texture_id, "ui-service") {
@@ -30,7 +40,7 @@ pub fn delegate(ev: &veldsdk::proto::app::WindowResized, old_texture: Option<u64
         scale_factor: ev.scale_factor,
     });
 
-    veldsdk::app::on_set_surface(&veldsdk::proto::app::SetSurface {
+    attach(&veldsdk::proto::app::SetSurface {
         plugin_id: ev.plugin_id.clone(),
         surface: Some(handle),
     });

@@ -30,5 +30,8 @@ dependencies:
   network:
     subs: [on_fs_download_result, on_fs_download_progress, on_http_result]
     calls: [on_fs_download, on_http]
+  # Отмена своих закачек: TaskTracker публикует on_cancel через этот стаб,
+  # терминальное событие приходит обратно как on_task_finished{cancelled}.
   tasks:
     subs: [on_task_started, on_task_finished]
+    calls: [on_cancel]

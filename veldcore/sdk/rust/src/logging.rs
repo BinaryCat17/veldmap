@@ -52,6 +52,9 @@ macro_rules! vtrace {
     };
 }
 
+/// Мост log::Log → ABI хоста. Ставится сгенерированным клеем модуля
+/// (buildgen, lib.rs.j2) — прикладной код пишет через макросы v*!.
+#[doc(hidden)]
 pub struct HostLogger;
 impl Log for HostLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool { true }
@@ -68,6 +71,8 @@ impl Log for HostLogger {
     fn flush(&self) {}
 }
 
+/// Вызывается из init() сгенерированного клея модуля.
+#[doc(hidden)]
 pub fn init() -> Result<(), SetLoggerError> {
     // Уровень не ограничиваем: фильтрация — на хосте через RUST_LOG,
     // иначе debug/trace из модулей терялись бы ещё в wasm.

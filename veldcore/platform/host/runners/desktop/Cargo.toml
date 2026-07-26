@@ -5,10 +5,10 @@ edition = "2021"
 
 [dependencies]
 veldmap-host-core = { path = "../../core" }
-veldmap-host-fs = { path = "../../modules/fs/generated" }
-veldmap-host-network = { path = "../../modules/network/generated" }
-veldmap-host-tasks = { path = "../../modules/tasks/generated" }
 veldmap-host-bindings = { path = "../../generated" }
+# Крейт композиции: список модулей объявлен в runner.yaml, крейт генерирует
+# buildgen. Добавление модуля — правка runner.yaml, а не этого файла.
+veldmap-desktop-modules = { path = "generated" }
 
 async-trait = "0.1"
 tokio = { version = "1.49", features = ["full"] }

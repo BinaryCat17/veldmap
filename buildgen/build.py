@@ -183,21 +183,11 @@ def generate_code():
              "--schema",     schema_path,
              "--output-dir", generated_dir])
 
-    # Платформенные стабы SDK (топики app/*) из veldcore/interface/app.schema.yaml
-    app_schema = os.path.join(PROJECT_ROOT, "veldcore", "interface", "app.schema.yaml")
-    if os.path.exists(app_schema):
-        print("  Generating SDK platform stubs (app) ...")
-        run([venv_python, gen_script,
-             "--schema",    app_schema,
-             "--sdk-stubs", os.path.join(PROJECT_ROOT, "veldcore", "sdk", "rust", "src", "app.rs")])
-
-    # Платформенные стабы SDK системы задач (топики tasks/*)
-    tasks_schema = os.path.join(PROJECT_ROOT, "veldcore", "interface", "modules", "tasks", "tasks.schema.yaml")
-    if os.path.exists(tasks_schema):
-        print("  Generating SDK platform stubs (tasks) ...")
-        run([venv_python, gen_script,
-             "--schema",    tasks_schema,
-             "--sdk-stubs", os.path.join(PROJECT_ROOT, "veldcore", "sdk", "rust", "src", "tasks.rs")])
+    # Платформенные сервисы (app, tasks, ...) для wasm-модулей стабов в SDK не
+    # имеют: модуль объявляет их в своей schema.yaml как обычную зависимость
+    # (`app: calls: [on_set_surface]`), и стабы приходят через crate::calls::*
+    # вместе со всеми остальными. Иначе исходящая связь была бы невидима для
+    # валидатора схем и для графа зависимостей.
 
     # Хостовые биндинги (veldcore/platform/host/host.yaml → platform/host/generated)
     host_dir  = os.path.join(PROJECT_ROOT, "veldcore", "platform", "host")

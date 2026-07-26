@@ -170,6 +170,10 @@ pub struct HostContext {
     pub memory: Arc<MemoryManager>,
     pub graphics: Arc<GraphicsDevice>,
     pub tasks: Arc<crate::tasks::TaskRegistry>,
+    /// Поверхности окон: пишет модуль app, дренирует кадровый цикл раннера.
+    /// Живёт в контексте, а не в State модуля, именно потому, что у неё два
+    /// потребителя по разные стороны шины.
+    pub surfaces: Arc<crate::surfaces::SurfaceQueue>,
     pub config: Arc<crate::config::HostConfig>,
 }
 
@@ -183,6 +187,7 @@ pub async fn init_core_services(
     let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone()));
     let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), queue.clone(), surface_format));
     let tasks = Arc::new(crate::tasks::TaskRegistry::new());
+    let surfaces = Arc::new(crate::surfaces::SurfaceQueue::new());
 
     let dispatcher = Arc::new(Dispatcher::new());
 
@@ -192,6 +197,7 @@ pub async fn init_core_services(
         memory,
         graphics,
         tasks,
+        surfaces,
         config,
     }))
 }

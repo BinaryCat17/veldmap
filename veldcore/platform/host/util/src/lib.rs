@@ -24,6 +24,12 @@ pub use veldmap_host_core::setup::HostContext;
 mod tasks;
 pub use tasks::Tasks;
 
+// ── Поверхности окон ────────────────────────────────────────────────────────
+// Фасад над очередью поверхностей: аттач с проверкой владения окном и
+// write-lease на текстуру. Реализация контракта app — модуль host/modules/app.
+mod surfaces;
+pub use surfaces::Surfaces;
+
 // ── Права доступа к ресурсам ────────────────────────────────────────────────
 pub use veldmap_host_core::registry::Access;
 

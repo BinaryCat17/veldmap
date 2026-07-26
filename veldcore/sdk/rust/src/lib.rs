@@ -1,12 +1,16 @@
 pub mod abi;
 pub mod proto;
-pub mod runtime;
 pub mod logging;
 pub mod graphics;
-pub mod app;
-pub mod tasks;
 pub mod tracker;
 pub mod correlator;
+
+/// Внутренности для сгенерированного клея модуля (buildgen, lib.rs.j2):
+/// хранение состояния между вызовами хоста и диспетчеризация обработчиков.
+/// Прикладной код сюда не обращается — модуль пишет только обработчики,
+/// а вызывает их кодоген.
+#[doc(hidden)]
+pub mod runtime;
 
 pub use logging::FLAG_PERF;
 

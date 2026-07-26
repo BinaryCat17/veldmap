@@ -1,9 +1,9 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_files = &[
         "../../interface/core.proto",
-        "../../interface/app.proto",
         "../../interface/graphics.proto",
-        // Контракты платформенных сервисов (fs, network, tasks)
+        // Контракты платформенных сервисов (app, fs, network, tasks)
+        "../../interface/modules/app/app.proto",
         "../../interface/modules/fs/fs.proto",
         "../../interface/modules/network/network.proto",
         "../../interface/modules/tasks/tasks.proto",

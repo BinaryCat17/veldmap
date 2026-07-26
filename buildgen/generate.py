@@ -443,7 +443,11 @@ def generate_host_bindings(args, script_dir: str):
     # Сервис с входами считается нативным модулем этой реализации хоста,
     # если рядом с generated/ существует каталог modules/<svc> с config.yaml.
     # Как и у wasm-модулей: generated — крейт, src/module.rs — гость через #[path].
-    modules_dir = os.path.join(os.path.dirname(out_dir), "modules")
+    host_dir = os.path.dirname(out_dir)
+    modules_dir = os.path.join(host_dir, "modules")
+    # Имя сервиса → имя крейта его нативной реализации: нужно раннерам,
+    # которые собирают модули по именам сервисов из runner.yaml.
+    module_crates = {}
     for svc in services:
         if not svc["inputs"]:
             continue
@@ -460,6 +464,7 @@ def generate_host_bindings(args, script_dir: str):
         module_data["dependencies"] = {
             name: yaml_dep_to_toml(val) for name, val in raw_deps.items()
         }
+        module_crates[svc["name"]] = module_data["package"]
 
         gen_dir = os.path.join(module_dir, "generated")
         module_renders = {
@@ -472,6 +477,61 @@ def generate_host_bindings(args, script_dir: str):
                 f.write(template.render(module_data))
         print(f"✅ Generated host module crate at {gen_dir}")
 
+    generate_runner_crates(host_dir, module_crates, env)
+
+
+def generate_runner_crates(host_dir: str, module_crates: dict, env) -> None:
+    """Generate the composition-root crate for every runner that declares one.
+
+    A runner is a directory under runners/ holding a runner.yaml that lists the
+    native modules it composes. The набор of modules is a property of the runner
+    (desktop and mobile builds take different lists), so it lives in data rather
+    than in #[cfg(target_os)] branches inside the runner's own source.
+    """
+    runners_dir = os.path.join(host_dir, "runners")
+    if not os.path.isdir(runners_dir):
+        return
+
+    for runner in sorted(os.listdir(runners_dir)):
+        runner_dir = os.path.join(runners_dir, runner)
+        runner_yaml = os.path.join(runner_dir, "runner.yaml")
+        if not os.path.exists(runner_yaml):
+            continue
+
+        with open(runner_yaml) as rf:
+            runner_config = yaml.safe_load(rf) or {}
+
+        package = runner_config.get("package")
+        if not package:
+            raise SystemExit(f"{runner_yaml}: 'package' is required")
+
+        modules = []
+        for name in runner_config.get("modules", []) or []:
+            crate = module_crates.get(name)
+            if crate is None:
+                known = ", ".join(sorted(module_crates)) or "<none>"
+                raise SystemExit(
+                    f"{runner_yaml}: module '{name}' has no native implementation "
+                    f"(expected {os.path.join('modules', name, 'config.yaml')} plus a "
+                    f"service schema with inputs). Available: {known}")
+            modules.append({
+                "name": name,
+                "crate": crate,
+                "crate_snake": crate.replace("-", "_"),
+            })
+
+        gen_dir = os.path.join(runner_dir, "generated")
+        renders = {
+            os.path.join(gen_dir, "src", "lib.rs"): env.get_template("runner_lib.rs.j2"),
+            os.path.join(gen_dir, "Cargo.toml"):    env.get_template("runner_Cargo.toml.j2"),
+        }
+        data = {"runner": runner, "package": package, "modules": modules}
+        for path, template in renders.items():
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(template.render(data))
+        print(f"✅ Generated runner composition crate at {gen_dir}")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -479,7 +539,6 @@ def main():
     parser = argparse.ArgumentParser(description="Generate Rust bindings from schema.yaml")
     parser.add_argument("--schema",        help="Absolute path to schema.yaml")
     parser.add_argument("--output-dir",    help="Absolute path to output directory")
-    parser.add_argument("--sdk-stubs",     help="Generate SDK platform stubs to this path and exit")
     parser.add_argument("--host-bindings", help="Generate host bindings crate to this dir and exit")
     parser.add_argument("--proto-dir",     help="Dir with *.proto and *.schema.yaml (host-bindings mode)")
     parser.add_argument("--package",       help="Package name (host-bindings mode)")
@@ -505,28 +564,8 @@ def main():
     with open(schema_path) as f:
         schema = yaml.safe_load(f)
 
-    # ── SDK platform stubs mode (--sdk-stubs) ────────────────────────────────
-    if args.sdk_stubs:
-        fail_on(validate_core_schema(schema, build_type_universe(core_proto_dir, None)),
-                schema_path)
-        out_path  = os.path.abspath(args.sdk_stubs)
-        svc_name  = schema.get("name")
-        pf_inputs = [
-            {"name": n, "rust_type": rust_type_name(((d or {}).get("type") or "").split("/")[-1])}
-            for n, d in (schema.get("interface", {}).get("inputs", {}) or {}).items()
-        ]
-        pf_inputs = [i for i in pf_inputs if i["rust_type"]]
-
-        env      = Environment(loader=FileSystemLoader(os.path.join(script_dir, "templates")))
-        template = env.get_template("sdk_app.rs.j2")
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "w") as f:
-            f.write(template.render({"service_name": svc_name, "inputs": pf_inputs}))
-        print(f"✅ Generated SDK platform stubs at {out_path}")
-        return
-
     if not args.output_dir:
-        parser.error("--output-dir is required unless --sdk-stubs is given")
+        parser.error("--output-dir is required")
 
     output_dir  = os.path.abspath(args.output_dir)
     schema_dir  = os.path.dirname(schema_path)

@@ -10,14 +10,11 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use prost::Message;
+use std::sync::Arc;
 
 use veldmap_host_core::app;
-use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
+use veldmap_host_core::dispatcher::Dispatcher;
 use veldmap_host_core::logging::FLAG_HOST_RENDER;
-use veldmap_host_core::registry::{Access, ResourceRegistry};
 use veldmap_host_core::{vinfo, vwarn, vdebug};
 use veldmap_host_bindings::app as app_bus;
 
@@ -30,51 +27,6 @@ struct HostWindow {
     /// Композитируемая поверхность: (texture_id, bind group для блита).
     /// None до первого set_surface — окно рисует фоновый цвет.
     surface: Option<(u64, wgpu::BindGroup)>,
-}
-
-/// Подписчик топика app/set_surface: принимает поверхности от владельцев
-/// окон. Свап делает кадровый цикл — здесь только авторизация и очередь.
-/// Актор-очередь диспетчера гарантирует порядок аттачей от одного владельца.
-struct SurfaceSink {
-    dispatcher: Arc<Dispatcher>,
-    registry: Arc<ResourceRegistry>,
-    /// Ожидающие аттачи: владелец окна → texture_id.
-    pending: Arc<Mutex<HashMap<String, u64>>>,
-}
-
-impl SurfaceSink {
-    fn set_surface(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<()> {
-        let msg = app::SetSurface::decode(&payload[..])?;
-        let surface = msg.surface.ok_or_else(|| anyhow::anyhow!("SetSurface without a surface handle"))?;
-
-        // Capability-проверка: аттачить можно только своё окно и только текстуру,
-        // в которую отправитель имеет право писать (0 = сам хост).
-        if requestor_id != 0 {
-            if self.dispatcher.instance_of(&msg.plugin_id) != Some(requestor_id) {
-                anyhow::bail!("'{}' is not the window owner '{}'", requestor_id, msg.plugin_id);
-            }
-            if !self.registry.check_access(surface.id, requestor_id, Access::Write) {
-                anyhow::bail!("No write access to texture {}", surface.id);
-            }
-        }
-
-        self.pending.lock().unwrap().insert(msg.plugin_id, surface.id);
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl AsyncNativeService for SurfaceSink {
-    async fn handle(&self, method: &str, payload: Vec<u8>, requestor_id: u32) {
-        match method {
-            "on_set_surface" => {
-                if let Err(e) = self.set_surface(payload, requestor_id) {
-                    vwarn!(FLAG_HOST_RENDER, "set_surface rejected: {}", e);
-                }
-            }
-            _ => vwarn!(FLAG_HOST_RENDER, "Unknown app topic: {}", method),
-        }
-    }
 }
 
 /// Публикация UI-события в нейтральный топик app/on_ui_event.
@@ -161,18 +113,10 @@ async fn main() -> anyhow::Result<()> {
     let dispatcher = ctx.dispatcher.clone();
     let graphics = ctx.graphics.clone();
 
-    #[cfg(target_os = "linux")]
-    veldmap_host_fs::register_services(ctx.clone());
-    veldmap_host_network::register_services(ctx.clone());
-    veldmap_host_tasks::register_services(ctx.clone());
-
-    // Приём поверхностей от владельцев окон.
-    let pending_surfaces: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-    dispatcher.subscribe(Arc::new(SurfaceSink {
-        dispatcher: dispatcher.clone(),
-        registry: ctx.registry.clone(),
-        pending: pending_surfaces.clone(),
-    }), &[app_bus::topics::ON_SET_SURFACE]);
+    // Нативные модули этого раннера — по списку из runner.yaml (крейт
+    // композиции генерирует buildgen). Приём поверхностей окон входит сюда
+    // как модуль app.
+    veldmap_desktop_modules::register_all(ctx.clone());
 
     veldmap_host_core::plugins::load_services(ctx.clone()).await?;
     if dispatcher.instance_of(&owner_name).is_none() {
@@ -253,7 +197,9 @@ async fn main() -> anyhow::Result<()> {
                 }));
 
                 // Атомарный свап поверхности, если владелец приаттачил новую.
-                if let Some(texture_id) = pending_surfaces.lock().unwrap().remove(&hw.owner) {
+                // Права проверены на входе (модуль app + фасад Surfaces);
+                // здесь остаётся только подмена между кадрами.
+                if let Some(texture_id) = ctx.surfaces.take(&hw.owner) {
                     match ctx.memory.get_texture(texture_id) {
                         Some((texture, _, _, _)) => {
                             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

@@ -11,5 +11,9 @@ use crate::module::state::State;
 use veldsdk::proto::app::WindowResized;
 
 pub fn on_window_resized(state: &mut State, ev: WindowResized) {
-    state.window_surface = veld_ui_service_wrap::surface::delegate(&ev, state.window_surface);
+    state.window_surface = veld_ui_service_wrap::surface::delegate(
+        &ev,
+        state.window_surface,
+        crate::calls::app::on_set_surface,
+    );
 }

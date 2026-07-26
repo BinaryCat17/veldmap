@@ -11,6 +11,7 @@ pub mod abi;
 pub mod dispatcher;
 pub mod logging;
 pub mod tasks;
+pub mod surfaces;
 
 // Protobuf-типы платформенных контрактов — из сгенерированного
 // биндинг-крейта (platform/host/generated, buildgen).
