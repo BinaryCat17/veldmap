@@ -53,13 +53,17 @@ fn progress_text(task: &TaskInfo) -> String {
 /// даёт настоящую сетку: начало каждой колонки — детерминированная сумма
 /// ширин предыдущих колонок и отступов, не зависящая от того, что внутри.
 ///
-/// - `label` — иконка + опциональная подпись ("Incomplete"), у левого края
-///   своей колонки (см. `status_row`);
-/// - `amount` — сколько скачано/сколько всего, у правого края своей колонки;
+/// - `label` — просто иконка статуса (без текстовой подписи вроде
+///   "Incomplete" — иконка сама несёт смысл, см. цвет/форму), у левого края
+///   своей узкой колонки (см. `status_row`) — амаунт начинается сразу после
+///   неё;
+/// - `amount` — сколько скачано/сколько всего, у левого края своей колонки,
+///   то есть вплотную к иконке;
 /// - кнопки — у правого края своей колонки, тоже независимо от того,
 ///   сколько их реально показано (2 у активной/недокачанной закачки, 3 у
 ///   готового файла, 1 у ещё не скачанного).
-const STATUS_LABEL_WIDTH: f32 = 110.0;
+/// Колонка под иконку узкая — под один глиф, не под текст.
+const STATUS_LABEL_WIDTH: f32 = 24.0;
 /// Запас под самый длинный вероятный вариант — активная закачка с
 /// процентом: "999.9 MB / 999.9 MB (100%)".
 const STATUS_AMOUNT_WIDTH: f32 = 220.0;
@@ -69,7 +73,7 @@ const STATUS_BUTTONS_WIDTH: f32 = 110.0;
 fn status_row(label: Element<()>, amount: Element<()>, buttons: Vec<Element<()>>) -> Element<()> {
     row![
         container(label).width(Length::Fixed(STATUS_LABEL_WIDTH)),
-        container(amount).width(Length::Fixed(STATUS_AMOUNT_WIDTH)).align_x(Alignment::End),
+        container(amount).width(Length::Fixed(STATUS_AMOUNT_WIDTH)),
         container(row(buttons).spacing(6.0).align_items(Alignment::Center))
             .width(Length::Fixed(STATUS_BUTTONS_WIDTH))
             .align_x(Alignment::End),
@@ -152,10 +156,9 @@ pub fn render_item(item: &BrowserItem, active: Option<&TaskInfo>, actions: ItemA
         if item.is_partial {
             // Недокачан и сейчас не качается — докачка (тот же remote-ключ,
             // host сам подхватит .part с оборванного байта) и удаление.
-            let label = row![
-                text("\u{f071}").font_family("Icons").color(styles::COLOR_WARNING),
-                text("Incomplete").size(13.0),
-            ].spacing(6.0).align_items(Alignment::Center).into();
+            // Только иконка, без подписи "Incomplete" — цвет и форма (⚠)
+            // уже достаточно говорят о статусе, текст был избыточен.
+            let label = text("\u{f071}").font_family("Icons").color(styles::COLOR_WARNING).into();
             let amount = text(paused_progress_text(item.size, item.total_size)).size(13.0).into();
 
             let mut buttons: Vec<Element<()>> = Vec::new();
