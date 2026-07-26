@@ -3,39 +3,24 @@
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, button, Element, Alignment};
 use crate::module::state::State;
-use crate::module::components::browser_list::{items_or_message, list_screen, ItemActions};
-use crate::module::components::browser_list::BrowserItem;
+use crate::module::components::browser_list::{Row, items_or_message, list_screen, ItemActions};
 use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
-use crate::module::state::downloaded::filename_from_key;
 
 pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;
-    let task_manager = &state.global.task_manager;
 
     let body: Element<()> = if let Some(err) = &browse_state.error {
         column![text(format!("Error: {}", err)).size(16.0)].into()
     } else {
-        let items: Vec<BrowserItem> = browse_state.items.iter().map(|i| {
-            // Папки нет смысла сверять с локальными файлами — это ключ
-            // remote-префикса, а не имя файла.
-            let filename = (!i.is_folder).then(|| filename_from_key(&i.s3_key));
-            let entry = filename.as_deref().and_then(|f| state.downloaded.entry_for(f));
-            BrowserItem {
-                s3_key: i.s3_key.clone(),
-                name: i.name.clone(),
-                description: None,
-                is_folder: i.is_folder,
-                local_path: entry.map(|f| f.path.clone()),
-                is_partial: entry.map(|f| f.is_partial).unwrap_or(false),
-                size: entry.map(|f| f.size).unwrap_or(0),
-                total_size: filename.as_deref()
-                    .and_then(|f| state.downloaded.known_total_bytes.get(f))
-                    .copied()
-                    .unwrap_or(0),
-            }
+        // Папки не сверяем с локальными файлами — это ключ remote-префикса,
+        // а не имя файла.
+        let items: Vec<Row> = browse_state.items.iter().map(|i| if i.is_folder {
+            Row::folder(i.s3_key.clone(), i.name.clone())
+        } else {
+            Row::remote(&state.downloaded, i.s3_key.clone(), i.name.clone())
         }).collect();
 
-        items_or_message(&items, task_manager, ItemActions {
+        items_or_message(&items, ItemActions {
             browse: Some(ON_BROWSE),
             view: Some(ON_VIEW_PRESSED),
             download: Some(ON_DOWNLOAD_PRESSED),

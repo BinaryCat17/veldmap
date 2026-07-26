@@ -17,6 +17,19 @@ pub struct State {
     /// Запрос листинга, ожидающий S3-ответа: id генерируется в on_list_path
     /// для внутреннего вызова network, снимается в on_http_result.
     pub pending_http: veldsdk::Correlator<PendingList>,
+    /// Закачки, запрошенные у network, но ещё не зарегистрированные
+    /// платформой. Пока задачи нет в реестре хоста, гарантия
+    /// tasks/task_finished на неё не распространяется (см. tasks.proto), а
+    /// значит и отменить её нельзя — tasks/cancel вернёт NotFound молча.
+    /// Поэтому DownloadStarted наружу уходит не отсюда, а из on_task_started.
+    pub starting: veldsdk::Correlator<StartingDownload>,
+}
+
+/// Закачка между «попросили network» и «платформа зарегистрировала задачу».
+#[derive(Clone)]
+pub struct StartingDownload {
+    pub identifier: String,
+    pub destination: String,
 }
 
 /// Контекст запроса на листинг: path — для дедупликации "самого себя" из
@@ -42,5 +55,6 @@ pub use cdse::{
     on_fs_download_result,
     on_fs_download_progress,
     on_http_result,
+    on_task_started,
     on_task_finished,
 };

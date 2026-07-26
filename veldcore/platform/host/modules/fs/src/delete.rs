@@ -16,6 +16,14 @@ pub fn on_delete(state: &State, req: FsDeleteRequest, _requestor_id: u32) {
         let path = resolve_path(&state.ctx, &req.path);
         match fs::remove_file(&path) {
             Ok(()) => FsDeleteResult { error: String::new(), correlation_id },
+            // Удалять то, чего нет — не ошибка: цель вызова достигнута.
+            // Нужно для строк-намерений в data-browser (.origin без данных
+            // на диске, см. handlers::nav) и для sidecar'ов у файлов,
+            // скачанных до его появления. Проверяем kind, а не текст ошибки:
+            // сборка кросс-компилируется под Windows, где текст другой.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                FsDeleteResult { error: String::new(), correlation_id }
+            }
             Err(e) => FsDeleteResult { error: e.to_string(), correlation_id },
         }
     };

@@ -1,9 +1,13 @@
-//! components/browser_list/view.rs — рендеринг списка файлов
+//! components/browser_list/view.rs — рендеринг списка файлов.
+//!
+//! Ничего не решает про состояние файла: получает готовый `RowStatus` (см.
+//! `row.rs`) и только рисует. Поэтому здесь нет ни доступа к задачам, ни к
+//! снимку диска — раньше состояние реконструировалось прямо тут вложенными
+//! if'ами по пяти переменным.
 
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, button, container, scrollable, Element, Length, Alignment, Padding};
-use crate::module::components::browser_list::BrowserItem;
-use crate::module::components::task_manager::{TaskManager, TaskInfo};
+use crate::module::components::browser_list::{Row, RowStatus};
 use crate::module::styles;
 
 /// Какие входные методы модуля вызывают кнопки элемента списка.
@@ -33,35 +37,22 @@ fn format_bytes(bytes: u64) -> String {
     format!("{:.1} {}", size, UNITS[unit])
 }
 
-/// Текст прогресса активной закачки: процент, если сервер прислал
-/// Content-Length, иначе только счётчик байт (см. network::download.rs —
-/// total_bytes == 0 для ответов без Content-Length).
-fn progress_text(task: &TaskInfo) -> String {
-    if task.total_bytes > 0 {
-        format!("{} / {} ({:.0}%)", format_bytes(task.bytes_downloaded), format_bytes(task.total_bytes), task.progress * 100.0)
-    } else if task.bytes_downloaded > 0 {
-        format_bytes(task.bytes_downloaded)
-    } else {
-        "Downloading...".to_string()
+/// "X / Y (Z%)", если полный размер известен, иначе только скачанное —
+/// сервер мог не прислать Content-Length (см. network::download.rs).
+fn amount_text(done: u64, total: u64, progress: Option<f32>) -> String {
+    match (total, progress) {
+        (0, _) if done == 0 => "Downloading...".to_string(),
+        (0, _) => format_bytes(done),
+        (t, Some(p)) => format!("{} / {} ({:.0}%)", format_bytes(done), format_bytes(t), p * 100.0),
+        (t, None) => format!("{} / {}", format_bytes(done), format_bytes(t)),
     }
 }
 
 /// Три колонки правой части строки — КАЖДАЯ своей фиксированной ширины,
-/// одинаковой для всех состояний строки (активная закачка / Incomplete /
-/// готовый файл / ещё не скачан / папка). Именно фиксация каждой колонки по
+/// одинаковой для всех состояний строки. Именно фиксация каждой колонки по
 /// отдельности (а не общего блока текста с "резиновым" промежутком внутри)
 /// даёт настоящую сетку: начало каждой колонки — детерминированная сумма
 /// ширин предыдущих колонок и отступов, не зависящая от того, что внутри.
-///
-/// - `label` — просто иконка статуса (без текстовой подписи вроде
-///   "Incomplete" — иконка сама несёт смысл, см. цвет/форму), у левого края
-///   своей узкой колонки (см. `status_row`) — амаунт начинается сразу после
-///   неё;
-/// - `amount` — сколько скачано/сколько всего, у левого края своей колонки,
-///   то есть вплотную к иконке;
-/// - кнопки — у правого края своей колонки, тоже независимо от того,
-///   сколько их реально показано (2 у активной/недокачанной закачки, 3 у
-///   готового файла, 1 у ещё не скачанного).
 /// Колонка под иконку узкая — под один глиф, не под текст.
 const STATUS_LABEL_WIDTH: f32 = 24.0;
 /// Запас под самый длинный вероятный вариант — активная закачка с
@@ -80,22 +71,15 @@ fn status_row(label: Element<()>, amount: Element<()>, buttons: Vec<Element<()>>
     ].spacing(6.0).align_items(Alignment::Center).into()
 }
 
-/// То же самое что `progress_text`, но для недокачанного файла на паузе —
-/// TaskInfo уже нет (задача finished/cancelled), есть только текущий размер
-/// `.part` на диске (`item.size`) и, если он был виден хоть раз в этой
-/// сессии, Content-Length (`item.total_size`, см. `DownloadedState::known_total_bytes`).
-fn paused_progress_text(current: u64, total: u64) -> String {
-    if total > 0 {
-        format!("{} / {}", format_bytes(current), format_bytes(total))
-    } else {
-        format_bytes(current)
-    }
+fn icon(glyph: &str) -> Element<()> {
+    text(glyph).font_family("Icons").into()
 }
 
-pub fn render_item(item: &BrowserItem, active: Option<&TaskInfo>, actions: ItemActions) -> Element<()> {
+pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
+    let is_folder = matches!(item.status, RowStatus::Folder);
+
     // Иконка и имя — раздельные Text: у иконки свой шрифт (Icons), имя файла
     // рисуется дефолтным — единая строка ломала бы одно из двух.
-    let icon_glyph = if item.is_folder { "\u{f07b}" } else { "\u{f016}" };
     // Имя — Length::Fill, а не Shrink по умолчанию: иначе при сужении окна
     // текст не переносится, а рисуется поверх границ карточки (Shrink меряет
     // себя без учёта родительских границ). Fill нужен на ОБОИХ уровнях — и
@@ -103,106 +87,81 @@ pub fn render_item(item: &BrowserItem, active: Option<&TaskInfo>, actions: ItemA
     // не получает реальной ширины от кнопки-родителя и схлопывается в
     // минимальную (отсюда вертикальный "по одной букве" — уже проверено).
     let title = row![
-        text(icon_glyph).font_family("Icons"),
+        icon(if is_folder { "\u{f07b}" } else { "\u{f016}" }),
         text(item.name.clone()).width(Length::Fill),
     ].spacing(6.0).align_items(Alignment::Center).width(Length::Fill);
 
-    // Открыть можно только по-настоящему скачанный файл — .part не читаем.
-    let viewable = item.local_path.is_some() && !item.is_partial;
-
-    // Одна и та же карточка (см. styles::file_button_style) для любой
-    // строки — папка, готовый файл, недокачанный или ещё не скачанный:
+    // Одна и та же карточка (см. styles::file_button_style) для любой строки:
     // `on_press_with` навешивается только там, где есть реальное действие,
-    // остальные строки — та же кнопка, просто без обработчика (хост рисует
-    // её в стиле `disabled`, см. styles.rs). Раньше некликабельные строки
-    // были голым текстом без паддинга кнопки — отсюда и другой отступ от
-    // края, и вообще другой виджет.
+    // остальные — та же кнопка без обработчика (хост рисует её в стиле
+    // `disabled`, см. styles.rs).
     let card = styles::apply_file(button(title)).width(Length::Fill);
-    let main_button: Element<()> = if item.is_folder {
-        match actions.browse {
-            Some(method) => card.on_press_with(method, item.s3_key.clone()).into(),
+    let main_button: Element<()> = match (&item.status, actions.browse, actions.view) {
+        (RowStatus::Folder, Some(m), _) => card.on_press_with(m, item.s3_key.clone()).into(),
+        // Открыть можно только по-настоящему скачанный файл — .part не читаем.
+        (RowStatus::Complete { .. }, _, Some(m)) => match &item.local_path {
+            Some(p) => card.on_press_with(m, p.clone()).into(),
             None => card.into(),
-        }
-    } else if viewable {
-        match actions.view {
-            Some(method) => card.on_press_with(method, item.local_path.clone().unwrap()).into(),
-            None => card.into(),
-        }
-    } else {
-        card.into()
+        },
+        _ => card.into(),
     };
 
-    let status: Element<()> = if let Some(task) = active {
-        // Качается прямо сейчас — прогресс, кнопка "стоп" (тот же
-        // on_download_pressed: повторное нажатие на активный s3_key отменяет,
-        // см. handlers::download) и корзина (отменяет и удаляет .part, см.
-        // handlers::download::on_delete_pressed/pending_delete_on_cancel).
-        let label = text("\u{f254}").font_family("Icons").into();
-        let amount = text(progress_text(task)).size(13.0).into();
+    // Кнопка закачки скрыта, если remote-ключ неизвестен — лучше не предлагать
+    // действие, чем слать заведомо неверный запрос.
+    let download_button = |glyph: &str, color| {
+        (!item.s3_key.is_empty()).then(|| actions.download.map(|m| {
+            styles::icon_button(glyph, color).on_press_with(m, item.s3_key.clone()).into()
+        })).flatten()
+    };
+    let delete_button = || {
+        item.local_path.as_ref().and_then(|p| actions.delete.map(|m| {
+            styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(m, p.clone()).into()
+        }))
+    };
 
-        let mut buttons: Vec<Element<()>> = Vec::new();
-        if let Some(method) = actions.download {
-            // Пауза, не стоп: повторное нажатие на скачиваемый s3_key просто
-            // отменяет текущий поток, но .part остаётся на диске и следующее
-            // нажатие "скачать" продолжит с оборванного байта (см.
-            // network::download.rs) — по факту это пауза, а не отмена насовсем.
-            buttons.push(styles::icon_button("\u{f04c}", styles::COLOR_WARNING).on_press_with(method, item.s3_key.clone()).into());
-        }
-        if let (Some(method), Some(path)) = (actions.delete, &item.local_path) {
-            buttons.push(styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(method, path.clone()).into());
-        }
-        status_row(label, amount, buttons)
-    } else if let Some(local_path) = &item.local_path {
-        if item.is_partial {
-            // Недокачан и сейчас не качается — докачка (тот же remote-ключ,
-            // host сам подхватит .part с оборванного байта) и удаление.
-            // Только иконка, без подписи "Incomplete" — цвет и форма (⚠)
-            // уже достаточно говорят о статусе, текст был избыточен.
-            let label = text("\u{f071}").font_family("Icons").color(styles::COLOR_WARNING).into();
-            let amount = text(paused_progress_text(item.size, item.total_size)).size(13.0).into();
+    let status: Element<()> = match &item.status {
+        RowStatus::Folder => status_row(text("").into(), text("").into(), Vec::new()),
 
-            let mut buttons: Vec<Element<()>> = Vec::new();
-            if !item.s3_key.is_empty() {
-                if let Some(method) = actions.download {
-                    // Play, не refresh: это продолжение (host сам подхватит
-                    // .part), а не повторное скачивание с нуля — зрительно
-                    // должно читаться как обратное действие "паузе" (f04c) выше.
-                    buttons.push(styles::icon_button("\u{f04b}", styles::COLOR_PRIMARY).on_press_with(method, item.s3_key.clone()).into());
-                }
-            }
-            if let Some(method) = actions.delete {
-                buttons.push(styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(method, local_path.clone()).into());
-            }
-            status_row(label, amount, buttons)
-        } else {
-            // Просмотр всегда идёт с локального пути, re-download — с
-            // remote-ключа: это разные значения (см. BrowserItem::local_path),
-            // кнопка закачки скрыта, если remote-ключ для файла неизвестен.
-            let label = text("\u{f00c}").font_family("Icons").into();
-            let amount = text(format_bytes(item.size)).size(13.0).into();
+        RowStatus::Remote => status_row(
+            text("").into(), text("").into(),
+            download_button("\u{f019}", styles::COLOR_PRIMARY).into_iter().collect(),
+        ),
 
-            let mut buttons: Vec<Element<()>> = Vec::new();
-            if let Some(method) = actions.view {
-                buttons.push(styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(method, local_path.clone()).into());
-            }
-            if !item.s3_key.is_empty() {
-                if let Some(method) = actions.download {
-                    buttons.push(styles::icon_button("\u{f021}", styles::COLOR_RELOAD).on_press_with(method, item.s3_key.clone()).into());
-                }
-            }
-            if let Some(method) = actions.delete {
-                buttons.push(styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(method, local_path.clone()).into());
-            }
-            status_row(label, amount, buttons)
-        }
-    } else if !item.is_folder {
-        let buttons = match actions.download {
-            Some(method) => vec![styles::icon_button("\u{f019}", styles::COLOR_PRIMARY).on_press_with(method, item.s3_key.clone()).into()],
-            None => Vec::new(),
-        };
-        status_row(text("").into(), text("").into(), buttons)
-    } else {
-        status_row(text("").into(), text("").into(), Vec::new())
+        // Пауза, не стоп: повторное нажатие на скачиваемый s3_key отменяет
+        // текущий поток, но .part остаётся на диске и следующее "скачать"
+        // продолжит с оборванного байта — по факту это пауза.
+        RowStatus::Downloading { done, total, progress } => status_row(
+            icon("\u{f254}"),
+            text(amount_text(*done, *total, Some(*progress))).size(13.0).into(),
+            download_button("\u{f04c}", styles::COLOR_WARNING).into_iter()
+                .chain(delete_button()).collect(),
+        ),
+
+        // Play, не refresh: это продолжение (host сам подхватит .part), а не
+        // повторное скачивание с нуля — зрительно должно читаться как
+        // обратное действие "паузе" выше. Только иконка, без подписи
+        // "Incomplete" — цвет и форма уже достаточно говорят о статусе.
+        RowStatus::Paused { done, total } => status_row(
+            text("\u{f071}").font_family("Icons").color(styles::COLOR_WARNING).into(),
+            text(amount_text(*done, *total, None)).size(13.0).into(),
+            download_button("\u{f04b}", styles::COLOR_PRIMARY).into_iter()
+                .chain(delete_button()).collect(),
+        ),
+
+        // Просмотр всегда с локального пути, re-download — с remote-ключа:
+        // это разные значения (см. Row::local_path).
+        RowStatus::Complete { size } => status_row(
+            icon("\u{f00c}"),
+            text(format_bytes(*size)).size(13.0).into(),
+            item.local_path.as_ref()
+                .and_then(|p| actions.view.map(|m| -> Element<()> {
+                    styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, p.clone()).into()
+                }))
+                .into_iter()
+                .chain(download_button("\u{f021}", styles::COLOR_RELOAD))
+                .chain(delete_button())
+                .collect(),
+        ),
     };
 
     row![main_button, status]
@@ -212,39 +171,36 @@ pub fn render_item(item: &BrowserItem, active: Option<&TaskInfo>, actions: ItemA
         .into()
 }
 
-pub fn render_list(items: &[BrowserItem], task_manager: &TaskManager, actions: ItemActions) -> Element<()> {
-    column(items.iter().map(|item| {
-        let active = task_manager.active_download(&item.s3_key);
-        render_item(item, active, actions)
-    }))
-    .width(Length::Fill)
-    .spacing(8.0)
-    .into()
+/// Принимает итератор, а не срез: экран Downloaded делит строки на секции
+/// через `partition` и держит `Vec<&Row>`, копировать их ради рендера незачем.
+pub fn render_list<'a>(items: impl IntoIterator<Item = &'a Row>, actions: ItemActions) -> Element<()> {
+    column(items.into_iter().map(|item| render_item(item, actions)))
+        .width(Length::Fill)
+        .spacing(8.0)
+        .into()
 }
 
 /// Список файлов или текст-заглушка, если он пуст — этот выбор одинаков на
 /// всех трёх экранах (Browse/Search/Downloaded), различается только
 /// сообщение-заглушка.
-pub fn items_or_message(items: &[BrowserItem], task_manager: &TaskManager, actions: ItemActions, empty_message: &str) -> Element<()> {
+pub fn items_or_message(items: &[Row], actions: ItemActions, empty_message: &str) -> Element<()> {
     if items.is_empty() {
         column![text(empty_message).size(16.0)].into()
     } else {
-        render_list(items, task_manager, actions)
+        render_list(items, actions)
     }
 }
 
 /// Обёртка экрана со списком файлов: одинаковые spacing/padding/width/height
 /// и скролл на всех трёх экранах — отличаются только `header_rows`
 /// (заголовок, плюс что у каждого экрана есть своего: кнопка "Up" в Browse,
-/// строка поиска в Search, секция недокачанных в Downloaded) и тело.
+/// строка поиска в Search) и тело.
 ///
 /// Колонку заголовка собирает сама (а не принимает готовый `Element`) —
 /// каждый вложенный `column![]` без явного `.width(Fill)` схлопывается по
 /// ширине до содержимого, а это тот же самый класс бага что и Length::Shrink
 /// по умолчанию у самих виджетов (кнопок/текста/иконок) — там он осознанный
 /// и его трогать не надо, но конкретно на экранном контейнере он неуместен.
-/// Раз этот вызов — единственное место, где вложенная колонка вообще
-/// создаётся, промахнуться мимо Fill здесь больше негде.
 pub fn list_screen(header_rows: Vec<Element<()>>, body: Element<()>) -> Element<()> {
     // Правый паддинг у тела, а не у всей колонки — резервирует место под
     // полосу прокрутки: у `scrollable` в этом фреймворке нет своего API для

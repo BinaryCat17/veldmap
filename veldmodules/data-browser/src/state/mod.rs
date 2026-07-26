@@ -25,8 +25,6 @@ impl State {
             global: types::GlobalState {
                 status_message: "VeldMap Data Browser".to_string(),
                 error_message: None,
-                task_manager: crate::module::components::task_manager::TaskManager::default(),
-                has_rendered: false,
             },
         })
     }

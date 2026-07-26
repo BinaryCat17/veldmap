@@ -71,6 +71,13 @@ impl<T> Correlator<T> {
         self.pending.values()
     }
 
+    /// То же, но с correlation_id: нужен, когда по найденному контексту надо
+    /// не только показать что-то, но и обратиться к источнику — например
+    /// отменить задачу, найденную поиском по её доменному ключу.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &T)> {
+        self.pending.iter().map(|(id, ctx)| (id.as_str(), ctx))
+    }
+
     /// Изменяемый вариант `values` — для массовых обновлений на месте.
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.pending.values_mut()

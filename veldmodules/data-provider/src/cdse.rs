@@ -10,7 +10,7 @@ use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use url::Url;
-use super::{Config, PendingList, State};
+use super::{Config, PendingList, StartingDownload, State};
 
 const S3_HOST: &str = "eodata.dataspace.copernicus.eu";
 const S3_REGION: &str = "default";
@@ -24,10 +24,11 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
     );
     let identity = Identity::new(credentials, None);
     
-    Ok(State { 
+    Ok(State {
         identity,
         tasks: veldsdk::TaskTracker::new(),
         pending_http: veldsdk::Correlator::new(),
+        starting: veldsdk::Correlator::new(),
     })
 }
 
@@ -49,14 +50,20 @@ pub fn on_download(
     let s3_key = request.identifier.trim_start_matches('/').trim_start_matches("eodata/").to_string();
     let destination = request.destination.clone();
     let identifier = request.identifier.clone();
-    
-    // Publish started immediately
-    crate::emit::on_download_started(&DownloadStarted {
-        task_id: task_id.clone(),
+
+    // DownloadStarted НЕ шлём здесь. Задача появится в реестре платформы
+    // только когда network обработает on_fs_download — а до тех пор гарантия
+    // "finished придёт для любой зарегистрированной задачи" (tasks.proto) на
+    // этот task_id не распространяется: tasks/cancel вернул бы NotFound и
+    // молча ничего не сделал, а подписчик, ждущий терминального события,
+    // завис бы навсегда. Переставить emit ниже нельзя — шина асинхронная,
+    // публикация после вызова тоже не значит "после регистрации". Ждём
+    // on_task_started: платформа эмитит его ровно в момент регистрации.
+    state.starting.insert(task_id.clone(), StartingDownload {
         identifier: identifier.clone(),
         destination: destination.clone(),
     });
-    
+
     let url = format!("https://{}/eodata/{}", S3_HOST, s3_key);
     let uri = format!("/eodata/{}", s3_key);
     let headers = get_s3_headers(state, "GET", &uri);
@@ -72,6 +79,21 @@ pub fn on_download(
     crate::calls::network::on_fs_download(&req_task);
 }
 
+/// Задача зарегистрирована платформой — с этого момента она отменяема и на
+/// неё распространяется гарантия терминального события. Только теперь
+/// сообщаем подписчикам, что закачка началась.
+pub fn on_task_started(
+    state: &mut State,
+    event: veldsdk::proto::tasks::TaskStarted
+) {
+    let Some(pending) = state.starting.take(&event.task_id) else { return; };
+    crate::emit::on_download_started(&DownloadStarted {
+        task_id: event.task_id,
+        identifier: pending.identifier,
+        destination: pending.destination,
+    });
+}
+
 pub fn on_cancel_download(
     state: &mut State,
     request: CancelDownloadRequest
@@ -79,7 +101,18 @@ pub fn on_cancel_download(
     // Отменяем только задачи, которые этот модуль реально запустил.
     // Отмену выполнит платформа (топик tasks/cancel, проверка lease);
     // доменное уведомление — в on_task_finished, когда отмена случится.
-    state.tasks.cancel(&request.task_id);
+    if !state.tasks.cancel(&request.task_id) {
+        // Задача нам неизвестна: чужой task_id либо уже завершившаяся
+        // закачка. Терминального события по ней не будет, поэтому молчать
+        // нельзя — подписчик ждёт ответа на свою отмену.
+        log::warn!("[data-provider] cancel for unknown task {}", request.task_id);
+        crate::emit::on_downloaded(&Downloaded {
+            task_id: request.task_id,
+            success: false,
+            error: "Unknown task".to_string(),
+            cancelled: true,
+        });
+    }
 }
 
 /// Терминальное событие платформы. Доменный результат (fs_download_result)
@@ -96,6 +129,7 @@ pub fn on_task_finished(
         task_id: event.task_id,
         success: false,
         error: "Cancelled by user".to_string(),
+        cancelled: true,
     });
 }
 
@@ -210,6 +244,9 @@ pub fn on_fs_download_result(
         task_id: correlation_id,
         success,
         error: response.error,
+        // Доменный результат — закачка дошла до конца сама: отмена сюда не
+        // попадает, она приходит только через on_task_finished (см. выше).
+        cancelled: false,
     });
 }
 

@@ -70,6 +70,11 @@ message Downloaded {
   string task_id = 1;
   bool success = 2;
   string error = 3;
+  // true — закачку отменил пользователь (пауза либо удаление), а не сбой.
+  // Отдельным полем, а не по тексту error: для подписчика это не ошибка —
+  // .part остаётся на диске и следующее "скачать" продолжит с него, поэтому
+  // показывать такое как failure нельзя (см. data-browser::on_downloaded).
+  bool cancelled = 4;
 }
 
 // Cancel download request

@@ -31,4 +31,4 @@ dependencies:
     subs: [on_fs_download_result, on_fs_download_progress, on_http_result]
     calls: [on_fs_download, on_http]
   tasks:
-    subs: [on_task_finished]
+    subs: [on_task_started, on_task_finished]

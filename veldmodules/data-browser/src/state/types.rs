@@ -6,10 +6,10 @@ pub enum Screen {
     Preview,
 }
 
+/// Общее для всех экранов. Закачки сюда НЕ входят: они живут в
+/// `DownloadedState` рядом со снимком диска и сидкарами — всё, из чего
+/// выводится строка списка, должно лежать в одном месте.
 pub struct GlobalState {
     pub status_message: String,
     pub error_message: Option<String>,
-    // Задачи управляются через components/task_manager
-    pub task_manager: crate::module::components::task_manager::TaskManager,
-    pub has_rendered: bool,
 }
