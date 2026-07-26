@@ -18,6 +18,9 @@ use crate::module::styles;
 pub struct ItemActions<'a> {
     pub browse: Option<&'a str>,
     pub view: Option<&'a str>,
+    /// Просмотр ещё не скачанного файла: открывается по remote-ключу и
+    /// читается по фрагментам прямо с той стороны.
+    pub preview: Option<&'a str>,
     pub download: Option<&'a str>,
     pub delete: Option<&'a str>,
 }
@@ -120,6 +123,13 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
             styles::icon_button(glyph, color).on_press_with(m, item.s3_key.clone()).into()
         })).flatten()
     };
+    // Просмотр без скачивания — там же, где и скачивание: обе кнопки живут
+    // от remote-ключа, локального файла для них ещё нет.
+    let preview_button = || {
+        (!item.s3_key.is_empty()).then(|| actions.preview.map(|m| -> Element<()> {
+            styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, item.s3_key.clone()).into()
+        })).flatten()
+    };
     let delete_button = || {
         item.local_path.as_ref().and_then(|p| actions.delete.map(|m| {
             styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(m, p.clone()).into()
@@ -131,7 +141,8 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
 
         RowStatus::Remote => status_row(
             text("").into(), text("").into(),
-            download_button("\u{f019}", styles::COLOR_PRIMARY).into_iter().collect(),
+            preview_button().into_iter()
+                .chain(download_button("\u{f019}", styles::COLOR_PRIMARY)).collect(),
         ),
 
         // Пауза, не стоп: повторное нажатие на скачиваемый s3_key отменяет

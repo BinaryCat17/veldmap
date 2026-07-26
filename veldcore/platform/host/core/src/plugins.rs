@@ -60,6 +60,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             registry: ctx.registry.clone(),
             memory: ctx.memory.clone(),
             graphics: ctx.graphics.clone(),
+            tasks: ctx.tasks.clone(),
             plugin_name: String::new(),
             instance_id,
             config: std::collections::HashMap::new(),

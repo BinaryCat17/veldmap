@@ -85,16 +85,27 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // ── Memory data access ────────────────────────────────────
 
     // veld_memory_write — write data into a memory region
-    linker.func_wrap("env", "veld_memory_write", |mut caller: Caller<'_, HostState>, id: u64, offset: u64, ptr: u64, len: u64| {
-        let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return };
-        let instance_id = caller.data().instance_id;
-        if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
-            let memory = caller.data().memory.clone();
+    linker.func_wrap_async("env", "veld_memory_write", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
+        Box::new(async move {
+            let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(()) };
+            let instance_id = caller.data().instance_id;
             let registry = caller.data().registry.clone();
-            if registry.check_access(id, instance_id, crate::registry::Access::Write) {
+            if !registry.check_access(id, instance_id, crate::registry::Access::Write) {
+                return Ok(());
+            }
+            let memory = caller.data().memory.clone();
+            if memory.write_blocks(id) {
+                // Носитель наружу (файл): копию отдаём blocking-пулу, иначе
+                // медленный диск встанет поперёк всего рантайма.
+                let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(<[u8]>::to_vec) else {
+                    return Ok(());
+                };
+                let _ = tokio::task::spawn_blocking(move || memory.write(id, offset, &data)).await;
+            } else if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
                 let _ = memory.write(id, offset, data);
             }
-        }
+            Ok(())
+        })
     })?;
 
     // veld_memory_read(id, offset, size) → (len << 32 | ptr), 0 — доступ
@@ -109,7 +120,18 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 return Ok(0u64);
             }
             let memory = caller.data().memory.clone();
-            let Ok(data) = memory.read(id, offset, size) else { return Ok(0u64) };
+            // Диск, сеть и ожидание GPU — на blocking-пул. Гость этого не
+            // замечает (вызов для него синхронный), но поток рантайма при
+            // медленном носителе остаётся свободным для других плагинов.
+            let data = if memory.read_blocks(id) {
+                match tokio::task::spawn_blocking(move || memory.read(id, offset, size)).await {
+                    Ok(Ok(data)) => data,
+                    _ => return Ok(0u64),
+                }
+            } else {
+                let Ok(data) = memory.read(id, offset, size) else { return Ok(0u64) };
+                data
+            };
             write_response_back(&mut caller, &data).await
         })
     })?;
@@ -127,6 +149,53 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             Some((_, width, height, _)) => (u64::from(width) << 32) | u64::from(height),
             None => 0,
         }
+    })?;
+
+    // ── Фоновые задачи ────────────────────────────────────────
+    // Длинная работа внутри одного обработчика (декодирование снимка,
+    // например) не может узнать об отмене событием: очередь плагина не
+    // разгребается, пока обработчик не вернул управление. Поэтому задача
+    // регистрируется в том же реестре, что и нативные (единая модель прав
+    // и единые lifecycle-события), а исполнитель опрашивает её живость.
+
+    // veld_task_begin(ptr, len) → 1 | 0 (id занят или владелец неизвестен)
+    linker.func_wrap("env", "veld_task_begin", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| -> u64 {
+        let Some(req) = read_message::<crate::tasks_proto::TaskBeginRequest>(&mut caller, ptr, len) else { return 0 };
+        let executor = caller.data().plugin_name.clone();
+        // Владелец — инициатор запроса: отменить задачу сможет он (и хост).
+        // Пустое имя означало бы задачу, которую некому отменить.
+        let Some(owner) = caller.data().dispatcher.instance_of(&req.owner) else { return 0 };
+        let tasks = caller.data().tasks.clone();
+        if tasks.begin(&req.task_id, owner, &executor, &req.label, &req.kind).is_err() {
+            return 0;
+        }
+        veldmap_host_bindings::tasks::emit::on_task_started(
+            &*caller.data().dispatcher,
+            &crate::tasks_proto::TaskStarted {
+                task_id: req.task_id, label: req.label, kind: req.kind,
+                executor, owner: req.owner,
+            },
+        );
+        1
+    })?;
+
+    // veld_task_alive(ptr, len) → 1 | 0. ptr/len — сырая строка task_id.
+    linker.func_wrap("env", "veld_task_alive", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| -> u64 {
+        let Some(id) = read_str(&mut caller, ptr, len) else { return 0 };
+        if caller.data().tasks.is_alive(&id) { 1 } else { 0 }
+    })?;
+
+    // veld_task_end(ptr, len) — терминальное событие задачи.
+    linker.func_wrap("env", "veld_task_end", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| {
+        let Some(req) = read_message::<crate::tasks_proto::TaskEndRequest>(&mut caller, ptr, len) else { return };
+        // false — задачу уже сняли отменой, и finished оттуда уже ушёл.
+        if !caller.data().tasks.complete(&req.task_id) { return; }
+        veldmap_host_bindings::tasks::emit::on_task_finished(
+            &*caller.data().dispatcher,
+            &crate::tasks_proto::TaskFinished {
+                task_id: req.task_id, error: req.error, cancelled: false,
+            },
+        );
     })?;
 
     // ── Memory management ─────────────────────────────────────
@@ -283,6 +352,23 @@ fn lease_op(
         if ok { 1 } else { 0 }
     })?;
     Ok(())
+}
+
+/// Читает строку из памяти гостя.
+fn read_str(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<String> {
+    let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return None };
+    mem.data(&*caller)
+        .get(ptr as usize..(ptr + len) as usize)
+        .and_then(|s| std::str::from_utf8(s).ok())
+        .map(str::to_string)
+}
+
+/// Читает protobuf-сообщение из памяти гостя — форма аргумента для ABI-вызовов
+/// с несколькими полями (та же, что у graphics_create_resource).
+fn read_message<M: Message + Default>(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<M> {
+    let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return None };
+    let bytes = mem.data(&*caller).get(ptr as usize..(ptr + len) as usize)?.to_vec();
+    M::decode(&bytes[..]).ok()
 }
 
 /// Helper: read a service name from WASM memory and resolve its instance id.

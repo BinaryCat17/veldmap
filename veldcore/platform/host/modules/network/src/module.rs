@@ -4,12 +4,14 @@
 //! как в wasm-модулях (crate::module).
 //!
 //! module.rs — фасад: State, init и реэкспорты обработчиков.
-//! Логика — в download.rs (потоковое скачивание) и http.rs (HTTP-запросы).
+//! Логика — в download.rs (потоковое скачивание), http.rs (HTTP-запросы и
+//! общий транспорт) и range.rs (удалённый файл как ресурс, без скачивания).
 //! Жизненный цикл задач (started/finished, отмена по tasks/cancel) —
 //! через фасад Tasks (host-util): сервис не ведёт свой реестр задач.
 
 mod download;
 mod http;
+mod range;
 
 use std::sync::Arc;
 use veldmap_host_util::{HostContext, Tasks};
@@ -26,3 +28,4 @@ pub fn hook_init(ctx: Arc<HostContext>) -> State {
 // -- Input handlers --
 pub use download::on_fs_download;
 pub use http::on_http;
+pub use range::on_open;

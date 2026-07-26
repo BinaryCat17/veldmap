@@ -39,6 +39,17 @@ pub fn surface_format_to_proto(fmt: wgpu::TextureFormat) -> i32 {
     }
 }
 
+/// Носитель, умеющий отдавать произвольный диапазон байт.
+///
+/// Реализация живёт в том модуле, который знает протокол (network — HTTP
+/// с Range-запросами): ядро не тянет в себя ни http-клиент, ни его
+/// зависимости, а получает готовый объект. Чтение блокирующее — хост
+/// вызывает его на blocking-пуле, см. `DataBacking::read_blocks`.
+pub trait RangeSource: Send + Sync {
+    fn len(&self) -> u64;
+    fn read_at(&self, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>;
+}
+
 /// Чем подкреплены байты ресурса.
 ///
 /// Ресурс один — id, владение (lease) и освобождение у всех вариантов общие;
@@ -53,6 +64,10 @@ pub enum DataBacking {
     /// не поднимаются. Так открываются ресурсы, которые в память не влезают
     /// (гигабайтные снимки), — потребитель тянет из них нужные фрагменты.
     File { file: std::sync::Mutex<std::fs::File>, len: u64 },
+    /// Удалённый носитель: чтение диапазона уходит в сеть (см. `RangeSource`).
+    /// Для потребителя неотличим от файла — тем и ценен: код, читающий
+    /// ресурс окнами, работает и с диском, и с сетью без единой правки.
+    Remote(Arc<dyn RangeSource>),
     /// Буфер GPU. `mapped` — создан с mapped_at_creation, запись идёт прямо
     /// в отображённый диапазон, а не через очередь.
     Buffer { buffer: Arc<wgpu::Buffer>, mapped: bool },
@@ -83,10 +98,24 @@ impl DataBacking {
         }
     }
 
+    /// Чтение уходит наружу (диск, ожидание GPU) и может занять поток надолго.
+    /// Такие вызовы хост выполняет на blocking-пуле: иначе медленный носитель
+    /// съедает воркер рантайма, а не только фибру своего плагина.
+    pub fn read_blocks(&self) -> bool {
+        matches!(self, Self::File { .. } | Self::Remote(_) | Self::Buffer { .. })
+    }
+
+    /// То же для записи. Буфер и текстура пишутся через очередь wgpu, поток
+    /// на этом не стоит — в отличие от файла.
+    pub fn write_blocks(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
+
     pub fn byte_len(&self) -> u64 {
         match self {
             Self::Cpu(v) => v.len() as u64,
             Self::File { len, .. } => *len,
+            Self::Remote(src) => src.len(),
             Self::Buffer { buffer, .. } => buffer.size(),
             Self::Texture { width, height, format, .. } => {
                 let bpp = bytes_per_pixel(*format);
@@ -139,6 +168,12 @@ impl MemoryManager {
         let len = file.metadata()?.len();
         let id = self.alloc(DataBacking::File { file: std::sync::Mutex::new(file), len }, owner_id);
         Ok((id, len))
+    }
+
+    /// Ресурс поверх удалённого носителя (см. `RangeSource`): содержимое
+    /// остаётся на той стороне, читатель тянет диапазоны.
+    pub fn alloc_remote(&self, source: Arc<dyn RangeSource>, owner_id: u32) -> ResourceId {
+        self.alloc(DataBacking::Remote(source), owner_id)
     }
 
     pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, owner_id: u32) -> ResourceId {
@@ -216,6 +251,11 @@ impl MemoryManager {
                 let mut view = slice.get_mapped_range_mut();
                 view[..data.len()].copy_from_slice(data);
             }
+            // Запись в удалённый носитель — отдельный протокол (PUT, докачка,
+            // права на той стороне), а не «ещё один вариант write».
+            DataBacking::Remote(_) => {
+                return Err(anyhow::anyhow!("Remote resources are read-only"));
+            }
             DataBacking::Texture { ref texture, width, height, format } => {
                 let bpp = bytes_per_pixel(*format);
                 let bytes_per_row = bpp * *width;
@@ -264,6 +304,11 @@ impl MemoryManager {
                 let mut buf = vec![0u8; size];
                 f.read_exact(&mut buf)?;
                 Ok(buf)
+            }
+            DataBacking::Remote(source) => {
+                let source = source.clone();
+                drop(region);
+                source.read_at(offset, size)
             }
             DataBacking::Buffer { buffer, .. } => {
                 let buffer = buffer.clone();
@@ -321,6 +366,15 @@ impl MemoryManager {
 
     pub fn exists(&self, region_id: ResourceId) -> bool {
         self.regions.contains_key(&region_id)
+    }
+
+    /// Нужно ли выполнять операцию на blocking-пуле (см. `DataBacking::read_blocks`).
+    pub fn read_blocks(&self, region_id: ResourceId) -> bool {
+        self.regions.get(&region_id).map(|r| r.backing.read_blocks()).unwrap_or(false)
+    }
+
+    pub fn write_blocks(&self, region_id: ResourceId) -> bool {
+        self.regions.get(&region_id).map(|r| r.backing.write_blocks()).unwrap_or(false)
     }
 
     pub fn get_size(&self, region_id: ResourceId) -> u64 {

@@ -17,6 +17,9 @@ pub mod surfaces;
 // Protobuf-типы платформенных контрактов — из сгенерированного
 // биндинг-крейта (platform/host/generated, buildgen).
 pub use veldmap_host_bindings::proto::{app, core};
+/// Сообщения контракта tasks — платформа заводит и завершает задачи,
+/// зарегистрированные модулями через ABI (см. abi::add_to_linker).
+pub use veldmap_host_bindings::proto::tasks as tasks_proto;
 
 pub struct CallContextInner {
     pub input: Vec<u8>,
@@ -37,6 +40,7 @@ pub struct HostState {
     pub registry: Arc<crate::registry::ResourceRegistry>,
     pub memory: Arc<crate::memory::MemoryManager>,
     pub graphics: Arc<crate::graphics::GraphicsDevice>,
+    pub tasks: Arc<crate::tasks::TaskRegistry>,
     pub plugin_name: String,
     pub instance_id: u32,
     pub config: std::collections::HashMap<String, serde_json::Value>,

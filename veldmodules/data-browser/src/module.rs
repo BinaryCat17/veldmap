@@ -39,14 +39,23 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         ON_SEARCH_INPUT => handlers::search::on_search_input(state, event),
         ON_DOWNLOAD_PRESSED => handlers::download::on_download_pressed(state, event),
         ON_VIEW_PRESSED => handlers::preview::on_view_pressed(state, event),
+        ON_PREVIEW_PRESSED => handlers::preview::on_preview_pressed(state, event),
         ON_DELETE_PRESSED => handlers::download::on_delete_pressed(state, event),
         other => veldsdk::log::warn!(target: "handlers", "[data-browser] unknown UI method: {}", other),
     }
 }
 
 // -- Sub handlers --
-pub use handlers::download::{on_download_started, on_download_progress, on_downloaded, on_delete_result, on_write_result, on_read_result};
-pub use handlers::preview::on_load_result;
+pub use handlers::download::{on_download_started, on_download_progress, on_downloaded, on_delete_result, on_write_result};
+pub use handlers::preview::{on_load_result, on_preview_result};
+
+/// fs/on_read_result — топик один, потребителей два: превью открывает им
+/// картинку, download дочитывает сидкары. Каждый узнаёт свой ответ по
+/// correlation_id, поэтому развилка тут, а не в схеме.
+pub fn on_read_result(state: &mut State, response: veldsdk::proto::fs::FsReadResult) {
+    if handlers::preview::on_file_opened(state, &response) { return; }
+    handlers::download::on_read_result(state, response);
+}
 pub use handlers::search::on_search_result;
 pub use handlers::browse::on_list_path_result;
 pub use handlers::nav::on_list_result;

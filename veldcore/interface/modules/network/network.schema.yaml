@@ -8,7 +8,12 @@ interface:
       type: network/FsDownloadRequest
     on_http:
       type: network/HttpTaskRequest
+    on_open:
+      type: network/RemoteOpenRequest
   outputs:
+    on_open_result:
+      type: network/RemoteOpenResult
+      replies_to: on_open
     on_fs_download_result:
       type: network/FsDownloadResponse
       replies_to: on_fs_download

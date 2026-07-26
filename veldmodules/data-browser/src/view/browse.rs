@@ -4,7 +4,7 @@ use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, button, Element, Alignment};
 use crate::module::state::State;
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
+use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_PRESSED, ON_PREVIEW_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
 
 pub fn view(state: &State) -> Element<()> {
     let browse_state = &state.browse;
@@ -23,6 +23,7 @@ pub fn view(state: &State) -> Element<()> {
         items_or_message(&items, ItemActions {
             browse: Some(ON_BROWSE),
             view: Some(ON_VIEW_PRESSED),
+            preview: Some(ON_PREVIEW_PRESSED),
             download: Some(ON_DOWNLOAD_PRESSED),
             delete: Some(ON_DELETE_PRESSED),
         }, "No items found")

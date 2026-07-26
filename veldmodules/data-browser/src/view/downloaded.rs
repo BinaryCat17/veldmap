@@ -15,6 +15,8 @@ pub fn view(state: &State) -> Element<()> {
     let actions = ItemActions {
         browse: None,
         view: Some(ON_VIEW_PRESSED),
+        preview: None, // всё уже на диске — смотреть удалённо нечего
+
         download: Some(ON_DOWNLOAD_PRESSED), // Докачка/перезакачка
         delete: Some(ON_DELETE_PRESSED),
     };

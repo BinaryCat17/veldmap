@@ -26,5 +26,6 @@ pub mod ui_methods {
     pub const ON_SEARCH_INPUT: &str = "on_search_input";
     pub const ON_DOWNLOAD_PRESSED: &str = "on_download_pressed";
     pub const ON_VIEW_PRESSED: &str = "on_view_pressed";
+    pub const ON_PREVIEW_PRESSED: &str = "on_preview_pressed";
     pub const ON_DELETE_PRESSED: &str = "on_delete_pressed";
 }

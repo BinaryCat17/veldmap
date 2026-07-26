@@ -29,7 +29,65 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
         tasks: veldsdk::TaskTracker::new(),
         pending_http: veldsdk::Correlator::new(),
         starting: veldsdk::Correlator::new(),
+        previews: veldsdk::Correlator::new(),
     })
+}
+
+/// Открыть продукт как ресурс, не скачивая его.
+///
+/// Подписать запрос к S3 может только этот модуль (ключи у него), поэтому
+/// открывает он — а владение готовым ресурсом сразу передаёт заказчику:
+/// дальше тот читает его как обычный файл и сам решает, когда закрыть.
+pub fn on_preview(state: &mut State, request: crate::proto::data_provider::PreviewRequest) {
+    let owner = veldsdk::abi::event_publisher();
+    if owner.is_empty() {
+        emit_preview_error(request.correlation_id, "on_preview пришёл от хоста: ресурс передать некому");
+        return;
+    }
+
+    let uri = format!("/eodata/{}", request.identifier);
+    let headers = get_s3_headers(state, "GET", &uri);
+    state.previews.insert(request.correlation_id.clone(), owner);
+
+    crate::calls::network::on_open(&veldsdk::proto::network::RemoteOpenRequest {
+        url: format!("https://{}{}", S3_HOST, uri),
+        headers,
+        correlation_id: request.correlation_id,
+    });
+}
+
+/// network открыл удалённый ресурс — передаём владение заказчику.
+pub fn on_open_result(state: &mut State, response: veldsdk::proto::network::RemoteOpenResult) {
+    let Some(owner) = state.previews.take(&response.correlation_id) else { return };
+    let correlation_id = response.correlation_id;
+
+    if !response.error.is_empty() {
+        emit_preview_error(correlation_id, &response.error);
+        return;
+    }
+    let Some(handle) = response.handle else {
+        emit_preview_error(correlation_id, "network вернул пустой handle");
+        return;
+    };
+    if !veldsdk::abi::arena_transfer(handle.id, &owner) {
+        veldsdk::abi::arena_free(handle.id);
+        emit_preview_error(correlation_id, &format!("не удалось передать ресурс сервису '{}'", owner));
+        return;
+    }
+
+    crate::emit::on_preview_result(&crate::proto::data_provider::PreviewResponse {
+        resource: Some(handle),
+        error: String::new(),
+        correlation_id,
+    });
+}
+
+fn emit_preview_error(correlation_id: String, error: &str) {
+    crate::emit::on_preview_result(&crate::proto::data_provider::PreviewResponse {
+        resource: None,
+        error: error.to_string(),
+        correlation_id,
+    });
 }
 
 //  inputs ---------------------------------------------------------------------------------------------------------------------------

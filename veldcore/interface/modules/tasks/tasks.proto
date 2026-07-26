@@ -15,6 +15,25 @@ message TaskCancelRequest {
   string task_id = 1;
 }
 
+// Регистрация задачи самим исполнителем (ABI veld_task_begin, не топик).
+// Нужна тому, кто делает длинную работу внутри одного обработчика и потому
+// не может принять tasks/cancel событием: платформа заводит запись, а
+// исполнитель опрашивает её живость между порциями работы. Лайфцикл-события
+// (task_started/task_finished) платформа эмитит сама, как и для нативных
+// задач через фасад Tasks.
+message TaskBeginRequest {
+  string task_id = 1;  // обычно correlation_id запроса, который исполняется
+  string kind = 2;     // тип операции ("image_decode", ...)
+  string label = 3;    // человекочитаемое описание (путь, url)
+  string owner = 4;    // имя сервиса-инициатора: он и сможет отменить
+}
+
+// Завершение задачи исполнителем (ABI veld_task_end, не топик).
+message TaskEndRequest {
+  string task_id = 1;
+  string error = 2;    // "" — успех
+}
+
 // Делегирование права отмены другому сервису (топик tasks/grant).
 // Менять lease может только владелец задачи — как у ресурсов.
 message TaskGrantRequest {

@@ -11,8 +11,13 @@ interface:
       type: module/ListPathRequest
     on_search:
       type: module/SearchRequest
+    on_preview:
+      type: module/PreviewRequest
 
   outputs:
+    on_preview_result:
+      type: module/PreviewResponse
+      replies_to: on_preview
     on_download_started:
       type: module/DownloadStarted
     on_list_path_result:
@@ -28,8 +33,8 @@ interface:
 
 dependencies:
   network:
-    subs: [on_fs_download_result, on_fs_download_progress, on_http_result]
-    calls: [on_fs_download, on_http]
+    subs: [on_fs_download_result, on_fs_download_progress, on_http_result, on_open_result]
+    calls: [on_fs_download, on_http, on_open]
   # Отмена своих закачек: TaskTracker публикует on_cancel через этот стаб,
   # терминальное событие приходит обратно как on_task_finished{cancelled}.
   tasks:

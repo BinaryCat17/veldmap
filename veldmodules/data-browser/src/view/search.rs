@@ -4,7 +4,7 @@ use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, text_input, button, Element, Length};
 use crate::module::state::State;
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
+use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED, ON_PREVIEW_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
 
 pub fn view(state: &State) -> Element<()> {
     let search_state = &state.search;
@@ -27,6 +27,7 @@ pub fn view(state: &State) -> Element<()> {
         items_or_message(&items, ItemActions {
             browse: None, // Папки не поддерживаются
             view: None,
+            preview: Some(ON_PREVIEW_PRESSED),
             download: Some(ON_DOWNLOAD_PRESSED),
             delete: Some(ON_DELETE_PRESSED),
         }, empty_message)

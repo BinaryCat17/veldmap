@@ -21,7 +21,7 @@ pub fn on_nav_downloaded(state: &mut State, _event: UiEventResponse) {
 /// достаточно забыть его на одной.
 fn go_to(state: &mut State, screen: Screen) {
     if state.current_screen == Screen::Preview && screen != Screen::Preview {
-        state.preview.reset();
+        super::preview::abandon(state);
     }
     state.current_screen = screen;
 }

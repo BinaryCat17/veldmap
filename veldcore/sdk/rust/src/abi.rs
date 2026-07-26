@@ -20,6 +20,10 @@ extern "C" {
 
     fn veld_memory_texture_size(id: u64) -> u64;
 
+    fn veld_task_begin(ptr: u64, len: u64) -> u64;
+    fn veld_task_alive(ptr: u64, len: u64) -> u64;
+    fn veld_task_end(ptr: u64, len: u64);
+
     fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
     fn veld_memory_alloc_cpu(size: u64) -> u64;
     fn veld_memory_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
@@ -120,6 +124,27 @@ pub fn arena_texture_size(id: u64) -> Option<(u32, u32)> {
     let packed = unsafe { veld_memory_texture_size(id) };
     if packed == 0 { return None; }
     Some(((packed >> 32) as u32, packed as u32))
+}
+
+// ── Фоновые задачи ─────────────────────────────────────────────
+// Обёртки для veldsdk::tasks::LocalTask — прикладной код работает с ним,
+// а не с этими функциями напрямую.
+
+#[doc(hidden)]
+pub fn task_begin(req: &crate::proto::tasks::TaskBeginRequest) -> bool {
+    let buf = prost::Message::encode_to_vec(req);
+    unsafe { veld_task_begin(buf.as_ptr() as u64, buf.len() as u64) != 0 }
+}
+
+#[doc(hidden)]
+pub fn task_alive(task_id: &str) -> bool {
+    unsafe { veld_task_alive(task_id.as_ptr() as u64, task_id.len() as u64) != 0 }
+}
+
+#[doc(hidden)]
+pub fn task_end(req: &crate::proto::tasks::TaskEndRequest) {
+    let buf = prost::Message::encode_to_vec(req);
+    unsafe { veld_task_end(buf.as_ptr() as u64, buf.len() as u64) }
 }
 
 // ── Memory management ──────────────────────────────────────────

@@ -1,6 +1,8 @@
 name: image-loader
 version: 0.1.0
 
+# Зависимостей нет намеренно: загрузчик получает готовый ресурс и не знает,
+# файл за ним или удалённый URL. Кто ресурс открыл — тот его и закроет.
 interface:
   inputs:
     on_load:
@@ -9,10 +11,3 @@ interface:
     on_load_result:
       type: module/LoadImageResult
       replies_to: on_load
-
-dependencies:
-  # У wasm нет доступа к диску: байты файла приходят от платформенного fs
-  # (ответ — ResourceHandle на memory-регион, owner = запросчик).
-  fs:
-    subs: [on_read_result]
-    calls: [on_read]

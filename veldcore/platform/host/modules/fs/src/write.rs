@@ -6,39 +6,42 @@ use veldmap_host_util::Access;
 use veldmap_host_util::bindings::fs as bus;
 use veldmap_host_util::bindings::proto::fs::{FsWriteRequest, FsWriteResult};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
+use veldmap_host_util::blocking;
 use std::fs;
 
 pub fn on_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
     let correlation_id = req.correlation_id.clone();
-    let result = if !is_path_safe(&req.path) {
-        FsWriteResult { error: "Access denied".into(), correlation_id }
-    } else {
-        let handle = match req.handle {
-            Some(h) => h,
-            None => {
-                bus::emit::on_write_result(&*state.ctx.dispatcher, &FsWriteResult { error: "Missing handle".into(), correlation_id });
-                return;
-            }
-        };
+    let fail = |error: &str| FsWriteResult { error: error.into(), correlation_id: correlation_id.clone() };
 
-        let data = if handle.id == 0 {
-            FsWriteResult { error: "Handle ID 0 not supported for fs_write yet".into(), correlation_id }
-        } else if !state.ctx.registry.check_access(handle.id, requestor_id, Access::Read) {
-            FsWriteResult { error: "Access denied to resource".into(), correlation_id }
-        } else {
-            match state.ctx.memory.read(handle.id, 0, handle.size) {
-                Ok(data) => {
-                    let path = resolve_path(&state.ctx, &req.path);
-                    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
-                    match fs::write(&path, &data) {
-                        Ok(()) => FsWriteResult { error: String::new(), correlation_id },
-                        Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
-                    }
-                }
-                Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
-            }
-        };
-        data
+    if !is_path_safe(&req.path) {
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied"));
+        return;
+    }
+    let Some(handle) = req.handle else {
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Missing handle"));
+        return;
     };
-    bus::emit::on_write_result(&*state.ctx.dispatcher, &result);
+    if handle.id == 0 {
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Handle ID 0 not supported for fs_write yet"));
+        return;
+    }
+    if !state.ctx.registry.check_access(handle.id, requestor_id, Access::Read) {
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied to resource"));
+        return;
+    }
+
+    blocking(&state.ctx, move |ctx| {
+        let result = match ctx.memory.read(handle.id, 0, handle.size) {
+            Ok(data) => {
+                let path = resolve_path(&ctx, &req.path);
+                if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+                match fs::write(&path, &data) {
+                    Ok(()) => FsWriteResult { error: String::new(), correlation_id },
+                    Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
+                }
+            }
+            Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
+        };
+        bus::emit::on_write_result(&*ctx.dispatcher, &result);
+    });
 }

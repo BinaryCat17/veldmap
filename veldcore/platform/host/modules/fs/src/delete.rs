@@ -6,15 +6,21 @@ use super::State;
 use veldmap_host_util::bindings::fs as bus;
 use veldmap_host_util::bindings::proto::fs::{FsDeleteRequest, FsDeleteResult};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
+use veldmap_host_util::blocking;
 use std::fs;
 
 pub fn on_delete(state: &State, req: FsDeleteRequest, _requestor_id: u32) {
     let correlation_id = req.correlation_id.clone();
-    let result = if !is_path_safe(&req.path) {
-        FsDeleteResult { error: "Access denied".into(), correlation_id }
-    } else {
-        let path = resolve_path(&state.ctx, &req.path);
-        match fs::remove_file(&path) {
+    if !is_path_safe(&req.path) {
+        bus::emit::on_delete_result(&*state.ctx.dispatcher, &FsDeleteResult {
+            error: "Access denied".into(), correlation_id,
+        });
+        return;
+    }
+
+    blocking(&state.ctx, move |ctx| {
+        let path = resolve_path(&ctx, &req.path);
+        let result = match fs::remove_file(&path) {
             Ok(()) => FsDeleteResult { error: String::new(), correlation_id },
             // Удалять то, чего нет — не ошибка: цель вызова достигнута.
             // Нужно для строк-намерений в data-browser (.origin без данных
@@ -25,7 +31,7 @@ pub fn on_delete(state: &State, req: FsDeleteRequest, _requestor_id: u32) {
                 FsDeleteResult { error: String::new(), correlation_id }
             }
             Err(e) => FsDeleteResult { error: e.to_string(), correlation_id },
-        }
-    };
-    bus::emit::on_delete_result(&*state.ctx.dispatcher, &result);
+        };
+        bus::emit::on_delete_result(&*ctx.dispatcher, &result);
+    });
 }

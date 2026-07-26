@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package veldmap.data_provider;
 
+import "core.proto";
+
 // --- Search ---
 
 message SearchFilter {
@@ -80,4 +82,21 @@ message Downloaded {
 // Cancel download request
 message CancelDownloadRequest {
   string task_id = 1;
+}
+
+// --- Preview ---
+// Открыть удалённый продукт как ресурс, не скачивая его. Подписывать запрос
+// умеет только этот модуль (у него ключи), поэтому открывает он, а владение
+// готовым ресурсом сразу передаёт заказчику: дальше тот читает его как
+// обычный файл — например, отдаёт image-loader на превью.
+
+message PreviewRequest {
+  string identifier = 1;  // s3_key продукта
+  string correlation_id = 2;
+}
+
+message PreviewResponse {
+  veldmap.core.ResourceHandle resource = 1;  // валиден, если error пуст
+  string error = 2;
+  string correlation_id = 3;
 }

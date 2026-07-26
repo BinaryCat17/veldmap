@@ -3,7 +3,65 @@
 //! поэтому трекер — это Correlator<()> плюс отмена по протоколу tasks/*.
 
 use crate::correlator::Correlator;
-use crate::proto::tasks::TaskCancelRequest;
+use crate::proto::tasks::{TaskBeginRequest, TaskCancelRequest, TaskEndRequest};
+
+/// Длинная работа, выполняемая модулем внутри одного обработчика.
+///
+/// Пока обработчик не вернул управление, очередь модуля не разгребается —
+/// принять `tasks/task_finished{cancelled}` событием он не может. Поэтому
+/// задача заводится в реестре платформы (те же права и те же lifecycle-события,
+/// что у нативных), а исполнитель опрашивает `cancelled()` между порциями
+/// работы: чтением чанка, декодированием полосы.
+///
+/// Отменяет её владелец — тот, кто прислал запрос (`owner`), обычным
+/// `tasks/on_cancel`. Завершение гарантируется Drop'ом: забыть терминальное
+/// событие нельзя, даже если обработчик вышел по ошибке.
+pub struct LocalTask {
+    id: String,
+    finished: bool,
+}
+
+impl LocalTask {
+    /// `task_id` — обычно correlation_id исполняемого запроса: тогда владелец
+    /// отменяет задачу тем же идентификатором, который уже держит у себя.
+    /// `None` — id занят живой задачей или владелец неизвестен платформе.
+    pub fn begin(task_id: &str, kind: &str, label: &str, owner: &str) -> Option<Self> {
+        let ok = crate::abi::task_begin(&TaskBeginRequest {
+            task_id: task_id.to_string(),
+            kind: kind.to_string(),
+            label: label.to_string(),
+            owner: owner.to_string(),
+        });
+        ok.then(|| Self { id: task_id.to_string(), finished: false })
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+
+    /// Задачу сняли отменой — работу пора прекращать.
+    pub fn cancelled(&self) -> bool {
+        !crate::abi::task_alive(&self.id)
+    }
+
+    /// Терминальное событие с результатом. Без вызова его пошлёт Drop.
+    pub fn finish(mut self, error: &str) {
+        self.end(error);
+    }
+
+    fn end(&mut self, error: &str) {
+        if self.finished { return; }
+        self.finished = true;
+        crate::abi::task_end(&TaskEndRequest {
+            task_id: self.id.clone(),
+            error: error.to_string(),
+        });
+    }
+}
+
+impl Drop for LocalTask {
+    fn drop(&mut self) {
+        self.end("");
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct TaskTracker {

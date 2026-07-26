@@ -19,13 +19,18 @@ dependencies:
   ui-service:
     subs: [on_ui_event]
   data-provider:
-    subs: [on_download_started, on_download_progress, on_downloaded, on_search_result, on_list_path_result]
-    calls: [on_list_path, on_download, on_cancel_download, on_search]
+    subs: [on_download_started, on_download_progress, on_downloaded, on_search_result, on_list_path_result, on_preview_result]
+    calls: [on_list_path, on_download, on_cancel_download, on_search, on_preview]
   fs:
     subs: [on_list_result, on_delete_result, on_write_result, on_read_result]
     calls: [on_list, on_delete, on_write, on_read]
-  # Превью картинок: image-loader грузит файл в GPU-текстуру и передаёт нам
-  # владение; ответ различим по correlation_id (broadcast-конвенция шины).
+  # Превью картинок: файл открываем сами (fs выше) и отдаём ресурс загрузчику,
+  # он возвращает GPU-текстуру и передаёт нам владение; ответ различим по
+  # correlation_id (broadcast-конвенция шины).
   image-loader:
     subs: [on_load_result]
     calls: [on_load]
+  # Отмена декодирования брошенного превью: задачу заводит image-loader на
+  # наше имя, поэтому отменяем её мы (tasks проверяет права по lease).
+  tasks:
+    calls: [on_cancel]

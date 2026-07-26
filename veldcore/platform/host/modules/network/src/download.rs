@@ -61,12 +61,10 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
         // узнаём его размер ДО запроса, чтобы попросить сервер прислать хвост.
         let resume_offset = tokio::fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0);
 
-        let client = reqwest::Client::new();
-        let mut builder = client.get(&req.url);
-        for (key, value) in req.headers { builder = builder.header(key, value); }
-        if resume_offset > 0 {
-            builder = builder.header("Range", format!("bytes={}-", resume_offset));
-        }
+        // Докачка — это тот же Range-запрос, что и чтение окна, только хвост
+        // тянется одним соединением потоком, а не блоками (см. http::get).
+        let range = (resume_offset > 0).then_some((resume_offset, 0));
+        let builder = super::http::get(&req.url, &req.headers, range);
 
         let res = match builder.send().await {
             Ok(r) => r,

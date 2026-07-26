@@ -23,6 +23,9 @@ pub struct State {
     /// значит и отменить её нельзя — tasks/cancel вернёт NotFound молча.
     /// Поэтому DownloadStarted наружу уходит не отсюда, а из on_task_started.
     pub starting: veldsdk::Correlator<StartingDownload>,
+    /// Открываемые удалённые ресурсы: correlation_id → имя заказчика, которому
+    /// уйдёт владение (см. cdse::on_preview).
+    pub previews: veldsdk::Correlator<String>,
 }
 
 /// Закачка между «попросили network» и «платформа зарегистрировала задачу».
@@ -50,11 +53,13 @@ pub use cdse::{
     on_cancel_download,
     on_list_path,
     on_search,
+    on_preview,
 
     // subs
     on_fs_download_result,
     on_fs_download_progress,
     on_http_result,
+    on_open_result,
     on_task_started,
     on_task_finished,
 };

@@ -1,9 +1,44 @@
 //! Разовый HTTP-запрос (топик network/http): ответ — событием http_result,
 //! жизненный цикл и отмена — через фасад Tasks (см. module.rs).
+//!
+//! Здесь же общий транспорт: клиент, заголовки и Range-запрос — одна
+//! реализация на всех потребителей (разовый запрос, потоковая докачка
+//! в download.rs, оконное чтение удалённого ресурса в range.rs).
 
 use super::State;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{HttpTaskRequest, HttpTaskResponse};
+use std::collections::HashMap;
+
+/// Общий клиент процесса: держит пул соединений, поэтому оконное чтение не
+/// переустанавливает TLS-сессию на каждый Range-запрос.
+pub fn client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        // Первым клиента может запросить и оконное чтение — а оно идёт с
+        // blocking-пула, где контекст рантайма надо назвать явно, иначе
+        // клиенту не к чему привязать таймеры и резолвер.
+        let _guard = tokio::runtime::Handle::current().enter();
+        reqwest::Client::new()
+    }).clone()
+}
+
+/// GET с заголовками вызывающего и (необязательно) диапазоном байт.
+/// `range` — полуинтервал [from, to); to == 0 означает «до конца файла»,
+/// то есть ровно то, что нужно докачке хвоста.
+pub fn get(url: &str, headers: &HashMap<String, String>, range: Option<(u64, u64)>) -> reqwest::RequestBuilder {
+    let mut builder = client().get(url);
+    for (key, value) in headers {
+        builder = builder.header(key, value);
+    }
+    if let Some((from, to)) = range {
+        builder = builder.header("Range", match to {
+            0 => format!("bytes={}-", from),
+            to => format!("bytes={}-{}", from, to.saturating_sub(1)),
+        });
+    }
+    builder
+}
 
 pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
     let ctx = state.ctx.clone();
@@ -13,7 +48,6 @@ pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
 
     let spawned = state.tasks.spawn(&req.correlation_id, requestor_id, "http", &label, |correlation_id| async move {
         log::info!(target: "host", "Executing HTTP request {}...", correlation_id);
-        let client = reqwest::Client::new();
         let method = match req.method.to_uppercase().as_str() {
             "POST" => reqwest::Method::POST,
             "PUT" => reqwest::Method::PUT,
@@ -21,7 +55,7 @@ pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
             _ => reqwest::Method::GET,
         };
 
-        let mut builder = client.request(method, &req.url);
+        let mut builder = client().request(method, &req.url);
         for (k, v) in req.headers { builder = builder.header(k, v); }
         if !req.body.is_empty() { builder = builder.body(req.body); }
 
