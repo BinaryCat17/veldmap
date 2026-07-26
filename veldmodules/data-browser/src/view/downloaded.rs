@@ -3,7 +3,7 @@
 use veld_ui_service_wrap::column;
 use crate::proto::ui_service::{text, Element, Length};
 use crate::module::state::State;
-use crate::module::components::browser_list::{Row, RowStatus, downloaded_rows, render_list, list_screen, ItemActions};
+use crate::module::components::{Row, RowStatus, downloaded_rows, render_list, list_screen, ItemActions};
 use crate::module::handlers::ui_methods::{ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
 use crate::module::styles;
 

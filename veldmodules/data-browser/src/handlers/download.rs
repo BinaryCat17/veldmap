@@ -30,7 +30,7 @@ pub fn on_download_pressed(
 
     // Origin — сразу, до ответа data-provider: даже если приложение упадёт
     // на первом байте, `.origin` на диске уже будет знать, откуда он взялся,
-    // и строка-намерение не пропадёт из списка (см. browser_list::row).
+    // и строка-намерение не пропадёт из списка (см. components::row).
     // total_bytes — если он уже известен из прошлой попытки, сразу пишем и
     // его: не нужно ждать первого progress-события, чтобы узнать известное.
     let known_total = state.downloaded.origins.get(&filename).and_then(|o| o.total_bytes);
@@ -116,19 +116,31 @@ pub fn on_view_pressed(
 }
 
 /// Data-provider сообщил что загрузка началась. Строка в списке отсюда НЕ
-/// добавляется: она выводится из реестра закачек (см. browser_list::row),
+/// добавляется: она выводится из реестра закачек (см. components::row),
 /// поэтому регистрации задачи достаточно.
 pub fn on_download_started(
     state: &mut State,
     event: DownloadStarted,
 ) {
     let filename = filename_from_key(&event.identifier);
+
+    // Засеваем тем, что уже известно, а не нулями: до первого progress-события
+    // строка рисуется из этой записи, и «0 B» на возобновлении недокачанного
+    // файла было бы враньём — байты на диске уже есть, host продолжит именно
+    // с них (resume_offset по `.part`, см. network::download.rs). Берём размер
+    // ТОЛЬКО у недокачанной записи: у полной `.part` нет, re-download пойдёт
+    // с нуля, и её размер выдал бы «361 MB / 361 MB» с падением на 0.
+    let done = state.downloaded.entry_for(&filename)
+        .filter(|e| e.is_partial)
+        .map(|e| e.size)
+        .unwrap_or(0);
+
     state.downloaded.downloads.insert(event.task_id, Download {
         s3_key: event.identifier,
         filename: filename.clone(),
-        progress: 0.0,
-        done: 0,
-        total: 0,
+        done,
+        // Из сидкара, если Content-Length видели в прошлой попытке.
+        total: state.downloaded.total_bytes(&filename),
     });
     state.global.status_message = format!("Starting download: {}", filename);
 }
@@ -137,8 +149,8 @@ pub fn on_download_progress(
     state: &mut State,
     event: DownloadProgress,
 ) {
+    // event.progress игнорируем — доля выводится из байт при отрисовке.
     let Some(dl) = state.downloaded.downloads.get_mut(&event.task_id) else { return; };
-    dl.progress = event.progress.clamp(0.0, 1.0);
     dl.done = event.downloaded_bytes;
     dl.total = event.total_bytes;
 
@@ -191,7 +203,7 @@ pub fn on_downloaded(
 
 /// Пользователь нажал "удалить" — на любом локальном файле (полном,
 /// недокачанном или заявленном одним лишь сидкаром), на любом из экранов:
-/// все они используют один и тот же browser_list.
+/// все они используют один и тот же components::file_list.
 pub fn on_delete_pressed(
     state: &mut State,
     event: UiEventResponse,

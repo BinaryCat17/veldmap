@@ -1,4 +1,4 @@
-//! components/browser_list/row.rs — вывод состояния строки списка.
+//! components/row.rs — вывод состояния строки списка.
 //!
 //! ЕДИНСТВЕННОЕ место, где решается, в каком состоянии находится файл. Три
 //! экрана (Browse/Search/Downloaded) раньше собирали это независимо, каждый
@@ -14,7 +14,7 @@ pub enum RowStatus {
     Folder,
     /// Файла нет ни на диске, ни в намерениях — только remote.
     Remote,
-    Downloading { done: u64, total: u64, progress: f32 },
+    Downloading { done: u64, total: u64 },
     /// Начато, но не доведено: `.part` на диске либо сидкар без данных
     /// (закачка сорвалась до первых байт). `done: 0` — второй случай.
     Paused { done: u64, total: u64 },
@@ -49,7 +49,6 @@ impl Row {
             RowStatus::Downloading {
                 done: dl.done,
                 total: if dl.total > 0 { dl.total } else { known_total },
-                progress: dl.progress,
             }
         } else if let Some(e) = entry {
             if e.is_partial {

@@ -3,7 +3,7 @@
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, text_input, button, Element, Length};
 use crate::module::state::State;
-use crate::module::components::browser_list::{Row, items_or_message, list_screen, ItemActions};
+use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
 use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
 
 pub fn view(state: &State) -> Element<()> {

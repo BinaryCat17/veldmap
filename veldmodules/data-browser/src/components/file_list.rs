@@ -1,13 +1,13 @@
-//! components/browser_list/view.rs — рендеринг списка файлов.
+//! components/file_list.rs — рендеринг строки файла и списка из них.
 //!
 //! Ничего не решает про состояние файла: получает готовый `RowStatus` (см.
-//! `row.rs`) и только рисует. Поэтому здесь нет ни доступа к задачам, ни к
-//! снимку диска — раньше состояние реконструировалось прямо тут вложенными
-//! if'ами по пяти переменным.
+//! `components::row`) и только рисует. Поэтому здесь нет ни доступа к
+//! закачкам, ни к снимку диска — раньше состояние реконструировалось прямо
+//! тут вложенными if'ами по пяти переменным.
 
 use veld_ui_service_wrap::{column, row};
-use crate::proto::ui_service::{text, button, container, scrollable, Element, Length, Alignment, Padding};
-use crate::module::components::browser_list::{Row, RowStatus};
+use crate::proto::ui_service::{text, button, container, Element, Length, Alignment};
+use crate::module::components::{Row, RowStatus};
 use crate::module::styles;
 
 /// Какие входные методы модуля вызывают кнопки элемента списка.
@@ -39,12 +39,19 @@ fn format_bytes(bytes: u64) -> String {
 
 /// "X / Y (Z%)", если полный размер известен, иначе только скачанное —
 /// сервер мог не прислать Content-Length (см. network::download.rs).
-fn amount_text(done: u64, total: u64, progress: Option<f32>) -> String {
-    match (total, progress) {
-        (0, _) if done == 0 => "Downloading...".to_string(),
-        (0, _) => format_bytes(done),
-        (t, Some(p)) => format!("{} / {} ({:.0}%)", format_bytes(done), format_bytes(t), p * 100.0),
-        (t, None) => format!("{} / {}", format_bytes(done), format_bytes(t)),
+/// Процент считается здесь из байт, а не берётся готовым: два числа об одном
+/// и том же неизбежно расходятся (см. `Download`).
+fn amount_text(done: u64, total: u64, with_percent: bool) -> String {
+    if total == 0 {
+        // Ни сколько всего, ни сколько сделано — закачка зарегистрирована,
+        // но первых байт ещё нет. Честное "неизвестно", а не ноль.
+        return if done == 0 { "Starting...".to_string() } else { format_bytes(done) };
+    }
+    let head = format!("{} / {}", format_bytes(done), format_bytes(total));
+    if with_percent {
+        format!("{} ({:.0}%)", head, done as f64 / total as f64 * 100.0)
+    } else {
+        head
     }
 }
 
@@ -130,9 +137,9 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // Пауза, не стоп: повторное нажатие на скачиваемый s3_key отменяет
         // текущий поток, но .part остаётся на диске и следующее "скачать"
         // продолжит с оборванного байта — по факту это пауза.
-        RowStatus::Downloading { done, total, progress } => status_row(
+        RowStatus::Downloading { done, total } => status_row(
             icon("\u{f254}"),
-            text(amount_text(*done, *total, Some(*progress))).size(13.0).into(),
+            text(amount_text(*done, *total, true)).size(13.0).into(),
             download_button("\u{f04c}", styles::COLOR_WARNING).into_iter()
                 .chain(delete_button()).collect(),
         ),
@@ -143,7 +150,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // "Incomplete" — цвет и форма уже достаточно говорят о статусе.
         RowStatus::Paused { done, total } => status_row(
             text("\u{f071}").font_family("Icons").color(styles::COLOR_WARNING).into(),
-            text(amount_text(*done, *total, None)).size(13.0).into(),
+            text(amount_text(*done, *total, false)).size(13.0).into(),
             download_button("\u{f04b}", styles::COLOR_PRIMARY).into_iter()
                 .chain(delete_button()).collect(),
         ),
@@ -189,34 +196,4 @@ pub fn items_or_message(items: &[Row], actions: ItemActions, empty_message: &str
     } else {
         render_list(items, actions)
     }
-}
-
-/// Обёртка экрана со списком файлов: одинаковые spacing/padding/width/height
-/// и скролл на всех трёх экранах — отличаются только `header_rows`
-/// (заголовок, плюс что у каждого экрана есть своего: кнопка "Up" в Browse,
-/// строка поиска в Search) и тело.
-///
-/// Колонку заголовка собирает сама (а не принимает готовый `Element`) —
-/// каждый вложенный `column![]` без явного `.width(Fill)` схлопывается по
-/// ширине до содержимого, а это тот же самый класс бага что и Length::Shrink
-/// по умолчанию у самих виджетов (кнопок/текста/иконок) — там он осознанный
-/// и его трогать не надо, но конкретно на экранном контейнере он неуместен.
-pub fn list_screen(header_rows: Vec<Element<()>>, body: Element<()>) -> Element<()> {
-    // Правый паддинг у тела, а не у всей колонки — резервирует место под
-    // полосу прокрутки: у `scrollable` в этом фреймворке нет своего API для
-    // отступа скроллбара (в отличие от iced, где это Properties::margin), он
-    // рисуется поверх правого края content-зоны — без запаса задевает
-    // последнюю кнопку в каждой строке.
-    let padded_body = container(body)
-        .width(Length::Fill)
-        .padding(Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 });
-    column![
-        column(header_rows).spacing(15.0).width(Length::Fill),
-        scrollable(padded_body).width(Length::Fill).height(Length::Fill)
-    ]
-    .spacing(15.0)
-    .padding(Padding::new(10.0))
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
 }
