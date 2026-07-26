@@ -95,6 +95,9 @@ pub enum DrawCmd {
         bounds: iced_core::Rectangle,
         texture_id: u64,
         index_count: u32,
+        /// Текстура обновляется источником непрерывно: такая команда
+        /// отмечает кадр live, см. GpuRenderer::has_live_images.
+        live: bool,
     },
 }
 
@@ -102,6 +105,10 @@ pub struct GpuRenderer {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u16>,
     pub draw_commands: Vec<DrawCmd>,
+    /// В текущем кадре нарисован хотя бы один live-WgpuImage: окно надо
+    /// перерисовывать каждый Frame, минуя кэш команд (содержимое внешней
+    /// текстуры меняется без изменения DrawCmd).
+    has_live_images: bool,
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
     /// Region id текстуры атласа (memory ABI).
@@ -155,6 +162,7 @@ impl GpuRenderer {
             vertices: Vec::with_capacity(8192),
             indices: Vec::with_capacity(12288),
             draw_commands: Vec::new(),
+            has_live_images: false,
             font_system,
             swash_cache: SwashCache::new(),
             atlas_texture_id: None,
@@ -202,9 +210,15 @@ impl GpuRenderer {
         self.vertices.clear();
         self.indices.clear();
         self.draw_commands.clear();
+        self.has_live_images = false;
         self.scissor_stack.clear();
         self.transformation_stack.clear();
         self.transformation_stack.push(Transformation::IDENTITY);
+    }
+
+    /// Был ли в только что нарисованном кадре live-WgpuImage.
+    pub fn has_live_images(&self) -> bool {
+        self.has_live_images
     }
 
     pub fn update_params(&mut self, width: u32, height: u32, sf: f32) {
@@ -308,7 +322,7 @@ impl GpuRenderer {
         self.indices.push(base + 3);
     }
 
-    pub fn draw_wgpu_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64) {
+    pub fn draw_wgpu_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64, live: bool) {
         // Mode 2.0 = External Image mode in shaders.wgsl
         // UV [0,0, 1,1] = Full texture
         self.push_quad_data(
@@ -317,12 +331,16 @@ impl GpuRenderer {
             [0.0, 0.0, 1.0, 1.0],
             0.0, 2.0, 0.0, [0.0, 0.0, 0.0, 0.0]
         );
+        if live {
+            self.has_live_images = true;
+        }
 
         self.draw_commands
             .push(DrawCmd::ExternalImage {
                 bounds,
                 texture_id,
-                index_count: 6
+                index_count: 6,
+                live,
             });
     }}
 
@@ -364,6 +382,7 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
         self.vertices.clear();
         self.indices.clear();
         self.draw_commands.clear();
+        self.has_live_images = false;
         self.transformation_stack.clear();
         self.transformation_stack.push(Transformation::IDENTITY);
     }

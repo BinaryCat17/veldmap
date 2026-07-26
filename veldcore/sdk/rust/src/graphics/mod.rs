@@ -18,7 +18,7 @@ pub use proto::{
     PrimitiveTopology, BlendFactor, BlendOperation, FrontFace, CullMode,
     BufferBindingType, SamplerBindingType, TextureSampleType, TextureViewDimension,
     VertexAttribute, VertexBufferLayout, BlendComponent, BlendState,
-    BindGroupLayoutEntry, BindGroupEntry, CreateRenderPipeline,
+    BindGroupLayoutEntry, BindGroupEntry, CreateRenderPipeline, LoadOp,
 };
 
 use prost::Message;

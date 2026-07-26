@@ -167,6 +167,10 @@ message WgpuImage {
     veldmap.core.ResourceHandle handle = 1;
     Length width = 2;
     Length height = 3;
+    // Текстура обновляется источником непрерывно (видео, камера, стрим):
+    // окно с таким виджетом перерисовывается каждый кадр, минуя кэш команд.
+    // Статичным картинкам поле не нужно — их отрисовки хватает по set_view.
+    bool live = 4;
 }
 
 message Space {

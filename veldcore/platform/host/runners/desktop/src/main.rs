@@ -228,19 +228,30 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(veldmap_host_core::graphics::Resource::GpuObj(
                         veldmap_host_core::graphics::GpuObject::TextureView(target_view)
                     )) = target {
+                        // Размеры целевой текстуры (не окна) — viewport/scissor
+                        // клампятся по таргету. У каждого view размеры записаны
+                        // при создании; None — view чужой или уже освобождён.
+                        let Some((target_w, target_h)) = graphics.get_texture_view_size(op.target_view_id, op.instance_id) else {
+                            log::error!(target: "veldmap::host::render", "Render op targets view {} with unknown size, skipped", op.target_view_id);
+                            continue;
+                        };
+                        let load = match op.load_op {
+                            veldmap_host_core::graphics::proto::LoadOp::Clear => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            veldmap_host_core::graphics::proto::LoadOp::Load => wgpu::LoadOp::Load,
+                        };
                         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("Module Render Pass"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                 view: &target_view,
                                 resolve_target: None,
-                                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
                                 depth_slice: None,
                             })],
                             depth_stencil_attachment: None,
                             ..Default::default()
                         });
                         let _ = veldmap_host_core::graphics::execute_render_commands(
-                            &mut rp, &op.command_buffer, &graphics, hw.size.0, hw.size.1, op.instance_id,
+                            &mut rp, &op.command_buffer, &graphics, target_w, target_h, op.instance_id,
                         );
                     } else {
                         log::warn!(target: "veldmap::host::render", "Render op targets unknown view {}", op.target_view_id);

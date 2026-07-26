@@ -45,7 +45,7 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
 }
 
 // -- Sub handlers --
-pub use handlers::download::{on_download_started, on_download_progress, on_downloaded, on_delete_result, on_write_result, on_read_result};
+pub use handlers::download::{on_download_started, on_download_progress, on_downloaded, on_delete_result, on_write_result, on_read_result, on_load_result};
 pub use handlers::search::on_search_result;
 pub use handlers::browse::on_list_path_result;
 pub use handlers::nav::on_list_result;

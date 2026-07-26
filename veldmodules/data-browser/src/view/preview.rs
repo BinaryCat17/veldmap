@@ -19,6 +19,17 @@ pub fn view(state: &State) -> Element<()> {
         .into();
     }
 
+    if let Some(error) = &preview.error {
+        return column![
+            text(format!("{}", error)).size(18.0),
+            button(text("Back")).on_press(ON_NAV_DOWNLOADED)
+        ]
+        .spacing(20.0)
+        .padding(Padding::new(20.0))
+        .align_items(Alignment::Center)
+        .into();
+    }
+
     if let Some(handle) = &preview.current_image {
         column![
             row![

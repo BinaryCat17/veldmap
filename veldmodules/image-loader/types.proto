@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package veldmap.image_loader;
+
+import "core.proto";
+
+// --- Image Loader ---
+// Файл с диска → GPU-текстура (RGBA8). Чтение идёт через платформенный
+// fs-сервис (у wasm нет доступа к диску), декод — крейтом image. Владение
+// готовой текстурой передаётся заказчику вместе с ответом: дальше он сам
+// грантит чтение (например, ui-service для виджета image) и освобождает её.
+
+message LoadImageRequest {
+  string path = 1;           // путь в семантике fs (относительно runtime/)
+  string correlation_id = 2;
+}
+
+message LoadImageResult {
+  veldmap.core.ResourceHandle handle = 1; // текстура RGBA8; валиден, если error пуст
+  uint32 width = 2;
+  uint32 height = 3;
+  string error = 4;          // "" = успех
+  string correlation_id = 5;
+}

@@ -239,6 +239,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 handle,
                 width: convert_length(&img.width),
                 height: convert_length(&img.height),
+                live: img.live,
             }.into()
         }
         _ => column([]).into(),
@@ -372,6 +373,7 @@ struct WgpuImageWidget {
     handle: veldsdk::proto::core::ResourceHandle,
     width: Length,
     height: Length,
+    live: bool,
 }
 
 impl<'a, Message, Theme> iced_widget::core::Widget<Message, Theme, GpuRenderer> for WgpuImageWidget {
@@ -398,7 +400,7 @@ impl<'a, Message, Theme> iced_widget::core::Widget<Message, Theme, GpuRenderer> 
         _cursor: iced_widget::core::mouse::Cursor,
         _viewport: &iced_widget::core::Rectangle,
     ) {
-        renderer.draw_wgpu_image(layout.bounds(), self.handle.id);
+        renderer.draw_wgpu_image(layout.bounds(), self.handle.id, self.live);
     }
 }
 

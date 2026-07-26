@@ -24,3 +24,8 @@ dependencies:
   fs:
     subs: [on_list_result, on_delete_result, on_write_result, on_read_result]
     calls: [on_list, on_delete, on_write, on_read]
+  # Превью картинок: image-loader грузит файл в GPU-текстуру и передаёт нам
+  # владение; ответ различим по correlation_id (broadcast-конвенция шины).
+  image-loader:
+    subs: [on_load_result]
+    calls: [on_load]

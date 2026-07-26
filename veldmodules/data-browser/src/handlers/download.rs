@@ -109,10 +109,58 @@ pub fn on_view_pressed(
     if value.is_empty() { return; }
 
     state.current_screen = crate::module::state::Screen::Preview;
-    state.preview.current_path = value;
+
+    // Прежняя текстура превью больше не показывается — освобождаем.
+    state.preview.clear();
+    state.preview.current_path = value.clone();
+
+    // Формат решаем по расширению: это UI-решение (что показать на экране
+    // превью). Сам декод image-loader тоже валидирует — по содержимому.
+    if !is_supported_image(&value) {
+        state.preview.is_loading = false;
+        state.preview.error = Some(format!("Неподдерживаемый формат изображения: {}", value));
+        return;
+    }
+
+    state.preview.is_loading = true;
+    let correlation_id = state.preview.pending.begin(());
+    crate::calls::image_loader::on_load(&crate::proto::image_loader::LoadImageRequest {
+        path: value,
+        correlation_id,
+    });
+}
+
+/// Расширения, которые умеет image-loader (features крейта image).
+fn is_supported_image(path: &str) -> bool {
+    let Some(ext) = path.rsplit('.').next() else { return false };
+    matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
+}
+
+/// Ответ image-loader: текстура готова (и уже наша) или ошибка.
+/// Broadcast — сверяем correlation_id.
+pub fn on_load_result(
+    state: &mut State,
+    result: crate::proto::image_loader::LoadImageResult,
+) {
+    if state.preview.pending.take(&result.correlation_id).is_none() { return; }
     state.preview.is_loading = false;
-    // TODO: wasm-модуль image ещё не реализован — загрузка превью появится вместе с ним.
-    state.global.error_message = Some("Image preview: модуль image ещё не реализован".to_string());
+
+    if !result.error.is_empty() {
+        state.preview.error = Some(result.error);
+        return;
+    }
+    let Some(handle) = result.handle else {
+        state.preview.error = Some("image-loader вернул пустой handle".to_string());
+        return;
+    };
+
+    // ui-service строит view/bind group этой текстуры по read-гранту —
+    // тот же ритуал, что grant_write оконной поверхности (surface.rs).
+    if !veldsdk::abi::arena_grant_read(handle.id, "ui-service") {
+        state.preview.error = Some("Не удалось выдать ui-service read-грант на текстуру".to_string());
+        return;
+    }
+    state.preview.current_image = Some(handle.id);
 }
 
 /// Data-provider сообщил что загрузка началась. Строка в списке отсюда НЕ

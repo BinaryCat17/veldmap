@@ -37,7 +37,9 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
 fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i32) {
     // plugins и renderer — разные поля State, заимствуются одновременно.
     let Some(plugin) = state.plugins.get(plugin_id) else { return };
-    let needs_render = *plugin.needs_redrawing.borrow() || *plugin.is_layout_dirty.borrow();
+    let needs_render = *plugin.needs_redrawing.borrow()
+        || *plugin.is_layout_dirty.borrow()
+        || *plugin.has_live_images.borrow();
     let surface_handle = *plugin.surface_handle.borrow();
 
     if let (Some(handle), true) = (surface_handle, needs_render) {
@@ -258,6 +260,12 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Drawing UI");
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
 
+    // Live-флаг этого кадра: пробивает кэш команд ниже и запоминается
+    // в состоянии плагина — render_plugin_if_needed будет рендерить окно
+    // каждый Frame, пока в layout есть live-WgpuImage.
+    let has_live_images = renderer.has_live_images();
+    *plugin.has_live_images.borrow_mut() = has_live_images;
+
     let mut last_cmds = plugin.last_draw_commands.borrow_mut();
     let mut last_verts = plugin.last_vertices.borrow_mut();
     let mut is_layout_dirty = plugin.is_layout_dirty.borrow_mut();
@@ -265,9 +273,9 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     let commands_changed = *last_cmds != renderer.draw_commands ||
                            *last_verts != renderer.vertices ||
                            renderer.is_atlas_dirty();
-    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] commands_changed={}, is_layout_dirty={}", commands_changed, *is_layout_dirty);
+    veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] commands_changed={}, is_layout_dirty={}, has_live_images={}", commands_changed, *is_layout_dirty, has_live_images);
 
-    if commands_changed || *is_layout_dirty {
+    if commands_changed || *is_layout_dirty || has_live_images {
         veldsdk::log::trace!(target: "handlers", "[RENDER-PLUGIN] Rendering into target texture {}", target_texture);
         crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf, surface_format)?;
 

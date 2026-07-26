@@ -654,6 +654,7 @@ impl<M> Image<M> {
                 handle: Some(handle),
                 width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                live: false,
             },
             _marker: std::marker::PhantomData,
         }
@@ -664,6 +665,12 @@ impl<M> Image<M> {
     }
     pub fn height(mut self, h: Length) -> Self {
         self.widget.height = Some(h.to_proto());
+        self
+    }
+    /// Текстура обновляется источником непрерывно (видео, камера): окно
+    /// перерисовывается каждый кадр. Статичной картинке не нужно.
+    pub fn live(mut self, live: bool) -> Self {
+        self.widget.live = live;
         self
     }
 }

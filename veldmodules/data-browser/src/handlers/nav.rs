@@ -12,6 +12,8 @@ pub fn on_nav_search(state: &mut State, _event: UiEventResponse) {
 }
 
 pub fn on_nav_downloaded(state: &mut State, _event: UiEventResponse) {
+    // Уход с экрана превью (его Back ведёт сюда): текстура освобождается.
+    state.preview.clear();
     state.current_screen = Screen::Downloaded;
     request_list(state);
 }
