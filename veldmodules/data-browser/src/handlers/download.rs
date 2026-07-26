@@ -2,7 +2,7 @@ use crate::proto::data_provider::{DownloadRequest, DownloadStarted, DownloadProg
 use crate::proto::ui_service::proto::UiEventResponse;
 
 use crate::module::state::{State, downloaded::{
-    Download, OriginSidecar, PROVIDER_NAME, filename_from_key, file_path, origin_path,
+    Download, OriginSidecar, SidecarWrite, PROVIDER_NAME, filename_from_key, file_path, origin_path,
 }};
 
 /// Пользователь нажал кнопку скачать.
@@ -63,7 +63,10 @@ fn write_origin_sidecar(state: &mut State, filename: &str, identifier: &str, tot
     // таблица заполняется только для wasm-плагинов, см. plugins.rs). on_write
     // проверяет доступ по requestor_id — паблишеру события, то есть нам же,
     // а мы и так владелец региона: доступ есть по праву владения.
-    let correlation_id = state.downloaded.pending_sidecar_writes.begin(region_id);
+    let correlation_id = state.downloaded.pending_sidecar_writes.begin(SidecarWrite {
+        region: region_id,
+        filename: filename.to_string(),
+    });
     crate::calls::fs::on_write(&veldsdk::proto::fs::FsWriteRequest {
         path: origin_path(filename),
         handle: Some(veldsdk::proto::core::ResourceHandle { id: region_id, size: json.len() as u64, content_hash: Vec::new() }),
@@ -73,8 +76,8 @@ fn write_origin_sidecar(state: &mut State, filename: &str, identifier: &str, tot
 
 /// fs прочитал наш буфер (успешно или нет) — регион больше не нужен.
 pub fn on_write_result(state: &mut State, response: veldsdk::proto::fs::FsWriteResult) {
-    let Some(region_id) = state.downloaded.pending_sidecar_writes.take(&response.correlation_id) else { return; };
-    veldsdk::abi::arena_free(region_id);
+    let Some(write) = state.downloaded.pending_sidecar_writes.take(&response.correlation_id) else { return; };
+    veldsdk::abi::arena_free(write.region);
     if !response.error.is_empty() {
         veldsdk::vwarn!(veldsdk::FLAG_SDK, "[data-browser] failed to persist origin sidecar: {}", response.error);
     }

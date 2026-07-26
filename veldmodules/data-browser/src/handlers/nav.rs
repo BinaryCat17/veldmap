@@ -57,13 +57,20 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
         }).collect();
 
     // origins — кэш сидкаров, а не независимая истина: подрезаем под то, что
-    // реально лежит на диске, иначе удалённый файл воскрес бы строкой-
-    // намерением, а запись о нём жила бы до конца сессии.
+    // реально лежит на диске, иначе файл, удалённый мимо приложения, остался
+    // бы строкой-намерением до конца сессии. Исключение — сидкары, чья запись
+    // ещё в полёте: на диске их закономерно нет, и срезать их значило бы
+    // потерять строку только что начатой закачки.
     let on_disk: Vec<String> = response.entries.iter()
         .filter_map(|e| e.name.strip_suffix(".origin"))
         .map(str::to_string)
         .collect();
-    state.downloaded.origins.retain(|name, _| on_disk.contains(name));
+    let in_flight: Vec<&str> = state.downloaded.pending_sidecar_writes.values()
+        .map(|w| w.filename.as_str())
+        .collect();
+    state.downloaded.origins.retain(|name, _| {
+        on_disk.contains(name) || in_flight.contains(&name.as_str())
+    });
 
     // Дочитываем то, чего ещё нет в памяти. Сидкар — единственное, что
     // переживает рестарт, так что для файлов с прошлого запуска это

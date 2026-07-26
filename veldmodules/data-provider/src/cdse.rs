@@ -51,6 +51,14 @@ pub fn on_download(
     let destination = request.destination.clone();
     let identifier = request.identifier.clone();
 
+    // Повторный запрос, пока предыдущий не зарегистрирован: у подписчика в
+    // этом окне ещё нет task_id, то есть нет и способа увидеть, что закачка
+    // уже идёт — отсечь дубль может только тот, кто её запустил.
+    if state.starting.values().any(|s| s.identifier == identifier) {
+        log::info!("[data-provider] download of {} already starting, ignoring duplicate", identifier);
+        return;
+    }
+
     // DownloadStarted НЕ шлём здесь. Задача появится в реестре платформы
     // только когда network обработает on_fs_download — а до тех пор гарантия
     // "finished придёт для любой зарегистрированной задачи" (tasks.proto) на

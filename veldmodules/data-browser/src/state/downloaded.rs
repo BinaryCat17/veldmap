@@ -32,11 +32,19 @@ pub struct DownloadedState {
     pub pending_list: veldsdk::Correlator<()>,
     /// Ожидание ответа на fs/on_delete — контекст: путь удаляемого файла.
     pub pending_delete: veldsdk::Correlator<String>,
-    /// Ожидание ответа на fs/on_write при записи origin-сидкара — контекст:
-    /// id CPU-региона, который нужно освободить после чтения хостом.
-    pub pending_sidecar_writes: veldsdk::Correlator<u64>,
+    /// Ожидание ответа на fs/on_write при записи origin-сидкара.
+    pub pending_sidecar_writes: veldsdk::Correlator<SidecarWrite>,
     /// Ожидание ответа на fs/on_read сидкара — контекст: имя файла.
     pub pending_origin_reads: veldsdk::Correlator<String>,
+}
+
+/// Сидкар, отданный в fs/on_write и ещё не подтверждённый.
+pub struct SidecarWrite {
+    /// CPU-регион с телом сидкара — освобождается по ответу хоста.
+    pub region: u64,
+    /// Имя файла: пока запись в полёте, сидкара на диске может ещё не быть,
+    /// и подрезка `origins` по листингу не должна принять его за удалённый.
+    pub filename: String,
 }
 
 /// Одна идущая закачка — единственный источник байтового прогресса, пока она
