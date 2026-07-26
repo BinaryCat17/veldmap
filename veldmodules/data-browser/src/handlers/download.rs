@@ -133,7 +133,7 @@ pub fn on_view_pressed(
 /// Расширения, которые умеет image-loader (features крейта image).
 fn is_supported_image(path: &str) -> bool {
     let Some(ext) = path.rsplit('.').next() else { return false };
-    matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
+    matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tif" | "tiff")
 }
 
 /// Ответ image-loader: текстура готова (и уже наша) или ошибка.
