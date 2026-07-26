@@ -239,7 +239,6 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 handle,
                 width: convert_length(&img.width),
                 height: convert_length(&img.height),
-                live: img.live,
             }.into()
         }
         _ => column([]).into(),
@@ -373,7 +372,6 @@ struct WgpuImageWidget {
     handle: veldsdk::proto::core::ResourceHandle,
     width: Length,
     height: Length,
-    live: bool,
 }
 
 impl<'a, Message, Theme> iced_widget::core::Widget<Message, Theme, GpuRenderer> for WgpuImageWidget {
@@ -400,7 +398,26 @@ impl<'a, Message, Theme> iced_widget::core::Widget<Message, Theme, GpuRenderer> 
         _cursor: iced_widget::core::mouse::Cursor,
         _viewport: &iced_widget::core::Rectangle,
     ) {
-        renderer.draw_wgpu_image(layout.bounds(), self.handle.id, self.live);
+        renderer.draw_wgpu_image(contain(layout.bounds(), self.handle.id), self.handle.id);
+    }
+}
+
+/// Вписывает текстуру в отведённое место с сохранением пропорций.
+///
+/// Размеры спрашиваются у хоста: текстура чужая (её владелец — плагин,
+/// выдавший нам read-грант), и её пропорции больше взять неоткуда. Если
+/// размеры недоступны — рисуем на всё место, как раньше.
+fn contain(bounds: iced_core::Rectangle, texture_id: u64) -> iced_core::Rectangle {
+    let Some((w, h)) = veldsdk::abi::arena_texture_size(texture_id) else { return bounds };
+    if w == 0 || h == 0 || bounds.width <= 0.0 || bounds.height <= 0.0 { return bounds; }
+
+    let scale = (bounds.width / w as f32).min(bounds.height / h as f32);
+    let (width, height) = (w as f32 * scale, h as f32 * scale);
+    iced_core::Rectangle {
+        x: bounds.x + (bounds.width - width) / 2.0,
+        y: bounds.y + (bounds.height - height) / 2.0,
+        width,
+        height,
     }
 }
 

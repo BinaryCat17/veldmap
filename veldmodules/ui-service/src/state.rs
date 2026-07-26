@@ -37,9 +37,6 @@ pub struct PluginUiState {
     pub last_vertices: RefCell<Vec<crate::module::renderer::Vertex>>,
     pub last_draw_commands: RefCell<Vec<crate::module::renderer::DrawCmd>>,
     pub external_bind_groups: RefCell<HashMap<u64, BindGroupId>>,
-    /// В последнем нарисованном кадре был live-WgpuImage: окно перерисовывается
-    /// каждый Frame независимо от dirty-флагов и кэша команд.
-    pub has_live_images: RefCell<bool>,
 
     /// Кэш view render-таргета: (texture_id, view).
     /// Инвалидируется сменой texture_id (владелец аллоцирует новый при resize).
@@ -105,7 +102,6 @@ impl PluginUiState {
             last_vertices: RefCell::new(Vec::new()),
             last_draw_commands: RefCell::new(Vec::new()),
             external_bind_groups: RefCell::new(HashMap::new()),
-            has_live_images: RefCell::new(false),
             target_view: RefCell::new(None),
             monitor_fps: RefCell::new(60),
             fps_window: RefCell::new((0, 0.0)),

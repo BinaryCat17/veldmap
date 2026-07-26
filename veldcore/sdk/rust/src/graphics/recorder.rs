@@ -1,5 +1,5 @@
 use super::proto::{
-    render_command::Command, CommandBuffer, Draw, DrawIndexed, LoadOp, RenderCommand,
+    render_command::Command, CommandBuffer, Draw, DrawIndexed, RenderCommand,
     SetBindGroup, SetIndexBuffer, SetPipeline, SetScissorRect, SetVertexBuffer,
     SetViewport, Submit,
 };
@@ -8,26 +8,14 @@ use prost::Message;
 
 /// Записывает render-команды кадра и отправляет их хосту одним submit'ом.
 /// Хост исполняет команды в своём цикле кадра, в указанный texture view.
+#[derive(Default)]
 pub struct RenderRecorder {
     commands: Vec<RenderCommand>,
-    load_op: LoadOp,
-}
-
-impl Default for RenderRecorder {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl RenderRecorder {
     pub fn new() -> Self {
-        Self { commands: Vec::with_capacity(128), load_op: LoadOp::Clear }
-    }
-
-    /// Load-op render pass'а таргета: Clear (по умолчанию) переписывает таргет
-    /// целиком, Load — дорисовывает поверх существующего содержимого.
-    pub fn set_load_op(&mut self, load_op: LoadOp) {
-        self.load_op = load_op;
+        Self { commands: Vec::with_capacity(128) }
     }
 
     fn push(&mut self, cmd: Command) {
@@ -87,7 +75,6 @@ impl RenderRecorder {
         let submit = Submit {
             target_texture_view_id: target.id(),
             command_buffer: Some(CommandBuffer { commands: self.commands }),
-            load_op: self.load_op as i32,
         };
         crate::abi::graphics_execute(submit.encode_to_vec())?;
         Ok(())

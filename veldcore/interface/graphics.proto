@@ -297,15 +297,9 @@ message CommandBuffer {
     repeated RenderCommand commands = 1;
 }
 
-// Поведение при входе в render pass таргета.
-enum LoadOp {
-    CLEAR = 0; // очистить в прозрачный (таргет переписывается целиком)
-    LOAD = 1;  // сохранить содержимое (дорисовка поверх)
-}
-
 // Кадр команд, исполняемый хостовым циклом кадра в указанный texture view.
+// Таргет переписывается целиком: pass начинается с очистки в прозрачный.
 message Submit {
     uint64 target_texture_view_id = 1;
     CommandBuffer command_buffer = 2;
-    LoadOp load_op = 3;
 }

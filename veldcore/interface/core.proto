@@ -31,13 +31,12 @@ package veldmap.core;
 //
 // Форма адреса ресурса в сообщениях шины. В ABI-вызовах (memory, graphics)
 // тот же самый id ходит голым uint64: адресат там локален по определению,
-// а content_hash/size нужны получателю события, который о ресурсе больше
-// ничего не знает. Поэтому `ResourceHandle { id, ..Default::default() }` на
-// границе ABI — норма, а не недозаполненное сообщение.
+// а size нужен получателю события, который о ресурсе больше ничего не знает.
+// Поэтому `ResourceHandle { id, ..Default::default() }` на границе ABI —
+// норма, а не недозаполненное сообщение.
 message ResourceHandle {
   uint64 id = 1;           // Local session ID
-  bytes content_hash = 2;  // Global BLAKE3/Iroh hash
-  uint64 size = 3;         // Data size
+  uint64 size = 3;         // Размер в байтах; у текстуры — размер образа
 }
 
 // Конверт события шины (fire-and-forget): publish и доставка подписчику.

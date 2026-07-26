@@ -8,9 +8,21 @@ use crate::module::handlers::ui_methods::ON_NAV_DOWNLOADED;
 pub fn view(state: &State) -> Element<()> {
     let preview = &state.preview;
 
-    if preview.is_loading {
+    // Пока картинки нет — на экране одна строка состояния: ждём, не смогли
+    // или нечего показывать.
+    let status = if preview.is_loading() {
+        Some("Loading preview...".to_string())
+    } else if let Some(error) = &preview.error {
+        Some(error.clone())
+    } else if preview.texture.is_none() {
+        Some("Failed to load image or no image selected.".to_string())
+    } else {
+        None
+    };
+
+    if let Some(status) = status {
         return column![
-            text("Loading preview...").size(20.0),
+            text(status).size(18.0),
             button(text("Back")).on_press(ON_NAV_DOWNLOADED)
         ]
         .spacing(20.0)
@@ -19,45 +31,29 @@ pub fn view(state: &State) -> Element<()> {
         .into();
     }
 
-    if let Some(error) = &preview.error {
-        return column![
-            text(format!("{}", error)).size(18.0),
-            button(text("Back")).on_press(ON_NAV_DOWNLOADED)
-        ]
-        .spacing(20.0)
-        .padding(Padding::new(20.0))
-        .align_items(Alignment::Center)
-        .into();
-    }
+    column![
+        row![
+            button(text("Back")).on_press(ON_NAV_DOWNLOADED),
+            text(format!("Preview: {}", preview.current_path)).size(18.0),
+        ].spacing(20.0).align_items(Alignment::Center),
 
-    if let Some(handle) = &preview.current_image {
-        column![
-            row![
-                button(text("Back")).on_press(ON_NAV_DOWNLOADED),
-                text(format!("Preview: {}", preview.current_path)).size(18.0),
-            ].spacing(20.0).align_items(Alignment::Center),
-
-            container(
-                image::<()>(crate::proto::ui_service::core::ResourceHandle { id: *handle, content_hash: Vec::new(), size: 0 })
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-            )
+        // Виджет занимает всё отведённое место, а пропорции картинки соблюдает
+        // ui-service: размеры текстуры знает хост (см. converter::contain).
+        container(
+            image::<()>(crate::proto::ui_service::core::ResourceHandle {
+                id: preview.texture.unwrap_or_default(),
+                size: 0,
+            })
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(10.0)
-        ]
-        .spacing(15.0)
-        .padding(Padding::new(10.0))
+        )
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
-    } else {
-        column![
-            text("Failed to load image or no image selected.").size(18.0),
-            button(text("Back")).on_press(ON_NAV_DOWNLOADED)
-        ]
-        .spacing(20.0)
-        .align_items(Alignment::Center)
-        .into()
-    }
+        .padding(10.0)
+    ]
+    .spacing(15.0)
+    .padding(Padding::new(10.0))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }

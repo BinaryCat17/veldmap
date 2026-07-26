@@ -3,19 +3,27 @@ use veldsdk::proto::fs::FsListRequest;
 use crate::proto::ui_service::proto::UiEventResponse;
 
 pub fn on_nav_browse(state: &mut State, _event: UiEventResponse) {
-    state.current_screen = Screen::Browse;
+    go_to(state, Screen::Browse);
     super::browse::request_path(state, state.browse.current_path.clone());
 }
 
 pub fn on_nav_search(state: &mut State, _event: UiEventResponse) {
-    state.current_screen = Screen::Search;
+    go_to(state, Screen::Search);
 }
 
 pub fn on_nav_downloaded(state: &mut State, _event: UiEventResponse) {
-    // Уход с экрана превью (его Back ведёт сюда): текстура освобождается.
-    state.preview.clear();
-    state.current_screen = Screen::Downloaded;
+    go_to(state, Screen::Downloaded);
     request_list(state);
+}
+
+/// Единственный переход между экранами: уход с превью освобождает его
+/// текстуру. Отдельный «выход» на каждой кнопке рано или поздно разъедется —
+/// достаточно забыть его на одной.
+fn go_to(state: &mut State, screen: Screen) {
+    if state.current_screen == Screen::Preview && screen != Screen::Preview {
+        state.preview.reset();
+    }
+    state.current_screen = screen;
 }
 
 /// Перечитать каталог. Единственный способ обновить снимок — вызывается при

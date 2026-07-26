@@ -39,11 +39,23 @@ pub fn surface_format_to_proto(fmt: wgpu::TextureFormat) -> i32 {
     }
 }
 
-/// How the bytes in a region are backed
+/// Чем подкреплены байты ресурса.
+///
+/// Ресурс один — id, владение (lease) и освобождение у всех вариантов общие;
+/// различается только носитель и, как следствие, набор доступных операций:
+/// `read`/`write` по смещению работают для Cpu/File/Buffer, а Texture — это
+/// не байтовый диапазон (чтение потребовало бы копии GPU→CPU со стопом
+/// конвейера), поэтому у неё только запись целого изображения.
 pub enum DataBacking {
+    /// Обычная память хоста.
     Cpu(Vec<u8>),
-    Buffer(Arc<wgpu::Buffer>),
-    Mapped(Arc<wgpu::Buffer>),
+    /// Файл на диске: байты читаются и пишутся по смещению, целиком в память
+    /// не поднимаются. Так открываются ресурсы, которые в память не влезают
+    /// (гигабайтные снимки), — потребитель тянет из них нужные фрагменты.
+    File { file: std::sync::Mutex<std::fs::File>, len: u64 },
+    /// Буфер GPU. `mapped` — создан с mapped_at_creation, запись идёт прямо
+    /// в отображённый диапазон, а не через очередь.
+    Buffer { buffer: Arc<wgpu::Buffer>, mapped: bool },
     Texture {
         texture: Arc<wgpu::Texture>,
         width: u32,
@@ -54,12 +66,12 @@ pub enum DataBacking {
 
 impl DataBacking {
     pub fn is_buffer(&self) -> bool {
-        matches!(self, Self::Buffer(_) | Self::Mapped(_))
+        matches!(self, Self::Buffer { .. })
     }
 
     pub fn as_buffer(&self) -> Option<&wgpu::Buffer> {
         match self {
-            Self::Buffer(b) | Self::Mapped(b) => Some(b),
+            Self::Buffer { buffer, .. } => Some(buffer),
             _ => None,
         }
     }
@@ -74,7 +86,8 @@ impl DataBacking {
     pub fn byte_len(&self) -> u64 {
         match self {
             Self::Cpu(v) => v.len() as u64,
-            Self::Buffer(b) | Self::Mapped(b) => b.size(),
+            Self::File { len, .. } => *len,
+            Self::Buffer { buffer, .. } => buffer.size(),
             Self::Texture { width, height, format, .. } => {
                 let bpp = bytes_per_pixel(*format);
                 (*width as u64) * (*height as u64) * (bpp as u64)
@@ -86,7 +99,6 @@ impl DataBacking {
 /// A data-bearing region
 pub struct Region {
     pub backing: DataBacking,
-    pub readonly: bool,
 }
 
 /// Host-managed shared memory manager: raw allocator
@@ -109,17 +121,27 @@ impl MemoryManager {
 
     // ── Allocation ────────────────────────────────────────────
 
-    fn alloc(&self, backing: DataBacking, readonly: bool, owner_id: u32) -> ResourceId {
+    fn alloc(&self, backing: DataBacking, owner_id: u32) -> ResourceId {
         let id = self.registry.register(ResourceBackend::Memory, owner_id, None);
-        self.regions.insert(id, Region { backing, readonly });
+        self.regions.insert(id, Region { backing });
         id
     }
 
     pub fn alloc_cpu(&self, data: Vec<u8>, owner_id: u32) -> ResourceId {
-        self.alloc(DataBacking::Cpu(data), false, owner_id)
+        self.alloc(DataBacking::Cpu(data), owner_id)
     }
 
-    pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, readonly: bool, owner_id: u32) -> ResourceId {
+    /// Ресурс поверх файла: содержимое остаётся на диске, чтение и запись
+    /// идут по смещению (см. `DataBacking::File`). Размер фиксируется на
+    /// момент открытия — он же уезжает потребителю в ResourceHandle.size.
+    pub fn alloc_file(&self, path: &std::path::Path, owner_id: u32) -> std::io::Result<(ResourceId, u64)> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        let id = self.alloc(DataBacking::File { file: std::sync::Mutex::new(file), len }, owner_id);
+        Ok((id, len))
+    }
+
+    pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, owner_id: u32) -> ResourceId {
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !mapped { final_usage |= wgpu::BufferUsages::COPY_DST; }
         if mapped { final_usage |= wgpu::BufferUsages::MAP_WRITE; }
@@ -130,15 +152,20 @@ impl MemoryManager {
             usage: final_usage,
             mapped_at_creation: mapped,
         });
-        let backing = if mapped {
-            DataBacking::Mapped(Arc::new(buffer))
-        } else {
-            DataBacking::Buffer(Arc::new(buffer))
-        };
-        self.alloc(backing, readonly, owner_id)
+        self.alloc(DataBacking::Buffer { buffer: Arc::new(buffer), mapped }, owner_id)
     }
 
-    pub fn alloc_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, readonly: bool, owner_id: u32) -> ResourceId {
+    /// 0 — размеры не по силам устройству. Проверка здесь, а не у вызывающего:
+    /// create_texture на превышении лимита — ошибка валидации wgpu, а её
+    /// обработчик по умолчанию роняет процесс, тогда как модулю достаточно
+    /// узнать, что текстуру выделить не удалось.
+    pub fn alloc_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, owner_id: u32) -> ResourceId {
+        let max = self.device.limits().max_texture_dimension_2d;
+        if width == 0 || height == 0 || width > max || height > max {
+            log::warn!(target: "veldmap::host::memory",
+                "Texture {}x{} rejected: limit is {}x{}", width, height, max, max);
+            return 0;
+        }
         let format = proto_to_wgpu_format(format_proto);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("memory-tex"),
@@ -154,27 +181,8 @@ impl MemoryManager {
         });
         self.alloc(
             DataBacking::Texture { texture: Arc::new(texture), width, height, format: format_proto },
-            readonly,
             owner_id,
         )
-    }
-
-    pub fn alloc_buffer_with_data(&self, data: &[u8], usage: u32, readonly: bool, owner_id: u32) -> ResourceId {
-        let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
-        if !readonly { final_usage |= wgpu::BufferUsages::COPY_DST; }
-        let aligned = ((data.len() as u64) + 3) & !3;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("memory-buf-data"),
-            size: aligned,
-            usage: final_usage,
-            mapped_at_creation: true,
-        });
-        {
-            let mut view = buffer.slice(..).get_mapped_range_mut();
-            view[..data.len()].copy_from_slice(data);
-        }
-        buffer.unmap();
-        self.alloc(DataBacking::Buffer(Arc::new(buffer)), readonly, owner_id)
     }
 
     // ── Data access ───────────────────────────────────────────
@@ -191,13 +199,20 @@ impl MemoryManager {
                 if end > vec.len() { vec.resize(end, 0); }
                 vec[offset as usize..end].copy_from_slice(data);
             }
-            DataBacking::Buffer(ref buffer) => {
+            DataBacking::File { file, len } => {
+                use std::io::{Seek, SeekFrom, Write};
+                let mut f = file.lock().unwrap();
+                f.seek(SeekFrom::Start(offset))?;
+                f.write_all(data)?;
+                *len = (*len).max(offset + data.len() as u64);
+            }
+            DataBacking::Buffer { buffer, mapped: false } => {
                 let q = self.queue.lock().unwrap();
                 q.write_buffer(buffer, offset, data);
             }
-            DataBacking::Mapped(ref buffer) => {
-                let end = offset as usize + data.len();
-                let slice = buffer.slice(offset..end as u64);
+            DataBacking::Buffer { buffer, mapped: true } => {
+                let end = offset + data.len() as u64;
+                let slice = buffer.slice(offset..end);
                 let mut view = slice.get_mapped_range_mut();
                 view[..data.len()].copy_from_slice(data);
             }
@@ -238,7 +253,19 @@ impl MemoryManager {
                 if end > vec.len() { return Err(anyhow::anyhow!("Read out of bounds")); }
                 Ok(vec[start..end].to_vec())
             }
-            DataBacking::Buffer(buffer) | DataBacking::Mapped(buffer) => {
+            // Хвост короче запрошенного — не ошибка, а конец файла: читатель
+            // (SDK Resource) идёт окнами и последнее окно почти всегда неполное.
+            DataBacking::File { file, len } => {
+                if offset >= *len { return Ok(Vec::new()); }
+                let size = size.min(*len - offset) as usize;
+                use std::io::{Read, Seek, SeekFrom};
+                let mut f = file.lock().unwrap();
+                f.seek(SeekFrom::Start(offset))?;
+                let mut buf = vec![0u8; size];
+                f.read_exact(&mut buf)?;
+                Ok(buf)
+            }
+            DataBacking::Buffer { buffer, .. } => {
                 let buffer = buffer.clone();
                 drop(region);
                 {
@@ -308,7 +335,7 @@ impl MemoryManager {
 
     pub fn get_buffer(&self, region_id: ResourceId) -> Option<Arc<wgpu::Buffer>> {
         self.regions.get(&region_id).and_then(|r| match &r.backing {
-            DataBacking::Buffer(b) | DataBacking::Mapped(b) => Some(b.clone()),
+            DataBacking::Buffer { buffer, .. } => Some(buffer.clone()),
             _ => None,
         })
     }
@@ -320,17 +347,6 @@ impl MemoryManager {
             }
             _ => None,
         })
-    }
-
-    pub fn get_cpu_data(&self, region_id: ResourceId) -> Option<Vec<u8>> {
-        self.regions.get(&region_id).and_then(|r| match &r.backing {
-            DataBacking::Cpu(v) => Some(v.clone()),
-            _ => None,
-        })
-    }
-
-    pub fn is_readonly(&self, region_id: ResourceId) -> bool {
-        self.regions.get(&region_id).map(|r| r.readonly).unwrap_or(false)
     }
 
     // ── Lifecycle ─────────────────────────────────────────────
@@ -345,17 +361,4 @@ impl MemoryManager {
         }
     }
 
-    pub fn compute_hash(&self, region_id: ResourceId) -> Option<Vec<u8>> {
-        let region = self.regions.get(&region_id)?;
-        match &region.backing {
-            DataBacking::Cpu(v) => Some(blake3::hash(v).as_bytes().to_vec()),
-            DataBacking::Buffer(_) | DataBacking::Mapped(_) => {
-                let size = region.backing.byte_len();
-                drop(region);
-                self.read(region_id, 0, size).ok()
-                    .map(|data| blake3::hash(&data).as_bytes().to_vec())
-            }
-            _ => None,
-        }
-    }
 }

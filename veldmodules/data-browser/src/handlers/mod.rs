@@ -4,6 +4,7 @@ pub mod search;
 pub mod browse;
 pub mod download;
 pub mod nav;
+pub mod preview;
 pub mod window;
 
 #[derive(serde::Deserialize)]

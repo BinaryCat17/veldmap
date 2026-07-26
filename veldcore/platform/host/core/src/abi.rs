@@ -114,13 +114,28 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
+    // veld_memory_texture_size(id) → (width << 32 | height), 0 — не текстура,
+    // не найдена или доступ запрещён. Нужен тому, кто рисует чужую текстуру:
+    // вписать её в отведённое место можно только зная её пропорции, а размеры
+    // знает только владелец ресурса (обычно — другой сервис).
+    linker.func_wrap("env", "veld_memory_texture_size", |caller: Caller<'_, HostState>, id: u64| -> u64 {
+        let instance_id = caller.data().instance_id;
+        if !caller.data().registry.check_access(id, instance_id, crate::registry::Access::Read) {
+            return 0;
+        }
+        match caller.data().memory.get_texture(id) {
+            Some((_, width, height, _)) => (u64::from(width) << 32) | u64::from(height),
+            None => 0,
+        }
+    })?;
+
     // ── Memory management ─────────────────────────────────────
 
     // veld_memory_alloc_buffer(size, usage, mapped) → region_id
     linker.func_wrap("env", "veld_memory_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
-        memory.alloc_buffer(size, usage as u32, mapped != 0, false, owner_id)
+        memory.alloc_buffer(size, usage as u32, mapped != 0, owner_id)
     })?;
 
     // veld_memory_alloc_cpu(size) → region_id. Обычная CPU-память (Vec<u8>),
@@ -138,7 +153,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap("env", "veld_memory_alloc_texture", |caller: Caller<'_, HostState>, width: u64, height: u64, format: u64, usage: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
-        memory.alloc_texture(width as u32, height as u32, format as i32, usage as u32, false, owner_id)
+        memory.alloc_texture(width as u32, height as u32, format as i32, usage as u32, owner_id)
     })?;
 
     // Lease-операции адресуются по имени сервиса — модули нигде не оперируют

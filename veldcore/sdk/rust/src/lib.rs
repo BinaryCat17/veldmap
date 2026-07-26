@@ -3,6 +3,7 @@ pub mod proto;
 pub mod graphics;
 pub mod tasks;
 pub mod correlator;
+pub mod resource;
 
 /// Мост `log` → ABI хоста. Ставится сгенерированным клеем модуля; прикладной
 /// код пишет обычными макросами крейта `log` (реэкспортирован ниже).
@@ -26,6 +27,7 @@ pub use abi::generate_id;
 pub use abi::event_publisher;
 pub use correlator::Correlator;
 pub use tasks::TaskTracker;
+pub use resource::ResourceReader;
 
 /// RAII handle to a memory region or graphics object.
 /// On drop: releases the resource via memory ABI.

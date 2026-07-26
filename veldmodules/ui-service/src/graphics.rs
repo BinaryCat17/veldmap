@@ -40,6 +40,7 @@ pub fn render_ui(
     }
 
     ensure_resources(plugin, renderer, surface_format)?;
+    evict_unused_bind_groups(plugin, renderer);
 
     let mut recorder = RenderRecorder::new();
     let logical_w = width as f32 / scale_factor;
@@ -159,6 +160,22 @@ fn render_geometry(
     }
 
     Ok(())
+}
+
+/// Выбрасывает из кэша bind group'ы текстур, которых в кадре больше нет.
+///
+/// Держать их «на всякий случай» нельзя: bind group на хосте хранит wgpu-ссылку
+/// на текстуру, поэтому пока запись жива, видеопамять не освобождается даже
+/// после того, как владелец сделал arena_free. Без этого каждая просмотренная
+/// картинка оставалась бы в VRAM до конца сессии.
+fn evict_unused_bind_groups(plugin: &PluginUiState, renderer: &GpuRenderer) {
+    let mut cache = plugin.external_bind_groups.borrow_mut();
+    if cache.is_empty() { return; }
+    cache.retain(|texture_id, _| {
+        renderer.draw_commands.iter().any(|cmd| {
+            matches!(cmd, DrawCmd::ExternalImage { texture_id: id, .. } if id == texture_id)
+        })
+    });
 }
 
 /// Get or create bind group for external texture

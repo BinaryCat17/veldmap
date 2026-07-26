@@ -18,6 +18,8 @@ extern "C" {
     fn veld_memory_write(id: u64, offset: u64, ptr: u64, len: u64);
     fn veld_memory_read(id: u64, offset: u64, size: u64) -> u64;
 
+    fn veld_memory_texture_size(id: u64) -> u64;
+
     fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
     fn veld_memory_alloc_cpu(size: u64) -> u64;
     fn veld_memory_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
@@ -109,6 +111,15 @@ pub fn arena_read(id: u64, offset: u64, size: u64) -> Option<Vec<u8>> {
         let packed = veld_memory_read(id, offset, size);
         take_host_bytes(packed)
     }
+}
+
+/// Размеры текстуры в пикселях. `None` — регион не текстура, не найден или
+/// доступ запрещён. Нужно тому, кто рисует чужую текстуру: вписать её в
+/// отведённое место можно только зная её пропорции.
+pub fn arena_texture_size(id: u64) -> Option<(u32, u32)> {
+    let packed = unsafe { veld_memory_texture_size(id) };
+    if packed == 0 { return None; }
+    Some(((packed >> 32) as u32, packed as u32))
 }
 
 // ── Memory management ──────────────────────────────────────────

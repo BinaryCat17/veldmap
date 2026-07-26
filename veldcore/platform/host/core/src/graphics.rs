@@ -17,7 +17,7 @@ use proto::{
     VertexFormat, StepMode, FilterMode, PrimitiveTopology,
     BlendFactor, BlendOperation, FrontFace, CullMode,
     BufferBindingType, SamplerBindingType, TextureSampleType, TextureViewDimension,
-    IndexFormat, LoadOp,
+    IndexFormat,
 };
 
 // ── Unified Resource Enum ──────────────────────────────────────
@@ -56,7 +56,6 @@ pub struct PendingRenderOp {
     pub target_view_id: u64,
     pub command_buffer: CommandBuffer,
     pub instance_id: u32,
-    pub load_op: LoadOp,
 }
 
 // ── GraphicsDevice ─────────────────────────────────────────────
@@ -486,15 +485,11 @@ impl GraphicsDevice {
         if !self.registry.check_access(req.target_texture_view_id, requestor_id, Access::Write) {
             return Err(anyhow::anyhow!("Access denied to target view {}", req.target_texture_view_id));
         }
-        let load_op = LoadOp::try_from(req.load_op)
-            .map_err(|_| anyhow::anyhow!("Invalid load_op value {}", req.load_op))?;
-
         if let Some(cb) = req.command_buffer {
             self.pending_ops.lock().unwrap().push(PendingRenderOp {
                 target_view_id: req.target_texture_view_id,
                 command_buffer: cb,
                 instance_id: requestor_id,
-                load_op,
             });
         }
         Ok(())

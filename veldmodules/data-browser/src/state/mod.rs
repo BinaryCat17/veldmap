@@ -11,6 +11,9 @@ pub struct State {
     /// Render-таргет нашего окна: аллоцируется в ответ на app/window_resized
     /// и делегируется рендереру (см. handlers::window).
     pub window_surface: Option<u64>,
+    /// Размер окна в физических пикселях (app/window_resized). Нужен как
+    /// потолок для превью: рисовать картинку крупнее окна незачем.
+    pub window: (u32, u32),
 }
 
 impl State {
@@ -22,6 +25,7 @@ impl State {
             downloaded: downloaded::DownloadedState::default(),
             preview: preview::PreviewState::default(),
             window_surface: None,
+            window: (0, 0),
             global: types::GlobalState {
                 status_message: "VeldMap Data Browser".to_string(),
                 error_message: None,

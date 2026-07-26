@@ -30,7 +30,7 @@ pub fn delegate(
         return None;
     }
 
-    let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0, content_hash: Vec::new() };
+    let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0 };
 
     crate::inputs::on_set_surface(&crate::proto::SetSurfaceRequest {
         plugin_id: ev.plugin_id.clone(),

@@ -9,7 +9,16 @@ rust:
     serde_json: "1.0"
     anyhow: "1.0"
     log: "0.4"
+    # Потоковые декодеры: превью снимается по строкам/чанкам, поэтому память
+    # не зависит от размера файла (см. src/decode.rs).
+    png: "0.17"
+    tiff: "0.9"
+    # default-features = false: по умолчанию тянется rayon, а потоков в wasm нет.
+    jpeg-decoder:
+      version: "0.3"
+      default-features: false
+    # Только форматы без потокового пути — они мелкие по своей природе.
     image:
       version: "0.25"
       default-features: false
-      features: ["png", "jpeg", "gif", "bmp", "webp", "tiff"]
+      features: ["gif", "bmp", "webp"]
