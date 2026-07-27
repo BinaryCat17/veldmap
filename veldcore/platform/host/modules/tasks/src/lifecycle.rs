@@ -15,7 +15,7 @@ use veldmap_host_util::bindings::proto::tasks::{TaskBeginRequest, TaskEndRequest
 
 pub fn on_begin(state: &State, req: TaskBeginRequest, requestor_id: u32) {
     if state.tasks.register(&req.task_id, requestor_id, &req.executor, &req.kind, &req.label).is_err() {
-        log::warn!(target: "host", "Task {} already exists, not registered", req.task_id);
+        log::warn!(target: "tasks", "Task {} already exists, not registered", req.task_id);
     }
 }
 

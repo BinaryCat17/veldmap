@@ -18,14 +18,6 @@ message ScrollEvent {
     float delta_y = 2;
 }
 
-// --- Download ---
-
-// User pressed download button
-message DownloadPressed {
-    string s3_key = 1;
-    string filename = 2;
-}
-
 // --- Search ---
 
 message SearchRequest {

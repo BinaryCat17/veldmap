@@ -24,7 +24,7 @@ pub fn hook_init(ctx: Arc<HostContext>) -> State {
 /// забрав поверхность из очереди — подменять текстуру можно только между кадрами.
 pub fn on_set_surface(state: &State, req: SetSurface, requestor_id: u32) {
     let Some(surface) = req.surface else {
-        log::warn!(target: "host", "set_surface for '{}' carries no surface handle", req.plugin_id);
+        log::warn!(target: "app", "set_surface for '{}' carries no surface handle", req.plugin_id);
         return;
     };
     state.surfaces.attach(&req.plugin_id, surface.id, requestor_id);

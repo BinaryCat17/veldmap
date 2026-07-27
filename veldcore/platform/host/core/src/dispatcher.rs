@@ -58,7 +58,7 @@ impl Dispatcher {
     }
 
     pub fn register_subscription(&self, topic: String, name: Option<String>, subscriber: Subscriber) {
-        log::trace!(target: "veldmap::host::dispatcher", "[DISPATCHER] Registering subscription: {}", topic);
+        log::trace!(target: "dispatcher", "[DISPATCHER] Registering subscription: {}", topic);
         let mut subscriptions = self.subscriptions.lock().unwrap();
         subscriptions.entry(topic).or_default().push((name, subscriber));
     }
@@ -99,7 +99,7 @@ impl Dispatcher {
     pub fn publish_from(&self, topic: &str, payload: Vec<u8>, publisher: u32, target: &str) {
         let parts: Vec<&str> = topic.splitn(2, '/').collect();
         if parts.len() != 2 {
-            log::warn!(target: "veldmap::host::dispatcher", "[DISPATCHER] Invalid publish topic: {}", topic);
+            log::warn!(target: "dispatcher", "[DISPATCHER] Invalid publish topic: {}", topic);
             return;
         }
         let (service_name, method) = (parts[0], parts[1]);
@@ -120,7 +120,7 @@ impl Dispatcher {
 
         if recipients.is_empty() {
             // A published message with no receiver is almost always a wiring bug.
-            log::warn!(target: "veldmap::host::dispatcher", "[DISPATCHER] Publish to '{}' (target '{}') dropped: no matching subscriber", topic, target);
+            log::warn!(target: "dispatcher", "[DISPATCHER] Publish to '{}' (target '{}') dropped: no matching subscriber", topic, target);
             return;
         }
 
@@ -131,7 +131,7 @@ impl Dispatcher {
                 payload: payload.clone(),
                 publisher,
             }).is_err() {
-                log::error!(target: "veldmap::host::dispatcher", "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
+                log::error!(target: "dispatcher", "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
             }
         }
     }

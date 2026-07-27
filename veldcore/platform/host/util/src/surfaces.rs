@@ -23,13 +23,13 @@ impl Surfaces {
     pub fn attach(&self, plugin_id: &str, texture_id: u64, requestor_id: u32) {
         if requestor_id != 0 {
             if self.ctx.dispatcher.instance_of(plugin_id) != Some(requestor_id) {
-                log::warn!(target: "host",
+                log::warn!(target: "surfaces",
                     "set_surface rejected: requestor {} is not the owner of window '{}'",
                     requestor_id, plugin_id);
                 return;
             }
             if !self.ctx.registry.check_access(texture_id, requestor_id, Access::Write) {
-                log::warn!(target: "host",
+                log::warn!(target: "surfaces",
                     "set_surface rejected: requestor {} has no write access to texture {}",
                     requestor_id, texture_id);
                 return;

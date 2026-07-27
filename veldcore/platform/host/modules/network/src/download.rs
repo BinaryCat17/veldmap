@@ -25,7 +25,7 @@ use tokio::io::AsyncWriteExt;
 /// Логирует провал скачивания, уведомляет подписчиков fs_download_result
 /// и возвращает текст ошибки — он же попадёт в tasks/task_finished.error.
 fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> String {
-    log::warn!(target: "host", "Download {} failed: {}", correlation_id, error);
+    log::warn!(target: "network", "Download {} failed: {}", correlation_id, error);
     bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
         error: error.clone(),
         correlation_id: correlation_id.to_string(),
@@ -163,7 +163,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
             return Err(fail_download(&ctx, &correlation_id, format!("Rename error: {}", e)));
         }
 
-        log::info!(target: "host", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
+        log::info!(target: "network", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
         bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
             error: String::new(),
             correlation_id: correlation_id.clone(),

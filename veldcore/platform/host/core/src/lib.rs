@@ -53,12 +53,18 @@ pub struct WasmModule {
 /// Конфигурация core модуля
 #[derive(serde::Deserialize, Debug)]
 pub struct CoreConfig {
-    /// Фильтр логов в синтаксисе env_logger, например
-    /// "veldmap=info,veldmap::host::render=debug,veldmap::ui-service::handlers=trace".
-    /// Подсистема — это таргет записи; RUST_LOG переопределяет значение отсюда.
+    /// Что видно в консоли и в host.log. Синтаксис env_logger; подсистема —
+    /// это таргет записи, `veldmap::<компонент>::<подсистема>` (см. logging).
+    /// Например "veldmap=info,veldmap::host::network=debug".
+    /// RUST_LOG переопределяет значение отсюда.
     #[serde(default = "default_log_filter")]
     pub log_filter: String,
-    /// Минимальный интервал между одинаковыми логами в миллисекундах (0 = без ограничения)
+    /// Что остаётся в trace.log — обычно шире предыдущего: этот файл читают,
+    /// когда в консоли не хватило подробностей.
+    #[serde(default = "default_trace_filter")]
+    pub trace_filter: String,
+    /// Минимальный интервал между одинаковыми логами в миллисекундах (0 = без
+    /// ограничения). Полного потока в trace.log не касается.
     #[serde(default = "default_log_rate_limit_ms")]
     pub log_rate_limit_ms: u64,
 }
@@ -67,9 +73,14 @@ fn default_log_rate_limit_ms() -> u64 {
     1000 // По умолчанию 1 секунда
 }
 
-/// Свои логи целиком, чужие крейты — только warn+.
+/// Ход работы своих компонентов, чужие крейты — только warn+.
 /// netlink_packet_route на каждом старте пишет бесполезное «ядро новее крейта».
 fn default_log_filter() -> String {
+    "veldmap=info,netlink_packet_route=error,warn".to_string()
+}
+
+/// Свои логи целиком: разбирать постфактум обычно нужно именно их.
+fn default_trace_filter() -> String {
     "veldmap=trace,netlink_packet_route=error,warn".to_string()
 }
 
@@ -77,6 +88,7 @@ impl Default for CoreConfig {
     fn default() -> Self {
         Self {
             log_filter: default_log_filter(),
+            trace_filter: default_trace_filter(),
             log_rate_limit_ms: default_log_rate_limit_ms(),
         }
     }

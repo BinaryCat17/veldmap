@@ -17,7 +17,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let req_buf = match data_bytes { Some(b) => b, None => return Ok(()) };
             let request = match EventEnvelope::decode(&req_buf[..]) {
                 Ok(r) => r,
-                Err(e) => { log::error!(target: "veldmap::host::abi", "[{}] publish decode error: {}", caller.data().plugin_name, e); return Ok(()); }
+                Err(e) => { log::error!(target: "abi", "[{}] publish decode error: {}", caller.data().plugin_name, e); return Ok(()); }
             };
             let topic = format!("{}/{}", request.service, request.method);
             let publisher = caller.data().instance_id;
@@ -93,15 +93,11 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             if !registry.check_access(id, instance_id, crate::registry::Access::Write) {
                 return Ok(());
             }
+            // Записываются только Cpu (memcpy) и GPU (через очередь wgpu) —
+            // ни один из них поток не держит, поэтому blocking-пул тут не
+            // нужен. Диапазонный носитель (диск, сеть) доступен на чтение.
             let memory = caller.data().memory.clone();
-            if memory.write_blocks(id) {
-                // Носитель наружу (файл): копию отдаём blocking-пулу, иначе
-                // медленный диск встанет поперёк всего рантайма.
-                let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(<[u8]>::to_vec) else {
-                    return Ok(());
-                };
-                let _ = tokio::task::spawn_blocking(move || memory.write(id, offset, &data)).await;
-            } else if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
+            if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
                 let _ = memory.write(id, offset, data);
             }
             Ok(())
@@ -337,7 +333,7 @@ fn resolve_service_arg(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -
     let name = read_str(caller, ptr, len)?;
     let resolved = caller.data().dispatcher.instance_of(&name);
     if resolved.is_none() {
-        log::warn!(target: "veldmap::host::abi", "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);
+        log::warn!(target: "abi", "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);
     }
     resolved
 }

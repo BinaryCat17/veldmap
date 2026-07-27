@@ -54,7 +54,7 @@ pub fn on_delete(state: &mut State, req: ItemRequest) {
 pub fn on_delete_result(state: &mut State, response: veldsdk::proto::fs::FsDeleteResult) {
     let Some(path) = state.pending_delete.take(&response.correlation_id) else { return };
     if !response.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "[data-library] не удалось удалить {}: {}", path, response.error);
+        veldsdk::log::warn!(target: "handlers", "не удалось удалить {}: {}", path, response.error);
     }
     // Перечитываем в любом случае: при ошибке — чтобы показать то, что на
     // диске на самом деле, при успехе — чтобы запись ушла.
@@ -117,7 +117,7 @@ pub fn on_downloaded(state: &mut State, event: Downloaded) {
     }
 
     if !event.success && !event.cancelled {
-        veldsdk::log::warn!(target: "handlers", "[data-library] закачка {} не удалась: {}", dl.name, event.error);
+        veldsdk::log::warn!(target: "handlers", "закачка {} не удалась: {}", dl.name, event.error);
     }
 
     // Перечитываем каталог: размер `.part`/готового файла берётся с диска, а

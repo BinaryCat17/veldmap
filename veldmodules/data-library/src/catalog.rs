@@ -1,6 +1,6 @@
 //! Снимок каталога и сидкары: чтение диска и вывод состояния библиотеки.
 
-use crate::module::{SidecarWrite, State};
+use crate::module::{ReadPurpose, SidecarWrite, State};
 use crate::module::storage::{self, LocalFile, OriginSidecar};
 use crate::proto::data_library::{LibraryEntry, LibraryRequest, LibraryState, LibraryStatus};
 use veldsdk::proto::core::ResourceOpened;
@@ -57,7 +57,8 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
     // единственный способ узнать ключ провайдера и ожидаемый размер.
     let missing: Vec<String> = on_disk.into_iter()
         .filter(|name| !state.origins.contains_key(name))
-        .filter(|name| !state.pending_origin_reads.values().any(|n| n == name))
+        .filter(|name| !state.pending_reads.values()
+            .any(|purpose| matches!(purpose, ReadPurpose::Sidecar(n) if n == name)))
         .collect();
 
     // Состояние отдаём сразу, не дожидаясь сидкаров: файлы на диске — уже
@@ -65,7 +66,7 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
     publish(state);
 
     for name in missing {
-        let correlation_id = state.pending_origin_reads.begin(name.clone());
+        let correlation_id = state.pending_reads.begin(ReadPurpose::Sidecar(name.clone()));
         crate::calls::fs::on_read(&FsReadRequest {
             path: storage::origin_path(&name),
             correlation_id,
@@ -73,22 +74,21 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
     }
 }
 
-/// Сидкар прочитан. Отсутствие сидкара — не ошибка: файл мог быть скачан
-/// мимо приложения, просто докачать его будет нечем.
-pub fn on_sidecar_read(state: &mut State, opened: &ResourceOpened) -> bool {
-    let Some(name) = state.pending_origin_reads.take(&opened.correlation_id) else { return false };
-    let Some(handle) = &opened.handle else { return true };
+/// Сидкар записи `name` прочитан (ожидание уже снято с учёта, см.
+/// module::on_read_result). Отсутствие сидкара — не ошибка: файл мог быть
+/// скачан мимо приложения, просто докачать его будет нечем.
+pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened) {
+    let Some(handle) = &opened.handle else { return };
 
     let bytes = veldsdk::abi::arena_read(handle.id, 0, handle.size);
     veldsdk::abi::arena_free(handle.id);
 
-    let Some(bytes) = bytes else { return true };
-    let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return true };
-    if sidecar.provider != storage::PROVIDER_NAME { return true; }
+    let Some(bytes) = bytes else { return };
+    let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return };
+    if sidecar.provider != storage::PROVIDER_NAME { return }
 
     state.origins.insert(name, sidecar);
     publish(state);
-    true
 }
 
 /// Пишет сидкар. Он ложится на диск ДО старта закачки, поэтому переживает
@@ -125,7 +125,7 @@ pub fn on_write_result(state: &mut State, response: FsWriteResult) {
     let Some(write) = state.pending_sidecar_writes.take(&response.correlation_id) else { return };
     veldsdk::abi::arena_free(write.region);
     if !response.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "[data-library] сидкар не сохранён: {}", response.error);
+        veldsdk::log::warn!(target: "handlers", "сидкар не сохранён: {}", response.error);
     }
 }
 

@@ -42,15 +42,21 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, requestor_id: u32) {
         let result = match HttpRange::open(&req.url, req.headers) {
             Ok(source) => {
                 let len = source.len();
-                let id = ctx.memory.alloc_remote(Arc::new(source), requestor_id);
-                log::info!(target: "host", "Opened remote resource {} ({} bytes): {}", id, len, req.url);
+                let id = ctx.memory.alloc_range(Arc::new(source), requestor_id);
+                log::info!(target: "network", "Opened remote resource {} ({} bytes): {}", id, len, req.url);
                 ResourceOpened {
                     handle: Some(ResourceHandle { id, size: len }),
                     error: String::new(),
                     correlation_id,
                 }
             }
-            Err(e) => ResourceOpened { handle: None, error: e.to_string(), correlation_id },
+            Err(e) => {
+                // Ошибка уходит событием заказчику, но на экране её увидит
+                // только тот, кто в этот момент смотрит на превью — в логе она
+                // нужна независимо от этого.
+                log::warn!(target: "network", "Failed to open remote resource {}: {}", req.url, e);
+                ResourceOpened { handle: None, error: e.to_string(), correlation_id }
+            }
         };
         bus::emit::on_open_result(&*ctx.dispatcher, &result);
     });
@@ -65,6 +71,22 @@ struct HttpRange {
     /// асинхронный запрос надо кому-то отдать.
     runtime: tokio::runtime::Handle,
     cache: Mutex<Cache>,
+    /// Сколько байт реально ушло по проводу. Смысл оконного чтения в том,
+    /// чтобы это была доля файла, а не он весь, — но доля зависит от формата
+    /// (тайловый TIFF с пирамидой читается кусками, PNG приходится прочесть
+    /// целиком). Поэтому не утверждение в комментарии, а счётчик: итог
+    /// пишется в лог при закрытии ресурса.
+    fetched: std::sync::atomic::AtomicU64,
+}
+
+/// Ресурс закрыт (гость позвал arena_free) — подводим итог по трафику.
+impl Drop for HttpRange {
+    fn drop(&mut self) {
+        let fetched = self.fetched.load(std::sync::atomic::Ordering::Relaxed);
+        let share = if self.len > 0 { fetched * 100 / self.len } else { 0 };
+        log::info!(target: "network", "Closed remote resource: fetched {} of {} bytes ({}%): {}",
+                   fetched, self.len, share, self.url);
+    }
 }
 
 /// Блоки хранятся под Arc: читатель ходит окнами по 256 КБ (ResourceReader),
@@ -106,8 +128,16 @@ impl HttpRange {
         let runtime = tokio::runtime::Handle::current();
         let response = runtime.block_on(super::http::get(url, &headers, Some((0, 1))).send())?;
 
-        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            anyhow::bail!("сервер не поддерживает Range (HTTP {})", response.status());
+        // Range здесь ни при чём, если ответ вообще не про содержимое: 404 —
+        // это неверный адрес, 401/403 — просроченная или чужая подпись. Валить
+        // всё в «сервер не поддерживает Range» значило бы уводить от причины;
+        // отсутствие поддержки — это именно 200 вместо 206.
+        let status = response.status();
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
+            if status == reqwest::StatusCode::OK {
+                anyhow::bail!("сервер не поддерживает Range: на запрос диапазона ответил целым файлом (HTTP 200)");
+            }
+            anyhow::bail!("удалённый ресурс не открыт: HTTP {} на {}", status, url);
         }
         let len = response
             .headers()
@@ -116,7 +146,14 @@ impl HttpRange {
             .and_then(|v| v.rsplit('/').next()?.parse::<u64>().ok())
             .ok_or_else(|| anyhow::anyhow!("сервер не сообщил размер файла (Content-Range)"))?;
 
-        Ok(Self { url: url.to_string(), headers, len, runtime, cache: Mutex::new(Cache::default()) })
+        Ok(Self {
+            url: url.to_string(),
+            headers,
+            len,
+            runtime,
+            cache: Mutex::new(Cache::default()),
+            fetched: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     /// Блок из кэша или из сети.
@@ -151,6 +188,7 @@ impl HttpRange {
                           from, to, data.len(), expected);
         }
 
+        self.fetched.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
         Ok(self.cache.lock().unwrap().insert(index, data))
     }
 }
@@ -160,9 +198,9 @@ impl RangeSource for HttpRange {
         self.len
     }
 
+    /// Диапазон приходит уже проверенным (см. `RangeSource`), поэтому здесь
+    /// только сборка ответа из блоков.
     fn read_at(&self, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
-        if offset >= self.len { return Ok(Vec::new()); }
-        let size = size.min(self.len - offset);
         let mut out = Vec::with_capacity(size as usize);
 
         let mut position = offset;

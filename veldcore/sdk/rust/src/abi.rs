@@ -186,8 +186,8 @@ pub fn arena_free(region_id: u64) -> bool {
 // ── Logging ────────────────────────────────────────────────────
 
 /// Транспорт для HostLogger: прикладной код пишет макросами крейта `log`.
-/// `target` — подсистема записи; хост дополнит его именем плагина и
-/// отфильтрует по своему env_logger-фильтру.
+/// `target` — подсистема записи; хост дополнит его именем плагина
+/// (`veldmap::<plugin>::<target>`) и отфильтрует.
 #[doc(hidden)]
 pub fn log(level: log::Level, target: &str, message: &str) {
     let level_u64 = match level {

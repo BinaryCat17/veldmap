@@ -50,7 +50,7 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         ON_VIEW_LOCAL_PRESSED => handlers::preview::on_view_local_pressed(state, event),
         ON_VIEW_REMOTE_PRESSED => handlers::preview::on_view_remote_pressed(state, event),
         ON_DELETE_PRESSED => handlers::library::on_delete_pressed(state, event),
-        other => veldsdk::log::warn!(target: "handlers", "[data-browser] unknown UI method: {}", other),
+        other => veldsdk::log::warn!(target: "handlers", "unknown UI method: {}", other),
     }
 }
 
@@ -67,7 +67,7 @@ pub use handlers::preview::on_load_result;
 pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
     if handlers::preview::on_resource_opened(state, &opened) { return; }
     veldsdk::log::warn!(target: "handlers",
-        "[data-browser] on_open_result без учтённого запроса: {}", opened.correlation_id);
+        "on_open_result без учтённого запроса: {}", opened.correlation_id);
     if let Some(handle) = opened.handle {
         veldsdk::abi::arena_free(handle.id);
     }

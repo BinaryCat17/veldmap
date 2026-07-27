@@ -136,11 +136,8 @@ fn tiff(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) ->
     let mut decoder = tiff::decoder::Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
     let source_dims = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
 
-    if let Some(level) = smallest_overview(&mut decoder, max_w, max_h) {
-        decoder.seek_to_image(level).map_err(|e| format!("tiff: {}", e))?;
-    } else {
-        decoder.seek_to_image(0).map_err(|e| format!("tiff: {}", e))?;
-    }
+    let overview = smallest_overview(&mut decoder, max_w, max_h);
+    decoder.seek_to_image(overview.unwrap_or(0)).map_err(|e| format!("tiff: {}", e))?;
 
     let (w, h) = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
     let color = decoder.colortype().map_err(|e| format!("tiff: {}", e))?;
@@ -151,6 +148,15 @@ fn tiff(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) ->
     }
     let across = w.div_ceil(chunk_w);
     let down = h.div_ceil(chunk_h);
+
+    // Раскладка снимка решает, во что обойдётся превью: с пирамидой читается
+    // одна мелкая копия, без неё — все чанки полного разрешения, то есть файл
+    // целиком. По логу видно, какой из случаев достался (счётчик трафика —
+    // на стороне хоста, network/range.rs).
+    veldsdk::log::info!(target: "decode",
+        "tiff {}×{} → уровень {}×{}, чанк {}×{}, всего {} (пирамида: {})",
+        source_dims.0, source_dims.1, w, h, chunk_w, chunk_h, across * down,
+        if overview.is_some() { "есть" } else { "нет" });
 
     let mut sink = Sink::new(w, h, max_w, max_h);
     for index in 0..across * down {

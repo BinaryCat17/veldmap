@@ -60,10 +60,10 @@ pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
     let ctx = state.ctx.clone();
     let label = format!("{} {}", req.method, req.url);
 
-    log::info!(target: "host", "Received HTTP request: {}", label);
+    log::info!(target: "network", "Received HTTP request: {}", label);
 
     let spawned = state.tasks.spawn(&req.correlation_id, requestor_id, "http", &label, |correlation_id| async move {
-        log::info!(target: "host", "Executing HTTP request {}...", correlation_id);
+        log::info!(target: "network", "Executing HTTP request {}...", correlation_id);
         let method = match req.method.to_uppercase().as_str() {
             "POST" => reqwest::Method::POST,
             "PUT" => reqwest::Method::PUT,
@@ -79,12 +79,12 @@ pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
             Ok(res) => {
                 let status = res.status().as_u16() as u32;
                 let body = res.bytes().await.unwrap_or_default().to_vec();
-                log::info!(target: "host", "HTTP request {} finished with status {}", correlation_id, status);
+                log::info!(target: "network", "HTTP request {} finished with status {}", correlation_id, status);
                 bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status, body, correlation_id });
                 Ok(())
             }
             Err(e) => {
-                log::warn!(target: "host", "HTTP request {} failed: {}", correlation_id, e);
+                log::warn!(target: "network", "HTTP request {} failed: {}", correlation_id, e);
                 let error = e.to_string();
                 bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status: 0, body: Vec::new(), correlation_id });
                 Err(error)

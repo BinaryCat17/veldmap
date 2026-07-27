@@ -99,7 +99,7 @@ impl Tasks {
     pub fn cancel(&self, task_id: &str, requestor: u32) {
         match self.ctx.tasks.cancel(task_id, requestor) {
             CancelOutcome::Cancelled => {
-                log::info!(target: "host", "Task {} cancelled by requestor {}", task_id, requestor);
+                log::info!(target: "tasks", "Task {} cancelled by requestor {}", task_id, requestor);
                 bus::emit::on_task_finished(&*self.ctx.dispatcher, &TaskFinished {
                     task_id: task_id.to_string(),
                     error: "Cancelled".to_string(),
@@ -107,10 +107,10 @@ impl Tasks {
                 });
             }
             CancelOutcome::NotFound => {
-                log::warn!(target: "host", "Cancel for unknown task {}", task_id);
+                log::warn!(target: "tasks", "Cancel for unknown task {}", task_id);
             }
             CancelOutcome::Denied => {
-                log::warn!(target: "host", "Cancel of task {} denied for requestor {}", task_id, requestor);
+                log::warn!(target: "tasks", "Cancel of task {} denied for requestor {}", task_id, requestor);
             }
         }
     }
@@ -119,11 +119,11 @@ impl Tasks {
     /// разрешает другому сервису отменять задачу — как grant_write у ресурсов.
     pub fn grant(&self, task_id: &str, requestor: u32, service: &str) {
         let Some(target) = self.ctx.dispatcher.instance_of(service) else {
-            log::warn!(target: "host", "Task grant to unknown service '{}'", service);
+            log::warn!(target: "tasks", "Task grant to unknown service '{}'", service);
             return;
         };
         if !self.ctx.tasks.grant(task_id, requestor, target) {
-            log::warn!(target: "host", "Task grant on {} denied for requestor {}", task_id, requestor);
+            log::warn!(target: "tasks", "Task grant on {} denied for requestor {}", task_id, requestor);
         }
     }
 }

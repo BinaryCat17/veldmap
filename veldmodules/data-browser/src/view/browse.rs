@@ -15,9 +15,9 @@ pub fn view(state: &State) -> Element<()> {
         // Папки не сверяем с локальными файлами — это ключ remote-префикса,
         // а не имя файла.
         let items: Vec<Row> = browse_state.items.iter().map(|i| if i.is_folder {
-            Row::folder(i.s3_key.clone(), i.name.clone())
+            Row::folder(i.identifier.clone(), i.name.clone())
         } else {
-            Row::remote(&state.library, i.s3_key.clone(), i.name.clone())
+            Row::remote(&state.library, i.identifier.clone(), i.name.clone())
         }).collect();
 
         items_or_message(&items, ItemActions {

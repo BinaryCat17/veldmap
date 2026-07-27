@@ -41,13 +41,47 @@ pub fn surface_format_to_proto(fmt: wgpu::TextureFormat) -> i32 {
 
 /// Носитель, умеющий отдавать произвольный диапазон байт.
 ///
-/// Реализация живёт в том модуле, который знает протокол (network — HTTP
-/// с Range-запросами): ядро не тянет в себя ни http-клиент, ни его
-/// зависимости, а получает готовый объект. Чтение блокирующее — хост
-/// вызывает его на blocking-пуле, см. `DataBacking::read_blocks`.
+/// Реализация живёт там, где известен протокол: файл на диске — здесь же
+/// (`FileSource`), HTTP с Range-запросами — в модуле network, чтобы ядро не
+/// тянуло в себя http-клиент. Для читателя разницы нет, и это не совпадение,
+/// а условие: код, идущий по ресурсу окнами, работает с диском и с сетью без
+/// единой правки. Чтение блокирующее — хост вызывает его на blocking-пуле,
+/// см. `DataBacking::read_blocks`.
 pub trait RangeSource: Send + Sync {
     fn len(&self) -> u64;
+
+    /// Диапазон уже проверен вызывающим: `offset < len()` и
+    /// `offset + size <= len()` (см. `MemoryManager::read`). Реализациям
+    /// клампить повторно не нужно — раньше это делал каждый носитель сам,
+    /// и делал по-своему.
     fn read_at(&self, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>;
+}
+
+/// Файл на диске: байты остаются на нём, читаются по смещению. Так открываются
+/// ресурсы, которые в память не влезают (гигабайтные снимки).
+///
+/// Открыт только на чтение — записи через ресурс у файла нет и не было:
+/// ветка записи существовала, но `alloc_file` открывает файл `File::open`, и
+/// любая запись возвращала бы ошибку дескриптора. Файлы пишет модуль fs
+/// (топик fs/write), а не владелец ресурса.
+struct FileSource {
+    file: std::sync::Mutex<std::fs::File>,
+    len: u64,
+}
+
+impl RangeSource for FileSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&self, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = self.file.lock().unwrap();
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; size as usize];
+        file.read_exact(&mut buf)?;
+        Ok(buf)
+    }
 }
 
 /// Чем подкреплены байты ресурса.
@@ -60,14 +94,12 @@ pub trait RangeSource: Send + Sync {
 pub enum DataBacking {
     /// Обычная память хоста.
     Cpu(Vec<u8>),
-    /// Файл на диске: байты читаются и пишутся по смещению, целиком в память
-    /// не поднимаются. Так открываются ресурсы, которые в память не влезают
-    /// (гигабайтные снимки), — потребитель тянет из них нужные фрагменты.
-    File { file: std::sync::Mutex<std::fs::File>, len: u64 },
-    /// Удалённый носитель: чтение диапазона уходит в сеть (см. `RangeSource`).
-    /// Для потребителя неотличим от файла — тем и ценен: код, читающий
-    /// ресурс окнами, работает и с диском, и с сетью без единой правки.
-    Remote(Arc<dyn RangeSource>),
+    /// Носитель, читаемый диапазонами: файл на диске или удалённый ресурс
+    /// (см. `RangeSource`). Один вариант на оба именно потому, что для
+    /// читателя они одинаковы; двумя вариантами они были ровно до тех пор,
+    /// пока клампинг хвоста и признак «чтение блокирует» не расползлись по
+    /// двум копиям.
+    Range(Arc<dyn RangeSource>),
     /// Буфер GPU. `mapped` — создан с mapped_at_creation, запись идёт прямо
     /// в отображённый диапазон, а не через очередь.
     Buffer { buffer: Arc<wgpu::Buffer>, mapped: bool },
@@ -98,24 +130,21 @@ impl DataBacking {
         }
     }
 
-    /// Чтение уходит наружу (диск, ожидание GPU) и может занять поток надолго.
-    /// Такие вызовы хост выполняет на blocking-пуле: иначе медленный носитель
-    /// съедает воркер рантайма, а не только фибру своего плагина.
+    /// Чтение уходит наружу (диск, сеть, ожидание GPU) и может занять поток
+    /// надолго. Такие вызовы хост выполняет на blocking-пуле: иначе медленный
+    /// носитель съедает воркер рантайма, а не только фибру своего плагина.
+    ///
+    /// Парного `write_blocks` нет: писать умеют только Cpu (memcpy) и GPU
+    /// (через очередь wgpu), а они не блокируют. Диапазонный носитель
+    /// доступен лишь на чтение.
     pub fn read_blocks(&self) -> bool {
-        matches!(self, Self::File { .. } | Self::Remote(_) | Self::Buffer { .. })
-    }
-
-    /// То же для записи. Буфер и текстура пишутся через очередь wgpu, поток
-    /// на этом не стоит — в отличие от файла.
-    pub fn write_blocks(&self) -> bool {
-        matches!(self, Self::File { .. })
+        matches!(self, Self::Range(_) | Self::Buffer { .. })
     }
 
     pub fn byte_len(&self) -> u64 {
         match self {
             Self::Cpu(v) => v.len() as u64,
-            Self::File { len, .. } => *len,
-            Self::Remote(src) => src.len(),
+            Self::Range(src) => src.len(),
             Self::Buffer { buffer, .. } => buffer.size(),
             Self::Texture { width, height, format, .. } => {
                 let bpp = bytes_per_pixel(*format);
@@ -160,20 +189,20 @@ impl MemoryManager {
         self.alloc(DataBacking::Cpu(data), owner_id)
     }
 
-    /// Ресурс поверх файла: содержимое остаётся на диске, чтение и запись
-    /// идут по смещению (см. `DataBacking::File`). Размер фиксируется на
-    /// момент открытия — он же уезжает потребителю в ResourceHandle.size.
+    /// Ресурс поверх файла: содержимое остаётся на диске, читатель тянет
+    /// диапазоны. Размер фиксируется на момент открытия — он же уезжает
+    /// потребителю в ResourceHandle.size.
     pub fn alloc_file(&self, path: &std::path::Path, owner_id: u32) -> std::io::Result<(ResourceId, u64)> {
         let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
-        let id = self.alloc(DataBacking::File { file: std::sync::Mutex::new(file), len }, owner_id);
-        Ok((id, len))
+        let source = FileSource { file: std::sync::Mutex::new(file), len };
+        Ok((self.alloc_range(Arc::new(source), owner_id), len))
     }
 
-    /// Ресурс поверх удалённого носителя (см. `RangeSource`): содержимое
-    /// остаётся на той стороне, читатель тянет диапазоны.
-    pub fn alloc_remote(&self, source: Arc<dyn RangeSource>, owner_id: u32) -> ResourceId {
-        self.alloc(DataBacking::Remote(source), owner_id)
+    /// Ресурс поверх произвольного диапазонного носителя (см. `RangeSource`):
+    /// содержимое остаётся на той стороне, читатель тянет диапазоны.
+    pub fn alloc_range(&self, source: Arc<dyn RangeSource>, owner_id: u32) -> ResourceId {
+        self.alloc(DataBacking::Range(source), owner_id)
     }
 
     pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, owner_id: u32) -> ResourceId {
@@ -197,7 +226,7 @@ impl MemoryManager {
     pub fn alloc_texture(&self, width: u32, height: u32, format_proto: i32, usage: u32, owner_id: u32) -> ResourceId {
         let max = self.device.limits().max_texture_dimension_2d;
         if width == 0 || height == 0 || width > max || height > max {
-            log::warn!(target: "veldmap::host::memory",
+            log::warn!(target: "memory",
                 "Texture {}x{} rejected: limit is {}x{}", width, height, max, max);
             return 0;
         }
@@ -234,13 +263,6 @@ impl MemoryManager {
                 if end > vec.len() { vec.resize(end, 0); }
                 vec[offset as usize..end].copy_from_slice(data);
             }
-            DataBacking::File { file, len } => {
-                use std::io::{Seek, SeekFrom, Write};
-                let mut f = file.lock().unwrap();
-                f.seek(SeekFrom::Start(offset))?;
-                f.write_all(data)?;
-                *len = (*len).max(offset + data.len() as u64);
-            }
             DataBacking::Buffer { buffer, mapped: false } => {
                 let q = self.queue.lock().unwrap();
                 q.write_buffer(buffer, offset, data);
@@ -251,10 +273,12 @@ impl MemoryManager {
                 let mut view = slice.get_mapped_range_mut();
                 view[..data.len()].copy_from_slice(data);
             }
-            // Запись в удалённый носитель — отдельный протокол (PUT, докачка,
-            // права на той стороне), а не «ещё один вариант write».
-            DataBacking::Remote(_) => {
-                return Err(anyhow::anyhow!("Remote resources are read-only"));
+            // Диапазонный носитель только читается. Для файла запись идёт
+            // топиком fs/write, для удалённого ресурса это вообще отдельный
+            // протокол (PUT, докачка, права на той стороне) — не «ещё один
+            // вариант write».
+            DataBacking::Range(_) => {
+                return Err(anyhow::anyhow!("Range-backed resources are read-only"));
             }
             DataBacking::Texture { ref texture, width, height, format } => {
                 let bpp = bytes_per_pixel(*format);
@@ -280,32 +304,35 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Байты ресурса со смещения.
+    ///
+    /// Чтение за концом — не ошибка, а короткий (возможно пустой) ответ, как
+    /// у файла: читатель идёт окнами, и последнее окно почти всегда неполное
+    /// (`ResourceReader` в SDK). Правило одно на все носители и проверяется
+    /// здесь: раньше каждый решал сам, и один и тот же ABI-вызов имел три
+    /// разных контракта — Cpu отвечал ошибкой «out of bounds», файл и сеть
+    /// возвращали короткий буфер. Держалось это лишь на том, что
+    /// единственный читатель клампил запрос у себя.
     pub fn read(&self, region_id: ResourceId, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
         if size == 0 { return Ok(Vec::new()); }
 
         let region = self.regions.get(&region_id)
             .ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?;
 
+        // Текстура — не байтовый диапазон, смещение для неё не определено;
+        // отвечаем отказом до всякого клампинга.
+        if matches!(region.backing, DataBacking::Texture { .. }) {
+            return Err(anyhow::anyhow!("Direct read from texture regions is not supported"));
+        }
+        let len = region.backing.byte_len();
+        if offset >= len { return Ok(Vec::new()); }
+        let size = size.min(len - offset);
+
         match &region.backing {
             DataBacking::Cpu(vec) => {
-                let start = offset as usize;
-                let end = (offset + size) as usize;
-                if end > vec.len() { return Err(anyhow::anyhow!("Read out of bounds")); }
-                Ok(vec[start..end].to_vec())
+                Ok(vec[offset as usize..(offset + size) as usize].to_vec())
             }
-            // Хвост короче запрошенного — не ошибка, а конец файла: читатель
-            // (SDK Resource) идёт окнами и последнее окно почти всегда неполное.
-            DataBacking::File { file, len } => {
-                if offset >= *len { return Ok(Vec::new()); }
-                let size = size.min(*len - offset) as usize;
-                use std::io::{Read, Seek, SeekFrom};
-                let mut f = file.lock().unwrap();
-                f.seek(SeekFrom::Start(offset))?;
-                let mut buf = vec![0u8; size];
-                f.read_exact(&mut buf)?;
-                Ok(buf)
-            }
-            DataBacking::Remote(source) => {
+            DataBacking::Range(source) => {
                 let source = source.clone();
                 drop(region);
                 source.read_at(offset, size)
@@ -358,9 +385,8 @@ impl MemoryManager {
                     Ok(data)
                 }
             }
-            DataBacking::Texture { .. } => {
-                Err(anyhow::anyhow!("Direct read from texture regions is not supported"))
-            }
+            // Отсеяна выше, до проверки диапазона.
+            DataBacking::Texture { .. } => unreachable!(),
         }
     }
 
@@ -371,10 +397,6 @@ impl MemoryManager {
     /// Нужно ли выполнять операцию на blocking-пуле (см. `DataBacking::read_blocks`).
     pub fn read_blocks(&self, region_id: ResourceId) -> bool {
         self.regions.get(&region_id).map(|r| r.backing.read_blocks()).unwrap_or(false)
-    }
-
-    pub fn write_blocks(&self, region_id: ResourceId) -> bool {
-        self.regions.get(&region_id).map(|r| r.backing.write_blocks()).unwrap_or(false)
     }
 
     pub fn get_size(&self, region_id: ResourceId) -> u64 {

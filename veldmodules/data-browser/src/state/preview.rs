@@ -16,20 +16,73 @@ pub struct PreviewState {
     /// остаётся на учёте до ответа не по забывчивости: ресурс придёт всё
     /// равно и придёт нам во владение, а опознать его как свой (и освободить)
     /// можно только здесь — открывают нам двое, библиотека и провайдер.
+    ///
+    /// Это множество, а не «текущий запрос»: чем занят экран, говорит `phase`.
     pub opening: veldsdk::Correlator<()>,
-    /// correlation_id запроса, результат которого показываем.
-    pub inflight: Option<String>,
-    /// Заведённая нами задача декодирования — есть только пока загрузчик
-    /// работает. Отдельно от `inflight` потому, что отменять и закрывать
-    /// нужно ровно то, что успело начаться: пока ресурс ещё открывается,
-    /// задачи нет, и отмена по ней была бы обращением в пустоту.
-    pub decode_task: Option<String>,
+    phase: Phase,
     pub error: Option<String>,
+}
+
+/// Чем занят экран.
+///
+/// Раньше то же самое хранилось тремя полями: `inflight` (какой запрос
+/// показываем) и `decode_task` (заведена ли задача). Инвариант «задача
+/// существует только после того, как ресурс открылся» держался на том, что
+/// оба поля меняют согласованно, — здесь он выражен формой типа: у `Opening`
+/// задачи нет по построению.
+#[derive(Default)]
+enum Phase {
+    #[default]
+    Idle,
+    /// Ресурс запрошен, ждём `core.ResourceOpened`. Задачи ещё нет: отменять
+    /// нечего, закрывать нечего.
+    Opening(String),
+    /// Ресурс открыт, задача декодирования заведена, ждём ответа загрузчика.
+    Decoding(String),
+}
+
+impl Phase {
+    fn id(&self) -> Option<&str> {
+        match self {
+            Phase::Idle => None,
+            Phase::Opening(id) | Phase::Decoding(id) => Some(id),
+        }
+    }
 }
 
 impl PreviewState {
     pub fn is_loading(&self) -> bool {
-        self.inflight.is_some()
+        self.phase.id().is_some()
+    }
+
+    /// Ответ относится к тому, что мы сейчас показываем? Топики широковещательные,
+    /// и пока ответ шёл, пользователь мог открыть другой файл или уйти с экрана.
+    pub fn is_current(&self, correlation_id: &str) -> bool {
+        self.phase.id() == Some(correlation_id)
+    }
+
+    /// Заводит новый запрос: ставит его на учёт открытий и делает текущим.
+    pub fn begin(&mut self) -> String {
+        let correlation_id = self.opening.begin(());
+        self.phase = Phase::Opening(correlation_id.clone());
+        correlation_id
+    }
+
+    /// Ресурс открыт, задача заведена — переходим ко второму шагу.
+    pub fn decoding(&mut self) {
+        if let Phase::Opening(correlation_id) = &self.phase {
+            self.phase = Phase::Decoding(correlation_id.clone());
+        }
+    }
+
+    /// Работа кончилась — успехом, ошибкой или отказом. Возвращает id
+    /// заведённой задачи, если она успела появиться: закрыть её (`tasks/end`)
+    /// или отменить (`tasks/cancel`) — дело вызывающего, исход знает он.
+    pub fn finish(&mut self) -> Option<String> {
+        match std::mem::take(&mut self.phase) {
+            Phase::Decoding(task_id) => Some(task_id),
+            Phase::Idle | Phase::Opening(_) => None,
+        }
     }
 
     /// Освобождает ресурс с файлом — после декодирования он не нужен.
@@ -55,7 +108,6 @@ impl PreviewState {
         self.close_file();
         self.error = None;
         self.current_path.clear();
-        self.inflight = None;
-        self.decode_task.take()
+        self.finish()
     }
 }

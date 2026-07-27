@@ -1,9 +1,11 @@
 //! Мост `log` → ABI хоста. Модуль пишет обычными макросами крейта `log`;
 //! таргет записи едет на хост как есть, и хост дополняет его именем плагина
-//! (`veldmap::<plugin>::<target>`). Фильтрация — там же, на хосте, стандартным
-//! env_logger-фильтром: собственного механизма у SDK нет.
+//! (`veldmap::<plugin>::<target>`). Фильтрация — там же, на хосте, по фильтру
+//! из core.json: собственного механизма у SDK нет.
 //!
 //! Подсистему указывайте таргетом: `log::trace!(target: "handlers", "...")`.
+//! Не указали — хост возьмёт её из пути модуля. Имя плагина в текст сообщения
+//! писать не нужно, оно и так в таргете.
 
 use log::{Log, Metadata, Record, LevelFilter, SetLoggerError};
 
@@ -14,8 +16,16 @@ impl Log for HostLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool { true }
 
     fn log(&self, record: &Record) {
+        // `log` подставляет в таргет путь модуля, когда таргет не указан —
+        // равенство и означает «подсистему не назвали». Тащить на хост
+        // veldmap_data_provider::cdse незачем: имя плагина он и так знает,
+        // от пути полезен только хвост.
+        let target = match record.module_path() {
+            Some(path) if path == record.target() => path.rsplit("::").next().unwrap_or(path),
+            _ => record.target(),
+        };
         // Прямой ABI-вызов: минуя шину событий.
-        crate::abi::log(record.level(), record.target(), &format!("{}", record.args()));
+        crate::abi::log(record.level(), target, &format!("{}", record.args()));
     }
 
     fn flush(&self) {}

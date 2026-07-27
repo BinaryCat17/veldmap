@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         0 => anyhow::bail!("No module declares a window; the desktop runner has nothing to present"),
         n => anyhow::bail!("{} modules declare windows, but the desktop runner supports exactly one for now", n),
     };
-    log::info!(target: "veldmap::host::render", "Window '{}': owner '{}'", win_cfg.title, owner_name);
+    log::info!(target: "render", "Window '{}': owner '{}'", win_cfg.title, owner_name);
 
     let event_loop = EventLoop::new()?;
     let mut builder = WindowBuilder::new()
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let winit_window = Arc::new(builder.build(&event_loop)?);
 
     // ── 2. GPU ──────────────────────────────────────────────────────────────
-    log::info!(target: "veldmap::host::render", "Creating wgpu instance (Vulkan only)...");
+    log::info!(target: "render", "Creating wgpu instance (Vulkan only)...");
     // Валидация Vulkan — только по запросу через env (WGPU_VALIDATION=1 и т.п.):
     // InstanceFlags::all() в релизе включал полный validation layer и тормозил.
     // ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER обязателен: Dozen (Vulkan поверх
@@ -203,9 +203,9 @@ async fn main() -> anyhow::Result<()> {
                             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                             let bind_group = compositor.create_bind_group(&device_arc, &view);
                             hw.surface = Some((texture_id, bind_group));
-                            log::debug!(target: "veldmap::host::render", "Window '{}' surface attached: texture {}", hw.owner, texture_id);
+                            log::debug!(target: "render", "Window '{}' surface attached: texture {}", hw.owner, texture_id);
                         }
-                        None => log::warn!(target: "veldmap::host::render", "set_surface for '{}' names unknown texture {}", hw.owner, texture_id),
+                        None => log::warn!(target: "render", "set_surface for '{}' names unknown texture {}", hw.owner, texture_id),
                     }
                 }
 
@@ -213,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
                     Ok(f) => f,
                     Err(wgpu::SurfaceError::Lost) => {
                         surface.configure(&device_arc, &config);
-                        log::debug!(target: "veldmap::host::render", "Surface reconfigured after loss");
+                        log::debug!(target: "render", "Surface reconfigured after loss");
                         winit_window.request_redraw();
                         return;
                     }
@@ -232,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
                         // клампятся по таргету. У каждого view размеры записаны
                         // при создании; None — view чужой или уже освобождён.
                         let Some((target_w, target_h)) = graphics.get_texture_view_size(op.target_view_id, op.instance_id) else {
-                            log::error!(target: "veldmap::host::render", "Render op targets view {} with unknown size, skipped", op.target_view_id);
+                            log::error!(target: "render", "Render op targets view {} with unknown size, skipped", op.target_view_id);
                             continue;
                         };
                         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -250,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
                             &mut rp, &op.command_buffer, &graphics, target_w, target_h, op.instance_id,
                         );
                     } else {
-                        log::warn!(target: "veldmap::host::render", "Render op targets unknown view {}", op.target_view_id);
+                        log::warn!(target: "render", "Render op targets unknown view {}", op.target_view_id);
                     }
                 }
 

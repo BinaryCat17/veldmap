@@ -5,7 +5,7 @@
 //! запрос к хранилищу умеет только он, а библиотека про подписи не знает
 //! ровно так же, как провайдер не знает про раскладку диска.
 
-use crate::module::State;
+use crate::module::{ReadPurpose, State};
 use crate::proto::data_library::OpenRequest;
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
@@ -26,12 +26,12 @@ pub fn on_open(state: &mut State, req: OpenRequest) {
     }
 
     let path = entry.path.clone();
-    // Внешний id вернём в ответе; собственный нужен, чтобы отличить своё
-    // чтение от чтения сидкаров (топик fs/on_read_result общий).
-    let correlation_id = state.pending_opens.begin(OpenFor {
+    // Внешний id вернём в ответе; собственный — это ключ ожидания, по нему
+    // же ответ и опознаётся как «открытие файла», а не чтение сидкара.
+    let correlation_id = state.pending_reads.begin(ReadPurpose::File(OpenFor {
         owner,
         reply_to: req.correlation_id,
-    });
+    }));
     crate::calls::fs::on_read(&FsReadRequest { path, correlation_id });
 }
 
@@ -41,24 +41,23 @@ pub struct OpenFor {
     pub reply_to: String,
 }
 
-/// fs открыл файл. `false` — ответ не наш (значит, это сидкар).
-pub fn on_file_opened(state: &mut State, opened: &ResourceOpened) -> bool {
-    let Some(target) = state.pending_opens.take(&opened.correlation_id) else { return false };
-
+/// fs открыл файл, который мы просили для заказчика (`target` — снятое с
+/// учёта ожидание, см. module::on_read_result).
+pub fn on_file_opened(target: OpenFor, opened: &ResourceOpened) {
     if !opened.error.is_empty() {
         emit_error(target.reply_to, &opened.error);
-        return true;
+        return;
     }
     let Some(handle) = opened.handle.clone() else {
         emit_error(target.reply_to, "fs вернул пустой handle");
-        return true;
+        return;
     };
     // Владение — заказчику: дальше он читает ресурс как хочет и сам решает,
     // когда закрыть.
     if !veldsdk::abi::arena_transfer(handle.id, &target.owner) {
         veldsdk::abi::arena_free(handle.id);
         emit_error(target.reply_to, &format!("не удалось передать ресурс сервису '{}'", target.owner));
-        return true;
+        return;
     }
 
     crate::emit::on_open_result(&ResourceOpened {
@@ -66,7 +65,6 @@ pub fn on_file_opened(state: &mut State, opened: &ResourceOpened) -> bool {
         error: String::new(),
         correlation_id: target.reply_to,
     });
-    true
 }
 
 fn emit_error(correlation_id: String, error: &str) {

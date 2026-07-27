@@ -53,7 +53,7 @@ message DownloadRequest {
 // Download started event
 message DownloadStarted {
   string task_id = 1;
-  string identifier = 2;  // s3_key
+  string identifier = 2;  // путь с префиксом бакета: eodata/Sentinel-2/...
   string destination = 3;
 }
 
@@ -94,6 +94,6 @@ message CancelDownloadRequest {
 // такой же, как у fs и network.
 
 message OpenRequest {
-  string identifier = 1;  // s3_key продукта
+  string identifier = 1;  // путь продукта с префиксом бакета
   string correlation_id = 2;
 }

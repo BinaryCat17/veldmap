@@ -23,7 +23,7 @@ impl veldmap_host_util::AsyncNativeService for Service {
                 module::{{ i.name }}(&self.state, req, requestor_id);
             }
             {%- endfor %}
-            _ => log::warn!(target: "host", "Unknown {{ name }} topic: {}", topic),
+            _ => log::warn!(target: "{{ name }}", "Unknown {{ name }} topic: {}", topic),
         }
     }
 }

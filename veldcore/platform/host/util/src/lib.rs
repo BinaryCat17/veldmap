@@ -35,7 +35,8 @@ pub use veldmap_host_core::registry::Access;
 
 // ── Носители ресурсов ───────────────────────────────────────────────────────
 // Модуль, знающий свой протокол, реализует RangeSource и отдаёт его
-// memory.alloc_remote(): дальше ресурс неотличим от файла для всех читателей.
+// memory.alloc_range(). Файл на диске подключается тем же способом, так что
+// для читателя диск и сеть — один и тот же ресурс.
 pub use veldmap_host_core::memory::RangeSource;
 
 // ── Протокол ────────────────────────────────────────────────────────────────
@@ -104,7 +105,7 @@ pub mod wire {
         match T::decode(payload) {
             Ok(v) => Some(v),
             Err(e) => {
-                log::error!(target: "host", "Failed to decode {}: {}", topic, e);
+                log::error!(target: "bus", "Failed to decode {}: {}", topic, e);
                 None
             }
         }

@@ -50,7 +50,7 @@ pub fn on_load(_state: &mut State, req: LoadImageRequest) {
     let (handle, width, height, source, error) = match make_texture(req, &|| cancelled.cancelled()) {
         Ok(t) => (Some(ResourceHandle { id: t.id, size: t.size }), t.width, t.height, t.source, String::new()),
         Err(e) => {
-            veldsdk::log::warn!(target: "handlers", "[image-loader] {}: {}", label, e);
+            veldsdk::log::warn!(target: "handlers", "{}: {}", label, e);
             (None, 0, 0, (0, 0), e)
         }
     };

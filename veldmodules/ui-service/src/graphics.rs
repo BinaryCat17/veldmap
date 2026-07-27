@@ -31,7 +31,7 @@ pub fn render_ui(
     scale_factor: f32,
     surface_format: i32,
 ) -> anyhow::Result<()> {
-    veldsdk::log::trace!(target: "graphics", "[RENDER-UI] START {}x{} into texture {}", width, height, target_texture);
+    veldsdk::log::trace!(target: "graphics", "START {}x{} into texture {}", width, height, target_texture);
 
     let fresh = matches!(&*plugin.target_view.borrow(), Some((tex, _)) if *tex == target_texture);
     if !fresh {
@@ -65,7 +65,7 @@ pub fn render_ui(
 
     // Render geometry if present
     if !renderer.vertices.is_empty() {
-        veldsdk::log::trace!(target: "graphics", "[RENDER-UI] Rendering {} vertices", renderer.vertices.len());
+        veldsdk::log::trace!(target: "graphics", "Rendering {} vertices", renderer.vertices.len());
         render_geometry(plugin, renderer, &mut recorder, width, height)?;
     }
 
@@ -75,7 +75,7 @@ pub fn render_ui(
         let view = &target.as_ref().expect("target view ensured above").1;
         recorder.submit(view)?;
     }
-    veldsdk::log::trace!(target: "graphics", "[RENDER-UI] END");
+    veldsdk::log::trace!(target: "graphics", "END");
     Ok(())
 }
 

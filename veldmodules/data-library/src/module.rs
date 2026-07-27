@@ -38,8 +38,12 @@ pub struct State {
 
     /// Ожидание fs/on_list — гасит устаревший ответ.
     pub pending_list: veldsdk::Correlator<()>,
-    /// Ожидание fs/on_read сидкара — контекст: имя записи.
-    pub pending_origin_reads: veldsdk::Correlator<String>,
+    /// Отданные fs чтения, ещё не отвеченные. Таблица одна на топик, а не на
+    /// назначение: ответ приходит один (`fs/on_read_result`), и вопрос «чей
+    /// это id» должен иметь один ответ. Раздельными таблицами на него отвечали
+    /// перебором, а id, не найденный ни в одной, проваливался мимо — вместе с
+    /// ресурсом, который в этом ответе пришёл.
+    pub pending_reads: veldsdk::Correlator<ReadPurpose>,
     /// Ожидание fs/on_write сидкара.
     pub pending_sidecar_writes: veldsdk::Correlator<SidecarWrite>,
     /// Ожидание fs/on_delete — контекст: путь удаляемого файла.
@@ -48,9 +52,16 @@ pub struct State {
     /// `.part` поверх активной записи нельзя (host держит файл открытым),
     /// поэтому сначала отменяем, а delete срабатывает по приходу отмены.
     pub pending_delete_on_cancel: veldsdk::Correlator<String>,
-    /// Ожидание fs/on_read при открытии файла для заказчика: кому уйдёт
-    /// владение и на какой запрос отвечаем.
-    pub pending_opens: veldsdk::Correlator<open::OpenFor>,
+}
+
+/// Зачем библиотека читает файл. Оба чтения идут одним топиком fs/read и
+/// возвращаются одним `core.ResourceOpened` — различает их только это.
+pub enum ReadPurpose {
+    /// Сидкар записи; контекст — её имя.
+    Sidecar(String),
+    /// Файл, открываемый заказчику: кому уйдёт владение и на какой запрос
+    /// отвечаем.
+    File(open::OpenFor),
 }
 
 /// Одна идущая закачка — единственный источник байтового прогресса, пока она
@@ -81,11 +92,10 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
         origins: HashMap::new(),
         downloads: veldsdk::Correlator::new(),
         pending_list: veldsdk::Correlator::new(),
-        pending_origin_reads: veldsdk::Correlator::new(),
+        pending_reads: veldsdk::Correlator::new(),
         pending_sidecar_writes: veldsdk::Correlator::new(),
         pending_delete: veldsdk::Correlator::new(),
         pending_delete_on_cancel: veldsdk::Correlator::new(),
-        pending_opens: veldsdk::Correlator::new(),
     };
     Ok(state)
 }
@@ -115,12 +125,24 @@ impl State {
 // -- Input handlers --
 pub use catalog::{on_list, on_list_result, on_write_result};
 
-/// fs/on_read_result — топик один, потребителей внутри два: каталог дочитывает
-/// сидкары, open открывает файл заказчику. Каждый узнаёт свой ответ по
-/// собственному корреляту, поэтому развилка здесь, а не в схеме.
+/// fs/on_read_result — топик один, назначений два: каталог дочитывает сидкары,
+/// open отдаёт файл заказчику. Развилка здесь, а не в схеме, потому что
+/// различает их не контракт шины, а назначение, записанное при запросе.
 pub fn on_read_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
-    if open::on_file_opened(state, &opened) { return; }
-    catalog::on_sidecar_read(state, &opened);
+    match state.pending_reads.take(&opened.correlation_id) {
+        Some(ReadPurpose::Sidecar(name)) => catalog::on_sidecar_read(state, name, &opened),
+        Some(ReadPurpose::File(target)) => open::on_file_opened(target, &opened),
+        // Ответ без учтённого запроса возможен только при рассогласовании, но
+        // ресурс в нём всё равно наш — освобождаем, чтобы ошибка стоила лога,
+        // а не утечки.
+        None => {
+            veldsdk::log::warn!(target: "handlers",
+                "fs/on_read_result без учтённого запроса: {}", opened.correlation_id);
+            if let Some(handle) = opened.handle {
+                veldsdk::abi::arena_free(handle.id);
+            }
+        }
+    }
 }
 pub use download::{on_download, on_cancel, on_delete, on_delete_result,
                    on_download_started, on_download_progress, on_downloaded};

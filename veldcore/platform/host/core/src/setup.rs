@@ -3,94 +3,26 @@ use crate::dispatcher::Dispatcher;
 use crate::registry::ResourceRegistry;
 use crate::memory::MemoryManager;
 use crate::graphics::GraphicsDevice;
-use std::io::Write;
 
 pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -> anyhow::Result<()> {
-    // Конфиг нужен до инициализации логгера: из него берётся фильтр.
+    // Конфиг нужен до инициализации логгера: из него берутся фильтры.
     let core_config: crate::CoreConfig =
         crate::config::load_config_with_path::<crate::CoreConfig, _>(&format!("{}/core.json", config_dir))
             .unwrap_or_default();
-    crate::logging::init_rate_limiting(core_config.log_rate_limit_ms);
 
-    let mut log_path = std::path::PathBuf::from("logs/host.log");
-    
-    if let Some(logs) = &host_config.logs {
-        log_path = std::path::PathBuf::from(logs);
-    }
+    let log_path = host_config.project_root.join(
+        host_config.logs.as_deref().unwrap_or("logs/host.log")
+    );
 
-    let final_log_path = host_config.project_root.join(log_path);
-    // Полный нефильтрованный поток логов — рядом с основным файлом.
-    let trace_log_path = final_log_path.with_file_name("trace.log");
+    crate::logging::init(crate::logging::Options {
+        log_filter: &core_config.log_filter,
+        trace_filter: &core_config.trace_filter,
+        rate_limit_ms: core_config.log_rate_limit_ms,
+        log_path: &log_path,
+    })?;
 
-    if let Some(parent) = final_log_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::remove_file(&final_log_path);
-    let _ = std::fs::remove_file(&trace_log_path);
-
-    let open_log = |path: &std::path::Path| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-            .map(|f| Arc::new(Mutex::new(f)))
-    };
-    // host.log — только важное (то же, что идёт в консоль).
-    let host_log = open_log(&final_log_path);
-    // trace.log — вообще всё, включая debug/trace сторонних крейтов.
-    let trace_log = open_log(&trace_log_path);
-
-    // Отбор по подсистемам — здесь: таргет записи называет подсистему
-    // (veldmap::host::render, veldmap::<plugin>::<target>). RUST_LOG
-    // переопределяет значение из core.json.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(core_config.log_filter.as_str()))
-        .format(move |buf, record| {
-            let message = format!("{}", record.args());
-
-            // Дедуп повторов — только для логов самого хоста: у модулей
-            // повторяющиеся события (кадровые тики, прогресс) осмысленны.
-            if record.target().starts_with("veldmap::host")
-                && crate::logging::is_rate_limited(&message)
-            {
-                return Ok(());
-            }
-
-            let log_line = format!(
-                "[{}] <{}> {:5} {}\n",
-                chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
-                record.target(),
-                record.level(),
-                message
-            );
-
-            // trace.log получает всё без фильтрации.
-            if let Some(file) = &trace_log {
-                if let Ok(mut f) = file.lock() {
-                    let _ = f.write_all(log_line.as_bytes());
-                }
-            }
-
-            let is_veldmap = record.target().starts_with("veldmap");
-            let is_info = record.level() == log::Level::Info;
-            let is_warn_or_error = record.level() == log::Level::Warn || record.level() == log::Level::Error;
-            let important = (is_veldmap && is_info) || is_warn_or_error;
-
-            if important {
-                if let Some(file) = &host_log {
-                    if let Ok(mut f) = file.lock() {
-                        let _ = f.write_all(log_line.as_bytes());
-                    }
-                }
-                write!(buf, "{}", log_line)
-            } else {
-                Ok(())
-            }
-        })
-        .init();
-
-    log::info!(target: "veldmap::host", "Log filter: {}", core_config.log_filter);
-    log::info!(target: "veldmap::host", "Log rate limit: {}ms", core_config.log_rate_limit_ms);
+    log::info!(target: "log", "Filter: {} (trace.log: {})", core_config.log_filter, core_config.trace_filter);
+    log::info!(target: "log", "Rate limit: {}ms", core_config.log_rate_limit_ms);
 
     Ok(())
 }
@@ -102,11 +34,11 @@ pub async fn init_wgpu<'a>(
     window_width: u32,
     window_height: u32,
 ) -> anyhow::Result<(wgpu::Adapter, Arc<wgpu::Device>, Arc<Mutex<wgpu::Queue>>, wgpu::SurfaceConfiguration, wgpu::TextureFormat)> {
-    log::info!(target: "veldmap::host::render", "Enumerating Vulkan adapters...");
+    log::info!(target: "render", "Enumerating Vulkan adapters...");
     let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN).await;
     for (i, adapter) in adapters.iter().enumerate() {
         let info = adapter.get_info();
-        log::info!(target: "veldmap::host::render", "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
+        log::info!(target: "render", "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
             i, info.name, info.vendor, info.device);
     }
     
@@ -124,7 +56,7 @@ pub async fn init_wgpu<'a>(
     let adapter = match adapter {
         Some(a) => a,
         None => {
-            log::warn!(target: "veldmap::host::render", "No discrete GPU found, trying fallback...");
+            log::warn!(target: "render", "No discrete GPU found, trying fallback...");
             instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(surface),
@@ -133,7 +65,7 @@ pub async fn init_wgpu<'a>(
         }
     };
 
-    log::info!(target: "veldmap::host::render", "Selected GPU: {:?}", adapter.get_info().name);
+    log::info!(target: "render", "Selected GPU: {:?}", adapter.get_info().name);
 
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,

@@ -65,7 +65,7 @@ pub fn on_list_path_result(
     state.browse.items = response.items.into_iter().map(|s| {
         let is_folder = s.ends_with('/');
         crate::module::state::browse::BrowseItem {
-            s3_key: s.clone(),
+            identifier: s.clone(),
             name: s.split('/').filter(|x| !x.is_empty()).last().unwrap_or("").to_string(),
             is_folder,
         }

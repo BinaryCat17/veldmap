@@ -59,15 +59,21 @@ pub fn on_view_remote_pressed(state: &mut State, event: UiEventResponse) {
     });
 }
 
+/// Неудача превью: на экран и в лог. Экран видит только тот, кто в этот момент
+/// на него смотрит, — а причина отказа (истёкшая подпись, неподдерживаемый
+/// формат) нужна и после того, как пользователь ушёл на другой экран.
+fn fail(state: &mut State, error: String) {
+    veldsdk::log::warn!(target: "handlers", "превью '{}': {}", state.preview.current_path, error);
+    state.preview.error = Some(error);
+}
+
 /// Общее начало обоих путей: экран превью, отказ от предыдущего, новый id.
 fn begin_open(state: &mut State, label: String) -> String {
     state.current_screen = Screen::Preview;
     abandon(state);
     state.preview.current_path = label;
 
-    let correlation_id = state.preview.opening.begin(());
-    state.preview.inflight = Some(correlation_id.clone());
-    correlation_id
+    state.preview.begin()
 }
 
 /// Ресурс открыт — неважно кем: библиотекой (скачанный файл) или провайдером
@@ -80,7 +86,7 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     if !state.preview.opening.remove(&opened.correlation_id) {
         return false;
     }
-    if state.preview.inflight.as_deref() != Some(opened.correlation_id.as_str()) {
+    if !state.preview.is_current(&opened.correlation_id) {
         if let Some(handle) = &opened.handle {
             veldsdk::abi::arena_free(handle.id);
         }
@@ -90,8 +96,9 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     match opened.handle.clone() {
         Some(handle) => start_decode(state, handle, opened.correlation_id.clone()),
         None => {
-            state.preview.inflight = None;
-            state.preview.error = Some(if opened.error.is_empty() {
+            // Задачи на этой фазе ещё нет — закрывать нечего.
+            state.preview.finish();
+            fail(state, if opened.error.is_empty() {
                 "ресурс не открыт, но и ошибки не названо".to_string()
             } else {
                 opened.error.clone()
@@ -106,15 +113,15 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 fn start_decode(state: &mut State, resource: veldsdk::ResourceHandle, correlation_id: String) {
     state.preview.file = Some(resource.id);
     if !veldsdk::abi::arena_grant_read(resource.id, "image-loader") {
-        state.preview.inflight = None;
+        state.preview.finish();
         state.preview.close_file();
-        state.preview.error = Some("Не удалось выдать image-loader read-грант на ресурс".to_string());
+        fail(state, "Не удалось выдать image-loader read-грант на ресурс".to_string());
         return;
     }
 
     // Задачу заводим мы, а не загрузчик: владелец — паблишер begin, и только
     // он вправе её отменить. Загрузчик её лишь опрашивает, пока декодирует.
-    state.preview.decode_task = Some(correlation_id.clone());
+    state.preview.decoding();
     crate::calls::tasks::on_begin(&TaskBeginRequest {
         task_id: correlation_id.clone(),
         kind: DECODE_KIND.to_string(),
@@ -140,26 +147,25 @@ fn start_decode(state: &mut State, resource: veldsdk::ResourceHandle, correlatio
 /// открыть другой файл. Текстуру такого ответа освобождаем на месте —
 /// владение уже передано нам, и потерять её значит потерять видеопамять.
 pub fn on_load_result(state: &mut State, result: LoadImageResult) {
-    if state.preview.inflight.as_deref() != Some(result.correlation_id.as_str()) {
+    if !state.preview.is_current(&result.correlation_id) {
         if let Some(handle) = result.handle {
             veldsdk::abi::arena_free(handle.id);
         }
         return;
     }
-    state.preview.inflight = None;
     // Файл больше не нужен: декодирование кончилось (успехом или нет).
     state.preview.close_file();
     // Задачу заводили мы — нам её и закрывать, с тем же исходом, что у ответа.
-    if let Some(task_id) = state.preview.decode_task.take() {
+    if let Some(task_id) = state.preview.finish() {
         crate::calls::tasks::on_end(&TaskEndRequest { task_id, error: result.error.clone() });
     }
 
     if !result.error.is_empty() {
-        state.preview.error = Some(result.error);
+        fail(state, result.error);
         return;
     }
     let Some(handle) = result.handle else {
-        state.preview.error = Some("image-loader вернул пустой handle".to_string());
+        fail(state, "image-loader вернул пустой handle".to_string());
         return;
     };
 
@@ -167,7 +173,7 @@ pub fn on_load_result(state: &mut State, result: LoadImageResult) {
     // тот же ритуал, что grant_write оконной поверхности (surface.rs).
     if !veldsdk::abi::arena_grant_read(handle.id, "ui-service") {
         veldsdk::abi::arena_free(handle.id);
-        state.preview.error = Some("Не удалось выдать ui-service read-грант на текстуру".to_string());
+        fail(state, "Не удалось выдать ui-service read-грант на текстуру".to_string());
         return;
     }
     state.preview.texture = Some(handle.id);

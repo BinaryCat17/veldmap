@@ -9,7 +9,10 @@ pub struct BrowseState {
 }
 
 pub struct BrowseItem {
-    pub s3_key: String,
+    /// Путь продукта вместе с именем бакета (`eodata/Sentinel-2/…`) — в этом
+    /// виде его принимают все топики data-provider. Ключ объекта в бакете
+    /// живёт под этим префиксом, но срезает его провайдер, а не мы.
+    pub identifier: String,
     pub name: String,
     pub is_folder: bool,
 }

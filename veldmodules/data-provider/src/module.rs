@@ -1,4 +1,5 @@
 pub mod cdse;
+pub mod s3;
 
 use aws_smithy_runtime_api::client::identity::Identity;
 
