@@ -5,6 +5,10 @@ name: tasks
 version: 0.1.0
 interface:
   inputs:
+    on_begin:
+      type: tasks/TaskBeginRequest
+    on_end:
+      type: tasks/TaskEndRequest
     on_cancel:
       type: tasks/TaskCancelRequest
     on_grant:

@@ -12,7 +12,7 @@ interface:
       type: network/RemoteOpenRequest
   outputs:
     on_open_result:
-      type: network/RemoteOpenResult
+      type: core/ResourceOpened
       replies_to: on_open
     on_fs_download_result:
       type: network/FsDownloadResponse

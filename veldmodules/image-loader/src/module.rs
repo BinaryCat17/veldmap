@@ -37,10 +37,20 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 
 pub fn on_load(_state: &mut State, req: LoadImageRequest) {
     let correlation_id = req.correlation_id.clone();
-    let (handle, width, height, source, error) = match make_texture(req) {
+    // Чем назвать источник в логах и в списке задач, знает только заказчик:
+    // сюда приходит ресурс, у которого ни имени, ни пути уже нет.
+    let label = if req.label.is_empty() { correlation_id.clone() } else { req.label.clone() };
+
+    // Декодирование занимает наш обработчик целиком, а с ним и очередь: узнать
+    // об отмене событием невозможно, поэтому декодер опрашивает её между
+    // порциями. Саму задачу завёл заказчик — он её владелец и он же её
+    // отменяет; нам остаётся только смотреть, живая ли она.
+    let cancelled = veldsdk::Cancellation::watch(&correlation_id);
+
+    let (handle, width, height, source, error) = match make_texture(req, &|| cancelled.cancelled()) {
         Ok(t) => (Some(ResourceHandle { id: t.id, size: t.size }), t.width, t.height, t.source, String::new()),
         Err(e) => {
-            veldsdk::log::warn!(target: "handlers", "[image-loader] {}", e);
+            veldsdk::log::warn!(target: "handlers", "[image-loader] {}: {}", label, e);
             (None, 0, 0, (0, 0), e)
         }
     };
@@ -64,7 +74,7 @@ struct Texture {
     source: (u32, u32),
 }
 
-fn make_texture(req: LoadImageRequest) -> Result<Texture, String> {
+fn make_texture(req: LoadImageRequest, cancelled: decode::Cancelled) -> Result<Texture, String> {
     // Владелец ресурса и будущий владелец текстуры — тот, кто прислал запрос.
     // Без имени передать текстуру некому.
     let owner = veldsdk::abi::event_publisher();
@@ -73,17 +83,10 @@ fn make_texture(req: LoadImageRequest) -> Result<Texture, String> {
     }
     let resource = req.resource.ok_or_else(|| "в запросе нет ресурса".to_string())?;
 
-    // Декодирование занимает наш обработчик целиком, а с ним и очередь: узнать
-    // об отмене событием невозможно. Заводим задачу на имя заказчика (отменяет
-    // её он) и опрашиваем между порциями. Не удалось завести — работаем без
-    // отмены, это не повод не показать картинку.
-    let task = veldsdk::LocalTask::begin(&req.correlation_id, "image_decode", &owner, &owner);
-    let cancelled = || task.as_ref().is_some_and(|t| t.cancelled());
-
     let preview = decode::preview(
         resource.id, resource.size,
         preview_side(req.max_width), preview_side(req.max_height),
-        &cancelled,
+        cancelled,
     )?;
 
     // sRGB: сэмплер ui-service отдаст линейные значения, которые рендер в

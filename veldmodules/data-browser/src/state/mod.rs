@@ -5,7 +5,7 @@ pub struct State {
     pub current_screen: types::Screen,
     pub search: search::SearchState,
     pub browse: browse::BrowseState,
-    pub downloaded: downloaded::DownloadedState,
+    pub library: library::LibraryState,
     pub preview: preview::PreviewState,
     pub global: types::GlobalState,
     /// Render-таргет нашего окна: аллоцируется в ответ на app/window_resized
@@ -22,7 +22,7 @@ impl State {
             current_screen: types::Screen::Search,
             search: search::SearchState::default(),
             browse: browse::BrowseState::default(),
-            downloaded: downloaded::DownloadedState::default(),
+            library: library::LibraryState::default(),
             preview: preview::PreviewState::default(),
             window_surface: None,
             window: (0, 0),
@@ -36,5 +36,5 @@ impl State {
 
 pub mod search;
 pub mod browse;
-pub mod downloaded;
+pub mod library;
 pub mod preview;

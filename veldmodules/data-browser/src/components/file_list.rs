@@ -11,16 +11,17 @@ use crate::module::components::{Row, RowStatus};
 use crate::module::styles;
 
 /// Какие входные методы модуля вызывают кнопки элемента списка.
-/// `None` — действие недоступно на этом экране. Значением события всегда
-/// идёт `s3_key` элемента (для download/re-download/resume/cancel) или
-/// `local_path` (для view/delete) — см. render_item.
+/// `None` — действие недоступно на этом экране. Значением события идёт ключ
+/// провайдера (для download/re-download/resume/cancel и просмотра ещё не
+/// скачанного) или имя записи библиотеки (для view/delete) — см. render_item.
 #[derive(Clone, Copy, Default)]
 pub struct ItemActions<'a> {
     pub browse: Option<&'a str>,
-    pub view: Option<&'a str>,
+    /// Просмотр скачанного файла — по имени записи библиотеки.
+    pub view_local: Option<&'a str>,
     /// Просмотр ещё не скачанного файла: открывается по remote-ключу и
     /// читается по фрагментам прямо с той стороны.
-    pub preview: Option<&'a str>,
+    pub view_remote: Option<&'a str>,
     pub download: Option<&'a str>,
     pub delete: Option<&'a str>,
 }
@@ -98,7 +99,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
     // минимальную (отсюда вертикальный "по одной букве" — уже проверено).
     let title = row![
         icon(if is_folder { "\u{f07b}" } else { "\u{f016}" }),
-        text(item.name.clone()).width(Length::Fill),
+        text(item.title.clone()).width(Length::Fill),
     ].spacing(6.0).align_items(Alignment::Center).width(Length::Fill);
 
     // Одна и та же карточка (см. styles::file_button_style) для любой строки:
@@ -106,34 +107,34 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
     // остальные — та же кнопка без обработчика (хост рисует её в стиле
     // `disabled`, см. styles.rs).
     let card = styles::apply_file(button(title)).width(Length::Fill);
-    let main_button: Element<()> = match (&item.status, actions.browse, actions.view) {
-        (RowStatus::Folder, Some(m), _) => card.on_press_with(m, item.s3_key.clone()).into(),
-        // Открыть можно только по-настоящему скачанный файл — .part не читаем.
-        (RowStatus::Complete { .. }, _, Some(m)) => match &item.local_path {
-            Some(p) => card.on_press_with(m, p.clone()).into(),
-            None => card.into(),
-        },
+    let main_button: Element<()> = match (&item.status, actions.browse, actions.view_local) {
+        (RowStatus::Folder, Some(m), _) => card.on_press_with(m, item.identifier.clone()).into(),
+        // Открыть можно только по-настоящему скачанную запись — недокачанную
+        // библиотека и не отдаст.
+        (RowStatus::Complete { .. }, _, Some(m)) => card.on_press_with(m, item.name.clone()).into(),
         _ => card.into(),
     };
 
     // Кнопка закачки скрыта, если remote-ключ неизвестен — лучше не предлагать
     // действие, чем слать заведомо неверный запрос.
     let download_button = |glyph: &str, color| {
-        (!item.s3_key.is_empty()).then(|| actions.download.map(|m| {
-            styles::icon_button(glyph, color).on_press_with(m, item.s3_key.clone()).into()
+        (!item.identifier.is_empty()).then(|| actions.download.map(|m| {
+            styles::icon_button(glyph, color).on_press_with(m, item.identifier.clone()).into()
         })).flatten()
     };
     // Просмотр без скачивания — там же, где и скачивание: обе кнопки живут
     // от remote-ключа, локального файла для них ещё нет.
-    let preview_button = || {
-        (!item.s3_key.is_empty()).then(|| actions.preview.map(|m| -> Element<()> {
-            styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, item.s3_key.clone()).into()
+    let view_remote_button = || {
+        (!item.identifier.is_empty()).then(|| actions.view_remote.map(|m| -> Element<()> {
+            styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, item.identifier.clone()).into()
         })).flatten()
     };
+    // Удалять есть что, пока запись в библиотеке есть — даже если данных на
+    // диске ещё нет: намерение тоже удаляется.
     let delete_button = || {
-        item.local_path.as_ref().and_then(|p| actions.delete.map(|m| {
-            styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(m, p.clone()).into()
-        }))
+        (!item.name.is_empty()).then(|| actions.delete.map(|m| -> Element<()> {
+            styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(m, item.name.clone()).into()
+        })).flatten()
     };
 
     let status: Element<()> = match &item.status {
@@ -141,13 +142,13 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
 
         RowStatus::Remote => status_row(
             text("").into(), text("").into(),
-            preview_button().into_iter()
+            view_remote_button().into_iter()
                 .chain(download_button("\u{f019}", styles::COLOR_PRIMARY)).collect(),
         ),
 
-        // Пауза, не стоп: повторное нажатие на скачиваемый s3_key отменяет
-        // текущий поток, но .part остаётся на диске и следующее "скачать"
-        // продолжит с оборванного байта — по факту это пауза.
+        // Пауза, не стоп: повторное нажатие на скачиваемый ключ обрывает
+        // текущий поток, но скачанное библиотека сохраняет и следующее
+        // "скачать" продолжит с оборванного байта — по факту это пауза.
         RowStatus::Downloading { done, total } => status_row(
             icon("\u{f254}"),
             text(amount_text(*done, *total, true)).size(13.0).into(),
@@ -155,9 +156,9 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
                 .chain(delete_button()).collect(),
         ),
 
-        // Play, не refresh: это продолжение (host сам подхватит .part), а не
-        // повторное скачивание с нуля — зрительно должно читаться как
-        // обратное действие "паузе" выше. Только иконка, без подписи
+        // Play, не refresh: это продолжение (библиотека сама подхватит
+        // недокачанное), а не скачивание с нуля — зрительно должно читаться
+        // как обратное действие "паузе" выше. Только иконка, без подписи
         // "Incomplete" — цвет и форма уже достаточно говорят о статусе.
         RowStatus::Paused { done, total } => status_row(
             text("\u{f071}").font_family("Icons").color(styles::COLOR_WARNING).into(),
@@ -166,15 +167,14 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
                 .chain(delete_button()).collect(),
         ),
 
-        // Просмотр всегда с локального пути, re-download — с remote-ключа:
-        // это разные значения (см. Row::local_path).
+        // Просмотр — по имени записи, re-download — по ключу провайдера:
+        // это разные значения (см. Row).
         RowStatus::Complete { size } => status_row(
             icon("\u{f00c}"),
             text(format_bytes(*size)).size(13.0).into(),
-            item.local_path.as_ref()
-                .and_then(|p| actions.view.map(|m| -> Element<()> {
-                    styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, p.clone()).into()
-                }))
+            actions.view_local.map(|m| -> Element<()> {
+                    styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, item.name.clone()).into()
+                })
                 .into_iter()
                 .chain(download_button("\u{f021}", styles::COLOR_RELOAD))
                 .chain(delete_button())

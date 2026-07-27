@@ -4,18 +4,18 @@ use veld_ui_service_wrap::column;
 use crate::proto::ui_service::{text, Element, Length};
 use crate::module::state::State;
 use crate::module::components::{Row, RowStatus, downloaded_rows, render_list, list_screen, ItemActions};
-use crate::module::handlers::ui_methods::{ON_VIEW_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
+use crate::module::handlers::ui_methods::{ON_VIEW_LOCAL_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
 use crate::module::styles;
 
 pub fn view(state: &State) -> Element<()> {
-    let rows = downloaded_rows(&state.downloaded);
+    let rows = downloaded_rows(&state.library);
     let (pending, complete): (Vec<&Row>, Vec<&Row>) = rows.iter()
         .partition(|r| !matches!(r.status, RowStatus::Complete { .. }));
 
     let actions = ItemActions {
         browse: None,
-        view: Some(ON_VIEW_PRESSED),
-        preview: None, // всё уже на диске — смотреть удалённо нечего
+        view_local: Some(ON_VIEW_LOCAL_PRESSED),
+        view_remote: None, // всё уже на диске — смотреть удалённо нечего
 
         download: Some(ON_DOWNLOAD_PRESSED), // Докачка/перезакачка
         delete: Some(ON_DELETE_PRESSED),

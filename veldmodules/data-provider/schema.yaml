@@ -11,13 +11,13 @@ interface:
       type: module/ListPathRequest
     on_search:
       type: module/SearchRequest
-    on_preview:
-      type: module/PreviewRequest
+    on_open:
+      type: module/OpenRequest
 
   outputs:
-    on_preview_result:
-      type: module/PreviewResponse
-      replies_to: on_preview
+    on_open_result:
+      type: core/ResourceOpened
+      replies_to: on_open
     on_download_started:
       type: module/DownloadStarted
     on_list_path_result:

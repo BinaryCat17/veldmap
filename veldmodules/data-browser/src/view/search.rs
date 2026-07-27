@@ -4,7 +4,7 @@ use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, text_input, button, Element, Length};
 use crate::module::state::State;
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED, ON_PREVIEW_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
+use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED, ON_VIEW_REMOTE_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
 
 pub fn view(state: &State) -> Element<()> {
     let search_state = &state.search;
@@ -15,7 +15,7 @@ pub fn view(state: &State) -> Element<()> {
         column![text("Searching...").size(16.0)].into()
     } else {
         let items: Vec<Row> = search_state.results.iter()
-            .map(|p| Row::remote(&state.downloaded, p.path.clone(), p.name.clone()))
+            .map(|p| Row::remote(&state.library, p.path.clone(), p.name.clone()))
             .collect();
 
         let empty_message = if search_state.query.is_empty() {
@@ -26,8 +26,8 @@ pub fn view(state: &State) -> Element<()> {
 
         items_or_message(&items, ItemActions {
             browse: None, // Папки не поддерживаются
-            view: None,
-            preview: Some(ON_PREVIEW_PRESSED),
+            view_local: None,
+            view_remote: Some(ON_VIEW_REMOTE_PRESSED),
             download: Some(ON_DOWNLOAD_PRESSED),
             delete: Some(ON_DELETE_PRESSED),
         }, empty_message)

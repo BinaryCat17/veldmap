@@ -7,15 +7,11 @@ import "core.proto";
 // --- FILESYSTEM API ---
 // Контракт нативного сервиса fs (чтение/запись через shared memory, листинг).
 
+// Ответ — общий core.ResourceOpened: открытый файл ничем не отличается от
+// любого другого ресурса, и читателю всё равно, кто его открыл.
 message FsReadRequest {
   string path = 1;
   string correlation_id = 2;
-}
-
-message FsReadResult {
-  veldmap.core.ResourceHandle handle = 1;
-  string error = 2;
-  string correlation_id = 3;
 }
 
 message FsWriteRequest {

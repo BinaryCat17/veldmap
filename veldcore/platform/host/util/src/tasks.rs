@@ -1,14 +1,15 @@
-//! Фасад системы задач для нативных модулей — зеркало SDK TaskTracker
-//! на стороне wasm. Это единственный способ модуля работать с задачами:
-//! голый TaskRegistry из core модулям не экспортируется.
+//! Фасад системы задач. Это единственный способ менять реестр задач: голый
+//! TaskRegistry из core модулям не экспортируется, и потому все пути сюда
+//! сходятся — и `spawn` нативного исполнителя, и топики tasks/begin|end|cancel,
+//! которыми заказчик обрамляет работу wasm-исполнителя.
 //!
 //! Гарантии фасада:
-//! - spawn регистрирует задачу и эмитит tasks/task_started — забыть событие
-//!   невозможно, оно часть операции;
-//! - tasks/task_finished эмитится ровно один раз: из результата фьючерса
-//!   (Err → error) или из отмены (cancelled=true);
-//! - отмена и делегирование проверяют lease: владелец — инициатор запроса
-//!   (owner), writer — сервис с grant'ом, хост (id 0) — всегда.
+//! - регистрация и tasks/task_started неразделимы — забыть событие нельзя,
+//!   оно часть операции;
+//! - tasks/task_finished эмитится ровно один раз: из завершения (Err → error)
+//!   или из отмены (cancelled=true);
+//! - права всюду по lease: владелец — инициатор (owner), writer — сервис
+//!   с grant'ом, хост (id 0) — всегда.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -40,35 +41,58 @@ impl Tasks {
         F: Future<Output = Result<(), String>> + Send + 'static,
     {
         let id = if task_id.is_empty() { uuid::Uuid::new_v4().to_string() } else { task_id.to_string() };
-        self.ctx.tasks.begin(&id, owner, &self.executor, label, kind)?;
+        self.register(&id, owner, &self.executor, kind, label)?;
 
         let ctx = self.ctx.clone();
         let done_id = id.clone();
         let join = tokio::spawn(async move {
             let error = make(done_id.clone()).await.err().unwrap_or_default();
-            // Отменённая задача уже снята с учёта путём отмены, и
-            // finished{cancelled} эмитирован там — не дублируем.
-            if ctx.tasks.complete(&done_id) {
-                bus::emit::on_task_finished(&*ctx.dispatcher, &TaskFinished { task_id: done_id, error, cancelled: false });
-            }
+            // Хост (0) вправе закрыть любую задачу — исполнитель здесь он.
+            Tasks::finish_in(&ctx, &done_id, 0, &error);
         });
 
-        // Хендл прикрепляется ДО emit started: отмена, причинно следующая за
-        // started, всегда найдёт живой хендл. Если задачу успели отменить в
-        // окне регистрации — запись снята, abort'им сами и started не шлём.
+        // Хендл прикрепляется ДО того, как задача могла быть отменена извне:
+        // false — её уже сняли, тогда abort'им сами.
         if !self.ctx.tasks.attach_abort(&id, join.abort_handle()) {
             join.abort();
-            return Ok(id);
         }
+        Ok(id)
+    }
 
+    /// Регистрирует задачу без фьючерса — работу делает кто-то другой
+    /// (wasm-исполнитель), а заказчик лишь обозначает её начало (топик
+    /// tasks/begin). `executor` описателен: он идёт в task_started для показа
+    /// и правами не управляет, в отличие от `owner`.
+    pub fn register(&self, task_id: &str, owner: u32, executor: &str, kind: &str, label: &str)
+        -> Result<(), DuplicateTaskId>
+    {
+        self.ctx.tasks.begin(task_id, owner)?;
         bus::emit::on_task_started(&*self.ctx.dispatcher, &TaskStarted {
-            task_id: id.clone(),
+            task_id: task_id.to_string(),
             label: label.to_string(),
             kind: kind.to_string(),
-            executor: self.executor.clone(),
+            executor: executor.to_string(),
             owner: self.ctx.dispatcher.name_of(owner).unwrap_or_default(),
         });
-        Ok(id)
+        Ok(())
+    }
+
+    /// Закрытие задачи владельцем (топик tasks/end). Отменённая задача уже
+    /// снята с учёта и терминальное событие эмитил путь отмены — второго
+    /// не будет.
+    pub fn finish(&self, task_id: &str, requestor: u32, error: &str) {
+        Self::finish_in(&self.ctx, task_id, requestor, error);
+    }
+
+    fn finish_in(ctx: &Arc<HostContext>, task_id: &str, requestor: u32, error: &str) {
+        if !ctx.tasks.complete(task_id, requestor) {
+            return;
+        }
+        bus::emit::on_task_finished(&*ctx.dispatcher, &TaskFinished {
+            task_id: task_id.to_string(),
+            error: error.to_string(),
+            cancelled: false,
+        });
     }
 
     /// Отмена по требованию (обработчик topics::ON_CANCEL): права — в реестре.

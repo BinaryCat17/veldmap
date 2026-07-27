@@ -152,50 +152,19 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     })?;
 
     // ── Фоновые задачи ────────────────────────────────────────
-    // Длинная работа внутри одного обработчика (декодирование снимка,
-    // например) не может узнать об отмене событием: очередь плагина не
-    // разгребается, пока обработчик не вернул управление. Поэтому задача
-    // регистрируется в том же реестре, что и нативные (единая модель прав
-    // и единые lifecycle-события), а исполнитель опрашивает её живость.
-
-    // veld_task_begin(ptr, len) → 1 | 0 (id занят или владелец неизвестен)
-    linker.func_wrap("env", "veld_task_begin", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| -> u64 {
-        let Some(req) = read_message::<crate::tasks_proto::TaskBeginRequest>(&mut caller, ptr, len) else { return 0 };
-        let executor = caller.data().plugin_name.clone();
-        // Владелец — инициатор запроса: отменить задачу сможет он (и хост).
-        // Пустое имя означало бы задачу, которую некому отменить.
-        let Some(owner) = caller.data().dispatcher.instance_of(&req.owner) else { return 0 };
-        let tasks = caller.data().tasks.clone();
-        if tasks.begin(&req.task_id, owner, &executor, &req.label, &req.kind).is_err() {
-            return 0;
-        }
-        veldmap_host_bindings::tasks::emit::on_task_started(
-            &*caller.data().dispatcher,
-            &crate::tasks_proto::TaskStarted {
-                task_id: req.task_id, label: req.label, kind: req.kind,
-                executor, owner: req.owner,
-            },
-        );
-        1
-    })?;
 
     // veld_task_alive(ptr, len) → 1 | 0. ptr/len — сырая строка task_id.
+    //
+    // Единственное, что система задач отдаёт через ABI, и единственное, чего
+    // нельзя отдать событием: длинная работа внутри одного обработчика не
+    // разгребает очередь модуля, поэтому ответ «тебя ещё ждут?», доставленный
+    // событием, придёт уже после той работы, которую должен был прервать.
+    // Всё остальное — завести, закрыть, отменить, делегировать — обычные
+    // топики сервиса tasks. Вызов только читает: ничего не меняет и никаких
+    // прав не выдаёт, поэтому и проверять в нём нечего.
     linker.func_wrap("env", "veld_task_alive", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| -> u64 {
         let Some(id) = read_str(&mut caller, ptr, len) else { return 0 };
-        if caller.data().tasks.is_alive(&id) { 1 } else { 0 }
-    })?;
-
-    // veld_task_end(ptr, len) — терминальное событие задачи.
-    linker.func_wrap("env", "veld_task_end", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| {
-        let Some(req) = read_message::<crate::tasks_proto::TaskEndRequest>(&mut caller, ptr, len) else { return };
-        // false — задачу уже сняли отменой, и finished оттуда уже ушёл.
-        if !caller.data().tasks.complete(&req.task_id) { return; }
-        veldmap_host_bindings::tasks::emit::on_task_finished(
-            &*caller.data().dispatcher,
-            &crate::tasks_proto::TaskFinished {
-                task_id: req.task_id, error: req.error, cancelled: false,
-            },
-        );
+        u64::from(caller.data().tasks.is_alive(&id))
     })?;
 
     // ── Memory management ─────────────────────────────────────
@@ -363,20 +332,9 @@ fn read_str(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<St
         .map(str::to_string)
 }
 
-/// Читает protobuf-сообщение из памяти гостя — форма аргумента для ABI-вызовов
-/// с несколькими полями (та же, что у graphics_create_resource).
-fn read_message<M: Message + Default>(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<M> {
-    let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return None };
-    let bytes = mem.data(&*caller).get(ptr as usize..(ptr + len) as usize)?.to_vec();
-    M::decode(&bytes[..]).ok()
-}
-
 /// Helper: read a service name from WASM memory and resolve its instance id.
 fn resolve_service_arg(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<u32> {
-    let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return None };
-    let name = mem.data(&mut *caller).get(ptr as usize..(ptr + len) as usize)
-        .and_then(|s| std::str::from_utf8(s).ok())?
-        .to_string();
+    let name = read_str(caller, ptr, len)?;
     let resolved = caller.data().dispatcher.instance_of(&name);
     if resolved.is_none() {
         log::warn!(target: "veldmap::host::abi", "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);

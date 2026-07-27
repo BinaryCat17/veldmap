@@ -18,19 +18,27 @@ dependencies:
   # этот топик тоже слушают, но чужие события не получают.
   ui-service:
     subs: [on_ui_event]
+  # Каталог провайдера: поиск и обход. Скачанное — не здесь, а в data-library:
+  # провайдер знает свои продукты, но не то, что из них у нас на диске.
+  # on_open — просмотр ещё не скачанного: подписать запрос к хранилищу умеет
+  # только провайдер.
   data-provider:
-    subs: [on_download_started, on_download_progress, on_downloaded, on_search_result, on_list_path_result, on_preview_result]
-    calls: [on_list_path, on_download, on_cancel_download, on_search, on_preview]
-  fs:
-    subs: [on_list_result, on_delete_result, on_write_result, on_read_result]
-    calls: [on_list, on_delete, on_write, on_read]
-  # Превью картинок: файл открываем сами (fs выше) и отдаём ресурс загрузчику,
-  # он возвращает GPU-текстуру и передаёт нам владение; ответ различим по
-  # correlation_id (broadcast-конвенция шины).
+    subs: [on_search_result, on_list_path_result, on_open_result]
+    calls: [on_list_path, on_search, on_open]
+  # Библиотека скачанного. Диска мы не касаемся вовсе: ни путей, ни суффиксов,
+  # ни сидкаров — приходит уже выведенное состояние записей.
+  data-library:
+    subs: [on_state, on_open_result]
+    calls: [on_list, on_download, on_cancel, on_delete, on_open]
+  # Превью картинок: ресурс открывает библиотека или провайдер, мы отдаём его
+  # загрузчику, он возвращает GPU-текстуру и передаёт нам владение; ответ
+  # различим по correlation_id (broadcast-конвенция шины).
   image-loader:
     subs: [on_load_result]
     calls: [on_load]
-  # Отмена декодирования брошенного превью: задачу заводит image-loader на
-  # наше имя, поэтому отменяем её мы (tasks проверяет права по lease).
+  # Декодирование превью — задача платформы, и заводим её мы: владелец тот,
+  # кто публикует begin, а значит только он и вправе её отменить. image-loader
+  # лишь опрашивает её живость (ABI veld_task_alive) и потому в зависимостях
+  # у себя tasks не имеет.
   tasks:
-    calls: [on_cancel]
+    calls: [on_begin, on_end, on_cancel]

@@ -2,7 +2,7 @@
 
 pub mod search;
 pub mod browse;
-pub mod download;
+pub mod library;
 pub mod nav;
 pub mod preview;
 pub mod window;
@@ -25,7 +25,9 @@ pub mod ui_methods {
     pub const ON_SEARCH: &str = "on_search";
     pub const ON_SEARCH_INPUT: &str = "on_search_input";
     pub const ON_DOWNLOAD_PRESSED: &str = "on_download_pressed";
-    pub const ON_VIEW_PRESSED: &str = "on_view_pressed";
-    pub const ON_PREVIEW_PRESSED: &str = "on_preview_pressed";
+    /// Просмотр скачанного файла (открывает data-library) и ещё не скачанного
+    /// (открывает data-provider) — разные источники, дальше путь общий.
+    pub const ON_VIEW_LOCAL_PRESSED: &str = "on_view_local_pressed";
+    pub const ON_VIEW_REMOTE_PRESSED: &str = "on_view_remote_pressed";
     pub const ON_DELETE_PRESSED: &str = "on_delete_pressed";
 }

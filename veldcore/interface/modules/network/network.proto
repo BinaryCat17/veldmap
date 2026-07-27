@@ -11,19 +11,16 @@ import "core.proto";
 // (veldcore/proto/tasks.proto).
 
 // Открыть удалённый файл как ресурс, не скачивая его (топик network/open).
-// В ответе — обычный ResourceHandle: читатель тянет из него фрагменты
+// В ответе — общий core.ResourceOpened: читатель тянет из него фрагменты
 // (arena_read), а сервер получает Range-запросы. Так превью снимка на
 // гигабайты стоит нескольких сотен килобайт трафика — при условии, что
 // сервер отвечает Accept-Ranges, а формат допускает произвольный доступ.
 message RemoteOpenRequest {
   string url = 1;
-  map<string, string> headers = 2;  // авторизация и прочее, как у скачивания
-  string correlation_id = 3;
-}
-
-message RemoteOpenResult {
-  veldmap.core.ResourceHandle handle = 1;  // валиден, если error пуст
-  string error = 2;
+  // Авторизация и прочее, как у скачивания — но здесь это снимок на момент
+  // открытия: ресурс живёт ровно столько, сколько заголовки действительны.
+  // Подпись с ограниченным сроком (SigV4 и подобные) задаёт этот срок.
+  map<string, string> headers = 2;
   string correlation_id = 3;
 }
 

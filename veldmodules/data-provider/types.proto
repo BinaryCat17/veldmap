@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package veldmap.data_provider;
 
-import "core.proto";
-
 // --- Search ---
 
 message SearchFilter {
@@ -84,19 +82,18 @@ message CancelDownloadRequest {
   string task_id = 1;
 }
 
-// --- Preview ---
-// Открыть удалённый продукт как ресурс, не скачивая его. Подписывать запрос
+// --- Open ---
+// Открыть продукт как ресурс, не скачивая его. Подписывать запрос к хранилищу
 // умеет только этот модуль (у него ключи), поэтому открывает он, а владение
-// готовым ресурсом сразу передаёт заказчику: дальше тот читает его как
-// обычный файл — например, отдаёт image-loader на превью.
+// готовым ресурсом сразу передаёт заказчику: дальше тот читает его как обычный
+// файл — например, отдаёт image-loader на превью.
+//
+// Зачем это здесь, а не у заказчика: единственное, что он не может сделать
+// сам, — подписать запрос. Всё остальное (чтение окнами, декодирование) уже
+// не про поставщика данных, поэтому и ответ — общий core.ResourceOpened,
+// такой же, как у fs и network.
 
-message PreviewRequest {
+message OpenRequest {
   string identifier = 1;  // s3_key продукта
   string correlation_id = 2;
-}
-
-message PreviewResponse {
-  veldmap.core.ResourceHandle resource = 1;  // валиден, если error пуст
-  string error = 2;
-  string correlation_id = 3;
 }

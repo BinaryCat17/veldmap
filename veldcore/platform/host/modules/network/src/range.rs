@@ -7,11 +7,16 @@
 //! по проводу не идёт. Условия — сервер отвечает на Range (иначе открытие
 //! завершится ошибкой сразу, а не посреди чтения) и формат допускает
 //! произвольный доступ.
+//!
+//! Заголовки авторизации — снимок на момент открытия (см. RemoteOpenRequest):
+//! ресурс живёт ровно столько, сколько они действительны. Для подписи вида
+//! AWS SigV4 это порядка четверти часа — достаточно, чтобы открыть и
+//! декодировать, но не для ресурса, который держат открытым часами.
 
 use super::State;
 use veldmap_host_util::bindings::network as bus;
-use veldmap_host_util::bindings::proto::network::{RemoteOpenRequest, RemoteOpenResult};
-use veldmap_host_util::core::ResourceHandle;
+use veldmap_host_util::bindings::proto::network::RemoteOpenRequest;
+use veldmap_host_util::core::{ResourceHandle, ResourceOpened};
 use veldmap_host_util::{blocking, RangeSource};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -24,6 +29,11 @@ const BLOCK: u64 = 4 * 1024 * 1024;
 /// превращаться в его копию в памяти — что не влезло, перечитается.
 const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
 
+/// Задачи здесь нет намеренно, в отличие от download и http: открытие — это
+/// один пробный запрос, ограниченный таймаутами клиента (см. http::client),
+/// и отменять в нём нечего. Долгая часть — чтение, а оно идёт через ABI
+/// памяти, вне системы задач; correlation_id запроса достаётся задаче того,
+/// кто ресурс потом читает (например, декодирования в image-loader).
 pub fn on_open(state: &State, req: RemoteOpenRequest, requestor_id: u32) {
     let correlation_id = req.correlation_id.clone();
 
@@ -34,13 +44,13 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, requestor_id: u32) {
                 let len = source.len();
                 let id = ctx.memory.alloc_remote(Arc::new(source), requestor_id);
                 log::info!(target: "host", "Opened remote resource {} ({} bytes): {}", id, len, req.url);
-                RemoteOpenResult {
+                ResourceOpened {
                     handle: Some(ResourceHandle { id, size: len }),
                     error: String::new(),
                     correlation_id,
                 }
             }
-            Err(e) => RemoteOpenResult { handle: None, error: e.to_string(), correlation_id },
+            Err(e) => ResourceOpened { handle: None, error: e.to_string(), correlation_id },
         };
         bus::emit::on_open_result(&*ctx.dispatcher, &result);
     });
@@ -57,13 +67,36 @@ struct HttpRange {
     cache: Mutex<Cache>,
 }
 
+/// Блоки хранятся под Arc: читатель ходит окнами по 256 КБ (ResourceReader),
+/// и копировать ради каждого окна весь четырёхмегабайтный блок незачем.
 #[derive(Default)]
 struct Cache {
-    blocks: HashMap<u64, Vec<u8>>,
+    blocks: HashMap<u64, Arc<[u8]>>,
     /// Порядок появления — им же и вытесняем: у последовательного прохода
     /// (а это основной сценарий) самый старый блок и есть самый ненужный.
     order: std::collections::VecDeque<u64>,
     bytes: u64,
+}
+
+impl Cache {
+    /// Кладёт блок, вытесняя старые. Если блок уже есть (два читателя
+    /// запросили его одновременно), возвращается лежащий: учёт байт должен
+    /// совпадать с содержимым, иначе потолок кэша поплывёт.
+    fn insert(&mut self, index: u64, data: Arc<[u8]>) -> Arc<[u8]> {
+        if let Some(present) = self.blocks.get(&index) {
+            return present.clone();
+        }
+        while self.bytes + data.len() as u64 > CACHE_LIMIT {
+            let Some(oldest) = self.order.pop_front() else { break };
+            if let Some(dropped) = self.blocks.remove(&oldest) {
+                self.bytes -= dropped.len() as u64;
+            }
+        }
+        self.bytes += data.len() as u64;
+        self.order.push_back(index);
+        self.blocks.insert(index, data.clone());
+        data
+    }
 }
 
 impl HttpRange {
@@ -87,32 +120,38 @@ impl HttpRange {
     }
 
     /// Блок из кэша или из сети.
-    fn block(&self, index: u64) -> anyhow::Result<Vec<u8>> {
+    fn block(&self, index: u64) -> anyhow::Result<Arc<[u8]>> {
         if let Some(data) = self.cache.lock().unwrap().blocks.get(&index) {
             return Ok(data.clone());
         }
 
         let from = index * BLOCK;
         let to = (from + BLOCK).min(self.len);
+        let expected = to - from;
         let response = self.runtime.block_on(
             super::http::get(&self.url, &self.headers, Some((from, to))).send(),
         )?;
-        if !response.status().is_success() {
-            anyhow::bail!("HTTP {}", response.status());
-        }
-        let data = self.runtime.block_on(response.bytes())?.to_vec();
 
-        let mut cache = self.cache.lock().unwrap();
-        while cache.bytes + data.len() as u64 > CACHE_LIMIT {
-            let Some(oldest) = cache.order.pop_front() else { break };
-            if let Some(dropped) = cache.blocks.remove(&oldest) {
-                cache.bytes -= dropped.len() as u64;
+        // Только 206: ответ 200 означал бы, что Range проигнорирован и пришёл
+        // весь файл — принять его за блок значило бы сдвинуть все смещения.
+        let status = response.status();
+        if status != reqwest::StatusCode::PARTIAL_CONTENT {
+            if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+                anyhow::bail!("доступ к удалённому ресурсу больше не действителен (HTTP {}): \
+                               заголовки авторизации выданы при открытии и могли истечь", status);
             }
+            anyhow::bail!("чтение диапазона {}..{}: HTTP {}", from, to, status);
         }
-        cache.bytes += data.len() as u64;
-        cache.order.push_back(index);
-        cache.blocks.insert(index, data.clone());
-        Ok(data)
+
+        let data: Arc<[u8]> = Arc::from(self.runtime.block_on(response.bytes())?.as_ref());
+        // Короткий ответ — это обрыв, а не конец файла: длину мы знаем из
+        // Content-Range и запросили ровно столько, сколько есть.
+        if data.len() as u64 != expected {
+            anyhow::bail!("чтение диапазона {}..{}: получено {} байт вместо {}",
+                          from, to, data.len(), expected);
+        }
+
+        Ok(self.cache.lock().unwrap().insert(index, data))
     }
 }
 
@@ -130,7 +169,6 @@ impl RangeSource for HttpRange {
         while (out.len() as u64) < size {
             let block = self.block(position / BLOCK)?;
             let start = (position % BLOCK) as usize;
-            if start >= block.len() { break; }
             let take = ((size - out.len() as u64) as usize).min(block.len() - start);
             out.extend_from_slice(&block[start..start + take]);
             position += take as u64;

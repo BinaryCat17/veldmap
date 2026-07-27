@@ -1,65 +1,53 @@
 //! Клиент сервиса tasks на стороне wasm — зеркало фасада Tasks (host-util).
-//! Физического хендла у wasm-задачи нет (работу исполняют сервисы хоста),
-//! поэтому трекер — это Correlator<()> плюс отмена по протоколу tasks/*.
+//!
+//! Две роли, две структуры. `TaskTracker` — для заказчика: физического хендла
+//! у задачи на этой стороне нет (работу делает кто-то другой), поэтому он
+//! просто Correlator<()> плюс отмена по протоколу tasks/*. `Cancellation` —
+//! для исполнителя: единственный способ узнать об отмене, не выходя из
+//! обработчика.
 
 use crate::correlator::Correlator;
-use crate::proto::tasks::{TaskBeginRequest, TaskCancelRequest, TaskEndRequest};
+use crate::proto::tasks::TaskCancelRequest;
 
-/// Длинная работа, выполняемая модулем внутри одного обработчика.
+/// Наблюдатель отмены для длинной работы внутри одного обработчика.
 ///
 /// Пока обработчик не вернул управление, очередь модуля не разгребается —
 /// принять `tasks/task_finished{cancelled}` событием он не может. Поэтому
-/// задача заводится в реестре платформы (те же права и те же lifecycle-события,
-/// что у нативных), а исполнитель опрашивает `cancelled()` между порциями
-/// работы: чтением чанка, декодированием полосы.
+/// исполнитель опрашивает `cancelled()` между порциями работы: чтением чанка,
+/// декодированием полосы. Это единственное, ради чего у системы задач есть
+/// ABI (`veld_task_alive`): вопрос «меня ещё ждут?» шиной не отвечается по
+/// построению.
 ///
-/// Отменяет её владелец — тот, кто прислал запрос (`owner`), обычным
-/// `tasks/on_cancel`. Завершение гарантируется Drop'ом: забыть терминальное
-/// событие нельзя, даже если обработчик вышел по ошибке.
-pub struct LocalTask {
-    id: String,
-    finished: bool,
+/// Саму задачу заводит и закрывает заказчик (топики `tasks/begin` и
+/// `tasks/end`) — он её владелец, он же её и отменяет. Исполнителю остаётся
+/// только смотреть.
+pub struct Cancellation {
+    task_id: String,
+    /// Видели ли задачу живой хоть раз. До этого её отсутствие означает не
+    /// отмену, а то, что заказчик ещё не успел её завести: `tasks/begin` и
+    /// запрос к нам — события к разным акторам, порядок между ними не
+    /// гарантирован. Без этого флага работа отменяла бы сама себя на первом
+    /// же опросе — и тем чаще, чем быстрее исполнитель начинает.
+    seen_alive: std::cell::Cell<bool>,
 }
 
-impl LocalTask {
-    /// `task_id` — обычно correlation_id исполняемого запроса: тогда владелец
-    /// отменяет задачу тем же идентификатором, который уже держит у себя.
-    /// `None` — id занят живой задачей или владелец неизвестен платформе.
-    pub fn begin(task_id: &str, kind: &str, label: &str, owner: &str) -> Option<Self> {
-        let ok = crate::abi::task_begin(&TaskBeginRequest {
-            task_id: task_id.to_string(),
-            kind: kind.to_string(),
-            label: label.to_string(),
-            owner: owner.to_string(),
-        });
-        ok.then(|| Self { id: task_id.to_string(), finished: false })
+impl Cancellation {
+    /// `task_id` — correlation_id исполняемого запроса: тем же идентификатором
+    /// заказчик завёл задачу и им же её отменит.
+    pub fn watch(task_id: &str) -> Self {
+        Self { task_id: task_id.to_string(), seen_alive: std::cell::Cell::new(false) }
     }
-
-    pub fn id(&self) -> &str { &self.id }
 
     /// Задачу сняли отменой — работу пора прекращать.
+    ///
+    /// Если задачи не было вовсе (заказчик её не заводил), работа идёт до
+    /// конца: невозможность отменить — не повод не сделать работу.
     pub fn cancelled(&self) -> bool {
-        !crate::abi::task_alive(&self.id)
-    }
-
-    /// Терминальное событие с результатом. Без вызова его пошлёт Drop.
-    pub fn finish(mut self, error: &str) {
-        self.end(error);
-    }
-
-    fn end(&mut self, error: &str) {
-        if self.finished { return; }
-        self.finished = true;
-        crate::abi::task_end(&TaskEndRequest {
-            task_id: self.id.clone(),
-            error: error.to_string(),
-        });
-    }
-}
-
-impl Drop for LocalTask {
-    fn drop(&mut self) {
-        self.end("");
+        if crate::abi::task_alive(&self.task_id) {
+            self.seen_alive.set(true);
+            return false;
+        }
+        self.seen_alive.get()
     }
 }
 

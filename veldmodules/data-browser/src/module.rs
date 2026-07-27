@@ -18,7 +18,16 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
 // уходит по сети — дедуп по хэшу внутри render(). --
 static LAST_UI_HASH: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 
+/// Первый вызов hook_event — это app/on_ready: все сервисы подняты. Тогда же
+/// и спрашиваем библиотеку, иначе до первого перехода между экранами мы не
+/// знали бы, что уже скачано. Флаг снаружи State: hook_event получает его по
+/// ссылке, да и относится это к жизни модуля, а не к тому, что он показывает.
+static LIBRARY_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub fn hook_event(state: &State) {
+    if !LIBRARY_REQUESTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        handlers::nav::request_library();
+    }
     let root = view::build_root(state);
     veld_ui_service_wrap::render::render(crate::SERVICE_NAME, root, &mut LAST_UI_HASH.lock().unwrap());
 }
@@ -37,26 +46,32 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         ON_BROWSE_UP => handlers::browse::on_browse_up(state, event),
         ON_SEARCH => handlers::search::on_search(state, event),
         ON_SEARCH_INPUT => handlers::search::on_search_input(state, event),
-        ON_DOWNLOAD_PRESSED => handlers::download::on_download_pressed(state, event),
-        ON_VIEW_PRESSED => handlers::preview::on_view_pressed(state, event),
-        ON_PREVIEW_PRESSED => handlers::preview::on_preview_pressed(state, event),
-        ON_DELETE_PRESSED => handlers::download::on_delete_pressed(state, event),
+        ON_DOWNLOAD_PRESSED => handlers::library::on_download_pressed(state, event),
+        ON_VIEW_LOCAL_PRESSED => handlers::preview::on_view_local_pressed(state, event),
+        ON_VIEW_REMOTE_PRESSED => handlers::preview::on_view_remote_pressed(state, event),
+        ON_DELETE_PRESSED => handlers::library::on_delete_pressed(state, event),
         other => veldsdk::log::warn!(target: "handlers", "[data-browser] unknown UI method: {}", other),
     }
 }
 
 // -- Sub handlers --
-pub use handlers::download::{on_download_started, on_download_progress, on_downloaded, on_delete_result, on_write_result};
-pub use handlers::preview::{on_load_result, on_preview_result};
+pub use handlers::library::on_state;
+pub use handlers::preview::on_load_result;
 
-/// fs/on_read_result — топик один, потребителей два: превью открывает им
-/// картинку, download дочитывает сидкары. Каждый узнаёт свой ответ по
-/// correlation_id, поэтому развилка тут, а не в схеме.
-pub fn on_read_result(state: &mut State, response: veldsdk::proto::fs::FsReadResult) {
-    if handlers::preview::on_file_opened(state, &response) { return; }
-    handlers::download::on_read_result(state, response);
+/// Ресурс открыт. Топиков два — библиотека отдаёт скачанный файл, провайдер
+/// открывает ещё не скачанный, — но сообщение одно и потребитель один, так
+/// что и обработчик один: дальше превью безразлично, откуда взялись байты.
+///
+/// Ответ без учтённого запроса возможен только при рассогласовании, но ресурс
+/// в нём всё равно наш — освобождаем, чтобы ошибка стоила лога, а не утечки.
+pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
+    if handlers::preview::on_resource_opened(state, &opened) { return; }
+    veldsdk::log::warn!(target: "handlers",
+        "[data-browser] on_open_result без учтённого запроса: {}", opened.correlation_id);
+    if let Some(handle) = opened.handle {
+        veldsdk::abi::arena_free(handle.id);
+    }
 }
 pub use handlers::search::on_search_result;
 pub use handlers::browse::on_list_path_result;
-pub use handlers::nav::on_list_result;
 pub use handlers::window::on_window_resized;

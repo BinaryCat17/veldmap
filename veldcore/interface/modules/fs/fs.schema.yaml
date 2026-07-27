@@ -14,7 +14,7 @@ interface:
       type: fs/FsDeleteRequest
   outputs:
     on_read_result:
-      type: fs/FsReadResult
+      type: core/ResourceOpened
       replies_to: on_read
     on_write_result:
       type: fs/FsWriteResult

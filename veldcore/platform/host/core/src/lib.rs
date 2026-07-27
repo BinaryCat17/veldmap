@@ -17,10 +17,6 @@ pub mod surfaces;
 // Protobuf-типы платформенных контрактов — из сгенерированного
 // биндинг-крейта (platform/host/generated, buildgen).
 pub use veldmap_host_bindings::proto::{app, core};
-/// Сообщения контракта tasks — платформа заводит и завершает задачи,
-/// зарегистрированные модулями через ABI (см. abi::add_to_linker).
-pub use veldmap_host_bindings::proto::tasks as tasks_proto;
-
 pub struct CallContextInner {
     pub input: Vec<u8>,
     pub output: Vec<u8>,

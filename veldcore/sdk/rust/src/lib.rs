@@ -26,7 +26,7 @@ pub use proto::core::ResourceHandle;
 pub use abi::generate_id;
 pub use abi::event_publisher;
 pub use correlator::Correlator;
-pub use tasks::{LocalTask, TaskTracker};
+pub use tasks::{Cancellation, TaskTracker};
 pub use resource::ResourceReader;
 
 /// RAII handle to a memory region or graphics object.

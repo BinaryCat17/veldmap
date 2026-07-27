@@ -1,0 +1,36 @@
+name: data-library
+version: 0.1.0
+
+interface:
+  inputs:
+    on_list:
+      type: module/LibraryRequest
+    on_download:
+      type: module/DownloadRequest
+    on_cancel:
+      type: module/ItemRequest
+    on_delete:
+      type: module/ItemRequest
+    on_open:
+      type: module/OpenRequest
+
+  outputs:
+    # Одно состояние на всех — и после on_list, и при любом изменении.
+    # Второго топика «а теперь изменилось» нет намеренно: он отличался бы
+    # только поводом, а состояние присылается одно и то же.
+    on_state:
+      type: module/LibraryState
+    on_open_result:
+      type: core/ResourceOpened
+      replies_to: on_open
+
+dependencies:
+  # Диск: листинг каталога, чтение и запись сидкаров, удаление. Единственный
+  # модуль, которому положено знать раскладку хранения.
+  fs:
+    subs: [on_list_result, on_read_result, on_write_result, on_delete_result]
+    calls: [on_list, on_read, on_write, on_delete]
+  # Провайдер: он качает и он же открывает то, чего у нас ещё нет.
+  data-provider:
+    subs: [on_download_started, on_download_progress, on_downloaded]
+    calls: [on_download, on_cancel_download]

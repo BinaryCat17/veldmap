@@ -10,6 +10,18 @@ use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{HttpTaskRequest, HttpTaskResponse};
 use std::collections::HashMap;
 
+/// Сколько ждать установления соединения и следующей порции байт.
+///
+/// Таймауты обязательны, а не «на всякий случай»: оконное чтение удалённого
+/// ресурса — синхронный для гостя ABI-вызов, поэтому зависшее соединение
+/// останавливает не запрос, а весь модуль-читатель (его актор ждёт возврата
+/// из handle_event). Отмена задачи такому чтению не поможет — оно опрашивает
+/// её только между порциями. Ограничение по времени — единственное, что
+/// делает зависание конечным. Пишется на весь ответ намеренно не берётся:
+/// скачивание снимка легально идёт долго, а вот молчание сервера — нет.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Общий клиент процесса: держит пул соединений, поэтому оконное чтение не
 /// переустанавливает TLS-сессию на каждый Range-запрос.
 pub fn client() -> reqwest::Client {
@@ -19,7 +31,11 @@ pub fn client() -> reqwest::Client {
         // blocking-пула, где контекст рантайма надо назвать явно, иначе
         // клиенту не к чему привязать таймеры и резолвер.
         let _guard = tokio::runtime::Handle::current().enter();
-        reqwest::Client::new()
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+            .unwrap_or_default()
     }).clone()
 }
 

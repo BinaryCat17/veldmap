@@ -1,21 +1,26 @@
 //! Реестр фоновых задач платформы: владение по lease (та же модель прав,
 //! что у ресурсов — registry.rs), отмена по task_id и уникальность
-//! идентификаторов. Заполняется только через фасад Tasks (host-util);
-//! голый реестр модулям не экспортируется.
+//! идентификаторов.
+//!
+//! Только хранение и права. Шину реестр не знает: жизненный цикл
+//! (tasks/task_started, tasks/task_finished) эмитит фасад `Tasks` в host-util
+//! — единственный, кто эту таблицу меняет. Голый реестр модулям не
+//! экспортируется; ядро отдаёт наружу лишь `is_alive` через ABI
+//! `veld_task_alive` — единственный вопрос, на который шина ответить не может
+//! (wasm-модуль внутри обработчика не разгребает свою очередь).
 
 use dashmap::DashMap;
 use tokio::task::AbortHandle;
 use crate::registry::Lease;
 
+/// Живая задача. Только то, что нужно для отмены: описание (label, kind,
+/// executor) уходит в tasks/task_started и больше никому не нужно — хранить
+/// его здесь значило бы держать копию, которую никто не читает.
 pub struct TaskEntry {
     pub lease: Lease,
     /// None между begin() и attach_abort(): отмена в этом окне снимает
     /// запись, а attach_abort вернёт false — фасад abort'ит хендл сам.
     pub abort: Option<AbortHandle>,
-    pub label: String,
-    pub kind: String,
-    /// Имя сервиса-исполнителя (для tasks/task_started).
-    pub executor: String,
 }
 
 pub enum CancelOutcome {
@@ -37,29 +42,18 @@ impl TaskRegistry {
         Self { tasks: DashMap::new() }
     }
 
-    /// Открывает регистрацию задачи (до spawn'а фьючерса). owner — instance id
-    /// инициатора (0 = хост). Дубликат живого id — ошибка: чужой идентификатор
-    /// нельзя переиспользовать, пока задача не завершилась.
-    pub fn begin(
-        &self,
-        task_id: &str,
-        owner: u32,
-        executor: &str,
-        label: &str,
-        kind: &str,
-    ) -> Result<(), DuplicateTaskId> {
-        let entry = TaskEntry {
-            lease: Lease::new(owner),
-            abort: None,
-            label: label.to_string(),
-            kind: kind.to_string(),
-            executor: executor.to_string(),
-        };
+    /// Открывает регистрацию задачи. owner — instance id инициатора (0 = хост).
+    /// Дубликат живого id — ошибка: чужой идентификатор нельзя переиспользовать,
+    /// пока задача не завершилась.
+    pub fn begin(&self, task_id: &str, owner: u32) -> Result<(), DuplicateTaskId> {
         // entry() не подходит: нужно отличить занятый id, не перезаписывая его.
         if self.tasks.contains_key(task_id) {
             return Err(DuplicateTaskId(task_id.to_string()));
         }
-        self.tasks.insert(task_id.to_string(), entry);
+        self.tasks.insert(task_id.to_string(), TaskEntry {
+            lease: Lease::new(owner),
+            abort: None,
+        });
         Ok(())
     }
 
@@ -99,9 +93,17 @@ impl TaskRegistry {
         CancelOutcome::Cancelled
     }
 
-    /// Завершение исполнителем: снимает задачу с учёта. false — уже снята
-    /// (отменена): терминальное событие тогда эмитит путь отмены.
-    pub fn complete(&self, task_id: &str) -> bool {
+    /// Завершение: снимает задачу с учёта. false — уже снята (отменена):
+    /// терминальное событие тогда эмитит путь отмены.
+    ///
+    /// `requestor` проверяется тем же lease, что и отмена: закрыть задачу
+    /// может её владелец, обладатель grant'а или хост. Иначе чужой модуль
+    /// закрывал бы задачу, за которую не отвечает.
+    pub fn complete(&self, task_id: &str, requestor: u32) -> bool {
+        match self.tasks.get(task_id) {
+            Some(entry) if entry.lease.can_write(requestor) => {}
+            _ => return false,
+        }
         self.tasks.remove(task_id).is_some()
     }
 
@@ -115,11 +117,5 @@ impl TaskRegistry {
             }
             _ => false,
         }
-    }
-}
-
-impl Default for TaskRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
