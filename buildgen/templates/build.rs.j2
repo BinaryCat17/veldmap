@@ -2,16 +2,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = prost_build::Config::new();
     config.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
     
-    let mut proto_files = Vec::new();
-    let mut include_dirs = Vec::new();
+    // Типы указаны явно: у модуля без собственного types.proto оба вектора
+    // остаются пустыми, и выводить их элемент компилятору не из чего.
+    let mut proto_files: Vec<String> = Vec::new();
+    let mut include_dirs: Vec<String> = Vec::new();
 
 {% if local_proto_path %}
     proto_files.push("{{ local_proto_path }}".to_string());
 {% endif %}
-
-{% for proto_path in proto_paths %}
-    proto_files.push("{{ proto_path }}".to_string());
-{% endfor %}
 
 {% for include_dir in include_dirs %}
     include_dirs.push("{{ include_dir }}".to_string());

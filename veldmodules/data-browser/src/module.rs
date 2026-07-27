@@ -29,7 +29,12 @@ pub fn hook_event(state: &State) {
         handlers::nav::request_library();
     }
     let root = view::build_root(state);
-    veld_ui_service_wrap::render::render(crate::SERVICE_NAME, root, &mut LAST_UI_HASH.lock().unwrap());
+    veld_ui_service_wrap::render::render(
+        crate::SERVICE_NAME,
+        root,
+        &mut LAST_UI_HASH.lock().unwrap(),
+        crate::calls::ui_service::on_set_view,
+    );
 }
 
 // -- UI-события (ui-service/on_ui_event, адресовано нам через target) --

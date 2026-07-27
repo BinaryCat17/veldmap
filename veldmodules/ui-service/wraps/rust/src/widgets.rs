@@ -166,7 +166,6 @@ impl<M> Text<M> {
                 bold: false,
                 horizontal_alignment: 0,
                 vertical_alignment: 0,
-                style: String::new(),
                 width: None,
                 height: None,
                 shaping: 0,
@@ -181,10 +180,6 @@ impl<M> Text<M> {
     }
     pub fn color(mut self, color: super::style::Color) -> Self {
         self.widget.color = Some(color.to_proto());
-        self
-    }
-    pub fn style(mut self, style: impl Into<String>) -> Self {
-        self.widget.style = style.into();
         self
     }
     pub fn width(mut self, w: Length) -> Self {
@@ -335,10 +330,6 @@ impl<M> TextInput<M> {
         self.widget.size = size;
         self
     }
-    pub fn style(mut self, style: impl Into<String>) -> Self {
-        self.widget.style = style.into();
-        self
-    }
 }
 
 impl<M> From<TextInput<M>> for Element<M> {
@@ -387,10 +378,6 @@ impl<M> Container<M> {
     }
     pub fn padding(mut self, p: impl Into<Padding>) -> Self {
         self.widget.padding = Some(p.into().to_proto());
-        self
-    }
-    pub fn style(mut self, style: impl Into<String>) -> Self {
-        self.widget.style = style.into();
         self
     }
     pub fn background(mut self, background: impl Into<Background>) -> Self {

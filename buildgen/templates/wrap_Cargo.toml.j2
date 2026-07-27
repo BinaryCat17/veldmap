@@ -15,9 +15,6 @@ futures-util = { version = "0.3", default-features = false }
 {% if wrap_sdk_path %}
 veldsdk = { path = "{{ wrap_sdk_path }}" }
 {% endif %}
-{% for name, spec in wrap_dependencies.items() %}
-{{ name }} = {{ spec }}
-{% endfor %}
 
 [build-dependencies]
 prost-build = "0.14"

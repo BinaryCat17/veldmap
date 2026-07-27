@@ -11,18 +11,16 @@ pub use proto::*;
 
 pub use veldsdk::proto::core;
 pub use veldsdk::proto::app;
-{% if inputs %}
 
-/// Типизированные стабы входных топиков сервиса (interface.inputs из
-/// schema.yaml). Строки топиков существуют только здесь.
-pub mod inputs {
-    use veldsdk::prost::Message;
-    {% for input in inputs %}
-
-    /// `{{ service_name }}/{{ input.name }}`
-    pub fn {{ input.name }}(msg: &{{ input.rust_path }}) {
-        veldsdk::abi::publish("{{ service_name }}/{{ input.name }}", msg.encode_to_vec());
-    }
-    {% endfor %}
-}
-{% endif %}
+// Стабов входных топиков здесь намеренно нет.
+//
+// Wrap-крейт собирается один раз на производителя и общий для всех его
+// потребителей — он физически не может знать, объявил ли конкретный
+// потребитель эту связь в своём `dependencies.<dep>.calls`. Публикуй он сам,
+// и граф связей из schema.yaml перестал бы быть полным: валидация типов,
+// топологическая сортировка сборки и любая проверка прав видели бы неполную
+// картину, а схема утверждала бы, что связь односторонняя.
+//
+// Поэтому публикует всегда потребитель, своим сгенерированным стабом
+// `crate::calls::<dep>::<method>`, а рукописные хелперы wrap-крейта
+// принимают его параметром (см. `render::render`, `surface::delegate`).

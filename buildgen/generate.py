@@ -17,6 +17,7 @@ generated emit/call stubs are typed with the exact message from the schema.
 """
 import os
 import re
+import shutil
 import argparse
 import yaml
 from jinja2 import Environment, FileSystemLoader
@@ -361,6 +362,43 @@ def fail_on(errors: list[str], schema_path: str):
         raise SystemExit(1)
 
 
+def validate_schema_identity(schema: dict, schema_path: str) -> list[str]:
+    """`name:` обязан совпадать с тем, как модуль зовётся снаружи.
+
+    Производитель строит свои топики из `schema.name`, а потребитель — из
+    ключа в `dependencies:`, то есть из имени каталога (см. generate_module:
+    `f"{name}/{input}"` против `f"{dep_name}/{sub}"`). Хост, в свою очередь,
+    ищет конфиг как `<config_dir>/<name>.json`. Разъехавшись, эти три строки
+    не дают ни ошибки компиляции, ни ошибки загрузки: событие просто никогда
+    не доставляется. Поэтому равенство проверяется здесь, до генерации.
+
+    Признак вида схемы — имя файла: `schema.yaml` у wasm-модуля (имя задаёт
+    каталог), `<X>.schema.yaml` у сервиса платформы (имя задаёт сам файл).
+    """
+    name = schema.get("name")
+    if not name:
+        return [f"schema has no 'name'"]
+
+    basename = os.path.basename(schema_path)
+    if basename == "schema.yaml":
+        expected = os.path.basename(os.path.dirname(schema_path))
+        source = "имя каталога модуля"
+    elif basename.endswith(".schema.yaml"):
+        expected = basename[: -len(".schema.yaml")]
+        source = "имя файла схемы"
+    else:
+        return []
+
+    if name != expected:
+        return [
+            f"name: '{name}' не совпадает с '{expected}' ({source}). "
+            f"Потребители адресуют этот сервис как '{expected}/<топик>', "
+            f"а он публикует в '{name}/<топик>' — события не дойдут. "
+            f"Переименуйте и то, и другое."
+        ]
+    return []
+
+
 # ── Host bindings generation ─────────────────────────────────────────────────
 
 def generate_host_bindings(args, script_dir: str):
@@ -395,7 +433,8 @@ def generate_host_bindings(args, script_dir: str):
     for schema_path in schema_files:
         with open(schema_path) as sf:
             svc_schema = yaml.safe_load(sf)
-        fail_on(validate_core_schema(svc_schema, universe), schema_path)
+        fail_on(validate_schema_identity(svc_schema, schema_path)
+                + validate_core_schema(svc_schema, universe), schema_path)
         iface = svc_schema.get("interface", {}) or {}
 
         def entries(kind):
@@ -584,9 +623,7 @@ def main():
     # ── Validate the schema before rendering anything ────────────────────────
     universe = build_type_universe(core_proto_dir, os.path.dirname(schema_dir))
     errors, resolved = validate_module_schema(schema, schema_dir, core_proto_dir, universe)
-    fail_on(errors, schema_path)
-
-    own_alias = local_package_alias(schema_dir)
+    fail_on(validate_schema_identity(schema, schema_path) + errors, schema_path)
 
     def module_rust_path(canonical: str) -> str:
         """Rust path of a canonical 'alias/Message' inside the module crate."""
@@ -677,7 +714,6 @@ def main():
 
     # ── Discover dependent protos (from schema.yaml dependencies) ─────────────
     raw_deps    = rust_config.get("dependencies", {})
-    proto_paths = []
     dep_protos  = []
     cargo_dependencies = {}
 
@@ -686,7 +722,6 @@ def main():
         cargo_dependencies[dep_name] = yaml_dep_to_toml(dep_val)
 
     # 2. Add schema-inferred internal dependencies
-    dep_wrap_crates = {}   # package alias → (wrap crate snake name, dep dir name)
     schema_deps = schema.get("dependencies", {})
     for dep_name in schema_deps.keys():
         dep_dir = os.path.normpath(os.path.join(schema_dir, "..", dep_name))
@@ -701,42 +736,25 @@ def main():
             api_crate_name = f"{dep_pkg_name}-wrap"
             api_crate_snake = api_crate_name.replace("-", "_")
 
-            # Dependency on the generated wrap crate
-            cargo_dependencies[api_crate_name] = f'{{ path = "../../{dep_name}/generated/wraps/rust" }}'
-
-            # Extract package name for aliasing
+            # Зависимость на wrap-крейт — только если он вообще порождается,
+            # то есть у зависимости есть свой types.proto (см. рендер ниже).
+            # Иначе Cargo.toml ссылался бы на несуществующий путь.
             proto_file = os.path.join(dep_dir, "types.proto")
             if os.path.exists(proto_file):
                 pkg = read_proto_package(proto_file)
                 if pkg:
+                    cargo_dependencies[api_crate_name] = \
+                        f'{{ path = "../../{dep_name}/generated/wraps/rust" }}'
                     dep_snake = pkg.split(".")[-1]
                     dep_protos.append({
                         "snake": dep_snake,
                         "api_crate": api_crate_snake,
                     })
-                    dep_wrap_crates[dep_snake] = (api_crate_snake, api_crate_name, dep_name)
 
-    # ── Wrap-crate input stubs (typed against the exact message) ─────────────
-    # Inputs may be typed with another module's message (e.g. the renderer's
-    # UiEventResponse); the wrap crate then depends on that module's wrap.
-    wrap_dependencies = {}
-
-    def wrap_rust_path(canonical: str) -> str:
-        alias, tname = canonical.split("/")
-        rust_name = rust_type_name(tname)
-        if alias == own_alias:
-            return f"crate::proto::{rust_name}"
-        if universe[alias]["origin"] == "core":
-            return f"veldsdk::proto::{alias}::{rust_name}"
-        crate_snake, crate_name, dep_dir_name = dep_wrap_crates[alias]
-        wrap_dependencies[crate_name] = \
-            f'{{ path = "../../../../{dep_dir_name}/generated/wraps/rust" }}'
-        return f"{crate_snake}::{rust_name}"
-
-    inputs = [
-        {"name": n, "rust_path": wrap_rust_path(resolved["inputs"][n])}
-        for n in schema.get("interface", {}).get("inputs", {}) or {}
-    ]
+    # Стабов входных топиков wrap-крейт не получает: публиковать в чужой вход
+    # вправе только потребитель, объявивший связь в своём
+    # `dependencies.<dep>.calls` (см. wrap_lib.rs.j2). Иначе граф связей из
+    # schema.yaml был бы неполным.
 
     # ── Local proto metadata ─────────────────────────────────────────────────
     local_proto_package = None
@@ -764,16 +782,13 @@ def main():
         },
         "handlers":           handlers,
         "emits":              emits,
-        "inputs":             inputs,
         "dep_calls":          dep_calls,
         "hook_event":         hook_event,
         "has_local_proto":    has_local_proto,
         "local_proto_package": local_proto_package,
         "local_proto_path":   local_proto_path,
-        "proto_paths":        proto_paths,
         "include_dirs":       include_dirs,
         "dep_protos":         dep_protos,
-        "wrap_dependencies":  wrap_dependencies,
     }
 
     # ── Render templates ─────────────────────────────────────────────────────
@@ -788,7 +803,16 @@ def main():
     }
 
     # ── Render API Crate (Wrap) ──────────────────────────────────────────────
-    if has_local_proto:
+    # Wrap-крейт существует только у модуля с собственным types.proto: он для
+    # того и нужен, чтобы отдать потребителям типы производителя.
+    if not has_local_proto:
+        # Каталог generated/ между запусками не чистится, поэтому wrap от
+        # прежней сборки пережил бы удаление types.proto и остался бы живым
+        # входом для cargo — источник говорил бы одно, диск другое.
+        stale_wrap = os.path.join(output_dir, "wraps")
+        if os.path.isdir(stale_wrap):
+            shutil.rmtree(stale_wrap)
+    else:
         wrap_dir = os.path.join(output_dir, "wraps", "rust")
         wrap_renders = {
             os.path.join(wrap_dir, "src", "lib.rs"): env.get_template("wrap_lib.rs.j2"),

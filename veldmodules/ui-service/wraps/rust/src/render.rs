@@ -9,7 +9,18 @@ use super::widgets::Element;
 /// Ship the module's current view to the renderer.
 /// The layout is sent whole; unchanged layouts are skipped by content hash.
 /// Change detection beyond that (what to redraw, when) is the renderer's job.
-pub fn render(plugin_id: &str, root: Element<()>, last_hash: &mut u64) {
+///
+/// `publish` — стаб топика `ui-service/on_set_view` из кодогена вызывающего
+/// модуля: `render::render(id, root, &mut hash, crate::calls::ui_service::on_set_view)`.
+/// Wrap-крейт не публикует сам: он один на всех потребителей и не знает, кто
+/// из них объявил `ui-service: calls: [on_set_view]` у себя в schema.yaml, —
+/// а публикация в обход объявления сделала бы граф связей в схемах неполным.
+pub fn render(
+    plugin_id: &str,
+    root: Element<()>,
+    last_hash: &mut u64,
+    publish: impl FnOnce(&crate::proto::SetViewRequest),
+) {
     let layout = crate::proto::Layout { root: Some(root.widget) };
 
     let encoded = layout.encode_to_vec();
@@ -26,5 +37,5 @@ pub fn render(plugin_id: &str, root: Element<()>, last_hash: &mut u64) {
         plugin_id: plugin_id.to_string(),
         layout: Some(layout),
     };
-    crate::inputs::on_set_view(&request);
+    publish(&request);
 }

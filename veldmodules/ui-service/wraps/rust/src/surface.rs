@@ -12,14 +12,18 @@ const RENDER_TARGET_USAGE: u32 = 2 | 4 | 16;
 /// хосту. Старая текстура освобождается (хост блитит её до свапа — wgpu
 /// держит её живой через view в bind group). Возвращает id новой текстуры.
 ///
-/// `attach` — стаб топика app/on_set_surface из кодогена вызывающего модуля:
-/// `surface::delegate(&ev, old, crate::calls::app::on_set_surface)`. Wrap-крейт
-/// не публикует туда сам, потому что аттачит окно не он, а его потребитель —
-/// владелец окна, и объявить `app: calls: [on_set_surface]` должна схема
-/// именно этого модуля.
+/// Оба топика публикует потребитель, своими сгенерированными стабами:
+/// `surface::delegate(&ev, old, crate::calls::ui_service::on_set_surface,
+/// crate::calls::app::on_set_surface)`. Wrap-крейт не публикует ни в один из
+/// них сам — ни в чужой `app`, ни даже в вход собственного сервиса: он один на
+/// всех потребителей и не знает, кто из них объявил эту связь у себя в
+/// schema.yaml. Объявить `ui-service: calls: [on_set_surface]` и
+/// `app: calls: [on_set_surface]` обязана схема владельца окна, иначе граф
+/// связей, по которому идут валидация и порядок сборки, будет неполным.
 pub fn delegate(
     ev: &veldsdk::proto::app::WindowResized,
     old_texture: Option<u64>,
+    set_surface: impl FnOnce(&crate::proto::SetSurfaceRequest),
     attach: impl FnOnce(&veldsdk::proto::app::SetSurface),
 ) -> Option<u64> {
     let texture_id = abi::arena_alloc_texture(ev.width, ev.height, ev.format, RENDER_TARGET_USAGE)?;
@@ -32,7 +36,7 @@ pub fn delegate(
 
     let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0 };
 
-    crate::inputs::on_set_surface(&crate::proto::SetSurfaceRequest {
+    set_surface(&crate::proto::SetSurfaceRequest {
         plugin_id: ev.plugin_id.clone(),
         surface: Some(handle.clone()),
         width: ev.width,

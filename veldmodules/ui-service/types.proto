@@ -45,7 +45,7 @@ message Tooltip {
     uint32 position = 3; // Enum Position
     float gap = 4;
     Padding padding = 5;
-    string style = 6;
+    reserved 6; // бывший `string style` — конвертер его не читал
 }
 
 message ProgressBar {
@@ -91,7 +91,10 @@ message Text {
     bool bold = 4;
     Alignment horizontal_alignment = 5;
     Alignment vertical_alignment = 6;
-    string style = 7;
+    // 7 — бывший `string style`: класс-строка, которую конвертер никогда не
+    // читал. Внешний вид текста задают color/size/bold, и это единственный
+    // способ; сеттер в wrap-крейте существовал и молча ничего не делал.
+    reserved 7;
     Length width = 8;
     Length height = 9;
     uint32 shaping = 10;
@@ -157,7 +160,7 @@ message TextInput {
     string placeholder = 2;
     Handler on_input = 3;
     Handler on_submit = 4;
-    string style = 5;
+    reserved 5; // бывший `string style` — конвертер его не читал
     Length width = 6;
     Padding padding = 7;
     float size = 8;
@@ -183,8 +186,10 @@ message Container {
     Length max_height = 10;
     Alignment align_x = 5;
     Alignment align_y = 6;
+    // Фон контейнера задаётся только этим полем. Поле 8 было вторым,
+    // конкурирующим `string style`, которое конвертер не читал.
     Background background = 7;
-    string style = 8;
+    reserved 8;
 }
 
 message Padding {

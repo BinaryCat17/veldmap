@@ -108,10 +108,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
 
             match &b.style_variant {
                 Some(proto::button::StyleVariant::StyleClass(name)) => {
+                    // Только пресеты iced. Имён кнопок конкретного приложения
+                    // здесь быть не должно: сервис не знает своих клиентов, а
+                    // свой внешний вид клиент задаёт структурно (StyleCustom).
                     match name.as_str() {
-                        "text" | "sync_button" | "download_button" => { 
-                            btn = btn.style(iced_widget::button::text); 
-                        }
+                        "text" => { btn = btn.style(iced_widget::button::text); }
                         "primary" => { btn = btn.style(iced_widget::button::primary); }
                         "secondary" => { btn = btn.style(iced_widget::button::secondary); }
                         "success" => { btn = btn.style(iced_widget::button::success); }

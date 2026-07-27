@@ -71,35 +71,6 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
 
         let mut store = Store::new(&engine, state);
 
-        let registry_clone = ctx.registry.clone();
-        linker.func_wrap("host", "check_access", move |_caller: Caller<'_, HostState>, id: u64, flags: i32| -> i32 {
-            let access = if flags == 1 { crate::registry::Access::Write } else { crate::registry::Access::Read };
-            if registry_clone.check_access(id, instance_id, access) { 1 } else { 0 }
-        })?;
-
-        let mem_clone = ctx.memory.clone();
-        linker.func_wrap("host", "read_memory", move |mut caller: Caller<'_, HostState>, id: u64, offset: i64, size: i64, out_ptr: i32| -> i32 {
-            let wasm_mem = match caller.get_export("memory") {
-                Some(Extern::Memory(mem)) => mem,
-                _ => return -1,
-            };
-
-            if let Ok(data) = mem_clone.read(id, offset as u64, size as u64) {
-                if wasm_mem.write(&mut caller, out_ptr as usize, &data).is_ok() { 0 } else { -1 }
-            } else { -1 }
-        })?;
-
-        let mem_write_clone = ctx.memory.clone();
-        linker.func_wrap("host", "write_memory", move |mut caller: Caller<'_, HostState>, id: u64, offset: i64, in_ptr: i32, size: i32| -> i32 {
-            let wasm_mem = match caller.get_export("memory") {
-                Some(Extern::Memory(mem)) => mem,
-                _ => return -1,
-            };
-            let mem_data = wasm_mem.data(&caller);
-            let data = &mem_data[in_ptr as usize..(in_ptr + size) as usize];
-            if mem_write_clone.write(id, offset as u64, data).is_ok() { 0 } else { -1 }
-        })?;
-
         linker.define_unknown_imports_as_traps(&module)?;
         let instance = linker.instantiate_async(&mut store, &module).await?;
 
