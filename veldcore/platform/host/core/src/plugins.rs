@@ -187,6 +187,9 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                 let req = crate::core::EventEnvelope {
                     service: ev.service, method: ev.method, payload: ev.payload,
                     publisher: dispatcher_for_actor.name_of(ev.publisher).unwrap_or_default(),
+                    // Корреляция едет к модулю как есть: опознать по ней свой
+                    // запрос может только он сам.
+                    correlation_id: ev.correlation,
                     // Адресат уже разрешён на стороне доставки (только целевой
                     // подписчик получил это событие) — модулю его знать не нужно.
                     target: String::new(),

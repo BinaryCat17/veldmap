@@ -229,22 +229,35 @@ pub fn generate_id() -> String {
 
 // ── Call context ───────────────────────────────────────────────
 
-/// Паблишер обрабатываемого сейчас сообщения (заполняется handle_event из
-/// конверта, который кодирует хост, — полю можно доверять).
-/// Пустая строка — сам хост. Wasm однопоточный, поэтому простого Mutex хватает.
+/// Конверт обрабатываемого сейчас события — то, что известно о вызове помимо
+/// payload (заполняется handle_event из конверта, который кодирует хост, —
+/// полям можно доверять). Wasm однопоточный, поэтому простого Mutex хватает.
 static EVENT_PUBLISHER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static EVENT_CORRELATION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 /// Заполняется handle_event сгенерированного клея — читается через
-/// [`event_publisher`].
+/// [`event_publisher`] и [`correlation`].
 #[doc(hidden)]
-pub fn set_event_publisher(name: String) {
-    *EVENT_PUBLISHER.lock().unwrap() = name;
+pub fn set_event_context(publisher: String, correlation: String) {
+    *EVENT_PUBLISHER.lock().unwrap() = publisher;
+    *EVENT_CORRELATION.lock().unwrap() = correlation;
 }
 
 /// Имя сервиса, опубликовавшего текущее событие ("" — хост).
 /// Для авторизации: сравнивайте с ожидаемым отправителем.
 pub fn event_publisher() -> String {
     EVENT_PUBLISHER.lock().unwrap().clone()
+}
+
+/// Корреляция текущего события: у запроса — id, которым заказчик его пометил
+/// (в ответ его надо вернуть тем же), у ответа — id нашего запроса, по
+/// которому он ищется в таблице ожиданий. "" — топик не объявлен парой
+/// `replies_to`, и корреспондента у события нет.
+///
+/// Раньше это же значение приезжало полем доменного сообщения, из-за чего
+/// каждый контракт обязан был его объявить, а прикладной код — протащить.
+pub fn correlation() -> String {
+    EVENT_CORRELATION.lock().unwrap().clone()
 }
 
 /// Вход текущего вызова хоста (конверт события, конфиг при init).
@@ -274,18 +287,15 @@ pub fn store_output(data: Vec<u8>) {
 /// сгенерированные стабы (crate::emit::* для своих выходов, crate::calls::*
 /// для объявленных зависимостей). Строковый топик здесь — это нормально: он
 /// существует только внутри стабов.
+/// `correlation` — пусто у топиков, не объявленных парой `replies_to`; иначе
+/// id запроса (у ответа — тот, что пришёл с запросом). `target` — пусто при
+/// broadcast; непустой доставляется только подписчику с этим именем и
+/// используется для output'ов с `targeted: true` (адресат известен лишь в
+/// рантайме — например, ui-service рассылает события владельцам виджетов).
+/// Что чем заполнять, решает не автор модуля, а схема: стабы подставляют
+/// сюда константы или свои аргументы.
 #[doc(hidden)]
-pub fn publish(topic: &str, payload: Vec<u8>) {
-    publish_targeted(topic, payload, "");
-}
-
-/// Как `publish`, но с адресатом: событие доставляется только подписчику с
-/// именем `target`, а не всем подписчикам топика. Пустой `target` — обычный
-/// broadcast (см. `publish`). Используется для output'ов, помеченных в схеме
-/// `targeted: true` (адресат известен только в рантайме — например,
-/// ui-service рассылает UI-события владельцам виджетов).
-#[doc(hidden)]
-pub fn publish_targeted(topic: &str, payload: Vec<u8>, target: &str) {
+pub fn publish(topic: &str, payload: Vec<u8>, correlation: &str, target: &str) {
     let parts: Vec<&str> = topic.splitn(2, '/').collect();
     if parts.len() != 2 {
         log::error!(target: "sdk", "Invalid topic: {}", topic);
@@ -295,7 +305,9 @@ pub fn publish_targeted(topic: &str, payload: Vec<u8>, target: &str) {
     // и подписывает события сам при доставке.
     let request = EventEnvelope {
         service: parts[0].to_string(), method: parts[1].to_string(), payload,
-        publisher: String::new(), target: target.to_string(),
+        publisher: String::new(),
+        correlation_id: correlation.to_string(),
+        target: target.to_string(),
     };
     let req_buf = request.encode_to_vec();
     unsafe { veld_host_publish(req_buf.as_ptr() as u64, req_buf.len() as u64); }

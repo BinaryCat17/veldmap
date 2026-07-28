@@ -7,16 +7,14 @@ use crate::module::state::State;
 /// расходились в мелочах.
 pub fn request_path(state: &mut State, path: String) {
     state.browse.current_path = path.clone();
-    state.browse.is_loading = true;
     state.browse.error = None;
     state.global.status_message = format!("Loading /{}...", path);
 
-    let correlation_id = state.browse.pending.begin(());
+    let correlation_id = state.browse.request.begin();
     crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path,
         token: String::new(),
-        correlation_id,
-    });
+    }, &correlation_id);
 }
 
 /// Браузинг запрошен (через UI событие). Путь берётся из value — это
@@ -43,16 +41,16 @@ pub fn on_browse_up(state: &mut State, _event: UiEventResponse) {
     request_path(state, path);
 }
 
-/// Broadcast-топик — сверяем correlation_id, чтобы не принять устаревший
-/// или чужой ответ (например, от предыдущего on_browse_up).
+/// Broadcast-топик — сверяем корреляцию. Отбрасываем не только чужой ответ,
+/// но и свой устаревший: пока он шёл, пользователь мог уйти в другую папку,
+/// и его содержимое под нынешним путём было бы неправдой.
 pub fn on_list_path_result(
     state: &mut State,
     response: crate::proto::data_provider::ListPathResponse,
 ) {
-    if state.browse.pending.take(&response.correlation_id).is_none() {
+    if state.browse.request.settle(&veldsdk::correlation()) != veldsdk::Reply::Current {
         return;
     }
-    state.browse.is_loading = false;
 
     if !response.error.is_empty() {
         state.browse.error = Some(response.error);

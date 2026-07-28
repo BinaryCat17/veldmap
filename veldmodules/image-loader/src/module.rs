@@ -36,7 +36,9 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 }
 
 pub fn on_load(_state: &mut State, req: LoadImageRequest) {
-    let correlation_id = req.correlation_id.clone();
+    // Корреляция запроса — она же идентификатор задачи декодирования, которую
+    // завёл заказчик: он её владелец, он же её и отменяет.
+    let correlation_id = veldsdk::correlation();
     // Чем назвать источник в логах и в списке задач, знает только заказчик:
     // сюда приходит ресурс, у которого ни имени, ни пути уже нет.
     let label = if req.label.is_empty() { correlation_id.clone() } else { req.label.clone() };
@@ -62,8 +64,7 @@ pub fn on_load(_state: &mut State, req: LoadImageRequest) {
         source_width: source.0,
         source_height: source.1,
         error,
-        correlation_id,
-    });
+    }, &correlation_id);
 }
 
 struct Texture {

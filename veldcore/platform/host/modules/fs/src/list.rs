@@ -4,15 +4,15 @@ use super::State;
 use veldmap_host_util::bindings::fs as bus;
 use veldmap_host_util::bindings::proto::fs::{FsEntry, FsListRequest, FsListResult};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
-use veldmap_host_util::blocking;
+use veldmap_host_util::{blocking, Caller};
 use std::fs;
 
-pub fn on_list(state: &State, req: FsListRequest, _requestor_id: u32) {
-    let correlation_id = req.correlation_id.clone();
+pub fn on_list(state: &State, req: FsListRequest, caller: Caller) {
+    let correlation = caller.correlation;
     if !is_path_safe(&req.path) {
         bus::emit::on_list_result(&*state.ctx.dispatcher, &FsListResult {
-            entries: vec![], error: "Access denied".into(), correlation_id,
-        });
+            entries: vec![], error: "Access denied".into(),
+        }, &correlation);
         return;
     }
 
@@ -20,7 +20,7 @@ pub fn on_list(state: &State, req: FsListRequest, _requestor_id: u32) {
         let path = resolve_path(&ctx, &req.path);
         let mut entries = Vec::new();
         let result = if !path.exists() {
-            FsListResult { entries, error: String::new(), correlation_id }
+            FsListResult { entries, error: String::new() }
         } else {
             match fs::read_dir(&path) {
                 Ok(iter) => {
@@ -33,11 +33,11 @@ pub fn on_list(state: &State, req: FsListRequest, _requestor_id: u32) {
                             entries.push(FsEntry { name: name.to_string(), size });
                         }
                     }
-                    FsListResult { entries, error: String::new(), correlation_id }
+                    FsListResult { entries, error: String::new() }
                 }
-                Err(e) => FsListResult { entries: vec![], error: e.to_string(), correlation_id },
+                Err(e) => FsListResult { entries: vec![], error: e.to_string() },
             }
         };
-        bus::emit::on_list_result(&*ctx.dispatcher, &result);
+        bus::emit::on_list_result(&*ctx.dispatcher, &result, &correlation);
     });
 }

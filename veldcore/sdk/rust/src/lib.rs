@@ -3,6 +3,7 @@ pub mod proto;
 pub mod graphics;
 pub mod tasks;
 pub mod correlator;
+pub mod latest;
 pub mod resource;
 
 /// Мост `log` → ABI хоста. Ставится сгенерированным клеем модуля; прикладной
@@ -25,7 +26,9 @@ pub use log;
 pub use proto::core::ResourceHandle;
 pub use abi::generate_id;
 pub use abi::event_publisher;
+pub use abi::correlation;
 pub use correlator::Correlator;
+pub use latest::{Latest, Reply};
 pub use tasks::Cancellation;
 pub use resource::ResourceReader;
 

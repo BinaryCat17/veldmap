@@ -3,8 +3,9 @@
 //! у ресурсов (получатель адресуется по имени, резолвится в instance id).
 
 use super::State;
+use veldmap_host_util::Caller;
 use veldmap_host_util::bindings::proto::tasks::TaskGrantRequest;
 
-pub fn on_grant(state: &State, req: TaskGrantRequest, requestor_id: u32) {
-    state.tasks.grant(&req.task_id, requestor_id, &req.service);
+pub fn on_grant(state: &State, req: TaskGrantRequest, caller: Caller) {
+    state.tasks.grant(&req.task_id, caller.instance, &req.service);
 }

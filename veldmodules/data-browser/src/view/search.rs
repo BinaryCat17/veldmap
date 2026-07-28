@@ -11,7 +11,7 @@ pub fn view(state: &State) -> Element<()> {
 
     let body: Element<()> = if let Some(err) = &search_state.error {
         column![text(format!("Error: {}", err)).size(16.0)].into()
-    } else if search_state.is_loading {
+    } else if search_state.request.is_pending() {
         column![text("Searching...").size(16.0)].into()
     } else {
         let items: Vec<Row> = search_state.results.iter()

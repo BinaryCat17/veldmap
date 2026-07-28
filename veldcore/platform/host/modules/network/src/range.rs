@@ -17,7 +17,7 @@ use super::State;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::RemoteOpenRequest;
 use veldmap_host_util::core::{ResourceHandle, ResourceOpened};
-use veldmap_host_util::{blocking, RangeSource};
+use veldmap_host_util::{blocking, Caller, RangeSource};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -32,22 +32,21 @@ const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
 /// Задачи здесь нет намеренно, в отличие от download и http: открытие — это
 /// один пробный запрос, ограниченный таймаутами клиента (см. http::client),
 /// и отменять в нём нечего. Долгая часть — чтение, а оно идёт через ABI
-/// памяти, вне системы задач; correlation_id запроса достаётся задаче того,
+/// памяти, вне системы задач; корреляция запроса достаётся задаче того,
 /// кто ресурс потом читает (например, декодирования в image-loader).
-pub fn on_open(state: &State, req: RemoteOpenRequest, requestor_id: u32) {
-    let correlation_id = req.correlation_id.clone();
+pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
+    let Caller { instance, correlation } = caller;
 
     // Пробный запрос уходит в сеть, поэтому не в async-обработчике.
     blocking(&state.ctx, move |ctx| {
         let result = match HttpRange::open(&req.url, req.headers) {
             Ok(source) => {
                 let len = source.len();
-                let id = ctx.memory.alloc_range(Arc::new(source), requestor_id);
+                let id = ctx.memory.alloc_range(Arc::new(source), instance);
                 log::info!(target: "network", "Opened remote resource {} ({} bytes): {}", id, len, req.url);
                 ResourceOpened {
                     handle: Some(ResourceHandle { id, size: len }),
                     error: String::new(),
-                    correlation_id,
                 }
             }
             Err(e) => {
@@ -55,10 +54,10 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, requestor_id: u32) {
                 // только тот, кто в этот момент смотрит на превью — в логе она
                 // нужна независимо от этого.
                 log::warn!(target: "network", "Failed to open remote resource {}: {}", req.url, e);
-                ResourceOpened { handle: None, error: e.to_string(), correlation_id }
+                ResourceOpened { handle: None, error: e.to_string() }
             }
         };
-        bus::emit::on_open_result(&*ctx.dispatcher, &result);
+        bus::emit::on_open_result(&*ctx.dispatcher, &result, &correlation);
     });
 }
 

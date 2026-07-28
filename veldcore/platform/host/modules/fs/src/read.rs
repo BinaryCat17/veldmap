@@ -11,28 +11,27 @@ use veldmap_host_util::bindings::fs as bus;
 use veldmap_host_util::bindings::proto::fs::FsReadRequest;
 use veldmap_host_util::core::{ResourceHandle, ResourceOpened};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
-use veldmap_host_util::blocking;
+use veldmap_host_util::{blocking, Caller};
 
-pub fn on_read(state: &State, req: FsReadRequest, requestor_id: u32) {
-    let correlation_id = req.correlation_id.clone();
+pub fn on_read(state: &State, req: FsReadRequest, caller: Caller) {
+    let Caller { instance, correlation } = caller;
     if !is_path_safe(&req.path) {
         bus::emit::on_read_result(&*state.ctx.dispatcher, &ResourceOpened {
-            handle: None, error: "Access denied".into(), correlation_id,
-        });
+            handle: None, error: "Access denied".into(),
+        }, &correlation);
         return;
     }
 
     // Открытие — тоже обращение к диску: на сетевом или спящем носителе
     // даже open с метаданными отвечает не сразу.
     blocking(&state.ctx, move |ctx| {
-        let result = match ctx.memory.alloc_file(&resolve_path(&ctx, &req.path), requestor_id) {
+        let result = match ctx.memory.alloc_file(&resolve_path(&ctx, &req.path), instance) {
             Ok((id, size)) => ResourceOpened {
                 handle: Some(ResourceHandle { id, size }),
                 error: String::new(),
-                correlation_id,
             },
-            Err(e) => ResourceOpened { handle: None, error: e.to_string(), correlation_id },
+            Err(e) => ResourceOpened { handle: None, error: e.to_string() },
         };
-        bus::emit::on_read_result(&*ctx.dispatcher, &result);
+        bus::emit::on_read_result(&*ctx.dispatcher, &result, &correlation);
     });
 }

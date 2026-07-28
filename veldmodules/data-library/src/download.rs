@@ -45,31 +45,35 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
     let done = state.entry_for(&name).filter(|e| e.is_partial).map(|e| e.size).unwrap_or(0);
     let total = state.total_bytes(&name);
 
-    let correlation_id = state.downloads.begin(Download {
+    // Операцию именуем мы: этим же id мы спросим подпись, попросим закачку и
+    // отменим задачу у платформы — она наша от начала до конца.
+    let correlation_id = veldsdk::generate_id();
+    state.downloads.insert(correlation_id.clone(), Download {
         identifier: req.identifier.clone(),
         name,
         done,
         total,
+        delete_when_done: false,
     });
 
     crate::calls::data_provider::on_sign(&SignRequest {
         identifier: req.identifier,
-        correlation_id,
-    });
+    }, &correlation_id);
     catalog::publish(state);
 }
 
 /// Адрес подписан — качаем. Путь на диске подставляется здесь: провайдер
 /// раскладки хранения не знает и знать не должен.
 pub fn on_signed(state: &mut State, signed: SignedUrl) {
-    let Some(dl) = state.downloads.get(&signed.correlation_id) else { return };
+    let correlation_id = veldsdk::correlation();
+    let Some(dl) = state.downloads.get(&correlation_id) else { return };
     let name = dl.name.clone();
 
     if !signed.error.is_empty() {
         veldsdk::log::warn!(target: "handlers", "подпись для {} не удалась: {}", name, signed.error);
         // Задачи ещё нет — терминального события платформы не будет, снимаем
         // с учёта сами, иначе запись навсегда останется «качается».
-        finish(state, &signed.correlation_id);
+        finish(state, &correlation_id);
         return;
     }
 
@@ -77,8 +81,7 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
         url: signed.url,
         path: storage::file_path(&name),
         headers: signed.headers,
-        correlation_id: signed.correlation_id,
-    });
+    }, &correlation_id);
 }
 
 /// Отмена — она же пауза: `.part` остаётся на диске, следующее «скачать»
@@ -95,7 +98,9 @@ pub fn on_delete(state: &mut State, req: ItemRequest) {
     // сработает по терминальному событию.
     if let Some((task_id, _)) = state.active_download(&req.name) {
         let task_id = task_id.to_string();
-        state.pending_delete_on_cancel.insert(task_id.clone(), req.name);
+        if let Some(dl) = state.downloads.get_mut(&task_id) {
+            dl.delete_when_done = true;
+        }
         crate::calls::tasks::on_cancel(&TaskCancelRequest { task_id });
         return;
     }
@@ -104,7 +109,7 @@ pub fn on_delete(state: &mut State, req: ItemRequest) {
 
 /// Broadcast-топик — сверяем correlation_id, чтобы не принять чужой ответ.
 pub fn on_delete_result(state: &mut State, response: veldsdk::proto::fs::FsDeleteResult) {
-    let Some(path) = state.pending_delete.take(&response.correlation_id) else { return };
+    let Some(path) = state.pending_delete.take(&veldsdk::correlation()) else { return };
     if !response.error.is_empty() {
         veldsdk::log::warn!(target: "handlers", "не удалось удалить {}: {}", path, response.error);
     }
@@ -115,7 +120,7 @@ pub fn on_delete_result(state: &mut State, response: veldsdk::proto::fs::FsDelet
 
 pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
     // event.progress игнорируем — доля выводится из байт у того, кто рисует.
-    let Some(dl) = state.downloads.get_mut(&event.correlation_id) else { return };
+    let Some(dl) = state.downloads.get_mut(&veldsdk::correlation()) else { return };
     dl.done = event.downloaded_bytes;
     dl.total = event.total_bytes;
 
@@ -134,13 +139,14 @@ pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
 
 /// Доменный итог: закачка дошла до конца сама — успехом или ошибкой.
 pub fn on_fs_download_result(state: &mut State, response: FsDownloadResponse) {
+    let correlation_id = veldsdk::correlation();
     if !response.error.is_empty() {
-        let name = state.downloads.get(&response.correlation_id).map(|d| d.name.clone());
+        let name = state.downloads.get(&correlation_id).map(|d| d.name.clone());
         if let Some(name) = name {
             veldsdk::log::warn!(target: "handlers", "закачка {} не удалась: {}", name, response.error);
         }
     }
-    finish(state, &response.correlation_id);
+    finish(state, &correlation_id);
 }
 
 /// Терминальное событие платформы. Доменный результат приходит первым и
@@ -158,13 +164,13 @@ pub fn on_task_finished(state: &mut State, event: TaskFinished) {
 /// Ранние отказы (подпись не удалась, небезопасный путь) не порождают ни
 /// одного из них, поэтому сюда же ведёт и путь ошибки подписи.
 fn finish(state: &mut State, id: &str) {
-    if state.downloads.take(id).is_none() { return; }
+    let Some(dl) = state.downloads.remove(id) else { return };
 
     // Корзину нажимали во время закачки — тогда это не отмена ради отмены,
     // а отложенное удаление: `.part` остался ровно там, где abort его бросил,
     // и теперь его можно безопасно удалить.
-    if let Some(name) = state.pending_delete_on_cancel.take(id) {
-        delete_entry(state, &name);
+    if dl.delete_when_done {
+        delete_entry(state, &dl.name);
         return;
     }
 

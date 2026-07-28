@@ -59,21 +59,23 @@ pub fn hand_off(handle: ResourceHandle, owner: &str) -> Result<ResourceHandle, S
 
 /// Собирает ответ на «открой мне это» — удача и неудача одной формы.
 ///
-/// Публикует его модуль сам, своим стабом (`crate::emit::on_open_result`):
-/// SDK топиков модуля не знает и знать не должен, иначе исходящая связь
-/// перестала бы быть объявленной в его schema.yaml.
-pub fn opened(result: Result<ResourceHandle, String>, correlation_id: String) -> ResourceOpened {
+/// Публикует его модуль сам, своим стабом (`crate::emit::on_open_result`), и
+/// передаёт туда же корреляцию запроса: SDK топиков модуля не знает и знать
+/// не должен, иначе исходящая связь перестала бы быть объявленной в его
+/// schema.yaml.
+pub fn opened(result: Result<ResourceHandle, String>) -> ResourceOpened {
     let (handle, error) = match result {
         Ok(handle) => (Some(handle), String::new()),
         Err(error) => (None, error),
     };
-    ResourceOpened { handle, error, correlation_id }
+    ResourceOpened { handle, error }
 }
 
 /// Ответ, которого никто не ждал: ресурс в нём всё равно наш, поэтому
 /// освобождаем — рассогласование должно стоить строчки в логе, а не утечки.
 pub fn discard(topic: &str, opened: ResourceOpened) {
-    log::warn!(target: "handlers", "{} без учтённого запроса: {}", topic, opened.correlation_id);
+    log::warn!(target: "handlers", "{} без учтённого запроса: {}",
+               topic, crate::abi::correlation());
     if let Some(handle) = opened.handle {
         crate::abi::arena_free(handle.id);
     }

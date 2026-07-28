@@ -66,35 +66,6 @@ def collect_proto_info(proto_file: str) -> tuple[str | None, set[str]]:
     return package, messages
 
 
-def collect_message_fields(proto_file: str) -> dict[str, set[str]]:
-    """Map each message name to the set of field names declared directly in
-    it. Regex-based like collect_proto_info; assumes flat (non-nested)
-    messages, which holds for every .proto in this repo today."""
-    fields: dict[str, set[str]] = {}
-    current = None
-    depth = 0
-    field_re = re.compile(r"^(?:repeated|optional)?\s*[\w.]+\s+(\w+)\s*=\s*\d+\s*;")
-    with open(proto_file) as f:
-        for raw in f:
-            line = raw.strip()
-            if current is None:
-                m = re.match(r"message\s+(\w+)", line)
-                if m:
-                    current = m.group(1)
-                    fields.setdefault(current, set())
-                    depth = line.count("{") - line.count("}")
-                continue
-            if depth == 1:
-                fm = field_re.match(line)
-                if fm:
-                    fields[current].add(fm.group(1))
-            depth += line.count("{") - line.count("}")
-            if depth <= 0:
-                current = None
-                depth = 0
-    return fields
-
-
 def read_proto_package(proto_file: str) -> str | None:
     """Read the 'package' declaration from a .proto file."""
     return collect_proto_info(proto_file)[0]
@@ -141,17 +112,17 @@ def iter_core_proto_files(proto_dir: str):
 def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
     universe = {}
 
-    def add(alias, messages, fields, origin, source):
+    def add(alias, messages, origin, source):
         if alias in universe:
             raise SystemExit(
                 f"Proto package alias collision: '{alias}' is defined by both "
                 f"{universe[alias]['source']} and {source}")
-        universe[alias] = {"messages": messages, "fields": fields, "origin": origin, "source": source}
+        universe[alias] = {"messages": messages, "origin": origin, "source": source}
 
     for path in iter_core_proto_files(proto_dir):
         pkg, messages = collect_proto_info(path)
         if pkg:
-            add(pkg.split(".")[-1], messages, collect_message_fields(path), "core", path)
+            add(pkg.split(".")[-1], messages, "core", path)
 
     if modules_root and os.path.isdir(modules_root):
         for name in sorted(os.listdir(modules_root)):
@@ -159,20 +130,46 @@ def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
             if os.path.exists(tp):
                 pkg, messages = collect_proto_info(tp)
                 if pkg:
-                    add(pkg.split(".")[-1], messages, collect_message_fields(tp), name, tp)
+                    add(pkg.split(".")[-1], messages, name, tp)
 
     return universe
 
 
-# A reply's payload must echo the request's correlation_id (see Correlator in
-# the SDK) so a caller can tell its own response apart from a broadcast one.
-# `replies_to` on an output declares that pairing; this is what's checked.
-CORRELATION_FIELD = "correlation_id"
+# Корреляция запрос/ответ едет в конверте (EventEnvelope.correlation_id), а не
+# полем доменного сообщения: заказчик отличает свой ответ от чужого, не тратя
+# на это место в контракте типа. `replies_to` на выходе объявляет пару — по
+# ней же генерируются стабы, требующие correlation_id аргументом.
+def correlated_topics(schema: dict) -> tuple[dict[str, list[str]], set[str]]:
+    """Топики сервиса, участвующие в паре `replies_to`.
+
+    Возвращает (запрос → его ответы, множество ответов). Ответов у запроса
+    может быть несколько: у `network/on_fs_download` их два — прогресс и
+    результат, и корреляцию несут оба.
+
+    Всё остальное корреляции не несёт: у события «состояние изменилось»
+    корреспондента нет, и стаб для него её не принимает — забыть или
+    приписать её лишнему топику нельзя по построению.
+    """
+    outputs = (schema.get("interface") or {}).get("outputs") or {}
+    pairs = [(n, (e or {}).get("replies_to")) for n, e in outputs.items()]
+    replies = {n for n, r in pairs if r}
+    requests: dict[str, list[str]] = {}
+    for reply, request in pairs:
+        if request:
+            requests.setdefault(request, []).append(reply)
+    return requests, replies
 
 
-def has_field(universe: dict, canonical: str, field: str) -> bool:
-    alias, _, tname = canonical.partition("/")
-    return field in universe.get(alias, {}).get("fields", {}).get(tname, set())
+def load_dep_schema(dep: str, modules_root: str, proto_dir: str) -> dict | None:
+    """Схема зависимости: соседний wasm-модуль либо платформенный сервис
+    (root-контракт или нативный сервис в interface/modules/)."""
+    for p in (os.path.join(modules_root, dep, "schema.yaml"),
+              os.path.join(proto_dir, f"{dep}.schema.yaml"),
+              os.path.join(proto_dir, "modules", dep, f"{dep}.schema.yaml")):
+        if os.path.exists(p):
+            with open(p) as f:
+                return yaml.safe_load(f) or {}
+    return None
 
 
 def local_package_alias(module_dir: str) -> str | None:
@@ -257,30 +254,10 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
         where = f"interface.outputs.{output_name}.replies_to"
         if replies_to not in (iface.get("inputs") or {}):
             err(where, f"'{replies_to}' is not one of this module's interface.inputs")
-            continue
-        out_type = resolved["outputs"].get(output_name)
-        in_type = resolved["inputs"].get(replies_to)
-        if out_type is None or in_type is None:
-            continue  # already reported above as a type error
-        if not has_field(universe, in_type, CORRELATION_FIELD):
-            err(where, f"request '{replies_to}' ({in_type}) has no '{CORRELATION_FIELD}' field")
-        if not has_field(universe, out_type, CORRELATION_FIELD):
-            err(where, f"reply '{output_name}' ({out_type}) has no '{CORRELATION_FIELD}' field")
-
-    def load_dep_schema(dep):
-        """A dependency is a sibling wasm module or a platform service (either
-        a root-level contract or a native service under interface/modules/)."""
-        for p in (os.path.join(modules_root, dep, "schema.yaml"),
-                  os.path.join(proto_dir, f"{dep}.schema.yaml"),
-                  os.path.join(proto_dir, "modules", dep, f"{dep}.schema.yaml")):
-            if os.path.exists(p):
-                with open(p) as f:
-                    return yaml.safe_load(f) or {}
-        return None
 
     for dep, dep_data in deps.items():
         dep_data = dep_data or {}
-        dep_schema = load_dep_schema(dep)
+        dep_schema = load_dep_schema(dep, modules_root, proto_dir)
         if dep_schema is None:
             err(f"dependencies.{dep}", "no schema found (neither a sibling module "
                                        "nor a veldcore/interface *.schema.yaml service)")
@@ -342,15 +319,8 @@ def validate_core_schema(svc_schema: dict, universe: dict) -> list[str]:
         if not replies_to:
             continue
         where = f"schema '{name}': interface.outputs.{topic}.replies_to"
-        in_entry = inputs.get(replies_to)
-        if in_entry is None:
+        if replies_to not in inputs:
             errors.append(f"{where}: '{replies_to}' is not one of this service's interface.inputs")
-            continue
-        in_type = (in_entry or {}).get("type") or ""
-        out_type = (entry or {}).get("type") or ""
-        for label, t in (("request", in_type), ("reply", out_type)):
-            if not has_field(universe, t, CORRELATION_FIELD):
-                errors.append(f"{where}: {label} type '{t}' has no '{CORRELATION_FIELD}' field")
     return errors
 
 
@@ -436,14 +406,24 @@ def generate_host_bindings(args, script_dir: str):
         fail_on(validate_schema_identity(svc_schema, schema_path)
                 + validate_core_schema(svc_schema, universe), schema_path)
         iface = svc_schema.get("interface", {}) or {}
+        requests, replies = correlated_topics(svc_schema)
 
         def entries(kind):
+            # Корреляцию несут только топики из пары `replies_to`: вход-запрос
+            # (обработчик получает её в Caller) и выход-ответ (emit-стаб
+            # требует её аргументом).
+            correlated = requests if kind == "inputs" else replies
             return [
                 {
-                    "name":      n,
-                    "const":     n.upper(),
-                    "rust_path": schema_type_to_rust_path((d or {}).get("type") or ""),
-                    "targeted":  bool((d or {}).get("targeted", False)),
+                    "name":       n,
+                    "const":      n.upper(),
+                    "rust_path":  schema_type_to_rust_path((d or {}).get("type") or ""),
+                    "targeted":   bool((d or {}).get("targeted", False)),
+                    "correlated": n in correlated,
+                    # Чему этот топик корреспондент — в док-комментарий стаба.
+                    "pairs_with": ", ".join(f"`{svc_schema.get('name')}/{t}`" for t in (
+                        requests.get(n, []) if kind == "inputs" else [(d or {}).get("replies_to")]
+                    )),
                 }
                 for n, d in (iface.get(kind, {}) or {}).items()
             ]
@@ -633,6 +613,18 @@ def main():
             return f"veldsdk::proto::{alias}::{rust_name}"
         return f"crate::proto::{alias}::{rust_name}"
 
+    # ── Корреляционные топики (пары `replies_to`) ────────────────────────────
+    # Свои — из собственной схемы, чужие — из схемы зависимости: какой её
+    # выход отвечает какому входу, знает только она. Корреляция едет в
+    # конверте, поэтому стабы этих топиков принимают её отдельным аргументом,
+    # а у всех прочих её негде и указать.
+    own_requests, own_replies = correlated_topics(schema)
+    modules_root = os.path.dirname(schema_dir)
+    dep_correlated = {}
+    for dep_name in schema.get("dependencies", {}):
+        dep_schema = load_dep_schema(dep_name, modules_root, core_proto_dir) or {}
+        dep_correlated[dep_name] = correlated_topics(dep_schema)
+
     # ── Build handler dispatch table (topic → handler + payload type) ────────
     handlers = []
 
@@ -662,6 +654,8 @@ def main():
             "name": n,
             "rust_path": module_rust_path(resolved["outputs"][n]),
             "targeted": bool((schema["interface"]["outputs"][n] or {}).get("targeted", False)),
+            "correlated": n in own_replies,
+            "pairs_with": f"`{name}/{(schema['interface']['outputs'][n] or {}).get('replies_to')}`",
         }
         for n in schema.get("interface", {}).get("outputs", {}) or {}
     ]
@@ -670,11 +664,18 @@ def main():
     for dep_name, dep_data in schema.get("dependencies", {}).items():
         calls = list((dep_data or {}).get("calls", {}) or {})
         if calls:
+            dep_requests, _ = dep_correlated[dep_name]
             dep_calls.append({
                 "service": dep_name,
                 "snake": dep_name.replace("-", "_"),
                 "methods": [
-                    {"name": c, "rust_path": module_rust_path(resolved["calls"][(dep_name, c)])}
+                    {
+                        "name": c,
+                        "rust_path": module_rust_path(resolved["calls"][(dep_name, c)]),
+                        "correlated": c in dep_requests,
+                        "pairs_with": ", ".join(f"`{dep_name}/{r}`"
+                                                for r in dep_requests.get(c, [])),
+                    }
                     for c in calls
                 ],
             })

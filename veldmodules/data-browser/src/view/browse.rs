@@ -29,7 +29,7 @@ pub fn view(state: &State) -> Element<()> {
         }, "No items found")
     };
 
-    let title_row: Element<()> = if browse_state.is_loading {
+    let title_row: Element<()> = if browse_state.request.is_pending() {
         row![
             text(format!("Browse: {}", browse_state.current_path)).size(20.0),
             text("\u{f110}").font_family("Icons").color(crate::module::styles::COLOR_TEXT_DIM),

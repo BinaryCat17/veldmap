@@ -30,20 +30,17 @@ pub const SERVICE_NAME: &str = "{{ service_name }}";
 /// Typed topic stubs for this module's declared outputs (interface.outputs).
 /// The schema is the single source of truth: an undeclared output does not
 /// exist, and each stub accepts exactly the message the schema declares.
+///
+/// Корреляцию принимают только стабы топиков, объявленных парой `replies_to`:
+/// у остальных её негде указать, а у этих — нельзя забыть.
 pub mod emit {
     {% if emits %}use veldsdk::prost::Message;{% endif %}
     {% for output in emits %}
-    {%- if output.targeted %}
-    /// `{{ service_name }}/{{ output.name }}` (адресовано: доставляется только `target`)
-    pub fn {{ output.name }}(msg: &{{ output.rust_path }}, target: &str) {
-        veldsdk::abi::publish_targeted("{{ service_name }}/{{ output.name }}", msg.encode_to_vec(), target);
+    /// `{{ service_name }}/{{ output.name }}`{% if output.correlated %} — ответ на {{ output.pairs_with }}: `correlation_id` берётся из запроса{% endif %}{% if output.targeted %} (адресовано: доставляется только `target`){% endif %}
+    pub fn {{ output.name }}(msg: &{{ output.rust_path }}{% if output.correlated %}, correlation_id: &str{% endif %}{% if output.targeted %}, target: &str{% endif %}) {
+        veldsdk::abi::publish("{{ service_name }}/{{ output.name }}", msg.encode_to_vec(),
+            {% if output.correlated %}correlation_id{% else %}""{% endif %}, {% if output.targeted %}target{% else %}""{% endif %});
     }
-    {%- else %}
-    /// `{{ service_name }}/{{ output.name }}`
-    pub fn {{ output.name }}(msg: &{{ output.rust_path }}) {
-        veldsdk::abi::publish("{{ service_name }}/{{ output.name }}", msg.encode_to_vec());
-    }
-    {%- endif %}
     {% endfor %}
 }
 
@@ -53,9 +50,10 @@ pub mod calls {
     pub mod {{ dep.snake }} {
         use veldsdk::prost::Message;
         {% for method in dep.methods %}
-        /// `{{ dep.service }}/{{ method.name }}`
-        pub fn {{ method.name }}(msg: &{{ method.rust_path }}) {
-            veldsdk::abi::publish("{{ dep.service }}/{{ method.name }}", msg.encode_to_vec());
+        /// `{{ dep.service }}/{{ method.name }}`{% if method.correlated %} — запрос; ответ придёт в {{ method.pairs_with }} с этим же `correlation_id`{% endif %}
+        pub fn {{ method.name }}(msg: &{{ method.rust_path }}{% if method.correlated %}, correlation_id: &str{% endif %}) {
+            veldsdk::abi::publish("{{ dep.service }}/{{ method.name }}", msg.encode_to_vec(),
+                {% if method.correlated %}correlation_id{% else %}""{% endif %}, "");
         }
         {% endfor %}
     }
@@ -101,8 +99,9 @@ pub extern "C" fn handle_event() -> i32 {
 
     let topic = format!("{}/{}", request.service, request.method);
     // Конверт кодирует хост: publisher достоверен, модуль может авторизовать
-    // отправителя через veldsdk::event_publisher().
-    veldsdk::abi::set_event_publisher(request.publisher);
+    // отправителя через veldsdk::event_publisher(). Корреляция оттуда же —
+    // читается через veldsdk::correlation(); пуста у топиков без пары.
+    veldsdk::abi::set_event_context(request.publisher, request.correlation_id);
 
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         veldsdk::runtime::with_state(|app_state: &mut {{ rust.state }}| {

@@ -15,6 +15,7 @@
 use crate::module::state::{State, Screen};
 use crate::proto::image_loader::{LoadImageRequest, LoadImageResult};
 use crate::proto::ui_service::proto::UiEventResponse;
+use veldsdk::Reply;
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::tasks::{TaskBeginRequest, TaskCancelRequest, TaskEndRequest};
 
@@ -40,8 +41,7 @@ pub fn on_view_local_pressed(state: &mut State, event: UiEventResponse) {
     let correlation_id = begin_open(state, name.clone());
     crate::calls::data_library::on_open(&crate::proto::data_library::OpenRequest {
         name,
-        correlation_id,
-    });
+    }, &correlation_id);
 }
 
 /// Просмотр ещё не скачанного файла. Ресурс открывает data-provider (подписать
@@ -55,8 +55,7 @@ pub fn on_view_remote_pressed(state: &mut State, event: UiEventResponse) {
     let correlation_id = begin_open(state, identifier.clone());
     crate::calls::data_provider::on_open(&crate::proto::data_provider::OpenRequest {
         identifier,
-        correlation_id,
-    });
+    }, &correlation_id);
 }
 
 /// Неудача превью: на экран и в лог. Экран видит только тот, кто в этот момент
@@ -83,21 +82,29 @@ fn begin_open(state: &mut State, label: String) -> String {
 /// всё равно наш: ресурс уже принадлежит нам, и бросить его значит потерять
 /// и регион, и открытый на той стороне дескриптор. `false` — ответ не наш.
 pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
-    if !state.preview.opening.remove(&opened.correlation_id) {
-        return false;
-    }
-    if !state.preview.is_current(&opened.correlation_id) {
-        if let Some(handle) = &opened.handle {
-            veldsdk::abi::arena_free(handle.id);
+    let correlation_id = veldsdk::correlation();
+    // Не снимаем с учёта: у актуального запроса впереди второй ответ — от
+    // загрузчика, и он опознаётся той же корреляцией.
+    match state.preview.request.status(&correlation_id) {
+        Reply::Foreign => return false,
+        Reply::Stale => {
+            // Запрос вытеснен, показывать его нечего — но ресурс уже наш,
+            // и второго ответа по нему не будет: операция кончается здесь.
+            state.preview.request.settle(&correlation_id);
+            if let Some(handle) = &opened.handle {
+                veldsdk::abi::arena_free(handle.id);
+            }
+            return true;
         }
-        return true;
+        Reply::Current => {}
     }
 
     match opened.handle.clone() {
-        Some(handle) => start_decode(state, handle, opened.correlation_id.clone()),
+        Some(handle) => start_decode(state, handle, correlation_id),
         None => {
-            // Задачи на этой фазе ещё нет — закрывать нечего.
-            state.preview.finish();
+            // Операция кончилась здесь: задачи на этой фазе ещё нет,
+            // закрывать нечего.
+            state.preview.request.settle(&correlation_id);
             fail(state, if opened.error.is_empty() {
                 "ресурс не открыт, но и ошибки не названо".to_string()
             } else {
@@ -113,7 +120,8 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 fn start_decode(state: &mut State, resource: veldsdk::ResourceHandle, correlation_id: String) {
     state.preview.file = Some(resource.id);
     if !veldsdk::abi::arena_grant_read(resource.id, "image-loader") {
-        state.preview.finish();
+        // Загрузчику ресурс не отдан — второго ответа не будет.
+        state.preview.request.settle(&correlation_id);
         state.preview.close_file();
         fail(state, "Не удалось выдать image-loader read-грант на ресурс".to_string());
         return;
@@ -135,29 +143,38 @@ fn start_decode(state: &mut State, resource: veldsdk::ResourceHandle, correlatio
         resource: Some(resource),
         max_width: state.window.0,
         max_height: state.window.1,
-        correlation_id,
         // Загрузчик получил безымянный ресурс — назвать источник в логах и в
         // списке задач можем только мы.
         label: state.preview.current_path.clone(),
-    });
+    }, &correlation_id);
 }
 
-/// Ответ image-loader. Broadcast — сверяем correlation_id, а заодно и то, что
-/// запрос ещё актуален: пока ответ шёл, пользователь мог уйти с экрана или
-/// открыть другой файл. Текстуру такого ответа освобождаем на месте —
-/// владение уже передано нам, и потерять её значит потерять видеопамять.
+/// Ответ image-loader — терминальный, снимаем запрос с учёта. Устаревший
+/// (пока ответ шёл, пользователь ушёл с экрана или открыл другой файл) — всё
+/// равно наш: текстуру освобождаем на месте, владение уже передано нам, и
+/// потерять её значит потерять видеопамять. Чужую не трогаем.
 pub fn on_load_result(state: &mut State, result: LoadImageResult) {
-    if !state.preview.is_current(&result.correlation_id) {
-        if let Some(handle) = result.handle {
-            veldsdk::abi::arena_free(handle.id);
+    let correlation_id = veldsdk::correlation();
+    match state.preview.request.settle(&correlation_id) {
+        Reply::Current => {}
+        Reply::Stale => {
+            // Показывать уже нечего, но текстура наша — владение передано нам.
+            if let Some(handle) = result.handle {
+                veldsdk::abi::arena_free(handle.id);
+            }
+            return;
         }
-        return;
+        // Чужой ответ: текстура не наша, трогать её нельзя.
+        Reply::Foreign => return,
     }
     // Файл больше не нужен: декодирование кончилось (успехом или нет).
     state.preview.close_file();
     // Задачу заводили мы — нам её и закрывать, с тем же исходом, что у ответа.
-    if let Some(task_id) = state.preview.finish() {
-        crate::calls::tasks::on_end(&TaskEndRequest { task_id, error: result.error.clone() });
+    if state.preview.finish_decoding() {
+        crate::calls::tasks::on_end(&TaskEndRequest {
+            task_id: correlation_id,
+            error: result.error.clone(),
+        });
     }
 
     if !result.error.is_empty() {

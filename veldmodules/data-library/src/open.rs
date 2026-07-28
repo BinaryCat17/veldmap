@@ -12,15 +12,16 @@ use veldsdk::proto::fs::FsReadRequest;
 use veldsdk::resource;
 
 pub fn on_open(state: &mut State, req: OpenRequest) {
+    let reply_to = veldsdk::correlation();
     let owner = match resource::requester("data-library/on_open") {
         Ok(owner) => owner,
-        Err(e) => return fail(req.correlation_id, e),
+        Err(e) => return fail(reply_to, e),
     };
     let Some(entry) = state.entry_for(&req.name) else {
-        return fail(req.correlation_id, format!("в каталоге нет записи '{}'", req.name));
+        return fail(reply_to, format!("в каталоге нет записи '{}'", req.name));
     };
     if entry.is_partial {
-        return fail(req.correlation_id, format!("'{}' скачан не полностью", req.name));
+        return fail(reply_to, format!("'{}' скачан не полностью", req.name));
     }
 
     let path = entry.path.clone();
@@ -28,9 +29,9 @@ pub fn on_open(state: &mut State, req: OpenRequest) {
     // же ответ и опознаётся как «открытие файла», а не чтение сидкара.
     let correlation_id = state.pending_reads.begin(ReadPurpose::File(OpenFor {
         owner,
-        reply_to: req.correlation_id,
+        reply_to,
     }));
-    crate::calls::fs::on_read(&FsReadRequest { path, correlation_id });
+    crate::calls::fs::on_read(&FsReadRequest { path }, &correlation_id);
 }
 
 /// Кому уйдёт открытый ресурс и на какой запрос он отвечает.
@@ -45,9 +46,9 @@ pub struct OpenFor {
 pub fn on_file_opened(target: OpenFor, opened: &ResourceOpened) {
     let result = resource::accept(opened)
         .and_then(|handle| resource::hand_off(handle, &target.owner));
-    crate::emit::on_open_result(&resource::opened(result, target.reply_to));
+    crate::emit::on_open_result(&resource::opened(result), &target.reply_to);
 }
 
 fn fail(correlation_id: String, error: String) {
-    crate::emit::on_open_result(&resource::opened(Err(error), correlation_id));
+    crate::emit::on_open_result(&resource::opened(Err(error)), &correlation_id);
 }

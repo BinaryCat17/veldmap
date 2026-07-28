@@ -1,11 +1,12 @@
 pub struct BrowseState {
     pub current_path: String,
     pub items: Vec<BrowseItem>,
-    pub is_loading: bool,
     /// Последняя ошибка list_path от data-provider (пусто, если запрос успешен)
     pub error: Option<String>,
-    /// Ожидание ответа на data-provider/on_list_path — гасит устаревший/чужой ответ.
-    pub pending: veldsdk::Correlator<()>,
+    /// Ожидание ответа на data-provider/on_list_path. Актуален только
+    /// последний: два быстрых перехода по папкам дают два ответа, и содержимое
+    /// первого под заголовком второго — враньё, а не устаревшие данные.
+    pub request: veldsdk::Latest,
 }
 
 pub struct BrowseItem {
@@ -22,9 +23,8 @@ impl Default for BrowseState {
         Self {
             current_path: String::new(),
             items: Vec::new(),
-            is_loading: false,
             error: None,
-            pending: veldsdk::Correlator::new(),
+            request: veldsdk::Latest::new(),
         }
     }
 }

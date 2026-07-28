@@ -15,12 +15,12 @@ struct Service {
 
 #[async_trait::async_trait]
 impl veldmap_host_util::AsyncNativeService for Service {
-    async fn handle(&self, topic: &str, payload: Vec<u8>, requestor_id: u32) {
+    async fn handle(&self, topic: &str, payload: Vec<u8>, caller: veldmap_host_util::Caller) {
         match topic {
             {%- for i in inputs %}
             "{{ i.name }}" => {
                 let Some(req) = veldmap_host_util::wire::decode_or_log::<veldmap_host_util::bindings::proto::{{ i.rust_path }}>(&payload, veldmap_host_util::bindings::{{ snake }}::topics::{{ i.const }}) else { return };
-                module::{{ i.name }}(&self.state, req, requestor_id);
+                module::{{ i.name }}(&self.state, req, caller);
             }
             {%- endfor %}
             _ => log::warn!(target: "{{ name }}", "Unknown {{ name }} topic: {}", topic),

@@ -11,7 +11,7 @@
 
 // ── Трейты сервисов ─────────────────────────────────────────────────────────
 // Контракт, который реализует каждый нативный модуль.
-pub use veldmap_host_core::dispatcher::{AsyncNativeService, Dispatcher};
+pub use veldmap_host_core::dispatcher::{AsyncNativeService, Caller, Dispatcher};
 
 // ── Контекст хоста ──────────────────────────────────────────────────────────
 // Ручка на собранную платформу: dispatcher, memory, registry.

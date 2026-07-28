@@ -66,5 +66,4 @@ message ItemRequest {
 // открывает не библиотека, а провайдер (подписать запрос умеет только он).
 message OpenRequest {
   string name = 1;
-  string correlation_id = 2;
 }

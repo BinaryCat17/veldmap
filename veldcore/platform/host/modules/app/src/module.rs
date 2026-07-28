@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 use veldmap_host_util::bindings::proto::app::SetSurface;
-use veldmap_host_util::{HostContext, Surfaces};
+use veldmap_host_util::{Caller, HostContext, Surfaces};
 
 pub struct State {
     surfaces: Surfaces,
@@ -22,10 +22,10 @@ pub fn hook_init(ctx: Arc<HostContext>) -> State {
 /// Владелец окна аллоцировал текстуру, делегировал её рендереру и просит
 /// композить именно её. Права проверяет фасад; свап делает кадровый цикл,
 /// забрав поверхность из очереди — подменять текстуру можно только между кадрами.
-pub fn on_set_surface(state: &State, req: SetSurface, requestor_id: u32) {
+pub fn on_set_surface(state: &State, req: SetSurface, caller: Caller) {
     let Some(surface) = req.surface else {
         log::warn!(target: "app", "set_surface for '{}' carries no surface handle", req.plugin_id);
         return;
     };
-    state.surfaces.attach(&req.plugin_id, surface.id, requestor_id);
+    state.surfaces.attach(&req.plugin_id, surface.id, caller.instance);
 }

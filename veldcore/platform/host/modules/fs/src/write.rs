@@ -6,27 +6,27 @@ use veldmap_host_util::Access;
 use veldmap_host_util::bindings::fs as bus;
 use veldmap_host_util::bindings::proto::fs::{FsWriteRequest, FsWriteResult};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
-use veldmap_host_util::blocking;
+use veldmap_host_util::{blocking, Caller};
 use std::fs;
 
-pub fn on_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
-    let correlation_id = req.correlation_id.clone();
-    let fail = |error: &str| FsWriteResult { error: error.into(), correlation_id: correlation_id.clone() };
+pub fn on_write(state: &State, req: FsWriteRequest, caller: Caller) {
+    let Caller { instance, correlation } = caller;
+    let fail = |error: &str| FsWriteResult { error: error.into() };
 
     if !is_path_safe(&req.path) {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied"));
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied"), &correlation);
         return;
     }
     let Some(handle) = req.handle else {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Missing handle"));
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Missing handle"), &correlation);
         return;
     };
     if handle.id == 0 {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Handle ID 0 not supported for fs_write yet"));
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Handle ID 0 not supported for fs_write yet"), &correlation);
         return;
     }
-    if !state.ctx.registry.check_access(handle.id, requestor_id, Access::Read) {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied to resource"));
+    if !state.ctx.registry.check_access(handle.id, instance, Access::Read) {
+        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied to resource"), &correlation);
         return;
     }
 
@@ -36,12 +36,12 @@ pub fn on_write(state: &State, req: FsWriteRequest, requestor_id: u32) {
                 let path = resolve_path(&ctx, &req.path);
                 if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
                 match fs::write(&path, &data) {
-                    Ok(()) => FsWriteResult { error: String::new(), correlation_id },
-                    Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
+                    Ok(()) => FsWriteResult { error: String::new() },
+                    Err(e) => FsWriteResult { error: e.to_string() },
                 }
             }
-            Err(e) => FsWriteResult { error: e.to_string(), correlation_id },
+            Err(e) => FsWriteResult { error: e.to_string() },
         };
-        bus::emit::on_write_result(&*ctx.dispatcher, &result);
+        bus::emit::on_write_result(&*ctx.dispatcher, &result, &correlation);
     });
 }

@@ -3,18 +3,37 @@ use std::sync::{Arc, Mutex};
 
 #[async_trait::async_trait]
 pub trait AsyncNativeService: Send + Sync {
-    async fn handle(&self, topic: &str, payload: Vec<u8>, requestor_id: u32);
+    async fn handle(&self, topic: &str, payload: Vec<u8>, caller: Caller);
+}
+
+/// Кто прислал событие и в рамках какой корреляции — всё, что обработчик
+/// знает о вызове помимо payload.
+///
+/// Корреляция раньше приезжала полем доменного сообщения, и каждый сервис
+/// доставал её сам (`req.correlation_id`), из-за чего доменный тип обязан был
+/// её объявить. Теперь оба факта о вызове приходят из конверта, который
+/// заполняет хост.
+pub struct Caller {
+    /// Instance id паблишера: по нему проверяются права (0 = сам хост).
+    pub instance: u32,
+    /// Корреляция запроса; пусто у топиков без пары `replies_to`. Ответ
+    /// сервис публикует с ней же — иначе заказчик его не опознает.
+    pub correlation: String,
 }
 
 /// Событие шины: пространство топика (service), метод, payload и
 /// идентичность паблишера (0 = сам хост). Единственная форма общения между
-/// сервисами — fire-and-forget; «ответ» — это ещё одно событие с
-/// correlation_id. Синхронное — только ABI-вызовы в состояние хоста.
+/// сервисами — fire-and-forget; «ответ» — это ещё одно событие, опознаваемое
+/// по корреляции. Синхронное — только ABI-вызовы в состояние хоста.
 pub struct Event {
     pub service: String,
     pub method: String,
     pub payload: Vec<u8>,
     pub publisher: u32,
+    /// Корреляция запрос/ответ. Пусто у топиков, не объявленных парой
+    /// `replies_to`. Диспетчер её только переносит: смысл ей придают схема
+    /// (какие топики парные) и заказчик (какой запрос стоит за id).
+    pub correlation: String,
 }
 
 /// Очередь подписчика. Каждый подписчик — актор: unbounded-канал позволяет
@@ -71,7 +90,8 @@ impl Dispatcher {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
-                service.handle(&ev.method, ev.payload, ev.publisher).await;
+                let caller = Caller { instance: ev.publisher, correlation: ev.correlation };
+                service.handle(&ev.method, ev.payload, caller).await;
             }
         });
         for topic in topics {
@@ -81,22 +101,27 @@ impl Dispatcher {
         }
     }
 
-    /// Fire-and-forget delivery to every subscriber of the topic.
+    /// Fire-and-forget delivery to every subscriber of the topic, published by
+    /// the host itself and correlated with nothing.
     /// Delivery is synchronous into each subscriber's queue, so events published
     /// from one thread arrive at each subscriber in publish order.
     pub fn publish(&self, topic: &str, payload: Vec<u8>) {
-        self.publish_from(topic, payload, 0, "");
+        self.publish_from(topic, payload, 0, "", "");
     }
 
     /// Like `publish`, carrying the publisher's instance id. Subscribers
     /// receive it as requestor_id and can authorize commands (0 = host itself).
+    ///
+    /// `correlation`: пусто у топиков, не объявленных парой `replies_to`;
+    /// у запроса — id, выданный заказчиком, у ответа — он же, возвращённый
+    /// эхом. Хост его не выдаёт и не проверяет, только переносит.
     ///
     /// `target`: empty delivers to every subscriber of `topic` (broadcast,
     /// the historical behavior). Non-empty delivers only to the subscriber
     /// registered under that module name — every other subscriber of the same
     /// topic doesn't see it. An addressed event with no matching subscriber is
     /// dropped, same as an unsubscribed topic.
-    pub fn publish_from(&self, topic: &str, payload: Vec<u8>, publisher: u32, target: &str) {
+    pub fn publish_from(&self, topic: &str, payload: Vec<u8>, publisher: u32, correlation: &str, target: &str) {
         let parts: Vec<&str> = topic.splitn(2, '/').collect();
         if parts.len() != 2 {
             log::warn!(target: "dispatcher", "[DISPATCHER] Invalid publish topic: {}", topic);
@@ -130,6 +155,7 @@ impl Dispatcher {
                 method: method.to_string(),
                 payload: payload.clone(),
                 publisher,
+                correlation: correlation.to_string(),
             }).is_err() {
                 log::error!(target: "dispatcher", "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
             }
@@ -140,11 +166,7 @@ impl Dispatcher {
 /// Хостовый паблишер для сгенерированных emit-стабов
 /// (platform/host/generated): публикация от имени самого хоста.
 impl veldmap_host_bindings::Publisher for Dispatcher {
-    fn publish(&self, topic: &str, payload: Vec<u8>) {
-        Dispatcher::publish(self, topic, payload);
-    }
-
-    fn publish_targeted(&self, topic: &str, payload: Vec<u8>, target: &str) {
-        self.publish_from(topic, payload, 0, target);
+    fn publish(&self, topic: &str, payload: Vec<u8>, correlation: &str, target: &str) {
+        self.publish_from(topic, payload, 0, correlation, target);
     }
 }

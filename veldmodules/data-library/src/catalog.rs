@@ -18,14 +18,13 @@ pub fn rescan(state: &mut State) {
     let correlation_id = state.pending_list.begin(());
     crate::calls::fs::on_list(&FsListRequest {
         path: storage::DATA_DIR.to_string(),
-        correlation_id,
-    });
+    }, &correlation_id);
 }
 
 /// Снимок диска пришёл. Здесь же подрезаются сидкары и дочитываются те,
 /// которых ещё нет в памяти.
 pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
-    if state.pending_list.take(&response.correlation_id).is_none() { return }
+    if state.pending_list.take(&veldsdk::correlation()).is_none() { return }
 
     if !response.error.is_empty() {
         publish_error(&response.error);
@@ -69,8 +68,7 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
         let correlation_id = state.pending_reads.begin(ReadPurpose::Sidecar(name.clone()));
         crate::calls::fs::on_read(&FsReadRequest {
             path: storage::origin_path(&name),
-            correlation_id,
-        });
+        }, &correlation_id);
     }
 }
 
@@ -116,13 +114,12 @@ pub fn write_sidecar(state: &mut State, name: &str, identifier: &str, total_byte
     crate::calls::fs::on_write(&FsWriteRequest {
         path: storage::origin_path(name),
         handle: Some(veldsdk::proto::core::ResourceHandle { id: region, size: json.len() as u64 }),
-        correlation_id,
-    });
+    }, &correlation_id);
 }
 
 /// fs прочитал наш буфер (успешно или нет) — регион больше не нужен.
 pub fn on_write_result(state: &mut State, response: FsWriteResult) {
-    let Some(write) = state.pending_sidecar_writes.take(&response.correlation_id) else { return };
+    let Some(write) = state.pending_sidecar_writes.take(&veldsdk::correlation()) else { return };
     veldsdk::abi::arena_free(write.region);
     if !response.error.is_empty() {
         veldsdk::log::warn!(target: "handlers", "сидкар не сохранён: {}", response.error);
@@ -133,10 +130,11 @@ pub fn on_write_result(state: &mut State, response: FsWriteResult) {
 /// и файл воскрес бы записью о намерении.
 pub fn delete_entry(state: &mut State, name: &str) {
     state.origins.remove(name);
+    // Сидкар удаляем без учёта: ответ на него никого не интересует — судьбу
+    // записи решает удаление самих данных ниже.
     crate::calls::fs::on_delete(&FsDeleteRequest {
         path: storage::origin_path(name),
-        correlation_id: String::new(),
-    });
+    }, "");
 
     // Недокачанный лежит под `.part`, готовый — под своим именем.
     let path = match state.entry_for(name) {
@@ -144,7 +142,7 @@ pub fn delete_entry(state: &mut State, name: &str) {
         None => storage::part_path(name),
     };
     let correlation_id = state.pending_delete.begin(path.clone());
-    crate::calls::fs::on_delete(&FsDeleteRequest { path, correlation_id });
+    crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
 }
 
 // ── Вывод состояния ────────────────────────────────────────────

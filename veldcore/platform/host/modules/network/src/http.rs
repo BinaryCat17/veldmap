@@ -6,6 +6,7 @@
 //! в download.rs, оконное чтение удалённого ресурса в range.rs).
 
 use super::State;
+use veldmap_host_util::Caller;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{HttpTaskRequest, HttpTaskResponse};
 use std::collections::HashMap;
@@ -56,13 +57,15 @@ pub fn get(url: &str, headers: &HashMap<String, String>, range: Option<(u64, u64
     builder
 }
 
-pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
+pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
     let ctx = state.ctx.clone();
     let label = format!("{} {}", req.method, req.url);
 
     log::info!(target: "network", "Received HTTP request: {}", label);
 
-    let spawned = state.tasks.spawn(&req.correlation_id, requestor_id, "http", &label, |correlation_id| async move {
+    // Задача именуется корреляцией запроса: заказчик отменяет её тем же id,
+    // которым опознаёт ответ.
+    let spawned = state.tasks.spawn(&caller.correlation, caller.instance, "http", &label, |correlation_id| async move {
         log::info!(target: "network", "Executing HTTP request {}...", correlation_id);
         let method = match req.method.to_uppercase().as_str() {
             "POST" => reqwest::Method::POST,
@@ -80,13 +83,13 @@ pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
                 let status = res.status().as_u16() as u32;
                 let body = res.bytes().await.unwrap_or_default().to_vec();
                 log::info!(target: "network", "HTTP request {} finished with status {}", correlation_id, status);
-                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status, body, correlation_id });
+                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status, body }, &correlation_id);
                 Ok(())
             }
             Err(e) => {
                 log::warn!(target: "network", "HTTP request {} failed: {}", correlation_id, e);
                 let error = e.to_string();
-                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status: 0, body: Vec::new(), correlation_id });
+                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status: 0, body: Vec::new() }, &correlation_id);
                 Err(error)
             }
         }
@@ -96,7 +99,6 @@ pub fn on_http(state: &State, req: HttpTaskRequest, requestor_id: u32) {
         bus::emit::on_http_result(&*state.ctx.dispatcher, &HttpTaskResponse {
             status: 0,
             body: Vec::new(),
-            correlation_id: dup.0,
-        });
+        }, &dup.0);
     }
 }

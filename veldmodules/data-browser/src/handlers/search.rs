@@ -10,27 +10,24 @@ pub fn on_search(state: &mut State, _event: UiEventResponse) {
     let query = state.search.query.clone();
     
     if !query.is_empty() {
-        state.search.is_loading = true;
         state.search.error = None;
-        let correlation_id = state.search.pending.begin(());
+        let correlation_id = state.search.request.begin();
         crate::calls::data_provider::on_search(&crate::proto::data_provider::SearchRequest {
             query,
             filters: vec![],
-            correlation_id,
-        });
+        }, &correlation_id);
     }
 }
 
-/// Результат поиска. Broadcast-топик — сверяем correlation_id, чтобы не
-/// принять устаревший или чужой ответ.
+/// Результат поиска. Broadcast-топик — сверяем корреляцию: и чужой ответ, и
+/// свой устаревший (запрос успели сменить) одинаково не наше дело.
 pub fn on_search_result(
     state: &mut State,
     response: SearchResponse,
 ) {
-    if state.search.pending.take(&response.correlation_id).is_none() {
+    if state.search.request.settle(&veldsdk::correlation()) != veldsdk::Reply::Current {
         return;
     }
-    state.search.is_loading = false;
 
     if !response.error.is_empty() {
         state.search.error = Some(response.error);

@@ -27,30 +27,33 @@ pub fn module_init(config: Config) -> anyhow::Result<State> {
 /// открывает он — а владение готовым ресурсом сразу передаёт заказчику:
 /// дальше тот читает его как обычный файл и сам решает, когда закрыть.
 pub fn on_open(state: &mut State, request: crate::proto::data_provider::OpenRequest) {
+    // Корреляция заказчика проходит насквозь: тем же id мы спрашиваем network
+    // и тем же отвечаем ему — второго учёта эта передача не требует.
+    let correlation_id = veldsdk::correlation();
     let owner = match veldsdk::resource::requester("data-provider/on_open") {
         Ok(owner) => owner,
         Err(e) => {
-            crate::emit::on_open_result(&veldsdk::resource::opened(Err(e), request.correlation_id));
+            crate::emit::on_open_result(&veldsdk::resource::opened(Err(e)), &correlation_id);
             return;
         }
     };
 
     let object = s3::object(&state.identity, &request.identifier);
-    state.opening.insert(request.correlation_id.clone(), owner);
+    state.opening.insert(correlation_id.clone(), owner);
 
     crate::calls::network::on_open(&veldsdk::proto::network::RemoteOpenRequest {
         url: object.url,
         headers: object.headers,
-        correlation_id: request.correlation_id,
-    });
+    }, &correlation_id);
 }
 
 /// network открыл удалённый ресурс — передаём владение заказчику.
 pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
-    let Some(owner) = state.opening.take(&opened.correlation_id) else { return };
+    let correlation_id = veldsdk::correlation();
+    let Some(owner) = state.opening.take(&correlation_id) else { return };
     let result = veldsdk::resource::accept(&opened)
         .and_then(|handle| veldsdk::resource::hand_off(handle, &owner));
-    crate::emit::on_open_result(&veldsdk::resource::opened(result, opened.correlation_id));
+    crate::emit::on_open_result(&veldsdk::resource::opened(result), &correlation_id);
 }
 
 //  inputs ---------------------------------------------------------------------------------------------------------------------------
@@ -81,17 +84,17 @@ pub fn on_sign(state: &mut State, req: SignRequest) {
         None => (String::new(), Default::default()),
     };
 
-    crate::emit::on_signed(&SignedUrl { url, headers, error, correlation_id: req.correlation_id });
+    crate::emit::on_signed(&SignedUrl { url, headers, error }, &veldsdk::correlation());
 }
 
 pub fn on_list_path(
-    state: &mut State, 
+    state: &mut State,
     request: ListPathRequest
 ) {
     let listing = s3::listing(&state.identity, &request.path, &request.token);
     let internal_id = state.pending_http.begin(PendingList {
         path: request.path,
-        correlation_id: request.correlation_id,
+        correlation_id: veldsdk::correlation(),
     });
 
     log::info!(target: "handlers", "Requesting S3 list: {}", listing.url);
@@ -101,8 +104,7 @@ pub fn on_list_path(
         method: "GET".to_string(),
         headers: listing.headers,
         body: Vec::new(),
-        correlation_id: internal_id,
-    });
+    }, &internal_id);
 }
 
 // subs ---------------------------------------------------------------------------------------------------------------------------
@@ -111,7 +113,7 @@ pub fn on_http_result(
     state: &mut State,
     response: veldsdk::proto::network::HttpTaskResponse,
 ) {
-    let Some(pending) = state.pending_http.take(&response.correlation_id) else {
+    let Some(pending) = state.pending_http.take(&veldsdk::correlation()) else {
         return;
     };
 
@@ -133,6 +135,5 @@ pub fn on_http_result(
         items,
         next_token,
         error,
-        correlation_id: pending.correlation_id,
-    });
+    }, &pending.correlation_id);
 }

@@ -15,10 +15,11 @@ pub mod proto {
 /// Паблишер шины: реализуется диспетчером конкретного хоста. Через этот
 /// трейт generated-крейт не зависит от реализации хоста (иначе был бы цикл).
 pub trait Publisher {
-    fn publish(&self, topic: &str, payload: Vec<u8>);
-    /// Как `publish`, но доставляется только подписчику с именем `target`
-    /// (см. `targeted: true` в schema.yaml outputs).
-    fn publish_targeted(&self, topic: &str, payload: Vec<u8>, target: &str);
+    /// `correlation` — пусто у топиков без пары `replies_to`; у ответа это id
+    /// запроса, на который он отвечает.
+    /// `target` — пусто при широковещательной доставке; непустой доставляется
+    /// только подписчику с этим именем (см. `targeted: true` в schema.yaml).
+    fn publish(&self, topic: &str, payload: Vec<u8>, correlation: &str, target: &str);
 }
 {% for svc in services %}
 /// Контракт сервиса `{{ svc.name }}` ({{ svc.name }}.schema.yaml).
@@ -34,31 +35,16 @@ pub mod {{ svc.snake }} {
     {%- endif %}
     {%- if svc.outputs %}
 
-    /// Типизированные стабы публикации выходов сервиса.
+    /// Типизированные стабы публикации выходов сервиса. Корреляцию принимают
+    /// только ответы (`replies_to` в схеме) — у остальных её негде указать.
     pub mod emit {
-        use prost::Message;
+        {% if svc.outputs | selectattr("rust_path") | list %}use prost::Message;{% endif %}
         {% for o in svc.outputs %}
-        {%- if o.rust_path and o.targeted %}
-        /// `{{ svc.name }}/{{ o.name }}` (адресовано: доставляется только `target`)
-        pub fn {{ o.name }}(p: &impl crate::Publisher, msg: &crate::proto::{{ o.rust_path }}, target: &str) {
-            p.publish_targeted("{{ svc.name }}/{{ o.name }}", msg.encode_to_vec(), target);
+        /// `{{ svc.name }}/{{ o.name }}`{% if not o.rust_path %} (без payload){% endif %}{% if o.correlated %} — ответ на {{ o.pairs_with }}: `correlation` берётся из запроса{% endif %}{% if o.targeted %} (адресовано: доставляется только `target`){% endif %}
+        pub fn {{ o.name }}(p: &impl crate::Publisher{% if o.rust_path %}, msg: &crate::proto::{{ o.rust_path }}{% endif %}{% if o.correlated %}, correlation: &str{% endif %}{% if o.targeted %}, target: &str{% endif %}) {
+            p.publish("{{ svc.name }}/{{ o.name }}", {% if o.rust_path %}msg.encode_to_vec(){% else %}Vec::new(){% endif %},
+                {% if o.correlated %}correlation{% else %}""{% endif %}, {% if o.targeted %}target{% else %}""{% endif %});
         }
-        {%- elif o.rust_path %}
-        /// `{{ svc.name }}/{{ o.name }}`
-        pub fn {{ o.name }}(p: &impl crate::Publisher, msg: &crate::proto::{{ o.rust_path }}) {
-            p.publish("{{ svc.name }}/{{ o.name }}", msg.encode_to_vec());
-        }
-        {%- elif o.targeted %}
-        /// `{{ svc.name }}/{{ o.name }}` (без payload, адресовано: доставляется только `target`)
-        pub fn {{ o.name }}(p: &impl crate::Publisher, target: &str) {
-            p.publish_targeted("{{ svc.name }}/{{ o.name }}", Vec::new(), target);
-        }
-        {%- else %}
-        /// `{{ svc.name }}/{{ o.name }}` (без payload)
-        pub fn {{ o.name }}(p: &impl crate::Publisher) {
-            p.publish("{{ svc.name }}/{{ o.name }}", Vec::new());
-        }
-        {%- endif %}
         {% endfor %}
     }
     {%- endif %}

@@ -11,7 +11,7 @@
 //! пользователе (fs/on_delete), не на этом обработчике.
 
 use super::State;
-use veldmap_host_util::HostContext;
+use veldmap_host_util::{Caller, HostContext};
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::{
     FsDownloadRequest, FsDownloadResponse, FsDownloadProgress,
@@ -28,17 +28,15 @@ fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> Stri
     log::warn!(target: "network", "Download {} failed: {}", correlation_id, error);
     bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
         error: error.clone(),
-        correlation_id: correlation_id.to_string(),
-    });
+    }, correlation_id);
     error
 }
 
-pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) {
+pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
     if !is_path_safe(&req.path) {
         bus::emit::on_fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
             error: format!("Unsafe path: {}", req.path),
-            correlation_id: req.correlation_id.clone(),
-        });
+        }, &caller.correlation);
         return;
     }
 
@@ -56,7 +54,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
 
     // owner = инициатор запроса: отменить скачивание может он, хост
     // или сервис с его grant'ом (топик tasks/cancel).
-    let spawned = state.tasks.spawn(&req.correlation_id, requestor_id, "fs_download", &label, |correlation_id| async move {
+    let spawned = state.tasks.spawn(&caller.correlation, caller.instance, "fs_download", &label, |correlation_id| async move {
         // Существующий .part с предыдущей попытки — точка возобновления:
         // узнаём его размер ДО запроса, чтобы попросить сервер прислать хвост.
         let resume_offset = tokio::fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0);
@@ -101,11 +99,10 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
         // троттлинга ниже.
         if resuming {
             bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
-                correlation_id: correlation_id.clone(),
                 progress: if total_size > 0 { downloaded as f32 / total_size as f32 } else { 0.0 },
                 downloaded_bytes: downloaded,
                 total_bytes: total_size,
-            });
+            }, &correlation_id);
         }
 
         let mut stream = res.bytes_stream();
@@ -132,20 +129,18 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
                                 if percent > last_percent {
                                     last_percent = percent;
                                     bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
-                                        correlation_id: correlation_id.clone(),
                                         progress: downloaded as f32 / total_size as f32,
                                         downloaded_bytes: downloaded,
                                         total_bytes: total_size,
-                                    });
+                                    }, &correlation_id);
                                 }
                             } else if downloaded - last_reported_bytes >= BYTES_THROTTLE {
                                 last_reported_bytes = downloaded;
                                 bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
-                                    correlation_id: correlation_id.clone(),
                                     progress: 0.0,
                                     downloaded_bytes: downloaded,
                                     total_bytes: 0,
-                                });
+                                }, &correlation_id);
                             }
                         }
                         Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("Stream error: {}", e))),
@@ -166,15 +161,13 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, requestor_id: u32) 
         log::info!(target: "network", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
         bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
             error: String::new(),
-            correlation_id: correlation_id.clone(),
-        });
+        }, &correlation_id);
         Ok(())
     });
 
     if let Err(dup) = spawned {
         bus::emit::on_fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
             error: format!("Duplicate task id: {}", dup.0),
-            correlation_id: dup.0,
-        });
+        }, &dup.0);
     }
 }

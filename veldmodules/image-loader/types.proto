@@ -21,14 +21,10 @@ message LoadImageRequest {
   // целиком с сохранением пропорций. 0 — на усмотрение загрузчика.
   uint32 max_width = 2;
   uint32 max_height = 3;
-  // Он же идентификатор задачи декодирования, которую завёл заказчик: он же
-  // её и отменяет через tasks/on_cancel, если превью больше не нужно. Здесь
-  // задачу только опрашивают (см. Cancellation в SDK).
-  string correlation_id = 4;
   // Чем назвать источник в логах и в списке задач. У ресурса имени нет —
   // знает его только заказчик, поэтому пустое поле означает лишь менее
   // внятную диагностику, а не ошибку.
-  string label = 5;
+  string label = 4;
 }
 
 message LoadImageResult {
@@ -38,5 +34,4 @@ message LoadImageResult {
   uint32 source_width = 4;   // размеры исходного изображения
   uint32 source_height = 5;
   string error = 6;          // "" = успех
-  string correlation_id = 7;
 }
