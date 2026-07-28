@@ -30,7 +30,19 @@ dependencies:
   fs:
     subs: [on_list_result, on_read_result, on_write_result, on_delete_result]
     calls: [on_list, on_read, on_write, on_delete]
-  # Провайдер: он качает и он же открывает то, чего у нас ещё нет.
+  # Провайдер умеет одно: подписать адрес продукта. Качаем мы сами — запись в
+  # каталоге, её раскладка и её состояние наши, а платформа делает владельцем
+  # задачи того, кто публикует network/on_fs_download. Владея задачей, мы
+  # отменяем её напрямую (tasks/on_cancel), без посредника.
   data-provider:
-    subs: [on_download_started, on_download_progress, on_downloaded]
-    calls: [on_download, on_cancel_download]
+    subs: [on_signed]
+    calls: [on_sign]
+  # Собственно закачка и её прогресс.
+  network:
+    subs: [on_fs_download_progress, on_fs_download_result]
+    calls: [on_fs_download]
+  # Отмена (она же пауза) и терминальное событие отменённой закачки:
+  # доменного результата при обрыве не будет, приходит только это.
+  tasks:
+    subs: [on_task_finished]
+    calls: [on_cancel]

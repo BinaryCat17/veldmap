@@ -43,43 +43,35 @@ message ListPathResponse {
   string correlation_id = 4;
 }
 
-// --- Download ---
+// --- Подпись ---
+//
+// Единственное, чего не может сделать никто другой: подписать запрос к
+// хранилищу — ключи есть только здесь. Всё остальное про закачку (куда
+// класть, когда начать, чем отменить, что показать пользователю) знает
+// заказчик, поэтому качает он сам, а сюда обращается ровно за подписью.
+//
+// Раньше на этом месте жил весь цикл закачки: DownloadRequest, DownloadStarted,
+// DownloadProgress, Downloaded, CancelDownloadRequest. Это было переизложение
+// платформенного tasks/* своими словами — DownloadProgress совпадал с
+// network.FsDownloadProgress поле в поле, Downloaded повторял tasks.TaskFinished,
+// а `task_id` был тем же correlation_id под другим именем. Держалось это на
+// том, что владельцем задачи платформа делает публикующего (network/on_fs_download),
+// то есть провайдера, — и заказчику приходилось просить его обо всём через
+// доменные сообщения. Заодно провайдер вынужден был знать `destination`, то
+// есть раскладку чужого хранилища.
 
-message DownloadRequest {
-  string identifier = 1;
-  string destination = 2;
+message SignRequest {
+  string identifier = 1;  // путь продукта с префиксом бакета
+  string correlation_id = 2;
 }
 
-// Download started event
-message DownloadStarted {
-  string task_id = 1;
-  string identifier = 2;  // путь с префиксом бакета: eodata/Sentinel-2/...
-  string destination = 3;
-}
-
-// Download progress event
-message DownloadProgress {
-  string task_id = 1;
-  float progress = 2;  // 0.0 to 1.0
-  uint64 downloaded_bytes = 3;
-  uint64 total_bytes = 4;  // 0, если сервер не прислал Content-Length
-}
-
-// Download completed event
-message Downloaded {
-  string task_id = 1;
-  bool success = 2;
+// Подписанный адрес. Живёт столько же, сколько сама подпись (для SigV4 это
+// порядка четверти часа) — заказчик обязан пустить его в дело сразу.
+message SignedUrl {
+  string url = 1;
+  map<string, string> headers = 2;
   string error = 3;
-  // true — закачку отменил пользователь (пауза либо удаление), а не сбой.
-  // Отдельным полем, а не по тексту error: для подписчика это не ошибка —
-  // .part остаётся на диске и следующее "скачать" продолжит с него, поэтому
-  // показывать такое как failure нельзя (см. data-browser::on_downloaded).
-  bool cancelled = 4;
-}
-
-// Cancel download request
-message CancelDownloadRequest {
-  string task_id = 1;
+  string correlation_id = 4;
 }
 
 // --- Open ---

@@ -3,10 +3,12 @@ version: 1.0.0
 
 interface:
   inputs:
-    on_download:
-      type: module/DownloadRequest
-    on_cancel_download:
-      type: module/CancelDownloadRequest
+    # Подписать адрес продукта. Скачиванием и его жизненным циклом провайдер
+    # не занимается: владельцем задачи платформа делает того, кто публикует
+    # network/on_fs_download, и это должен быть заказчик — иначе отменять
+    # свою же закачку он может только через посредника.
+    on_sign:
+      type: module/SignRequest
     on_list_path:
       type: module/ListPathRequest
     on_search:
@@ -15,28 +17,22 @@ interface:
       type: module/OpenRequest
 
   outputs:
+    on_signed:
+      type: module/SignedUrl
+      replies_to: on_sign
     on_open_result:
       type: core/ResourceOpened
       replies_to: on_open
-    on_download_started:
-      type: module/DownloadStarted
     on_list_path_result:
       type: module/ListPathResponse
       replies_to: on_list_path
     on_search_result:
       type: module/SearchResponse
       replies_to: on_search
-    on_downloaded:
-      type: module/Downloaded
-    on_download_progress:
-      type: module/DownloadProgress
 
 dependencies:
+  # Открытие удалённого ресурса (подписать умеем только мы) и HTTP для
+  # листинга бакета. Закачек здесь больше нет — их ведёт заказчик.
   network:
-    subs: [on_fs_download_result, on_fs_download_progress, on_http_result, on_open_result]
-    calls: [on_fs_download, on_http, on_open]
-  # Отмена своих закачек: TaskTracker публикует on_cancel через этот стаб,
-  # терминальное событие приходит обратно как on_task_finished{cancelled}.
-  tasks:
-    subs: [on_task_started, on_task_finished]
-    calls: [on_cancel]
+    subs: [on_http_result, on_open_result]
+    calls: [on_http, on_open]

@@ -1,6 +1,5 @@
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 pub type ResourceId = u64;
 
@@ -23,12 +22,11 @@ pub struct Lease {
     /// Modules granted write access by the owner (e.g. a renderer writing into
     /// a window target texture owned by the window's module). Writers can read.
     pub writers: Vec<u32>,
-    pub expires_at: Option<Instant>,
 }
 
 impl Lease {
     pub fn new(owner_id: u32) -> Self {
-        Self { owner_id, readers: Vec::new(), writers: Vec::new(), expires_at: None }
+        Self { owner_id, readers: Vec::new(), writers: Vec::new() }
     }
 
     pub fn can_read(&self, module_id: u32) -> bool {
@@ -38,9 +36,18 @@ impl Lease {
             || self.writers.contains(&module_id)
     }
 
+    /// Владелец и хост (id 0) пишут всегда — это и есть владение. Остальные —
+    /// только по выданному гранту.
+    ///
+    /// Срока у права нет намеренно: аренды с TTL в платформе не существует, а
+    /// поле `expires_at` тут было единственным её следом. Выставлял его только
+    /// `revoke_all`, причём моментом «сейчас», и проверка стояла ПОСЛЕ проверки
+    /// владельца — то есть отзыв чужих грантов запрещал запись и самому
+    /// владельцу, и хосту. А так как `veld_memory_free` пускает по этому же
+    /// праву (см. abi.rs), владелец после отзыва не мог и освободить свой
+    /// регион: тот утекал до конца процесса, молча.
     pub fn can_write(&self, module_id: u32) -> bool {
-        (self.owner_id == module_id || module_id == 0 || self.writers.contains(&module_id))
-            && self.expires_at.map_or(true, |e| e > Instant::now())
+        self.owner_id == module_id || module_id == 0 || self.writers.contains(&module_id)
     }
 
     pub fn add_reader(&mut self, module_id: u32) {
@@ -59,10 +66,12 @@ impl Lease {
         self.readers.retain(|&r| r != module_id);
     }
 
+    /// Снимает все выданные гранты. Владения не касается: владелец продолжает
+    /// читать, писать и освобождать свой регион — отозвать у себя собственный
+    /// ресурс нельзя, для этого есть `free`.
     pub fn revoke_all(&mut self) {
         self.readers.clear();
         self.writers.clear();
-        self.expires_at = Some(Instant::now());
     }
 }
 

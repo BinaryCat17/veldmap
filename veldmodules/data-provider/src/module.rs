@@ -12,28 +12,12 @@ pub struct Config {
 #[derive(Clone)]
 pub struct State {
     pub identity: Identity,
-    /// Учёт запущенных модулем задач: фильтрация broadcast-событий
-    /// и отмена через платформенный протокол tasks/* (veldsdk).
-    pub tasks: veldsdk::TaskTracker,
     /// Запрос листинга, ожидающий S3-ответа: id генерируется в on_list_path
     /// для внутреннего вызова network, снимается в on_http_result.
     pub pending_http: veldsdk::Correlator<PendingList>,
-    /// Закачки, запрошенные у network, но ещё не зарегистрированные
-    /// платформой. Пока задачи нет в реестре хоста, гарантия
-    /// tasks/task_finished на неё не распространяется (см. tasks.proto), а
-    /// значит и отменить её нельзя — tasks/cancel вернёт NotFound молча.
-    /// Поэтому DownloadStarted наружу уходит не отсюда, а из on_task_started.
-    pub starting: veldsdk::Correlator<StartingDownload>,
     /// Открываемые удалённые ресурсы: correlation_id → имя заказчика, которому
     /// уйдёт владение (см. cdse::on_open).
     pub opening: veldsdk::Correlator<String>,
-}
-
-/// Закачка между «попросили network» и «платформа зарегистрировала задачу».
-#[derive(Clone)]
-pub struct StartingDownload {
-    pub identifier: String,
-    pub destination: String,
 }
 
 /// Контекст запроса на листинг: path — для дедупликации "самого себя" из
@@ -49,18 +33,13 @@ pub struct PendingList {
 pub use cdse::{
     module_init as hook_init,
 
-    // calls
-    on_download,
-    on_cancel_download,
+    // inputs
+    on_sign,
     on_list_path,
     on_search,
     on_open,
 
     // subs
-    on_fs_download_result,
-    on_fs_download_progress,
     on_http_result,
     on_open_result,
-    on_task_started,
-    on_task_finished,
 };

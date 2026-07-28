@@ -242,6 +242,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 height: convert_length(&img.height),
             }.into()
         }
+        Some(proto::widget::Type::Space(s)) => {
+            Space::new(convert_length(&s.width), convert_length(&s.height)).into()
+        }
+        // Виджет без ветки конвертации молча стал бы пустой колонкой, поэтому
+        // сюда попадает только `type: None` — сообщение без содержимого.
         _ => column([]).into(),
     }
 }

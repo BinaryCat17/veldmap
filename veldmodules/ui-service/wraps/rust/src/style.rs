@@ -14,7 +14,6 @@ pub struct Padding {
 impl Padding {
     pub const ZERO: Padding = Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 0.0 };
     pub fn new(p: f32) -> Self { Self { top: p, right: p, bottom: p, left: p } }
-    pub fn from_proto(p: proto::Padding) -> Self { Self { top: p.top, right: p.right, bottom: p.bottom, left: p.left } }
     pub fn to_proto(self) -> proto::Padding { proto::Padding { top: self.top, right: self.right, bottom: self.bottom, left: self.left } }
 }
 

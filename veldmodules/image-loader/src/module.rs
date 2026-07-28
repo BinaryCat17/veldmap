@@ -77,10 +77,7 @@ struct Texture {
 fn make_texture(req: LoadImageRequest, cancelled: decode::Cancelled) -> Result<Texture, String> {
     // Владелец ресурса и будущий владелец текстуры — тот, кто прислал запрос.
     // Без имени передать текстуру некому.
-    let owner = veldsdk::abi::event_publisher();
-    if owner.is_empty() {
-        return Err("on_load пришёл от хоста: владение текстурой передать некому".to_string());
-    }
+    let owner = veldsdk::resource::requester("image-loader/on_load")?;
     let resource = req.resource.ok_or_else(|| "в запросе нет ресурса".to_string())?;
 
     let preview = decode::preview(
@@ -98,14 +95,14 @@ fn make_texture(req: LoadImageRequest, cancelled: decode::Cancelled) -> Result<T
     ).ok_or_else(|| format!("не удалось выделить текстуру {}×{}", preview.width, preview.height))?;
     veldsdk::abi::arena_write(texture_id, 0, &preview.rgba);
 
-    if !veldsdk::abi::arena_transfer(texture_id, &owner) {
-        veldsdk::abi::arena_free(texture_id);
-        return Err(format!("не удалось передать владение текстурой сервису '{}'", owner));
-    }
+    let texture = veldsdk::resource::hand_off(
+        ResourceHandle { id: texture_id, size: preview.rgba.len() as u64 },
+        &owner,
+    )?;
 
     Ok(Texture {
-        id: texture_id,
-        size: preview.rgba.len() as u64,
+        id: texture.id,
+        size: texture.size,
         width: preview.width,
         height: preview.height,
         source: preview.source,

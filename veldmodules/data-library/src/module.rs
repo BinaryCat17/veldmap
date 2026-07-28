@@ -32,8 +32,10 @@ pub struct State {
     /// листинг подрезает его под то, что реально лежит в каталоге, поэтому
     /// удалённый мимо приложения файл не воскреснет записью о намерении.
     pub origins: HashMap<String, OriginSidecar>,
-    /// Идущие закачки, ключ — task_id провайдера. Запись живёт ровно пока
-    /// идёт закачка: терминальное событие её снимает.
+    /// Идущие закачки. Ключ — наш собственный correlation_id, он же task_id
+    /// задачи у платформы: операцию именуем мы, потому что мы же её и владелец
+    /// (см. download.rs). Запись живёт от нажатия «скачать» до терминального
+    /// события — включая окно ожидания подписи, когда задачи ещё нет.
     pub downloads: veldsdk::Correlator<Download>,
 
     /// Ожидание fs/on_list — гасит устаревший ответ.
@@ -132,18 +134,10 @@ pub fn on_read_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
     match state.pending_reads.take(&opened.correlation_id) {
         Some(ReadPurpose::Sidecar(name)) => catalog::on_sidecar_read(state, name, &opened),
         Some(ReadPurpose::File(target)) => open::on_file_opened(target, &opened),
-        // Ответ без учтённого запроса возможен только при рассогласовании, но
-        // ресурс в нём всё равно наш — освобождаем, чтобы ошибка стоила лога,
-        // а не утечки.
-        None => {
-            veldsdk::log::warn!(target: "handlers",
-                "fs/on_read_result без учтённого запроса: {}", opened.correlation_id);
-            if let Some(handle) = opened.handle {
-                veldsdk::abi::arena_free(handle.id);
-            }
-        }
+        None => veldsdk::resource::discard("fs/on_read_result", opened),
     }
 }
 pub use download::{on_download, on_cancel, on_delete, on_delete_result,
-                   on_download_started, on_download_progress, on_downloaded};
+                   on_signed, on_fs_download_progress, on_fs_download_result,
+                   on_task_finished};
 pub use open::on_open;

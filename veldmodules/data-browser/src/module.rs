@@ -67,15 +67,9 @@ pub use handlers::preview::on_load_result;
 /// открывает ещё не скачанный, — но сообщение одно и потребитель один, так
 /// что и обработчик один: дальше превью безразлично, откуда взялись байты.
 ///
-/// Ответ без учтённого запроса возможен только при рассогласовании, но ресурс
-/// в нём всё равно наш — освобождаем, чтобы ошибка стоила лога, а не утечки.
 pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
     if handlers::preview::on_resource_opened(state, &opened) { return; }
-    veldsdk::log::warn!(target: "handlers",
-        "on_open_result без учтённого запроса: {}", opened.correlation_id);
-    if let Some(handle) = opened.handle {
-        veldsdk::abi::arena_free(handle.id);
-    }
+    veldsdk::resource::discard("on_open_result", opened);
 }
 pub use handlers::search::on_search_result;
 pub use handlers::browse::on_list_path_result;

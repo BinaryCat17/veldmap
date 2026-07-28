@@ -32,15 +32,8 @@ impl Drop for ScopeGuard {
     }
 }
 
-/// Шейпит строку — единственный путь на весь модуль.
-///
-/// Измерение (`RealParagraph::with_text`, от него зависит layout) и отрисовка
-/// (`GpuRenderer::fill_text`) обязаны получать одинаково разложенный буфер:
-/// иначе виджет измеряется по одним метрикам, а рисуется по другим, и текст
-/// не влезает в кнопку, которая под него посчиталась. Раньше это были две
-/// независимые копии ~90 строк, и они успели разойтись — измерение всегда
-/// шейпило `Advanced` и откатывалось на `SansSerif`, отрисовка честно читала
-/// `text.shaping` и всегда звала `Family::Name`, в том числе пустое.
+/// Раскладывает строку в буфер cosmic-text. Единственный вызывающий —
+/// `build_paragraph`, и через него на неё выходят оба пути текста.
 ///
 /// `family` — уже разрешённое семейство (см. `resolve_family`); пустая строка
 /// означает «разрешить не удалось», и тогда нужен именно `SansSerif`:
@@ -172,12 +165,10 @@ pub struct GpuRenderer {
     current_atlas_x: u32,
     current_atlas_y: u32,
     row_height: u32,
-    atlas_dirty: bool,
     atlas_dirty_y_min: u32,
     atlas_dirty_y_max: u32,
     font_map: HashMap<String, String>,
     default_family: String,
-    text_cache: HashMap<String, Buffer>,
     pub current_sf: f32,
     scissor_stack: Vec<iced_core::Rectangle>,
     transformation_stack: Vec<Transformation>,
@@ -235,12 +226,10 @@ impl GpuRenderer {
             current_atlas_x: 6,
             current_atlas_y: 6,
             row_height: 1,
-            atlas_dirty: true,
             atlas_dirty_y_min: 0,
             atlas_dirty_y_max: 2048,
             font_map,
             default_family,
-            text_cache: HashMap::new(),
             current_sf: 1.0,
             scissor_stack: Vec::new(),
             transformation_stack: vec![Transformation::IDENTITY],
@@ -276,18 +265,10 @@ impl GpuRenderer {
         (self.atlas_width, self.atlas_height)
     }
 
-    pub fn atlas_dirty_range(&self) -> (u64, &[u8]) {
-        let y_min = self.atlas_dirty_y_min;
-        let y_max = self.atlas_dirty_y_max.min(self.atlas_height);
-        if y_min >= y_max { return (0, &[]); }
-
-        let bytes_per_row = (self.atlas_width * 4) as u64;
-        let start = (y_min as u64 * bytes_per_row) as usize;
-        let end = (y_max as u64 * bytes_per_row) as usize;
-        (start as u64, &self.atlas_data[start..end])
-    }
-
-    /// Returns full atlas data for dzn compatibility (full texture writes only)
+    /// Атлас грузится целиком: dzn (Vulkan поверх DX12 в WSL) не принимает
+    /// частичную запись текстуры. Диапазон `atlas_dirty_y_*` поэтому отвечает
+    /// только на вопрос «менялся ли атлас» (`is_atlas_dirty`), а оконная
+    /// выгрузка по нему была вторым, никем не вызываемым путём.
     pub fn atlas_data_full(&self) -> &[u8] {
         &self.atlas_data
     }
@@ -297,13 +278,11 @@ impl GpuRenderer {
     }
 
     pub fn mark_atlas_clean(&mut self) {
-        self.atlas_dirty = false;
         self.atlas_dirty_y_min = self.atlas_height;
         self.atlas_dirty_y_max = 0;
     }
 
     pub fn mark_atlas_dirty(&mut self) {
-        self.atlas_dirty = true;
         self.atlas_dirty_y_min = 0;
         self.atlas_dirty_y_max = self.atlas_height;
     }
@@ -491,82 +470,95 @@ impl Default for RealParagraph {
     }
 }
 
+/// Шейпит текст и меряет его — единственный путь на весь модуль.
+///
+/// И измерение (iced зовёт его через `Paragraph::with_text`, от результата
+/// зависит layout), и отрисовка (`fill_text`) обязаны получать одинаково
+/// разложенный буфер и одинаковые метрики: иначе виджет измеряется по одним
+/// правилам, а рисуется по другим. Раньше вокруг общего `shape_text` жили
+/// две обвязки со своими кэшами, своим `min_x` и — уже разошедшимися —
+/// формулами вертикального центрирования.
+fn build_paragraph(
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    font_map: &HashMap<String, String>,
+    default_family: &str,
+    text: iced_core::Text<&str, Font>,
+    origin: &str,
+) -> RealParagraph {
+    let font_family = resolve_family(font_system.db(), font_map, default_family, &text.font.family);
+
+    let buffer = shape_text(
+        font_system,
+        text.content,
+        text.size,
+        text.line_height,
+        text.bounds.width,
+        &font_family,
+        text.shaping,
+        origin,
+    );
+
+    // Границы по горизонтали берутся из растровых образов глифов, а не из их
+    // advance: у наклонного или свисающего глифа чернила выходят за перо, и
+    // без этого текст обрезался бы по краю.
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut line_count = 0;
+
+    for run in buffer.layout_runs() {
+        line_count += 1;
+        for glyph in run.glyphs {
+            let physical = glyph.physical((0.0, 0.0), 1.0);
+            if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
+                let left = glyph.x + image.placement.left as f32;
+                min_x = min_x.min(left);
+                max_x = max_x.max(left + image.placement.width as f32);
+            } else {
+                min_x = min_x.min(glyph.x);
+                max_x = max_x.max(glyph.x + glyph.w);
+            }
+        }
+    }
+
+    if !min_x.is_finite() {
+        min_x = 0.0;
+        max_x = 0.0;
+    }
+
+    let visual_height = line_count as f32 * buffer.metrics().line_height;
+
+    RealParagraph {
+        buffer: Some(buffer),
+        horizontal_alignment: text.horizontal_alignment,
+        vertical_alignment: text.vertical_alignment,
+        bounds: text.bounds,
+        min_x,
+        max_x,
+        visual_height,
+    }
+}
+
 impl iced_core::text::Paragraph for RealParagraph {
     type Font = Font;
+    /// iced зовёт это статически, без доступа к рендереру, поэтому шрифтовое
+    /// хозяйство приезжает сюда через `ScopeGuard` (thread-local). Вся работа —
+    /// в `build_paragraph`, общем с путём отрисовки.
     fn with_text(text: iced_core::Text<&str, Self::Font>) -> Self {
         FONT_SYSTEM.with(|fs_cell| {
-            if let Some(mut fs_ptr) = *fs_cell.borrow_mut() {
-                let font_system = unsafe { fs_ptr.as_mut() };
-
-                let font_family = FONT_MAP.with(|fm_cell| {
+            SWASH_CACHE.with(|sc_cell| {
+                FONT_MAP.with(|fm_cell| {
                     DEFAULT_FAMILY.with(|df_cell| {
-                        match (*fm_cell.borrow(), *df_cell.borrow()) {
-                            (Some(fm), Some(df)) => unsafe {
-                                resolve_family(font_system.db(), fm.as_ref(), df.as_ref(), &text.font.family)
+                        match (*fs_cell.borrow_mut(), *sc_cell.borrow_mut(), *fm_cell.borrow(), *df_cell.borrow()) {
+                            (Some(mut fs), Some(mut sc), Some(fm), Some(df)) => unsafe {
+                                build_paragraph(fs.as_mut(), sc.as_mut(), fm.as_ref(), df.as_ref(), text, "with_text")
                             },
-                            // Без ScopeGuard параграф не рендерится; семейство не важно.
-                            _ => String::new(),
+                            // Без ScopeGuard параграф не рендерится.
+                            _ => Self::default(),
                         }
                     })
-                });
-
-                let buffer = shape_text(
-                    font_system,
-                    text.content,
-                    text.size,
-                    text.line_height,
-                    text.bounds.width,
-                    &font_family,
-                    text.shaping,
-                    "with_text",
-                );
-
-                let mut min_x = f32::INFINITY;
-                let mut max_x = f32::NEG_INFINITY;
-                let mut line_count = 0;
-
-                SWASH_CACHE.with(|sc_cell| {
-                    if let Some(mut sc_ptr) = *sc_cell.borrow_mut() {
-                        let swash_cache = unsafe { sc_ptr.as_mut() };
-                        for run in buffer.layout_runs() {
-                            line_count += 1;
-                            for glyph in run.glyphs {
-                                let physical = glyph.physical((0.0, 0.0), 1.0);
-                                if let Some(image) =
-                                    swash_cache.get_image(font_system, physical.cache_key)
-                                {
-                                    let left = glyph.x + image.placement.left as f32;
-                                    let right = left + image.placement.width as f32;
-                                    min_x = min_x.min(left);
-                                    max_x = max_x.max(right);
-                                } else {
-                                    min_x = min_x.min(glyph.x);
-                                    max_x = max_x.max(glyph.x + glyph.w);
-                                }
-                            }
-                        }
-                    }
-                });
-
-                if !min_x.is_finite() {
-                    min_x = 0.0;
-                    max_x = 0.0;
-                }
-
-                let visual_height = line_count as f32 * buffer.metrics().line_height;
-
-                Self {
-                    buffer: Some(buffer),
-                    horizontal_alignment: text.horizontal_alignment,
-                    vertical_alignment: text.vertical_alignment,
-                    bounds: text.bounds,
-                    min_x,
-                    max_x,
-                    visual_height,
-                }
-            } else {
-                Self::default()
-            }
+                })
+            })
         })
     }
     fn with_spans<Link>(
@@ -706,73 +698,43 @@ impl iced_core::text::Renderer for GpuRenderer {
 
     fn fill_editor(&mut self, _e: &Self::Editor, _pos: Point, _color: Color, _clip: iced_core::Rectangle) {}
 
+    /// Текст без параграфа: iced зовёт это из виджетов, которые не кэшируют
+    /// разложенный текст сами (pick_list, checkbox, text_editor, меню оверлея).
+    /// Ни один из них в наборе виджетов сервиса не встречается, но путь обязан
+    /// быть согласован с основным — поэтому он просто раскладывает текст тем же
+    /// `build_paragraph` и отдаёт его в `fill_paragraph`. Своего кэша здесь нет:
+    /// он был бы вторым, ни с чем не сверяемым представлением того же текста.
     fn fill_text(
         &mut self,
         text: iced_core::Text,
         pos: Point,
         color: Color,
-        _clip: iced_core::Rectangle,
+        clip: iced_core::Rectangle,
     ) {
         if text.content.is_empty() {
             return;
         }
 
-        let font_family = resolve_family(self.font_system.db(), &self.font_map, &self.default_family, &text.font.family);
-
-        let cache_key = format!(
-            "{}_{}_{:?}_{:?}_{}",
-            text.content, text.size.0, font_family, text.shaping, text.bounds.width
+        let paragraph = build_paragraph(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &self.font_map,
+            &self.default_family,
+            iced_core::Text {
+                content: text.content.as_str(),
+                bounds: text.bounds,
+                size: text.size,
+                line_height: text.line_height,
+                font: text.font,
+                horizontal_alignment: text.horizontal_alignment,
+                vertical_alignment: text.vertical_alignment,
+                shaping: text.shaping,
+                wrapping: text.wrapping,
+            },
+            "fill_text",
         );
 
-        if !self.text_cache.contains_key(&cache_key) {
-            if self.text_cache.len() > 1000 {
-                self.text_cache.clear();
-            }
-
-            let buffer = shape_text(
-                &mut self.font_system,
-                &text.content,
-                text.size,
-                text.line_height,
-                text.bounds.width,
-                &font_family,
-                text.shaping,
-                "fill_text",
-            );
-            self.text_cache.insert(cache_key.clone(), buffer);
-        }
-
-        let buffer = self.text_cache.remove(&cache_key).unwrap();
-
-        let mut min_x = f32::INFINITY;
-        for run in buffer.layout_runs() {
-            for glyph in run.glyphs {
-                let physical = glyph.physical((0.0, 0.0), 1.0);
-                if let Some(image) = self.swash_cache.get_image(&mut self.font_system, physical.cache_key) {
-                    let left = glyph.x + image.placement.left as f32;
-                    min_x = min_x.min(left);
-                } else {
-                    min_x = min_x.min(glyph.x);
-                }
-            }
-        }
-
-        if !min_x.is_finite() {
-            min_x = 0.0;
-        }
-
-        let y_offset = match text.vertical_alignment {
-            iced_core::alignment::Vertical::Center => text.bounds.height / 2.0,
-            iced_core::alignment::Vertical::Bottom => text.bounds.height,
-            _ => 0.0,
-        };
-
-        let adjusted_pos = Point::new(pos.x - min_x, pos.y - y_offset);
-
-        self.prepare_glyphs(&buffer);
-        self.draw_buffer(&buffer, adjusted_pos, color);
-        
-        self.text_cache.insert(cache_key, buffer);
+        self.fill_paragraph(&paragraph, pos, color, clip);
     }
 }
 
@@ -895,7 +857,6 @@ impl GpuRenderer {
         }
 
         if atlas_modified {
-            self.atlas_dirty = true;
-        }
+            }
     }
 }

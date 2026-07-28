@@ -9,20 +9,18 @@ use crate::module::{ReadPurpose, State};
 use crate::proto::data_library::OpenRequest;
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
+use veldsdk::resource;
 
 pub fn on_open(state: &mut State, req: OpenRequest) {
-    let owner = veldsdk::abi::event_publisher();
-    if owner.is_empty() {
-        emit_error(req.correlation_id, "on_open пришёл от хоста: ресурс передать некому");
-        return;
-    }
+    let owner = match resource::requester("data-library/on_open") {
+        Ok(owner) => owner,
+        Err(e) => return fail(req.correlation_id, e),
+    };
     let Some(entry) = state.entry_for(&req.name) else {
-        emit_error(req.correlation_id, &format!("в каталоге нет записи '{}'", req.name));
-        return;
+        return fail(req.correlation_id, format!("в каталоге нет записи '{}'", req.name));
     };
     if entry.is_partial {
-        emit_error(req.correlation_id, &format!("'{}' скачан не полностью", req.name));
-        return;
+        return fail(req.correlation_id, format!("'{}' скачан не полностью", req.name));
     }
 
     let path = entry.path.clone();
@@ -42,35 +40,14 @@ pub struct OpenFor {
 }
 
 /// fs открыл файл, который мы просили для заказчика (`target` — снятое с
-/// учёта ожидание, см. module::on_read_result).
+/// учёта ожидание, см. module::on_read_result). Владение уходит заказчику:
+/// дальше он читает ресурс как хочет и сам решает, когда закрыть.
 pub fn on_file_opened(target: OpenFor, opened: &ResourceOpened) {
-    if !opened.error.is_empty() {
-        emit_error(target.reply_to, &opened.error);
-        return;
-    }
-    let Some(handle) = opened.handle.clone() else {
-        emit_error(target.reply_to, "fs вернул пустой handle");
-        return;
-    };
-    // Владение — заказчику: дальше он читает ресурс как хочет и сам решает,
-    // когда закрыть.
-    if !veldsdk::abi::arena_transfer(handle.id, &target.owner) {
-        veldsdk::abi::arena_free(handle.id);
-        emit_error(target.reply_to, &format!("не удалось передать ресурс сервису '{}'", target.owner));
-        return;
-    }
-
-    crate::emit::on_open_result(&ResourceOpened {
-        handle: Some(handle),
-        error: String::new(),
-        correlation_id: target.reply_to,
-    });
+    let result = resource::accept(opened)
+        .and_then(|handle| resource::hand_off(handle, &target.owner));
+    crate::emit::on_open_result(&resource::opened(result, target.reply_to));
 }
 
-fn emit_error(correlation_id: String, error: &str) {
-    crate::emit::on_open_result(&ResourceOpened {
-        handle: None,
-        error: error.to_string(),
-        correlation_id,
-    });
+fn fail(correlation_id: String, error: String) {
+    crate::emit::on_open_result(&resource::opened(Err(error), correlation_id));
 }
