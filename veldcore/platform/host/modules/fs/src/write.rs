@@ -14,19 +14,19 @@ pub fn on_write(state: &State, req: FsWriteRequest, caller: Caller) {
     let fail = |error: &str| FsWriteResult { error: error.into() };
 
     if !is_path_safe(&req.path) {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Access denied"), &correlation);
         return;
     }
     let Some(handle) = req.handle else {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Missing handle"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Missing handle"), &correlation);
         return;
     };
     if handle.id == 0 {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Handle ID 0 not supported for fs_write yet"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Handle ID 0 not supported for fs_write yet"), &correlation);
         return;
     }
     if !state.ctx.registry.check_access(handle.id, instance, Access::Read) {
-        bus::emit::on_write_result(&*state.ctx.dispatcher, &fail("Access denied to resource"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Access denied to resource"), &correlation);
         return;
     }
 
@@ -42,6 +42,6 @@ pub fn on_write(state: &State, req: FsWriteRequest, caller: Caller) {
             }
             Err(e) => FsWriteResult { error: e.to_string() },
         };
-        bus::emit::on_write_result(&*ctx.dispatcher, &result, &correlation);
+        bus::emit::on_write_result(&*ctx.publisher, &result, &correlation);
     });
 }

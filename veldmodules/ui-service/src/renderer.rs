@@ -154,8 +154,8 @@ pub struct GpuRenderer {
     pub draw_commands: Vec<DrawCmd>,
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
-    /// Region id текстуры атласа (memory ABI).
-    pub atlas_texture_id: Option<u64>,
+    /// Текстура атласа (memory ABI): наша, освобождается Drop'ом.
+    pub atlas_texture_id: Option<veldsdk::OwnedResource>,
     pub atlas_bind_group: Option<veldsdk::graphics::BindGroupId>,
     pub atlas_layout: Option<veldsdk::graphics::BindGroupLayoutId>,
     glyph_cache: HashMap<cosmic_text::CacheKey, GlyphInfo>,

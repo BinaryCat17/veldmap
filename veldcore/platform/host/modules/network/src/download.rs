@@ -26,7 +26,7 @@ use tokio::io::AsyncWriteExt;
 /// и возвращает текст ошибки — он же попадёт в tasks/task_finished.error.
 fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> String {
     log::warn!(target: "network", "Download {} failed: {}", correlation_id, error);
-    bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
+    bus::emit::on_fs_download_result(&*ctx.publisher, &FsDownloadResponse {
         error: error.clone(),
     }, correlation_id);
     error
@@ -34,7 +34,7 @@ fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> Stri
 
 pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
     if !is_path_safe(&req.path) {
-        bus::emit::on_fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
+        bus::emit::on_fs_download_result(&*state.ctx.publisher, &FsDownloadResponse {
             error: format!("Unsafe path: {}", req.path),
         }, &caller.correlation);
         return;
@@ -98,7 +98,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
         // а первым что-то покажет только когда новых байт наберётся на шаг
         // троттлинга ниже.
         if resuming {
-            bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
+            bus::emit::on_fs_download_progress(&*ctx.publisher, &FsDownloadProgress {
                 progress: if total_size > 0 { downloaded as f32 / total_size as f32 } else { 0.0 },
                 downloaded_bytes: downloaded,
                 total_bytes: total_size,
@@ -128,7 +128,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
                                 let percent = (downloaded * 100 / total_size) as u32;
                                 if percent > last_percent {
                                     last_percent = percent;
-                                    bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
+                                    bus::emit::on_fs_download_progress(&*ctx.publisher, &FsDownloadProgress {
                                         progress: downloaded as f32 / total_size as f32,
                                         downloaded_bytes: downloaded,
                                         total_bytes: total_size,
@@ -136,7 +136,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
                                 }
                             } else if downloaded - last_reported_bytes >= BYTES_THROTTLE {
                                 last_reported_bytes = downloaded;
-                                bus::emit::on_fs_download_progress(&*ctx.dispatcher, &FsDownloadProgress {
+                                bus::emit::on_fs_download_progress(&*ctx.publisher, &FsDownloadProgress {
                                     progress: 0.0,
                                     downloaded_bytes: downloaded,
                                     total_bytes: 0,
@@ -159,14 +159,14 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
         }
 
         log::info!(target: "network", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
-        bus::emit::on_fs_download_result(&*ctx.dispatcher, &FsDownloadResponse {
+        bus::emit::on_fs_download_result(&*ctx.publisher, &FsDownloadResponse {
             error: String::new(),
         }, &correlation_id);
         Ok(())
     });
 
     if let Err(dup) = spawned {
-        bus::emit::on_fs_download_result(&*state.ctx.dispatcher, &FsDownloadResponse {
+        bus::emit::on_fs_download_result(&*state.ctx.publisher, &FsDownloadResponse {
             error: format!("Duplicate task id: {}", dup.0),
         }, &dup.0);
     }

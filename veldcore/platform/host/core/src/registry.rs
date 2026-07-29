@@ -1,5 +1,23 @@
+//! Реестр ресурсов — единственный источник истины о существовании ресурса,
+//! его носителе (payload) и правах доступа (lease). Раньше реестр хранил
+//! только lease и классификатор backend, а сами носители лежали в трёх
+//! параллельных картах (`memory.regions`, `graphics.gpu_objects`), которые
+//! приходилось держать согласованными вручную: аллокация была двухшаговой
+//! без отката, освобождение перебирало карты. Теперь запись одна —
+//! lease + payload, регистрация и освобождение атомарны относительно карты.
+//!
+//! Акцессоры `payload`/`payload_mut` выполняют замыкание под guard'ом
+//! DashMap. Отсюда два правила: нельзя звать их, уже держа guard той же
+//! карты (дедлок шарда), и нельзя звать из замыкания обратно в реестр
+//! (`register`/`unregister`/`payload*`) — guard берётся рекурсивно. Долгие
+//! операции (блокирующее чтение носителя) выполняют, вынеся Arc из
+//! замыкания и отпустив guard — так делает `MemoryManager::read`.
+
 use dashmap::DashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::memory::DataBacking;
 
 pub type ResourceId = u64;
 
@@ -7,13 +25,6 @@ pub type ResourceId = u64;
 pub enum Access {
     Read,
     Write,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ResourceBackend {
-    Memory,
-    GpuState,
-    // Network, // For future use
 }
 
 pub struct Lease {
@@ -75,16 +86,42 @@ impl Lease {
     }
 }
 
+/// Непрозрачные GPU-объекты: разделяемых байт нет, только Arc-обёртки
+/// wgpu-дескрипторов, которые модуль адресует по id.
+#[derive(Clone)]
+pub enum GpuObject {
+    TextureView(Arc<wgpu::TextureView>),
+    Sampler(Arc<wgpu::Sampler>),
+    BindGroupLayout(Arc<wgpu::BindGroupLayout>),
+    RenderPipeline(Arc<wgpu::RenderPipeline>),
+    BindGroup(Arc<wgpu::BindGroup>),
+    ShaderModule(Arc<wgpu::ShaderModule>),
+}
+
+pub struct GpuEntry {
+    pub obj: GpuObject,
+    /// Размеры исходной текстуры — только у TextureView; хост знает их в
+    /// момент создания view и отдаёт кадровому циклу для
+    /// viewport/scissor-клампинга (вместо размеров окна).
+    pub size: Option<(u32, u32)>,
+}
+
+/// Носитель ресурса: байтовые данные (память, файл, GPU-буфер, текстура)
+/// или непрозрачный GPU-объект. Ресурс один — id, владение (lease) и
+/// освобождение у обоих вариантов общие.
+pub enum ResourcePayload {
+    Data(DataBacking),
+    Gpu(GpuEntry),
+}
+
 pub struct ResourceEntry {
-    pub backend: ResourceBackend,
     pub lease: Lease,
-    pub name: Option<String>,
+    pub payload: ResourcePayload,
 }
 
 pub struct ResourceRegistry {
     next_id: AtomicU64,
     entries: DashMap<ResourceId, ResourceEntry>,
-    named_resources: DashMap<String, ResourceId>,
 }
 
 impl ResourceRegistry {
@@ -93,49 +130,21 @@ impl ResourceRegistry {
             // Id 0 обозначает хост (суперпользователь в lease-проверках)
             next_id: AtomicU64::new(1),
             entries: DashMap::new(),
-            named_resources: DashMap::new(),
         }
     }
 
-    pub fn register(&self, backend: ResourceBackend, owner_id: u32, name: Option<String>) -> ResourceId {
+    pub fn register(&self, payload: ResourcePayload, owner_id: u32) -> ResourceId {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let entry = ResourceEntry {
-            backend,
             lease: Lease::new(owner_id),
-            name: name.clone(),
+            payload,
         };
         self.entries.insert(id, entry);
-        if let Some(n) = name {
-            self.named_resources.insert(n, id);
-        }
         id
     }
 
-    pub fn register_with_id(&self, id: ResourceId, backend: ResourceBackend, owner_id: u32, name: Option<String>) {
-        let entry = ResourceEntry {
-            backend,
-            lease: Lease::new(owner_id),
-            name: name.clone(),
-        };
-        self.entries.insert(id, entry);
-        if let Some(n) = name {
-            self.named_resources.insert(n, id);
-        }
-    }
-
     pub fn unregister(&self, id: ResourceId) -> bool {
-        if let Some((_, entry)) = self.entries.remove(&id) {
-            if let Some(name) = entry.name {
-                self.named_resources.remove(&name);
-            }
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn get_named_id(&self, name: &str) -> Option<ResourceId> {
-        self.named_resources.get(name).map(|v| *v)
+        self.entries.remove(&id).is_some()
     }
 
     pub fn check_access(&self, id: ResourceId, requestor_id: u32, access: Access) -> bool {
@@ -147,10 +156,6 @@ impl ResourceRegistry {
         } else {
             false
         }
-    }
-
-    pub fn get_backend(&self, id: ResourceId) -> Option<ResourceBackend> {
-        self.entries.get(&id).map(|e| e.backend)
     }
 
     pub fn get_owner(&self, id: ResourceId) -> Option<u32> {
@@ -167,6 +172,19 @@ impl ResourceRegistry {
         } else {
             false
         }
+    }
+
+    /// Доступ к носителю под shared-guard'ом карты. Guard живёт до конца
+    /// замыкания: возвращать из него можно только клоны/копии, а блокирующие
+    /// операции выполнять уже после выхода (см. комментарий к модулю).
+    pub fn payload<R>(&self, id: ResourceId, f: impl FnOnce(&ResourcePayload) -> R) -> Option<R> {
+        self.entries.get(&id).map(|e| f(&e.payload))
+    }
+
+    /// То же по mutable-guard'у — для операций, пишущих в носитель на месте
+    /// (CPU-буфер, mapped-диапазон, очередь wgpu).
+    pub fn payload_mut<R>(&self, id: ResourceId, f: impl FnOnce(&mut ResourcePayload) -> R) -> Option<R> {
+        self.entries.get_mut(&id).map(|mut e| f(&mut e.payload))
     }
 }
 

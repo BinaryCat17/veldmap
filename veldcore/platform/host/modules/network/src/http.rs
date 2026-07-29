@@ -83,20 +83,20 @@ pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
                 let status = res.status().as_u16() as u32;
                 let body = res.bytes().await.unwrap_or_default().to_vec();
                 log::info!(target: "network", "HTTP request {} finished with status {}", correlation_id, status);
-                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status, body }, &correlation_id);
+                bus::emit::on_http_result(&*ctx.publisher, &HttpTaskResponse { status, body }, &correlation_id);
                 Ok(())
             }
             Err(e) => {
                 log::warn!(target: "network", "HTTP request {} failed: {}", correlation_id, e);
                 let error = e.to_string();
-                bus::emit::on_http_result(&*ctx.dispatcher, &HttpTaskResponse { status: 0, body: Vec::new() }, &correlation_id);
+                bus::emit::on_http_result(&*ctx.publisher, &HttpTaskResponse { status: 0, body: Vec::new() }, &correlation_id);
                 Err(error)
             }
         }
     });
 
     if let Err(dup) = spawned {
-        bus::emit::on_http_result(&*state.ctx.dispatcher, &HttpTaskResponse {
+        bus::emit::on_http_result(&*state.ctx.publisher, &HttpTaskResponse {
             status: 0,
             body: Vec::new(),
         }, &dup.0);

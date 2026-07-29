@@ -29,31 +29,5 @@ pub use abi::event_publisher;
 pub use abi::correlation;
 pub use correlator::Correlator;
 pub use latest::{Latest, Reply};
-pub use tasks::Cancellation;
-pub use resource::ResourceReader;
-
-/// RAII handle to a memory region or graphics object.
-/// On drop: releases the resource via memory ABI.
-/// Deliberately not Clone: exactly one owner frees the resource.
-pub struct OwnedResource {
-    handle: ResourceHandle,
-}
-
-impl OwnedResource {
-    pub fn new(handle: ResourceHandle) -> Self {
-        Self { handle }
-    }
-
-    pub fn handle(&self) -> ResourceHandle { self.handle.clone() }
-    pub fn id(&self) -> u64 { self.handle.id }
-}
-
-impl Drop for OwnedResource {
-    fn drop(&mut self) {
-        abi::arena_free(self.handle.id);
-    }
-}
-
-impl AsRef<ResourceHandle> for OwnedResource {
-    fn as_ref(&self) -> &ResourceHandle { &self.handle }
-}
+pub use tasks::{Cancellation, TaskGuard};
+pub use resource::{OwnedResource, ResourceReader};

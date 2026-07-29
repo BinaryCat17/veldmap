@@ -57,7 +57,7 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
                 ResourceOpened { handle: None, error: e.to_string() }
             }
         };
-        bus::emit::on_open_result(&*ctx.dispatcher, &result, &correlation);
+        bus::emit::on_open_result(&*ctx.publisher, &result, &correlation);
     });
 }
 
@@ -78,7 +78,8 @@ struct HttpRange {
     fetched: std::sync::atomic::AtomicU64,
 }
 
-/// Ресурс закрыт (гость позвал arena_free) — подводим итог по трафику.
+/// Ресурс закрыт (гость освободил его через veld_memory_free) — подводим
+/// итог по трафику.
 impl Drop for HttpRange {
     fn drop(&mut self) {
         let fetched = self.fetched.load(std::sync::atomic::Ordering::Relaxed);

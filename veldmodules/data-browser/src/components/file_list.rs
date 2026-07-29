@@ -83,7 +83,7 @@ fn status_row(label: Element<()>, amount: Element<()>, buttons: Vec<Element<()>>
 }
 
 fn icon(glyph: &str) -> Element<()> {
-    text(glyph).font_family("Icons").into()
+    text(glyph).font_family(veld_ui_service_wrap::style::FONT_ICONS).into()
 }
 
 pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
@@ -161,7 +161,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // как обратное действие "паузе" выше. Только иконка, без подписи
         // "Incomplete" — цвет и форма уже достаточно говорят о статусе.
         RowStatus::Paused { done, total } => status_row(
-            text("\u{f071}").font_family("Icons").color(styles::COLOR_WARNING).into(),
+            text("\u{f071}").font_family(veld_ui_service_wrap::style::FONT_ICONS).color(styles::COLOR_WARNING).into(),
             text(amount_text(*done, *total, false)).size(13.0).into(),
             download_button("\u{f04b}", styles::COLOR_PRIMARY).into_iter()
                 .chain(delete_button()).collect(),

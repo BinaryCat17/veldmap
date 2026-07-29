@@ -78,10 +78,9 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
 pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened) {
     let Some(handle) = &opened.handle else { return };
 
-    let bytes = veldsdk::abi::arena_read(handle.id, 0, handle.size);
-    veldsdk::abi::arena_free(handle.id);
-
-    let Some(bytes) = bytes else { return };
+    // RAII-гард: регион освобождается при любом выходе ниже.
+    let resource = veldsdk::OwnedResource::new(handle.clone());
+    let Some(bytes) = veldsdk::abi::arena_read(resource.id(), 0, handle.size) else { return };
     let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return };
     if sidecar.provider != storage::PROVIDER_NAME { return }
 
@@ -120,7 +119,7 @@ pub fn write_sidecar(state: &mut State, name: &str, identifier: &str, total_byte
 /// fs прочитал наш буфер (успешно или нет) — регион больше не нужен.
 pub fn on_write_result(state: &mut State, response: FsWriteResult) {
     let Some(write) = state.pending_sidecar_writes.take(&veldsdk::correlation()) else { return };
-    veldsdk::abi::arena_free(write.region);
+    drop(veldsdk::OwnedResource::from_raw_id(write.region));
     if !response.error.is_empty() {
         veldsdk::log::warn!(target: "handlers", "сидкар не сохранён: {}", response.error);
     }

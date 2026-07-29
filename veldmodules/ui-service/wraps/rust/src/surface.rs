@@ -4,13 +4,20 @@
 //! «alloc → grant_write → attach хосту → delegate рендереру» одной функцией.
 
 use veldsdk::abi;
+use veldsdk::graphics::texture_usage;
 
-// COPY_DST | TEXTURE_BINDING | RENDER_ATTACHMENT
-const RENDER_TARGET_USAGE: u32 = 2 | 4 | 16;
+const RENDER_TARGET_USAGE: u32 = texture_usage::COPY_DST
+    | texture_usage::TEXTURE_BINDING
+    | texture_usage::RENDER_ATTACHMENT;
 
 /// Выделяет render-таргет под окно, делегирует его ui-service и аттачит
 /// хосту. Старая текстура освобождается (хост блитит её до свапа — wgpu
 /// держит её живой через view в bind group). Возвращает id новой текстуры.
+///
+/// При отказе (не выделилась текстура, не вышел grant) возвращает ПРЕЖНИЙ
+/// id: старая поверхность продолжает действовать — ui-service про новую не
+/// узнал, а вернуть None значило бы потерять id действующей текстуры навсегда
+/// (освободить её больше некому) и утекать по текстуре на каждый такой отказ.
 ///
 /// Оба топика публикует потребитель, своими сгенерированными стабами:
 /// `surface::delegate(&ev, old, crate::calls::ui_service::on_set_surface,
@@ -26,12 +33,13 @@ pub fn delegate(
     set_surface: impl FnOnce(&crate::proto::SetSurfaceRequest),
     attach: impl FnOnce(&veldsdk::proto::app::SetSurface),
 ) -> Option<u64> {
-    let texture_id = abi::arena_alloc_texture(ev.width, ev.height, ev.format, RENDER_TARGET_USAGE)?;
+    let Some(texture_id) = abi::arena_alloc_texture(ev.width, ev.height, ev.format, RENDER_TARGET_USAGE) else {
+        return old_texture;
+    };
 
-    if !abi::arena_grant_write(texture_id, "ui-service") {
-        veldsdk::log::error!(target: "sdk", "[SURFACE] grant_write to ui-service failed for texture {}", texture_id);
-        abi::arena_free(texture_id);
-        return None;
+    if let Err(error) = veldsdk::resource::grant_write_or_free(texture_id, "ui-service") {
+        veldsdk::log::error!(target: "sdk", "[SURFACE] {}", error);
+        return old_texture;
     }
 
     let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0 };
@@ -50,7 +58,7 @@ pub fn delegate(
     });
 
     if let Some(old) = old_texture {
-        abi::arena_free(old);
+        drop(veldsdk::OwnedResource::from_raw_id(old));
     }
     Some(texture_id)
 }

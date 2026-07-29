@@ -9,6 +9,7 @@ pub mod window;
 
 #[derive(serde::Deserialize)]
 pub struct Config {
+    /// Стартовый экран: "search" (умолчание), "browse", "downloaded", "preview".
     pub initial_screen: Option<String>,
 }
 

@@ -41,7 +41,7 @@ pub fn view(state: &State) -> Element<()> {
         // ui-service: размеры текстуры знает хост (см. converter::contain).
         container(
             image::<()>(crate::proto::ui_service::core::ResourceHandle {
-                id: preview.texture.unwrap_or_default(),
+                id: preview.texture.as_ref().map(|t| t.id()).unwrap_or_default(),
                 size: 0,
             })
             .width(Length::Fill)

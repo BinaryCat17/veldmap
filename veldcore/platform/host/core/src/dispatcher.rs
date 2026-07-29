@@ -1,9 +1,36 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[async_trait::async_trait]
 pub trait AsyncNativeService: Send + Sync {
     async fn handle(&self, topic: &str, payload: Vec<u8>, caller: Caller);
+}
+
+/// Актор шины: последовательный потребитель своей очереди событий.
+///
+/// Единая форма цикла подписчика — и у нативных сервисов (через
+/// `NativeActor`), и у wasm-плагинов (актор из plugins::load_services):
+/// события доставляются по одному, в порядке публикации, следующее не
+/// начинается, пока не обработано предыдущее. Чем доставка занята — вызовом
+/// трейта или wasm-экспорта — цикл не знает.
+#[async_trait::async_trait]
+pub trait Actor: Send + 'static {
+    async fn deliver(&mut self, event: Event);
+}
+
+/// Актор нативного сервиса: разбирает конверт события в (метод, payload,
+/// caller) и зовёт трейт сервиса.
+pub struct NativeActor {
+    service: Arc<dyn AsyncNativeService>,
+}
+
+#[async_trait::async_trait]
+impl Actor for NativeActor {
+    async fn deliver(&mut self, event: Event) {
+        let caller = Caller { instance: event.publisher, correlation: event.correlation };
+        self.service.handle(&event.method, event.payload, caller).await;
+    }
 }
 
 /// Кто прислал событие и в рамках какой корреляции — всё, что обработчик
@@ -42,24 +69,37 @@ pub struct Event {
 /// release). Обратная сторона — нет backpressure: обработчики обязаны успевать.
 pub type Subscriber = tokio::sync::mpsc::UnboundedSender<Event>;
 
-/// Регистрация подписчика: имя — None у нативных сервисов хоста (у них нет
-/// адресуемой идентичности модуля), Some(name) у wasm-акторов. Нужно, чтобы
-/// адресованный publish (target непустой) мог выбрать среди подписчиков
-/// топика ровно одного получателя, а не разослать всем.
-type Registration = (Option<String>, Subscriber);
+/// Регистрация подписчика: имя его сервиса на шине (есть у каждого —
+/// wasm-акторов и нативных модулей alike). Нужно, чтобы адресованный
+/// publish (target непустой) мог выбрать среди подписчиков топика ровно
+/// одного получателя, а не разослать всем.
+type Registration = (String, Subscriber);
 
 #[derive(Default)]
 pub struct Dispatcher {
     subscriptions: Mutex<HashMap<String, Vec<Registration>>>,
-    /// Instance id каждого локального wasm-сервиса: адресат для lease-грантов.
+    /// Instance id каждого сервиса на шине: адресат для lease-грантов.
     instances: Mutex<HashMap<String, u32>>,
     /// Обратный индекс instance id → имя: им подписывается publisher событий.
     names: Mutex<HashMap<u32, String>>,
+    /// Единый пул instance id (0 зарезервирован за хостом). Нативные сервисы
+    /// получают id при регистрации на старте (в порядке композиции раннера),
+    /// wasm — при загрузке в отсортированном порядке файлов, поэтому
+    /// идентификаторы детерминированы от запуска к запуску.
+    next_instance: AtomicU32,
 }
 
 impl Dispatcher {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            next_instance: AtomicU32::new(1),
+            ..Default::default()
+        }
+    }
+
+    /// Следующий свободный instance id из общего пула.
+    pub fn alloc_instance_id(&self) -> u32 {
+        self.next_instance.fetch_add(1, Ordering::SeqCst)
     }
 
     pub fn register_instance(&self, name: String, instance_id: u32) {
@@ -76,29 +116,36 @@ impl Dispatcher {
         self.names.lock().unwrap().get(&instance_id).cloned()
     }
 
-    pub fn register_subscription(&self, topic: String, name: Option<String>, subscriber: Subscriber) {
+    pub fn register_subscription(&self, topic: String, name: String, subscriber: Subscriber) {
         log::trace!(target: "dispatcher", "[DISPATCHER] Registering subscription: {}", topic);
         let mut subscriptions = self.subscriptions.lock().unwrap();
         subscriptions.entry(topic).or_default().push((name, subscriber));
     }
 
-    /// Подписывает нативный сервис на его топики. Сервис получает одну
-    /// очередь и одну задачу-актор на все свои топики: события обрабатываются
-    /// последовательно, в порядке публикации — та же гарантия, что у
-    /// wasm-акторов, и без tokio::spawn на каждое событие.
-    pub fn subscribe(&self, service: Arc<dyn AsyncNativeService>, topics: &[&str]) {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    /// Подписывает нативный сервис на его топики под его именем: как и у
+    /// wasm-акторов, имя делает сервис адресуемым для targeted-публикаций.
+    /// Цикл доставки один на всех подписчиков шины — см. `spawn_actor`.
+    ///
+    /// Идентичность (instance id) выдаётся отдельно — `HostContext::for_service`
+    /// до вызова этого метода: State сервиса собирается раньше подписки.
+    pub fn subscribe_named(&self, service: Arc<dyn AsyncNativeService>, name: &str, topics: &[&str]) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        Self::spawn_actor(rx, NativeActor { service });
+        for topic in topics {
+            self.register_subscription((*topic).to_string(), name.to_string(), tx.clone());
+        }
+    }
+
+    /// Единственный актор-цикл шины: дренирует очередь подписчика в его
+    /// `deliver` строго последовательно (порядок публикации сохраняется,
+    /// параллелизма внутри подписчика нет). Подписчик — wasm или нативный —
+    /// различается только реализацией `Actor`.
+    pub fn spawn_actor<A: Actor>(mut rx: tokio::sync::mpsc::UnboundedReceiver<Event>, mut actor: A) {
         tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
-                let caller = Caller { instance: ev.publisher, correlation: ev.correlation };
-                service.handle(&ev.method, ev.payload, caller).await;
+                actor.deliver(ev).await;
             }
         });
-        for topic in topics {
-            // Нативные сервисы хоста не адресуются как target: у них нет
-            // отдельной модульной идентичности, только топики.
-            self.register_subscription((*topic).to_string(), None, tx.clone());
-        }
     }
 
     /// Fire-and-forget delivery to every subscriber of the topic, published by
@@ -138,7 +185,7 @@ impl Dispatcher {
             subs.into_iter().map(|(_, tx)| tx).collect()
         } else {
             subs.into_iter()
-                .filter(|(name, _)| name.as_deref() == Some(target))
+                .filter(|(name, _)| name == target)
                 .map(|(_, tx)| tx)
                 .collect()
         };
@@ -168,5 +215,35 @@ impl Dispatcher {
 impl veldmap_host_bindings::Publisher for Dispatcher {
     fn publish(&self, topic: &str, payload: Vec<u8>, correlation: &str, target: &str) {
         self.publish_from(topic, payload, 0, correlation, target);
+    }
+}
+
+/// Паблишер конкретного сервиса: штампует события его instance id — зеркало
+/// `HostState.instance_id` у wasm (там идентичность подставляет abi.rs).
+/// Хост кодирует конверт, поэтому имя отправителя достоверно и для нативных
+/// модулей: подписчик может авторизовать их наравне с wasm.
+pub struct ServicePublisher {
+    dispatcher: Arc<Dispatcher>,
+    instance: u32,
+}
+
+impl veldmap_host_bindings::Publisher for ServicePublisher {
+    fn publish(&self, topic: &str, payload: Vec<u8>, correlation: &str, target: &str) {
+        self.dispatcher.publish_from(topic, payload, self.instance, correlation, target);
+    }
+}
+
+impl Dispatcher {
+    /// Паблишер, штампующий события заданным instance id.
+    pub fn publisher_for(self: &Arc<Self>, instance: u32) -> ServicePublisher {
+        ServicePublisher { dispatcher: self.clone(), instance }
+    }
+
+    /// Паблишер именованного сервиса. Незарегистрированное имя — instance 0
+    /// (хост): так раннер публикует события контракта app, который сам и
+    /// реализует, даже если app-модуля в композиции нет.
+    pub fn publisher_of(self: &Arc<Self>, name: &str) -> ServicePublisher {
+        let instance = self.instance_of(name).unwrap_or(0);
+        self.publisher_for(instance)
     }
 }

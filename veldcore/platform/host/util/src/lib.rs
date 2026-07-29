@@ -83,11 +83,11 @@ pub mod path {
         true
     }
 
-    /// Резолвит путь из запроса модуля: относительный — от project_root
+    /// Резолвит путь из запроса модуля: относительный — от runtime_dir
     /// хоста (каталог runtime/), абсолютный возвращается как есть.
     pub fn resolve_path(ctx: &crate::HostContext, path: &str) -> std::path::PathBuf {
         let path_obj = std::path::Path::new(path);
-        if path_obj.is_absolute() { path_obj.to_path_buf() } else { ctx.config.project_root.join(path_obj) }
+        if path_obj.is_absolute() { path_obj.to_path_buf() } else { ctx.config.runtime_dir.join(path_obj) }
     }
 }
 
@@ -111,13 +111,14 @@ pub mod wire {
         }
     }
 
-    /// Подписывает один асинхронный сервис сразу на несколько его топиков.
+    /// Подписывает один асинхронный сервис сразу на несколько его топиков под
+    /// его именем — оно делает сервис адресуемым для targeted-публикаций.
     /// События придут последовательно, в порядке публикации (актор-очередь
     /// в диспетчере — одна на сервис).
-    pub fn subscribe_async<S>(ctx: &HostContext, service: &Arc<S>, topics: &[&str])
+    pub fn subscribe_async<S>(ctx: &HostContext, name: &str, service: &Arc<S>, topics: &[&str])
     where
         S: AsyncNativeService + 'static,
     {
-        ctx.dispatcher.subscribe(service.clone(), topics);
+        ctx.dispatcher.subscribe_named(service.clone(), name, topics);
     }
 }

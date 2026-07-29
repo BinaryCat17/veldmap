@@ -17,9 +17,21 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(_config: crate::module::handlers::Config) -> anyhow::Result<Self> {
+    pub fn new(config: crate::module::handlers::Config) -> anyhow::Result<Self> {
+        // Стартовый экран — из конфига; умолчание и поведение при неизвестном
+        // значении — Search (экран по умолчанию всегда существует).
+        let current_screen = match config.initial_screen.as_deref() {
+            None | Some("search") => types::Screen::Search,
+            Some("browse") => types::Screen::Browse,
+            Some("downloaded") => types::Screen::Downloaded,
+            Some("preview") => types::Screen::Preview,
+            Some(other) => {
+                veldsdk::log::warn!(target: "system", "unknown initial_screen '{}', falling back to Search", other);
+                types::Screen::Search
+            }
+        };
         Ok(Self {
-            current_screen: types::Screen::Search,
+            current_screen,
             search: search::SearchState::default(),
             browse: browse::BrowseState::default(),
             library: library::LibraryState::default(),

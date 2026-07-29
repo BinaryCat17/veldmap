@@ -1,4 +1,5 @@
-//! Ресурсы на стороне модуля: протокол «открой мне это» и потоковое чтение.
+//! Ресурсы на стороне модуля: владение, протокол «открой мне это» и
+//! потоковое чтение.
 //!
 //! Ресурс не обязан лежать в памяти — за его id может стоять файл на диске
 //! (fs отдаёт именно такой), и тогда чтение диапазона читает с диска ровно
@@ -6,12 +7,69 @@
 //! `Read + Seek` и отдаёт его любому парсеру (png, tiff, zip, netcdf…),
 //! а память тратится на одно окно, а не на весь ресурс.
 //!
-//! Владение ресурсом читатель не берёт: освобождает его тот, кому он
-//! принадлежит (обычно через `OwnedResource`).
+//! Вся дисциплина владения собрана здесь: `OwnedResource` (RAII), `hand_off`
+//! и `grant_*_or_free` (передача и делегирование с освобождением при отказе).
+//! Прямые вызовы `abi::arena_free`/`arena_grant_*` в прикладном коде — признак
+//! того, что обряд переписан заново: ровно так копии и расходились формой.
 
 use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::proto::core::{ResourceHandle, ResourceOpened};
+
+// ── Владение ───────────────────────────────────────────────────
+
+/// RAII-владелец ресурса хоста: Drop освобождает ресурс через ABI.
+/// Намеренно не Clone: освобождает ресурс ровно один владелец.
+///
+/// Разделяемое владение нужно только GPU-объектам (шейдеры, пайплайны) —
+/// у них свои типизированные id в `crate::graphics`; байтовым регионам
+/// хватает единоличного владельца.
+pub struct OwnedResource {
+    handle: ResourceHandle,
+}
+
+impl OwnedResource {
+    pub fn new(handle: ResourceHandle) -> Self {
+        Self { handle }
+    }
+
+    pub fn handle(&self) -> ResourceHandle { self.handle.clone() }
+    pub fn id(&self) -> u64 { self.handle.id }
+
+    /// Владение по голому id — для протоколов, где размер ресурса не несёт
+    /// смысла (буферы, текстуры): на хосте они и живут как чистые id.
+    pub fn from_raw_id(id: u64) -> Self {
+        Self { handle: ResourceHandle { id, size: 0 } }
+    }
+
+    /// Снимает RAII-обёртку, отдавая голый handle: владение переходит
+    /// вызывающему, Drop не срабатывает. Это единственный способ передать
+    /// обёрнутый ресурс дальше по протоколу (transfer, ответ заказчику) —
+    /// без него `OwnedResource` и `hand_off` были несовместимы, и модули
+    /// держали голые id, освобождая их вручную.
+    pub fn into_handle(self) -> ResourceHandle {
+        let handle = self.handle.clone();
+        std::mem::forget(self);
+        handle
+    }
+
+    /// Передаёт владение заказчику: тот же обряд, что `hand_off` для голого
+    /// handle, — при отказе ресурс освобождён, при успехе освобождать его
+    /// больше некому (им владеет `owner`).
+    pub fn hand_off(self, owner: &str) -> Result<ResourceHandle, String> {
+        hand_off(self.into_handle(), owner)
+    }
+}
+
+impl Drop for OwnedResource {
+    fn drop(&mut self) {
+        crate::abi::arena_free(self.handle.id);
+    }
+}
+
+impl AsRef<ResourceHandle> for OwnedResource {
+    fn as_ref(&self) -> &ResourceHandle { &self.handle }
+}
 
 // ── Протокол «открой мне это» ──────────────────────────────────
 //
@@ -38,10 +96,18 @@ pub fn requester(topic: &str) -> Result<String, String> {
 /// Ресурс из ответа «открой мне это». `Err` — открыть не удалось: либо
 /// производитель сообщил ошибку, либо ответил пустым handle.
 pub fn accept(opened: &ResourceOpened) -> Result<ResourceHandle, String> {
-    if !opened.error.is_empty() {
-        return Err(opened.error.clone());
+    accept_parts(opened.handle.clone(), &opened.error)
+}
+
+/// Тот же разбор, что `accept`, но по частям — для result-типов с
+/// дополнительными полями (например `image_loader.LoadImageResult` с
+/// размерами картинки): обряд «error пуст? → handle есть?» один, какой бы
+/// формы ни был ответ.
+pub fn accept_parts(handle: Option<ResourceHandle>, error: &str) -> Result<ResourceHandle, String> {
+    if !error.is_empty() {
+        return Err(error.to_string());
     }
-    opened.handle.clone().ok_or_else(|| "ответ без handle".to_string())
+    handle.ok_or_else(|| "ответ без handle".to_string())
 }
 
 /// Передаёт владение ресурсом заказчику.
@@ -55,6 +121,29 @@ pub fn hand_off(handle: ResourceHandle, owner: &str) -> Result<ResourceHandle, S
     }
     crate::abi::arena_free(handle.id);
     Err(format!("не удалось передать ресурс сервису '{}'", owner))
+}
+
+/// Выдаёт сервису право чтения ресурса. При отказе ресурс освобождается
+/// здесь же — та же форма «действие, при отказе — освободи», что у
+/// `hand_off`: владельцу ресурс после неудачного делегирования всё равно
+/// не нужен, а без хелпера free рядом с каждым grant переписывался руками
+/// (и тексты ошибок расходились по модулям).
+pub fn grant_read_or_free(id: u64, service: &str) -> Result<(), String> {
+    if crate::abi::arena_grant_read(id, service) {
+        return Ok(());
+    }
+    crate::abi::arena_free(id);
+    Err(format!("не удалось выдать чтение ресурса {} сервису '{}'", id, service))
+}
+
+/// Выдаёт сервису право записи — так владелец окна делегирует рендереру
+/// свою текстуру-цель. Форма отказа та же, что у `grant_read_or_free`.
+pub fn grant_write_or_free(id: u64, service: &str) -> Result<(), String> {
+    if crate::abi::arena_grant_write(id, service) {
+        return Ok(());
+    }
+    crate::abi::arena_free(id);
+    Err(format!("не удалось выдать запись ресурса {} сервису '{}'", id, service))
 }
 
 /// Собирает ответ на «открой мне это» — удача и неудача одной формы.

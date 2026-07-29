@@ -47,15 +47,16 @@ pub fn render_ui(
     let logical_h = height as f32 / scale_factor;
 
     // Update uniform buffer with logical size
-    if let Some(u_region) = *plugin.uniform_buffer_region.borrow() {
+    if let Some(u) = plugin.uniform_buffer_region.borrow().as_ref() {
         let res_data: [f32; 2] = [logical_w, logical_h];
         let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
-        arena_write(u_region, 0, data);
+        arena_write(u.id(), 0, data);
     }
 
     // Update texture atlas if dirty
     if renderer.is_atlas_dirty() {
-        if let Some(tid) = renderer.atlas_texture_id {
+        let atlas_id = renderer.atlas_texture_id.as_ref().map(|t| t.id());
+        if let Some(tid) = atlas_id {
             // NOTE: For dzn (DirectX 12 on Vulkan), we need full texture writes only
             let data = renderer.atlas_data_full();
             arena_write(tid, 0, data);
@@ -166,7 +167,7 @@ fn render_geometry(
 ///
 /// Держать их «на всякий случай» нельзя: bind group на хосте хранит wgpu-ссылку
 /// на текстуру, поэтому пока запись жива, видеопамять не освобождается даже
-/// после того, как владелец сделал arena_free. Без этого каждая просмотренная
+/// после того, как владелец освободил текстуру. Без этого каждая просмотренная
 /// картинка оставалась бы в VRAM до конца сессии.
 fn evict_unused_bind_groups(plugin: &PluginUiState, renderer: &GpuRenderer) {
     let mut cache = plugin.external_bind_groups.borrow_mut();
@@ -281,7 +282,8 @@ fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
         if let Some(layout) = layout.as_ref() {
             let buf_region = arena_alloc_buffer(16, buffer_usage::UNIFORM, false)
                 .ok_or_else(|| anyhow!("Failed to allocate uniform buffer"))?;
-            *plugin.uniform_buffer_region.borrow_mut() = Some(buf_region);
+            *plugin.uniform_buffer_region.borrow_mut() =
+                Some(OwnedResource::new(ResourceHandle { id: buf_region, size: 16, ..Default::default() }));
             *uniform_bind_group = Some(gfx::create_bind_group(
                 "UI Uniform BG", layout, vec![gfx::buffer_entry(0, buf_region)],
             )?);
@@ -295,7 +297,7 @@ fn ensure_atlas_texture(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
         let (w, h) = renderer.atlas_dimensions();
         let usage = texture_usage::COPY_DST | texture_usage::TEXTURE_BINDING;
         if let Some(id) = arena_alloc_texture(w, h, TextureFormat::TexRgba8Unorm as i32, usage) {
-            renderer.atlas_texture_id = Some(id);
+            renderer.atlas_texture_id = Some(OwnedResource::new(ResourceHandle { id, size: 0 }));
             renderer.mark_atlas_dirty();
         }
     }
@@ -304,7 +306,8 @@ fn ensure_atlas_texture(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
 
 fn ensure_atlas_bind_group(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     if renderer.atlas_bind_group.is_none() {
-        if let (Some(atlas_texture), Some(layout)) = (renderer.atlas_texture_id, renderer.atlas_layout.as_ref()) {
+        let atlas_id = renderer.atlas_texture_id.as_ref().map(|t| t.id());
+        if let (Some(atlas_texture), Some(layout)) = (atlas_id, renderer.atlas_layout.as_ref()) {
             let view = gfx::create_texture_view(atlas_texture)?;
             let sampler = gfx::create_sampler(FilterMode::FiltLinear, FilterMode::FiltLinear)?;
             renderer.atlas_bind_group = Some(gfx::create_bind_group(

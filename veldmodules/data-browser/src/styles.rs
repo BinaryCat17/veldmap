@@ -158,7 +158,7 @@ const ICON_BUTTON_SIZE: f32 = 32.0;
 /// размере кнопки, большем чем сам глиф, он прижимался бы к левому краю
 /// паддинга вместо центра.
 pub fn icon_button<M>(glyph: impl Into<String>, color: Color) -> Button<M> {
-    let icon = container(text(glyph).font_family("Icons"))
+    let icon = container(text(glyph).font_family(veld_ui_service_wrap::style::FONT_ICONS))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x()

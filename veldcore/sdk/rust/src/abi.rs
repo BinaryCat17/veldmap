@@ -157,19 +157,22 @@ pub fn arena_alloc_texture(width: u32, height: u32, format: i32, usage: u32) -> 
     if id == 0 { None } else { Some(id) }
 }
 
-/// Transfer ownership of a region to another service (zero-copy)
-pub fn arena_transfer(region_id: u64, service: &str) -> bool {
+/// Transfer ownership of a region to another service (zero-copy).
+/// Низкий уровень ABI: прикладной код пользуется `resource::hand_off`,
+/// который при отказе освобождает ресурс.
+pub(crate) fn arena_transfer(region_id: u64, service: &str) -> bool {
     unsafe { veld_memory_transfer(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
-/// Grant read access to another service (owner only)
-pub fn arena_grant_read(region_id: u64, service: &str) -> bool {
+/// Grant read access to another service (owner only).
+/// Низкий уровень ABI: прикладной код — `resource::grant_read_or_free`.
+pub(crate) fn arena_grant_read(region_id: u64, service: &str) -> bool {
     unsafe { veld_memory_grant_read(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
 /// Grant write access to another service (owner only).
-/// This is how a window owner delegates its render target to a renderer.
-pub fn arena_grant_write(region_id: u64, service: &str) -> bool {
+/// Низкий уровень ABI: прикладной код — `resource::grant_write_or_free`.
+pub(crate) fn arena_grant_write(region_id: u64, service: &str) -> bool {
     unsafe { veld_memory_grant_write(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
@@ -178,8 +181,11 @@ pub fn arena_revoke(region_id: u64) -> bool {
     unsafe { veld_memory_revoke(region_id) != 0 }
 }
 
-/// Free a resource region
-pub fn arena_free(region_id: u64) -> bool {
+/// Free a resource region.
+/// Низкий уровень ABI: прикладной код пользуется `OwnedResource` (RAII)
+/// и обрядами `resource::*`; прямой вызов — признак переписанного вручную
+/// обряда.
+pub(crate) fn arena_free(region_id: u64) -> bool {
     unsafe { veld_memory_free(region_id) != 0 }
 }
 

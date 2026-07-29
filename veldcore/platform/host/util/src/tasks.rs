@@ -67,7 +67,7 @@ impl Tasks {
         -> Result<(), DuplicateTaskId>
     {
         self.ctx.tasks.begin(task_id, owner)?;
-        bus::emit::on_task_started(&*self.ctx.dispatcher, &TaskStarted {
+        bus::emit::on_task_started(&*self.ctx.publisher, &TaskStarted {
             task_id: task_id.to_string(),
             label: label.to_string(),
             kind: kind.to_string(),
@@ -88,7 +88,7 @@ impl Tasks {
         if !ctx.tasks.complete(task_id, requestor) {
             return;
         }
-        bus::emit::on_task_finished(&*ctx.dispatcher, &TaskFinished {
+        bus::emit::on_task_finished(&*ctx.publisher, &TaskFinished {
             task_id: task_id.to_string(),
             error: error.to_string(),
             cancelled: false,
@@ -100,7 +100,7 @@ impl Tasks {
         match self.ctx.tasks.cancel(task_id, requestor) {
             CancelOutcome::Cancelled => {
                 log::info!(target: "tasks", "Task {} cancelled by requestor {}", task_id, requestor);
-                bus::emit::on_task_finished(&*self.ctx.dispatcher, &TaskFinished {
+                bus::emit::on_task_finished(&*self.ctx.publisher, &TaskFinished {
                     task_id: task_id.to_string(),
                     error: "Cancelled".to_string(),
                     cancelled: true,

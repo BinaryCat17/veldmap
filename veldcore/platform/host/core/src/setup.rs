@@ -10,7 +10,7 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
         crate::config::load_config_with_path::<crate::CoreConfig, _>(&format!("{}/core.json", config_dir))
             .unwrap_or_default();
 
-    let log_path = host_config.project_root.join(
+    let log_path = host_config.runtime_dir.join(
         host_config.logs.as_deref().unwrap_or("logs/host.log")
     );
 
@@ -106,6 +106,7 @@ pub async fn init_wgpu<'a>(
     Ok((adapter, device_arc, queue_arc, config, surface_format))
 }
 
+#[derive(Clone)]
 pub struct HostContext {
     pub dispatcher: Arc<Dispatcher>,
     pub registry: Arc<ResourceRegistry>,
@@ -117,6 +118,25 @@ pub struct HostContext {
     /// потребителя по разные стороны шины.
     pub surfaces: Arc<crate::surfaces::SurfaceQueue>,
     pub config: Arc<crate::config::HostConfig>,
+    /// Паблишер шины для emit-стабов. В базовом контексте — хост (id 0);
+    /// каждый нативный сервис получает клон контекста со своей идентичностью
+    /// (см. `for_service`) — как HostState.instance_id у wasm.
+    pub publisher: Arc<dyn veldmap_host_bindings::Publisher + Send + Sync>,
+}
+
+impl HostContext {
+    /// Контекст нативного сервиса: регистрирует его имя на шине (instance id
+    /// из общего пула) и возвращает клон с паблишером, штампующим его
+    /// идентичность. Вызывается клеем сервиса до сборки его State — поэтому
+    /// подписка на топики (`subscribe_named`) идёт отдельным шагом, уже с
+    /// готовым сервисом.
+    pub fn for_service(self: &Arc<Self>, name: &str) -> Arc<Self> {
+        let id = self.dispatcher.alloc_instance_id();
+        self.dispatcher.register_instance(name.to_string(), id);
+        let publisher: Arc<dyn veldmap_host_bindings::Publisher + Send + Sync> =
+            Arc::new(self.dispatcher.publisher_for(id));
+        Arc::new(Self { publisher, ..(**self).clone() })
+    }
 }
 
 pub async fn init_core_services(
@@ -134,12 +154,13 @@ pub async fn init_core_services(
     let dispatcher = Arc::new(Dispatcher::new());
 
     Ok(Arc::new(HostContext {
-        dispatcher,
+        dispatcher: dispatcher.clone(),
         registry,
         memory,
         graphics,
         tasks,
         surfaces,
         config,
+        publisher: dispatcher,
     }))
 }

@@ -218,15 +218,15 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
     // veld_memory_free(region_id) → bool
     // Освобождает и memory-регионы, и непрозрачные GPU-объекты (view,
-    // сэмплеры, bind group'ы): у OwnedResource в SDK один путь освобождения.
+    // сэмплеры, bind group'ы): у OwnedResource в SDK один путь освобождения,
+    // и на хосте он один — запись о ресурсе едина (реестр), поэтому
+    // освобождение атомарно и не перебирает карты носителей.
     linker.func_wrap("env", "veld_memory_free", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
         let registry = caller.data().registry.clone();
-        let memory = caller.data().memory.clone();
-        let graphics = caller.data().graphics.clone();
         let owner_id = caller.data().instance_id;
         let can_free = registry.check_access(region_id, owner_id, crate::registry::Access::Write);
         if can_free {
-            if memory.free(region_id) || graphics.free_gpu(region_id) { 1 } else { 0 }
+            if registry.unregister(region_id) { 1 } else { 0 }
         } else {
             0
         }

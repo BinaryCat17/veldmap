@@ -12,7 +12,7 @@ use std::fs;
 pub fn on_delete(state: &State, req: FsDeleteRequest, caller: Caller) {
     let correlation = caller.correlation;
     if !is_path_safe(&req.path) {
-        bus::emit::on_delete_result(&*state.ctx.dispatcher, &FsDeleteResult {
+        bus::emit::on_delete_result(&*state.ctx.publisher, &FsDeleteResult {
             error: "Access denied".into(),
         }, &correlation);
         return;
@@ -32,6 +32,6 @@ pub fn on_delete(state: &State, req: FsDeleteRequest, caller: Caller) {
             }
             Err(e) => FsDeleteResult { error: e.to_string() },
         };
-        bus::emit::on_delete_result(&*ctx.dispatcher, &result, &correlation);
+        bus::emit::on_delete_result(&*ctx.publisher, &result, &correlation);
     });
 }

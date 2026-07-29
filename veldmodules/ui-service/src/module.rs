@@ -8,11 +8,17 @@ mod graphics;
 mod keyboard;
 
 #[derive(serde::Deserialize, Clone)]
-pub struct Config {}
+pub struct Config {
+    /// Формат поверхности окна (proto TextureFormat): инъектируется хостом
+    /// в init-конфиг — знать его нужно до первого set_surface, пайплайн
+    /// создаётся под него.
+    #[serde(default)]
+    pub surface_format: i32,
+}
 
 // -- Init --
-pub fn hook_init(_config: Config) -> anyhow::Result<State> {
-    Ok(State::new())
+pub fn hook_init(config: Config) -> anyhow::Result<State> {
+    Ok(State::new(config.surface_format))
 }
 
 // -- Input handlers --

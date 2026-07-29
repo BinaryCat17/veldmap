@@ -28,10 +28,12 @@ impl veldmap_host_util::AsyncNativeService for Service {
     }
 }
 
-/// Регистрирует сервис в шине: одна актор-очередь на все его топики.
+/// Регистрирует сервис в шине: его идентичность (per-service контекст с
+/// именованным паблишером) и одна актор-очередь на все его топики.
 pub fn register_services(ctx: std::sync::Arc<veldmap_host_util::HostContext>) {
+    let ctx = ctx.for_service("{{ name }}");
     let service = std::sync::Arc::new(Service { state: module::hook_init(ctx.clone()) });
-    veldmap_host_util::wire::subscribe_async(&ctx, &service, &[
+    veldmap_host_util::wire::subscribe_async(&ctx, "{{ name }}", &service, &[
         {%- for i in inputs %}
         veldmap_host_util::bindings::{{ snake }}::topics::{{ i.const }},
         {%- endfor %}

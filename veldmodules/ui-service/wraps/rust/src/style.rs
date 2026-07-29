@@ -3,6 +3,12 @@
 
 use crate::proto;
 
+/// Логические имена шрифтов ui-service — строковый контракт между ним и
+/// клиентами разметки. Регистрация файлов шрифтов — в ui-service (state.rs),
+/// здесь — единственное место имён для клиентов; литералы не разносить.
+pub const FONT_DEFAULT: &str = "JetBrains Mono";
+pub const FONT_ICONS: &str = "Icons";
+
 #[derive(Clone, Copy, Default)]
 pub struct Padding {
     pub top: f32,

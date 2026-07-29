@@ -32,7 +32,7 @@ pub fn view(state: &State) -> Element<()> {
     let title_row: Element<()> = if browse_state.request.is_pending() {
         row![
             text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-            text("\u{f110}").font_family("Icons").color(crate::module::styles::COLOR_TEXT_DIM),
+            text("\u{f110}").font_family(veld_ui_service_wrap::style::FONT_ICONS).color(crate::module::styles::COLOR_TEXT_DIM),
             text("Loading...").size(14.0).color(crate::module::styles::COLOR_TEXT_DIM),
         ].spacing(8.0).align_items(Alignment::Center).into()
     } else {
@@ -40,7 +40,7 @@ pub fn view(state: &State) -> Element<()> {
     };
 
     let up_button: Element<()> = crate::module::styles::apply_primary(button(
-        row![text("\u{f062}").font_family("Icons"), text("Up")]
+        row![text("\u{f062}").font_family(veld_ui_service_wrap::style::FONT_ICONS), text("Up")]
             .spacing(6.0)
             .align_items(Alignment::Center)
     )).on_press(ON_BROWSE_UP).into();

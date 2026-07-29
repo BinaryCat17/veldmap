@@ -12,8 +12,11 @@ pub mod proto {
     {%- endfor %}
 }
 
-/// Паблишер шины: реализуется диспетчером конкретного хоста. Через этот
-/// трейт generated-крейт не зависит от реализации хоста (иначе был бы цикл).
+/// Паблишер шины: реализуется диспетчером конкретного хоста (публикация от
+/// его имени, id 0) и ServicePublisher'ами сервисов (со своей идентичностью).
+/// Через этот трейт generated-крейт не зависит от реализации хоста (иначе
+/// был бы цикл). Стабы принимают `?Sized`, чтобы их можно было звать через
+/// `Arc<dyn Publisher + Send + Sync>` из per-service контекста.
 pub trait Publisher {
     /// `correlation` — пусто у топиков без пары `replies_to`; у ответа это id
     /// запроса, на который он отвечает.
@@ -41,7 +44,7 @@ pub mod {{ svc.snake }} {
         {% if svc.outputs | selectattr("rust_path") | list %}use prost::Message;{% endif %}
         {% for o in svc.outputs %}
         /// `{{ svc.name }}/{{ o.name }}`{% if not o.rust_path %} (без payload){% endif %}{% if o.correlated %} — ответ на {{ o.pairs_with }}: `correlation` берётся из запроса{% endif %}{% if o.targeted %} (адресовано: доставляется только `target`){% endif %}
-        pub fn {{ o.name }}(p: &impl crate::Publisher{% if o.rust_path %}, msg: &crate::proto::{{ o.rust_path }}{% endif %}{% if o.correlated %}, correlation: &str{% endif %}{% if o.targeted %}, target: &str{% endif %}) {
+        pub fn {{ o.name }}(p: &(impl crate::Publisher + ?Sized){% if o.rust_path %}, msg: &crate::proto::{{ o.rust_path }}{% endif %}{% if o.correlated %}, correlation: &str{% endif %}{% if o.targeted %}, target: &str{% endif %}) {
             p.publish("{{ svc.name }}/{{ o.name }}", {% if o.rust_path %}msg.encode_to_vec(){% else %}Vec::new(){% endif %},
                 {% if o.correlated %}correlation{% else %}""{% endif %}, {% if o.targeted %}target{% else %}""{% endif %});
         }

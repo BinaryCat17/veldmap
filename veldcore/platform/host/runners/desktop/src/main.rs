@@ -13,7 +13,6 @@ use winit::{
 use std::sync::Arc;
 
 use veldmap_host_core::app;
-use veldmap_host_core::dispatcher::Dispatcher;
 use veldmap_host_bindings::app as app_bus;
 
 /// Окно, созданное по декларации модуля-владельца.
@@ -29,12 +28,12 @@ struct HostWindow {
 
 /// Публикация UI-события в нейтральный топик app/on_ui_event.
 /// Адресация — в данных: plugin_id называет владельца окна.
-fn publish_ui_event(dispatcher: &Dispatcher, owner: &str, event: app::ui_event::Event) {
+fn publish_ui_event(p: &impl veldmap_host_bindings::Publisher, owner: &str, event: app::ui_event::Event) {
     let ev = app::UiEvent {
         plugin_id: owner.to_string(),
         event: Some(event),
     };
-    app_bus::emit::on_ui_event(dispatcher, &ev);
+    app_bus::emit::on_ui_event(p, &ev);
 }
 
 /// Битовая маска модификаторов для KeyEvent: 1=Shift, 2=Ctrl, 4=Alt, 8=Super.
@@ -48,7 +47,7 @@ fn modifiers_bits(m: winit::keyboard::ModifiersState) -> u32 {
 }
 
 /// Сообщает владельцу окна размер и формат требуемой поверхности.
-fn publish_window_resized(dispatcher: &Dispatcher, owner: &str, width: u32, height: u32, scale_factor: f32, format: i32) {
+fn publish_window_resized(p: &impl veldmap_host_bindings::Publisher, owner: &str, width: u32, height: u32, scale_factor: f32, format: i32) {
     let ev = app::WindowResized {
         plugin_id: owner.to_string(),
         width,
@@ -56,7 +55,7 @@ fn publish_window_resized(dispatcher: &Dispatcher, owner: &str, width: u32, heig
         scale_factor,
         format,
     };
-    app_bus::emit::on_window_resized(dispatcher, &ev, owner);
+    app_bus::emit::on_window_resized(p, &ev, owner);
 }
 
 #[tokio::main]
@@ -67,6 +66,17 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_else(|| "config".to_string());
+
+    // Секреты для ${VAR} в конфигах — из .env, до всякого чтения конфигов.
+    // Кандидаты: cwd (так запускает лаунчер) и корень проекта относительно
+    // каталога конфигов (прямой запуск бинарника из любого места).
+    for candidate in [std::path::PathBuf::from(".env"),
+                      std::path::Path::new(&config_dir).join("../../.env")] {
+        if candidate.exists() {
+            veldmap_host_core::config::load_dotenv(&candidate);
+            break;
+        }
+    }
 
     let host_config = Arc::new(veldmap_host_core::config::load_host_config(&config_dir)?);
     veldmap_host_core::setup::init_logging(&config_dir, &host_config)?;
@@ -116,6 +126,12 @@ async fn main() -> anyhow::Result<()> {
     // как модуль app.
     veldmap_desktop_modules::register_all(ctx.clone());
 
+    // Контракт app реализует сам раннер (оконная система): его события
+    // штампуем именем app, как у остальных сервисов. app-модуль уже
+    // зарегистрирован в register_all выше; без него — fallback на хост (0),
+    // что для событий окна семантически честно.
+    let app_pub = dispatcher.publisher_of("app");
+
     veldmap_host_core::plugins::load_services(ctx.clone()).await?;
     if dispatcher.instance_of(&owner_name).is_none() {
         anyhow::bail!("Window owner '{}' is not a loaded service", owner_name);
@@ -137,8 +153,8 @@ async fn main() -> anyhow::Result<()> {
     // На X11/WSLg winit часто репортит 1.0 даже на HiDPI (Xft.dpi не задан),
     // поэтому конфиг задаёт нижнюю границу.
     let effective_scale = move |w: &winit::window::Window| (w.scale_factor() as f32).max(win_cfg.ui_scale);
-    publish_window_resized(&dispatcher, &hw.owner, hw.size.0, hw.size.1, effective_scale(&winit_window), format_proto);
-    app_bus::emit::on_ready(&*dispatcher);
+    publish_window_resized(&app_pub, &hw.owner, hw.size.0, hw.size.1, effective_scale(&winit_window), format_proto);
+    app_bus::emit::on_ready(&app_pub);
 
     winit_window.request_redraw();
 
@@ -171,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
 
                     // Старая поверхность блитится растянутой, пока владелец
                     // не приаттачит новую нужного размера.
-                    publish_window_resized(&dispatcher, &hw.owner, width, height, effective_scale(&winit_window), format_proto);
+                    publish_window_resized(&app_pub, &hw.owner, width, height, effective_scale(&winit_window), format_proto);
                 }
                 winit_window.request_redraw();
             }
@@ -183,12 +199,12 @@ async fn main() -> anyhow::Result<()> {
                 // Коалесцированный курсор — не чаще одного события на кадр.
                 if cursor_dirty {
                     cursor_dirty = false;
-                    publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::CursorMoved(
+                    publish_ui_event(&app_pub, &hw.owner, app::ui_event::Event::CursorMoved(
                         app::CursorMovedEvent { x: cursor_pos.0, y: cursor_pos.1 },
                     ));
                 }
 
-                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Frame(app::FrameEvent {
+                publish_ui_event(&app_pub, &hw.owner, app::ui_event::Event::Frame(app::FrameEvent {
                     dt,
                     actual_fps: if dt > 0.0 { 1.0 / dt } else { 0.0 },
                     monitor_fps: 60,
@@ -224,10 +240,8 @@ async fn main() -> anyhow::Result<()> {
 
                 // 1) Render-опы модулей — в их таргеты (обычно текстура окна).
                 for op in graphics.take_pending_ops() {
-                    let target = graphics.get_resource(op.target_view_id, op.instance_id);
-                    if let Some(veldmap_host_core::graphics::Resource::GpuObj(
-                        veldmap_host_core::graphics::GpuObject::TextureView(target_view)
-                    )) = target {
+                    let target = graphics.get_gpu(op.target_view_id, op.instance_id);
+                    if let Ok(veldmap_host_core::registry::GpuObject::TextureView(target_view)) = target {
                         // Размеры целевой текстуры (не окна) — viewport/scissor
                         // клампятся по таргету. У каждого view размеры записаны
                         // при создании; None — view чужой или уже освобождён.
@@ -285,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::WindowEvent { event: WindowEvent::MouseInput { state: button_state, button, .. }, .. } => {
                 let b_idx = match button { winit::event::MouseButton::Left => 1, winit::event::MouseButton::Right => 2, winit::event::MouseButton::Middle => 3, _ => 0 };
-                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Click(
+                publish_ui_event(&app_pub, &hw.owner, app::ui_event::Event::Click(
                     app::ClickEvent {
                         button: b_idx,
                         pressed: button_state == winit::event::ElementState::Pressed,
@@ -295,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
                 ));
             }
             Event::WindowEvent { event: WindowEvent::MouseWheel { delta, .. }, .. } => {
-                publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Scroll(
+                publish_ui_event(&app_pub, &hw.owner, app::ui_event::Event::Scroll(
                     app::ScrollEvent {
                         delta_x: match delta { winit::event::MouseScrollDelta::LineDelta(x, _) => x * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.x as f32 },
                         delta_y: match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 },
@@ -308,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
             Event::WindowEvent { event: WindowEvent::KeyboardInput { event: input, .. }, .. } => {
                 if let winit::keyboard::PhysicalKey::Code(kc) = input.physical_key {
                     let pressed = input.state == winit::event::ElementState::Pressed;
-                    publish_ui_event(&dispatcher, &hw.owner, app::ui_event::Event::Key(
+                    publish_ui_event(&app_pub, &hw.owner, app::ui_event::Event::Key(
                         app::KeyEvent {
                             key_code: kc as u32,
                             pressed,

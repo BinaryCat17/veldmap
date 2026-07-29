@@ -7,16 +7,19 @@ use regex::Regex;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServicesManifest {
-    /// Каталог с *.wasm плагинами, относительно `project_root`. По умолчанию
-    /// `../build/plugins` (тот же путь, что раньше прописывался в
-    /// services.json для каждого сервиса вручную).
+    /// Каталог с *.wasm плагинами, относительно `runtime_dir`. По умолчанию
+    /// `../build/plugins`. Тот же каталог, что `plugins_dir` в workspace.yaml
+    /// для сборки; build.py сверяет оба при каждой сборке, поэтому разойтись
+    /// они не могут молча.
     pub plugins_dir: Option<String>,
     pub logs: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct HostConfig {
-    pub project_root: std::path::PathBuf,
+    /// Каталог runtime: родитель config_dir. База для относительных путей
+    /// из конфигов (plugins_dir, logs) и из запросов модулей (см. util::path).
+    pub runtime_dir: std::path::PathBuf,
     pub config_dir: std::path::PathBuf,
     pub plugins_dir: std::path::PathBuf,
     pub logs: Option<String>,
@@ -34,7 +37,7 @@ pub struct HostConfig {
 pub fn load_host_config(config_dir: &str) -> anyhow::Result<HostConfig> {
     let config_dir_path = Path::new(config_dir).to_path_buf();
     let manifest_path = config_dir_path.join("services.json");
-    let project_root = config_dir_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let runtime_dir = config_dir_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
     let manifest: ServicesManifest = if manifest_path.exists() {
         load_config_with_path(&manifest_path)?
@@ -42,7 +45,7 @@ pub fn load_host_config(config_dir: &str) -> anyhow::Result<HostConfig> {
         ServicesManifest { plugins_dir: None, logs: None }
     };
 
-    let plugins_dir = project_root.join(manifest.plugins_dir.as_deref().unwrap_or("../build/plugins"));
+    let plugins_dir = runtime_dir.join(manifest.plugins_dir.as_deref().unwrap_or("../build/plugins"));
 
     let mut plugin_configs = HashMap::new();
     let mut plugin_raw_configs = HashMap::new();
@@ -66,7 +69,7 @@ pub fn load_host_config(config_dir: &str) -> anyhow::Result<HostConfig> {
     }
 
     Ok(HostConfig {
-        project_root,
+        runtime_dir,
         config_dir: config_dir_path,
         plugins_dir,
         logs: manifest.logs,
@@ -75,11 +78,38 @@ pub fn load_host_config(config_dir: &str) -> anyhow::Result<HostConfig> {
     })
 }
 
-pub fn load_config<T: DeserializeOwned>(crate_name: &str) -> anyhow::Result<T> {
-    let mut path = std::env::current_dir()?;
-    path.push("config");
-    path.push(format!("{}.json", crate_name));
-    load_config_with_path(path)
+/// Подхватывает .env (KEY=VALUE) в окружение процесса. Уже заданные
+/// переменные не переопределяются — как и у лаунчера, у окружения приоритет.
+///
+/// Читается до `load_host_config`, чтобы ${VAR} в конфигах раскрывался при
+/// любом способе запуска, а не только через лаунчер: раньше .env парсил
+/// только run-native.py, и прямой запуск бинарника молча получал пустые
+/// подстановки.
+pub fn load_dotenv(path: &Path) {
+    let Ok(content) = fs::read_to_string(path) else { return };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        let value = value.trim();
+        // Кавычки снимаем только парные ("..." или '...'), как в старом парсере.
+        let bytes = value.as_bytes();
+        let value = if value.len() >= 2
+            && (bytes[0] == b'"' || bytes[0] == b'\'')
+            && bytes[0] == bytes[value.len() - 1]
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        if key.is_empty() || std::env::var_os(key).is_some() {
+            continue;
+        }
+        std::env::set_var(key, value);
+    }
 }
 
 pub fn read_config_string<P: AsRef<Path>>(path: P) -> anyhow::Result<String> {

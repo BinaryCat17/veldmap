@@ -29,8 +29,8 @@ pub struct PluginUiState {
     pub keyboard_modifiers: RefCell<iced_core::keyboard::Modifiers>,
     pub vertex_buffer: RefCell<Option<OwnedResource>>,
     pub index_buffer: RefCell<Option<OwnedResource>>,
-    /// Region id uniform-буфера (memory ABI).
-    pub uniform_buffer_region: RefCell<Option<u64>>,
+    /// Uniform-буфер (memory ABI): наш, освобождается Drop'ом.
+    pub uniform_buffer_region: RefCell<Option<OwnedResource>>,
     pub uniform_bind_group: RefCell<Option<BindGroupId>>,
     pub uniform_layout: RefCell<Option<BindGroupLayoutId>>,
     pub ui_pipeline: RefCell<Option<PipelineId>>,
@@ -51,6 +51,8 @@ pub struct PluginUiState {
     /// Messages captured from iced UI events, waiting to be dispatched
     pub pending_messages: RefCell<Vec<PendingMessage>>,
     /// Render-таргет, делегированный владельцем окна через set_surface.
+    /// Не наш ресурс: освобождает его владелец окна, поэтому здесь голый id,
+    /// а не OwnedResource.
     pub surface_handle: RefCell<Option<u64>>,
 }
 
@@ -60,22 +62,17 @@ pub struct State {
     pub surface_format: i32,
 }
 
-unsafe impl Send for State {}
-unsafe impl Sync for State {}
-
 impl State {
-    pub fn new() -> Self {
-        let sf = veldsdk::abi::get_config("surface_format")
-            .and_then(|s| s.parse::<i32>().ok())
-            .unwrap_or(0);
-
+    pub fn new(surface_format: i32) -> Self {
         Self {
             plugins: HashMap::new(),
+            // Имена шрифтов — контракт с клиентами разметки; для них они
+            // объявлены константами в veld-ui-service-wrap (style::FONT_*).
             renderer: GpuRenderer::new("JetBrains Mono", vec![
                 ("JetBrains Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
                 ("Icons", include_bytes!("../../../runtime/assets/SymbolsNerdFontMono-Regular.ttf")),
             ]),
-            surface_format: sf,
+            surface_format,
         }
     }
 }

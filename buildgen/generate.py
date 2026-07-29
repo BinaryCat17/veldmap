@@ -94,17 +94,18 @@ def schema_type_to_rust_path(type_str: str) -> str:
 # (platform contracts at its root plus native services under interface/modules/),
 # otherwise the directory name of the wasm module that owns types.proto.
 
-def iter_core_proto_files(proto_dir: str):
-    """Yield every platform .proto file: root-level contracts (core, app,
-    graphics, ...) plus one per native service in modules/<name>/<name>.proto."""
-    for f in sorted(os.listdir(proto_dir)):
-        path = os.path.join(proto_dir, f)
-        if f.endswith(".proto") and os.path.isfile(path):
+def iter_core_files(iface_dir: str, suffix: str):
+    """Single walk over veldcore/interface: root-level `*<suffix>` files
+    (platform contracts: core, graphics, ...), then one file per native
+    service at modules/<name>/<name><suffix>."""
+    for f in sorted(os.listdir(iface_dir)):
+        path = os.path.join(iface_dir, f)
+        if f.endswith(suffix) and os.path.isfile(path):
             yield path
-    modules_dir = os.path.join(proto_dir, "modules")
+    modules_dir = os.path.join(iface_dir, "modules")
     if os.path.isdir(modules_dir):
         for name in sorted(os.listdir(modules_dir)):
-            path = os.path.join(modules_dir, name, f"{name}.proto")
+            path = os.path.join(modules_dir, name, f"{name}{suffix}")
             if os.path.exists(path):
                 yield path
 
@@ -119,7 +120,7 @@ def build_type_universe(proto_dir: str, modules_root: str | None) -> dict:
                 f"{universe[alias]['source']} and {source}")
         universe[alias] = {"messages": messages, "origin": origin, "source": source}
 
-    for path in iter_core_proto_files(proto_dir):
+    for path in iter_core_files(proto_dir, ".proto"):
         pkg, messages = collect_proto_info(path)
         if pkg:
             add(pkg.split(".")[-1], messages, "core", path)
@@ -160,11 +161,58 @@ def correlated_topics(schema: dict) -> tuple[dict[str, list[str]], set[str]]:
     return requests, replies
 
 
+# ── Нормализация: схема → модель сервиса ─────────────────────────────────────
+# Общий для обоих конвейеров (wasm-модули и нативные сервисы хоста) шаг:
+# флаги топиков вычисляются из схемы один раз, а тонкие бэкенды рендеринга
+# различаются только резолвером rust_path и набором шаблонов.
+
+def topic_entries(svc_name: str, schema: dict, kind: str, rust_path_of,
+                  only: set | None = None) -> list[dict]:
+    """Топики одного направления (`inputs`/`outputs`) с вычисленными флагами:
+    `correlated`/`pairs_with` — из пар `replies_to`, `targeted` — из
+    объявления топика. `rust_path_of(kind, name, entry)` — бэкенд-специфичный
+    резолвер типа (хост и wasm раскладывают один тип по разным crate-путям).
+    `only` ограничивает набор имён (потребителю нужны лишь объявленные им
+    вызовы, а не все входы производителя)."""
+    requests, replies = correlated_topics(schema)
+    entries = []
+    for n, d in ((schema.get("interface") or {}).get(kind) or {}).items():
+        if only is not None and n not in only:
+            continue
+        d = d or {}
+        # Корреспондент топика (в док-комментарий стаба): у входа-запроса —
+        # его ответы, у выхода-ответа — его запрос.
+        if kind == "inputs":
+            peers = requests.get(n, [])
+            correlated = n in requests
+        else:
+            peers = [d.get("replies_to")]
+            correlated = n in replies
+        entries.append({
+            "name":       n,
+            "const":      n.upper(),
+            "rust_path":  rust_path_of(kind, n, d),
+            "targeted":   bool(d.get("targeted", False)),
+            "correlated": correlated,
+            "pairs_with": ", ".join(f"`{svc_name}/{t}`" for t in peers),
+        })
+    return entries
+
+
+def service_model(svc_name: str, schema: dict, rust_path_of) -> dict:
+    """Схема → нормализованная модель сервиса: inputs/outputs с флагами."""
+    return {
+        "name":    svc_name,
+        "snake":   svc_name.replace("-", "_"),
+        "inputs":  topic_entries(svc_name, schema, "inputs", rust_path_of),
+        "outputs": topic_entries(svc_name, schema, "outputs", rust_path_of),
+    }
+
+
 def load_dep_schema(dep: str, modules_root: str, proto_dir: str) -> dict | None:
-    """Схема зависимости: соседний wasm-модуль либо платформенный сервис
-    (root-контракт или нативный сервис в interface/modules/)."""
+    """Схема зависимости: соседний wasm-модуль либо платформенный нативный
+    сервис (interface/modules/<dep>/<dep>.schema.yaml)."""
     for p in (os.path.join(modules_root, dep, "schema.yaml"),
-              os.path.join(proto_dir, f"{dep}.schema.yaml"),
               os.path.join(proto_dir, "modules", dep, f"{dep}.schema.yaml")):
         if os.path.exists(p):
             with open(p) as f:
@@ -182,13 +230,21 @@ def local_package_alias(module_dir: str) -> str | None:
     return None
 
 
-def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
-                           universe: dict) -> tuple[list[str], dict]:
-    """Validate a module schema against the type universe and the schemas of
+def validate_service_schema(schema: dict, universe: dict,
+                            allow_empty_payload: bool,
+                            schema_dir: str | None = None,
+                            proto_dir: str | None = None) -> tuple[list[str], dict]:
+    """Validate a service schema against the type universe and the schemas of
     its dependencies. Returns (errors, resolved) where resolved maps every
     type reference to its canonical 'alias/Message' form:
         resolved["inputs"][name], resolved["outputs"][name],
         resolved["subs"][(dep, sub)], resolved["calls"][(dep, call)]
+
+    Оба диалекта схем — один валидатор; различаются они одним параметром:
+    платформенный сервис МОЖЕТ иметь топик без payload (app/on_ready) —
+    `allow_empty_payload=True`, wasm-модуль — нет (обязателен `type`).
+    Перекрёстная проверка dependencies есть только у wasm-модуля (задан
+    schema_dir): платформенные сервисы зависимостей не объявляют.
 
     A topic's payload type is declared exactly once, in the interface of the
     module that owns it (interface.outputs / interface.inputs). dependencies.
@@ -197,13 +253,16 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
     """
     errors = []
     name = schema.get("name")
-    modules_root = os.path.dirname(schema_dir)
-    own_alias = local_package_alias(schema_dir)
     iface = schema.get("interface") or {}
     deps = schema.get("dependencies") or {}
     resolved = {"inputs": {}, "outputs": {}, "subs": {}, "calls": {}}
 
-    dep_aliases = {a for a, info in universe.items() if info["origin"] in deps}
+    own_alias = local_package_alias(schema_dir) if schema_dir else None
+    # Чужие (не core) пакеты разрешены только через объявленные зависимости —
+    # диалект wasm-модуля; у платформенного сервиса зависимостей не бывает,
+    # поэтому для него остаётся чистое правило «только core».
+    dep_aliases = ({a for a, info in universe.items() if info["origin"] in deps}
+                   if schema_dir else set())
 
     def err(where, msg):
         errors.append(f"{where}: {msg}")
@@ -211,7 +270,8 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
     def check(where, type_str) -> str | None:
         """Validate one type reference; return canonical 'alias/Message'."""
         if not type_str:
-            err(where, "missing 'type'")
+            if not allow_empty_payload:
+                err(where, "missing 'type'")
             return None
         alias, _, tname = type_str.partition("/")
         if not tname:
@@ -253,74 +313,60 @@ def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
             continue
         where = f"interface.outputs.{output_name}.replies_to"
         if replies_to not in (iface.get("inputs") or {}):
-            err(where, f"'{replies_to}' is not one of this module's interface.inputs")
+            err(where, f"'{replies_to}' is not one of this service's interface.inputs")
 
-    for dep, dep_data in deps.items():
-        dep_data = dep_data or {}
-        dep_schema = load_dep_schema(dep, modules_root, proto_dir)
-        if dep_schema is None:
-            err(f"dependencies.{dep}", "no schema found (neither a sibling module "
-                                       "nor a veldcore/interface *.schema.yaml service)")
-            continue
+    # Перекрёстная проверка зависимостей — только диалект wasm-модуля.
+    if schema_dir is not None:
+        modules_root = os.path.dirname(schema_dir)
+        for dep, dep_data in deps.items():
+            dep_data = dep_data or {}
+            dep_schema = load_dep_schema(dep, modules_root, proto_dir)
+            if dep_schema is None:
+                err(f"dependencies.{dep}", "no schema found (neither a sibling module "
+                                           "nor a veldcore/interface/modules service)")
+                continue
 
-        # In the dependency's own schema 'module/' refers to *its* package.
-        dep_alias = local_package_alias(os.path.join(modules_root, dep)) or dep
-        dep_iface = dep_schema.get("interface") or {}
-        dep_outputs = dep_iface.get("outputs") or {}
-        dep_inputs = dep_iface.get("inputs") or {}
+            # In the dependency's own schema 'module/' refers to *its* package.
+            dep_alias = local_package_alias(os.path.join(modules_root, dep)) or dep
+            dep_iface = dep_schema.get("interface") or {}
+            dep_outputs = dep_iface.get("outputs") or {}
+            dep_inputs = dep_iface.get("inputs") or {}
 
-        def cross_check(kind, declared_topics, contract, contract_kind):
-            for topic in declared_topics:
-                where = f"dependencies.{dep}.{kind}.{topic}"
-                if topic not in contract:
-                    err(where, f"'{dep}' declares no {contract_kind} '{topic}' "
-                               f"({contract_kind}s: {', '.join(sorted(contract)) or '—'})")
-                    continue
-                theirs_raw = (contract[topic] or {}).get("type") or ""
-                if not theirs_raw:
-                    err(where, f"'{dep}' {contract_kind} '{topic}' has no payload type "
-                               f"and cannot be used as a typed dependency {kind[:-1]}")
-                    continue
-                alias, _, tname = theirs_raw.partition("/")
-                theirs = f"{dep_alias}/{tname}" if alias == "module" else theirs_raw
-                c = check(where, theirs)
-                if c:
-                    resolved[kind][(dep, topic)] = c
+            def cross_check(kind, declared_topics, contract, contract_kind):
+                for topic in declared_topics:
+                    where = f"dependencies.{dep}.{kind}.{topic}"
+                    if topic not in contract:
+                        err(where, f"'{dep}' declares no {contract_kind} '{topic}' "
+                                   f"({contract_kind}s: {', '.join(sorted(contract)) or '—'})")
+                        continue
+                    theirs_raw = (contract[topic] or {}).get("type") or ""
+                    if not theirs_raw:
+                        err(where, f"'{dep}' {contract_kind} '{topic}' has no payload type "
+                                   f"and cannot be used as a typed dependency {kind[:-1]}")
+                        continue
+                    alias, _, tname = theirs_raw.partition("/")
+                    theirs = f"{dep_alias}/{tname}" if alias == "module" else theirs_raw
+                    c = check(where, theirs)
+                    if c:
+                        resolved[kind][(dep, topic)] = c
 
-        cross_check("subs", list(dep_data.get("subs") or []), dep_outputs, "output")
-        cross_check("calls", list(dep_data.get("calls") or []), dep_inputs, "input")
+            cross_check("subs", list(dep_data.get("subs") or []), dep_outputs, "output")
+            cross_check("calls", list(dep_data.get("calls") or []), dep_inputs, "input")
 
     return [f"schema '{name}': {e}" for e in errors], resolved
 
 
-def validate_core_schema(svc_schema: dict, universe: dict) -> list[str]:
-    """Validate a veldcore service schema: every type must resolve to a
-    veldcore proto message. Payload-less topics (`{}`) are allowed."""
-    errors = []
-    name = svc_schema.get("name")
-    iface = svc_schema.get("interface") or {}
-    for kind in ("inputs", "outputs"):
-        for topic, entry in (iface.get(kind) or {}).items():
-            type_str = (entry or {}).get("type")
-            if not type_str:
-                continue
-            alias, _, tname = type_str.partition("/")
-            info = universe.get(alias)
-            if info is None or info["origin"] != "core":
-                errors.append(f"schema '{name}': interface.{kind}.{topic}: unknown "
-                              f"veldcore proto package '{alias}' in '{type_str}'")
-            elif tname not in info["messages"]:
-                errors.append(f"schema '{name}': interface.{kind}.{topic}: message "
-                              f"'{tname}' not found in package '{alias}'")
+def validate_module_schema(schema: dict, schema_dir: str, proto_dir: str,
+                           universe: dict) -> tuple[list[str], dict]:
+    """Wasm-модуль: payload обязателен, dependencies проверяются перекрёстно."""
+    return validate_service_schema(schema, universe, allow_empty_payload=False,
+                                   schema_dir=schema_dir, proto_dir=proto_dir)
 
-    inputs = iface.get("inputs") or {}
-    for topic, entry in (iface.get("outputs") or {}).items():
-        replies_to = (entry or {}).get("replies_to")
-        if not replies_to:
-            continue
-        where = f"schema '{name}': interface.outputs.{topic}.replies_to"
-        if replies_to not in inputs:
-            errors.append(f"{where}: '{replies_to}' is not one of this service's interface.inputs")
+
+def validate_core_schema(svc_schema: dict, universe: dict) -> list[str]:
+    """Платформенный сервис veldcore: топик может быть без payload (`{}`,
+    напр. app/on_ready)."""
+    errors, _ = validate_service_schema(svc_schema, universe, allow_empty_payload=True)
     return errors
 
 
@@ -384,20 +430,13 @@ def generate_host_bindings(args, script_dir: str):
     universe = build_type_universe(proto_dir, None)
 
     proto_files = [os.path.relpath(p, proto_dir).replace("\\", "/")
-                   for p in iter_core_proto_files(proto_dir)]
+                   for p in iter_core_files(proto_dir, ".proto")]
     proto_packages = []
     for f in proto_files:
         pkg_decl = read_proto_package(os.path.join(proto_dir, f))
         proto_packages.append({"file": pkg_decl, "mod": pkg_decl.split(".")[-1]})
 
-    schema_files = [os.path.join(proto_dir, f)
-                     for f in sorted(os.listdir(proto_dir)) if f.endswith(".schema.yaml")]
-    modules_dir = os.path.join(proto_dir, "modules")
-    if os.path.isdir(modules_dir):
-        for name in sorted(os.listdir(modules_dir)):
-            p = os.path.join(modules_dir, name, f"{name}.schema.yaml")
-            if os.path.exists(p):
-                schema_files.append(p)
+    schema_files = list(iter_core_files(proto_dir, ".schema.yaml"))
 
     services = []
     for schema_path in schema_files:
@@ -405,36 +444,9 @@ def generate_host_bindings(args, script_dir: str):
             svc_schema = yaml.safe_load(sf)
         fail_on(validate_schema_identity(svc_schema, schema_path)
                 + validate_core_schema(svc_schema, universe), schema_path)
-        iface = svc_schema.get("interface", {}) or {}
-        requests, replies = correlated_topics(svc_schema)
-
-        def entries(kind):
-            # Корреляцию несут только топики из пары `replies_to`: вход-запрос
-            # (обработчик получает её в Caller) и выход-ответ (emit-стаб
-            # требует её аргументом).
-            correlated = requests if kind == "inputs" else replies
-            return [
-                {
-                    "name":       n,
-                    "const":      n.upper(),
-                    "rust_path":  schema_type_to_rust_path((d or {}).get("type") or ""),
-                    "targeted":   bool((d or {}).get("targeted", False)),
-                    "correlated": n in correlated,
-                    # Чему этот топик корреспондент — в док-комментарий стаба.
-                    "pairs_with": ", ".join(f"`{svc_schema.get('name')}/{t}`" for t in (
-                        requests.get(n, []) if kind == "inputs" else [(d or {}).get("replies_to")]
-                    )),
-                }
-                for n, d in (iface.get(kind, {}) or {}).items()
-            ]
-
-        svc_name = svc_schema.get("name")
-        services.append({
-            "name":    svc_name,
-            "snake":   svc_name.replace("-", "_"),
-            "inputs":  entries("inputs"),
-            "outputs": entries("outputs"),
-        })
+        services.append(service_model(
+            svc_schema.get("name"), svc_schema,
+            lambda _kind, _n, d: schema_type_to_rust_path(d.get("type") or "")))
 
     proto_dir_rel = os.path.relpath(proto_dir, out_dir).replace("\\", "/")
     template_data = {
@@ -613,17 +625,19 @@ def main():
             return f"veldsdk::proto::{alias}::{rust_name}"
         return f"crate::proto::{alias}::{rust_name}"
 
-    # ── Корреляционные топики (пары `replies_to`) ────────────────────────────
-    # Свои — из собственной схемы, чужие — из схемы зависимости: какой её
-    # выход отвечает какому входу, знает только она. Корреляция едет в
-    # конверте, поэтому стабы этих топиков принимают её отдельным аргументом,
-    # а у всех прочих её негде и указать.
-    own_requests, own_replies = correlated_topics(schema)
+    # ── Нормализованная модель сервиса (общий шаг обоих конвейеров) ──────────
+    # Корреляция едет в конверте (EventEnvelope.correlation_id), поэтому стабы
+    # топиков из пар `replies_to` принимают её отдельным аргументом, а у всех
+    # прочих её негде и указать. Свои пары — из собственной схемы, чужие — из
+    # схемы зависимости: какой её выход отвечает какому входу, знает только она.
+    own_model = service_model(
+        name, schema,
+        lambda kind, n, _d: module_rust_path(resolved[kind][n]))
+
     modules_root = os.path.dirname(schema_dir)
-    dep_correlated = {}
+    dep_schemas = {}
     for dep_name in schema.get("dependencies", {}):
-        dep_schema = load_dep_schema(dep_name, modules_root, core_proto_dir) or {}
-        dep_correlated[dep_name] = correlated_topics(dep_schema)
+        dep_schemas[dep_name] = load_dep_schema(dep_name, modules_root, core_proto_dir) or {}
 
     # ── Build handler dispatch table (topic → handler + payload type) ────────
     handlers = []
@@ -631,11 +645,11 @@ def main():
     # Handler name = schema key, verbatim (no injected on_input_/on_sub_
     # prefix): the schema is expected to already name it `on_*`, so the
     # topic key and the Rust function it maps to are the same string.
-    for input_name in schema.get("interface", {}).get("inputs", {}):
+    for entry in own_model["inputs"]:
         handlers.append({
-            "topic":     f"{name}/{input_name}",
-            "handler":   f"crate::module::{input_name}",
-            "rust_path": module_rust_path(resolved["inputs"][input_name]),
+            "topic":     f"{name}/{entry['name']}",
+            "handler":   f"crate::module::{entry['name']}",
+            "rust_path": entry["rust_path"],
         })
 
     for dep_name, dep_data in schema.get("dependencies", {}).items():
@@ -649,35 +663,20 @@ def main():
     # ── Typed emit/call stubs (schema is the source of truth for topics) ─────
     # interface.outputs  → crate::emit::<name>(&ExactMessage)
     # dependencies.*.calls → crate::calls::<dep_snake>::<name>(&ExactMessage)
-    emits = [
-        {
-            "name": n,
-            "rust_path": module_rust_path(resolved["outputs"][n]),
-            "targeted": bool((schema["interface"]["outputs"][n] or {}).get("targeted", False)),
-            "correlated": n in own_replies,
-            "pairs_with": f"`{name}/{(schema['interface']['outputs'][n] or {}).get('replies_to')}`",
-        }
-        for n in schema.get("interface", {}).get("outputs", {}) or {}
-    ]
+    emits = own_model["outputs"]
 
     dep_calls = []
     for dep_name, dep_data in schema.get("dependencies", {}).items():
         calls = list((dep_data or {}).get("calls", {}) or {})
         if calls:
-            dep_requests, _ = dep_correlated[dep_name]
+            dep_inputs = {e["name"]: e for e in topic_entries(
+                dep_name, dep_schemas[dep_name], "inputs",
+                lambda _kind, n, _d: module_rust_path(resolved["calls"][(dep_name, n)]),
+                only=set(calls))}
             dep_calls.append({
                 "service": dep_name,
                 "snake": dep_name.replace("-", "_"),
-                "methods": [
-                    {
-                        "name": c,
-                        "rust_path": module_rust_path(resolved["calls"][(dep_name, c)]),
-                        "correlated": c in dep_requests,
-                        "pairs_with": ", ".join(f"`{dep_name}/{r}`"
-                                                for r in dep_requests.get(c, [])),
-                    }
-                    for c in calls
-                ],
+                "methods": [dep_inputs[c] for c in calls],
             })
 
     # ── Hooks (runtime lifecycle callbacks, not tied to a topic) ──────────────

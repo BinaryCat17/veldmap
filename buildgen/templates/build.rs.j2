@@ -4,8 +4,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Типы указаны явно: у модуля без собственного types.proto оба вектора
     // остаются пустыми, и выводить их элемент компилятору не из чего.
-    let mut proto_files: Vec<String> = Vec::new();
-    let mut include_dirs: Vec<String> = Vec::new();
+    let {% if local_proto_path %}mut {% endif %}proto_files: Vec<String> = Vec::new();
+    let {% if include_dirs %}mut {% endif %}include_dirs: Vec<String> = Vec::new();
 
 {% if local_proto_path %}
     proto_files.push("{{ local_proto_path }}".to_string());

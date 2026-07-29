@@ -7,6 +7,7 @@ that contain both schema.yaml and config.yaml. Each module is built
 independently — no shared Cargo workspace.
 """
 import os
+import json
 import shutil
 import subprocess
 import sys
@@ -63,6 +64,32 @@ WASM_TARGET   = "wasm32-wasip1"
 CORE_MANIFEST = os.path.join(PROJECT_ROOT, "veldcore", "Cargo.toml")
 
 
+def _check_plugins_dir_consistency():
+    """Сверяет plugins_dir сборки (workspace.yaml) с рантайм-манифестом.
+
+    Хост резолвит plugins_dir из runtime/config/services.json относительно
+    runtime/ (см. load_host_config). Раньше эти два объявления одного каталога
+    жили независимо, и правка workspace.yaml молча рассинхронизировала сборку
+    и запуск: wasm ложились в одно место, а хост искал в другом.
+    """
+    manifest_path = os.path.join(RUNTIME_DIR, "config", "services.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        manifest = {}
+    runtime_value = manifest.get("plugins_dir", "../build/plugins")
+    runtime_plugins = os.path.normpath(os.path.join(RUNTIME_DIR, runtime_value))
+    if runtime_plugins != os.path.normpath(PLUGINS_DIR):
+        sys.exit(
+            "plugins_dir расходится между сборкой и рантаймом:\n"
+            f"  workspace.yaml: {_plugins_val} -> {os.path.normpath(PLUGINS_DIR)}\n"
+            f"  services.json:  {runtime_value} -> {runtime_plugins}\n"
+            "Приведите оба к одному каталогу (база workspace.yaml — корень "
+            "проекта, база services.json — runtime/)."
+        )
+
+
 def discover_modules() -> list[dict]:
     """Scan veldmodules/ for module directories, sorted in dependency order.
 
@@ -92,41 +119,40 @@ def discover_modules() -> list[dict]:
     return _topo_sort(raw)
 
 
+def _schema_dependencies(modules: list[dict]) -> dict:
+    """Read every module's `dependencies:` block with a real YAML parser.
+
+    Runs under the buildgen venv interpreter: build.py itself runs on system
+    Python, where pyyaml is not guaranteed (see ensure_venv)."""
+    build_dir = os.path.dirname(os.path.abspath(__file__))
+    script    = os.path.join(build_dir, "schema_deps.py")
+    schemas   = [os.path.join(m["dir"], "schema.yaml") for m in modules]
+    if not schemas:
+        return {}
+    try:
+        out = subprocess.check_output([ensure_venv(), script] + schemas, text=True)
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"FATAL: cannot parse module schemas:\n{e.output or e}")
+    return json.loads(out)
+
+
 def _topo_sort(modules: list[dict]) -> list[dict]:
     """Return modules in build order: dependencies before dependents.
 
-    Dependency edges are inferred from 'path' entries in config.yaml:
-    if module A's generated/ is referenced by module B, A must build first.
+    Dependency edges come from the `dependencies:` block of each module's
+    schema.yaml: if module A is listed among module B's dependencies,
+    A must build first.
     """
     # Map: module name -> module dict
     by_name = {m["name"]: m for m in modules}
+    declared = _schema_dependencies(modules)
 
     # Build adjacency: name -> set of names it depends on
     deps: dict[str, set] = {m["name"]: set() for m in modules}
     for m in modules:
-        schema_path = os.path.join(m["dir"], "schema.yaml")
-        # Simple scan: look for modules defined in `dependencies:` block
-        try:
-            with open(schema_path) as f:
-                in_deps = False
-                for line in f:
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("#"):
-                        continue
-                    if line.startswith("dependencies:"):
-                        in_deps = True
-                        continue
-                    if in_deps:
-                        if not line.startswith(" ") and not line.startswith("\t"):
-                            in_deps = False
-                            continue
-                        # Direct children of dependencies block
-                        if line.startswith("  ") and not line.startswith("   ") and ":" in stripped:
-                            dep_name = stripped.split(":")[0].strip()
-                            if dep_name in by_name:
-                                deps[m["name"]].add(dep_name)
-        except Exception:
-            pass
+        for dep_name in declared.get(os.path.join(m["dir"], "schema.yaml"), []):
+            if dep_name in by_name:
+                deps[m["name"]].add(dep_name)
 
     # Kahn's algorithm: in_degree[name] = число зависимостей, которые должны
     # собраться раньше name.
@@ -354,6 +380,7 @@ def main():
     if args.command == "clean":
         clean()
     else:
+        _check_plugins_dir_consistency()
         build_all(debug=args.debug, windows=args.windows, dist_dir=args.dist_dir)
         mode   = "DEBUG" if args.debug else "RELEASE"
         target = " (Windows x64)" if args.windows else ""

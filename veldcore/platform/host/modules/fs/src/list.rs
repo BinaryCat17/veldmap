@@ -10,7 +10,7 @@ use std::fs;
 pub fn on_list(state: &State, req: FsListRequest, caller: Caller) {
     let correlation = caller.correlation;
     if !is_path_safe(&req.path) {
-        bus::emit::on_list_result(&*state.ctx.dispatcher, &FsListResult {
+        bus::emit::on_list_result(&*state.ctx.publisher, &FsListResult {
             entries: vec![], error: "Access denied".into(),
         }, &correlation);
         return;
@@ -38,6 +38,6 @@ pub fn on_list(state: &State, req: FsListRequest, caller: Caller) {
                 Err(e) => FsListResult { entries: vec![], error: e.to_string() },
             }
         };
-        bus::emit::on_list_result(&*ctx.dispatcher, &result, &correlation);
+        bus::emit::on_list_result(&*ctx.publisher, &result, &correlation);
     });
 }

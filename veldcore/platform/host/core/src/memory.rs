@@ -1,7 +1,6 @@
 use std::sync::Arc;
-use dashmap::DashMap;
 use crate::graphics::proto::TextureFormat;
-use crate::registry::{ResourceRegistry, ResourceId, ResourceBackend};
+use crate::registry::{ResourceRegistry, ResourceId, ResourcePayload};
 
 // ── Format helpers (self-contained) ────────────────────────────
 
@@ -154,14 +153,11 @@ impl DataBacking {
     }
 }
 
-/// A data-bearing region
-pub struct Region {
-    pub backing: DataBacking,
-}
-
 /// Host-managed shared memory manager: raw allocator
+///
+/// Сам менеджер ничего не хранит: записи (носитель + lease) живут в
+/// реестре, здесь только создание носителей и байтовые операции над ними.
 pub struct MemoryManager {
-    regions: DashMap<ResourceId, Region>,
     registry: Arc<ResourceRegistry>,
     device: Arc<wgpu::Device>,
     queue: Arc<std::sync::Mutex<wgpu::Queue>>,
@@ -170,7 +166,6 @@ pub struct MemoryManager {
 impl MemoryManager {
     pub fn new(registry: Arc<ResourceRegistry>, device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>) -> Self {
         Self {
-            regions: DashMap::new(),
             registry,
             device,
             queue,
@@ -180,9 +175,7 @@ impl MemoryManager {
     // ── Allocation ────────────────────────────────────────────
 
     fn alloc(&self, backing: DataBacking, owner_id: u32) -> ResourceId {
-        let id = self.registry.register(ResourceBackend::Memory, owner_id, None);
-        self.regions.insert(id, Region { backing });
-        id
+        self.registry.register(ResourcePayload::Data(backing), owner_id)
     }
 
     pub fn alloc_cpu(&self, data: Vec<u8>, owner_id: u32) -> ResourceId {
@@ -250,58 +243,61 @@ impl MemoryManager {
     }
 
     // ── Data access ───────────────────────────────────────────
-    // Note: Security checks are performed by the caller using ResourceRegistry.
-    // This is just a raw byte store.
+    // Проверки доступа выполняет вызывающий через ResourceRegistry
+    // (см. abi.rs); здесь — только байтовые операции с носителем.
 
     pub fn write(&self, region_id: ResourceId, offset: u64, data: &[u8]) -> anyhow::Result<()> {
-        let mut region = self.regions.get_mut(&region_id)
-            .ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?;
-        
-        match &mut region.backing {
-            DataBacking::Cpu(ref mut vec) => {
-                let end = offset as usize + data.len();
-                if end > vec.len() { vec.resize(end, 0); }
-                vec[offset as usize..end].copy_from_slice(data);
+        self.registry.payload_mut(region_id, |payload| match payload {
+            ResourcePayload::Data(backing) => {
+                match backing {
+                    DataBacking::Cpu(vec) => {
+                        let end = offset as usize + data.len();
+                        if end > vec.len() { vec.resize(end, 0); }
+                        vec[offset as usize..end].copy_from_slice(data);
+                    }
+                    DataBacking::Buffer { buffer, mapped: false } => {
+                        let q = self.queue.lock().unwrap();
+                        q.write_buffer(buffer, offset, data);
+                    }
+                    DataBacking::Buffer { buffer, mapped: true } => {
+                        let end = offset + data.len() as u64;
+                        let slice = buffer.slice(offset..end);
+                        let mut view = slice.get_mapped_range_mut();
+                        view[..data.len()].copy_from_slice(data);
+                    }
+                    // Диапазонный носитель только читается. Для файла запись идёт
+                    // топиком fs/write, для удалённого ресурса это вообще отдельный
+                    // протокол (PUT, докачка, права на той стороне) — не «ещё один
+                    // вариант write».
+                    DataBacking::Range(_) => {
+                        return Err(anyhow::anyhow!("Range-backed resources are read-only"));
+                    }
+                    DataBacking::Texture { texture, width, height, format } => {
+                        let bpp = bytes_per_pixel(*format);
+                        let bytes_per_row = bpp * *width;
+                        let q = self.queue.lock().unwrap();
+                        q.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d::ZERO,
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            data,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(bytes_per_row),
+                                rows_per_image: Some(*height),
+                            },
+                            wgpu::Extent3d { width: *width, height: *height, depth_or_array_layers: 1 },
+                        );
+                    }
+                }
+                Ok(())
             }
-            DataBacking::Buffer { buffer, mapped: false } => {
-                let q = self.queue.lock().unwrap();
-                q.write_buffer(buffer, offset, data);
-            }
-            DataBacking::Buffer { buffer, mapped: true } => {
-                let end = offset + data.len() as u64;
-                let slice = buffer.slice(offset..end);
-                let mut view = slice.get_mapped_range_mut();
-                view[..data.len()].copy_from_slice(data);
-            }
-            // Диапазонный носитель только читается. Для файла запись идёт
-            // топиком fs/write, для удалённого ресурса это вообще отдельный
-            // протокол (PUT, докачка, права на той стороне) — не «ещё один
-            // вариант write».
-            DataBacking::Range(_) => {
-                return Err(anyhow::anyhow!("Range-backed resources are read-only"));
-            }
-            DataBacking::Texture { ref texture, width, height, format } => {
-                let bpp = bytes_per_pixel(*format);
-                let bytes_per_row = bpp * *width;
-                let q = self.queue.lock().unwrap();
-                q.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(*height),
-                    },
-                    wgpu::Extent3d { width: *width, height: *height, depth_or_array_layers: 1 },
-                );
-            }
-        }
-        Ok(())
+            // GPU-объект — не байтовый ресурс; для вызывающего это «нет такого региона».
+            ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
+        }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?
     }
 
     /// Байты ресурса со смещения.
@@ -316,30 +312,44 @@ impl MemoryManager {
     pub fn read(&self, region_id: ResourceId, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
         if size == 0 { return Ok(Vec::new()); }
 
-        let region = self.regions.get(&region_id)
-            .ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?;
-
-        // Текстура — не байтовый диапазон, смещение для неё не определено;
-        // отвечаем отказом до всякого клампинга.
-        if matches!(region.backing, DataBacking::Texture { .. }) {
-            return Err(anyhow::anyhow!("Direct read from texture regions is not supported"));
+        // Что читаем, вынесено из-под guard'а реестра: Cpu копируется сразу
+        // (это memcpy), Range/Buffer отдают Arc, а блокирующее чтение идёт
+        // уже без guard'а — под ним оно заперло бы шард DashMap для всех
+        // остальных обращений к реестру (см. комментарий к ResourceRegistry).
+        enum Source {
+            Bytes(Vec<u8>),
+            Range(Arc<dyn RangeSource>),
+            Buffer(Arc<wgpu::Buffer>),
         }
-        let len = region.backing.byte_len();
-        if offset >= len { return Ok(Vec::new()); }
-        let size = size.min(len - offset);
 
-        match &region.backing {
-            DataBacking::Cpu(vec) => {
-                Ok(vec[offset as usize..(offset + size) as usize].to_vec())
+        let (size, source) = self.registry.payload(region_id, |payload| match payload {
+            ResourcePayload::Data(backing) => {
+                // Текстура — не байтовый диапазон, смещение для неё не определено;
+                // отвечаем отказом до всякого клампинга.
+                if matches!(backing, DataBacking::Texture { .. }) {
+                    return Err(anyhow::anyhow!("Direct read from texture regions is not supported"));
+                }
+                let len = backing.byte_len();
+                if offset >= len { return Ok((0, Source::Bytes(Vec::new()))); }
+                let size = size.min(len - offset);
+                Ok((size, match backing {
+                    DataBacking::Cpu(vec) => {
+                        Source::Bytes(vec[offset as usize..(offset + size) as usize].to_vec())
+                    }
+                    DataBacking::Range(source) => Source::Range(source.clone()),
+                    DataBacking::Buffer { buffer, .. } => Source::Buffer(buffer.clone()),
+                    // Отсеяна выше, до проверки диапазона.
+                    DataBacking::Texture { .. } => unreachable!(),
+                }))
             }
-            DataBacking::Range(source) => {
-                let source = source.clone();
-                drop(region);
-                source.read_at(offset, size)
-            }
-            DataBacking::Buffer { buffer, .. } => {
-                let buffer = buffer.clone();
-                drop(region);
+            // GPU-объект — не байтовый ресурс; для вызывающего это «нет такого региона».
+            ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
+        }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))??;
+
+        match source {
+            Source::Bytes(data) => Ok(data),
+            Source::Range(source) => source.read_at(offset, size),
+            Source::Buffer(buffer) => {
                 {
                     let q = self.queue.lock().unwrap();
                     q.submit([]);
@@ -385,56 +395,42 @@ impl MemoryManager {
                     Ok(data)
                 }
             }
-            // Отсеяна выше, до проверки диапазона.
-            DataBacking::Texture { .. } => unreachable!(),
         }
-    }
-
-    pub fn exists(&self, region_id: ResourceId) -> bool {
-        self.regions.contains_key(&region_id)
     }
 
     /// Нужно ли выполнять операцию на blocking-пуле (см. `DataBacking::read_blocks`).
     pub fn read_blocks(&self, region_id: ResourceId) -> bool {
-        self.regions.get(&region_id).map(|r| r.backing.read_blocks()).unwrap_or(false)
+        self.registry.payload(region_id, |p| match p {
+            ResourcePayload::Data(backing) => backing.read_blocks(),
+            ResourcePayload::Gpu(_) => false,
+        }).unwrap_or(false)
     }
 
     pub fn get_size(&self, region_id: ResourceId) -> u64 {
-        if let Some(r) = self.regions.get(&region_id) {
-            r.backing.byte_len()
-        } else {
-            0
-        }
+        self.registry.payload(region_id, |p| match p {
+            ResourcePayload::Data(backing) => backing.byte_len(),
+            ResourcePayload::Gpu(_) => 0,
+        }).unwrap_or(0)
     }
 
     // ── Lookup helpers ────────────
 
     pub fn get_buffer(&self, region_id: ResourceId) -> Option<Arc<wgpu::Buffer>> {
-        self.regions.get(&region_id).and_then(|r| match &r.backing {
-            DataBacking::Buffer { buffer, .. } => Some(buffer.clone()),
+        self.registry.payload(region_id, |p| match p {
+            ResourcePayload::Data(DataBacking::Buffer { buffer, .. }) => Some(buffer.clone()),
             _ => None,
-        })
+        }).flatten()
     }
 
     pub fn get_texture(&self, region_id: ResourceId) -> Option<(Arc<wgpu::Texture>, u32, u32, i32)> {
-        self.regions.get(&region_id).and_then(|r| match &r.backing {
-            DataBacking::Texture { texture, width, height, format } => {
+        self.registry.payload(region_id, |p| match p {
+            ResourcePayload::Data(DataBacking::Texture { texture, width, height, format }) => {
                 Some((texture.clone(), *width, *height, *format))
             }
             _ => None,
-        })
+        }).flatten()
     }
 
-    // ── Lifecycle ─────────────────────────────────────────────
-
-    pub fn free(&self, region_id: ResourceId) -> bool {
-        // Validation happens in the caller (System or host module)
-        if self.regions.remove(&region_id).is_some() {
-            self.registry.unregister(region_id);
-            true
-        } else {
-            false
-        }
-    }
-
+    // Освобождения отдельного метода нет: запись одна, поэтому освобождение
+    // одно — `ResourceRegistry::unregister` (см. `veld_memory_free` в abi.rs).
 }

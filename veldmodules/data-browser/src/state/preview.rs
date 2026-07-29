@@ -8,21 +8,19 @@
 pub struct PreviewState {
     /// Текстура превью. Владелец — мы (image-loader передал владение),
     /// поэтому освобождаем её сами: при замене и при уходе с экрана.
-    pub texture: Option<u64>,
+    pub texture: Option<veldsdk::OwnedResource>,
     /// Открытый ресурс с файлом: наш, живёт только пока идёт декодирование.
-    pub file: Option<u64>,
+    pub file: Option<veldsdk::OwnedResource>,
     pub current_path: String,
     /// Запрос на показ. Актуален последний; вытесненный остаётся на учёте до
     /// ответа не по забывчивости: ресурс по нему придёт всё равно и придёт нам
     /// во владение, а опознать его как свой (и освободить) можно только здесь —
     /// открывают нам двое, библиотека и провайдер.
     pub request: veldsdk::Latest,
-    /// Заведена ли задача декодирования. Она появляется только после того, как
-    /// ресурс открылся: пока идёт открытие, отменять и закрывать нечего.
-    /// Раньше это же выражала трёхсоставная `Phase` рядом с таблицей ожиданий,
-    /// но два из трёх её состояний несли ровно тот id, что и таблица, — своим
-    /// в ней был только этот флаг.
-    decoding: bool,
+    /// Задача декодирования в реестре платформы (id — корреляция запроса).
+    /// Появляется только после того, как ресурс открылся: пока идёт открытие,
+    /// отменять и закрывать нечего.
+    task: Option<veldsdk::TaskGuard>,
     pub error: Option<String>,
 }
 
@@ -33,28 +31,35 @@ impl PreviewState {
 
     /// Заводит новый запрос: он становится актуальным, предыдущий — нет.
     pub fn begin(&mut self) -> String {
-        self.decoding = false;
-        self.request.begin()
+        let id = self.request.begin();
+        self.task = Some(veldsdk::TaskGuard::new(id.clone()));
+        id
     }
 
-    /// Ресурс открыт, задача заведена — переходим ко второму шагу.
-    pub fn decoding(&mut self) {
-        self.decoding = true;
+    /// Ресурс открыт — заводим задачу декодирования и переходим ко второму
+    /// шагу. Публикацию выполняет вызывающий своим стабом: состояние в шину
+    /// не пишет, иначе исходящая связь модуля перестала бы быть видна в схеме.
+    pub fn begin_task(&mut self, kind: &str, executor: &str,
+                      emit: impl FnOnce(&veldsdk::proto::tasks::TaskBeginRequest)) {
+        let label = self.current_path.clone();
+        if let Some(task) = &mut self.task {
+            task.begin(kind, &label, executor, emit);
+        }
     }
 
-    /// Декодирование кончилось: `true`, если задача успела появиться и её надо
-    /// закрыть (`tasks/on_end`). Идентификатор задачи — корреляция ответа,
-    /// она у вызывающего на руках.
-    #[must_use]
-    pub fn finish_decoding(&mut self) -> bool {
-        std::mem::take(&mut self.decoding)
+    /// Декодирование кончилось: закрываем задачу с исходом ответа, если она
+    /// успела появиться (guard сам следит, чтобы `on_end` ушёл ровно один раз).
+    pub fn end_task(&mut self, error: &str,
+                    emit: impl FnOnce(&veldsdk::proto::tasks::TaskEndRequest)) {
+        if let Some(task) = &mut self.task {
+            task.end(error, emit);
+        }
     }
 
     /// Освобождает ресурс с файлом — после декодирования он не нужен.
     pub fn close_file(&mut self) {
-        if let Some(file) = self.file.take() {
-            veldsdk::abi::arena_free(file);
-        }
+        // Drop у OwnedResource освобождает регион.
+        self.file = None;
     }
 
     /// Готовит состояние под новый файл: старая текстура больше не показывается
@@ -62,20 +67,18 @@ impl PreviewState {
     /// этом не снимается — ресурс по нему ещё придёт, и освободит его
     /// обработчик ответа (см. handlers::preview), как и текстуру.
     ///
-    /// Возвращает id задачи, которую стоит отменить, — то есть только той,
-    /// что успела начаться. Публикует отмену вызывающий: состояние в шину не
-    /// пишет, иначе исходящая связь модуля перестала бы быть видна в схеме.
-    #[must_use]
-    pub fn reset(&mut self) -> Option<String> {
-        if let Some(old) = self.texture.take() {
-            veldsdk::abi::arena_free(old);
-        }
+    /// Задача декодирования отменяется, если успела начаться (guard сам решает,
+    /// есть ли что отменять); отмену публикует вызывающий своим стабом.
+    pub fn reset(&mut self, cancel: impl FnOnce(&veldsdk::proto::tasks::TaskCancelRequest)) {
+        // Старая текстура больше не показывается и освобождается (Drop).
+        self.texture = None;
         self.close_file();
         self.error = None;
         self.current_path.clear();
 
-        let abandoned = self.request.abandon();
-        // Задачи нет — отменять нечего, даже если запрос был.
-        if self.finish_decoding() { abandoned } else { None }
+        self.request.abandon();
+        if let Some(task) = &mut self.task {
+            task.cancel(cancel);
+        }
     }
 }

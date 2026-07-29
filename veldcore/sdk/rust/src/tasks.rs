@@ -1,6 +1,68 @@
-//! Сторона исполнителя в системе задач. Заказчику здесь ничего нет: ему
-//! хватает сгенерированных стабов `tasks/on_begin|on_end|on_cancel` и
-//! собственного учёта операций.
+//! Система задач с двух сторон. Исполнителю — `Cancellation` (опрос отмены).
+//! Заказчику — `TaskGuard`: учёт «заведена ли» и обряды begin/end/cancel,
+//! чтобы инварианты протокола не кодировались флагом в каждом модуле заново.
+
+use crate::proto::tasks::{TaskBeginRequest, TaskCancelRequest, TaskEndRequest};
+
+/// Заказчикская сторона задачи: факт «заведена» и обряды вокруг него.
+///
+/// Инварианты протокола — задачу заводит/закрывает/отменяет только владелец,
+/// `on_end` уходит ровно один раз, отменять можно только заведённую. Раньше
+/// каждый заказчик кодировал их сам флагом рядом со своим состоянием (у
+/// data-browser это был `decoding: bool`), и формы таких автоматов уже
+/// начали расходиться. Теперь флаг один, здесь.
+///
+/// Публикацию выполняет вызывающий своими сгенерированными стабами: SDK
+/// топиков модуля не знает (тот же приём, что у `resource::opened`).
+pub struct TaskGuard {
+    task_id: String,
+    active: bool,
+}
+
+impl TaskGuard {
+    /// Задача, которую заказчик собирается завести. `task_id` — обычно
+    /// корреляция породившего запроса.
+    pub fn new(task_id: String) -> Self {
+        Self { task_id, active: false }
+    }
+
+    pub fn id(&self) -> &str { &self.task_id }
+    pub fn is_active(&self) -> bool { self.active }
+
+    /// Заводит задачу в реестре платформы. Владельцем становится паблишер —
+    /// сам модуль; отменить её сможет он, хост или сервис с выданным правом
+    /// (`tasks/on_grant`).
+    pub fn begin(&mut self, kind: &str, label: &str, executor: &str,
+                 emit: impl FnOnce(&TaskBeginRequest)) {
+        emit(&TaskBeginRequest {
+            task_id: self.task_id.clone(),
+            kind: kind.to_string(),
+            label: label.to_string(),
+            executor: executor.to_string(),
+        });
+        self.active = true;
+    }
+
+    /// Закрывает задачу с исходом. `false`, без публикации — задача не была
+    /// заведена или уже закрыта: `on_end` уходит ровно один раз.
+    pub fn end(&mut self, error: &str, emit: impl FnOnce(&TaskEndRequest)) -> bool {
+        if !self.active { return false; }
+        self.active = false;
+        emit(&TaskEndRequest {
+            task_id: self.task_id.clone(),
+            error: error.to_string(),
+        });
+        true
+    }
+
+    /// Отменяет заведённую задачу. `false`, без публикации — отменять нечего.
+    pub fn cancel(&mut self, emit: impl FnOnce(&TaskCancelRequest)) -> bool {
+        if !self.active { return false; }
+        self.active = false;
+        emit(&TaskCancelRequest { task_id: self.task_id.clone() });
+        true
+    }
+}
 
 /// Наблюдатель отмены для длинной работы внутри одного обработчика.
 ///
