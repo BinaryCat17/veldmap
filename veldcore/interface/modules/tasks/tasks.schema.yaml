@@ -1,20 +1,16 @@
 # Контракт платформенного сервиса tasks (сообщения — tasks.proto, рядом).
-# buildgen генерирует из этого файла хостовые биндинги (topics/emit) и
-# клей нативного модуля platform/host/modules/tasks.
+#
+# От сервиса осталось одно: убить операцию. Завести и закрыть её топиков нет —
+# учёт ведёт диспетчер по самим публикациям запроса и его терминального ответа
+# (`cancellable:`/`terminal:` в схемах исполнителей).
 name: tasks
 version: 0.1.0
 interface:
   inputs:
-    on_begin:
-      type: tasks/TaskBeginRequest
-    on_end:
-      type: tasks/TaskEndRequest
     on_cancel:
       type: tasks/TaskCancelRequest
-    on_grant:
-      type: tasks/TaskGrantRequest
   outputs:
-    on_task_started:
-      type: tasks/TaskStarted
+    # Только про убийство: операция, кончившаяся сама, сообщает об этом
+    # собственным терминальным ответом.
     on_task_finished:
       type: tasks/TaskFinished

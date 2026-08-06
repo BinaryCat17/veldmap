@@ -4,19 +4,28 @@ name: network
 version: 0.1.0
 interface:
   inputs:
+    # Закачка и HTTP идут в фоне и бывают долгими — их можно убить. Учёт
+    # операции заводит и снимает хост по самой публикации запроса и его
+    # терминального ответа; отдельных «начать/закончить» у платформы нет.
     on_fs_download:
       type: network/FsDownloadRequest
+      cancellable: true
     on_http:
       type: network/HttpTaskRequest
+      cancellable: true
+    # Открытие ресурса — один Range-запрос за заголовками, убивать нечего.
     on_open:
       type: network/RemoteOpenRequest
   outputs:
     on_open_result:
       type: core/ResourceOpened
       replies_to: on_open
+    # У закачки два ответа, и концом работы является только этот: прогресс
+    # приходит многократно и операцию не закрывает.
     on_fs_download_result:
       type: network/FsDownloadResponse
       replies_to: on_fs_download
+      terminal: true
     on_fs_download_progress:
       type: network/FsDownloadProgress
       replies_to: on_fs_download

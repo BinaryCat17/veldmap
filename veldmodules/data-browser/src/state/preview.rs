@@ -17,10 +17,6 @@ pub struct PreviewState {
     /// во владение, а опознать его как свой (и освободить) можно только здесь —
     /// открывают нам двое, библиотека и провайдер.
     pub request: veldsdk::Latest,
-    /// Задача декодирования в реестре платформы (id — корреляция запроса).
-    /// Появляется только после того, как ресурс открылся: пока идёт открытие,
-    /// отменять и закрывать нечего.
-    task: Option<veldsdk::TaskGuard>,
     pub error: Option<String>,
 }
 
@@ -31,29 +27,7 @@ impl PreviewState {
 
     /// Заводит новый запрос: он становится актуальным, предыдущий — нет.
     pub fn begin(&mut self) -> String {
-        let id = self.request.begin();
-        self.task = Some(veldsdk::TaskGuard::new(id.clone()));
-        id
-    }
-
-    /// Ресурс открыт — заводим задачу декодирования и переходим ко второму
-    /// шагу. Публикацию выполняет вызывающий своим стабом: состояние в шину
-    /// не пишет, иначе исходящая связь модуля перестала бы быть видна в схеме.
-    pub fn begin_task(&mut self, kind: &str, executor: &str,
-                      emit: impl FnOnce(&veldsdk::proto::tasks::TaskBeginRequest)) {
-        let label = self.current_path.clone();
-        if let Some(task) = &mut self.task {
-            task.begin(kind, &label, executor, emit);
-        }
-    }
-
-    /// Декодирование кончилось: закрываем задачу с исходом ответа, если она
-    /// успела появиться (guard сам следит, чтобы `on_end` ушёл ровно один раз).
-    pub fn end_task(&mut self, error: &str,
-                    emit: impl FnOnce(&veldsdk::proto::tasks::TaskEndRequest)) {
-        if let Some(task) = &mut self.task {
-            task.end(error, emit);
-        }
+        self.request.begin()
     }
 
     /// Освобождает ресурс с файлом — после декодирования он не нужен.
@@ -67,18 +41,17 @@ impl PreviewState {
     /// этом не снимается — ресурс по нему ещё придёт, и освободит его
     /// обработчик ответа (см. handlers::preview), как и текстуру.
     ///
-    /// Задача декодирования отменяется, если успела начаться (guard сам решает,
-    /// есть ли что отменять); отмену публикует вызывающий своим стабом.
-    pub fn reset(&mut self, cancel: impl FnOnce(&veldsdk::proto::tasks::TaskCancelRequest)) {
+    /// Возвращает корреляцию брошенного запроса: ею вызывающий убивает
+    /// декодирование, если оно уже идёт. Публикует он сам, своим стабом —
+    /// состояние в шину не пишет, иначе исходящая связь модуля перестала бы
+    /// быть видна в схеме.
+    pub fn reset(&mut self) -> Option<String> {
         // Старая текстура больше не показывается и освобождается (Drop).
         self.texture = None;
         self.close_file();
         self.error = None;
         self.current_path.clear();
 
-        self.request.abandon();
-        if let Some(task) = &mut self.task {
-            task.cancel(cancel);
-        }
+        self.request.abandon()
     }
 }

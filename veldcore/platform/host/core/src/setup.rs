@@ -151,7 +151,9 @@ pub async fn init_core_services(
     let tasks = Arc::new(crate::tasks::TaskRegistry::new());
     let surfaces = Arc::new(crate::surfaces::SurfaceQueue::new());
 
-    let dispatcher = Arc::new(Dispatcher::new());
+    // Диспетчер ведёт учёт операций в полёте, поэтому реестр создаётся до
+    // него и разделяется с контекстом: ABI отвечает из него на «жива ли».
+    let dispatcher = Arc::new(Dispatcher::new(tasks.clone()));
 
     Ok(Arc::new(HostContext {
         dispatcher: dispatcher.clone(),

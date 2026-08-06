@@ -43,7 +43,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
     let ctx = state.ctx.clone();
     let path = resolve_path(&ctx, &req.path);
     if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
-    let label = req.path.clone();
+    log::info!(target: "network", "Received download request: {}", req.path);
     // Суффикс, а не замена расширения (set_extension) — иначе "foo.tif" и
     // "foo.zip" в одной папке схлопнулись бы в один и тот же "foo.part".
     let part_path: PathBuf = {
@@ -52,9 +52,10 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
         s.into()
     };
 
-    // owner = инициатор запроса: отменить скачивание может он, хост
-    // или сервис с его grant'ом (топик tasks/cancel).
-    let spawned = state.tasks.spawn(&caller.correlation, caller.instance, "fs_download", &label, |correlation_id| async move {
+    // Операция уже учтена диспетчером: её топик объявлен `cancellable: true`,
+    // владелец — паблишер запроса. Нам остаётся сделать её убиваемой, отдав
+    // фасаду abort-хендл фьючерса.
+    state.tasks.spawn(&caller.correlation, |correlation_id| async move {
         // Существующий .part с предыдущей попытки — точка возобновления:
         // узнаём его размер ДО запроса, чтобы попросить сервер прислать хвост.
         let resume_offset = tokio::fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0);
@@ -164,10 +165,4 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
         }, &correlation_id);
         Ok(())
     });
-
-    if let Err(dup) = spawned {
-        bus::emit::on_fs_download_result(&*state.ctx.publisher, &FsDownloadResponse {
-            error: format!("Duplicate task id: {}", dup.0),
-        }, &dup.0);
-    }
 }

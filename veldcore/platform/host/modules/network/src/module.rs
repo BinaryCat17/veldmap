@@ -22,7 +22,7 @@ pub struct State {
 }
 
 pub fn hook_init(ctx: Arc<HostContext>) -> State {
-    State { tasks: Tasks::new(&ctx, "network"), ctx }
+    State { tasks: Tasks::new(&ctx), ctx }
 }
 
 // -- Input handlers --

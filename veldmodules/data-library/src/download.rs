@@ -149,11 +149,10 @@ pub fn on_fs_download_result(state: &mut State, response: FsDownloadResponse) {
     finish(state, &correlation_id);
 }
 
-/// Терминальное событие платформы. Доменный результат приходит первым и
-/// снимает закачку с учёта, поэтому сюда доходят только отмены: при обрыве
-/// задачи `fs_download_result` не публикуется вовсе.
+/// Закачку убили. Платформа сообщает только об этом: дошедшая до конца сама
+/// приходит своим `on_fs_download_result`, а у убитой его не будет — сетевого
+/// исполнителя уже нет.
 pub fn on_task_finished(state: &mut State, event: TaskFinished) {
-    if !event.cancelled { return; }
     finish(state, &event.task_id);
 }
 

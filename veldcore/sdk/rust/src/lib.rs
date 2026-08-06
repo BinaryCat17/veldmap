@@ -29,5 +29,5 @@ pub use abi::event_publisher;
 pub use abi::correlation;
 pub use correlator::Correlator;
 pub use latest::{Latest, Reply};
-pub use tasks::{Cancellation, TaskGuard};
+pub use tasks::Cancellation;
 pub use resource::{OwnedResource, ResourceReader};

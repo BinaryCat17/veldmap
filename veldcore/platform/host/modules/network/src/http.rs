@@ -63,9 +63,9 @@ pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
 
     log::info!(target: "network", "Received HTTP request: {}", label);
 
-    // Задача именуется корреляцией запроса: заказчик отменяет её тем же id,
-    // которым опознаёт ответ.
-    let spawned = state.tasks.spawn(&caller.correlation, caller.instance, "http", &label, |correlation_id| async move {
+    // Операция именуется корреляцией запроса: под ней её учёл диспетчер, ею
+    // же заказчик её убьёт и по ней опознает ответ.
+    state.tasks.spawn(&caller.correlation, |correlation_id| async move {
         log::info!(target: "network", "Executing HTTP request {}...", correlation_id);
         let method = match req.method.to_uppercase().as_str() {
             "POST" => reqwest::Method::POST,
@@ -94,11 +94,4 @@ pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
             }
         }
     });
-
-    if let Err(dup) = spawned {
-        bus::emit::on_http_result(&*state.ctx.publisher, &HttpTaskResponse {
-            status: 0,
-            body: Vec::new(),
-        }, &dup.0);
-    }
 }

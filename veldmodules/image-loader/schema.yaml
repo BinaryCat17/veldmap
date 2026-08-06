@@ -5,8 +5,12 @@ version: 0.1.0
 # файл за ним или удалённый URL. Кто ресурс открыл — тот его и закроет.
 interface:
   inputs:
+    # Снимок декодируется секундами, и заказчик вправе бросить работу, если
+    # смотреть на результат уже некому. Учёт операции заводит хост на самой
+    # публикации запроса — заказчику для этого делать нечего.
     on_load:
       type: module/LoadImageRequest
+      cancellable: true
   outputs:
     on_load_result:
       type: module/LoadImageResult

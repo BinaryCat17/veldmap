@@ -17,15 +17,19 @@ use crate::proto::image_loader::{LoadImageRequest, LoadImageResult};
 use crate::proto::ui_service::proto::UiEventResponse;
 use veldsdk::Reply;
 use veldsdk::proto::core::ResourceOpened;
+use veldsdk::proto::tasks::TaskCancelRequest;
 
-/// Тип задачи декодирования в реестре платформы (идёт в tasks/task_started).
-const DECODE_KIND: &str = "image_decode";
-
-/// Бросает текущее превью: освобождает ресурсы и отменяет декодирование, если
+/// Бросает текущее превью: освобождает ресурсы и убивает декодирование, если
 /// оно ещё идёт. Снимок декодируется секундами, и продолжать работу ради
 /// картинки, которую уже никто не увидит, незачем.
+///
+/// Убиваем безусловно, не разбирая, дошло ли дело до декодирования: операция
+/// учтена платформой с самой публикации запроса, а убийство того, чего уже
+/// нет, — это отказ в реестре, а не ошибка здесь.
 pub fn abandon(state: &mut State) {
-    state.preview.reset(crate::calls::tasks::on_cancel);
+    if let Some(task_id) = state.preview.reset() {
+        crate::calls::tasks::on_cancel(&TaskCancelRequest { task_id });
+    }
 }
 
 /// Просмотр скачанного файла: открывает библиотека — файл её, и где он лежит,
@@ -120,10 +124,6 @@ fn start_decode(state: &mut State, resource: veldsdk::ResourceHandle, correlatio
     }
     state.preview.file = Some(veldsdk::OwnedResource::new(resource.clone()));
 
-    // Задачу заводим мы, а не загрузчик: владелец — паблишер begin, и только
-    // он вправе её отменить. Загрузчик её лишь опрашивает, пока декодирует.
-    state.preview.begin_task(DECODE_KIND, "image-loader", crate::calls::tasks::on_begin);
-
     // Бокс превью — размер окна в физических пикселях: больше на экран всё
     // равно не поместится, а декодировать в полный размер снимка незачем.
     crate::calls::image_loader::on_load(&LoadImageRequest {
@@ -156,8 +156,8 @@ pub fn on_load_result(state: &mut State, result: LoadImageResult) {
     }
     // Файл больше не нужен: декодирование кончилось (успехом или нет).
     state.preview.close_file();
-    // Задачу заводили мы — нам её и закрывать, с тем же исходом, что у ответа.
-    state.preview.end_task(&result.error, crate::calls::tasks::on_end);
+    // Учёт операции снял хост, приняв этот ответ: он терминальный по схеме
+    // загрузчика. Закрывать здесь нечего.
 
     let handle = match veldsdk::resource::accept_parts(result.handle, &result.error) {
         Ok(handle) => handle,

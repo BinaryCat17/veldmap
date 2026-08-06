@@ -1,38 +1,40 @@
-//! Реестр фоновых задач платформы: владение по lease (та же модель прав,
-//! что у ресурсов — registry.rs), отмена по task_id и уникальность
-//! идентификаторов.
+//! Учёт операций в полёте: кто их запросил и чем их убить.
 //!
-//! Только хранение и права. Шину реестр не знает: жизненный цикл
-//! (tasks/task_started, tasks/task_finished) эмитит фасад `Tasks` в host-util
-//! — единственный, кто эту таблицу меняет. Голый реестр модулям не
-//! экспортируется; ядро отдаёт наружу лишь `is_alive` через ABI
-//! `veld_task_alive` — единственный вопрос, на который шина ответить не может
-//! (wasm-модуль внутри обработчика не разгребает свою очередь).
+//! Отдельной сущности «задача» в платформе нет — задача это событие в полёте.
+//! Поэтому записи здесь не заводят топиками: диспетчер открывает учёт, когда
+//! публикуется запрос, объявленный `cancellable: true`, и закрывает, когда
+//! проходит терминальный ответ на ту же корреляцию (см. dispatcher.rs).
+//! Ключ — correlation_id запроса, владелец — паблишер, которого штампует хост.
+//!
+//! Только хранение и права. Шину реестр не знает: `tasks/on_task_finished`
+//! эмитит диспетчер — единственный, кто эту таблицу меняет.
 
 use dashmap::DashMap;
 use tokio::task::AbortHandle;
-use crate::registry::Lease;
 
-/// Живая задача. Только то, что нужно для отмены: описание (label, kind,
-/// executor) уходит в tasks/task_started и больше никому не нужно — хранить
-/// его здесь значило бы держать копию, которую никто не читает.
+/// Операция в полёте. Владелец — instance id заказчика (0 = хост): только он
+/// вправе её убить. `abort` есть лишь у нативных исполнителей, работающих
+/// фьючерсом; wasm снимается иначе (его убивает трап по epoch-прерыванию).
 pub struct TaskEntry {
-    pub lease: Lease,
-    /// None между begin() и attach_abort(): отмена в этом окне снимает
-    /// запись, а attach_abort вернёт false — фасад abort'ит хендл сам.
+    pub owner: u32,
+    /// None, пока нативный исполнитель не прикрепил хендл (attach_abort) —
+    /// или навсегда, если исполнитель не токиевский.
     pub abort: Option<AbortHandle>,
 }
 
+/// Чем кончилось требование убить.
 pub enum CancelOutcome {
-    Cancelled,
+    Killed,
+    /// Убивать нечего: операция уже кончилась сама либо её топик отменяемым
+    /// не объявлен. Обычное дело, а не ошибка: заказчик бросает работу, не
+    /// разбираясь, в какой она фазе, — иначе он вёл бы у себя копию учёта,
+    /// который платформа и так ведёт.
     NotFound,
+    /// Операция есть, но проситель ей не владеет — это уже ошибка в коде.
     Denied,
 }
 
-#[derive(Debug)]
-pub struct DuplicateTaskId(pub String);
-
-/// Реестр живых задач. Ключ — task_id (correlation_id инициатора).
+/// Реестр операций в полёте. Ключ — correlation_id запроса.
 pub struct TaskRegistry {
     tasks: DashMap<String, TaskEntry>,
 }
@@ -42,22 +44,16 @@ impl TaskRegistry {
         Self { tasks: DashMap::new() }
     }
 
-    /// Открывает регистрацию задачи. owner — instance id инициатора (0 = хост).
-    /// Дубликат живого id — ошибка: чужой идентификатор нельзя переиспользовать,
-    /// пока задача не завершилась.
-    pub fn begin(&self, task_id: &str, owner: u32) -> Result<(), DuplicateTaskId> {
-        // entry() не подходит: нужно отличить занятый id, не перезаписывая его.
-        if self.tasks.contains_key(task_id) {
-            return Err(DuplicateTaskId(task_id.to_string()));
-        }
-        self.tasks.insert(task_id.to_string(), TaskEntry {
-            lease: Lease::new(owner),
-            abort: None,
-        });
-        Ok(())
+    /// Открывает учёт операции. Повторный id живой операции игнорируется:
+    /// корреляция уникальна у своего заказчика, а совпасть она может только
+    /// у сквозного запроса, который отвечает чужой корреляцией и своей
+    /// операции не заводит.
+    pub fn begin(&self, task_id: &str, owner: u32) {
+        self.tasks.entry(task_id.to_string())
+            .or_insert(TaskEntry { owner, abort: None });
     }
 
-    /// Жива ли задача. Единственный способ узнать об отмене для того, кто
+    /// Жива ли операция. Единственный способ узнать об убийстве для того, кто
     /// не может принять событие прямо сейчас: wasm-модуль внутри обработчика
     /// не разгребает свою очередь, поэтому длинную работу он проверяет
     /// опросом между порциями.
@@ -65,57 +61,41 @@ impl TaskRegistry {
         self.tasks.contains_key(task_id)
     }
 
-    /// Прикрепляет abort-хендл к зарегистрированной задаче. false — задача
-    /// уже снята (отменена в окне между begin и attach): хендл надо abort'ить.
+    /// Прикрепляет abort-хендл к учтённой операции. false — её уже сняли
+    /// (убили в окне между публикацией запроса и стартом фьючерса): хендл
+    /// тогда abort'ит вызывающий.
     pub fn attach_abort(&self, task_id: &str, abort: AbortHandle) -> bool {
-        if let Some(mut entry) = self.tasks.get_mut(task_id) {
-            entry.abort = Some(abort);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Отмена с проверкой прав: владелец, writer (grant) или хост (id 0).
-    pub fn cancel(&self, task_id: &str, requestor: u32) -> CancelOutcome {
-        let can_cancel = match self.tasks.get(task_id) {
-            Some(entry) => entry.lease.can_write(requestor),
-            None => return CancelOutcome::NotFound,
-        };
-        if !can_cancel {
-            return CancelOutcome::Denied;
-        }
-        if let Some((_, entry)) = self.tasks.remove(task_id) {
-            if let Some(abort) = entry.abort {
-                abort.abort();
-            }
-        }
-        CancelOutcome::Cancelled
-    }
-
-    /// Завершение: снимает задачу с учёта. false — уже снята (отменена):
-    /// терминальное событие тогда эмитит путь отмены.
-    ///
-    /// `requestor` проверяется тем же lease, что и отмена: закрыть задачу
-    /// может её владелец, обладатель grant'а или хост. Иначе чужой модуль
-    /// закрывал бы задачу, за которую не отвечает.
-    pub fn complete(&self, task_id: &str, requestor: u32) -> bool {
-        match self.tasks.get(task_id) {
-            Some(entry) if entry.lease.can_write(requestor) => {}
-            _ => return false,
-        }
-        self.tasks.remove(task_id).is_some()
-    }
-
-    /// Делегирование права отмены другому сервису. Менять lease может
-    /// только владелец (или хост) — то же правило, что у lease_op в abi.rs.
-    pub fn grant(&self, task_id: &str, requestor: u32, target: u32) -> bool {
         match self.tasks.get_mut(task_id) {
-            Some(mut entry) if entry.lease.owner_id == requestor || requestor == 0 => {
-                entry.lease.add_writer(target);
-                true
-            }
-            _ => false,
+            Some(mut entry) => { entry.abort = Some(abort); true }
+            None => false,
         }
+    }
+
+    /// Убийство по требованию.
+    ///
+    /// Право одно и проверяется одним сравнением: убить может заказчик или
+    /// хост. Делегирования этого права нет — им никто не пользовался, а
+    /// вопрос «кто вправе убить мою операцию» с одним ответом честнее.
+    pub fn cancel(&self, task_id: &str, requestor: u32) -> CancelOutcome {
+        match self.tasks.get(task_id) {
+            Some(entry) if entry.owner == requestor || requestor == 0 => {}
+            Some(_) => return CancelOutcome::Denied,
+            None => return CancelOutcome::NotFound,
+        }
+        match self.tasks.remove(task_id) {
+            Some((_, entry)) => {
+                if let Some(abort) = entry.abort {
+                    abort.abort();
+                }
+                CancelOutcome::Killed
+            }
+            None => CancelOutcome::NotFound,
+        }
+    }
+
+    /// Снимает учёт по терминальному ответу: операция дошла до конца сама.
+    /// `false` — записи не было (её убили, и событие об этом уже ушло).
+    pub fn complete(&self, task_id: &str) -> bool {
+        self.tasks.remove(task_id).is_some()
     }
 }

@@ -24,6 +24,41 @@ pub trait Publisher {
     /// только подписчику с этим именем (см. `targeted: true` в schema.yaml).
     fn publish(&self, topic: &str, payload: Vec<u8>, correlation: &str, target: &str);
 }
+
+/// Поток операции, выведенный из схем: какой запрос можно убить и каким
+/// ответом он кончается.
+///
+/// Событие в полёте — это и есть задача, поэтому «завести» и «закрыть» у
+/// платформы не топики, а следствие самой публикации: диспетчер открывает
+/// учёт на отменяемом запросе и закрывает на его терминальном ответе. Обе
+/// половины таблицы отсортированы — поиск бинарный, аллокаций нет.
+pub mod flow {
+    /// Топики-запросы с `cancellable: true`: на них диспетчер заводит учёт.
+    pub const CANCELLABLE: &[&str] = &[
+        {%- for topic in cancellable %}
+        "{{ topic }}",
+        {%- endfor %}
+    ];
+
+    /// Терминальные ответы этих запросов: на них учёт снимается. Ответ,
+    /// объявленный промежуточным (прогресс), сюда не попадает и операцию
+    /// не закрывает.
+    pub const TERMINAL: &[&str] = &[
+        {%- for topic in terminal %}
+        "{{ topic }}",
+        {%- endfor %}
+    ];
+
+    /// Открывает ли публикация этого топика учёт операции.
+    pub fn is_cancellable(topic: &str) -> bool {
+        CANCELLABLE.binary_search(&topic).is_ok()
+    }
+
+    /// Закрывает ли публикация этого топика учёт операции.
+    pub fn is_terminal(topic: &str) -> bool {
+        TERMINAL.binary_search(&topic).is_ok()
+    }
+}
 {% for svc in services %}
 /// Контракт сервиса `{{ svc.name }}` ({{ svc.name }}.schema.yaml).
 pub mod {{ svc.snake }} {

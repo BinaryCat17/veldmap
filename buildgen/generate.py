@@ -161,6 +161,64 @@ def correlated_topics(schema: dict) -> tuple[dict[str, list[str]], set[str]]:
     return requests, replies
 
 
+# ── Поток операции: чем она кончается и можно ли её убить ────────────────────
+# Событие в полёте — это и есть задача, поэтому отдельных «завести/закрыть» у
+# платформы нет: хост открывает учёт, когда публикуется запрос, объявленный
+# `cancellable: true`, и закрывает, когда проходит его терминальный ответ.
+# Какой из ответов терминальный, знает только схема: у `network/on_fs_download`
+# их два (прогресс и результат), и лишь второй означает конец работы.
+
+def terminal_reply_of(schema: dict) -> tuple[dict[str, str], list[str]]:
+    """Запрос → имя его терминального ответа, плюс список ошибок.
+
+    Единственный ответ терминален по умолчанию — писать `terminal: true` там,
+    где выбора нет, значило бы заставлять повторять очевидное. Ключ обязателен
+    ровно тогда, когда ответов несколько и решение действительно есть.
+    """
+    outputs = (schema.get("interface") or {}).get("outputs") or {}
+    requests, _ = correlated_topics(schema)
+    terminal, errors = {}, []
+    for request, replies in requests.items():
+        marked = [r for r in replies if (outputs.get(r) or {}).get("terminal")]
+        if len(replies) == 1 and not marked:
+            terminal[request] = replies[0]
+        elif len(marked) == 1:
+            terminal[request] = marked[0]
+        elif not marked:
+            errors.append(f"interface.inputs.{request}: у запроса несколько ответов "
+                          f"({', '.join(sorted(replies))}) — ровно один из них должен "
+                          f"нести `terminal: true`")
+        else:
+            errors.append(f"interface.inputs.{request}: `terminal: true` стоит у "
+                          f"нескольких ответов ({', '.join(sorted(marked))}) — "
+                          f"терминальный ответ у запроса один")
+    return terminal, errors
+
+
+def flow_entries(svc_name: str, schema: dict) -> tuple[list[dict], list[str]]:
+    """Отменяемые запросы сервиса в виде записей для таблицы потока хоста.
+
+    Отменяемость объявляет исполнитель у себя во входе: только он знает, что
+    работа бывает достаточно долгой, чтобы её имело смысл убивать. Заказчику
+    объявлять нечего — он лишь публикует запрос.
+    """
+    inputs = (schema.get("interface") or {}).get("inputs") or {}
+    terminal, errors = terminal_reply_of(schema)
+    entries = []
+    for name, entry in inputs.items():
+        if not (entry or {}).get("cancellable"):
+            continue
+        if name not in terminal:
+            errors.append(f"interface.inputs.{name}: `cancellable: true` требует ответа "
+                          f"(`replies_to`) — иначе учёт операции некому закрыть")
+            continue
+        entries.append({
+            "request":  f"{svc_name}/{name}",
+            "terminal": f"{svc_name}/{terminal[name]}",
+        })
+    return entries, errors
+
+
 # ── Нормализация: схема → модель сервиса ─────────────────────────────────────
 # Общий для обоих конвейеров (wasm-модули и нативные сервисы хоста) шаг:
 # флаги топиков вычисляются из схемы один раз, а тонкие бэкенды рендеринга
@@ -315,6 +373,10 @@ def validate_service_schema(schema: dict, universe: dict,
         if replies_to not in (iface.get("inputs") or {}):
             err(where, f"'{replies_to}' is not one of this service's interface.inputs")
 
+    # Терминальный ответ и отменяемость: учёт операции ведёт хост, и открыть
+    # его без ответа, которым он закрывается, нельзя (см. flow_entries).
+    errors.extend(flow_entries(name, schema)[1])
+
     # Перекрёстная проверка зависимостей — только диалект wasm-модуля.
     if schema_dir is not None:
         modules_root = os.path.dirname(schema_dir)
@@ -439,6 +501,7 @@ def generate_host_bindings(args, script_dir: str):
     schema_files = list(iter_core_files(proto_dir, ".schema.yaml"))
 
     services = []
+    flow = []
     for schema_path in schema_files:
         with open(schema_path) as sf:
             svc_schema = yaml.safe_load(sf)
@@ -447,6 +510,24 @@ def generate_host_bindings(args, script_dir: str):
         services.append(service_model(
             svc_schema.get("name"), svc_schema,
             lambda _kind, _n, d: schema_type_to_rust_path(d.get("type") or "")))
+        flow.extend(flow_entries(svc_schema.get("name"), svc_schema)[0])
+
+    # ── Таблица потока: по всему дереву, а не только по veldcore/interface ───
+    # Учёт операций ведёт диспетчер, и топики wasm-модулей идут через него
+    # наравне с платформенными: отменяемый декод живёт в image-loader. Схемы
+    # модулей к этому моменту уже проверены (build.py генерирует их раньше),
+    # поэтому здесь они только читаются.
+    project_root = os.path.normpath(os.path.join(script_dir, ".."))
+    modules_root = os.path.join(project_root, "veldmodules")
+    for entry in sorted(os.scandir(modules_root), key=lambda e: e.name):
+        module_schema_path = os.path.join(entry.path, "schema.yaml")
+        if not entry.is_dir() or not os.path.exists(module_schema_path):
+            continue
+        with open(module_schema_path) as sf:
+            module_schema = yaml.safe_load(sf)
+        entries, errors = flow_entries(module_schema.get("name"), module_schema)
+        fail_on(errors, module_schema_path)
+        flow.extend(entries)
 
     proto_dir_rel = os.path.relpath(proto_dir, out_dir).replace("\\", "/")
     template_data = {
@@ -455,6 +536,9 @@ def generate_host_bindings(args, script_dir: str):
         "proto_packages": proto_packages,
         "proto_dir_rel":  proto_dir_rel,
         "services":       services,
+        # Таблица ищется бинарным поиском — обе половины отсортированы.
+        "cancellable":    sorted(e["request"] for e in flow),
+        "terminal":       sorted(e["terminal"] for e in flow),
     }
 
     env = Environment(loader=FileSystemLoader(os.path.join(script_dir, "templates")))

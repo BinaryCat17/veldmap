@@ -75,7 +75,6 @@ pub type Subscriber = tokio::sync::mpsc::UnboundedSender<Event>;
 /// одного получателя, а не разослать всем.
 type Registration = (String, Subscriber);
 
-#[derive(Default)]
 pub struct Dispatcher {
     subscriptions: Mutex<HashMap<String, Vec<Registration>>>,
     /// Instance id каждого сервиса на шине: адресат для lease-грантов.
@@ -87,13 +86,19 @@ pub struct Dispatcher {
     /// wasm — при загрузке в отсортированном порядке файлов, поэтому
     /// идентификаторы детерминированы от запуска к запуску.
     next_instance: AtomicU32,
+    /// Операции в полёте. Диспетчер их и ведёт: задача — это событие в
+    /// полёте, а не отдельно заводимая запись (см. `account`).
+    tasks: Arc<crate::tasks::TaskRegistry>,
 }
 
 impl Dispatcher {
-    pub fn new() -> Self {
+    pub fn new(tasks: Arc<crate::tasks::TaskRegistry>) -> Self {
         Self {
+            subscriptions: Mutex::new(HashMap::new()),
+            instances: Mutex::new(HashMap::new()),
+            names: Mutex::new(HashMap::new()),
             next_instance: AtomicU32::new(1),
-            ..Default::default()
+            tasks,
         }
     }
 
@@ -175,6 +180,7 @@ impl Dispatcher {
             return;
         }
         let (service_name, method) = (parts[0], parts[1]);
+        self.account(topic, publisher, correlation);
 
         let subs = {
             let subscriptions = self.subscriptions.lock().unwrap();
@@ -206,6 +212,30 @@ impl Dispatcher {
             }).is_err() {
                 log::error!(target: "dispatcher", "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
             }
+        }
+    }
+
+    /// Учёт операции по самой публикации: отменяемый запрос открывает его,
+    /// его терминальный ответ — закрывает.
+    ///
+    /// Здесь и происходит то, ради чего у платформы больше нет топиков
+    /// «завести» и «закрыть»: оба факта уже есть в проходящем событии. Кто
+    /// владеет операцией — паблишер запроса, которого штампует хост, а не
+    /// имя, названное в сообщении; чем она кончилась — терминальный ответ,
+    /// объявленный схемой исполнителя. Модулю сообщать нечего, а значит и
+    /// разойтись с действительностью нечему.
+    ///
+    /// Учёт открывается ДО доставки запроса: к моменту, когда исполнитель
+    /// начнёт работу, запись уже есть, и «меня ещё ждут?» отвечается
+    /// однозначно с первого же опроса.
+    fn account(&self, topic: &str, publisher: u32, correlation: &str) {
+        if correlation.is_empty() {
+            return;
+        }
+        if veldmap_host_bindings::flow::is_cancellable(topic) {
+            self.tasks.begin(correlation, publisher);
+        } else if veldmap_host_bindings::flow::is_terminal(topic) {
+            self.tasks.complete(correlation);
         }
     }
 }
