@@ -111,24 +111,6 @@ pub enum DataBacking {
 }
 
 impl DataBacking {
-    pub fn is_buffer(&self) -> bool {
-        matches!(self, Self::Buffer { .. })
-    }
-
-    pub fn as_buffer(&self) -> Option<&wgpu::Buffer> {
-        match self {
-            Self::Buffer { buffer, .. } => Some(buffer),
-            _ => None,
-        }
-    }
-
-    pub fn as_texture(&self) -> Option<&wgpu::Texture> {
-        match self {
-            Self::Texture { texture, .. } => Some(texture),
-            _ => None,
-        }
-    }
-
     /// Чтение уходит наружу (диск, сеть, ожидание GPU) и может занять поток
     /// надолго. Такие вызовы хост выполняет на blocking-пуле: иначе медленный
     /// носитель съедает воркер рантайма, а не только фибру своего плагина.
@@ -404,13 +386,6 @@ impl MemoryManager {
             ResourcePayload::Data(backing) => backing.read_blocks(),
             ResourcePayload::Gpu(_) => false,
         }).unwrap_or(false)
-    }
-
-    pub fn get_size(&self, region_id: ResourceId) -> u64 {
-        self.registry.payload(region_id, |p| match p {
-            ResourcePayload::Data(backing) => backing.byte_len(),
-            ResourcePayload::Gpu(_) => 0,
-        }).unwrap_or(0)
     }
 
     // ── Lookup helpers ────────────

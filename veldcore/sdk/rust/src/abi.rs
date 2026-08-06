@@ -28,7 +28,6 @@ extern "C" {
     fn veld_memory_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
     fn veld_memory_grant_read(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
     fn veld_memory_grant_write(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
-    fn veld_memory_revoke(region_id: u64) -> u64;
     fn veld_memory_free(region_id: u64) -> u64;
 
     fn veld_input_len() -> u64;
@@ -180,11 +179,6 @@ pub(crate) fn arena_grant_read(region_id: u64, service: &str) -> bool {
 /// Низкий уровень ABI: прикладной код — `resource::grant_write_or_free`.
 pub(crate) fn arena_grant_write(region_id: u64, service: &str) -> bool {
     unsafe { veld_memory_grant_write(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
-}
-
-/// Revoke all external access to a region
-pub fn arena_revoke(region_id: u64) -> bool {
-    unsafe { veld_memory_revoke(region_id) != 0 }
 }
 
 /// Free a resource region.

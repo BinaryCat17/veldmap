@@ -147,12 +147,12 @@ pub async fn init_core_services(
 ) -> anyhow::Result<Arc<HostContext>> {
     let registry = Arc::new(ResourceRegistry::new());
     let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone()));
-    let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), queue.clone(), surface_format));
+    let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), surface_format));
     let tasks = Arc::new(crate::tasks::TaskRegistry::new());
     let surfaces = Arc::new(crate::surfaces::SurfaceQueue::new());
 
-    // Диспетчер ведёт учёт операций в полёте, поэтому реестр создаётся до
-    // него и разделяется с контекстом: ABI отвечает из него на «жива ли».
+    // Диспетчер ведёт учёт операций в полёте, поэтому реестр задач создаётся
+    // до него и разделяется с контекстом: из него же убивает ABI.
     let dispatcher = Arc::new(Dispatcher::new(tasks.clone()));
 
     Ok(Arc::new(HostContext {

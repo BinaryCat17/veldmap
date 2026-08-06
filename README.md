@@ -108,7 +108,7 @@ fire-and-forget. Синхронных вызовов между модулями
 | Шина и логи | `veld_host_publish`, `veld_host_log` |
 | Система | `veld_get_config`, `veld_random_bytes` |
 | Память | `veld_memory_alloc_cpu`, `veld_memory_alloc_buffer`, `veld_memory_alloc_texture`, `veld_memory_read`, `veld_memory_write`, `veld_memory_texture_size`, `veld_memory_free` |
-| Права | `veld_memory_transfer`, `veld_memory_grant_read`, `veld_memory_grant_write`, `veld_memory_revoke` |
+| Права | `veld_memory_transfer`, `veld_memory_grant_read`, `veld_memory_grant_write` |
 | Графика | `veld_graphics_create_resource`, `veld_graphics_execute` |
 | Задачи | `veld_task_kill` |
 | Контекст вызова | `veld_input_len`, `veld_input_copy`, `veld_output_set` |
@@ -183,8 +183,10 @@ hooks: [hook_event]             # опциональные хуки жизнен
 
 У каждого ресурса есть аренда: владелец, список читателей и список писателей.
 Владелец может передать владение (`transfer`), выдать право чтения или записи
-(`grant_read`, `grant_write`), снять все выданные права (`revoke`) и
-освободить ресурс (`free`). Проверки выполняет хост на каждом обращении.
+(`grant_read`, `grant_write`) и освободить ресурс (`free`). Проверки выполняет
+хост на каждом обращении. Отзыва выданного права нет: гранты живут ровно
+столько, сколько сам ресурс, а отобрать их у читателей — то же самое, что
+освободить его.
 
 Ответ на «открой мне это» у всех одинаковый — `core.ResourceOpened`; его
 публикуют `fs`, `network`, `data-provider` и `data-library`. Владение открытым

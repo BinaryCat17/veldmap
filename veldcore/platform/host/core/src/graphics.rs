@@ -33,25 +33,25 @@ pub struct GraphicsDevice {
     registry: Arc<ResourceRegistry>,
     memory: Arc<MemoryManager>,
     device: Arc<wgpu::Device>,
-    queue: Arc<std::sync::Mutex<wgpu::Queue>>,
     surface_format: wgpu::TextureFormat,
     /// Render ops submitted by modules, drained by the runner's frame loop.
     pending_ops: Mutex<Vec<PendingRenderOp>>,
 }
 
 impl GraphicsDevice {
+    /// Очереди здесь нет намеренно: writes в GPU идут через `MemoryManager`,
+    /// у которого она своя. Второй handle сюда только раздваивал бы владельца
+    /// одной и той же очереди.
     pub fn new(
         registry: Arc<ResourceRegistry>,
         memory: Arc<MemoryManager>,
         device: Arc<wgpu::Device>,
-        queue: Arc<std::sync::Mutex<wgpu::Queue>>,
         surface_format: wgpu::TextureFormat,
     ) -> Self {
         Self {
             registry,
             memory,
             device,
-            queue,
             surface_format,
             pending_ops: Mutex::new(Vec::new()),
         }
@@ -64,8 +64,6 @@ impl GraphicsDevice {
 
     pub fn registry(&self) -> &Arc<ResourceRegistry> { &self.registry }
     pub fn memory(&self) -> &Arc<MemoryManager> { &self.memory }
-    pub fn get_device(&self) -> Arc<wgpu::Device> { self.device.clone() }
-    pub fn get_queue(&self) -> Arc<std::sync::Mutex<wgpu::Queue>> { self.queue.clone() }
     pub fn get_surface_format_proto(&self) -> i32 { surface_format_to_proto(self.surface_format) }
 
     // ── GPU object helpers ────────────────────────────────────

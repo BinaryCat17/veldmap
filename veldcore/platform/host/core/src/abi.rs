@@ -209,20 +209,6 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     lease_op(linker, "veld_memory_grant_read", |lease, target| lease.add_reader(target))?;
     lease_op(linker, "veld_memory_grant_write", |lease, target| lease.add_writer(target))?;
 
-    // veld_memory_revoke(region_id) → bool
-    linker.func_wrap("env", "veld_memory_revoke", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
-        let registry = caller.data().registry.clone();
-        let owner_id = caller.data().instance_id;
-        let mut ok = false;
-        registry.update_lease(region_id, |lease| {
-            if lease.owner_id == owner_id || owner_id == 0 {
-                lease.revoke_all();
-                ok = true;
-            }
-        });
-        if ok { 1 } else { 0 }
-    })?;
-
     // veld_memory_free(region_id) → bool
     // Освобождает и memory-регионы, и непрозрачные GPU-объекты (view,
     // сэмплеры, bind group'ы): у OwnedResource в SDK один путь освобождения,
