@@ -36,20 +36,18 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 }
 
 pub fn on_load(_state: &mut State, req: LoadImageRequest) {
-    // Корреляция запроса — она же идентификатор задачи декодирования, которую
-    // завёл заказчик: он её владелец, он же её и отменяет.
+    // Корреляция запроса — она же имя операции у платформы: ею заказчик её
+    // и убьёт, если результат перестанет быть нужен.
     let correlation_id = veldsdk::correlation();
-    // Чем назвать источник в логах и в списке задач, знает только заказчик:
-    // сюда приходит ресурс, у которого ни имени, ни пути уже нет.
+    // Чем назвать источник в логах, знает только заказчик: сюда приходит
+    // ресурс, у которого ни имени, ни пути уже нет.
     let label = if req.label.is_empty() { correlation_id.clone() } else { req.label.clone() };
 
-    // Декодирование занимает наш обработчик целиком, а с ним и очередь: узнать
-    // об отмене событием невозможно, поэтому декодер опрашивает её между
-    // порциями. Саму задачу завёл заказчик — он её владелец и он же её
-    // отменяет; нам остаётся только смотреть, живая ли она.
-    let cancelled = veldsdk::Cancellation::watch(&correlation_id);
-
-    let (handle, width, height, source, error) = match make_texture(req, &|| cancelled.cancelled()) {
+    // Об убийстве узнавать не нужно: нас снимут посреди любой строки трапом,
+    // и этот обработчик просто не дойдёт до конца. Состояния между вызовами у
+    // нас нет, терять при этом нечего — потому декодирование и объявлено
+    // отменяемым (schema.yaml, `cancellable: true`).
+    let (handle, width, height, source, error) = match make_texture(req) {
         Ok(t) => (Some(ResourceHandle { id: t.id, size: t.size }), t.width, t.height, t.source, String::new()),
         Err(e) => {
             veldsdk::log::warn!(target: "handlers", "{}: {}", label, e);
@@ -75,7 +73,7 @@ struct Texture {
     source: (u32, u32),
 }
 
-fn make_texture(req: LoadImageRequest, cancelled: decode::Cancelled) -> Result<Texture, String> {
+fn make_texture(req: LoadImageRequest) -> Result<Texture, String> {
     // Владелец ресурса и будущий владелец текстуры — тот, кто прислал запрос.
     // Без имени передать текстуру некому.
     let owner = veldsdk::resource::requester("image-loader/on_load")?;
@@ -84,7 +82,6 @@ fn make_texture(req: LoadImageRequest, cancelled: decode::Cancelled) -> Result<T
     let preview = decode::preview(
         resource.id, resource.size,
         preview_side(req.max_width), preview_side(req.max_height),
-        cancelled,
     )?;
 
     // sRGB: сэмплер ui-service отдаст линейные значения, которые рендер в

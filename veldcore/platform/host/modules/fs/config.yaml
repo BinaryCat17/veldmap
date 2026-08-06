@@ -3,4 +3,6 @@
 package: veldmap-host-fs
 language: rust
 rust:
-  dependencies: {}
+  dependencies:
+    # Имя временного файла для атомарной записи (см. write.rs).
+    uuid: { version: "1", features: ["v4"] }

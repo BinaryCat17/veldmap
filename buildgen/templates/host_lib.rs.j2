@@ -33,10 +33,14 @@ pub trait Publisher {
 /// учёт на отменяемом запросе и закрывает на его терминальном ответе. Обе
 /// половины таблицы отсортированы — поиск бинарный, аллокаций нет.
 pub mod flow {
-    /// Топики-запросы с `cancellable: true`: на них диспетчер заводит учёт.
-    pub const CANCELLABLE: &[&str] = &[
-        {%- for topic in cancellable %}
-        "{{ topic }}",
+    /// Отменяемые запросы (`cancellable: true`) и терминальные ответы, в
+    /// которые они кончаются. Пара нужна целиком: на запросе диспетчер заводит
+    /// учёт, а ответом из той же строки отвечает за убитого исполнителя —
+    /// заказчик получает свой единственный терминальный ответ независимо от
+    /// того, как операция кончилась.
+    pub const CANCELLABLE: &[(&str, &str)] = &[
+        {%- for e in cancellable %}
+        ("{{ e.request }}", "{{ e.terminal }}"),
         {%- endfor %}
     ];
 
@@ -49,9 +53,12 @@ pub mod flow {
         {%- endfor %}
     ];
 
-    /// Открывает ли публикация этого топика учёт операции.
-    pub fn is_cancellable(topic: &str) -> bool {
-        CANCELLABLE.binary_search(&topic).is_ok()
+    /// Терминальный ответ отменяемого запроса — `None`, если топик отменяемым
+    /// не объявлен и учёт на него не заводится.
+    pub fn terminal_reply_of(topic: &str) -> Option<&'static str> {
+        CANCELLABLE.binary_search_by_key(&topic, |(request, _)| request)
+            .ok()
+            .map(|at| CANCELLABLE[at].1)
     }
 
     /// Закрывает ли публикация этого топика учёт операции.

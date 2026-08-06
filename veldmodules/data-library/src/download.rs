@@ -1,11 +1,9 @@
 //! Приобретение продукта: подпись у провайдера, закачка, пауза, удаление.
 //!
-//! У операции здесь одно имя на весь путь. Платформа делает владельцем задачи
-//! того, кто публикует `network/on_fs_download` — то есть нас, — поэтому наш
-//! `correlation_id` он же correlation_id запроса к провайдеру, он же
-//! correlation_id запроса к network, он же `task_id` платформы. Отменяем мы
-//! задачу напрямую (`tasks/on_cancel`), без посредника, и прогресс читаем
-//! прямо из платформенных событий.
+//! У операции здесь одно имя на весь путь: наш `correlation_id` — он же id
+//! запроса к провайдеру, он же id запроса к network, он же имя операции у
+//! платформы. Владельцем её платформа делает того, кто публикует
+//! `network/on_fs_download`, то есть нас, — поэтому убиваем мы её сами.
 //!
 //! Провайдер участвует ровно в одном шаге — подписывает адрес. Раскладка
 //! хранения из библиотеки не выходит: путь подставляем мы, уже после подписи.
@@ -16,7 +14,6 @@ use crate::module::catalog::{self, delete_entry, write_sidecar};
 use crate::proto::data_library::{DownloadRequest, ItemRequest};
 use crate::proto::data_provider::{SignRequest, SignedUrl};
 use veldsdk::proto::network::{FsDownloadProgress, FsDownloadRequest, FsDownloadResponse};
-use veldsdk::proto::tasks::{TaskCancelRequest, TaskFinished};
 
 /// Скачать или докачать продукт. Куда он ляжет — решаем мы: раскладка
 /// хранения наша, и заказчику её знать незачем.
@@ -84,24 +81,29 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
     }, &correlation_id);
 }
 
-/// Отмена — она же пауза: `.part` остаётся на диске, следующее «скачать»
-/// продолжит с оборванного байта. Отменяем сами: задача наша.
+/// Отмена — она же пауза: `.part` остаётся на диске ровно там, где его бросил
+/// обрыв, и следующее «скачать» продолжит с оборванного байта. Убиваем сами:
+/// операция наша. Прибирать за собой здесь нечего — терминальный
+/// `on_fs_download_result` придёт всё равно, его за убитого качальщика
+/// опубликует хост.
 pub fn on_cancel(state: &mut State, req: ItemRequest) {
     let Some((task_id, _)) = state.active_download(&req.name) else { return };
-    crate::calls::tasks::on_cancel(&TaskCancelRequest { task_id: task_id.to_string() });
+    crate::cancel::network::on_fs_download(&task_id.to_string());
 }
 
 /// Удалить запись — полную, недокачанную или заявленную одним лишь сидкаром.
 pub fn on_delete(state: &mut State, req: ItemRequest) {
     // Файл прямо сейчас качается — host держит `.part` открытым на запись,
-    // удалять поверх активной записи нельзя. Сначала отменяем; сам delete
-    // сработает по терминальному событию.
+    // удалять поверх активной записи нельзя. Убиваем закачку и помечаем запись
+    // к удалению: `abort` не дожидается, пока качальщик отпустит файл, поэтому
+    // сам delete делается по терминальному ответу — к тому моменту фьючерс
+    // уже дропнут вместе с дескриптором.
     if let Some((task_id, _)) = state.active_download(&req.name) {
         let task_id = task_id.to_string();
         if let Some(dl) = state.downloads.get_mut(&task_id) {
             dl.delete_when_done = true;
         }
-        crate::calls::tasks::on_cancel(&TaskCancelRequest { task_id });
+        crate::cancel::network::on_fs_download(&task_id);
         return;
     }
     delete_entry(state, &req.name);
@@ -137,7 +139,9 @@ pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
     catalog::publish(state);
 }
 
-/// Доменный итог: закачка дошла до конца сама — успехом или ошибкой.
+/// Единственный конец закачки, каким бы он ни был: успех, ошибка сети или
+/// убийство. У убитой доменного итога нет — пустой ответ за неё публикует
+/// хост, — но приходит он тем же топиком, поэтому и разбирать здесь нечего.
 pub fn on_fs_download_result(state: &mut State, response: FsDownloadResponse) {
     let correlation_id = veldsdk::correlation();
     if !response.error.is_empty() {
@@ -149,19 +153,11 @@ pub fn on_fs_download_result(state: &mut State, response: FsDownloadResponse) {
     finish(state, &correlation_id);
 }
 
-/// Закачку убили. Платформа сообщает только об этом: дошедшая до конца сама
-/// приходит своим `on_fs_download_result`, а у убитой его не будет — сетевого
-/// исполнителя уже нет.
-pub fn on_task_finished(state: &mut State, event: TaskFinished) {
-    finish(state, &event.task_id);
-}
-
 /// Снимает закачку с учёта и приводит каталог в соответствие диску.
 ///
-/// Идемпотентна намеренно: терминальных источников два — доменный результат и
-/// отмена, — и какой из них придёт, зависит от того, как закачка кончилась.
-/// Ранние отказы (подпись не удалась, небезопасный путь) не порождают ни
-/// одного из них, поэтому сюда же ведёт и путь ошибки подписи.
+/// Идемпотентна намеренно: ранний отказ (подпись не удалась) случается до
+/// того, как операция вообще заведена, и терминального ответа по нему не
+/// будет — этот путь ведёт сюда напрямую.
 fn finish(state: &mut State, id: &str) {
     let Some(dl) = state.downloads.remove(id) else { return };
 

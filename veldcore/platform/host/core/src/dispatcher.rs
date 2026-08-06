@@ -28,7 +28,11 @@ pub struct NativeActor {
 #[async_trait::async_trait]
 impl Actor for NativeActor {
     async fn deliver(&mut self, event: Event) {
-        let caller = Caller { instance: event.publisher, correlation: event.correlation };
+        let caller = Caller {
+            instance: event.publisher,
+            correlation: event.correlation,
+            accounted: event.accounted,
+        };
         self.service.handle(&event.method, event.payload, caller).await;
     }
 }
@@ -46,6 +50,10 @@ pub struct Caller {
     /// Корреляция запроса; пусто у топиков без пары `replies_to`. Ответ
     /// сервис публикует с ней же — иначе заказчик его не опознает.
     pub correlation: String,
+    /// Учтена ли эта операция платформой (топик объявлен `cancellable: true`).
+    /// Нативному исполнителю это говорит, есть ли к чему привязывать
+    /// abort-хендл: без учёта работу нечем убить, но и убивать её не за что.
+    pub accounted: bool,
 }
 
 /// Событие шины: пространство топика (service), метод, payload и
@@ -61,6 +69,8 @@ pub struct Event {
     /// `replies_to`. Диспетчер её только переносит: смысл ей придают схема
     /// (какие топики парные) и заказчик (какой запрос стоит за id).
     pub correlation: String,
+    /// Открыт ли на это событие учёт операции (см. `Dispatcher::account`).
+    pub accounted: bool,
 }
 
 /// Очередь подписчика. Каждый подписчик — актор: unbounded-канал позволяет
@@ -180,7 +190,7 @@ impl Dispatcher {
             return;
         }
         let (service_name, method) = (parts[0], parts[1]);
-        self.account(topic, publisher, correlation);
+        let accounted = self.account(topic, publisher, correlation);
 
         let subs = {
             let subscriptions = self.subscriptions.lock().unwrap();
@@ -209,6 +219,7 @@ impl Dispatcher {
                 payload: payload.clone(),
                 publisher,
                 correlation: correlation.to_string(),
+                accounted,
             }).is_err() {
                 log::error!(target: "dispatcher", "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
             }
@@ -228,14 +239,53 @@ impl Dispatcher {
     /// Учёт открывается ДО доставки запроса: к моменту, когда исполнитель
     /// начнёт работу, запись уже есть, и «меня ещё ждут?» отвечается
     /// однозначно с первого же опроса.
-    fn account(&self, topic: &str, publisher: u32, correlation: &str) {
+    /// Возвращает, попало ли событие под учёт: исполнителю это говорит, есть
+    /// ли к чему привязывать abort-хендл.
+    fn account(&self, topic: &str, publisher: u32, correlation: &str) -> bool {
         if correlation.is_empty() {
-            return;
+            return false;
         }
-        if veldmap_host_bindings::flow::is_cancellable(topic) {
-            self.tasks.begin(correlation, publisher);
-        } else if veldmap_host_bindings::flow::is_terminal(topic) {
+        if let Some(terminal) = veldmap_host_bindings::flow::terminal_reply_of(topic) {
+            self.tasks.begin(correlation, publisher, terminal);
+            return true;
+        }
+        if veldmap_host_bindings::flow::is_terminal(topic) {
             self.tasks.complete(correlation);
+        }
+        false
+    }
+
+    /// Убивает операцию и отвечает за убитого исполнителя.
+    ///
+    /// Убийство без церемоний: исполнителя снимают там, где он есть, ничего
+    /// не доделывая и не разматывая (это моделирует отключение электричества).
+    /// Но у заказчика инвариант остаётся прежним — ровно один терминальный
+    /// ответ на операцию, — и раз исполнителя больше нет, этот ответ публикует
+    /// хост. Payload пуст: доменного итога у убитой работы нет и взяться ему
+    /// неоткуда. Отличить такой ответ от настоящего заказчик не может, и это
+    /// намеренно — обрабатывать их по-разному ему всё равно нечем.
+    ///
+    /// `true` — операция была жива и снята.
+    pub fn kill(&self, task_id: &str, requestor: u32) -> bool {
+        match self.tasks.cancel(task_id, requestor) {
+            crate::tasks::CancelOutcome::Killed { terminal_topic } => {
+                // Синтезированный ответ иначе никак себя не проявляет: он
+                // выглядит как обычный терминальный, только исполнителя за ним
+                // уже нет. Пусть в логе будет видно, что конец операции
+                // договорил хост.
+                log::info!(target: "tasks", "Task {} killed by requestor {}, answering with {}",
+                    task_id, requestor, terminal_topic);
+                self.publish_from(terminal_topic, Vec::new(), 0, task_id, "");
+                true
+            }
+            crate::tasks::CancelOutcome::NotFound => {
+                log::debug!(target: "tasks", "Nothing to kill for task {}", task_id);
+                false
+            }
+            crate::tasks::CancelOutcome::Denied => {
+                log::warn!(target: "tasks", "Kill of task {} denied for requestor {}", task_id, requestor);
+                false
+            }
         }
     }
 }

@@ -65,7 +65,7 @@ pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
 
     // Операция именуется корреляцией запроса: под ней её учёл диспетчер, ею
     // же заказчик её убьёт и по ней опознает ответ.
-    state.tasks.spawn(&caller.correlation, |correlation_id| async move {
+    state.tasks.spawn(&caller, |correlation_id| async move {
         log::info!(target: "network", "Executing HTTP request {}...", correlation_id);
         let method = match req.method.to_uppercase().as_str() {
             "POST" => reqwest::Method::POST,

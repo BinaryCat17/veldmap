@@ -1,21 +1,125 @@
 use std::fs;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
 use crate::dispatcher::{Actor, Dispatcher, Event};
 use crate::{HostState, WasmModule, CallContext};
 
+/// Как часто хост подкручивает эпоху движка. Это же и задержка убийства:
+/// приговор wasm-инстансу приводится в исполнение на ближайшем тике, потому
+/// что раньше движку просто негде проверить, не пора ли уронить вызов.
+const EPOCH_TICK: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Всё, из чего собирается инстанс плагина. Хранится у актора, потому что
+/// собирать приходится не только на старте: убитый инстанс поднимается заново
+/// из этого же набора.
+struct PluginSpec {
+    engine: Engine,
+    module: Module,
+    linker: Linker<HostState>,
+    ctx: Arc<crate::setup::HostContext>,
+    instance_id: u32,
+    name: String,
+    config: std::collections::HashMap<String, serde_json::Value>,
+    init_input: Vec<u8>,
+}
+
+impl PluginSpec {
+    /// Свежий инстанс: новый Store — а значит и чистое состояние модуля, —
+    /// приговор для epoch-прерывания и инстанцирование.
+    ///
+    /// `init` сюда не входит: на первом заходе конфига ещё нет (его подбирают
+    /// по имени, которое спрашивают у уже поднятого инстанса), а имя без
+    /// конфига спросить можно.
+    async fn instantiate(&self) -> anyhow::Result<(WasmModule, Arc<AtomicBool>)> {
+        let state = HostState {
+            dispatcher: self.ctx.dispatcher.clone(),
+            registry: self.ctx.registry.clone(),
+            memory: self.ctx.memory.clone(),
+            graphics: self.ctx.graphics.clone(),
+            tasks: self.ctx.tasks.clone(),
+            plugin_name: self.name.clone(),
+            instance_id: self.instance_id,
+            config: self.config.clone(),
+            call_context: None,
+            wasi: WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build_p1(),
+            resource_limiter: StoreLimitsBuilder::new().memory_size(1024 * 1024 * 1024).build(),
+        };
+        let mut store = Store::new(&self.engine, state);
+
+        // Приговор и его исполнитель. Движок сам вызвать модуль не прервёт —
+        // проверка живёт здесь и срабатывает на каждом тике эпохи; пока
+        // приговора нет, дедлайн просто продлевается дальше.
+        let doomed = Arc::new(AtomicBool::new(false));
+        let watch = doomed.clone();
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(move |_| {
+            if watch.load(Ordering::SeqCst) {
+                Err(anyhow::anyhow!("killed"))
+            } else {
+                Ok(UpdateDeadline::Continue(1))
+            }
+        });
+
+        let instance = self.linker.instantiate_async(&mut store, &self.module).await?;
+        Ok((WasmModule { store, instance }, doomed))
+    }
+
+    /// Готовый к работе инстанс: поднятый и прошедший `init`. Один путь и для
+    /// загрузки, и для воскрешения убитого — разойтись им негде, потому что
+    /// он один.
+    async fn build(&self) -> anyhow::Result<(WasmModule, Arc<AtomicBool>)> {
+        let (mut wasm, doomed) = self.instantiate().await?;
+        self.run_init(&mut wasm).await?;
+        Ok((wasm, doomed))
+    }
+
+    /// Отдаёт модулю его конфиг. Экспорт необязателен: модуль без состояния
+    /// может обойтись и без init.
+    async fn run_init(&self, wasm: &mut WasmModule) -> anyhow::Result<()> {
+        let Ok(init) = wasm.instance.get_typed_func::<(), i32>(&mut wasm.store, "init") else {
+            return Ok(());
+        };
+        wasm.store.data_mut().call_context = Some(CallContext::new(self.init_input.clone()));
+        let code = init.call_async(&mut wasm.store, ()).await;
+        wasm.store.data_mut().call_context = None;
+        match code {
+            Ok(0) => Ok(()),
+            Ok(code) => anyhow::bail!("init returned code {}", code),
+            Err(e) => anyhow::bail!("init failed: {}", e),
+        }
+    }
+}
+
 /// Актор wasm-плагина: владеет его инстансом и доставляет события шины
 /// вызовом экспорта `handle_event`. Общий цикл очереди — `Dispatcher::spawn_actor`.
 struct WasmActor {
+    spec: PluginSpec,
     module: WasmModule,
+    /// Приговор текущему инстансу, общий с epoch-колбэком его стора.
+    doomed: Arc<AtomicBool>,
     dispatcher: Arc<Dispatcher>,
+    tasks: Arc<crate::tasks::TaskRegistry>,
 }
 
 #[async_trait::async_trait]
 impl Actor for WasmActor {
     async fn deliver(&mut self, ev: Event) {
+        // Приговор действует ровно на одну операцию: снимаем его перед каждым
+        // событием, чтобы опоздавший на микросекунду kill не унёс следующее.
+        self.doomed.store(false, Ordering::SeqCst);
+
+        // Учтённый запрос: отдаём платформе то, чем нас снять. Убийство —
+        // это трап на ближайшем тике эпохи, посреди любой работы и без всякой
+        // раскрутки: ресурсы убитого возвращает хост, а состояние модуля
+        // теряется вместе со стором.
+        if ev.accounted {
+            let doomed = self.doomed.clone();
+            self.tasks.arm(&ev.correlation, move |victim| victim.doomed = Some(doomed));
+        }
+
         // handle_event() декодирует вход как EventEnvelope, восстанавливая
         // топик "{service}/{method}", поэтому событие оборачивается здесь.
         // Конверт кодирует хост, поэтому publisher достоверен: модуль может
@@ -32,13 +136,56 @@ impl Actor for WasmActor {
         };
         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
         self.module.store.data_mut().call_context = Some(call_ctx);
-        if let Ok(handle_event) = self.module.instance.get_typed_func::<(), i32>(&mut self.module.store, "handle_event") {
-            let _ = handle_event.call_async(&mut self.module.store, ()).await;
+        let Ok(handle_event) = self.module.instance.get_typed_func::<(), i32>(&mut self.module.store, "handle_event") else {
+            return;
+        };
+        if let Err(trap) = handle_event.call_async(&mut self.module.store, ()).await {
+            self.revive(trap).await;
         }
     }
 }
 
+impl WasmActor {
+    /// Поднимает инстанс заново после трапа.
+    ///
+    /// Трап отравляет Store безвозвратно — продолжать в нём нельзя ни после
+    /// убийства, ни после падения самого модуля. Поэтому инстанс собирается
+    /// с нуля и проходит init: состояние модуля при этом теряется целиком,
+    /// и это ровно то, что означает отключение электричества. Пережить его
+    /// должно только то, что модуль успел положить на диск.
+    ///
+    /// Пересобирается инстанс, но не бинарник: `Module` уже скомпилирован и
+    /// переиспользуется, поэтому цена — новый Store с чистой линейной памятью
+    /// плюс init. Её и печатает лог: подниматься дорого — это про компиляцию,
+    /// а её здесь нет.
+    async fn revive(&mut self, trap: anyhow::Error) {
+        let started = std::time::Instant::now();
+        if self.doomed.load(Ordering::SeqCst) {
+            log::info!(target: "tasks", "Plugin '{}' killed mid-handler, reviving", self.spec.name);
+        } else {
+            log::error!("Plugin '{}' trapped: {:#}; reviving", self.spec.name, trap);
+        }
 
+        // Деструкторов у убитого не было — их исполняет хост. Модуль мог
+        // остаться владельцем наполовину собранного ресурса, и вернуть его
+        // может только тот, у кого лежит таблица владения.
+        let freed = self.spec.ctx.registry.free_owned_by(self.spec.instance_id);
+        if freed > 0 {
+            log::info!(target: "tasks", "Reclaimed {} resource(s) from '{}'", freed, self.spec.name);
+        }
+        match self.spec.build().await {
+            Ok((module, doomed)) => {
+                self.module = module;
+                self.doomed = doomed;
+                log::info!(target: "tasks", "Plugin '{}' revived in {:?}", self.spec.name, started.elapsed());
+            }
+            // Инстанс не поднялся — актор остаётся с отравленным стором, и
+            // каждое следующее событие будет падать. Молчать об этом нельзя:
+            // сервис фактически выбыл из системы.
+            Err(e) => log::error!("Plugin '{}' failed to revive: {:#}", self.spec.name, e),
+        }
+    }
+}
 
 /// Загружает все *.wasm из `plugins_dir`. Имя каждого плагина на шине — то,
 /// что он сам сообщает через `get_service_name` (единственный источник
@@ -48,7 +195,23 @@ impl Actor for WasmActor {
 pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Result<()> {
     let mut config = Config::new();
     config.async_support(true);
+    // Без этого вызов wasm нельзя прервать ничем: движок не проверяет условий
+    // выхода, пока модуль не вернёт управление сам.
+    config.epoch_interruption(true);
     let engine = Engine::new(&config)?;
+
+    // Тикающая эпоха — то самое место, где движок оглядывается на приговор.
+    // Один тикер на весь процесс: эпоха у движка общая, а кого ронять,
+    // решает колбэк конкретного стора.
+    {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(EPOCH_TICK).await;
+                engine.increment_epoch();
+            }
+        });
+    }
 
     let mut wasm_files: Vec<std::path::PathBuf> = match fs::read_dir(&ctx.config.plugins_dir) {
         Ok(entries) => entries.flatten()
@@ -75,54 +238,38 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p1::add_to_linker_async(&mut linker, |s: &mut HostState| &mut s.wasi)?;
         crate::abi::add_to_linker(&mut linker)?;
-
-        let wasi = WasiCtxBuilder::new()
-            .inherit_stdout()
-            .inherit_stderr()
-            .build_p1();
+        linker.define_unknown_imports_as_traps(&module)?;
 
         // Имя и конфиг заполняются ниже, как только модуль сам себя назовёт
         // (get_service_name) — до этого их знать неоткуда и не нужно.
-        let state = HostState {
-            dispatcher: ctx.dispatcher.clone(),
-            registry: ctx.registry.clone(),
-            memory: ctx.memory.clone(),
-            graphics: ctx.graphics.clone(),
-            tasks: ctx.tasks.clone(),
-            plugin_name: String::new(),
+        let mut spec = PluginSpec {
+            engine: engine.clone(),
+            module,
+            linker,
+            ctx: ctx.clone(),
             instance_id,
+            name: String::new(),
             config: std::collections::HashMap::new(),
-            call_context: None,
-            wasi,
-            resource_limiter: StoreLimitsBuilder::new().memory_size(1024 * 1024 * 1024).build(),
+            init_input: Vec::new(),
         };
 
-        let mut store = Store::new(&engine, state);
-
-        linker.define_unknown_imports_as_traps(&module)?;
-        let instance = linker.instantiate_async(&mut store, &module).await?;
+        // Первое инстанцирование — только чтобы спросить имя: конфиг для init
+        // подбирается по нему, а до ответа его негде взять. Оно же проверяет,
+        // что бинарник вообще поднимается.
+        let (mut probe, _) = match spec.instantiate().await {
+            Ok(built) => built,
+            Err(e) => { log::error!("{:?}: cannot instantiate: {:#}, skipping", wasm_path, e); continue; }
+        };
 
         // Спрашиваем у бинарника его имя (сгенерированный экспорт,
         // buildgen/templates/lib.rs.j2::get_service_name) — единственный
         // источник истины, имя файла тут не при чём.
-        let Ok(get_name) = instance.get_typed_func::<(), i32>(&mut store, "get_service_name") else {
-            log::error!("{:?}: no get_service_name export, skipping", wasm_path);
+        let Some(name) = call_for_output(&mut probe, "get_service_name").await
+            .and_then(|out| String::from_utf8(out).ok())
+            .filter(|n| !n.is_empty())
+        else {
+            log::error!("{:?}: no usable get_service_name export, skipping", wasm_path);
             continue;
-        };
-        let name_ctx = CallContext::new(Vec::new());
-        store.data_mut().call_context = Some(name_ctx.clone());
-        let name_result = get_name.call_async(&mut store, ()).await;
-        store.data_mut().call_context = None;
-        let name = match name_result {
-            Ok(0) => {
-                let out = name_ctx.0.lock().unwrap().output.clone();
-                match String::from_utf8(out) {
-                    Ok(n) if !n.is_empty() => n,
-                    _ => { log::error!("{:?}: get_service_name returned an invalid name, skipping", wasm_path); continue; }
-                }
-            }
-            Ok(code) => { log::error!("{:?}: get_service_name returned code {}, skipping", wasm_path, code); continue; }
-            Err(e) => { log::error!("{:?}: get_service_name failed: {}, skipping", wasm_path, e); continue; }
         };
 
         // Дубликат имени на шине — в том числе имени нативного сервиса:
@@ -144,77 +291,42 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             }
         };
 
-        let mut config_map = ctx.config.plugin_configs.get(&name)
-            .cloned()
-            .unwrap_or_default();
-
+        let mut config_map = ctx.config.plugin_configs.get(&name).cloned().unwrap_or_default();
         config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
         config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
 
-        store.data_mut().plugin_name = name.clone();
-        store.data_mut().config = config_map;
+        // Инъектируемые хостом ключи едут в init тем же JSON, что и конфиг
+        // из файла: один канал, и типизированный Config модуля видит всё
+        // (адресный veld_get_config для этого не нужен).
+        let mut init_config = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&service_config_str)
+            .unwrap_or_default();
+        init_config.insert("surface_format".to_string(), ctx.graphics.get_surface_format_proto().into());
 
-        // Конфиг уезжает в HostState выше; модуль читает его через
-        // ABI-вызов veld_get_config — сервис-посредник не нужен.
-        log::trace!("Loading service '{}' with instance_id {}", name, instance_id);
+        spec.name = name.clone();
+        spec.config = config_map;
+        spec.init_input = serde_json::to_vec(&serde_json::Value::Object(init_config))?;
 
-        // Call init if it exists
-        if let Ok(init_func) = instance.get_typed_func::<(), i32>(&mut store, "init") {
-            log::trace!("Calling init for plugin '{}'...", name);
+        // Подписки спрашиваем у пробного инстанса: они свойство бинарника, а
+        // не живого состояния, и после воскрешения теми же и останутся.
+        let subs: Vec<String> = call_for_output(&mut probe, "get_subscriptions").await
+            .and_then(|out| serde_json::from_slice(&out).ok())
+            .unwrap_or_default();
+        drop(probe);
 
-            // Инъектируемые хостом ключи едут в init тем же JSON, что и конфиг
-            // из файла: один канал, и типизированный Config модуля видит всё
-            // (адресный veld_get_config для этого не нужен).
-            let mut init_config = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&service_config_str)
-                .unwrap_or_default();
-            init_config.insert("surface_format".to_string(), ctx.graphics.get_surface_format_proto().into());
-            let init_input = serde_json::to_vec(&serde_json::Value::Object(init_config))?;
-            let call_ctx = CallContext::new(init_input);
-            store.data_mut().call_context = Some(call_ctx);
-
-            match init_func.call_async(&mut store, ()).await {
-                Ok(0) => log::info!("Plugin '{}' initialized successfully.", name),
-                Ok(code) => {
-                    log::error!("Plugin '{}' failed to initialize with code: {}", name, code);
-                    continue;
-                }
-                Err(e) => {
-                    log::error!("Error while calling init for '{}': {}", name, e);
-                    continue;
-                }
-            }
-            // Reset call context after init
-            store.data_mut().call_context = None;
-        }
-
-        let mut wasm_module = WasmModule { store, instance };
-
-        // Extract subscriptions
-        let mut subs: Vec<String> = Vec::new();
-        if let Ok(get_subs) = wasm_module.instance.get_typed_func::<(), i32>(&mut wasm_module.store, "get_subscriptions") {
-            let call_ctx = CallContext::new(Vec::new());
-            wasm_module.store.data_mut().call_context = Some(call_ctx.clone());
-            match get_subs.call_async(&mut wasm_module.store, ()).await {
-                Ok(0) => {
-                    let out = {
-                        let inner = call_ctx.0.lock().unwrap();
-                        inner.output.clone()
-                    };
-                    if let Ok(topics) = serde_json::from_slice::<Vec<String>>(&out) {
-                        subs = topics;
-                    }
-                }
-                Ok(code) => log::warn!("Plugin '{}' get_subscriptions returned code: {}", name, code),
-                Err(e) => log::warn!("Plugin '{}' get_subscriptions failed: {}", name, e),
-            }
-            wasm_module.store.data_mut().call_context = None;
-        }
+        // Рабочий инстанс — уже с именем и конфигом, то есть прошедший init.
+        let (module, doomed) = match spec.build().await {
+            Ok(built) => built,
+            Err(e) => { log::error!("Plugin '{}' failed to initialize: {:#}, skipping", name, e); continue; }
+        };
+        log::info!("Plugin '{}' initialized successfully.", name);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
-
         Dispatcher::spawn_actor(rx, WasmActor {
-            module: wasm_module,
+            spec,
+            module,
+            doomed,
             dispatcher: ctx.dispatcher.clone(),
+            tasks: ctx.tasks.clone(),
         });
 
         ctx.dispatcher.register_instance(name.clone(), instance_id);
@@ -223,4 +335,19 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         }
     }
     Ok(())
+}
+
+/// Зовёт безаргументный экспорт и забирает то, что он положил в выход.
+/// `None` — экспорта нет, он вернул код ошибки или упал.
+async fn call_for_output(wasm: &mut WasmModule, export: &str) -> Option<Vec<u8>> {
+    let func = wasm.instance.get_typed_func::<(), i32>(&mut wasm.store, export).ok()?;
+    let call_ctx = CallContext::new(Vec::new());
+    wasm.store.data_mut().call_context = Some(call_ctx.clone());
+    let code = func.call_async(&mut wasm.store, ()).await;
+    wasm.store.data_mut().call_context = None;
+    match code {
+        Ok(0) => Some(call_ctx.0.lock().unwrap().output.clone()),
+        Ok(code) => { log::warn!("export '{}' returned code {}", export, code); None }
+        Err(e) => { log::warn!("export '{}' failed: {}", export, e); None }
+    }
 }

@@ -20,7 +20,7 @@ extern "C" {
 
     fn veld_memory_texture_size(id: u64) -> u64;
 
-    fn veld_task_alive(ptr: u64, len: u64) -> u64;
+    fn veld_task_kill(ptr: u64, len: u64) -> u64;
 
     fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
     fn veld_memory_alloc_cpu(size: u64) -> u64;
@@ -125,12 +125,18 @@ pub fn arena_texture_size(id: u64) -> Option<(u32, u32)> {
 }
 
 // ── Фоновые задачи ─────────────────────────────────────────────
-// Единственный ABI-вызов системы задач: жива ли задача. Всё остальное —
-// топики сервиса tasks. Прикладной код работает с veldsdk::Cancellation.
+// Вся система задач со стороны модуля: убить операцию. Заводить и закрывать
+// её нечем — учёт ведёт диспетчер по самим публикациям (dispatcher::account).
 
 #[doc(hidden)]
-pub fn task_alive(task_id: &str) -> bool {
-    unsafe { veld_task_alive(task_id.as_ptr() as u64, task_id.len() as u64) != 0 }
+/// Убивает операцию: исполнителя снимают на месте, ничего не доделывая.
+/// `false` — убивать было нечего (кончилась сама либо не была отменяемой).
+///
+/// Звать напрямую не нужно: у каждого отменяемого вызова есть свой стаб
+/// `crate::cancel::<сервис>::<топик>`, и только у него — убить то, что
+/// отменяемым не объявлено, нельзя по построению.
+pub fn task_kill(task_id: &str) -> bool {
+    unsafe { veld_task_kill(task_id.as_ptr() as u64, task_id.len() as u64) != 0 }
 }
 
 // ── Memory management ──────────────────────────────────────────
@@ -307,8 +313,8 @@ pub fn publish(topic: &str, payload: Vec<u8>, correlation: &str, target: &str) {
         log::error!(target: "sdk", "Invalid topic: {}", topic);
         return;
     }
-    // publisher не заполняется: хост игнорирует его во входящих сообщениях
-    // и подписывает события сам при доставке.
+    // publisher не заполняется: его штампует хост при доставке, а в исходящем
+    // сообщении игнорирует — иначе паблишер мог бы назваться чужим именем.
     let request = EventEnvelope {
         service: parts[0].to_string(), method: parts[1].to_string(), payload,
         publisher: String::new(),

@@ -35,7 +35,7 @@ const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
 /// памяти, вне системы задач; корреляция запроса достаётся задаче того,
 /// кто ресурс потом читает (например, декодирования в image-loader).
 pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
-    let Caller { instance, correlation } = caller;
+    let Caller { instance, correlation, .. } = caller;
 
     // Пробный запрос уходит в сеть, поэтому не в async-обработчике.
     blocking(&state.ctx, move |ctx| {

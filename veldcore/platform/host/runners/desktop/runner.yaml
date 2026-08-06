@@ -5,4 +5,4 @@
 # входят. Мобильный раннер заведёт свой runner.yaml с другим списком —
 # расходиться по #[cfg(target_os)] внутри main.rs для этого не нужно.
 package: veldmap-desktop-modules
-modules: [app, fs, network, tasks]
+modules: [app, fs, network]

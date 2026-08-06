@@ -8,8 +8,7 @@ import "core.proto";
 // Контракт нативного сервиса network (HTTP-запросы и потоковые скачивания).
 // Прогресс и результаты доставляются событиями; операцию заказчик опознаёт
 // по корреляции конверта (EventEnvelope.correlation_id — пары объявлены в
-// network.schema.yaml), отмена — платформенным событием tasks/cancel
-// (veldcore/interface/modules/tasks/tasks.proto).
+// network.schema.yaml).
 
 // Открыть удалённый файл как ресурс, не скачивая его (топик network/open).
 // В ответе — общий core.ResourceOpened: читатель тянет из него фрагменты

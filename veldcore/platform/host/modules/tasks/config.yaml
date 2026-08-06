@@ -1,4 +1,0 @@
-# Конфиг нативного модуля tasks: buildgen генерирует крейт в generated/
-# (Cargo.toml + клей диспетчеризации). Логика — src/module.rs.
-package: veldmap-host-tasks
-language: rust

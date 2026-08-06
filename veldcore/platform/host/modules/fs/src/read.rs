@@ -14,7 +14,7 @@ use veldmap_host_util::path::{is_path_safe, resolve_path};
 use veldmap_host_util::{blocking, Caller};
 
 pub fn on_read(state: &State, req: FsReadRequest, caller: Caller) {
-    let Caller { instance, correlation } = caller;
+    let Caller { instance, correlation, .. } = caller;
     if !is_path_safe(&req.path) {
         bus::emit::on_read_result(&*state.ctx.publisher, &ResourceOpened {
             handle: None, error: "Access denied".into(),

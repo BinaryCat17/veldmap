@@ -1,6 +1,8 @@
-//! Потоковое скачивание файла (топик network/fs_download): прогресс и
-//! результат доставляются событиями, жизненный цикл и отмена — через
-//! фасад Tasks (см. module.rs): started/finished эмитит платформа.
+//! Потоковое скачивание файла (топик network/on_fs_download): прогресс и
+//! результат доставляются событиями. Операция учтена платформой с самой
+//! публикации запроса (топик объявлен `cancellable: true`), и снимется с
+//! учёта терминальным `on_fs_download_result`; фасаду Tasks остаётся отдать
+//! abort-хендл, чтобы её было чем убить.
 //!
 //! Докачка: пишем в `<destination>.part`, переименовываем в конечное имя
 //! только по успешному завершению. Обрыв (ошибка, отмена — AbortHandle::abort()
@@ -22,8 +24,8 @@ use std::path::PathBuf;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 
-/// Логирует провал скачивания, уведомляет подписчиков fs_download_result
-/// и возвращает текст ошибки — он же попадёт в tasks/task_finished.error.
+/// Логирует провал скачивания и уведомляет подписчиков терминальным
+/// on_fs_download_result — им же операция снимается с учёта.
 fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> String {
     log::warn!(target: "network", "Download {} failed: {}", correlation_id, error);
     bus::emit::on_fs_download_result(&*ctx.publisher, &FsDownloadResponse {
@@ -55,7 +57,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
     // Операция уже учтена диспетчером: её топик объявлен `cancellable: true`,
     // владелец — паблишер запроса. Нам остаётся сделать её убиваемой, отдав
     // фасаду abort-хендл фьючерса.
-    state.tasks.spawn(&caller.correlation, |correlation_id| async move {
+    state.tasks.spawn(&caller, |correlation_id| async move {
         // Существующий .part с предыдущей попытки — точка возобновления:
         // узнаём его размер ДО запроса, чтобы попросить сервер прислать хвост.
         let resume_offset = tokio::fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0);

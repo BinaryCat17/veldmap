@@ -18,13 +18,6 @@ use crate::module::downsample::Downsampler;
 /// по своей природе, и полный кадр в памяти для них допустим.
 const FULL_DECODE_BUDGET: u64 = 256 * 1024 * 1024;
 
-/// Как часто опрашивать отмену при построчном декоде.
-const CANCEL_CHECK_ROWS: u32 = 64;
-
-/// Текст ошибки прерванного декодирования. Отмена — это не сбой: заказчик
-/// сам её и попросил, поэтому ответ он, как правило, уже игнорирует.
-pub const CANCELLED: &str = "декодирование отменено";
-
 pub struct Preview {
     pub width: u32,
     pub height: u32,
@@ -35,14 +28,7 @@ pub struct Preview {
 
 /// Проверка «работу пора прекращать», опрашиваемая между порциями. Декодер
 /// не знает, откуда берётся отмена (см. module.rs), — ему нужен только ответ.
-///
-/// Гранулярность разная и это свойство форматов, а не недоделка: png и tiff
-/// разбираются порциями, поэтому опрашиваются по ходу дела, а jpeg и gif/bmp/
-/// webp разворачиваются одним вызовом чужого декодера — прервать его нечем,
-/// и отмена там успевает сработать только до начала разворачивания.
-pub type Cancelled<'a> = &'a dyn Fn() -> bool;
-
-pub fn preview(resource_id: u64, len: u64, max_w: u32, max_h: u32, cancelled: Cancelled) -> Result<Preview, String> {
+pub fn preview(resource_id: u64, len: u64, max_w: u32, max_h: u32) -> Result<Preview, String> {
     let mut reader = ResourceReader::new(resource_id, len);
     let mut head = [0u8; 32];
     let read = reader.read(&mut head).map_err(|e| format!("чтение заголовка: {}", e))?;
@@ -51,17 +37,17 @@ pub fn preview(resource_id: u64, len: u64, max_w: u32, max_h: u32, cancelled: Ca
     reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
 
     match format {
-        ImageFormat::Png => png(reader, max_w, max_h, cancelled),
-        ImageFormat::Jpeg => jpeg(reader, max_w, max_h, cancelled),
-        ImageFormat::Tiff => tiff(reader, max_w, max_h, cancelled),
-        ImageFormat::Gif | ImageFormat::Bmp | ImageFormat::WebP => full(reader, format, max_w, max_h, cancelled),
+        ImageFormat::Png => png(reader, max_w, max_h),
+        ImageFormat::Jpeg => jpeg(reader, max_w, max_h),
+        ImageFormat::Tiff => tiff(reader, max_w, max_h),
+        ImageFormat::Gif | ImageFormat::Bmp | ImageFormat::WebP => full(reader, format, max_w, max_h),
         other => Err(format!("формат {:?} не поддерживается", other)),
     }
 }
 
 // ── PNG: построчно ─────────────────────────────────────────────
 
-fn png(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) -> Result<Preview, String> {
+fn png(reader: ResourceReader, max_w: u32, max_h: u32) -> Result<Preview, String> {
     let mut decoder = png::Decoder::new(reader);
     // Палитра разворачивается, 1/2/4 бита дополняются, 16 бит ужимаются до 8 —
     // ниже остаются только четыре комбинации каналов.
@@ -89,16 +75,13 @@ fn png(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) -> 
     while let Some(row) = reader.next_row().map_err(|e| format!("png: {}", e))? {
         sink.row(y, row.data(), w, channels);
         y += 1;
-        // Опрос раз в полосу, а не на каждой строке: у снимка их десятки тысяч,
-        // и ABI-вызов на строку был бы заметнее самой отмены.
-        if y % CANCEL_CHECK_ROWS == 0 && cancelled() { return Err(CANCELLED.to_string()); }
     }
     Ok(sink.finish((w, h)))
 }
 
 // ── JPEG: уменьшение прямо в DCT ───────────────────────────────
 
-fn jpeg(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) -> Result<Preview, String> {
+fn jpeg(reader: ResourceReader, max_w: u32, max_h: u32) -> Result<Preview, String> {
     let mut decoder = jpeg_decoder::Decoder::new(reader);
     decoder.read_info().map_err(|e| format!("jpeg: {}", e))?;
     let source = decoder.info().ok_or_else(|| "jpeg: нет заголовка".to_string())?;
@@ -109,9 +92,6 @@ fn jpeg(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) ->
     decoder
         .scale(clamp_u16(max_w), clamp_u16(max_h))
         .map_err(|e| format!("jpeg: {}", e))?;
-    // Последняя возможность отказаться: развернуть кадр decode() может только
-    // целиком, прервать его на середине нечем.
-    if cancelled() { return Err(CANCELLED.to_string()); }
     let pixels = decoder.decode().map_err(|e| format!("jpeg: {}", e))?;
     let info = decoder.info().ok_or_else(|| "jpeg: нет заголовка".to_string())?;
     let (w, h) = (u32::from(info.width), u32::from(info.height));
@@ -132,7 +112,7 @@ fn jpeg(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) ->
 
 // ── TIFF: стрипы/тайлы, с использованием уменьшенных копий ─────
 
-fn tiff(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) -> Result<Preview, String> {
+fn tiff(reader: ResourceReader, max_w: u32, max_h: u32) -> Result<Preview, String> {
     let mut decoder = tiff::decoder::Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
     let source_dims = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
 
@@ -160,7 +140,6 @@ fn tiff(reader: ResourceReader, max_w: u32, max_h: u32, cancelled: Cancelled) ->
 
     let mut sink = Sink::new(w, h, max_w, max_h);
     for index in 0..across * down {
-        if cancelled() { return Err(CANCELLED.to_string()); }
         let (cw, ch) = decoder.chunk_data_dimensions(index);
         let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
         let samples = tiff_samples(data)?;
@@ -230,7 +209,7 @@ fn tiff_samples(data: tiff::decoder::DecodingResult) -> Result<Vec<u8>, String> 
 
 // ── Форматы без потокового пути ────────────────────────────────
 
-fn full(reader: ResourceReader, format: ImageFormat, max_w: u32, max_h: u32, cancelled: Cancelled) -> Result<Preview, String> {
+fn full(reader: ResourceReader, format: ImageFormat, max_w: u32, max_h: u32) -> Result<Preview, String> {
     let decoder = image::ImageReader::with_format(std::io::BufReader::new(reader), format)
         .into_decoder()
         .map_err(|e| format!("{:?}: {}", format, e))?;
@@ -241,10 +220,6 @@ fn full(reader: ResourceReader, format: ImageFormat, max_w: u32, max_h: u32, can
             "{:?} {}×{}: кадр целиком не влезает в бюджет ({} МБ)",
             format, w, h, FULL_DECODE_BUDGET / (1024 * 1024)));
     }
-    // Как и у jpeg: развернуть можно только целиком, поэтому отказаться —
-    // до, а не во время.
-    if cancelled() { return Err(CANCELLED.to_string()); }
-
     let rgba = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| format!("{:?}: {}", format, e))?
         .to_rgba8();

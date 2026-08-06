@@ -44,6 +44,30 @@ pub mod emit {
     {% endfor %}
 }
 
+/// Убийство операций, заведённых нашими вызовами.
+///
+/// Стаб есть ровно у тех вызовов, чей топик исполнитель объявил
+/// `cancellable: true`: убить то, что отменяемым не объявлено, — ошибка
+/// компиляции, а не молчаливый отказ в рантайме. Убивать может только
+/// заказчик операции, то есть тот, кто её и запросил, — права проверяет хост
+/// по идентичности вызывающего.
+pub mod cancel {
+    {% for dep in dep_calls %}{% if dep.cancellable %}
+    pub mod {{ dep.snake }} {
+        {% for method in dep.cancellable %}
+        /// Убить операцию `{{ dep.service }}/{{ method }}`, заведённую нашим
+        /// вызовом с этой корреляцией. `false` — убивать было нечего.
+        ///
+        /// Терминальный ответ придёт в любом случае: за убитого исполнителя
+        /// его публикует хост.
+        pub fn {{ method }}(correlation_id: &str) -> bool {
+            veldsdk::abi::task_kill(correlation_id)
+        }
+        {% endfor %}
+    }
+    {% endif %}{% endfor %}
+}
+
 /// Typed topic stubs for declared dependency calls (dependencies.*.calls).
 pub mod calls {
     {% for dep in dep_calls %}

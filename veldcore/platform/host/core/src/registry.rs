@@ -147,6 +147,25 @@ impl ResourceRegistry {
         self.entries.remove(&id).is_some()
     }
 
+    /// Освобождает всё, чем владеет этот инстанс, и возвращает, сколько
+    /// освободила.
+    ///
+    /// Это деструкторы убитого, исполненные хостом. Убийство происходит
+    /// посреди любой работы и ничего не разматывает — модуль мог остаться
+    /// владельцем наполовину собранной текстуры, и вернуть её может только
+    /// тот, у кого лежит таблица владения. Ровно так же система забирает
+    /// дескрипторы у процесса, которому выключили питание.
+    ///
+    /// Выданные этому инстансу чужие гранты не трогаем: они принадлежат не
+    /// ему, а владельцам своих ресурсов, и те распорядятся ими сами.
+    pub fn free_owned_by(&self, owner_id: u32) -> usize {
+        let doomed: Vec<ResourceId> = self.entries.iter()
+            .filter(|e| e.lease.owner_id == owner_id)
+            .map(|e| *e.key())
+            .collect();
+        doomed.iter().filter(|id| self.unregister(**id)).count()
+    }
+
     pub fn check_access(&self, id: ResourceId, requestor_id: u32, access: Access) -> bool {
         if let Some(entry) = self.entries.get(&id) {
             match access {

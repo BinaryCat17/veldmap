@@ -3,7 +3,6 @@ members = [
     "platform/host/core", "platform/host/util",
     "platform/host/modules/app/generated",
     "platform/host/modules/fs/generated", "platform/host/modules/network/generated",
-    "platform/host/modules/tasks/generated",
     "platform/host/runners/desktop", "platform/host/runners/desktop/generated",
     "sdk/rust",
 ]

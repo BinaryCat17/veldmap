@@ -73,11 +73,11 @@ pub struct Download {
     /// 0, если сервер не прислал Content-Length.
     pub total: u64,
     /// Корзину нажали во время закачки. Удалить `.part` поверх активной записи
-    /// нельзя (хост держит файл открытым), поэтому сначала отменяем, а delete
-    /// срабатывает по терминальному событию. Флаг здесь, а не отдельной
-    /// таблицей: ключ у неё был бы тот же самый и читалась бы она на том же
-    /// `tasks/on_task_finished` — то есть на один топик приходилось бы две
-    /// таблицы, ровно то, от чего защищает правило у `pending_reads`.
+    /// нельзя (хост держит файл открытым), поэтому сначала убиваем закачку, а
+    /// delete срабатывает по её терминальному ответу. Флаг здесь, а не
+    /// отдельной таблицей: ключ у неё был бы тот же самый и читалась бы она на
+    /// том же топике — то есть на один топик приходилось бы две таблицы, ровно
+    /// то, от чего защищает правило у `pending_reads`.
     pub delete_when_done: bool,
 }
 // Доли (`progress` из DownloadProgress) здесь нет намеренно: она полностью
@@ -144,6 +144,5 @@ pub fn on_read_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
     }
 }
 pub use download::{on_download, on_cancel, on_delete, on_delete_result,
-                   on_signed, on_fs_download_progress, on_fs_download_result,
-                   on_task_finished};
+                   on_signed, on_fs_download_progress, on_fs_download_result};
 pub use open::on_open;

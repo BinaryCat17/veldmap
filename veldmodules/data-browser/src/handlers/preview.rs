@@ -17,18 +17,17 @@ use crate::proto::image_loader::{LoadImageRequest, LoadImageResult};
 use crate::proto::ui_service::proto::UiEventResponse;
 use veldsdk::Reply;
 use veldsdk::proto::core::ResourceOpened;
-use veldsdk::proto::tasks::TaskCancelRequest;
 
 /// Бросает текущее превью: освобождает ресурсы и убивает декодирование, если
 /// оно ещё идёт. Снимок декодируется секундами, и продолжать работу ради
 /// картинки, которую уже никто не увидит, незачем.
 ///
-/// Убиваем безусловно, не разбирая, дошло ли дело до декодирования: операция
-/// учтена платформой с самой публикации запроса, а убийство того, чего уже
-/// нет, — это отказ в реестре, а не ошибка здесь.
+/// Не разбираем, дошло ли дело до декодирования: копия учёта, который и так
+/// ведёт платформа, разошлась бы с ним, а убийство того, чего уже нет, —
+/// нормальный исход.
 pub fn abandon(state: &mut State) {
     if let Some(task_id) = state.preview.reset() {
-        crate::calls::tasks::on_cancel(&TaskCancelRequest { task_id });
+        crate::cancel::image_loader::on_load(&task_id);
     }
 }
 

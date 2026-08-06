@@ -203,14 +203,18 @@ def flow_entries(svc_name: str, schema: dict) -> tuple[list[dict], list[str]]:
     объявлять нечего — он лишь публикует запрос.
     """
     inputs = (schema.get("interface") or {}).get("inputs") or {}
+    requests, _ = correlated_topics(schema)
     terminal, errors = terminal_reply_of(schema)
     entries = []
     for name, entry in inputs.items():
         if not (entry or {}).get("cancellable"):
             continue
         if name not in terminal:
-            errors.append(f"interface.inputs.{name}: `cancellable: true` требует ответа "
-                          f"(`replies_to`) — иначе учёт операции некому закрыть")
+            # Про неоднозначный терминальный ответ уже сказано выше — второй
+            # раз о том же, да ещё и другими словами, только путает.
+            if name not in requests:
+                errors.append(f"interface.inputs.{name}: `cancellable: true` требует ответа "
+                              f"(`replies_to`) — иначе учёт операции некому закрыть")
             continue
         entries.append({
             "request":  f"{svc_name}/{name}",
@@ -536,8 +540,8 @@ def generate_host_bindings(args, script_dir: str):
         "proto_packages": proto_packages,
         "proto_dir_rel":  proto_dir_rel,
         "services":       services,
-        # Таблица ищется бинарным поиском — обе половины отсортированы.
-        "cancellable":    sorted(e["request"] for e in flow),
+        # Таблицы ищутся бинарным поиском — обе отсортированы по ключу.
+        "cancellable":    sorted(flow, key=lambda e: e["request"]),
         "terminal":       sorted(e["terminal"] for e in flow),
     }
 
@@ -757,10 +761,16 @@ def main():
                 dep_name, dep_schemas[dep_name], "inputs",
                 lambda _kind, n, _d: module_rust_path(resolved["calls"][(dep_name, n)]),
                 only=set(calls))}
+            # Отменяемость объявляет исполнитель у себя во входе — здесь она
+            # только считывается: заказчик получает стаб убийства ровно на те
+            # вызовы, которые исполнитель разрешил убивать.
+            dep_cancellable = {e["request"].split("/", 1)[1]
+                               for e in flow_entries(dep_name, dep_schemas[dep_name])[0]}
             dep_calls.append({
                 "service": dep_name,
                 "snake": dep_name.replace("-", "_"),
                 "methods": [dep_inputs[c] for c in calls],
+                "cancellable": [c for c in calls if c in dep_cancellable],
             })
 
     # ── Hooks (runtime lifecycle callbacks, not tied to a topic) ──────────────
