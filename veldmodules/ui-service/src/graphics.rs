@@ -9,7 +9,7 @@ use veldsdk::graphics::{
     TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat,
     VISIBILITY_FRAGMENT, VISIBILITY_VERTEX,
 };
-use veldsdk::abi::{arena_write, arena_alloc_buffer, arena_alloc_texture};
+use veldsdk::abi::{resource_write, resource_alloc_buffer, resource_alloc_texture};
 use veldsdk::proto::core::ResourceHandle;
 use veldsdk::OwnedResource;
 
@@ -50,7 +50,7 @@ pub fn render_ui(
     if let Some(u) = plugin.uniform_buffer_region.borrow().as_ref() {
         let res_data: [f32; 2] = [logical_w, logical_h];
         let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
-        arena_write(u.id(), 0, data);
+        resource_write(u.id(), 0, data);
     }
 
     // Update texture atlas if dirty
@@ -59,7 +59,7 @@ pub fn render_ui(
         if let Some(tid) = atlas_id {
             // NOTE: For dzn (DirectX 12 on Vulkan), we need full texture writes only
             let data = renderer.atlas_data_full();
-            arena_write(tid, 0, data);
+            resource_write(tid, 0, data);
             renderer.mark_atlas_clean();
         }
     }
@@ -93,7 +93,7 @@ fn render_geometry(
     // Ensure vertex buffer exists
     let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
     if vertex_buffer.is_none() {
-        let id = arena_alloc_buffer(VERTEX_BUFFER_SIZE, buffer_usage::VERTEX, false)
+        let id = resource_alloc_buffer(VERTEX_BUFFER_SIZE, buffer_usage::VERTEX, false)
             .ok_or_else(|| anyhow!("Failed to allocate vertex buffer"))?;
         *vertex_buffer = Some(OwnedResource::new(ResourceHandle { id, size: VERTEX_BUFFER_SIZE, ..Default::default() }));
     }
@@ -101,7 +101,7 @@ fn render_geometry(
     // Ensure index buffer exists
     let mut index_buffer = plugin.index_buffer.borrow_mut();
     if index_buffer.is_none() {
-        let id = arena_alloc_buffer(INDEX_BUFFER_SIZE, buffer_usage::INDEX, false)
+        let id = resource_alloc_buffer(INDEX_BUFFER_SIZE, buffer_usage::INDEX, false)
             .ok_or_else(|| anyhow!("Failed to allocate index buffer"))?;
         *index_buffer = Some(OwnedResource::new(ResourceHandle { id, size: INDEX_BUFFER_SIZE, ..Default::default() }));
     }
@@ -109,10 +109,10 @@ fn render_geometry(
     // Upload vertex and index data
     if let (Some(ref v_h), Some(ref i_h)) = (&*vertex_buffer, &*index_buffer) {
         let v_data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
-        arena_write(v_h.id(), 0, v_data);
+        resource_write(v_h.id(), 0, v_data);
 
         let i_data = unsafe { std::slice::from_raw_parts(renderer.indices.as_ptr() as *const u8, renderer.indices.len() * 2) };
-        arena_write(i_h.id(), 0, i_data);
+        resource_write(i_h.id(), 0, i_data);
     }
 
     // Record draw commands if pipeline is ready
@@ -280,7 +280,7 @@ fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
     let layout = plugin.uniform_layout.borrow();
     if uniform_bind_group.is_none() {
         if let Some(layout) = layout.as_ref() {
-            let buf_region = arena_alloc_buffer(16, buffer_usage::UNIFORM, false)
+            let buf_region = resource_alloc_buffer(16, buffer_usage::UNIFORM, false)
                 .ok_or_else(|| anyhow!("Failed to allocate uniform buffer"))?;
             *plugin.uniform_buffer_region.borrow_mut() =
                 Some(OwnedResource::new(ResourceHandle { id: buf_region, size: 16, ..Default::default() }));
@@ -296,7 +296,7 @@ fn ensure_atlas_texture(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     if renderer.atlas_texture_id.is_none() {
         let (w, h) = renderer.atlas_dimensions();
         let usage = texture_usage::COPY_DST | texture_usage::TEXTURE_BINDING;
-        if let Some(id) = arena_alloc_texture(w, h, TextureFormat::TexRgba8Unorm as i32, usage) {
+        if let Some(id) = resource_alloc_texture(w, h, TextureFormat::TexRgba8Unorm as i32, usage) {
             renderer.atlas_texture_id = Some(OwnedResource::new(ResourceHandle { id, size: 0 }));
             renderer.mark_atlas_dirty();
         }

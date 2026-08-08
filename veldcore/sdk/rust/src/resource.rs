@@ -9,7 +9,7 @@
 //!
 //! Вся дисциплина владения собрана здесь: `OwnedResource` (RAII), `hand_off`
 //! и `grant_*_or_free` (передача и делегирование с освобождением при отказе).
-//! Прямые вызовы `abi::arena_free`/`arena_grant_*` в прикладном коде — признак
+//! Прямые вызовы `abi::resource_free`/`resource_grant_*` в прикладном коде — признак
 //! того, что обряд переписан заново: ровно так копии и расходились формой.
 
 use std::io::{self, Read, Seek, SeekFrom};
@@ -63,7 +63,7 @@ impl OwnedResource {
 
 impl Drop for OwnedResource {
     fn drop(&mut self) {
-        crate::abi::arena_free(self.handle.id);
+        crate::abi::resource_free(self.handle.id);
     }
 }
 
@@ -83,7 +83,7 @@ impl AsRef<ResourceHandle> for OwnedResource {
 /// Заказчик текущего события — тот, кому уйдёт владение открытым ресурсом.
 ///
 /// `Err` — событие опубликовал хост: у него нет модульной идентичности, а
-/// значит `arena_transfer` некому адресовать. Отдать ресурс «в никуда» нельзя,
+/// значит `resource_transfer` некому адресовать. Отдать ресурс «в никуда» нельзя,
 /// поэтому это отказ, а не предупреждение.
 pub fn requester(topic: &str) -> Result<String, String> {
     let owner = crate::abi::event_publisher();
@@ -116,10 +116,10 @@ pub fn accept_parts(handle: Option<ResourceHandle>, error: &str) -> Result<Resou
 /// открывшем, которому он уже не нужен, — а заказчик про него не узнает и
 /// освободить не сможет.
 pub fn hand_off(handle: ResourceHandle, owner: &str) -> Result<ResourceHandle, String> {
-    if crate::abi::arena_transfer(handle.id, owner) {
+    if crate::abi::resource_transfer(handle.id, owner) {
         return Ok(handle);
     }
-    crate::abi::arena_free(handle.id);
+    crate::abi::resource_free(handle.id);
     Err(format!("не удалось передать ресурс сервису '{}'", owner))
 }
 
@@ -129,20 +129,20 @@ pub fn hand_off(handle: ResourceHandle, owner: &str) -> Result<ResourceHandle, S
 /// не нужен, а без хелпера free рядом с каждым grant переписывался руками
 /// (и тексты ошибок расходились по модулям).
 pub fn grant_read_or_free(id: u64, service: &str) -> Result<(), String> {
-    if crate::abi::arena_grant_read(id, service) {
+    if crate::abi::resource_grant_read(id, service) {
         return Ok(());
     }
-    crate::abi::arena_free(id);
+    crate::abi::resource_free(id);
     Err(format!("не удалось выдать чтение ресурса {} сервису '{}'", id, service))
 }
 
 /// Выдаёт сервису право записи — так владелец окна делегирует рендереру
 /// свою текстуру-цель. Форма отказа та же, что у `grant_read_or_free`.
 pub fn grant_write_or_free(id: u64, service: &str) -> Result<(), String> {
-    if crate::abi::arena_grant_write(id, service) {
+    if crate::abi::resource_grant_write(id, service) {
         return Ok(());
     }
-    crate::abi::arena_free(id);
+    crate::abi::resource_free(id);
     Err(format!("не удалось выдать запись ресурса {} сервису '{}'", id, service))
 }
 
@@ -166,7 +166,7 @@ pub fn discard(topic: &str, opened: ResourceOpened) {
     log::warn!(target: "handlers", "{} без учтённого запроса: {}",
                topic, crate::abi::correlation());
     if let Some(handle) = opened.handle {
-        crate::abi::arena_free(handle.id);
+        crate::abi::resource_free(handle.id);
     }
 }
 
@@ -202,7 +202,7 @@ impl ResourceReader {
         if covered { return Ok(true); }
 
         let size = WINDOW.min(self.len - self.pos);
-        let data = crate::abi::arena_read(self.id, self.pos, size).ok_or_else(|| {
+        let data = crate::abi::resource_read(self.id, self.pos, size).ok_or_else(|| {
             io::Error::new(io::ErrorKind::Other,
                 format!("resource {}: чтение {} байт со смещения {} не удалось", self.id, size, self.pos))
         })?;

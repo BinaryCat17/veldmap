@@ -1,6 +1,6 @@
 //! Типизированная обёртка над графическим сервисом хоста.
 //!
-//! Буферы и текстуры выделяются через memory ABI (`abi::arena_alloc_*`)
+//! Буферы и текстуры выделяются через memory ABI (`abi::resource_alloc_*`)
 //! и адресуются region id. Здесь создаются непрозрачные GPU-объекты
 //! (шейдеры, пайплайны, view, сэмплеры, bind group'ы) — каждый со своим
 //! типом идентификатора, чтобы их нельзя было перепутать, — и записываются
@@ -27,7 +27,7 @@ use proto::{resource_request, ResourceRequest};
 // ── Типизированные идентификаторы GPU-объектов ─────────────────
 
 /// Сырой id GPU-объекта. Drop освобождает объект на хосте: тот же путь,
-/// что у memory-регионов (veld_memory_free умеет и то, и другое).
+/// что у memory-регионов (veld_resource_free умеет и то, и другое).
 /// Bind group/пайплайн на хосте держат wgpu-ссылки на свои ресурсы,
 /// поэтому раннее освобождение view/сэмплера/шейдера после создания
 /// bind group/пайплайна безопасно.
@@ -36,7 +36,7 @@ struct RawGpuId(u64);
 
 impl Drop for RawGpuId {
     fn drop(&mut self) {
-        crate::abi::arena_free(self.0);
+        crate::abi::resource_free(self.0);
     }
 }
 
@@ -78,7 +78,7 @@ pub const VISIBILITY_VERTEX: u32 = 1;
 pub const VISIBILITY_FRAGMENT: u32 = 2;
 pub const VISIBILITY_COMPUTE: u32 = 4;
 
-/// Битовые флаги wgpu::BufferUsages для `abi::arena_alloc_buffer`.
+/// Битовые флаги wgpu::BufferUsages для `abi::resource_alloc_buffer`.
 pub mod buffer_usage {
     pub const MAP_READ: u32 = 1 << 0;
     pub const MAP_WRITE: u32 = 1 << 1;
@@ -90,7 +90,7 @@ pub mod buffer_usage {
     pub const STORAGE: u32 = 1 << 7;
 }
 
-/// Битовые флаги wgpu::TextureUsages для `abi::arena_alloc_texture`.
+/// Битовые флаги wgpu::TextureUsages для `abi::resource_alloc_texture`.
 pub mod texture_usage {
     pub const COPY_SRC: u32 = 1 << 0;
     pub const COPY_DST: u32 = 1 << 1;

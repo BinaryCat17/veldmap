@@ -1,42 +1,6 @@
 use std::sync::Arc;
-use crate::graphics::proto::TextureFormat;
-use crate::registry::{ResourceRegistry, ResourceId, ResourcePayload};
-
-// ── Format helpers (self-contained) ────────────────────────────
-
-pub fn bytes_per_pixel(format_proto: i32) -> u32 {
-    match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
-        TextureFormat::TexR8Unorm => 1,
-        TextureFormat::TexR32Float => 4,
-        TextureFormat::TexRgba16Float => 8,
-        TextureFormat::TexRgba32Float => 16,
-        _ => 4,
-    }
-}
-
-pub fn proto_to_wgpu_format(format_proto: i32) -> wgpu::TextureFormat {
-    match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
-        TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
-        TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
-        TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
-        TextureFormat::TexR8Unorm => wgpu::TextureFormat::R8Unorm,
-        TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
-        TextureFormat::TexRgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-        _ => wgpu::TextureFormat::Rgba8Unorm,
-    }
-}
-
-pub fn surface_format_to_proto(fmt: wgpu::TextureFormat) -> i32 {
-    match fmt {
-        wgpu::TextureFormat::R32Float => TextureFormat::TexR32Float as i32,
-        wgpu::TextureFormat::Rgba16Float => TextureFormat::TexRgba16Float as i32,
-        wgpu::TextureFormat::Rgba32Float => TextureFormat::TexRgba32Float as i32,
-        wgpu::TextureFormat::R8Unorm => TextureFormat::TexR8Unorm as i32,
-        wgpu::TextureFormat::Bgra8UnormSrgb => TextureFormat::TexBgra8UnormSrgb as i32,
-        wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::TexRgba8UnormSrgb as i32,
-        _ => TextureFormat::TexRgba8Unorm as i32,
-    }
-}
+use crate::format::{bytes_per_pixel, proto_to_wgpu};
+use crate::registry::{ResourceRegistry, ResourceId, ResourcePayload, GpuObject};
 
 /// Носитель, умеющий отдавать произвольный диапазон байт.
 ///
@@ -50,19 +14,16 @@ pub trait RangeSource: Send + Sync {
     fn len(&self) -> u64;
 
     /// Диапазон уже проверен вызывающим: `offset < len()` и
-    /// `offset + size <= len()` (см. `MemoryManager::read`). Реализациям
-    /// клампить повторно не нужно — раньше это делал каждый носитель сам,
-    /// и делал по-своему.
+    /// `offset + size <= len()` (см. `MemoryManager::read`). Клампить
+    /// повторно не нужно — иначе правило хвоста у каждого носителя своё.
     fn read_at(&self, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>;
 }
 
 /// Файл на диске: байты остаются на нём, читаются по смещению. Так открываются
 /// ресурсы, которые в память не влезают (гигабайтные снимки).
 ///
-/// Открыт только на чтение — записи через ресурс у файла нет и не было:
-/// ветка записи существовала, но `alloc_file` открывает файл `File::open`, и
-/// любая запись возвращала бы ошибку дескриптора. Файлы пишет модуль fs
-/// (топик fs/write), а не владелец ресурса.
+/// Только на чтение: файл открывается `File::open`, а пишет файлы модуль fs
+/// топиком fs/write, а не владелец ресурса.
 struct FileSource {
     file: std::sync::Mutex<std::fs::File>,
     len: u64,
@@ -83,31 +44,19 @@ impl RangeSource for FileSource {
     }
 }
 
-/// Чем подкреплены байты ресурса.
-///
-/// Ресурс один — id, владение (lease) и освобождение у всех вариантов общие;
-/// различается только носитель и, как следствие, набор доступных операций:
-/// `read`/`write` по смещению работают для Cpu/File/Buffer, а Texture — это
-/// не байтовый диапазон (чтение потребовало бы копии GPU→CPU со стопом
-/// конвейера), поэтому у неё только запись целого изображения.
+/// Байты ресурса: всё, у чего работает `read(offset, size)`. Непрозрачные
+/// GPU-объекты (текстуры, view, пайплайны) сюда не входят — они в
+/// [`GpuObject`].
 pub enum DataBacking {
     /// Обычная память хоста.
     Cpu(Vec<u8>),
     /// Носитель, читаемый диапазонами: файл на диске или удалённый ресурс
-    /// (см. `RangeSource`). Один вариант на оба именно потому, что для
-    /// читателя они одинаковы; двумя вариантами они были ровно до тех пор,
-    /// пока клампинг хвоста и признак «чтение блокирует» не расползлись по
-    /// двум копиям.
+    /// (см. `RangeSource`). Один вариант на оба потому, что для читателя они
+    /// неразличимы — на этом стоит чтение удалённых снимков окнами.
     Range(Arc<dyn RangeSource>),
     /// Буфер GPU. `mapped` — создан с mapped_at_creation, запись идёт прямо
     /// в отображённый диапазон, а не через очередь.
     Buffer { buffer: Arc<wgpu::Buffer>, mapped: bool },
-    Texture {
-        texture: Arc<wgpu::Texture>,
-        width: u32,
-        height: u32,
-        format: i32,
-    },
 }
 
 impl DataBacking {
@@ -115,9 +64,8 @@ impl DataBacking {
     /// надолго. Такие вызовы хост выполняет на blocking-пуле: иначе медленный
     /// носитель съедает воркер рантайма, а не только фибру своего плагина.
     ///
-    /// Парного `write_blocks` нет: писать умеют только Cpu (memcpy) и GPU
-    /// (через очередь wgpu), а они не блокируют. Диапазонный носитель
-    /// доступен лишь на чтение.
+    /// Парного `write_blocks` нет: писать умеют Cpu (memcpy) и GPU (через
+    /// очередь wgpu), и ни то, ни другое не блокирует.
     pub fn read_blocks(&self) -> bool {
         matches!(self, Self::Range(_) | Self::Buffer { .. })
     }
@@ -127,10 +75,6 @@ impl DataBacking {
             Self::Cpu(v) => v.len() as u64,
             Self::Range(src) => src.len(),
             Self::Buffer { buffer, .. } => buffer.size(),
-            Self::Texture { width, height, format, .. } => {
-                let bpp = bytes_per_pixel(*format);
-                (*width as u64) * (*height as u64) * (bpp as u64)
-            }
         }
     }
 }
@@ -205,7 +149,7 @@ impl MemoryManager {
                 "Texture {}x{} rejected: limit is {}x{}", width, height, max, max);
             return 0;
         }
-        let format = proto_to_wgpu_format(format_proto);
+        let format = proto_to_wgpu(format_proto);
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("memory-tex"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -218,8 +162,10 @@ impl MemoryManager {
                 | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        self.alloc(
-            DataBacking::Texture { texture: Arc::new(texture), width, height, format: format_proto },
+        self.registry.register(
+            ResourcePayload::Gpu(GpuObject::Texture {
+                texture: Arc::new(texture), width, height, format: format_proto,
+            }),
             owner_id,
         )
     }
@@ -228,6 +174,9 @@ impl MemoryManager {
     // Проверки доступа выполняет вызывающий через ResourceRegistry
     // (см. abi.rs); здесь — только байтовые операции с носителем.
 
+    /// Записывает байты в ресурс. Смещение имеет смысл только у байтовых
+    /// носителей; текстура заливается изображением целиком, и `offset` к ней
+    /// не применяется — данные обязаны покрывать её всю.
     pub fn write(&self, region_id: ResourceId, offset: u64, data: &[u8]) -> anyhow::Result<()> {
         self.registry.payload_mut(region_id, |payload| match payload {
             ResourcePayload::Data(backing) => {
@@ -247,37 +196,35 @@ impl MemoryManager {
                         let mut view = slice.get_mapped_range_mut();
                         view[..data.len()].copy_from_slice(data);
                     }
-                    // Диапазонный носитель только читается. Для файла запись идёт
-                    // топиком fs/write, для удалённого ресурса это вообще отдельный
-                    // протокол (PUT, докачка, права на той стороне) — не «ещё один
-                    // вариант write».
+                    // Для файла запись идёт топиком fs/write, для удалённого
+                    // ресурса это отдельный протокол (PUT, права на той
+                    // стороне) — не «ещё один вариант write».
                     DataBacking::Range(_) => {
                         return Err(anyhow::anyhow!("Range-backed resources are read-only"));
-                    }
-                    DataBacking::Texture { texture, width, height, format } => {
-                        let bpp = bytes_per_pixel(*format);
-                        let bytes_per_row = bpp * *width;
-                        let q = self.queue.lock().unwrap();
-                        q.write_texture(
-                            wgpu::TexelCopyTextureInfo {
-                                texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            data,
-                            wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(bytes_per_row),
-                                rows_per_image: Some(*height),
-                            },
-                            wgpu::Extent3d { width: *width, height: *height, depth_or_array_layers: 1 },
-                        );
                     }
                 }
                 Ok(())
             }
-            // GPU-объект — не байтовый ресурс; для вызывающего это «нет такого региона».
+            ResourcePayload::Gpu(GpuObject::Texture { texture, width, height, format }) => {
+                let q = self.queue.lock().unwrap();
+                q.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_pixel(*format) * *width),
+                        rows_per_image: Some(*height),
+                    },
+                    wgpu::Extent3d { width: *width, height: *height, depth_or_array_layers: 1 },
+                );
+                Ok(())
+            }
+            // Прочие GPU-объекты не несут байт вовсе.
             ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
         }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?
     }
@@ -287,10 +234,7 @@ impl MemoryManager {
     /// Чтение за концом — не ошибка, а короткий (возможно пустой) ответ, как
     /// у файла: читатель идёт окнами, и последнее окно почти всегда неполное
     /// (`ResourceReader` в SDK). Правило одно на все носители и проверяется
-    /// здесь: раньше каждый решал сам, и один и тот же ABI-вызов имел три
-    /// разных контракта — Cpu отвечал ошибкой «out of bounds», файл и сеть
-    /// возвращали короткий буфер. Держалось это лишь на том, что
-    /// единственный читатель клампил запрос у себя.
+    /// здесь, а не в каждом из них.
     pub fn read(&self, region_id: ResourceId, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
         if size == 0 { return Ok(Vec::new()); }
 
@@ -306,11 +250,6 @@ impl MemoryManager {
 
         let (size, source) = self.registry.payload(region_id, |payload| match payload {
             ResourcePayload::Data(backing) => {
-                // Текстура — не байтовый диапазон, смещение для неё не определено;
-                // отвечаем отказом до всякого клампинга.
-                if matches!(backing, DataBacking::Texture { .. }) {
-                    return Err(anyhow::anyhow!("Direct read from texture regions is not supported"));
-                }
                 let len = backing.byte_len();
                 if offset >= len { return Ok((0, Source::Bytes(Vec::new()))); }
                 let size = size.min(len - offset);
@@ -320,11 +259,13 @@ impl MemoryManager {
                     }
                     DataBacking::Range(source) => Source::Range(source.clone()),
                     DataBacking::Buffer { buffer, .. } => Source::Buffer(buffer.clone()),
-                    // Отсеяна выше, до проверки диапазона.
-                    DataBacking::Texture { .. } => unreachable!(),
                 }))
             }
-            // GPU-объект — не байтовый ресурс; для вызывающего это «нет такого региона».
+            // Смещение у текстуры не определено, и копия GPU→CPU остановила бы
+            // конвейер: превью снимают, рисуя текстуру, а не вычитывая её.
+            ResourcePayload::Gpu(GpuObject::Texture { .. }) => {
+                Err(anyhow::anyhow!("Direct read from texture regions is not supported"))
+            }
             ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
         }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))??;
 
@@ -399,13 +340,13 @@ impl MemoryManager {
 
     pub fn get_texture(&self, region_id: ResourceId) -> Option<(Arc<wgpu::Texture>, u32, u32, i32)> {
         self.registry.payload(region_id, |p| match p {
-            ResourcePayload::Data(DataBacking::Texture { texture, width, height, format }) => {
+            ResourcePayload::Gpu(GpuObject::Texture { texture, width, height, format }) => {
                 Some((texture.clone(), *width, *height, *format))
             }
             _ => None,
         }).flatten()
     }
 
-    // Освобождения отдельного метода нет: запись одна, поэтому освобождение
-    // одно — `ResourceRegistry::unregister` (см. `veld_memory_free` в abi.rs).
+    // Освобождения отдельного метода нет: запись о ресурсе одна, поэтому и
+    // освобождение одно — `ResourceRegistry::unregister`.
 }

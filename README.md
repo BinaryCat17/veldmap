@@ -146,8 +146,8 @@ fire-and-forget. Синхронных вызовов между модулями
 |---|---|
 | Шина и логи | `veld_host_publish`, `veld_host_log` |
 | Система | `veld_get_config`, `veld_random_bytes` |
-| Память | `veld_memory_alloc_cpu`, `veld_memory_alloc_buffer`, `veld_memory_alloc_texture`, `veld_memory_read`, `veld_memory_write`, `veld_memory_texture_size`, `veld_memory_free` |
-| Права | `veld_memory_transfer`, `veld_memory_grant_read`, `veld_memory_grant_write` |
+| Ресурсы | `veld_resource_alloc_cpu`, `veld_resource_alloc_buffer`, `veld_resource_alloc_texture`, `veld_resource_read`, `veld_resource_write`, `veld_resource_texture_size`, `veld_resource_free` |
+| Права | `veld_resource_transfer`, `veld_resource_grant_read`, `veld_resource_grant_write` |
 | Графика | `veld_graphics_create_resource`, `veld_graphics_execute` |
 | Задачи | `veld_task_kill` |
 | Контекст вызова | `veld_input_len`, `veld_input_copy`, `veld_output_set` |
@@ -204,15 +204,24 @@ hooks: [hook_event]             # опциональные хуки жизнен
 
 ### Ресурсы и права
 
-Ресурс — это область данных на стороне хоста, адресуемая `ResourceHandle
-{ id, size }`. Байты за ним могут лежать в разном:
+Ресурс — это то, что живёт на стороне хоста и адресуется `ResourceHandle
+{ id, size }`. Идентификатор, владение и освобождение у всех ресурсов общие,
+а вот содержимое делится надвое — по тому, работает ли над ним чтение по
+смещению.
+
+**Байтовые** (`ResourcePayload::Data`) — `read(offset, size)` и `write` есть:
 
 | Носитель | Что это |
 |---|---|
 | `Cpu` | обычная память хоста |
 | `Range` | файл на диске или удалённый файл, читаемый HTTP Range-запросами |
 | `Buffer` | буфер GPU |
-| `Texture` | текстура GPU |
+
+**Непрозрачные** (`ResourcePayload::Gpu`) — байтового диапазона за ними нет:
+текстура, view текстуры, сэмплер, шейдер, bind group и её layout, пайплайн.
+Текстура здесь, а не среди байтовых, потому что прочитать её по смещению
+нельзя — копия GPU→CPU остановила бы конвейер; заливка изображения целиком
+(`write`) при этом работает.
 
 Чтение и запись идут по смещению и копируют только запрошенный диапазон в
 память вызывающего. Для `Range`-ресурсов это означает, что гигабайтный файл
@@ -267,7 +276,7 @@ outputs:
 `crate::cancel::<сервис>::<топик>(&correlation_id)`. Стаб есть ровно у тех
 вызовов, чей топик объявлен `cancellable: true`: убить то, что отменяемым не
 объявлено, — ошибка компиляции, а не молчаливый отказ в рантайме. Это
-ABI-вызов, а не событие: убийство меняет состояние хоста, как `veld_memory_free`,
+ABI-вызов, а не событие: убийство меняет состояние хоста, как `veld_resource_free`,
 и отвечает сразу. Отдельного сервиса `tasks` в платформе поэтому нет.
 
 Убийство без церемоний. Нативного исполнителя снимает `abort` его фьючерса;

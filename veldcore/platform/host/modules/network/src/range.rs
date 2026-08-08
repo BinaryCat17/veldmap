@@ -1,7 +1,7 @@
 //! Удалённый файл как ресурс (топик network/open): читается Range-запросами,
 //! целиком не скачивается.
 //!
-//! Для читателя такой ресурс неотличим от файла — тот же `arena_read(id,
+//! Для читателя такой ресурс неотличим от файла — тот же `resource_read(id,
 //! offset, size)`. Поэтому декодер, умеющий работать окнами, снимает превью
 //! со снимка на гигабайты, вытянув заголовок и несколько тайлов: остальное
 //! по проводу не идёт. Условия — сервер отвечает на Range (иначе открытие
@@ -16,8 +16,7 @@
 use super::State;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::RemoteOpenRequest;
-use veldmap_host_util::core::{ResourceHandle, ResourceOpened};
-use veldmap_host_util::{blocking, Caller, RangeSource};
+use veldmap_host_util::{blocking, opened, opened_handle, Caller, RangeSource};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -44,17 +43,14 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
                 let len = source.len();
                 let id = ctx.memory.alloc_range(Arc::new(source), instance);
                 log::info!(target: "network", "Opened remote resource {} ({} bytes): {}", id, len, req.url);
-                ResourceOpened {
-                    handle: Some(ResourceHandle { id, size: len }),
-                    error: String::new(),
-                }
+                opened_handle(id, len)
             }
             Err(e) => {
                 // Ошибка уходит событием заказчику, но на экране её увидит
                 // только тот, кто в этот момент смотрит на превью — в логе она
                 // нужна независимо от этого.
                 log::warn!(target: "network", "Failed to open remote resource {}: {}", req.url, e);
-                ResourceOpened { handle: None, error: e.to_string() }
+                opened(Err(e.to_string()))
             }
         };
         bus::emit::on_open_result(&*ctx.publisher, &result, &correlation);
@@ -78,7 +74,7 @@ struct HttpRange {
     fetched: std::sync::atomic::AtomicU64,
 }
 
-/// Ресурс закрыт (гость освободил его через veld_memory_free) — подводим
+/// Ресурс закрыт (гость освободил его через veld_resource_free) — подводим
 /// итог по трафику.
 impl Drop for HttpRange {
     fn drop(&mut self) {

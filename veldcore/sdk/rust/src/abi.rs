@@ -15,20 +15,20 @@ extern "C" {
     fn veld_graphics_create_resource(ptr: u64, len: u64) -> u64;
     fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
 
-    fn veld_memory_write(id: u64, offset: u64, ptr: u64, len: u64);
-    fn veld_memory_read(id: u64, offset: u64, size: u64) -> u64;
+    fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64);
+    fn veld_resource_read(id: u64, offset: u64, size: u64) -> u64;
 
-    fn veld_memory_texture_size(id: u64) -> u64;
+    fn veld_resource_texture_size(id: u64) -> u64;
 
     fn veld_task_kill(ptr: u64, len: u64) -> u64;
 
-    fn veld_memory_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
-    fn veld_memory_alloc_cpu(size: u64) -> u64;
-    fn veld_memory_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
-    fn veld_memory_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
-    fn veld_memory_grant_read(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
-    fn veld_memory_grant_write(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
-    fn veld_memory_free(region_id: u64) -> u64;
+    fn veld_resource_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
+    fn veld_resource_alloc_cpu(size: u64) -> u64;
+    fn veld_resource_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
+    fn veld_resource_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+    fn veld_resource_grant_read(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+    fn veld_resource_grant_write(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+    fn veld_resource_free(region_id: u64) -> u64;
 
     fn veld_input_len() -> u64;
     fn veld_input_copy(p: u64, n: u64);
@@ -97,19 +97,20 @@ pub fn graphics_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     }
 }
 
-// ── Memory data access ─────────────────────────────────────────
+// ── Доступ к байтам ресурса ────────────────────────────────────
 
-/// Write data into a memory region
-pub fn arena_write(id: u64, offset: u64, data: &[u8]) {
-    unsafe { veld_memory_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
+/// Смещение имеет смысл у байтовых носителей; текстура заливается целиком,
+/// и данные обязаны покрывать её всю.
+pub fn resource_write(id: u64, offset: u64, data: &[u8]) {
+    unsafe { veld_resource_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
 }
 
-/// Read a byte range from a memory region into the caller's own wasm memory
-/// (not a raw pointer — enforces the access boundary, avoids data races).
-/// `None` — region not found, access denied, or read out of bounds.
-pub fn arena_read(id: u64, offset: u64, size: u64) -> Option<Vec<u8>> {
+/// Копирует диапазон в собственную память вызывающего, а не отдаёт указатель:
+/// на этом стоит граница доступа и защита от гонок. `None` — ресурс не найден
+/// либо доступ запрещён; чтение за концом даёт короткий буфер, не ошибку.
+pub fn resource_read(id: u64, offset: u64, size: u64) -> Option<Vec<u8>> {
     unsafe {
-        let packed = veld_memory_read(id, offset, size);
+        let packed = veld_resource_read(id, offset, size);
         take_host_bytes(packed)
     }
 }
@@ -117,8 +118,8 @@ pub fn arena_read(id: u64, offset: u64, size: u64) -> Option<Vec<u8>> {
 /// Размеры текстуры в пикселях. `None` — регион не текстура, не найден или
 /// доступ запрещён. Нужно тому, кто рисует чужую текстуру: вписать её в
 /// отведённое место можно только зная её пропорции.
-pub fn arena_texture_size(id: u64) -> Option<(u32, u32)> {
-    let packed = unsafe { veld_memory_texture_size(id) };
+pub fn resource_texture_size(id: u64) -> Option<(u32, u32)> {
+    let packed = unsafe { veld_resource_texture_size(id) };
     if packed == 0 { return None; }
     Some(((packed >> 32) as u32, packed as u32))
 }
@@ -138,55 +139,54 @@ pub fn task_kill(task_id: &str) -> bool {
     unsafe { veld_task_kill(task_id.as_ptr() as u64, task_id.len() as u64) != 0 }
 }
 
-// ── Memory management ──────────────────────────────────────────
+// ── Выделение ресурсов ─────────────────────────────────────────
 
-/// Allocate a GPU buffer region in the resource registry
-pub fn arena_alloc_buffer(size: u64, usage: u32, mapped: bool) -> Option<u64> {
-    let id = unsafe { veld_memory_alloc_buffer(size, usage as u64, mapped as u64) };
+/// `usage`/`mapped` — семантика wgpu: маска `BufferUsages` и запрос
+/// mapped_at_creation (запись пойдёт в отображённый диапазон, минуя очередь).
+pub fn resource_alloc_buffer(size: u64, usage: u32, mapped: bool) -> Option<u64> {
+    let id = unsafe { veld_resource_alloc_buffer(size, usage as u64, mapped as u64) };
     if id == 0 { None } else { Some(id) }
 }
 
-/// Allocate a plain CPU-backed memory region — not a GPU buffer. For moving
-/// bytes to the host that have nothing to do with rendering (e.g. a file
-/// through fs/on_write): `arena_alloc_buffer`'s usage/mapped params are wgpu
-/// semantics that don't apply here, so this is a sibling, not that function
-/// made more generic.
-pub fn arena_alloc_cpu(size: u64) -> Option<u64> {
-    let id = unsafe { veld_memory_alloc_cpu(size) };
+/// Обычная память хоста, не буфер GPU: для байт, которым нечего делать в
+/// рендеринге (например, файл через fs/on_write). Сосед `resource_alloc_buffer`,
+/// а не его частный случай — wgpu-семантика usage/mapped здесь не применима.
+pub fn resource_alloc_cpu(size: u64) -> Option<u64> {
+    let id = unsafe { veld_resource_alloc_cpu(size) };
     if id == 0 { None } else { Some(id) }
 }
 
-/// Allocate a GPU texture region in the resource registry
-pub fn arena_alloc_texture(width: u32, height: u32, format: i32, usage: u32) -> Option<u64> {
-    let id = unsafe { veld_memory_alloc_texture(width as u64, height as u64, format as u64, usage as u64) };
+/// Текстура — непрозрачный ресурс: читается не по смещению, а рисованием.
+/// `None` — размеры не по силам устройству.
+pub fn resource_alloc_texture(width: u32, height: u32, format: i32, usage: u32) -> Option<u64> {
+    let id = unsafe { veld_resource_alloc_texture(width as u64, height as u64, format as u64, usage as u64) };
     if id == 0 { None } else { Some(id) }
 }
 
-/// Transfer ownership of a region to another service (zero-copy).
-/// Низкий уровень ABI: прикладной код пользуется `resource::hand_off`,
-/// который при отказе освобождает ресурс.
-pub(crate) fn arena_transfer(region_id: u64, service: &str) -> bool {
-    unsafe { veld_memory_transfer(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
+/// Передаёт владение другому сервису. Низкий уровень ABI: прикладной код
+/// пользуется `resource::hand_off`, который при отказе освобождает ресурс.
+pub(crate) fn resource_transfer(region_id: u64, service: &str) -> bool {
+    unsafe { veld_resource_transfer(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
-/// Grant read access to another service (owner only).
-/// Низкий уровень ABI: прикладной код — `resource::grant_read_or_free`.
-pub(crate) fn arena_grant_read(region_id: u64, service: &str) -> bool {
-    unsafe { veld_memory_grant_read(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
+/// Право чтения другому сервису (только от владельца). Низкий уровень ABI:
+/// прикладной код — `resource::grant_read_or_free`.
+pub(crate) fn resource_grant_read(region_id: u64, service: &str) -> bool {
+    unsafe { veld_resource_grant_read(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
 /// Grant write access to another service (owner only).
 /// Низкий уровень ABI: прикладной код — `resource::grant_write_or_free`.
-pub(crate) fn arena_grant_write(region_id: u64, service: &str) -> bool {
-    unsafe { veld_memory_grant_write(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
+pub(crate) fn resource_grant_write(region_id: u64, service: &str) -> bool {
+    unsafe { veld_resource_grant_write(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
 /// Free a resource region.
 /// Низкий уровень ABI: прикладной код пользуется `OwnedResource` (RAII)
 /// и обрядами `resource::*`; прямой вызов — признак переписанного вручную
 /// обряда.
-pub(crate) fn arena_free(region_id: u64) -> bool {
-    unsafe { veld_memory_free(region_id) != 0 }
+pub(crate) fn resource_free(region_id: u64) -> bool {
+    unsafe { veld_resource_free(region_id) != 0 }
 }
 
 // ── Logging ────────────────────────────────────────────────────
@@ -289,8 +289,8 @@ pub fn event_publisher() -> String {
 /// которому он ищется в таблице ожиданий. "" — топик не объявлен парой
 /// `replies_to`, и корреспондента у события нет.
 ///
-/// Раньше это же значение приезжало полем доменного сообщения, из-за чего
-/// каждый контракт обязан был его объявить, а прикладной код — протащить.
+/// Едет в конверте, а не полем доменного сообщения: иначе её обязан был бы
+/// объявить каждый контракт.
 pub fn correlation() -> String {
     EVENT_CORRELATION.lock().unwrap().clone()
 }

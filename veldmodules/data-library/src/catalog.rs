@@ -80,7 +80,7 @@ pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened)
 
     // RAII-гард: регион освобождается при любом выходе ниже.
     let resource = veldsdk::OwnedResource::new(handle.clone());
-    let Some(bytes) = veldsdk::abi::arena_read(resource.id(), 0, handle.size) else { return };
+    let Some(bytes) = veldsdk::abi::resource_read(resource.id(), 0, handle.size) else { return };
     let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return };
     if sidecar.provider != storage::PROVIDER_NAME { return }
 
@@ -99,8 +99,8 @@ pub fn write_sidecar(state: &mut State, name: &str, identifier: &str, total_byte
     state.origins.insert(name.to_string(), sidecar.clone());
 
     let Ok(json) = serde_json::to_vec(&sidecar) else { return };
-    let Some(region) = veldsdk::abi::arena_alloc_cpu(json.len() as u64) else { return };
-    veldsdk::abi::arena_write(region, 0, &json);
+    let Some(region) = veldsdk::abi::resource_alloc_cpu(json.len() as u64) else { return };
+    veldsdk::abi::resource_write(region, 0, &json);
 
     // Гранта на "fs" не нужно (и он бы не сработал: fs — хостовый нативный
     // модуль, не wasm-плагин, dispatcher.instance_of его не резолвит). on_write

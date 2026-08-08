@@ -85,8 +85,8 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
     // ── Memory data access ────────────────────────────────────
 
-    // veld_memory_write — write data into a memory region
-    linker.func_wrap_async("env", "veld_memory_write", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
+    // veld_resource_write — write data into a memory region
+    linker.func_wrap_async("env", "veld_resource_write", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(()) };
             let instance_id = caller.data().instance_id;
@@ -99,17 +99,24 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             // нужен. Диапазонный носитель (диск, сеть) доступен на чтение.
             let memory = caller.data().memory.clone();
             if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
-                let _ = memory.write(id, offset, data);
+                // Ответить гостю нечем — вызов ничего не возвращает, — но
+                // молчать нельзя: отказ здесь означает пустую текстуру или
+                // недописанный буфер, а искать такое по картинке на экране
+                // куда дороже, чем прочитать строчку в логе.
+                if let Err(e) = memory.write(id, offset, data) {
+                    log::warn!(target: "abi", "[{}] write to resource {} failed: {}",
+                               caller.data().plugin_name, id, e);
+                }
             }
             Ok(())
         })
     })?;
 
-    // veld_memory_read(id, offset, size) → (len << 32 | ptr), 0 — доступ
+    // veld_resource_read(id, offset, size) → (len << 32 | ptr), 0 — доступ
     // запрещён, регион не найден или чтение вне границ. Копирует запрошенный
     // диапазон в собственную память вызывающего (не сырой указатель) — та же
-    // граница доступа и защита от гонок, что и у veld_memory_write.
-    linker.func_wrap_async("env", "veld_memory_read", |mut caller: Caller<'_, HostState>, (id, offset, size): (u64, u64, u64)| {
+    // граница доступа и защита от гонок, что и у veld_resource_write.
+    linker.func_wrap_async("env", "veld_resource_read", |mut caller: Caller<'_, HostState>, (id, offset, size): (u64, u64, u64)| {
         Box::new(async move {
             let instance_id = caller.data().instance_id;
             let registry = caller.data().registry.clone();
@@ -133,11 +140,11 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // veld_memory_texture_size(id) → (width << 32 | height), 0 — не текстура,
+    // veld_resource_texture_size(id) → (width << 32 | height), 0 — не текстура,
     // не найдена или доступ запрещён. Нужен тому, кто рисует чужую текстуру:
     // вписать её в отведённое место можно только зная её пропорции, а размеры
     // знает только владелец ресурса (обычно — другой сервис).
-    linker.func_wrap("env", "veld_memory_texture_size", |caller: Caller<'_, HostState>, id: u64| -> u64 {
+    linker.func_wrap("env", "veld_resource_texture_size", |caller: Caller<'_, HostState>, id: u64| -> u64 {
         let instance_id = caller.data().instance_id;
         if !caller.data().registry.check_access(id, instance_id, crate::registry::Access::Read) {
             return 0;
@@ -153,7 +160,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // veld_task_kill(ptr, len) → 1 | 0. ptr/len — сырая строка task_id
     // (correlation_id операции). 1 — операция была жива и снята.
     //
-    // Убийство — это изменение состояния хоста, как veld_memory_free,
+    // Убийство — это изменение состояния хоста, как veld_resource_free,
     // поэтому оно и обращается туда же: прямым
     // синхронным вызовом, а не событием. Права проверяет реестр: убить может
     // заказчик операции или сам хост, и заказчика здесь не назовёшь — он
@@ -173,26 +180,26 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
     // ── Memory management ─────────────────────────────────────
 
-    // veld_memory_alloc_buffer(size, usage, mapped) → region_id
-    linker.func_wrap("env", "veld_memory_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {
+    // veld_resource_alloc_buffer(size, usage, mapped) → region_id
+    linker.func_wrap("env", "veld_resource_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
         memory.alloc_buffer(size, usage as u32, mapped != 0, owner_id)
     })?;
 
-    // veld_memory_alloc_cpu(size) → region_id. Обычная CPU-память (Vec<u8>),
-    // не GPU-буфер — сосед veld_memory_alloc_buffer, не замена: для случаев,
+    // veld_resource_alloc_cpu(size) → region_id. Обычная CPU-память (Vec<u8>),
+    // не GPU-буфер — сосед veld_resource_alloc_buffer, не замена: для случаев,
     // когда wasm-модулю нужно просто переслать байты хосту (например, файл
     // через fs/on_write), а не wgpu usage/mapped-семантика, которая тут
     // не имеет смысла.
-    linker.func_wrap("env", "veld_memory_alloc_cpu", |caller: Caller<'_, HostState>, size: u64| -> u64 {
+    linker.func_wrap("env", "veld_resource_alloc_cpu", |caller: Caller<'_, HostState>, size: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
         memory.alloc_cpu(vec![0u8; size as usize], owner_id)
     })?;
 
-    // veld_memory_alloc_texture(width, height, format, usage) → region_id
-    linker.func_wrap("env", "veld_memory_alloc_texture", |caller: Caller<'_, HostState>, width: u64, height: u64, format: u64, usage: u64| -> u64 {
+    // veld_resource_alloc_texture(width, height, format, usage) → region_id
+    linker.func_wrap("env", "veld_resource_alloc_texture", |caller: Caller<'_, HostState>, width: u64, height: u64, format: u64, usage: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
         memory.alloc_texture(width as u32, height as u32, format as i32, usage as u32, owner_id)
@@ -201,20 +208,20 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // Lease-операции адресуются по имени сервиса — модули нигде не оперируют
     // числовыми instance id. Право менять lease имеет только владелец (или хост).
     // grant_write — делегирование: так владелец окна назначает рендерера текстуры.
-    lease_op(linker, "veld_memory_transfer", |lease, target| {
+    lease_op(linker, "veld_resource_transfer", |lease, target| {
         lease.owner_id = target;
         lease.readers.clear();
         lease.writers.clear();
     })?;
-    lease_op(linker, "veld_memory_grant_read", |lease, target| lease.add_reader(target))?;
-    lease_op(linker, "veld_memory_grant_write", |lease, target| lease.add_writer(target))?;
+    lease_op(linker, "veld_resource_grant_read", |lease, target| lease.add_reader(target))?;
+    lease_op(linker, "veld_resource_grant_write", |lease, target| lease.add_writer(target))?;
 
-    // veld_memory_free(region_id) → bool
+    // veld_resource_free(region_id) → bool
     // Освобождает и memory-регионы, и непрозрачные GPU-объекты (view,
     // сэмплеры, bind group'ы): у OwnedResource в SDK один путь освобождения,
     // и на хосте он один — запись о ресурсе едина (реестр), поэтому
     // освобождение атомарно и не перебирает карты носителей.
-    linker.func_wrap("env", "veld_memory_free", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
+    linker.func_wrap("env", "veld_resource_free", |caller: Caller<'_, HostState>, region_id: u64| -> u64 {
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
         let can_free = registry.check_access(region_id, owner_id, crate::registry::Access::Write);

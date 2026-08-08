@@ -33,7 +33,7 @@ pub fn delegate(
     set_surface: impl FnOnce(&crate::proto::SetSurfaceRequest),
     attach: impl FnOnce(&veldsdk::proto::app::SetSurface),
 ) -> Option<u64> {
-    let Some(texture_id) = abi::arena_alloc_texture(ev.width, ev.height, ev.format, RENDER_TARGET_USAGE) else {
+    let Some(texture_id) = abi::resource_alloc_texture(ev.width, ev.height, ev.format, RENDER_TARGET_USAGE) else {
         return old_texture;
     };
 

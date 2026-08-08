@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use crate::memory::{MemoryManager, proto_to_wgpu_format, surface_format_to_proto};
-use crate::registry::{ResourceRegistry, ResourceId, ResourcePayload, GpuObject, GpuEntry, Access};
+use crate::format::{proto_to_wgpu, wgpu_to_proto};
+use crate::memory::MemoryManager;
+use crate::registry::{ResourceRegistry, ResourceId, ResourcePayload, GpuObject, Access};
 use prost::Message;
 
 /// Сгенерированные prost-типы протокола `veldmap.graphics`
@@ -64,15 +65,15 @@ impl GraphicsDevice {
 
     pub fn registry(&self) -> &Arc<ResourceRegistry> { &self.registry }
     pub fn memory(&self) -> &Arc<MemoryManager> { &self.memory }
-    pub fn get_surface_format_proto(&self) -> i32 { surface_format_to_proto(self.surface_format) }
+    pub fn get_surface_format_proto(&self) -> i32 { wgpu_to_proto(self.surface_format) }
 
     // ── GPU object helpers ────────────────────────────────────
     // Носителей отдельно нет: GPU-объекты — такой же payload в реестре,
     // как и байтовые ресурсы; освобождение общее (registry.unregister,
-    // см. veld_memory_free в abi.rs).
+    // см. veld_resource_free в abi.rs).
 
-    fn insert_gpu(&self, obj: GpuObject, owner_id: u32, size: Option<(u32, u32)>) -> ResourceId {
-        self.registry.register(ResourcePayload::Gpu(GpuEntry { obj, size }), owner_id)
+    fn insert_gpu(&self, obj: GpuObject, owner_id: u32) -> ResourceId {
+        self.registry.register(ResourcePayload::Gpu(obj), owner_id)
     }
 
     /// GPU-объект по id с проверкой read-доступа. «Не найден» отвечаем и на
@@ -83,21 +84,9 @@ impl GraphicsDevice {
             return Err(anyhow::anyhow!("Access denied to GPU object {}", id));
         }
         self.registry.payload(id, |p| match p {
-            ResourcePayload::Gpu(entry) => Ok(entry.obj.clone()),
+            ResourcePayload::Gpu(obj) => Ok(obj.clone()),
             ResourcePayload::Data(_) => Err(anyhow::anyhow!("GPU object {} not found", id)),
         }).ok_or_else(|| anyhow::anyhow!("GPU object {} not found", id))?
-    }
-
-    /// Размеры текстуры, на которую указывает view. None — объект не view,
-    /// не найден или доступ запрещён.
-    pub fn get_texture_view_size(&self, id: ResourceId, requestor_id: u32) -> Option<(u32, u32)> {
-        if !self.registry.check_access(id, requestor_id, Access::Read) {
-            return None;
-        }
-        self.registry.payload(id, |p| match p {
-            ResourcePayload::Gpu(entry) => entry.size,
-            ResourcePayload::Data(_) => None,
-        }).flatten()
     }
 
     // ── Lookup helpers ────────────────────────────────────────
@@ -122,7 +111,7 @@ impl GraphicsDevice {
         let (texture, width, height, _) = self.get_texture_info(texture_id, owner_id)
             .ok_or_else(|| anyhow::anyhow!("Texture region {} not found or access denied", texture_id))?;
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Ok(self.insert_gpu(GpuObject::TextureView(Arc::new(view)), owner_id, Some((width, height))))
+        Ok(self.insert_gpu(GpuObject::TextureView { view: Arc::new(view), width, height }, owner_id))
     }
 
     pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, owner_id: u32) -> ResourceId {
@@ -133,21 +122,21 @@ impl GraphicsDevice {
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: map(mag_proto), min_filter: map(min_proto), ..Default::default()
         });
-        self.insert_gpu(GpuObject::Sampler(Arc::new(sampler)), owner_id, None)
+        self.insert_gpu(GpuObject::Sampler(Arc::new(sampler)), owner_id)
     }
 
     pub fn create_bind_group_layout(&self, entries: &[wgpu::BindGroupLayoutEntry], owner_id: u32) -> ResourceId {
         let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None, entries,
         });
-        self.insert_gpu(GpuObject::BindGroupLayout(Arc::new(layout)), owner_id, None)
+        self.insert_gpu(GpuObject::BindGroupLayout(Arc::new(layout)), owner_id)
     }
 
     pub fn create_shader(&self, source: &str, label: Option<&str>, owner_id: u32) -> ResourceId {
         let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label, source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)), owner_id, None)
+        self.insert_gpu(GpuObject::ShaderModule(Arc::new(shader)), owner_id)
     }
 
     pub fn create_bind_group(&self, layout_id: ResourceId, entries_proto: &[proto::BindGroupEntry], owner_id: u32) -> anyhow::Result<ResourceId> {
@@ -169,7 +158,7 @@ impl GraphicsDevice {
                 }
                 Some(proto::bind_group_entry::Resource::TextureViewId(tvid)) => {
                     match self.get_gpu(*tvid, owner_id) {
-                        Ok(GpuObject::TextureView(tv)) => { keep_views.push((e.binding, tv)); }
+                        Ok(GpuObject::TextureView { view, .. }) => { keep_views.push((e.binding, view)); }
                         _ => {
                             if let Some((tex, _, _, _)) = self.get_texture_info(*tvid, owner_id) {
                                 let v = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -214,7 +203,7 @@ impl GraphicsDevice {
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None, layout: &layout, entries: &entries,
         });
-        Ok(self.insert_gpu(GpuObject::BindGroup(Arc::new(bg)), owner_id, None))
+        Ok(self.insert_gpu(GpuObject::BindGroup(Arc::new(bg)), owner_id))
     }
 
     pub fn create_pipeline(&self, req: &proto::CreateRenderPipeline, owner_id: u32) -> anyhow::Result<ResourceId> {
@@ -223,7 +212,7 @@ impl GraphicsDevice {
             _ => return Err(anyhow::anyhow!("Object {} is not a Shader", req.shader_id)),
         };
 
-        let target_format = proto_to_wgpu_format(req.target_format);
+        let target_format = proto_to_wgpu(req.target_format);
 
         let mut bgl_refs = Vec::new();
         for &id in &req.bind_group_layout_ids {
@@ -345,7 +334,7 @@ impl GraphicsDevice {
             cache: None,
         });
 
-        Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline)), owner_id, None))
+        Ok(self.insert_gpu(GpuObject::RenderPipeline(Arc::new(pipeline)), owner_id))
     }
 
     // ── Create resource (protobuf dispatch) ───────────────────

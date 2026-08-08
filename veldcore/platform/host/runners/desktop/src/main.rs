@@ -162,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
     let mut cursor_pos = (0.0f32, 0.0f32);
     // CursorMoved коалесцируется до одного события на кадр: каждый move — это
     // отдельный вызов wasm-актера ui-service, и поток движений мыши (40-125/с)
-    // раньше создавал бэклог очереди с секундной задержкой кликов.
+    // иначе копит бэклог очереди с секундной задержкой кликов.
     let mut cursor_dirty = false;
     let mut last_frame_time = std::time::Instant::now();
     // Состояние модификаторов: winit шлёт его отдельно от KeyboardInput,
@@ -241,14 +241,11 @@ async fn main() -> anyhow::Result<()> {
                 // 1) Render-опы модулей — в их таргеты (обычно текстура окна).
                 for op in graphics.take_pending_ops() {
                     let target = graphics.get_gpu(op.target_view_id, op.instance_id);
-                    if let Ok(veldmap_host_core::registry::GpuObject::TextureView(target_view)) = target {
-                        // Размеры целевой текстуры (не окна) — viewport/scissor
-                        // клампятся по таргету. У каждого view размеры записаны
-                        // при создании; None — view чужой или уже освобождён.
-                        let Some((target_w, target_h)) = graphics.get_texture_view_size(op.target_view_id, op.instance_id) else {
-                            log::error!(target: "render", "Render op targets view {} with unknown size, skipped", op.target_view_id);
-                            continue;
-                        };
+                    // Размеры целевой текстуры (не окна): по ним клампятся
+                    // viewport и scissor. Записаны в view при создании.
+                    if let Ok(veldmap_host_core::registry::GpuObject::TextureView {
+                        view: target_view, width: target_w, height: target_h,
+                    }) = target {
                         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("Module Render Pass"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

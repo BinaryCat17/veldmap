@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::dispatcher::Dispatcher;
 
 pub mod registry;
+pub mod format;
 pub mod memory;
 pub mod graphics;
 pub mod config;

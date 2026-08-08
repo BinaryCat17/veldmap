@@ -22,8 +22,8 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
     let name = storage::name_from_identifier(&req.identifier);
 
     // Повторное нажатие, пока идёт предыдущая попытка (в том числе пока она
-    // ждёт подписи). Раньше дубли отсекал провайдер — у него одного был id
-    // операции; теперь id наш с самого начала, и окна без учёта нет.
+    // ждёт подписи). Отсекаем здесь: id операции наш с самого начала, поэтому
+    // окна, в котором закачка идёт, а учёта её ещё нет, не существует.
     if state.downloads.values().any(|d| d.name == name) {
         veldsdk::log::info!(target: "handlers", "{} уже качается, повтор игнорируем", name);
         return;
