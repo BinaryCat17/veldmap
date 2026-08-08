@@ -9,7 +9,7 @@ use veldsdk::graphics::{
     TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat,
     VISIBILITY_FRAGMENT, VISIBILITY_VERTEX,
 };
-use veldsdk::abi::{resource_write, resource_alloc_buffer, resource_alloc_texture};
+use veldsdk::abi::{resource_write, resource_upload_image, resource_alloc_buffer, resource_alloc_texture};
 use veldsdk::proto::core::ResourceHandle;
 use veldsdk::OwnedResource;
 
@@ -50,16 +50,16 @@ pub fn render_ui(
     if let Some(u) = plugin.uniform_buffer_region.borrow().as_ref() {
         let res_data: [f32; 2] = [logical_w, logical_h];
         let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
-        resource_write(u.id(), 0, data);
+        resource_write(u.id(), 0, data)?;
     }
 
     // Update texture atlas if dirty
     if renderer.is_atlas_dirty() {
         let atlas_id = renderer.atlas_texture_id.as_ref().map(|t| t.id());
         if let Some(tid) = atlas_id {
-            // NOTE: For dzn (DirectX 12 on Vulkan), we need full texture writes only
-            let data = renderer.atlas_data_full();
-            resource_write(tid, 0, data);
+            // Атлас заливается целиком, частичных обновлений нет: dzn
+            // (DirectX 12 поверх Vulkan) принимает только полную запись.
+            resource_upload_image(tid, renderer.atlas_data_full())?;
             renderer.mark_atlas_clean();
         }
     }
@@ -109,10 +109,10 @@ fn render_geometry(
     // Upload vertex and index data
     if let (Some(ref v_h), Some(ref i_h)) = (&*vertex_buffer, &*index_buffer) {
         let v_data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
-        resource_write(v_h.id(), 0, v_data);
+        resource_write(v_h.id(), 0, v_data)?;
 
         let i_data = unsafe { std::slice::from_raw_parts(renderer.indices.as_ptr() as *const u8, renderer.indices.len() * 2) };
-        resource_write(i_h.id(), 0, i_data);
+        resource_write(i_h.id(), 0, i_data)?;
     }
 
     // Record draw commands if pipeline is ready

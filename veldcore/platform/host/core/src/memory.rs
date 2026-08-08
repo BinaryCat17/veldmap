@@ -174,9 +174,8 @@ impl MemoryManager {
     // Проверки доступа выполняет вызывающий через ResourceRegistry
     // (см. abi.rs); здесь — только байтовые операции с носителем.
 
-    /// Записывает байты в ресурс. Смещение имеет смысл только у байтовых
-    /// носителей; текстура заливается изображением целиком, и `offset` к ней
-    /// не применяется — данные обязаны покрывать её всю.
+    /// Записывает байты по смещению. Только для байтовых носителей: у
+    /// текстуры смещение не определено, и заливается она [`Self::upload_image`].
     pub fn write(&self, region_id: ResourceId, offset: u64, data: &[u8]) -> anyhow::Result<()> {
         self.registry.payload_mut(region_id, |payload| match payload {
             ResourcePayload::Data(backing) => {
@@ -205,7 +204,29 @@ impl MemoryManager {
                 }
                 Ok(())
             }
+            ResourcePayload::Gpu(GpuObject::Texture { .. }) => {
+                Err(anyhow::anyhow!("resource {} is a texture: use upload_image", region_id))
+            }
+            // Прочие GPU-объекты байт не несут вовсе.
+            ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
+        }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?
+    }
+
+    /// Заливает изображение в текстуру целиком.
+    ///
+    /// Отдельная операция, а не `write` со смещением 0: смещения у текстуры
+    /// нет, частичной заливки нет, и данные обязаны покрывать её всю — то
+    /// есть от записи по смещению здесь не остаётся ни одного параметра.
+    /// Пока это был `write`, `offset` молча игнорировался.
+    pub fn upload_image(&self, region_id: ResourceId, data: &[u8]) -> anyhow::Result<()> {
+        self.registry.payload(region_id, |payload| match payload {
             ResourcePayload::Gpu(GpuObject::Texture { texture, width, height, format }) => {
+                let expected = (bytes_per_pixel(*format) * *width) as u64 * (*height as u64);
+                if (data.len() as u64) < expected {
+                    return Err(anyhow::anyhow!(
+                        "image is {} bytes, texture {}x{} needs {}",
+                        data.len(), width, height, expected));
+                }
                 let q = self.queue.lock().unwrap();
                 q.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -224,8 +245,7 @@ impl MemoryManager {
                 );
                 Ok(())
             }
-            // Прочие GPU-объекты не несут байт вовсе.
-            ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
+            _ => Err(anyhow::anyhow!("resource {} is not a texture", region_id)),
         }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?
     }
 

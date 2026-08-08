@@ -12,10 +12,11 @@ extern "C" {
     fn veld_host_log(level: u64, target_ptr: u64, target_len: u64, ptr: u64, len: u64);
     fn veld_get_config(ptr: u64, len: u64) -> u64;
     fn veld_random_bytes(ptr: u64, len: u64);
-    fn veld_graphics_create_resource(ptr: u64, len: u64) -> u64;
+    fn veld_resource_create(ptr: u64, len: u64) -> u64;
     fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
 
-    fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64);
+    fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64) -> u64;
+    fn veld_resource_upload_image(id: u64, ptr: u64, len: u64) -> u64;
     fn veld_resource_read(id: u64, offset: u64, size: u64) -> u64;
 
     fn veld_resource_texture_size(id: u64) -> u64;
@@ -83,10 +84,16 @@ unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>>
     }
 }
 
-pub fn graphics_create_resource(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+/// Создаёт ресурс по дескриптору (`graphics::ResourceRequest`): шейдер,
+/// пайплайн, сэмплер, view, bind group и её layout.
+///
+/// Сосед `resource_alloc_*`, а не отдельная подсистема: и то, и другое кладёт
+/// запись в один реестр, и освобождается всё одним `resource_free`. Разница
+/// только в форме аргументов — здесь вложенный дескриптор, там скаляры.
+pub fn resource_create(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     unsafe {
-        let packed = veld_graphics_create_resource(payload.as_ptr() as u64, payload.len() as u64);
-        take_host_response(packed, "Graphics create_resource")
+        let packed = veld_resource_create(payload.as_ptr() as u64, payload.len() as u64);
+        take_host_response(packed, "resource_create")
     }
 }
 
@@ -99,19 +106,36 @@ pub fn graphics_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
 
 // ── Доступ к байтам ресурса ────────────────────────────────────
 
-/// Смещение имеет смысл у байтовых носителей; текстура заливается целиком,
-/// и данные обязаны покрывать её всю.
-pub fn resource_write(id: u64, offset: u64, data: &[u8]) {
-    unsafe { veld_resource_write(id, offset, data.as_ptr() as u64, data.len() as u64); }
+/// Записывает байты по смещению. Только для байтовых носителей — текстуре
+/// нужен [`resource_upload_image`].
+pub fn resource_write(id: u64, offset: u64, data: &[u8]) -> anyhow::Result<()> {
+    unsafe {
+        let packed = veld_resource_write(id, offset, data.as_ptr() as u64, data.len() as u64);
+        take_host_response(packed, "resource_write").map(|_| ())
+    }
+}
+
+/// Заливает изображение в текстуру целиком: смещения у неё нет, а данные
+/// обязаны покрывать её всю. Отдельно от [`resource_write`] потому, что от
+/// записи по смещению здесь не остаётся ни одного параметра.
+pub fn resource_upload_image(id: u64, data: &[u8]) -> anyhow::Result<()> {
+    unsafe {
+        let packed = veld_resource_upload_image(id, data.as_ptr() as u64, data.len() as u64);
+        take_host_response(packed, "resource_upload_image").map(|_| ())
+    }
 }
 
 /// Копирует диапазон в собственную память вызывающего, а не отдаёт указатель:
-/// на этом стоит граница доступа и защита от гонок. `None` — ресурс не найден
-/// либо доступ запрещён; чтение за концом даёт короткий буфер, не ошибку.
-pub fn resource_read(id: u64, offset: u64, size: u64) -> Option<Vec<u8>> {
+/// на этом стоит граница доступа и защита от гонок.
+///
+/// Чтение за концом — не ошибка, а короткий (возможно пустой) буфер: читатель
+/// идёт окнами, и последнее окно почти всегда неполное. Ошибка — это «нет
+/// прав», «нет ресурса» или «носитель не читается по смещению», и текст
+/// причины приезжает вместе с ней.
+pub fn resource_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
     unsafe {
         let packed = veld_resource_read(id, offset, size);
-        take_host_bytes(packed)
+        take_host_response(packed, "resource_read")
     }
 }
 

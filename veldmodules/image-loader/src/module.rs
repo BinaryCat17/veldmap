@@ -91,7 +91,8 @@ fn make_texture(req: LoadImageRequest) -> Result<Texture, String> {
         TextureFormat::TexRgba8UnormSrgb as i32,
         texture_usage::TEXTURE_BINDING | texture_usage::COPY_DST,
     ).ok_or_else(|| format!("не удалось выделить текстуру {}×{}", preview.width, preview.height))?;
-    veldsdk::abi::resource_write(texture_id, 0, &preview.rgba);
+    veldsdk::abi::resource_upload_image(texture_id, &preview.rgba)
+        .map_err(|e| format!("не удалось залить превью в текстуру: {}", e))?;
 
     let texture = veldsdk::resource::hand_off(
         ResourceHandle { id: texture_id, size: preview.rgba.len() as u64 },

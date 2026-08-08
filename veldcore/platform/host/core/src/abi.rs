@@ -83,60 +83,56 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // ── Memory data access ────────────────────────────────────
+    // ── Доступ к байтам ресурса ───────────────────────────────
+    // Все три отвечают тегированным ответом (см. tagged_response): у отказа
+    // здесь несколько разных причин — нет прав, нет ресурса, носитель только
+    // на чтение, не та размерность, — и голый 0 их не различает.
 
-    // veld_resource_write — write data into a memory region
+    // veld_resource_write(id, offset, ptr, len) → тегированный ответ.
     linker.func_wrap_async("env", "veld_resource_write", |mut caller: Caller<'_, HostState>, (id, offset, ptr, len): (u64, u64, u64, u64)| {
         Box::new(async move {
-            let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(()) };
-            let instance_id = caller.data().instance_id;
-            let registry = caller.data().registry.clone();
-            if !registry.check_access(id, instance_id, crate::registry::Access::Write) {
-                return Ok(());
-            }
-            // Записываются только Cpu (memcpy) и GPU (через очередь wgpu) —
-            // ни один из них поток не держит, поэтому blocking-пул тут не
-            // нужен. Диапазонный носитель (диск, сеть) доступен на чтение.
-            let memory = caller.data().memory.clone();
-            if let Some(data) = mem.data(&caller).get(ptr as usize..(ptr + len) as usize) {
-                // Ответить гостю нечем — вызов ничего не возвращает, — но
-                // молчать нельзя: отказ здесь означает пустую текстуру или
-                // недописанный буфер, а искать такое по картинке на экране
-                // куда дороже, чем прочитать строчку в логе.
-                if let Err(e) = memory.write(id, offset, data) {
-                    log::warn!(target: "abi", "[{}] write to resource {} failed: {}",
-                               caller.data().plugin_name, id, e);
-                }
-            }
-            Ok(())
+            let result = write_bytes(&mut caller, id, Some(offset), ptr, len);
+            let buf = tagged_response(result.map(|_| Vec::new()));
+            write_response_back(&mut caller, &buf).await
         })
     })?;
 
-    // veld_resource_read(id, offset, size) → (len << 32 | ptr), 0 — доступ
-    // запрещён, регион не найден или чтение вне границ. Копирует запрошенный
-    // диапазон в собственную память вызывающего (не сырой указатель) — та же
-    // граница доступа и защита от гонок, что и у veld_resource_write.
+    // veld_resource_upload_image(id, ptr, len) → тегированный ответ.
+    // Смещения нет намеренно: текстура заливается целиком (см.
+    // MemoryManager::upload_image).
+    linker.func_wrap_async("env", "veld_resource_upload_image", |mut caller: Caller<'_, HostState>, (id, ptr, len): (u64, u64, u64)| {
+        Box::new(async move {
+            let result = write_bytes(&mut caller, id, None, ptr, len);
+            let buf = tagged_response(result.map(|_| Vec::new()));
+            write_response_back(&mut caller, &buf).await
+        })
+    })?;
+
+    // veld_resource_read(id, offset, size) → тегированный ответ с байтами.
+    // Копирует запрошенный диапазон в собственную память вызывающего (не сырой
+    // указатель) — та же граница доступа и защита от гонок, что и у записи.
     linker.func_wrap_async("env", "veld_resource_read", |mut caller: Caller<'_, HostState>, (id, offset, size): (u64, u64, u64)| {
         Box::new(async move {
             let instance_id = caller.data().instance_id;
             let registry = caller.data().registry.clone();
-            if !registry.check_access(id, instance_id, crate::registry::Access::Read) {
-                return Ok(0u64);
-            }
             let memory = caller.data().memory.clone();
-            // Диск, сеть и ожидание GPU — на blocking-пул. Гость этого не
-            // замечает (вызов для него синхронный), но поток рантайма при
-            // медленном носителе остаётся свободным для других плагинов.
-            let data = if memory.read_blocks(id) {
+
+            let result = if !registry.check_access(id, instance_id, crate::registry::Access::Read) {
+                Err(anyhow::anyhow!("read access to resource {} denied", id))
+            } else if memory.read_blocks(id) {
+                // Диск, сеть и ожидание GPU — на blocking-пул. Гость этого не
+                // замечает (вызов для него синхронный), но поток рантайма при
+                // медленном носителе остаётся свободным для других плагинов.
                 match tokio::task::spawn_blocking(move || memory.read(id, offset, size)).await {
-                    Ok(Ok(data)) => data,
-                    _ => return Ok(0u64),
+                    Ok(inner) => inner,
+                    Err(e) => Err(anyhow::anyhow!("read of resource {} panicked: {}", id, e)),
                 }
             } else {
-                let Ok(data) = memory.read(id, offset, size) else { return Ok(0u64) };
-                data
+                memory.read(id, offset, size)
             };
-            write_response_back(&mut caller, &data).await
+
+            let buf = tagged_response(result);
+            write_response_back(&mut caller, &buf).await
         })
     })?;
 
@@ -263,7 +259,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
     // ── Graphics ──────────────────────────────────────────────
 
-    linker.func_wrap_async("env", "veld_graphics_create_resource", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
+    linker.func_wrap_async("env", "veld_resource_create", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(0u64) };
             let data_bytes = mem.data(&caller).get(ptr as usize..(ptr + len) as usize).map(|s| s.to_vec());
@@ -342,6 +338,31 @@ fn resolve_service_arg(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -
 /// Кодирует результат синхронного ABI-вызова без protobuf: первый байт —
 /// тег (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст).
 /// Разбирается на SDK-стороне (sdk/rust/src/abi.rs::take_host_response).
+/// Общая часть записи в ресурс: границы гостевой памяти, проверка права и
+/// выбор операции. `offset: None` — заливка изображения в текстуру, у неё
+/// смещения нет.
+fn write_bytes(caller: &mut Caller<'_, HostState>, id: u64, offset: Option<u64>,
+               ptr: u64, len: u64) -> anyhow::Result<()> {
+    let mem = match caller.get_export("memory") {
+        Some(Extern::Memory(m)) => m,
+        _ => return Err(anyhow::anyhow!("guest exports no memory")),
+    };
+    let instance_id = caller.data().instance_id;
+    let registry = caller.data().registry.clone();
+    if !registry.check_access(id, instance_id, crate::registry::Access::Write) {
+        return Err(anyhow::anyhow!("write access to resource {} denied", id));
+    }
+    // Cpu — memcpy, GPU — постановка в очередь wgpu: ни то, ни другое поток не
+    // держит, поэтому blocking-пул здесь не нужен (в отличие от чтения).
+    let memory = caller.data().memory.clone();
+    let data = mem.data(&*caller).get(ptr as usize..(ptr + len) as usize)
+        .ok_or_else(|| anyhow::anyhow!("source range lies outside guest memory"))?;
+    match offset {
+        Some(offset) => memory.write(id, offset, data),
+        None => memory.upload_image(id, data),
+    }
+}
+
 fn tagged_response(result: anyhow::Result<Vec<u8>>) -> Vec<u8> {
     match result {
         Ok(payload) => {

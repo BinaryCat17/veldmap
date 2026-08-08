@@ -103,7 +103,7 @@ pub mod texture_usage {
 
 fn create(command: resource_request::Command) -> anyhow::Result<u64> {
     let req = ResourceRequest { command: Some(command) };
-    let res_bytes = crate::abi::graphics_create_resource(req.encode_to_vec())?;
+    let res_bytes = crate::abi::resource_create(req.encode_to_vec())?;
     let id_bytes: [u8; 8] = res_bytes.as_slice().try_into()
         .map_err(|_| anyhow::anyhow!("graphics create_resource: malformed id ({} bytes)", res_bytes.len()))?;
     Ok(u64::from_le_bytes(id_bytes))

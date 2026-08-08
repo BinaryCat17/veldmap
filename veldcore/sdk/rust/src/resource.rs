@@ -202,9 +202,9 @@ impl ResourceReader {
         if covered { return Ok(true); }
 
         let size = WINDOW.min(self.len - self.pos);
-        let data = crate::abi::resource_read(self.id, self.pos, size).ok_or_else(|| {
+        let data = crate::abi::resource_read(self.id, self.pos, size).map_err(|e| {
             io::Error::new(io::ErrorKind::Other,
-                format!("resource {}: чтение {} байт со смещения {} не удалось", self.id, size, self.pos))
+                format!("resource {}: чтение {} байт со смещения {}: {}", self.id, size, self.pos, e))
         })?;
         if data.is_empty() {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
