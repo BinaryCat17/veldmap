@@ -1,5 +1,12 @@
+# Окружение сборки Rust-части: toolchain и линковка. Профили живут не здесь,
+# а в Cargo.toml рядом — иначе один и тот же ключ задавался бы из двух мест
+# (так `codegen-units` и разъехался: 16 в манифесте против 256 здесь).
+#
+# Читается cargo только когда он запущен из этого каталога или ниже — поэтому
+# build.py зовёт его с cwd каталога манифеста (см. build.py::run).
+
 [build]
-rustflags = ["-Zthreads=16"]
+rustflags = ["-Zthreads=16"] # Параллельный фронтенд rustc (nightly)
 
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
@@ -8,13 +15,3 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Zthreads=16"]
 [target.x86_64-pc-windows-gnu]
 linker = "x86_64-w64-mingw32-gcc"
 ar = "x86_64-w64-mingw32-ar"
-
-[profile.release]
-opt-level = 3
-lto = false         # Отключаем для скорости линковки
-codegen-units = 256 # Максимальный параллелизм для LLVM
-panic = "abort"
-debug = false
-
-[profile.release.package.veldmap-host-gui]
-opt-level = 2 # Собираем Хост чуть быстрее

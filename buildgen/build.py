@@ -7,10 +7,12 @@ that contain both schema.yaml and config.yaml. Each module is built
 independently — no shared Cargo workspace.
 """
 import os
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
+import time
 import argparse
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -32,13 +34,41 @@ def _load_yaml_scalar(path: str, key: str) -> str | None:
     return None
 
 
+# Печатать ли каждую запускаемую команду (`--verbose`). По умолчанию нет:
+# полные строки cargo с абсолютными путями повторяют то, что уже сказано
+# заголовком модуля, и тонут в собственном выводе компилятора. Команда, которая
+# упала, печатается всегда — там она и нужна, чтобы её повторить руками.
+VERBOSE = False
+
+
 def run(cmd, cwd=None, env=None):
-    """Run a shell command; exit on failure."""
-    print(f"-> {' '.join(str(c) for c in cmd)}")
+    """Run a shell command; exit on failure.
+
+    Для cargo `cwd` — не косметика: и `rust-toolchain.toml`, и
+    `.cargo/config.toml` он ищет вверх от текущего каталога, а не от
+    `--manifest-path`. Запуск из корня проекта (корень намеренно языконейтрален
+    и Rust-конфигов не содержит) означал бы сборку не тем toolchain и без
+    объявленных rustflags — поэтому cargo всегда зовётся из каталога своего
+    манифеста.
+    """
+    if VERBOSE:
+        print(f"-> {' '.join(str(c) for c in cmd)}")
     res = subprocess.run(cmd, cwd=cwd, env=env)
     if res.returncode != 0:
-        print(f"\nFATAL: Command failed with exit code {res.returncode}")
+        print(f"\nFATAL: команда завершилась с кодом {res.returncode}:")
+        print(f"  {' '.join(str(c) for c in cmd)}")
+        if cwd:
+            print(f"  (запущена в {cwd})")
         sys.exit(1)
+
+
+def elapsed(since: float) -> str:
+    """Длительность в том виде, в каком её читают: секунды до минуты, дальше
+    минуты с секундами."""
+    seconds = time.monotonic() - since
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    return f"{int(seconds // 60)}m {seconds % 60:04.1f}s"
 
 
 # ── Project paths ─────────────────────────────────────────────────────────────
@@ -184,30 +214,70 @@ def _topo_sort(modules: list[dict]) -> list[dict]:
 # ── Code generation ───────────────────────────────────────────────────────────
 
 def ensure_venv() -> str:
-    """Create the buildgen venv if missing; return path to its Python binary."""
-    build_dir  = os.path.dirname(os.path.abspath(__file__))
-    venv_python = os.path.join(build_dir, ".venv", "bin", "python")
+    """Сборочный venv из requirements.txt; возвращает путь к его python.
+
+    Состав окружения сверяется с requirements.txt по хэшу, а не только по факту
+    существования каталога: иначе новая зависимость доезжала бы только до тех,
+    кто собирает с нуля, а у всех остальных сборка падала бы импортом.
+    """
+    build_dir    = os.path.dirname(os.path.abspath(__file__))
+    venv_dir     = os.path.join(build_dir, ".venv")
+    venv_python  = os.path.join(venv_dir, "bin", "python")
+    requirements = os.path.join(build_dir, "requirements.txt")
+    stamp        = os.path.join(venv_dir, ".requirements-sha256")
+
+    with open(requirements, "rb") as f:
+        want = hashlib.sha256(f.read()).hexdigest()
+
     if not os.path.exists(venv_python):
         print("Initializing build venv...")
         run(["python3", "-m", "venv", ".venv"], cwd=build_dir)
-        run([venv_python, "-m", "pip", "install", "pyyaml", "jinja2"])
+    elif os.path.exists(stamp):
+        with open(stamp) as f:
+            if f.read().strip() == want:
+                return venv_python
+
+    print("Installing build dependencies...")
+    run([venv_python, "-m", "pip", "install", "-q", "-r", requirements])
+    with open(stamp, "w") as f:
+        f.write(want)
     return venv_python
+
+
+def check_generator():
+    """Прогнать тесты кодогенератора перед кодогенерацией.
+
+    Валидатор схем — единственное, что не даёт схеме разойтись с кодом, и
+    ломается он молча: ослабевшая проверка не мешает сборке пройти, а
+    расхождение всплывает уже в рантайме недоставленным событием. Тесты идут
+    первым шагом и стоят десятые доли секунды — дешевле, чем один неверно
+    собранный модуль.
+    """
+    build_dir = os.path.dirname(os.path.abspath(__file__))
+    print("\nChecking code generator...")
+    run([ensure_venv(), "-m", "pytest", "-q", "--no-header",
+         os.path.join(build_dir, "tests")], cwd=build_dir)
 
 
 def generate_code():
     """Run generate.py for every discovered module (using absolute paths)."""
     print("\n[0/2] Generating module bindings...")
+    started     = time.monotonic()
     build_dir   = os.path.dirname(os.path.abspath(__file__))
     venv_python = ensure_venv()
     gen_script  = os.path.join(build_dir, "generate.py")
+    # Генератор отчитывается об успехе сам; при обычной сборке это шесть строк
+    # об одном и том же, поэтому он молчит, а имена перечисляются одной строкой.
+    quiet       = [] if VERBOSE else ["--quiet"]
 
+    generated = []
     for module in discover_modules():
         schema_path   = os.path.join(module["dir"], "schema.yaml")
         generated_dir = os.path.join(module["dir"], "generated")
-        print(f"  Generating {module['name']} ...")
         run([venv_python, gen_script,
              "--schema",     schema_path,
-             "--output-dir", generated_dir])
+             "--output-dir", generated_dir] + quiet)
+        generated.append(module["name"])
 
     # Платформенные сервисы (app, tasks, ...) для wasm-модулей стабов в SDK не
     # имеют: модуль объявляет их в своей schema.yaml как обычную зависимость
@@ -222,13 +292,15 @@ def generate_code():
         host_lang = _load_yaml_scalar(host_yaml, "language") or "rust"
         host_pkg  = _load_yaml_scalar(host_yaml, "package") or "veldmap-host-bindings"
         if host_lang == "rust":
-            print("  Generating host bindings ...")
             run([venv_python, gen_script,
                  "--host-bindings", os.path.join(host_dir, "generated"),
                  "--proto-dir",     os.path.join(PROJECT_ROOT, "veldcore", "interface"),
-                 "--package",       host_pkg])
+                 "--package",       host_pkg] + quiet)
+            generated.append("host bindings")
         else:
             print(f"  WARNING: no host bindings generator for language '{host_lang}', skipping")
+
+    print(f"  {', '.join(generated)} — {elapsed(started)}")
 
 
 # ── Module builders (one per language) ────────────────────────────────────────
@@ -243,7 +315,7 @@ def build_rust_module(module: dict, profile: str, cargo_args: list):
          "--manifest-path", manifest,
          "-p", package,
          "--target", WASM_TARGET,
-         ] + cargo_args)
+         ] + cargo_args, cwd=generated_dir)
 
     # Wrap-крейт листового модуля ни от кого не зависит и без явной проверки
     # никогда не компилируется — ошибки в его typed-стабах молчали бы.
@@ -252,14 +324,14 @@ def build_rust_module(module: dict, profile: str, cargo_args: list):
         run(["cargo", "check",
              "--manifest-path", wrap_manifest,
              "--target", WASM_TARGET,
-             ] + cargo_args)
+             ] + cargo_args, cwd=os.path.dirname(wrap_manifest))
 
     wasm_name   = package.replace("-", "_") + ".wasm"
     source_path = os.path.join(generated_dir, "target", WASM_TARGET, profile, wasm_name)
     dest_path   = os.path.join(PLUGINS_DIR, wasm_name)
 
-    print(f"  Deploying {wasm_name} -> build/plugins/")
     shutil.copy(source_path, dest_path)
+    return wasm_name
 
 
 # ── Main build ─────────────────────────────────────────────────────────────────
@@ -269,6 +341,8 @@ def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None =
     profile    = "debug" if debug else "release"
     cargo_args = [] if debug else ["--release"]
 
+    started = time.monotonic()
+    check_generator()
     generate_code()
 
     # 1. WASM modules
@@ -283,14 +357,17 @@ def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None =
     for module in discover_modules():
         lang    = module["language"]
         builder = BUILDERS.get(lang)
+        if not builder:
+            print(f"  WARNING: no builder for language '{lang}', skipping {module['name']}")
+            continue
         print(f"\n--- {module['name']} ({lang}) ---")
-        if builder:
-            builder(module, profile, cargo_args)
-        else:
-            print(f"  WARNING: no builder for language '{lang}', skipping")
+        module_started = time.monotonic()
+        artefact = builder(module, profile, cargo_args)
+        print(f"  {artefact} -> build/plugins/ — {elapsed(module_started)}")
 
     # 2. Native host
     print(f"\n[2/2] Building native host ({profile})...")
+    host_started = time.monotonic()
     host_args = list(cargo_args)
     if windows:
         host_args += ["--target", "x86_64-pc-windows-gnu"]
@@ -298,10 +375,13 @@ def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None =
     run(["cargo", "build",
          "--manifest-path", CORE_MANIFEST,
          "-p", "veldmap-host-gui",
-         ] + host_args)
+         ] + host_args, cwd=os.path.dirname(CORE_MANIFEST))
+    print(f"  готов за {elapsed(host_started)}")
 
     if windows:
         _deploy_windows(profile, dist_dir)
+
+    return started
 
 
 # ── Windows deployment ─────────────────────────────────────────────────────────
@@ -375,18 +455,29 @@ def main():
                         help="Cross-compile for Windows x86_64")
     parser.add_argument("--dist-dir", default=None,
                         help="Windows deployment directory (required with --windows)")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="Печатать каждую запускаемую команду")
     args = parser.parse_args()
+
+    # Подпроцессы (cargo, pytest, generate.py) пишут в тот же дескриптор
+    # напрямую, а print() в питоне при перенаправлении в файл буферизуется
+    # блоками — и лог сборки выходил перемешанным: сначала чужой вывод, потом
+    # наши заголовки. В терминале этого не видно, в `> build.log` видно сразу.
+    sys.stdout.reconfigure(line_buffering=True)
+
+    global VERBOSE
+    VERBOSE = args.verbose
 
     if args.command == "clean":
         clean()
     else:
         _check_plugins_dir_consistency()
-        build_all(debug=args.debug, windows=args.windows, dist_dir=args.dist_dir)
+        started = build_all(debug=args.debug, windows=args.windows, dist_dir=args.dist_dir)
         mode   = "DEBUG" if args.debug else "RELEASE"
         target = " (Windows x64)" if args.windows else ""
-        print(f"\n{'='*35}")
-        print(f"{mode}{target} build complete!")
-        print(f"{'='*35}\n")
+        print(f"\n{'='*45}")
+        print(f"{mode}{target} build complete in {elapsed(started)}")
+        print(f"{'='*45}\n")
 
 
 if __name__ == "__main__":

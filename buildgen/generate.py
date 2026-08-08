@@ -51,6 +51,47 @@ def yaml_dep_to_toml(val) -> str:
     return str(val)
 
 
+# Сообщения об успехе (`--quiet`). Сборка зовёт генератор по разу на модуль и
+# сама говорит, что делает, — её вывод не должен состоять из шести чужих
+# отчётов об успехе. При ручном запуске генератор остаётся разговорчивым.
+# Ошибки печатаются всегда: молчаливого провала быть не должно.
+QUIET = False
+
+
+def note(message: str) -> None:
+    if not QUIET:
+        print(message)
+
+
+def write_if_changed(path: str, content: str) -> bool:
+    """Записать файл, только если содержимое отличается. Возвращает True,
+    если запись действительно была.
+
+    Кодогенерация идёт на каждой сборке и на неизменной схеме даёт байт в байт
+    тот же вывод. Но cargo сверяет исходники по mtime, а не по содержимому:
+    перезапись тем же текстом — это для него правка, и крейт пересобирается
+    целиком. Переписанный `build.rs` вдобавок заставляет заново прогнать
+    prost-build, а вместе с ним и всё, что зависит от его вывода.
+
+    Отсюда пустая сборка стоила столько же, сколько сборка с правками: цену
+    платили все модули, а не тот один, который трогали.
+    """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        with open(path) as f:
+            if f.read() == content:
+                return False
+    with open(path, "w") as f:
+        f.write(content)
+    return True
+
+
+def render_all(renders: dict, data: dict) -> None:
+    """Отрендерить каждый шаблон в свой файл через `write_if_changed`."""
+    for path, template in renders.items():
+        write_if_changed(path, template.render(data))
+
+
 def collect_proto_info(proto_file: str) -> tuple[str | None, set[str]]:
     """Read the package declaration and all message names from a .proto file."""
     package = None
@@ -551,12 +592,9 @@ def generate_host_bindings(args, script_dir: str):
         os.path.join(out_dir, "Cargo.toml"):    env.get_template("host_Cargo.toml.j2"),
         os.path.join(out_dir, "build.rs"):      env.get_template("host_build.rs.j2"),
     }
-    for path, template in renders.items():
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(template.render(template_data))
+    render_all(renders, template_data)
 
-    print(f"✅ Generated host bindings at {out_dir}")
+    note(f"✅ Generated host bindings at {out_dir}")
 
     # ── Крейты нативных модулей хоста (modules/<svc>/generated) ─────────────
     # Сервис с входами считается нативным модулем этой реализации хоста,
@@ -590,11 +628,8 @@ def generate_host_bindings(args, script_dir: str):
             os.path.join(gen_dir, "src", "lib.rs"): env.get_template("host_module_lib.rs.j2"),
             os.path.join(gen_dir, "Cargo.toml"):    env.get_template("host_module_Cargo.toml.j2"),
         }
-        for path, template in module_renders.items():
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as f:
-                f.write(template.render(module_data))
-        print(f"✅ Generated host module crate at {gen_dir}")
+        render_all(module_renders, module_data)
+        note(f"✅ Generated host module crate at {gen_dir}")
 
     generate_runner_crates(host_dir, module_crates, env)
 
@@ -645,11 +680,8 @@ def generate_runner_crates(host_dir: str, module_crates: dict, env) -> None:
             os.path.join(gen_dir, "Cargo.toml"):    env.get_template("runner_Cargo.toml.j2"),
         }
         data = {"runner": runner, "package": package, "modules": modules}
-        for path, template in renders.items():
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as f:
-                f.write(template.render(data))
-        print(f"✅ Generated runner composition crate at {gen_dir}")
+        render_all(renders, data)
+        note(f"✅ Generated runner composition crate at {gen_dir}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -661,7 +693,12 @@ def main():
     parser.add_argument("--host-bindings", help="Generate host bindings crate to this dir and exit")
     parser.add_argument("--proto-dir",     help="Dir with *.proto and *.schema.yaml (host-bindings mode)")
     parser.add_argument("--package",       help="Package name (host-bindings mode)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Молчать об успехе; ошибки печатаются всегда")
     args = parser.parse_args()
+
+    global QUIET
+    QUIET = args.quiet
 
     script_dir   = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.normpath(os.path.join(script_dir, ".."))
@@ -921,12 +958,9 @@ def main():
         template_data["wrap_sdk_path"] = wrap_sdk_path
         template_data["include_proto_dir"] = os.path.join(os.path.relpath(project_root, wrap_dir), "veldcore", "interface").replace("\\", "/")
 
-    for path, template in renders.items():
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            f.write(template.render(template_data))
+    render_all(renders, template_data)
 
-    print(f"✅ Generated module at {output_dir}")
+    note(f"✅ Generated module at {output_dir}")
 
 
 if __name__ == "__main__":
