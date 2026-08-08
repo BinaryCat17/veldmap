@@ -44,6 +44,28 @@ pub mod emit {
     {% endfor %}
 }
 
+/// Ответы, которыми обмен не кончается: за таким по той же корреляции придёт
+/// ещё один. Список — из схем тех, на кого мы подписаны: какой из ответов
+/// промежуточный, знает только исполнитель.
+///
+/// Знание одностороннее. «Промежуточный» — надёжный запрет снимать запрос с
+/// учёта: следующий ответ перестал бы опознаваться, а вместе с ним потерялся
+/// бы и приехавший в нём ресурс. Обратного («терминальный — значит снимай»)
+/// здесь нет: ту же корреляцию заказчик вправе продолжить следующим обменом,
+/// и где кончается цепочка, знает он один.
+mod flow {
+    /// Отсортирован для binary_search — как `flow::TERMINAL` у хоста.
+    const INTERMEDIATE: &[&str] = &[
+        {%- for topic in intermediate_subs %}
+        "{{ topic }}",
+        {%- endfor %}
+    ];
+
+    pub fn is_intermediate(topic: &str) -> bool {
+        INTERMEDIATE.binary_search(&topic).is_ok()
+    }
+}
+
 /// Убийство операций, заведённых нашими вызовами.
 ///
 /// Стаб есть ровно у тех вызовов, чей топик исполнитель объявил
@@ -125,7 +147,10 @@ pub extern "C" fn handle_event() -> i32 {
     // Конверт кодирует хост: publisher достоверен, модуль может авторизовать
     // отправителя через veldsdk::event_publisher(). Корреляция оттуда же —
     // читается через veldsdk::correlation(); пуста у топиков без пары.
-    veldsdk::abi::set_event_context(request.publisher, request.correlation_id);
+    // Промежуточность ответа в конверте не едет: она свойство контракта, а не
+    // события, и берётся из схемы исполнителя на нашей стороне.
+    veldsdk::abi::set_event_context(request.publisher, request.correlation_id,
+        flow::is_intermediate(&topic));
 
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         veldsdk::runtime::with_state(|app_state: &mut {{ rust.state }}| {

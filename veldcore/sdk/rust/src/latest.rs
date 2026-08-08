@@ -64,7 +64,13 @@ impl Latest {
 
     /// Снимает id с учёта и говорит, чей это ответ — для терминального.
     /// Повторный вызов с тем же id вернёт `Foreign`.
+    ///
+    /// На промежуточном ответе (прогресс) нужен [`Self::status`]: снятие с
+    /// учёта сделало бы следующий ответ по той же корреляции `Foreign`.
+    /// Схема исполнителя знает, какой из ответов какой, — вызов не по адресу
+    /// попадёт в лог предупреждением.
     pub fn settle(&mut self, correlation_id: &str) -> Reply {
+        crate::abi::warn_if_intermediate("Latest::settle");
         if self.current.as_deref() == Some(correlation_id) {
             self.current = None;
             return Reply::Current;

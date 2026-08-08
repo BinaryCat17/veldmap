@@ -236,6 +236,30 @@ def terminal_reply_of(schema: dict) -> tuple[dict[str, str], list[str]]:
     return terminal, errors
 
 
+def intermediate_replies_of(schema: dict) -> set[str]:
+    """Ответы сервиса, которыми обмен не кончается: прогресс.
+
+    Дополнение к терминальному ответу внутри той же пары. Нужно заказчику, а
+    не исполнителю: сняв запрос с учёта на прогрессе, он перестанет опознавать
+    ответы, которые ещё придут по той же корреляции, — а вместе с ними и
+    ресурсы, которые в них приедут. Ошибка молчаливая, и поймать её можно
+    только здесь: какой из ответов промежуточный, знает одна схема.
+
+    Знание одностороннее, и это важно. «Не терминальный» — надёжный запрет:
+    исполнитель пришлёт ещё. «Терминальный» разрешением снять с учёта не
+    является: заказчик вправе продолжить ту же корреляцию следующим обменом
+    к другому сервису (см. data-browser: on_open_result → image-loader/on_load),
+    и цепочка кончится не там, где кончился протокольный обмен.
+    """
+    requests, _ = correlated_topics(schema)
+    terminal, _ = terminal_reply_of(schema)
+    intermediate = set()
+    for request, replies in requests.items():
+        end = terminal.get(request)
+        intermediate.update(r for r in replies if r != end)
+    return intermediate
+
+
 def flow_entries(svc_name: str, schema: dict) -> tuple[list[dict], list[str]]:
     """Отменяемые запросы сервиса в виде записей для таблицы потока хоста.
 
@@ -785,6 +809,18 @@ def main():
                 "rust_path": module_rust_path(resolved["subs"][(dep_name, sub_name)]),
             })
 
+    # ── Промежуточные ответы среди наших подписок ────────────────────────────
+    # Какой ответ обмен не закрывает, знает схема исполнителя — до сих пор это
+    # знание доходило только до хоста (flow::TERMINAL), а заказчик выбирал
+    # «подсмотреть или снять с учёта» руками. Отдаём его и модулю: SDK ловит
+    # снятие с учёта на прогрессе (Correlator::take, Latest::settle) вместо
+    # того, чтобы молча потерять следующий ответ.
+    intermediate_subs = sorted(
+        f"{dep_name}/{sub_name}"
+        for dep_name, dep_data in schema.get("dependencies", {}).items()
+        for sub_name in ((dep_data or {}).get("subs", {}) or {})
+        if sub_name in intermediate_replies_of(dep_schemas[dep_name]))
+
     # ── Typed emit/call stubs (schema is the source of truth for topics) ─────
     # interface.outputs  → crate::emit::<name>(&ExactMessage)
     # dependencies.*.calls → crate::calls::<dep_snake>::<name>(&ExactMessage)
@@ -912,6 +948,7 @@ def main():
             "init":   "crate::module::hook_init",
         },
         "handlers":           handlers,
+        "intermediate_subs":  intermediate_subs,
         "emits":              emits,
         "dep_calls":          dep_calls,
         "hook_event":         hook_event,

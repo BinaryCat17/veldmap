@@ -98,6 +98,32 @@ def test_ambiguous_terminal_is_rejected(gen, replies, expected):
     assert expected in errors[0]
 
 
+# ── Промежуточные ответы ─────────────────────────────────────────────────────
+#
+# Дополнение терминального ответа внутри пары, и считается оно ради заказчика:
+# сняв запрос с учёта на прогрессе, он перестанет опознавать то, что придёт по
+# той же корреляции следом. Список едет в модуль, где SDK ловит такое снятие.
+
+def test_progress_is_intermediate_and_terminal_is_not(gen):
+    # Ровно случай network/on_fs_download: прогресс приходит многократно.
+    assert gen.intermediate_replies_of(schema_with({
+        "on_progress": reply("on_work"),
+        "on_done":     reply("on_work", terminal=True)})) == {"on_progress"}
+
+
+def test_single_reply_is_never_intermediate(gen):
+    # Единственный ответ терминален по умолчанию — промежуточным ему стать
+    # неоткуда, и предупреждать на нём не о чем.
+    assert gen.intermediate_replies_of(schema_with({"on_done": reply("on_work")})) == set()
+
+
+def test_topic_without_a_pair_is_not_intermediate(gen):
+    # У события без `replies_to` корреспондента нет: снимать с учёта нечего.
+    assert gen.intermediate_replies_of(
+        {"name": "svc",
+         "interface": {"outputs": {"on_state": {"type": "fs/FsReadResult"}}}}) == set()
+
+
 # ── Отменяемость и таблица потока ────────────────────────────────────────────
 #
 # `cancellable` объявляет исполнитель, а хост по нему открывает учёт. Учёт,

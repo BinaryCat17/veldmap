@@ -72,6 +72,21 @@ def test_download_progress_is_not_terminal(gen, real_schemas):
     assert terminal["on_fs_download"] == "on_fs_download_result"
 
 
+def test_intermediate_replies_are_exactly_the_declared_ones(gen, real_schemas):
+    """Ответы, за которыми по той же корреляции придёт ещё один.
+
+    Список едет в подписчиков: SDK ловит по нему снятие запроса с учёта на
+    прогрессе (`Correlator::take`, `Latest::settle`), которое иначе молча
+    потеряло бы следующий ответ вместе с приехавшим в нём ресурсом. Пусто
+    здесь — значит предупреждать не о чем ни в одном модуле.
+    """
+    intermediate = {f"{schema.get('name')}/{topic}"
+                    for _, _, schema, _ in real_schemas
+                    for topic in gen.intermediate_replies_of(schema)}
+
+    assert sorted(intermediate) == ["network/on_fs_download_progress"]
+
+
 def test_targeted_topics_are_declared_deliberately(gen, real_schemas):
     """Адресная доставка — исключение из широковещательной шины, и список
     исключений должен быть виден целиком."""

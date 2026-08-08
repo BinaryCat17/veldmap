@@ -240,13 +240,42 @@ pub fn generate_id() -> String {
 /// полям можно доверять). Wasm однопоточный, поэтому простого Mutex хватает.
 static EVENT_PUBLISHER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static EVENT_CORRELATION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static EVENT_INTERMEDIATE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Заполняется handle_event сгенерированного клея — читается через
-/// [`event_publisher`] и [`correlation`].
+/// [`event_publisher`], [`correlation`] и [`reply_is_intermediate`].
 #[doc(hidden)]
-pub fn set_event_context(publisher: String, correlation: String) {
+pub fn set_event_context(publisher: String, correlation: String, intermediate: bool) {
     *EVENT_PUBLISHER.lock().unwrap() = publisher;
     *EVENT_CORRELATION.lock().unwrap() = correlation;
+    EVENT_INTERMEDIATE.store(intermediate, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Придёт ли по этой корреляции ещё ответ: текущее событие объявлено в схеме
+/// исполнителя промежуточным (прогресс), и обмен им не кончается.
+///
+/// `false` не означает «обмен кончился»: у топика может не быть пары вовсе, а
+/// терминальный ответ заказчик вправе продолжить следующим обменом с той же
+/// корреляцией. Надёжен здесь только `true` — на нём снимать запрос с учёта
+/// заведомо рано.
+pub fn reply_is_intermediate() -> bool {
+    EVENT_INTERMEDIATE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Общая жалоба таблиц ожидания на преждевременное снятие с учёта.
+///
+/// Не паника и не отказ: ответ уже пришёл, и уронить обработчик значит
+/// потерять приехавший в нём ресурс — то же, от чего предостерегаем. Записью
+/// в лог ошибка перестаёт быть невидимой, а поведение остаётся прежним.
+pub(crate) fn warn_if_intermediate(method: &str) {
+    if reply_is_intermediate() {
+        crate::log::warn!(
+            target: "veldsdk",
+            "{} на промежуточном ответе: по корреляции {} придёт ещё один, \
+             и опознать его будет уже нечем",
+            method, correlation());
+    }
 }
 
 /// Имя сервиса, опубликовавшего текущее событие ("" — хост).
