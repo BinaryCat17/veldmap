@@ -454,7 +454,7 @@ pub fn execute_render_commands<'a>(
         match cmd {
             RenderCommand::SetPipeline(p) => {
                 // Не pipeline (другой GPU-объект, байтовый ресурс, чужой или
-                // освобождённый id) — команда молча пропускается, как и раньше.
+                // освобождённый id) — команда молча пропускается.
                 if let Ok(GpuObject::RenderPipeline(pipeline)) = gpu.get_gpu(p.pipeline_id, requestor_id) {
                     rp.set_pipeline(pipeline.as_ref());
                 }

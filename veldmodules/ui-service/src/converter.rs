@@ -412,7 +412,7 @@ impl<'a, Message, Theme> iced_widget::core::Widget<Message, Theme, GpuRenderer> 
 ///
 /// Размеры спрашиваются у хоста: текстура чужая (её владелец — плагин,
 /// выдавший нам read-грант), и её пропорции больше взять неоткуда. Если
-/// размеры недоступны — рисуем на всё место, как раньше.
+/// размеры недоступны — рисуем на всё место.
 fn contain(bounds: iced_core::Rectangle, texture_id: u64) -> iced_core::Rectangle {
     let Some((w, h)) = veldsdk::abi::arena_texture_size(texture_id) else { return bounds };
     if w == 0 || h == 0 || bounds.width <= 0.0 || bounds.height <= 0.0 { return bounds; }
