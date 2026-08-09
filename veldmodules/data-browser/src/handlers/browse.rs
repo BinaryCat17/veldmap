@@ -1,16 +1,19 @@
+use crate::module::state::{State, ViewId, ViewKind};
 use crate::proto::ui_service::proto::UiEventResponse;
-use crate::module::state::State;
 
-/// Запрашивает листинг пути у data-provider и переводит экран в loading.
-/// Единственная точка входа — и для навигации в папку, и для "вверх", и для
-/// захода на экран (см. handlers::nav): три копии этих десяти строк
+/// Запрашивает листинг пути у названного вида и переводит его в loading.
+/// Единственная точка входа — и для навигации в папку, и для «вверх», и для
+/// открытия вкладки (см. handlers::nav): три копии этих десяти строк
 /// расходились в мелочах.
-pub fn request_path(state: &mut State, path: String) {
-    state.browse.current_path = path.clone();
-    state.browse.error = None;
-    state.global.status_message = format!("Loading /{}...", path);
+pub fn request_path(state: &mut State, view: ViewId, path: String) {
+    let correlation_id = {
+        let Some(ViewKind::Browse(browse)) = state.get_mut(view) else { return };
+        browse.current_path = path.clone();
+        browse.error = None;
+        browse.request.begin()
+    };
+    state.listings.insert(correlation_id.clone(), view);
 
-    let correlation_id = state.browse.request.begin();
     crate::calls::data_provider::on_list_path(&crate::proto::data_provider::ListPathRequest {
         path,
         token: String::new(),
@@ -20,16 +23,18 @@ pub fn request_path(state: &mut State, path: String) {
 /// Браузинг запрошен (через UI событие). Путь берётся из value — это
 /// нажатие на папку; пусто — перечитать текущий.
 pub fn on_browse(state: &mut State, event: UiEventResponse) {
+    let Some((view, browse)) = state.active_browse_mut() else { return };
     let target = if event.value.is_empty() {
-        state.browse.current_path.clone()
+        browse.current_path.clone()
     } else {
         event.value
     };
-    request_path(state, target);
+    request_path(state, view, target);
 }
 
 pub fn on_browse_up(state: &mut State, _event: UiEventResponse) {
-    let mut path = state.browse.current_path.clone();
+    let Some((view, browse)) = state.active_browse_mut() else { return };
+    let mut path = browse.current_path.clone();
 
     if path.ends_with('/') {
         path.pop();
@@ -38,36 +43,38 @@ pub fn on_browse_up(state: &mut State, _event: UiEventResponse) {
         Some(idx) => path.truncate(idx + 1),
         None => path.clear(), // Root
     }
-    request_path(state, path);
+    request_path(state, view, path);
 }
 
-/// Broadcast-топик — сверяем корреляцию. Отбрасываем не только чужой ответ,
-/// но и свой устаревший: пока он шёл, пользователь мог уйти в другую папку,
-/// и его содержимое под нынешним путём было бы неправдой.
+/// Broadcast-топик: чей это ответ, знает таблица маршрутов. Не найден — не наш;
+/// вид не найден — вкладку закрыли, пока ответ шёл, и показывать его негде.
+/// Свой, но устаревший (пользователь успел уйти в другую папку) отбрасываем
+/// тоже: его содержимое под нынешним путём было бы неправдой.
 pub fn on_list_path_result(
     state: &mut State,
     response: crate::proto::data_provider::ListPathResponse,
 ) {
-    if state.browse.request.settle(&veldsdk::correlation()) != veldsdk::Reply::Current {
+    let correlation_id = veldsdk::correlation();
+    let Some(view) = state.listings.take(&correlation_id) else { return };
+    let Some(ViewKind::Browse(browse)) = state.get_mut(view) else { return };
+
+    if browse.request.settle(&correlation_id) != veldsdk::Reply::Current {
         return;
     }
 
     if !response.error.is_empty() {
-        state.browse.error = Some(response.error);
-        state.browse.items = Vec::new();
-        state.global.status_message = "Load failed".to_string();
+        browse.error = Some(response.error);
+        browse.items = Vec::new();
         return;
     }
-    state.browse.error = None;
+    browse.error = None;
 
-    state.browse.items = response.items.into_iter().map(|s| {
+    browse.items = response.items.into_iter().map(|s| {
         let is_folder = s.ends_with('/');
         crate::module::state::browse::BrowseItem {
             identifier: s.clone(),
-            name: s.split('/').filter(|x| !x.is_empty()).last().unwrap_or("").to_string(),
+            name: s.split('/').filter(|x| !x.is_empty()).next_back().unwrap_or("").to_string(),
             is_folder,
         }
     }).collect();
-    state.global.status_message = format!("{} items", state.browse.items.len());
-    // Рендер происходит автоматически в on_frame
 }

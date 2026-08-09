@@ -2,13 +2,11 @@
 
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, text_input, button, Element, Length};
-use crate::module::state::State;
+use crate::module::state::{SearchState, State};
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
 use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED, ON_VIEW_REMOTE_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
 
-pub fn view(state: &State) -> Element<()> {
-    let search_state = &state.search;
-
+pub fn view(state: &State, search_state: &SearchState) -> Element<()> {
     let body: Element<()> = if let Some(err) = &search_state.error {
         column![text(format!("Error: {}", err)).size(16.0)].into()
     } else if search_state.request.is_pending() {

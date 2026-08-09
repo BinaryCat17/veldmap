@@ -5,7 +5,7 @@
 //! закачкам, ни к снимку диска — иначе состояние реконструируется прямо в
 //! разметке вложенными if'ами по пяти переменным.
 
-use veld_ui_service_wrap::{column, row};
+use veld_ui_service_wrap::{column, row, Keyed};
 use crate::proto::ui_service::{text, button, container, Element, Length, Alignment};
 use crate::module::components::{Row, RowStatus};
 use crate::module::styles;
@@ -151,7 +151,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // "скачать" продолжит с оборванного байта — по факту это пауза.
         RowStatus::Downloading { done, total } => status_row(
             icon("\u{f254}"),
-            text(amount_text(*done, *total, true)).size(13.0).into(),
+            text(amount_text(*done, *total, true)).size(13.0).single_line().into(),
             download_button("\u{f04c}", styles::COLOR_WARNING).into_iter()
                 .chain(delete_button()).collect(),
         ),
@@ -162,7 +162,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // "Incomplete" — цвет и форма уже достаточно говорят о статусе.
         RowStatus::Paused { done, total } => status_row(
             text("\u{f071}").font_family(veld_ui_service_wrap::style::FONT_ICONS).color(styles::COLOR_WARNING).into(),
-            text(amount_text(*done, *total, false)).size(13.0).into(),
+            text(amount_text(*done, *total, false)).size(13.0).single_line().into(),
             download_button("\u{f04b}", styles::COLOR_PRIMARY).into_iter()
                 .chain(delete_button()).collect(),
         ),
@@ -171,7 +171,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // это разные значения (см. Row).
         RowStatus::Complete { size } => status_row(
             icon("\u{f00c}"),
-            text(format_bytes(*size)).size(13.0).into(),
+            text(format_bytes(*size)).size(13.0).single_line().into(),
             actions.view_local.map(|m| -> Element<()> {
                     styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, item.name.clone()).into()
                 })
@@ -192,7 +192,10 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
 /// Принимает итератор, а не срез: экран Downloaded делит строки на секции
 /// через `partition` и держит `Vec<&Row>`, копировать их ради рендера незачем.
 pub fn render_list<'a>(items: impl IntoIterator<Item = &'a Row>, actions: ItemActions) -> Element<()> {
-    column(items.into_iter().map(|item| render_item(item, actions)))
+    // Строка названа своим ключом: список переупорядочивается и теряет
+    // элементы из середины (закачка доходит до конца и переезжает в другую
+    // секцию), а состояние виджетов должно ехать за строкой, а не за местом.
+    column(items.into_iter().map(|item| render_item(item, actions).key(item.key())))
         .width(Length::Fill)
         .spacing(8.0)
         .into()

@@ -21,7 +21,7 @@ pub use style::{
     Radius, Shadow, Style, WidgetStyle,
 };
 pub use widgets::{
-    Button, Column, Container, Element, Image, ProgressBar, Row, Scrollable,
+    Button, Column, Container, Element, Image, Keyed, ProgressBar, Row, Scrollable,
     Space, Stack, Text, TextInput, Tooltip, TooltipPosition,
     button, column, container, image, progress_bar, row, scrollable, space,
     stack, text, text_input, tooltip,

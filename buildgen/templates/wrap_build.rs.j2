@@ -2,8 +2,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = prost_build::Config::new();
     config.type_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]");
     
-    // In generated/wraps/rust, types.proto is at ../../../types.proto
+    // In generated/wraps/rust, types.proto is at ../../../types.proto.
+    // Cargo следит за изменениями только внутри пакета, а proto лежит выше:
+    // без этой строки правка types.proto не пересобирает обёртку, и её типы
+    // молча расходятся с типами самого модуля.
+    println!("cargo:rerun-if-changed=../../../types.proto");
     config.compile_protos(&["../../../types.proto"], &["../../../", "{{ include_proto_dir }}"])?;
-    
+
     Ok(())
 }

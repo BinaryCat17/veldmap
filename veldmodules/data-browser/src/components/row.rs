@@ -32,6 +32,13 @@ pub struct Row {
 }
 
 impl Row {
+    /// Устойчивое имя строки в списке — им она сопоставляется между кадрами
+    /// (см. `Element::key`). Ключ провайдера, а без него имя записи: пустыми
+    /// оба сразу не бывают, иначе строке неоткуда взяться.
+    pub fn key(&self) -> &str {
+        if self.identifier.is_empty() { &self.name } else { &self.identifier }
+    }
+
     pub fn folder(identifier: String, title: String) -> Row {
         Row { identifier, name: String::new(), title, status: RowStatus::Folder }
     }

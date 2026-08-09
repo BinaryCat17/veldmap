@@ -1,6 +1,6 @@
 //! view/downloaded.rs — экран скачанных файлов
 
-use veld_ui_service_wrap::column;
+use veld_ui_service_wrap::{column, Keyed};
 use crate::proto::ui_service::{text, Element, Length};
 use crate::module::state::State;
 use crate::module::components::{Row, RowStatus, downloaded_rows, render_list, list_screen, ItemActions};
@@ -24,10 +24,12 @@ pub fn view(state: &State) -> Element<()> {
     // Незавершённые и полные рендерятся одним и тем же компонентом, что и
     // Browse — это тот же файл в том же виде, секции только группируют.
     let section = |title: &str, color, items: Vec<&Row>| -> Option<Element<()>> {
+        // Секция названа своим заголовком: «Incomplete» исчезает, когда
+        // недокачанных не осталось, и «Complete» встаёт на её место.
         (!items.is_empty()).then(|| column![
-            text(title.to_string()).size(14.0).color(color),
+            text(title.to_string()).size(14.0).color(color).single_line(),
             render_list(items, actions),
-        ].spacing(8.0).width(Length::Fill).into())
+        ].spacing(8.0).width(Length::Fill).key(title.to_string()))
     };
 
     // Заголовок симметричен "Incomplete" (тот же spacing(8.0) до своего

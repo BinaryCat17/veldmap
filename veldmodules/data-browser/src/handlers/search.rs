@@ -1,41 +1,49 @@
-use crate::proto::ui_service::proto::UiEventResponse;
+use crate::module::state::{State, ViewKind};
 use crate::proto::data_provider::SearchResponse;
-use crate::module::state::State;
+use crate::proto::ui_service::proto::UiEventResponse;
 
 pub fn on_search_input(state: &mut State, event: UiEventResponse) {
-    state.search.query = event.value;
-}
-
-pub fn on_search(state: &mut State, _event: UiEventResponse) {
-    let query = state.search.query.clone();
-    
-    if !query.is_empty() {
-        state.search.error = None;
-        let correlation_id = state.search.request.begin();
-        crate::calls::data_provider::on_search(&crate::proto::data_provider::SearchRequest {
-            query,
-            filters: vec![],
-        }, &correlation_id);
+    if let Some((_, search)) = state.active_search_mut() {
+        search.query = event.value;
     }
 }
 
-/// Результат поиска. Broadcast-топик — сверяем корреляцию: и чужой ответ, и
-/// свой устаревший (запрос успели сменить) одинаково не наше дело.
+pub fn on_search(state: &mut State, _event: UiEventResponse) {
+    let Some((view, search)) = state.active_search_mut() else { return };
+    let query = search.query.clone();
+    if query.is_empty() {
+        return;
+    }
+
+    search.error = None;
+    let correlation_id = search.request.begin();
+    state.searches.insert(correlation_id.clone(), view);
+
+    crate::calls::data_provider::on_search(&crate::proto::data_provider::SearchRequest {
+        query,
+        filters: vec![],
+    }, &correlation_id);
+}
+
+/// Результат поиска. Чей он — знает таблица маршрутов; свой устаревший
+/// (запрос успели сменить) отбрасываем так же, как чужой.
 pub fn on_search_result(
     state: &mut State,
     response: SearchResponse,
 ) {
-    if state.search.request.settle(&veldsdk::correlation()) != veldsdk::Reply::Current {
+    let correlation_id = veldsdk::correlation();
+    let Some(view) = state.searches.take(&correlation_id) else { return };
+    let Some(ViewKind::Search(search)) = state.get_mut(view) else { return };
+
+    if search.request.settle(&correlation_id) != veldsdk::Reply::Current {
         return;
     }
 
     if !response.error.is_empty() {
-        state.search.error = Some(response.error);
-        state.search.results = Vec::new();
+        search.error = Some(response.error);
+        search.results = Vec::new();
         return;
     }
-    state.search.error = None;
-
-    state.search.results = response.products;
-    // Рендер происходит автоматически в on_frame
+    search.error = None;
+    search.results = response.products;
 }

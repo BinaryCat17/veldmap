@@ -9,8 +9,10 @@ pub mod window;
 
 #[derive(serde::Deserialize)]
 pub struct Config {
-    /// Стартовый экран: "search" (умолчание), "browse", "downloaded", "preview".
-    pub initial_screen: Option<String>,
+    /// Вид в стартовой вкладке: "search" (умолчание), "browse", "downloaded".
+    /// Превью здесь нет: оно открывается на конкретный файл, а его в конфиге
+    /// не назовёшь.
+    pub initial_view: Option<String>,
 }
 
 /// Имена UI-методов: приватная проводка между построением view (`.on_press`,
@@ -21,6 +23,11 @@ pub mod ui_methods {
     pub const ON_NAV_BROWSE: &str = "on_nav_browse";
     pub const ON_NAV_SEARCH: &str = "on_nav_search";
     pub const ON_NAV_DOWNLOADED: &str = "on_nav_downloaded";
+    /// Выбор и закрытие вкладки. Значением едет `ViewId` строкой — вкладка
+    /// адресуется по идентификатору, а не по позиции: позиция меняется, когда
+    /// закрывают соседа.
+    pub const ON_TAB_SELECT: &str = "on_tab_select";
+    pub const ON_TAB_CLOSE: &str = "on_tab_close";
     pub const ON_BROWSE: &str = "on_browse";
     pub const ON_BROWSE_UP: &str = "on_browse_up";
     pub const ON_SEARCH: &str = "on_search";

@@ -47,6 +47,8 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         ON_NAV_BROWSE => handlers::nav::on_nav_browse(state, event),
         ON_NAV_SEARCH => handlers::nav::on_nav_search(state, event),
         ON_NAV_DOWNLOADED => handlers::nav::on_nav_downloaded(state, event),
+        ON_TAB_SELECT => handlers::nav::on_tab_select(state, event),
+        ON_TAB_CLOSE => handlers::nav::on_tab_close(state, event),
         ON_BROWSE => handlers::browse::on_browse(state, event),
         ON_BROWSE_UP => handlers::browse::on_browse_up(state, event),
         ON_SEARCH => handlers::search::on_search(state, event),

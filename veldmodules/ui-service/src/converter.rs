@@ -11,6 +11,33 @@ pub struct UiMessage {
     pub value: String,
 }
 
+/// Все дети одного рода — условие, при котором колонку можно диффить по
+/// ключам (см. вызов). Сравнивается именно вид виджета: у одного рода детей
+/// подменить состояние нечем.
+fn same_kind(children: &[proto::Widget]) -> bool {
+    let kind = |widget: &proto::Widget| widget.r#type.as_ref().map(std::mem::discriminant);
+    let Some(first) = children.first().map(kind) else { return true };
+    children.iter().all(|child| kind(child) == first)
+}
+
+/// Ключ ребёнка для keyed-колонки. `keyed::Column` требует `Copy + PartialEq`,
+/// поэтому имя из разметки сворачивается в число.
+///
+/// Безымянный ребёнок получает ключ от своей позиции — то есть ровно прежнее
+/// поведение для него одного. Позиционные ключи солятся, чтобы не совпасть с
+/// хэшем строки: совпадение означало бы, что состояние достаётся чужому.
+fn child_key(widget: &proto::Widget, index: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if widget.key.is_empty() {
+        "\u{0}position".hash(&mut hasher);
+        index.hash(&mut hasher);
+    } else {
+        widget.key.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 /// `iced_core::Font::family` требует `&'static str`, а логическое имя шрифта
 /// приходит рантаймовой строкой из proto (через wasm ABI). Каждое различное
 /// имя один раз "утекает" в статическую память и переиспользуется — набор
@@ -38,10 +65,36 @@ pub fn convert_layout(layout: &proto::Layout) -> Element<'static, UiMessage, The
 fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, GpuRenderer> {
     match &widget.r#type {
         Some(proto::widget::Type::Column(c)) => {
+            // Колонка с именованными детьми сопоставляет состояние по имени, а
+            // не по позиции (см. Widget.key в types.proto). Разные виджеты на
+            // оба случая, потому что keyed-вариант в iced отдельный.
+            //
+            // Однородность детей — условие безопасности, а не придирка:
+            // keyed-колонка диффит их без проверки типа, и виджет, встав на
+            // место виджета другого рода, получит его состояние и уронит
+            // downcast. Обычная колонка такой подменой не смущается, поэтому
+            // разнородный список ей и достаётся.
+            if c.children.iter().any(|child| !child.key.is_empty()) && same_kind(&c.children) {
+                let keys = c.children.iter().enumerate()
+                    .map(|(index, child)| child_key(child, index))
+                    .collect();
+                let children = c.children.iter().map(convert_widget).collect();
+                let mut col = iced_widget::keyed::Column::from_vecs(keys, children)
+                    .spacing(c.spacing)
+                    .padding(convert_padding(&c.padding));
+
+                if let Some(align) = convert_alignment(c.align_items()) {
+                    col = col.align_items(align);
+                }
+                return col.width(convert_length(&c.width))
+                          .height(convert_length(&c.height))
+                          .into();
+            }
+
             let mut col = column(c.children.iter().map(convert_widget))
                 .spacing(c.spacing)
                 .padding(convert_padding(&c.padding));
-            
+
             if let Some(align) = convert_alignment(c.align_items()) {
                 col = col.align_x(align);
             }
@@ -77,6 +130,12 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .shaping(match t.shaping {
                     1 => iced_core::text::Shaping::Advanced,
                     _ => iced_core::text::Shaping::Basic,
+                })
+                .wrapping(match t.wrapping() {
+                    proto::Wrapping::NoWrap => iced_core::text::Wrapping::None,
+                    proto::Wrapping::WrapGlyph => iced_core::text::Wrapping::Glyph,
+                    proto::Wrapping::WrapWordOrGlyph => iced_core::text::Wrapping::WordOrGlyph,
+                    proto::Wrapping::WrapWord => iced_core::text::Wrapping::Word,
                 });
 
             if !t.font_family.is_empty() {
@@ -196,7 +255,14 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         }
         Some(proto::widget::Type::Scrollable(s)) => {
             let content = if let Some(child) = &s.content { convert_widget(child) } else { Space::with_width(0.0).into() };
+            let bar = iced_widget::scrollable::Scrollbar::default();
+            let direction = match s.direction() {
+                proto::ScrollDirection::ScrollHorizontal => iced_widget::scrollable::Direction::Horizontal(bar),
+                proto::ScrollDirection::ScrollBoth => iced_widget::scrollable::Direction::Both { vertical: bar, horizontal: bar },
+                proto::ScrollDirection::ScrollVertical => iced_widget::scrollable::Direction::Vertical(bar),
+            };
             scrollable(content)
+                .direction(direction)
                 .width(convert_length(&s.width))
                 .height(convert_length(&s.height))
                 .into()

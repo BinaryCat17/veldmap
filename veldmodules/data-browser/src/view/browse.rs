@@ -2,13 +2,11 @@
 
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, button, Element, Alignment};
-use crate::module::state::State;
+use crate::module::state::{BrowseState, State};
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
 use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_LOCAL_PRESSED, ON_VIEW_REMOTE_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
 
-pub fn view(state: &State) -> Element<()> {
-    let browse_state = &state.browse;
-
+pub fn view(state: &State, browse_state: &BrowseState) -> Element<()> {
     let body: Element<()> = if let Some(err) = &browse_state.error {
         column![text(format!("Error: {}", err)).size(16.0)].into()
     } else {

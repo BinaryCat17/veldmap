@@ -13,6 +13,28 @@ impl<M> From<proto::Widget> for Element<M> {
     fn from(widget: proto::Widget) -> Self { Self { widget, _marker: std::marker::PhantomData } }
 }
 
+/// Именование элемента внутри его родителя. Отдельный трейт, а не метод
+/// `Element`: имя навешивается на готовый виджет любого рода, и приводить его
+/// к `Element` руками ради одного вызова — лишний шаг на каждом call-сайте.
+pub trait Keyed<M> {
+    /// По имени видно, где в списке на самом деле произошло изменение, и
+    /// состояние (позиция скролла, каретка и выделение в поле ввода) не
+    /// съезжает к соседу, когда элемент удалили из середины.
+    ///
+    /// Имя должно быть устойчивым между кадрами и уникальным среди соседей.
+    /// Учитывает его пока только `column`, и только у однородных детей;
+    /// подменять именем целое поддерево нельзя (см. `Widget.key`).
+    fn key(self, key: impl Into<String>) -> Element<M>;
+}
+
+impl<M, T: Into<Element<M>>> Keyed<M> for T {
+    fn key(self, key: impl Into<String>) -> Element<M> {
+        let mut element = self.into();
+        element.widget.key = key.into();
+        element
+    }
+}
+
 // --- Builder Structs ---
 
 pub struct Column<M> {
@@ -170,6 +192,7 @@ impl<M> Text<M> {
                 height: None,
                 shaping: 0,
                 font_family: String::new(),
+                wrapping: proto::Wrapping::WrapWord as i32,
             },
             _marker: std::marker::PhantomData
         }
@@ -200,6 +223,19 @@ impl<M> Text<M> {
     }
     pub fn shaping(mut self, advanced: bool) -> Self {
         self.widget.shaping = if advanced { 1 } else { 0 };
+        self
+    }
+    /// Одна строка: подпись, а не абзац. Обязательно для всего, что может не
+    /// поместиться в свою ширину, — иначе длинное имя без пробелов переносится
+    /// по букве и растёт в высоту, ломая раскладку вокруг (см. `Wrapping`).
+    pub fn single_line(mut self) -> Self {
+        self.widget.wrapping = proto::Wrapping::NoWrap as i32;
+        self
+    }
+    /// Полный выбор поведения при нехватке ширины; `single_line` — частый
+    /// случай этого же.
+    pub fn wrapping(mut self, wrapping: proto::Wrapping) -> Self {
+        self.widget.wrapping = wrapping as i32;
         self
     }
     /// Логическое имя шрифта, как оно было зарегистрировано в `GpuRenderer::new`
@@ -427,6 +463,7 @@ impl<M> Scrollable<M> {
                 content: Some(Box::new(content.into().widget)),
                 width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                direction: proto::ScrollDirection::ScrollVertical as i32,
             },
             _marker: std::marker::PhantomData,
         }
@@ -437,6 +474,12 @@ impl<M> Scrollable<M> {
     }
     pub fn height(mut self, h: Length) -> Self {
         self.widget.height = Some(h.to_proto());
+        self
+    }
+    /// Ось прокрутки. Горизонтальная нужна там, где содержимое шире места и
+    /// сжимать его нельзя: полоса вкладок, длинная строка команд.
+    pub fn direction(mut self, direction: proto::ScrollDirection) -> Self {
+        self.widget.direction = direction as i32;
         self
     }
 }

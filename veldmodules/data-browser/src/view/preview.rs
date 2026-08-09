@@ -1,13 +1,14 @@
-//! view/preview.rs — экран предпросмотра изображения
+//! view/preview.rs — вид предпросмотра изображения.
+//!
+//! Выход отсюда — закрытие вкладки, поэтому своей кнопки «назад» нет: она
+//! знала бы, куда возвращаться, только назвав другой вид по имени, а
+//! открывают превью из любого.
 
 use veld_ui_service_wrap::{column, row};
-use crate::proto::ui_service::{text, button, container, image, Element, Length, Padding, Alignment};
-use crate::module::state::State;
-use crate::module::handlers::ui_methods::ON_NAV_DOWNLOADED;
+use crate::proto::ui_service::{text, container, image, Element, Length, Padding, Alignment};
+use crate::module::state::PreviewState;
 
-pub fn view(state: &State) -> Element<()> {
-    let preview = &state.preview;
-
+pub fn view(preview: &PreviewState) -> Element<()> {
     // Пока картинки нет — на экране одна строка состояния: ждём, не смогли
     // или нечего показывать.
     let status = if preview.is_loading() {
@@ -21,19 +22,17 @@ pub fn view(state: &State) -> Element<()> {
     };
 
     if let Some(status) = status {
-        return column![
-            text(status).size(18.0),
-            button(text("Back")).on_press(ON_NAV_DOWNLOADED)
-        ]
-        .spacing(20.0)
-        .padding(Padding::new(20.0))
-        .align_items(Alignment::Center)
-        .into();
+        return container(text(status).size(18.0))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x()
+            .center_y()
+            .padding(20.0)
+            .into();
     }
 
     column![
         row![
-            button(text("Back")).on_press(ON_NAV_DOWNLOADED),
             text(format!("Preview: {}", preview.current_path)).size(18.0),
         ].spacing(20.0).align_items(Alignment::Center),
 

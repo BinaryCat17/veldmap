@@ -109,6 +109,42 @@ pub fn apply_nav<M>(btn: Button<M>) -> Button<M> {
     btn.style(nav_style()).padding(Padding { top: 8.0, bottom: 8.0, left: 15.0, right: 15.0 })
 }
 
+/// Вкладка. Активная светлее фона окна и с полным контрастом текста —
+/// показанное ниже принадлежит именно ей; остальные приглушены. Разница
+/// именно в фоне, а не в рамке: рамка на одной вкладке из ряда читается как
+/// выделение чего угодно, а поднятый фон — как «этот слой сейчас сверху».
+pub fn tab_style(active: bool) -> Style {
+    let (background, text_color) = if active {
+        (Color::from_rgb(0.16, 0.16, 0.20), COLOR_TEXT)
+    } else {
+        (Color::from_rgb(0.09, 0.09, 0.11), COLOR_TEXT_DIM)
+    };
+
+    let base = WidgetStyle {
+        background: Some(Background::Color(background)),
+        text_color: Some(text_color),
+        border: Border::with_radius(4.0),
+        ..Default::default()
+    };
+    let hovered = WidgetStyle {
+        background: Some(Background::Color(COLOR_BG_HOVER)),
+        text_color: Some(COLOR_TEXT),
+        border: Border::with_radius(4.0),
+        ..Default::default()
+    };
+
+    ButtonStyle {
+        active: base.clone(),
+        hovered,
+        pressed: base,
+        disabled: WidgetStyle::default(),
+    }.into()
+}
+
+pub fn apply_tab<M>(btn: Button<M>, active: bool) -> Button<M> {
+    btn.style(tab_style(active)).padding(Padding { top: 6.0, bottom: 6.0, left: 10.0, right: 10.0 })
+}
+
 pub fn apply_primary<M>(btn: Button<M>) -> Button<M> {
     btn.style(primary_style()).padding(Padding { top: 6.0, bottom: 6.0, left: 12.0, right: 12.0 })
 }
