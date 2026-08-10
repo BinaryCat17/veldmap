@@ -2,59 +2,58 @@ use crate::proto::ui_service as proto;
 use veldsdk::OwnedResource;
 use veldsdk::graphics::{BindGroupId, BindGroupLayoutId, PipelineId, TextureViewId};
 use std::collections::HashMap;
-use std::cell::RefCell;
 use iced_core::{Point, Event};
 use iced_runtime::user_interface;
 use crate::module::renderer::GpuRenderer;
+use crate::module::converter::UiMessage;
 
-/// Сообщение виджета, ждущее отправки владельцу поверхности.
-#[derive(Clone)]
-pub struct PendingMessage {
-    pub method: String,
-    pub value: String,
-}
-
+/// Всё, что сервис помнит об одном клиенте: его разметка, состояние ввода и
+/// ресурсы устройства, живущие дольше кадра.
+///
+/// Поля обычные, без интерьерной изменяемости: обработчики получают `&mut
+/// State`, а `plugins` и `renderer` — разные поля, и заимствовать их
+/// одновременно borrow checker даёт. Кто чего касается за кадр, видно в
+/// сигнатурах, и заметит расхождение компилятор, а не паника в рантайме.
 pub struct PluginUiState {
     pub layout: proto::Layout,
-    pub is_layout_dirty: RefCell<bool>,
-    pub interface_cache: RefCell<user_interface::Cache>,
-    pub needs_redrawing: RefCell<bool>,
-    pub canvas_size: RefCell<(u32, u32)>,
-    pub scale_factor: RefCell<f32>,
-    pub cursor_position: RefCell<Point>,
-    pub scroll_velocity: RefCell<Point>,
-    pub pending_events: RefCell<Vec<Event>>,
+    pub is_layout_dirty: bool,
+    pub interface_cache: user_interface::Cache,
+    pub needs_redrawing: bool,
+    pub canvas_size: (u32, u32),
+    pub scale_factor: f32,
+    pub cursor_position: Point,
+    pub scroll_velocity: Point,
+    pub pending_events: Vec<Event>,
     /// Последнее отправленное в iced состояние модификаторов: text_input
     /// хранит modifiers у себя и обновляет их только по ModifiersChanged.
-    pub keyboard_modifiers: RefCell<iced_core::keyboard::Modifiers>,
-    pub vertex_buffer: RefCell<Option<OwnedResource>>,
-    pub index_buffer: RefCell<Option<OwnedResource>>,
+    pub keyboard_modifiers: iced_core::keyboard::Modifiers,
+    pub vertex_buffer: Option<OwnedResource>,
+    pub index_buffer: Option<OwnedResource>,
     /// Uniform-буфер (memory ABI): наш, освобождается Drop'ом.
-    pub uniform_buffer_region: RefCell<Option<OwnedResource>>,
-    pub uniform_bind_group: RefCell<Option<BindGroupId>>,
-    pub uniform_layout: RefCell<Option<BindGroupLayoutId>>,
-    pub ui_pipeline: RefCell<Option<PipelineId>>,
-    pub last_vertices: RefCell<Vec<crate::module::renderer::Vertex>>,
-    pub last_draw_commands: RefCell<Vec<crate::module::renderer::DrawCmd>>,
-    pub external_bind_groups: RefCell<HashMap<u64, BindGroupId>>,
+    pub uniform_buffer_region: Option<OwnedResource>,
+    pub uniform_bind_group: Option<BindGroupId>,
+    pub uniform_layout: Option<BindGroupLayoutId>,
+    pub ui_pipeline: Option<PipelineId>,
+    pub last_vertices: Vec<crate::module::renderer::Vertex>,
+    pub last_draw_commands: Vec<crate::module::renderer::DrawCmd>,
+    pub external_bind_groups: HashMap<u64, BindGroupId>,
 
     /// Кэш view render-таргета: (texture_id, view).
     /// Инвалидируется сменой texture_id (владелец аллоцирует новый при resize).
-    pub target_view: RefCell<Option<(u64, TextureViewId)>>,
+    pub target_view: Option<(u64, TextureViewId)>,
 
-    pub monitor_fps: RefCell<u32>,
+    pub monitor_fps: u32,
     /// FPS-счётчик: (кадры, накопленные секунды) с последнего отчёта.
     /// Раз в 5 секунд средний FPS уходит в лог с флагом PERF.
-    pub fps_window: RefCell<(u32, f32)>,
-
+    pub fps_window: (u32, f32),
 
     /// Пойманное iced'ом за этот кадр; рассылается сразу после рендера
     /// (см. handlers::render_plugin_if_needed).
-    pub pending_messages: RefCell<Vec<PendingMessage>>,
+    pub pending_messages: Vec<UiMessage>,
     /// Render-таргет, делегированный владельцем окна через set_surface.
     /// Не наш ресурс: освобождает его владелец окна, поэтому здесь голый id,
     /// а не OwnedResource.
-    pub surface_handle: RefCell<Option<u64>>,
+    pub surface_handle: Option<u64>,
 }
 
 pub struct State {
@@ -82,29 +81,29 @@ impl PluginUiState {
     pub fn new() -> Self {
         Self {
             layout: proto::Layout::default(),
-            is_layout_dirty: RefCell::new(true),
-            interface_cache: RefCell::new(user_interface::Cache::default()),
-            needs_redrawing: RefCell::new(true),
-            canvas_size: RefCell::new((1024, 768)),
-            scale_factor: RefCell::new(1.0),
-            cursor_position: RefCell::new(Point::ORIGIN),
-            scroll_velocity: RefCell::new(Point::ORIGIN),
-            pending_events: RefCell::new(Vec::new()),
-            keyboard_modifiers: RefCell::new(iced_core::keyboard::Modifiers::empty()),
-            vertex_buffer: RefCell::new(None),
-            index_buffer: RefCell::new(None),
-            uniform_buffer_region: RefCell::new(None),
-            uniform_bind_group: RefCell::new(None),
-            uniform_layout: RefCell::new(None),
-            ui_pipeline: RefCell::new(None),
-            last_vertices: RefCell::new(Vec::new()),
-            last_draw_commands: RefCell::new(Vec::new()),
-            external_bind_groups: RefCell::new(HashMap::new()),
-            target_view: RefCell::new(None),
-            monitor_fps: RefCell::new(60),
-            fps_window: RefCell::new((0, 0.0)),
-            pending_messages: RefCell::new(Vec::new()),
-            surface_handle: RefCell::new(None),
+            is_layout_dirty: true,
+            interface_cache: user_interface::Cache::default(),
+            needs_redrawing: true,
+            canvas_size: (1024, 768),
+            scale_factor: 1.0,
+            cursor_position: Point::ORIGIN,
+            scroll_velocity: Point::ORIGIN,
+            pending_events: Vec::new(),
+            keyboard_modifiers: iced_core::keyboard::Modifiers::empty(),
+            vertex_buffer: None,
+            index_buffer: None,
+            uniform_buffer_region: None,
+            uniform_bind_group: None,
+            uniform_layout: None,
+            ui_pipeline: None,
+            last_vertices: Vec::new(),
+            last_draw_commands: Vec::new(),
+            external_bind_groups: HashMap::new(),
+            target_view: None,
+            monitor_fps: 60,
+            fps_window: (0, 0.0),
+            pending_messages: Vec::new(),
+            surface_handle: None,
         }
     }
 }

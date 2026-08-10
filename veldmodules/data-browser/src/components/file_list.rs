@@ -88,7 +88,7 @@ fn status_row(
     ].spacing(6.0).align_items(Alignment::Center).into()
 }
 
-pub fn render_item(item: &Row, actions: ItemActions) -> Element<Msg> {
+fn render_item(item: &Row, actions: ItemActions) -> Element<Msg> {
     let is_folder = matches!(item.status, RowStatus::Folder);
 
     // Иконка и имя — раздельные Text: у иконки свой шрифт (Icons), имя файла

@@ -185,16 +185,19 @@ message ButtonStyle {
     WidgetStyle disabled = 4;
 }
 
+// Кнопка нажимается ровно тогда, когда у неё есть `on_press`: отдельного
+// «выключена» нет, потому что выключенная кнопка с обработчиком и включённая
+// без него — состояния, которых не бывает. Как выглядит ненажимаемая, говорит
+// `ButtonStyle.disabled`.
 message Button {
     Widget child = 1;
     Handler on_press = 2;
-    bool disabled = 3;
     Length width = 4;
     Length height = 5;
-    oneof style_variant {
-        string style_class = 8;
-        ButtonStyle style_custom = 10;
-    }
+    // Не задан — рисуется темой рендерера. Стилей по имени нет намеренно:
+    // сервис не знает своих клиентов, и список имён был бы списком ролей
+    // чужого приложения.
+    ButtonStyle style = 10;
     Padding padding = 9;
 }
 
@@ -260,11 +263,15 @@ message Color {
     float a = 4;
 }
 
-// RPC messages for ui-service.
-// SetView is fire-and-forget: the module ships its full current view; the
-// renderer owns change detection and frame pacing.
+// Сообщения ui-service.
+//
+// Имени отправителя ни в одном из них нет: его штампует хост, и модуль читает
+// достоверное через veldsdk::event_publisher(). Клиента сервис узнаёт только
+// так — по нему же он и адресует события виджетов обратно.
+
+// Fire-and-forget: модуль шлёт свой текущий view целиком, а когда его рисовать,
+// решает рендерер.
 message SetViewRequest {
-    string plugin_id = 1;
     Layout layout = 2;
 }
 
@@ -272,16 +279,15 @@ message SetViewRequest {
 // ui-service write-lease и передаёт её сюда вместе с размером холста.
 // Пока модуль не делегировал поверхность, его события ввода игнорируются.
 message SetSurfaceRequest {
-    string plugin_id = 1;
     veldmap.core.ResourceHandle surface = 2;
     uint32 width = 3;
     uint32 height = 4;
     float scale_factor = 5;
 }
 
-// A UI event captured by the renderer, dispatched to `{plugin_id}/{method}`.
+// Сработавший виджет, как его объявили в разметке (см. Handler). Едет обратно
+// автору разметки адресным топиком, поэтому получателя в себе не несёт.
 message UiEventResponse {
-    string plugin_id = 1;
     string method = 2;
-    string value = 3; // For TextInput or similar
+    string value = 3;
 }

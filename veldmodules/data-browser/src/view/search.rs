@@ -4,7 +4,7 @@ use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, text_input, button, Element, Length};
 use crate::module::state::{SearchState, State};
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::Msg;
+use crate::module::{styles, Msg};
 
 pub fn view(state: &State, search_state: &SearchState) -> Element<Msg> {
     let body: Element<Msg> = if let Some(err) = &search_state.error {
@@ -23,8 +23,10 @@ pub fn view(state: &State, search_state: &SearchState) -> Element<Msg> {
         };
 
         items_or_message(&items, ItemActions {
-            browse: None, // Папки не поддерживаются
-            view_local: None,
+            browse: None, // Каталог поиск не отдаёт — только продукты
+            // Найденное может быть уже скачано: тогда смотрим его с диска,
+            // как на Browse, — строка тут та же и состояние у неё то же.
+            view_local: Some(Msg::ViewLocal),
             view_remote: Some(Msg::ViewRemote),
             download: Some(Msg::Download),
             delete: Some(Msg::Delete),
@@ -33,13 +35,13 @@ pub fn view(state: &State, search_state: &SearchState) -> Element<Msg> {
 
     let title: Element<Msg> = text("Search Copernicus Data Space").size(20.0).into();
     let search_row: Element<Msg> = row![
-        crate::module::styles::apply_search_input(
+        styles::apply_search_input(
             text_input("Search query...", &search_state.query)
         )
             .width(Length::Fill)
             .on_input(Msg::SearchInput)
             .on_submit(Msg::Search),
-        crate::module::styles::apply_primary(button(text("Search"))).on_press(Msg::Search)
+        styles::apply_primary(button(text("Search"))).on_press(Msg::Search)
     ]
     .spacing(10.0)
     .width(Length::Fill)

@@ -3,6 +3,8 @@
 //! Геометрию считает renderer, сюда она приходит готовой — здесь только то,
 //! что нужно хосту, чтобы её нарисовать.
 
+use std::collections::HashMap;
+
 use crate::module::state::PluginUiState;
 use crate::module::renderer::{GpuRenderer, DrawCmd};
 use veldsdk::graphics::{
@@ -24,7 +26,7 @@ const INDEX_BUFFER_SIZE: u64 = 2 * 1024 * 1024;
 /// выданная нам write-lease'ом). View текстуры кэшируется по её id: на resize
 /// владелец выделяет новый таргет, id меняется, и прежний view заменяется.
 pub fn render_ui(
-    plugin: &PluginUiState,
+    plugin: &mut PluginUiState,
     renderer: &mut GpuRenderer,
     target_texture: u64,
     width: u32,
@@ -34,14 +36,14 @@ pub fn render_ui(
 ) -> anyhow::Result<()> {
     veldsdk::log::trace!(target: "graphics", "START {}x{} into texture {}", width, height, target_texture);
 
-    let fresh = matches!(&*plugin.target_view.borrow(), Some((tex, _)) if *tex == target_texture);
-    if !fresh {
+    let cached = matches!(&plugin.target_view, Some((tex, _)) if *tex == target_texture);
+    if !cached {
         let view = gfx::create_texture_view(target_texture)?;
-        *plugin.target_view.borrow_mut() = Some((target_texture, view));
+        plugin.target_view = Some((target_texture, view));
     }
 
     ensure_resources(plugin, renderer, surface_format)?;
-    evict_unused_bind_groups(plugin, renderer);
+    evict_unused_bind_groups(&mut plugin.external_bind_groups, renderer);
 
     let mut recorder = RenderRecorder::new();
     let logical_w = width as f32 / scale_factor;
@@ -49,7 +51,7 @@ pub fn render_ui(
 
     // Размер холста в логических пикселях: по нему шейдер переводит координаты
     // раскладки в clip space.
-    if let Some(u) = plugin.uniform_buffer_region.borrow().as_ref() {
+    if let Some(u) = plugin.uniform_buffer_region.as_ref() {
         let res_data: [f32; 2] = [logical_w, logical_h];
         let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
         resource_write(u.id(), 0, data)?;
@@ -73,11 +75,8 @@ pub fn render_ui(
 
     // Записанное исполняет кадровый цикл хоста — не мы: наш вызов лишь ставит
     // работу в очередь на этот таргет.
-    {
-        let target = plugin.target_view.borrow();
-        let view = &target.as_ref().expect("target view ensured above").1;
-        recorder.submit(view)?;
-    }
+    let view = &plugin.target_view.as_ref().expect("target view ensured above").1;
+    recorder.submit(view)?;
     veldsdk::log::trace!(target: "graphics", "END");
     Ok(())
 }
@@ -85,7 +84,7 @@ pub fn render_ui(
 /// Переводит команды рисования в записи для хоста. Порядок сохраняется: у
 /// ножниц и внешних картинок он значащий.
 fn render_geometry(
-    plugin: &PluginUiState,
+    plugin: &mut PluginUiState,
     renderer: &GpuRenderer,
     recorder: &mut RenderRecorder,
     width: u32,
@@ -93,21 +92,19 @@ fn render_geometry(
 ) -> anyhow::Result<()> {
     let vertex_size = std::mem::size_of::<crate::module::renderer::Vertex>();
 
-    let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
-    if vertex_buffer.is_none() {
+    if plugin.vertex_buffer.is_none() {
         let id = resource_alloc_buffer(VERTEX_BUFFER_SIZE, buffer_usage::VERTEX, false)
             .ok_or_else(|| anyhow!("Failed to allocate vertex buffer"))?;
-        *vertex_buffer = Some(OwnedResource::new(ResourceHandle { id, size: VERTEX_BUFFER_SIZE, ..Default::default() }));
+        plugin.vertex_buffer = Some(OwnedResource::new(ResourceHandle { id, size: VERTEX_BUFFER_SIZE, ..Default::default() }));
     }
 
-    let mut index_buffer = plugin.index_buffer.borrow_mut();
-    if index_buffer.is_none() {
+    if plugin.index_buffer.is_none() {
         let id = resource_alloc_buffer(INDEX_BUFFER_SIZE, buffer_usage::INDEX, false)
             .ok_or_else(|| anyhow!("Failed to allocate index buffer"))?;
-        *index_buffer = Some(OwnedResource::new(ResourceHandle { id, size: INDEX_BUFFER_SIZE, ..Default::default() }));
+        plugin.index_buffer = Some(OwnedResource::new(ResourceHandle { id, size: INDEX_BUFFER_SIZE, ..Default::default() }));
     }
 
-    if let (Some(v_h), Some(i_h)) = (&*vertex_buffer, &*index_buffer) {
+    if let (Some(v_h), Some(i_h)) = (&plugin.vertex_buffer, &plugin.index_buffer) {
         let v_data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
         resource_write(v_h.id(), 0, v_data)?;
 
@@ -116,10 +113,11 @@ fn render_geometry(
     }
 
     // Без пайплайна или буферов рисовать нечем — кадр просто пропускается.
-    let ui_pipeline = plugin.ui_pipeline.borrow();
-    let uniform_bind_group = plugin.uniform_bind_group.borrow();
+    // Кэш bind group'ов берётся отдельным полем: остальные здесь заимствованы
+    // на чтение, и одолжить ради него весь plugin было бы нельзя.
+    let external_bind_groups = &mut plugin.external_bind_groups;
     if let (Some(pipeline), Some(v_h), Some(i_h), Some(uniform_bg)) =
-        (ui_pipeline.as_ref(), &*vertex_buffer, &*index_buffer, uniform_bind_group.as_ref())
+        (&plugin.ui_pipeline, &plugin.vertex_buffer, &plugin.index_buffer, &plugin.uniform_bind_group)
     {
         recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
 
@@ -141,7 +139,7 @@ fn render_geometry(
                     recorder.set_scissor_rect(*x, *y, *width, *height);
                 }
                 DrawCmd::ExternalImage { texture_id, index_count, .. } => {
-                    match get_external_bind_group(plugin, renderer, *texture_id) {
+                    match get_external_bind_group(external_bind_groups, renderer, *texture_id) {
                         Ok(bg) => {
                             recorder.set_bind_group(0, &bg);
                             recorder.draw_indexed(current_index_offset..(current_index_offset + *index_count), 0, 0..1);
@@ -169,8 +167,7 @@ fn render_geometry(
 /// на текстуру, поэтому пока запись жива, видеопамять не освобождается даже
 /// после того, как владелец освободил текстуру. Без этого каждая просмотренная
 /// картинка оставалась бы в VRAM до конца сессии.
-fn evict_unused_bind_groups(plugin: &PluginUiState, renderer: &GpuRenderer) {
-    let mut cache = plugin.external_bind_groups.borrow_mut();
+fn evict_unused_bind_groups(cache: &mut HashMap<u64, BindGroupId>, renderer: &GpuRenderer) {
     if cache.is_empty() { return; }
     cache.retain(|texture_id, _| {
         renderer.draw_commands.iter().any(|cmd| {
@@ -181,11 +178,10 @@ fn evict_unused_bind_groups(plugin: &PluginUiState, renderer: &GpuRenderer) {
 
 /// Bind group внешней текстуры — из кэша или новая. Кэш чистится
 /// `evict_unused_bind_groups`.
-fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, texture_id: u64) -> anyhow::Result<BindGroupId> {
+fn get_external_bind_group(cache: &mut HashMap<u64, BindGroupId>, renderer: &GpuRenderer, texture_id: u64) -> anyhow::Result<BindGroupId> {
     if texture_id == 0 {
         return Err(anyhow!("Invalid texture_id: 0"));
     }
-    let mut cache = plugin.external_bind_groups.borrow_mut();
     if let Some(bg) = cache.get(&texture_id) {
         return Ok(bg.clone());
     }
@@ -206,7 +202,7 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
 
 /// Ленивое создание всего, что живёт дольше кадра: layout'ы, пайплайн, буферы,
 /// атлас. Каждый шаг проверяет своё и ничего не пересоздаёт.
-pub fn ensure_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
+pub fn ensure_resources(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
     ensure_atlas_layout(renderer)?;
     ensure_uniform_layout(plugin)?;
     ensure_pipeline(plugin, renderer, surface_format)?;
@@ -226,24 +222,22 @@ fn ensure_atlas_layout(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ensure_uniform_layout(plugin: &PluginUiState) -> anyhow::Result<()> {
-    let mut uniform_layout = plugin.uniform_layout.borrow_mut();
-    if uniform_layout.is_none() {
-        *uniform_layout = Some(gfx::create_bind_group_layout("UI Uniform BGL", vec![
+fn ensure_uniform_layout(plugin: &mut PluginUiState) -> anyhow::Result<()> {
+    if plugin.uniform_layout.is_none() {
+        plugin.uniform_layout = Some(gfx::create_bind_group_layout("UI Uniform BGL", vec![
             gfx::uniform_buffer_layout_entry(0, VISIBILITY_VERTEX | VISIBILITY_FRAGMENT),
         ])?);
     }
     Ok(())
 }
 
-fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
-    let mut ui_pipeline = plugin.ui_pipeline.borrow_mut();
-    if ui_pipeline.is_none() {
+fn ensure_pipeline(plugin: &mut PluginUiState, renderer: &GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
+    if plugin.ui_pipeline.is_none() {
         let shader = gfx::create_shader(include_str!("shaders.wgsl"), "UI Shader")?;
 
         let mut bgl_ids = Vec::new();
         if let Some(layout) = renderer.atlas_layout.as_ref() { bgl_ids.push(layout.id()); }
-        if let Some(layout) = plugin.uniform_layout.borrow().as_ref() { bgl_ids.push(layout.id()); }
+        if let Some(layout) = plugin.uniform_layout.as_ref() { bgl_ids.push(layout.id()); }
 
         let pipeline = gfx::create_render_pipeline(CreateRenderPipeline {
             shader_id: shader.id(),
@@ -272,25 +266,29 @@ fn ensure_pipeline(plugin: &PluginUiState, renderer: &GpuRenderer, surface_forma
             cull_mode: CullMode::None as i32,
             ..Default::default()
         })?;
-        *ui_pipeline = Some(pipeline);
+        plugin.ui_pipeline = Some(pipeline);
     }
     Ok(())
 }
 
-fn ensure_uniform_buffer(plugin: &PluginUiState) -> anyhow::Result<()> {
-    let mut uniform_bind_group = plugin.uniform_bind_group.borrow_mut();
-    let layout = plugin.uniform_layout.borrow();
-    if uniform_bind_group.is_none() {
-        if let Some(layout) = layout.as_ref() {
-            let buf_region = resource_alloc_buffer(16, buffer_usage::UNIFORM, false)
-                .ok_or_else(|| anyhow!("Failed to allocate uniform buffer"))?;
-            *plugin.uniform_buffer_region.borrow_mut() =
-                Some(OwnedResource::new(ResourceHandle { id: buf_region, size: 16, ..Default::default() }));
-            *uniform_bind_group = Some(gfx::create_bind_group(
-                "UI Uniform BG", layout, vec![gfx::buffer_entry(0, buf_region)],
-            )?);
-        }
+/// Uniform-буфер и bind group поверх него. Буфер сразу заворачивается во
+/// владельца: сорвись создание bind group — освободит его Drop, а голый id
+/// остался бы висеть на хосте.
+fn ensure_uniform_buffer(plugin: &mut PluginUiState) -> anyhow::Result<()> {
+    if plugin.uniform_bind_group.is_some() {
+        return Ok(());
     }
+    let Some(layout) = plugin.uniform_layout.as_ref() else { return Ok(()) };
+
+    let id = resource_alloc_buffer(16, buffer_usage::UNIFORM, false)
+        .ok_or_else(|| anyhow!("Failed to allocate uniform buffer"))?;
+    let region = OwnedResource::new(ResourceHandle { id, size: 16, ..Default::default() });
+    let bind_group = gfx::create_bind_group(
+        "UI Uniform BG", layout, vec![gfx::buffer_entry(0, region.id())],
+    )?;
+
+    plugin.uniform_buffer_region = Some(region);
+    plugin.uniform_bind_group = Some(bind_group);
     Ok(())
 }
 

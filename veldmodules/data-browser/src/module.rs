@@ -21,10 +21,15 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
 // уходит по сети — дедуп по хэшу внутри render(). --
 static LAST_UI_HASH: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 
-/// Первый вызов hook_event — это app/on_ready: все сервисы подняты. Тогда же
-/// и спрашиваем библиотеку, иначе до первого перехода между экранами мы не
-/// знали бы, что уже скачано. Флаг снаружи State: hook_event получает его по
-/// ссылке, да и относится это к жизни модуля, а не к тому, что он показывает.
+/// Библиотеку спрашиваем один раз, на первом же событии: до ответа мы не знаем,
+/// что уже скачано, а сама она рассылает только изменения.
+///
+/// Первым приходит app/on_window_resized — раннер объявляет размер окна, а
+/// готовность следом (см. runners/desktop, `announce`). К этому моменту все
+/// плагины уже загружены и подписаны, так что запрос доедет до библиотеки.
+///
+/// Флаг снаружи State: hook_event получает его по ссылке, да и относится это к
+/// жизни модуля, а не к тому, что он показывает.
 static LIBRARY_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn hook_event(state: &State) {
@@ -33,7 +38,6 @@ pub fn hook_event(state: &State) {
     }
     let root = view::build_root(state);
     veld_ui_service_wrap::render::render(
-        crate::SERVICE_NAME,
         root,
         &mut LAST_UI_HASH.lock().unwrap(),
         crate::calls::ui_service::on_set_view,

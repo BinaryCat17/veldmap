@@ -4,7 +4,7 @@ use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, button, icon, Element, Alignment};
 use crate::module::state::{BrowseState, State};
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::Msg;
+use crate::module::{styles, Msg};
 
 pub fn view(state: &State, browse_state: &BrowseState) -> Element<Msg> {
     let body: Element<Msg> = if let Some(err) = &browse_state.error {
@@ -30,14 +30,14 @@ pub fn view(state: &State, browse_state: &BrowseState) -> Element<Msg> {
     let title_row: Element<Msg> = if browse_state.request.is_pending() {
         row![
             text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-            icon("\u{f110}").color(crate::module::styles::COLOR_TEXT_DIM),
-            text("Loading...").size(14.0).color(crate::module::styles::COLOR_TEXT_DIM),
+            icon("\u{f110}").color(styles::COLOR_TEXT_DIM),
+            text("Loading...").size(14.0).color(styles::COLOR_TEXT_DIM),
         ].spacing(8.0).align_items(Alignment::Center).into()
     } else {
         text(format!("Browse: {}", browse_state.current_path)).size(20.0).into()
     };
 
-    let up_button: Element<Msg> = crate::module::styles::apply_primary(button(
+    let up_button: Element<Msg> = styles::apply_primary(button(
         row![icon("\u{f062}"), text("Up")]
             .spacing(6.0)
             .align_items(Alignment::Center)

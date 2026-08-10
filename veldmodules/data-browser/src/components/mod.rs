@@ -10,5 +10,5 @@ pub mod file_list;
 pub mod list_screen;
 
 pub use row::{Row, RowStatus, downloaded_rows};
-pub use file_list::{render_item, render_list, items_or_message, ItemActions};
+pub use file_list::{render_list, items_or_message, ItemActions};
 pub use list_screen::list_screen;

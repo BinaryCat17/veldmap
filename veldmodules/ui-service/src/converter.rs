@@ -157,35 +157,20 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .height(convert_length(&b.height))
                 .padding(convert_padding(&b.padding));
             
-            if !b.disabled {
-                if let Some(h) = &b.on_press {
-                    if !h.method.is_empty() {
-                        btn = btn.on_press(UiMessage { method: h.method.clone(), value: h.value.clone() });
-                    }
+            // Нажимаемость — это наличие обработчика: iced сам рисует кнопку
+            // без него состоянием Disabled.
+            if let Some(h) = &b.on_press {
+                if !h.method.is_empty() {
+                    btn = btn.on_press(UiMessage { method: h.method.clone(), value: h.value.clone() });
                 }
             }
 
-            match &b.style_variant {
-                Some(proto::button::StyleVariant::StyleClass(name)) => {
-                    // Только пресеты iced. Имён кнопок конкретного приложения
-                    // здесь быть не должно: сервис не знает своих клиентов, а
-                    // свой внешний вид клиент задаёт структурно (StyleCustom).
-                    match name.as_str() {
-                        "text" => { btn = btn.style(iced_widget::button::text); }
-                        "primary" => { btn = btn.style(iced_widget::button::primary); }
-                        "secondary" => { btn = btn.style(iced_widget::button::secondary); }
-                        "success" => { btn = btn.style(iced_widget::button::success); }
-                        "danger" => { btn = btn.style(iced_widget::button::danger); }
-                        _ => {
-                            btn = btn.style(iced_widget::button::primary);
-                        }
-                    }
-                }
-                Some(proto::button::StyleVariant::StyleCustom(custom)) => {
-                    let active = custom.active.clone().unwrap_or_default();
-                    let hovered = custom.hovered.clone().unwrap_or_default();
-                    let pressed = custom.pressed.clone().unwrap_or_default();
-                    let disabled = custom.disabled.clone().unwrap_or_default();
+            match &b.style {
+                Some(style) => {
+                    let active = style.active.clone().unwrap_or_default();
+                    let hovered = style.hovered.clone().unwrap_or_default();
+                    let pressed = style.pressed.clone().unwrap_or_default();
+                    let disabled = style.disabled.clone().unwrap_or_default();
 
                     // Перевод в стиль iced идёт внутри замыкания, а не рядом:
                     // цвет текста в стиле может быть не задан, и тогда его
@@ -200,11 +185,10 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                          convert_widget_style(style, theme.palette().text)
                     });
                 }
-                None => {
-                    btn = btn.style(iced_widget::button::primary);
-                }
+                // Стиль не задан — рисуем темой.
+                None => btn = btn.style(iced_widget::button::primary),
             }
-            
+
             btn.into()
         }
         Some(proto::widget::Type::TextInput(t)) => {

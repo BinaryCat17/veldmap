@@ -14,4 +14,3 @@ pub struct Config {
     /// не назовёшь.
     pub initial_view: Option<String>,
 }
-

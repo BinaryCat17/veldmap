@@ -21,6 +21,9 @@ rust:
     iced_widget:
       version: "0.14"
       default-features: false
+    # Не используется в коде: iced_widget тянет iced_renderer транзитивно, а тот
+    # без включённого бэкенда падает compile_error!. Своего рендерера у нас нет,
+    # поэтому включаем самый дешёвый — линковаться в wasm ему всё равно нечем.
     iced_renderer:
       version: "0.14"
       default-features: false

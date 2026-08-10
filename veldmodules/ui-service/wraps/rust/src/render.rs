@@ -11,13 +11,15 @@ use super::widgets::Element;
 /// Разметка едет целиком; неизменившаяся не едет вовсе — отсекается по хэшу
 /// содержимого. Что и когда перерисовывать, решает уже рендерер.
 ///
+/// Себя называть не нужно: отправителя штампует хост, и ui-service читает его
+/// из конверта (см. `SetViewRequest` в types.proto).
+///
 /// `publish` — стаб топика `ui-service/on_set_view` из кодогена вызывающего
-/// модуля: `render::render(id, root, &mut hash, crate::calls::ui_service::on_set_view)`.
+/// модуля: `render::render(root, &mut hash, crate::calls::ui_service::on_set_view)`.
 /// Wrap-крейт не публикует сам: он один на всех потребителей и не знает, кто
 /// из них объявил `ui-service: calls: [on_set_view]` у себя в schema.yaml, —
 /// а публикация в обход объявления сделала бы граф связей в схемах неполным.
 pub fn render<M>(
-    plugin_id: &str,
     root: Element<M>,
     last_hash: &mut u64,
     publish: impl FnOnce(&crate::proto::SetViewRequest),
@@ -34,9 +36,5 @@ pub fn render<M>(
     }
     *last_hash = hash;
 
-    let request = crate::proto::SetViewRequest {
-        plugin_id: plugin_id.to_string(),
-        layout: Some(layout),
-    };
-    publish(&request);
+    publish(&crate::proto::SetViewRequest { layout: Some(layout) });
 }

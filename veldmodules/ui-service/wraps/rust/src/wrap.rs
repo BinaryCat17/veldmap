@@ -7,8 +7,6 @@
 
 pub use super::proto::*;
 
-pub use futures_util::task::noop_waker_ref;
-
 pub mod style;
 pub mod widgets;
 pub mod surface;
@@ -17,7 +15,7 @@ pub mod render;
 // Явные реэкспорты затеняют одноимённые proto-сообщения из глоба выше:
 // снаружи Column — билдер, а сырой proto::Column доступен через crate::proto.
 pub use style::{
-    Alignment, Background, Border, ButtonStyle, Color, Length, Padding, Style, WidgetStyle,
+    Alignment, Background, Border, ButtonStyle, Color, Length, Padding, WidgetStyle,
 };
 pub use widgets::{
     Button, Column, Container, Element, Image, Keyed, ProgressBar, Row, Scrollable,
@@ -25,11 +23,6 @@ pub use widgets::{
     button, column, container, icon, image, progress_bar, row, scrollable, space,
     stack, text, text_input, tooltip,
 };
-
-pub mod reexports {
-    pub use std::task::{Poll, Context};
-    pub use futures_util::task::noop_waker_ref;
-}
 
 #[macro_export]
 macro_rules! column {

@@ -126,6 +126,9 @@ impl WidgetStyle {
     }
 }
 
+/// Кнопка во всех своих состояниях. `disabled` — та, у которой нет `on_press`:
+/// hover и нажатие до неё не доходят (см. `Button` в types.proto).
+#[derive(Clone, Default)]
 pub struct ButtonStyle {
     pub active: WidgetStyle,
     pub hovered: WidgetStyle,
@@ -133,26 +136,13 @@ pub struct ButtonStyle {
     pub disabled: WidgetStyle,
 }
 
-impl Default for ButtonStyle {
-    fn default() -> Self {
-        Self {
-            active: WidgetStyle::default(),
-            hovered: WidgetStyle::default(),
-            pressed: WidgetStyle::default(),
-            disabled: WidgetStyle::default(),
+impl ButtonStyle {
+    pub(crate) fn to_proto(self) -> proto::ButtonStyle {
+        proto::ButtonStyle {
+            active: Some(self.active.to_proto()),
+            hovered: Some(self.hovered.to_proto()),
+            pressed: Some(self.pressed.to_proto()),
+            disabled: Some(self.disabled.to_proto()),
         }
     }
-}
-
-pub enum Style {
-    Class(String),
-    Custom(Box<ButtonStyle>),
-}
-
-impl From<&str> for Style {
-    fn from(s: &str) -> Self { Style::Class(s.to_string()) }
-}
-
-impl From<ButtonStyle> for Style {
-    fn from(s: ButtonStyle) -> Self { Style::Custom(Box::new(s)) }
 }

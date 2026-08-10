@@ -2,7 +2,7 @@
 //! Стили и геометрия — в style.rs.
 
 use crate::proto;
-use super::style::{Alignment, Background, Length, Padding, Style};
+use super::style::{Alignment, Background, ButtonStyle, Length, Padding};
 
 pub struct Element<M> {
     pub widget: proto::Widget,
@@ -290,11 +290,7 @@ impl<M> Button<M> {
     pub fn new(content: impl Into<Element<M>>) -> Self {
         Self { widget: proto::Button {
             child: Some(Box::new(content.into().widget)),
-            on_press: None,
-            disabled: false,
-            width: None, height: None,
-            style_variant: Some(proto::button::StyleVariant::StyleClass(String::new())),
-            padding: None,
+            ..Default::default()
         }, _marker: std::marker::PhantomData }
     }
     /// Что модуль получит при нажатии. Кнопка без сообщения не нажимается —
@@ -307,18 +303,8 @@ impl<M> Button<M> {
         self.widget.on_press = Some(proto::Handler { method, value });
         self
     }
-    pub fn style(mut self, style: impl Into<Style>) -> Self {
-        match style.into() {
-            Style::Class(s) => self.widget.style_variant = Some(proto::button::StyleVariant::StyleClass(s)),
-            Style::Custom(c) => {
-                self.widget.style_variant = Some(proto::button::StyleVariant::StyleCustom(proto::ButtonStyle {
-                    active: Some(c.active.to_proto()),
-                    hovered: Some(c.hovered.to_proto()),
-                    pressed: Some(c.pressed.to_proto()),
-                    disabled: Some(c.disabled.to_proto()),
-                }));
-            }
-        }
+    pub fn style(mut self, style: ButtonStyle) -> Self {
+        self.widget.style = Some(style.to_proto());
         self
     }
 }

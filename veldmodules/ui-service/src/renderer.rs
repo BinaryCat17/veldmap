@@ -183,6 +183,16 @@ fn resolve_family(
     }
 }
 
+/// Ветка шейдера, которой рисуется вершина (`mode` в shaders.wgsl): глиф из
+/// атласа, скруглённый прямоугольник с рамкой (фон виджета) или чужая текстура.
+const MODE_GLYPH: f32 = 0.0;
+const MODE_SDF: f32 = 1.0;
+const MODE_IMAGE: f32 = 2.0;
+
+/// Зазор вокруг глифа в атласе. Сэмплер на границе берёт соседний тексель, и
+/// без зазора в глиф затекает сосед; тем же отступом начинается первая строка.
+const ATLAS_PADDING: u32 = 2;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
@@ -288,20 +298,9 @@ impl GpuRenderer {
             glyph_cache: HashMap::new(),
             atlas_width: 2048,
             atlas_height: 2048,
-            atlas_data: {
-                let mut data = vec![0; 2048 * 2048 * 4];
-                for y in 0..4 {
-                    for x in 0..4 {
-                        let idx = (y * 2048 + x) * 4;
-                        for i in 0..4 {
-                            data[idx + i] = 255;
-                        }
-                    }
-                }
-                data
-            },
-            current_atlas_x: 6,
-            current_atlas_y: 6,
+            atlas_data: vec![0; 2048 * 2048 * 4],
+            current_atlas_x: ATLAS_PADDING,
+            current_atlas_y: ATLAS_PADDING,
             row_height: 1,
             atlas_dirty: true,
             font_map,
@@ -418,19 +417,20 @@ impl GpuRenderer {
         self.indices.push(base + 3);
     }
 
+    /// Чужая текстура во весь отведённый прямоугольник: UV 0..1 — целиком,
+    /// цвет белый — шейдер умножает на него сэмпл.
     pub fn draw_wgpu_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64) {
-        // Mode 2.0 = External Image mode in shaders.wgsl
-        // UV [0,0, 1,1] = Full texture
         self.push_quad_data(
             [bounds.x, bounds.y, bounds.width, bounds.height],
             [1.0, 1.0, 1.0, 1.0],
             [0.0, 0.0, 1.0, 1.0],
-            0.0, 2.0, 0.0, [0.0, 0.0, 0.0, 0.0]
+            0.0, MODE_IMAGE, 0.0, [0.0, 0.0, 0.0, 0.0]
         );
 
         self.draw_commands
             .push(DrawCmd::ExternalImage { bounds, texture_id, index_count: 6 });
-    }}
+    }
+}
 
 impl iced_widget::core::renderer::Renderer for GpuRenderer {
     fn fill_quad(
@@ -443,15 +443,17 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             _ => [1.0, 1.0, 1.0, 1.0],
         };
 
-        let white_uv = [2.0 / 2048.0, 2.0 / 2048.0, 2.0 / 2048.0, 2.0 / 2048.0];
         let radius = quad.border.radius.top_left;
-        
+
         let bw = quad.border.width;
         let bc = quad.border.color;
         let border_color = [bc.r, bc.g, bc.b, bc.a];
 
         // Фон и рамка — одним прямоугольником: и то, и другое считает шейдер
         // по расстоянию до скруглённой границы, второй проход ему не нужен.
+        //
+        // UV нулевые: в режиме SDF шейдер атлас не сэмплит вовсе (shaders.wgsl),
+        // цвет он берёт из вершины.
         self.add_quad(
             [
                 quad.bounds.x,
@@ -460,9 +462,9 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
                 quad.bounds.height,
             ],
             color,
-            white_uv,
+            [0.0; 4],
             radius,
-            1.0, // SDF Mode
+            MODE_SDF,
             bw,
             border_color,
         );
@@ -936,7 +938,7 @@ impl GpuRenderer {
                         ],
                         text_color,
                         info.uv,
-                        0.0, 0.0, 0.0, [0.0, 0.0, 0.0, 0.0],
+                        0.0, MODE_GLYPH, 0.0, [0.0, 0.0, 0.0, 0.0],
                     );
                 }
             }
@@ -955,15 +957,15 @@ impl GpuRenderer {
                         let width = image.placement.width;
                         let height = image.placement.height;
 
-                        if self.current_atlas_x + width + 2 > self.atlas_width {
-                            self.current_atlas_x = 2;
-                            self.current_atlas_y += self.row_height + 2;
+                        if self.current_atlas_x + width + ATLAS_PADDING > self.atlas_width {
+                            self.current_atlas_x = ATLAS_PADDING;
+                            self.current_atlas_y += self.row_height + ATLAS_PADDING;
                             self.row_height = 0;
                         }
 
-                        if self.current_atlas_y + height + 2 > self.atlas_height {
-                            self.current_atlas_x = 2;
-                            self.current_atlas_y = 2;
+                        if self.current_atlas_y + height + ATLAS_PADDING > self.atlas_height {
+                            self.current_atlas_x = ATLAS_PADDING;
+                            self.current_atlas_y = ATLAS_PADDING;
                             self.row_height = 0;
                             self.glyph_cache.clear();
                         }
@@ -1021,7 +1023,7 @@ impl GpuRenderer {
                             },
                         );
 
-                        self.current_atlas_x += width + 2;
+                        self.current_atlas_x += width + ATLAS_PADDING;
                         self.row_height = self.row_height.max(height);
                         self.atlas_dirty = true;
                     }

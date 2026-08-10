@@ -45,7 +45,6 @@ pub fn delegate(
     let handle = veldsdk::proto::core::ResourceHandle { id: texture_id, size: 0 };
 
     set_surface(&crate::proto::SetSurfaceRequest {
-        plugin_id: ev.plugin_id.clone(),
         surface: Some(handle.clone()),
         width: ev.width,
         height: ev.height,
