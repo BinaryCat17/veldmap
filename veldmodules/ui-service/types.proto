@@ -57,10 +57,19 @@ message Stack {
 message Tooltip {
     Widget content = 1;
     string tooltip = 2;
-    uint32 position = 3; // Enum Position
+    TooltipPosition position = 3;
     float gap = 4;
-    Padding padding = 5;
-    reserved 6; // бывший `string style` — конвертер его не читал
+    // Одно число, а не Padding: подсказка отступает от своего содержимого
+    // одинаково со всех сторон, и разные значения по сторонам ей задать нечем.
+    float padding = 5;
+}
+
+// С какой стороны от содержимого встаёт подсказка.
+enum TooltipPosition {
+    TOOLTIP_TOP = 0;
+    TOOLTIP_BOTTOM = 1;
+    TOOLTIP_LEFT = 2;
+    TOOLTIP_RIGHT = 3;
 }
 
 message ProgressBar {
@@ -86,6 +95,8 @@ enum ScrollDirection {
     SCROLL_BOTH = 2;
 }
 
+// Потолок размера — только у Container: он умеет ограничить кого угодно, и
+// один такой способ понятнее, чем свой у каждого носителя детей.
 message Column {
     repeated Widget children = 1;
     float spacing = 2;
@@ -93,8 +104,6 @@ message Column {
     Alignment align_items = 4;
     Length width = 5;
     Length height = 6;
-    Length max_width = 7;
-    Length max_height = 8;
 }
 
 message Row {
@@ -104,34 +113,39 @@ message Row {
     Alignment align_items = 4;
     Length width = 5;
     Length height = 6;
-    Length max_width = 7;
-    Length max_height = 8;
 }
 
 message Text {
     string content = 1;
     float size = 2;
     Color color = 3;
-    bool bold = 4;
-    Alignment horizontal_alignment = 5;
-    Alignment vertical_alignment = 6;
-    // 7 — бывший `string style`: класс-строка, которую конвертер никогда не
-    // читал. Внешний вид текста задают color/size/bold, и это единственный
-    // способ; сеттер в wrap-крейте существовал и молча ничего не делал.
-    reserved 7;
-    Length width = 8;
-    Length height = 9;
-    uint32 shaping = 10;
-    string font_family = 11;
+    Alignment horizontal_alignment = 4;
+    Alignment vertical_alignment = 5;
+    Length width = 6;
+    Length height = 7;
+    Shaping shaping = 8;
+    string font_family = 9;
     // Что делать, когда текст не помещается в отведённую ширину.
-    Wrapping wrapping = 12;
+    Wrapping wrapping = 10;
 }
 
-// Умолчание — перенос по словам, как в iced. Подписи (заголовок вкладки, имя
-// в строке списка, надпись на кнопке) обязаны объявлять NO_WRAP: длинное имя
-// без пробелов в узком месте иначе переносится по букве, и высота подписи
-// растёт до высоты окна, унося за собой всю раскладку. Ширину такой текст
-// займёт больше отведённой — обрежет его ближайший скроллируемый предок.
+// Сложность разбора строки. Продвинутый шейпинг нужен письменностям с
+// лигатурами и переупорядочиванием (арабица, деванагари); латинице и кириллице
+// он стоит времени и ничего не даёт.
+enum Shaping {
+    SHAPE_BASIC = 0;
+    SHAPE_ADVANCED = 1;
+}
+
+// Умолчание — перенос по словам, как в iced: рвать строку можно только по
+// пробелам. В имени файла, пути или ключе пробелов нет, поэтому в отведённую
+// ширину такой текст не переносится, а выходит за неё — рамка своего места его
+// не удержит. Тексту, который обязан остаться внутри, нужен
+// WRAP_WORD_OR_GLYPH: он рвёт по словам, а неделимое слово — по буквам.
+//
+// NO_WRAP — для того, что обязано остаться одной строкой (заголовок вкладки,
+// глиф иконки). Ширину такой текст займёт больше отведённой, и обрежет его
+// только ближайший скроллируемый предок.
 enum Wrapping {
     WRAP_WORD = 0;
     NO_WRAP = 1;
@@ -139,24 +153,12 @@ enum Wrapping {
     WRAP_WORD_OR_GLYPH = 3;
 }
 
-message Radius {
-    float top_left = 1;
-    float top_right = 2;
-    float bottom_right = 3;
-    float bottom_left = 4;
-}
-
 message Border {
     Color color = 1;
     float width = 2;
-    Radius radius = 3;
-}
-
-message Shadow {
-    Color color = 1;
-    float offset_x = 2;
-    float offset_y = 3;
-    float blur_radius = 4;
+    // Скругление одно на все четыре угла: рисуется оно расстоянием до
+    // скруглённого прямоугольника (см. shaders.wgsl), и радиус там один.
+    float radius = 3;
 }
 
 message Background {
@@ -166,11 +168,14 @@ message Background {
     }
 }
 
+// Внешний вид виджета в одном из его состояний.
+//
+// `text_color` не задан — текст внутри рисуется цветом темы: «не сказано» тут
+// значит «как обычный текст», а не «чёрный».
 message WidgetStyle {
     optional Background background = 1;
     optional Color text_color = 2;
     optional Border border = 3;
-    optional Shadow shadow = 4;
 }
 
 message ButtonStyle {
@@ -198,10 +203,9 @@ message TextInput {
     string placeholder = 2;
     Handler on_input = 3;
     Handler on_submit = 4;
-    reserved 5; // бывший `string style` — конвертер его не читал
-    Length width = 6;
-    Padding padding = 7;
-    float size = 8;
+    Length width = 5;
+    Padding padding = 6;
+    float size = 7;
 }
 
 message WgpuImage {
@@ -220,14 +224,11 @@ message Container {
     Padding padding = 2;
     Length width = 3;
     Length height = 4;
-    Length max_width = 9;
-    Length max_height = 10;
-    Alignment align_x = 5;
-    Alignment align_y = 6;
-    // Фон контейнера задаётся только этим полем. Поле 8 было вторым,
-    // конкурирующим `string style`, которое конвертер не читал.
-    Background background = 7;
-    reserved 8;
+    Length max_width = 5;
+    Length max_height = 6;
+    Alignment align_x = 7;
+    Alignment align_y = 8;
+    Background background = 9;
 }
 
 message Padding {

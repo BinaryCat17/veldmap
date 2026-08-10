@@ -1,6 +1,9 @@
-//! styles.rs — стили приложения (обновлено под чистую архитектуру)
+//! styles.rs — внешний вид приложения: цвета и готовые виджеты по их роли.
+//!
+//! Роль, а не оформление: разметка просит «вкладку» или «строку списка», а как
+//! они выглядят, знает только этот файл.
 
-use crate::proto::ui_service::{Style, ButtonStyle, WidgetStyle, Color, Border, Radius, Background, Button, Padding, Length, text, button, container};
+use crate::proto::ui_service::{Style, ButtonStyle, WidgetStyle, Color, Border, Background, Button, Padding, Length, button, container, icon};
 
 // --- Colors ---
 pub const COLOR_TEXT: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
@@ -77,21 +80,21 @@ pub fn file_button_style() -> Style {
     let base = WidgetStyle {
         background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.02))),
         text_color: Some(Color::WHITE),
-        border: Border { color: COLOR_BORDER, width: 1.0, radius: Radius::new(4.0) },
+        border: Border { color: COLOR_BORDER, width: 1.0, radius: 4.0 },
         ..Default::default()
     };
 
     let hovered = WidgetStyle {
         background: Some(Background::Color(COLOR_BG_HOVER)),
         text_color: Some(Color::WHITE),
-        border: Border { color: COLOR_BORDER_HOVER, width: 1.0, radius: Radius::new(4.0) },
+        border: Border { color: COLOR_BORDER_HOVER, width: 1.0, radius: 4.0 },
         ..Default::default()
     };
 
     let disabled = WidgetStyle {
         background: Some(Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.02))),
         text_color: Some(COLOR_TEXT_DIM),
-        border: Border { color: COLOR_BORDER, width: 1.0, radius: Radius::new(4.0) },
+        border: Border { color: COLOR_BORDER, width: 1.0, radius: 4.0 },
         ..Default::default()
     };
 
@@ -191,12 +194,12 @@ const ICON_BUTTON_SIZE: f32 = 32.0;
 /// размере кнопки, большем чем сам глиф, он прижимался бы к левому краю
 /// паддинга вместо центра.
 pub fn icon_button<M>(glyph: impl Into<String>, color: Color) -> Button<M> {
-    let icon = container(text(glyph).font_family(veld_ui_service_wrap::style::FONT_ICONS))
+    let centered = container(icon(glyph))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x()
         .center_y();
-    apply_icon(button(icon), color)
+    apply_icon(button(centered), color)
         .width(Length::Fixed(ICON_BUTTON_SIZE))
         .height(Length::Fixed(ICON_BUTTON_SIZE))
 }

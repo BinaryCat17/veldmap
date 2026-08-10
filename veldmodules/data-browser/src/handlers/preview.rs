@@ -20,14 +20,12 @@
 
 use crate::module::state::{State, ViewId};
 use crate::proto::image_loader::{LoadImageRequest, LoadImageResult};
-use crate::proto::ui_service::proto::UiEventResponse;
 use veldsdk::Reply;
 use veldsdk::proto::core::ResourceOpened;
 
 /// Просмотр скачанного файла: открывает библиотека — файл её, и где он лежит,
 /// знает только она.
-pub fn on_view_local_pressed(state: &mut State, event: UiEventResponse) {
-    let name = event.value;
+pub fn on_view_local_pressed(state: &mut State, name: String) {
     if name.is_empty() { return; }
 
     // Один correlation_id на оба шага: по нему же отменяется декодирование.
@@ -41,8 +39,7 @@ pub fn on_view_local_pressed(state: &mut State, event: UiEventResponse) {
 /// запрос к хранилищу может только он) и передаёт нам владение; дальше путь
 /// тот же, что у локального файла: read-грант загрузчику и декод по фрагментам
 /// — по проводу идёт только то, что декодер действительно прочитал.
-pub fn on_view_remote_pressed(state: &mut State, event: UiEventResponse) {
-    let identifier = event.value;
+pub fn on_view_remote_pressed(state: &mut State, identifier: String) {
     if identifier.is_empty() { return; }
 
     let correlation_id = begin_open(state, identifier.clone());

@@ -1,5 +1,7 @@
-//! GPU graphics rendering for UI service
-//! Handles all GPU resource management and command encoding
+//! GPU-часть сервиса: ресурсы устройства и запись команд кадра.
+//!
+//! Геометрию считает renderer, сюда она приходит готовой — здесь только то,
+//! что нужно хосту, чтобы её нарисовать.
 
 use crate::module::state::PluginUiState;
 use crate::module::renderer::{GpuRenderer, DrawCmd};
@@ -18,10 +20,9 @@ use anyhow::anyhow;
 const VERTEX_BUFFER_SIZE: u64 = 8 * 1024 * 1024;
 const INDEX_BUFFER_SIZE: u64 = 2 * 1024 * 1024;
 
-/// Renders UI into the render target delegated by the window's owner (its
-/// texture, write-leased to this module). The view is cached per texture id:
-/// the owner allocates a new target on resize, changing the id; the stale
-/// view is freed on replacement.
+/// Рисует UI в render-таргет, делегированный владельцем окна (его текстура,
+/// выданная нам write-lease'ом). View текстуры кэшируется по её id: на resize
+/// владелец выделяет новый таргет, id меняется, и прежний view заменяется.
 pub fn render_ui(
     plugin: &PluginUiState,
     renderer: &mut GpuRenderer,
@@ -46,14 +47,15 @@ pub fn render_ui(
     let logical_w = width as f32 / scale_factor;
     let logical_h = height as f32 / scale_factor;
 
-    // Update uniform buffer with logical size
+    // Размер холста в логических пикселях: по нему шейдер переводит координаты
+    // раскладки в clip space.
     if let Some(u) = plugin.uniform_buffer_region.borrow().as_ref() {
         let res_data: [f32; 2] = [logical_w, logical_h];
         let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
         resource_write(u.id(), 0, data)?;
     }
 
-    // Update texture atlas if dirty
+    // Новые глифы с прошлого кадра.
     if renderer.is_atlas_dirty() {
         let atlas_id = renderer.atlas_texture_id.as_ref().map(|t| t.id());
         if let Some(tid) = atlas_id {
@@ -64,13 +66,13 @@ pub fn render_ui(
         }
     }
 
-    // Render geometry if present
     if !renderer.vertices.is_empty() {
         veldsdk::log::trace!(target: "graphics", "Rendering {} vertices", renderer.vertices.len());
         render_geometry(plugin, renderer, &mut recorder, width, height)?;
     }
 
-    // Submit render ops for the host frame loop to execute into the target
+    // Записанное исполняет кадровый цикл хоста — не мы: наш вызов лишь ставит
+    // работу в очередь на этот таргет.
     {
         let target = plugin.target_view.borrow();
         let view = &target.as_ref().expect("target view ensured above").1;
@@ -80,7 +82,8 @@ pub fn render_ui(
     Ok(())
 }
 
-/// Record draw commands into the recorder
+/// Переводит команды рисования в записи для хоста. Порядок сохраняется: у
+/// ножниц и внешних картинок он значащий.
 fn render_geometry(
     plugin: &PluginUiState,
     renderer: &GpuRenderer,
@@ -90,7 +93,6 @@ fn render_geometry(
 ) -> anyhow::Result<()> {
     let vertex_size = std::mem::size_of::<crate::module::renderer::Vertex>();
 
-    // Ensure vertex buffer exists
     let mut vertex_buffer = plugin.vertex_buffer.borrow_mut();
     if vertex_buffer.is_none() {
         let id = resource_alloc_buffer(VERTEX_BUFFER_SIZE, buffer_usage::VERTEX, false)
@@ -98,7 +100,6 @@ fn render_geometry(
         *vertex_buffer = Some(OwnedResource::new(ResourceHandle { id, size: VERTEX_BUFFER_SIZE, ..Default::default() }));
     }
 
-    // Ensure index buffer exists
     let mut index_buffer = plugin.index_buffer.borrow_mut();
     if index_buffer.is_none() {
         let id = resource_alloc_buffer(INDEX_BUFFER_SIZE, buffer_usage::INDEX, false)
@@ -106,8 +107,7 @@ fn render_geometry(
         *index_buffer = Some(OwnedResource::new(ResourceHandle { id, size: INDEX_BUFFER_SIZE, ..Default::default() }));
     }
 
-    // Upload vertex and index data
-    if let (Some(ref v_h), Some(ref i_h)) = (&*vertex_buffer, &*index_buffer) {
+    if let (Some(v_h), Some(i_h)) = (&*vertex_buffer, &*index_buffer) {
         let v_data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
         resource_write(v_h.id(), 0, v_data)?;
 
@@ -115,10 +115,10 @@ fn render_geometry(
         resource_write(i_h.id(), 0, i_data)?;
     }
 
-    // Record draw commands if pipeline is ready
+    // Без пайплайна или буферов рисовать нечем — кадр просто пропускается.
     let ui_pipeline = plugin.ui_pipeline.borrow();
     let uniform_bind_group = plugin.uniform_bind_group.borrow();
-    if let (Some(pipeline), Some(ref v_h), Some(ref i_h), Some(uniform_bg)) =
+    if let (Some(pipeline), Some(v_h), Some(i_h), Some(uniform_bg)) =
         (ui_pipeline.as_ref(), &*vertex_buffer, &*index_buffer, uniform_bind_group.as_ref())
     {
         recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
@@ -179,7 +179,8 @@ fn evict_unused_bind_groups(plugin: &PluginUiState, renderer: &GpuRenderer) {
     });
 }
 
-/// Get or create bind group for external texture
+/// Bind group внешней текстуры — из кэша или новая. Кэш чистится
+/// `evict_unused_bind_groups`.
 fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, texture_id: u64) -> anyhow::Result<BindGroupId> {
     if texture_id == 0 {
         return Err(anyhow!("Invalid texture_id: 0"));
@@ -203,7 +204,8 @@ fn get_external_bind_group(plugin: &PluginUiState, renderer: &GpuRenderer, textu
     Ok(bg)
 }
 
-/// Ensure all GPU resources are created (bind group layouts, pipeline, buffers, atlas)
+/// Ленивое создание всего, что живёт дольше кадра: layout'ы, пайплайн, буферы,
+/// атлас. Каждый шаг проверяет своё и ничего не пересоздаёт.
 pub fn ensure_resources(plugin: &PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
     ensure_atlas_layout(renderer)?;
     ensure_uniform_layout(plugin)?;

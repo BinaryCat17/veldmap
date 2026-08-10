@@ -2,13 +2,12 @@
 
 use crate::module::state::{BrowseState, PreviewState, SearchState, State, ViewId, ViewKind};
 use crate::proto::data_library::LibraryRequest;
-use crate::proto::ui_service::proto::UiEventResponse;
 
 /// Кнопки шапки показывают уже открытый вид такого рода, а не заводят второй:
 /// Search и Downloaded смысла размножать не имеют — их содержимое от вкладки
 /// не зависит. Browse размножать смысл есть (две папки рядом), но заводит
 /// вторую вкладку тот, кто этого явно просит, а не общая кнопка «Browse».
-pub fn on_nav_browse(state: &mut State, _event: UiEventResponse) {
+pub fn on_nav_browse(state: &mut State) {
     if let Some(id) = state.find(|kind| matches!(kind, ViewKind::Browse(_))) {
         state.focus(id);
         return;
@@ -17,7 +16,7 @@ pub fn on_nav_browse(state: &mut State, _event: UiEventResponse) {
     super::browse::request_path(state, id, String::new());
 }
 
-pub fn on_nav_search(state: &mut State, _event: UiEventResponse) {
+pub fn on_nav_search(state: &mut State) {
     match state.find(|kind| matches!(kind, ViewKind::Search(_))) {
         Some(id) => state.focus(id),
         None => {
@@ -26,7 +25,7 @@ pub fn on_nav_search(state: &mut State, _event: UiEventResponse) {
     }
 }
 
-pub fn on_nav_downloaded(state: &mut State, _event: UiEventResponse) {
+pub fn on_nav_downloaded(state: &mut State) {
     match state.find(|kind| matches!(kind, ViewKind::Downloaded)) {
         Some(id) => state.focus(id),
         None => {
@@ -39,10 +38,8 @@ pub fn on_nav_downloaded(state: &mut State, _event: UiEventResponse) {
     }
 }
 
-pub fn on_tab_select(state: &mut State, event: UiEventResponse) {
-    if let Some(id) = parse_view_id(&event.value) {
-        state.focus(id);
-    }
+pub fn on_tab_select(state: &mut State, id: ViewId) {
+    state.focus(id);
 }
 
 /// Закрытие вкладки — единственный выход из вида, поэтому уборка за ним тоже
@@ -52,23 +49,12 @@ pub fn on_tab_select(state: &mut State, event: UiEventResponse) {
 /// Учёт запроса при этом не снимается: ответ по нему придёт всё равно и придёт
 /// нам во владение, а опознать его как свой можно только по таблице маршрутов
 /// (см. State::previews).
-pub fn on_tab_close(state: &mut State, event: UiEventResponse) {
-    let Some(id) = parse_view_id(&event.value) else { return };
+pub fn on_tab_close(state: &mut State, id: ViewId) {
     let Some(view) = state.close(id) else { return };
 
     if let ViewKind::Preview(mut preview) = view.kind {
         if let Some(correlation_id) = preview.reset() {
             crate::cancel::image_loader::on_load(&correlation_id);
-        }
-    }
-}
-
-fn parse_view_id(value: &str) -> Option<ViewId> {
-    match value.parse() {
-        Ok(id) => Some(id),
-        Err(_) => {
-            veldsdk::log::warn!(target: "handlers", "вкладка названа непонятным id: '{}'", value);
-            None
         }
     }
 }

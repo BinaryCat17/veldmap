@@ -192,8 +192,11 @@ impl MemoryManager {
                     DataBacking::Buffer { buffer, mapped: true } => {
                         let end = offset + data.len() as u64;
                         let slice = buffer.slice(offset..end);
-                        let mut view = slice.get_mapped_range_mut();
-                        view[..data.len()].copy_from_slice(data);
+                        // Отображённая на запись память — write-combining, и
+                        // читать её нельзя, поэтому доступ только через
+                        // `slice(..)`: обычного `&mut [u8]` у неё больше нет.
+                        let mut view = slice.get_mapped_range_mut()?;
+                        view.slice(..data.len()).copy_from_slice(data);
                     }
                     // Для файла запись идёт топиком fs/write, для удалённого
                     // ресурса это отдельный протокол (PUT, права на той
@@ -308,7 +311,7 @@ impl MemoryManager {
                         let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
                     rx.recv()??;
-                    let data = slice.get_mapped_range()[..size as usize].to_vec();
+                    let data = slice.get_mapped_range()?[..size as usize].to_vec();
                     buffer.unmap();
                     Ok(data)
                 } else {
@@ -333,7 +336,7 @@ impl MemoryManager {
                         let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
                     rx.recv()??;
-                    let data = slice.get_mapped_range()[..size as usize].to_vec();
+                    let data = slice.get_mapped_range()?[..size as usize].to_vec();
                     staging.unmap();
                     Ok(data)
                 }

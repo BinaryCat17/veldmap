@@ -1,13 +1,13 @@
 //! View для экрана браузера
 
 use veld_ui_service_wrap::{column, row};
-use crate::proto::ui_service::{text, button, Element, Alignment};
+use crate::proto::ui_service::{text, button, icon, Element, Alignment};
 use crate::module::state::{BrowseState, State};
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::handlers::ui_methods::{ON_BROWSE, ON_BROWSE_UP, ON_VIEW_LOCAL_PRESSED, ON_VIEW_REMOTE_PRESSED, ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED};
+use crate::module::Msg;
 
-pub fn view(state: &State, browse_state: &BrowseState) -> Element<()> {
-    let body: Element<()> = if let Some(err) = &browse_state.error {
+pub fn view(state: &State, browse_state: &BrowseState) -> Element<Msg> {
+    let body: Element<Msg> = if let Some(err) = &browse_state.error {
         column![text(format!("Error: {}", err)).size(16.0)].into()
     } else {
         // Папки не сверяем с локальными файлами — это ключ remote-префикса,
@@ -19,29 +19,29 @@ pub fn view(state: &State, browse_state: &BrowseState) -> Element<()> {
         }).collect();
 
         items_or_message(&items, ItemActions {
-            browse: Some(ON_BROWSE),
-            view_local: Some(ON_VIEW_LOCAL_PRESSED),
-            view_remote: Some(ON_VIEW_REMOTE_PRESSED),
-            download: Some(ON_DOWNLOAD_PRESSED),
-            delete: Some(ON_DELETE_PRESSED),
+            browse: Some(Msg::Browse),
+            view_local: Some(Msg::ViewLocal),
+            view_remote: Some(Msg::ViewRemote),
+            download: Some(Msg::Download),
+            delete: Some(Msg::Delete),
         }, "No items found")
     };
 
-    let title_row: Element<()> = if browse_state.request.is_pending() {
+    let title_row: Element<Msg> = if browse_state.request.is_pending() {
         row![
             text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-            text("\u{f110}").font_family(veld_ui_service_wrap::style::FONT_ICONS).color(crate::module::styles::COLOR_TEXT_DIM),
+            icon("\u{f110}").color(crate::module::styles::COLOR_TEXT_DIM),
             text("Loading...").size(14.0).color(crate::module::styles::COLOR_TEXT_DIM),
         ].spacing(8.0).align_items(Alignment::Center).into()
     } else {
         text(format!("Browse: {}", browse_state.current_path)).size(20.0).into()
     };
 
-    let up_button: Element<()> = crate::module::styles::apply_primary(button(
-        row![text("\u{f062}").font_family(veld_ui_service_wrap::style::FONT_ICONS), text("Up")]
+    let up_button: Element<Msg> = crate::module::styles::apply_primary(button(
+        row![icon("\u{f062}"), text("Up")]
             .spacing(6.0)
             .align_items(Alignment::Center)
-    )).on_press(ON_BROWSE_UP).into();
+    )).on_press(Msg::BrowseUp).into();
 
     list_screen(vec![title_row, up_button], body)
 }

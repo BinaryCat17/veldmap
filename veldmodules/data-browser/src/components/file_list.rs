@@ -6,24 +6,26 @@
 //! разметке вложенными if'ами по пяти переменным.
 
 use veld_ui_service_wrap::{column, row, Keyed};
-use crate::proto::ui_service::{text, button, container, Element, Length, Alignment};
+use crate::proto::ui_service::{text, button, container, icon, Element, Length, Alignment, Wrapping};
 use crate::module::components::{Row, RowStatus};
-use crate::module::styles;
+use crate::module::{styles, Msg};
 
-/// Какие входные методы модуля вызывают кнопки элемента списка.
-/// `None` — действие недоступно на этом экране. Значением события идёт ключ
-/// провайдера (для download/re-download/resume/cancel и просмотра ещё не
-/// скачанного) или имя записи библиотеки (для view/delete) — см. render_item.
+/// Что делают кнопки элемента списка. `None` — действие на этом экране
+/// недоступно, и кнопки под него нет вовсе.
+///
+/// Хранится конструктор сообщения, а не готовое сообщение: ключ у каждой
+/// строки свой, а набор действий — общий на весь экран.
 #[derive(Clone, Copy, Default)]
-pub struct ItemActions<'a> {
-    pub browse: Option<&'a str>,
+pub struct ItemActions {
+    /// Зайти в папку — по ключу провайдера.
+    pub browse: Option<fn(String) -> Msg>,
     /// Просмотр скачанного файла — по имени записи библиотеки.
-    pub view_local: Option<&'a str>,
-    /// Просмотр ещё не скачанного файла: открывается по remote-ключу и
+    pub view_local: Option<fn(String) -> Msg>,
+    /// Просмотр ещё не скачанного файла: открывается по ключу провайдера и
     /// читается по фрагментам прямо с той стороны.
-    pub view_remote: Option<&'a str>,
-    pub download: Option<&'a str>,
-    pub delete: Option<&'a str>,
+    pub view_remote: Option<fn(String) -> Msg>,
+    pub download: Option<fn(String) -> Msg>,
+    pub delete: Option<fn(String) -> Msg>,
 }
 
 /// "12.3 MB" / "512 B" — байты человекочитаемо, без внешних крейтов.
@@ -72,7 +74,11 @@ const STATUS_AMOUNT_WIDTH: f32 = 220.0;
 const STATUS_BUTTONS_WIDTH: f32 = 110.0;
 
 /// Общая обвязка правой части строки — см. STATUS_*_WIDTH выше.
-fn status_row(label: Element<()>, amount: Element<()>, buttons: Vec<Element<()>>) -> Element<()> {
+fn status_row(
+    label: impl Into<Element<Msg>>,
+    amount: impl Into<Element<Msg>>,
+    buttons: Vec<Element<Msg>>,
+) -> Element<Msg> {
     row![
         container(label).width(Length::Fixed(STATUS_LABEL_WIDTH)),
         container(amount).width(Length::Fixed(STATUS_AMOUNT_WIDTH)),
@@ -82,11 +88,7 @@ fn status_row(label: Element<()>, amount: Element<()>, buttons: Vec<Element<()>>
     ].spacing(6.0).align_items(Alignment::Center).into()
 }
 
-fn icon(glyph: &str) -> Element<()> {
-    text(glyph).font_family(veld_ui_service_wrap::style::FONT_ICONS).into()
-}
-
-pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
+pub fn render_item(item: &Row, actions: ItemActions) -> Element<Msg> {
     let is_folder = matches!(item.status, RowStatus::Folder);
 
     // Иконка и имя — раздельные Text: у иконки свой шрифт (Icons), имя файла
@@ -97,9 +99,14 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
     // на самом Text, и на обёртывающем Row: Fill-текст внутри Shrink-строки
     // не получает реальной ширины от кнопки-родителя и схлопывается в
     // минимальную (отсюда вертикальный "по одной букве" — уже проверено).
+    //
+    // Перенос — по буквам: пробелов в имени файла нет, и умолчанию (по словам)
+    // рвать его негде — имя уехало бы за правый край карточки поверх колонки
+    // размера. Второй строкой карточка вырастет, зато останется в своих
+    // границах.
     let title = row![
         icon(if is_folder { "\u{f07b}" } else { "\u{f016}" }),
-        text(item.title.clone()).width(Length::Fill),
+        text(item.title.clone()).width(Length::Fill).wrapping(Wrapping::WrapWordOrGlyph),
     ].spacing(6.0).align_items(Alignment::Center).width(Length::Fill);
 
     // Одна и та же карточка (см. styles::file_button_style) для любой строки:
@@ -107,41 +114,41 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
     // остальные — та же кнопка без обработчика (хост рисует её в стиле
     // `disabled`, см. styles.rs).
     let card = styles::apply_file(button(title)).width(Length::Fill);
-    let main_button: Element<()> = match (&item.status, actions.browse, actions.view_local) {
-        (RowStatus::Folder, Some(m), _) => card.on_press_with(m, item.identifier.clone()).into(),
+    let main_button: Element<Msg> = match (&item.status, actions.browse, actions.view_local) {
+        (RowStatus::Folder, Some(message), _) => card.on_press(message(item.identifier.clone())).into(),
         // Открыть можно только по-настоящему скачанную запись — недокачанную
         // библиотека и не отдаст.
-        (RowStatus::Complete { .. }, _, Some(m)) => card.on_press_with(m, item.name.clone()).into(),
+        (RowStatus::Complete { .. }, _, Some(message)) => card.on_press(message(item.name.clone())).into(),
         _ => card.into(),
     };
 
     // Кнопка закачки скрыта, если remote-ключ неизвестен — лучше не предлагать
     // действие, чем слать заведомо неверный запрос.
     let download_button = |glyph: &str, color| {
-        (!item.identifier.is_empty()).then(|| actions.download.map(|m| {
-            styles::icon_button(glyph, color).on_press_with(m, item.identifier.clone()).into()
+        (!item.identifier.is_empty()).then(|| actions.download.map(|message| {
+            styles::icon_button(glyph, color).on_press(message(item.identifier.clone())).into()
         })).flatten()
     };
     // Просмотр без скачивания — там же, где и скачивание: обе кнопки живут
     // от remote-ключа, локального файла для них ещё нет.
     let view_remote_button = || {
-        (!item.identifier.is_empty()).then(|| actions.view_remote.map(|m| -> Element<()> {
-            styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, item.identifier.clone()).into()
+        (!item.identifier.is_empty()).then(|| actions.view_remote.map(|message| -> Element<Msg> {
+            styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press(message(item.identifier.clone())).into()
         })).flatten()
     };
     // Удалять есть что, пока запись в библиотеке есть — даже если данных на
     // диске ещё нет: намерение тоже удаляется.
     let delete_button = || {
-        (!item.name.is_empty()).then(|| actions.delete.map(|m| -> Element<()> {
-            styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press_with(m, item.name.clone()).into()
+        (!item.name.is_empty()).then(|| actions.delete.map(|message| -> Element<Msg> {
+            styles::icon_button("\u{f1f8}", styles::COLOR_DANGER).on_press(message(item.name.clone())).into()
         })).flatten()
     };
 
-    let status: Element<()> = match &item.status {
-        RowStatus::Folder => status_row(text("").into(), text("").into(), Vec::new()),
+    let status: Element<Msg> = match &item.status {
+        RowStatus::Folder => status_row(text(""), text(""), Vec::new()),
 
         RowStatus::Remote => status_row(
-            text("").into(), text("").into(),
+            text(""), text(""),
             view_remote_button().into_iter()
                 .chain(download_button("\u{f019}", styles::COLOR_PRIMARY)).collect(),
         ),
@@ -151,7 +158,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // "скачать" продолжит с оборванного байта — по факту это пауза.
         RowStatus::Downloading { done, total } => status_row(
             icon("\u{f254}"),
-            text(amount_text(*done, *total, true)).size(13.0).single_line().into(),
+            text(amount_text(*done, *total, true)).size(13.0).single_line(),
             download_button("\u{f04c}", styles::COLOR_WARNING).into_iter()
                 .chain(delete_button()).collect(),
         ),
@@ -161,8 +168,8 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // как обратное действие "паузе" выше. Только иконка, без подписи
         // "Incomplete" — цвет и форма уже достаточно говорят о статусе.
         RowStatus::Paused { done, total } => status_row(
-            text("\u{f071}").font_family(veld_ui_service_wrap::style::FONT_ICONS).color(styles::COLOR_WARNING).into(),
-            text(amount_text(*done, *total, false)).size(13.0).single_line().into(),
+            icon("\u{f071}").color(styles::COLOR_WARNING),
+            text(amount_text(*done, *total, false)).size(13.0).single_line(),
             download_button("\u{f04b}", styles::COLOR_PRIMARY).into_iter()
                 .chain(delete_button()).collect(),
         ),
@@ -171,9 +178,9 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
         // это разные значения (см. Row).
         RowStatus::Complete { size } => status_row(
             icon("\u{f00c}"),
-            text(format_bytes(*size)).size(13.0).single_line().into(),
-            actions.view_local.map(|m| -> Element<()> {
-                    styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press_with(m, item.name.clone()).into()
+            text(format_bytes(*size)).size(13.0).single_line(),
+            actions.view_local.map(|message| -> Element<Msg> {
+                    styles::icon_button("\u{f06e}", styles::COLOR_PRIMARY).on_press(message(item.name.clone())).into()
                 })
                 .into_iter()
                 .chain(download_button("\u{f021}", styles::COLOR_RELOAD))
@@ -191,7 +198,7 @@ pub fn render_item(item: &Row, actions: ItemActions) -> Element<()> {
 
 /// Принимает итератор, а не срез: экран Downloaded делит строки на секции
 /// через `partition` и держит `Vec<&Row>`, копировать их ради рендера незачем.
-pub fn render_list<'a>(items: impl IntoIterator<Item = &'a Row>, actions: ItemActions) -> Element<()> {
+pub fn render_list<'a>(items: impl IntoIterator<Item = &'a Row>, actions: ItemActions) -> Element<Msg> {
     // Строка названа своим ключом: список переупорядочивается и теряет
     // элементы из середины (закачка доходит до конца и переезжает в другую
     // секцию), а состояние виджетов должно ехать за строкой, а не за местом.
@@ -204,7 +211,7 @@ pub fn render_list<'a>(items: impl IntoIterator<Item = &'a Row>, actions: ItemAc
 /// Список файлов или текст-заглушка, если он пуст — этот выбор одинаков на
 /// всех трёх экранах (Browse/Search/Downloaded), различается только
 /// сообщение-заглушка.
-pub fn items_or_message(items: &[Row], actions: ItemActions, empty_message: &str) -> Element<()> {
+pub fn items_or_message(items: &[Row], actions: ItemActions, empty_message: &str) -> Element<Msg> {
     if items.is_empty() {
         column![text(empty_message).size(16.0)].into()
     } else {

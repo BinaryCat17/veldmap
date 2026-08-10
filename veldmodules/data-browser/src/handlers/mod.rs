@@ -15,27 +15,3 @@ pub struct Config {
     pub initial_view: Option<String>,
 }
 
-/// Имена UI-методов: приватная проводка между построением view (`.on_press`,
-/// `.on_input`, ...) и диспетчером `on_ui_event` в module.rs. Не публичный
-/// контракт — ui-service возвращает их эхом в `UiEventResponse.method`, сам
-/// не зная и не проверяя их смысла.
-pub mod ui_methods {
-    pub const ON_NAV_BROWSE: &str = "on_nav_browse";
-    pub const ON_NAV_SEARCH: &str = "on_nav_search";
-    pub const ON_NAV_DOWNLOADED: &str = "on_nav_downloaded";
-    /// Выбор и закрытие вкладки. Значением едет `ViewId` строкой — вкладка
-    /// адресуется по идентификатору, а не по позиции: позиция меняется, когда
-    /// закрывают соседа.
-    pub const ON_TAB_SELECT: &str = "on_tab_select";
-    pub const ON_TAB_CLOSE: &str = "on_tab_close";
-    pub const ON_BROWSE: &str = "on_browse";
-    pub const ON_BROWSE_UP: &str = "on_browse_up";
-    pub const ON_SEARCH: &str = "on_search";
-    pub const ON_SEARCH_INPUT: &str = "on_search_input";
-    pub const ON_DOWNLOAD_PRESSED: &str = "on_download_pressed";
-    /// Просмотр скачанного файла (открывает data-library) и ещё не скачанного
-    /// (открывает data-provider) — разные источники, дальше путь общий.
-    pub const ON_VIEW_LOCAL_PRESSED: &str = "on_view_local_pressed";
-    pub const ON_VIEW_REMOTE_PRESSED: &str = "on_view_remote_pressed";
-    pub const ON_DELETE_PRESSED: &str = "on_delete_pressed";
-}

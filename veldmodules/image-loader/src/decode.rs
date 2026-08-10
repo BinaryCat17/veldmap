@@ -61,7 +61,11 @@ fn png(reader: ResourceReader, max_w: u32, max_h: u32) -> Result<Preview, String
     // У чересстрочного PNG строки идут в порядке Adam7, а не сверху вниз:
     // потокового пути для него нет, декодируем кадр целиком.
     if interlaced {
-        let mut buf = vec![0u8; reader.output_buffer_size()];
+        // None — размер кадра не представим в usize: для 32-битного wasm это
+        // достижимо на больших снимках, и отказ здесь честнее паники в vec!.
+        let size = reader.output_buffer_size()
+            .ok_or_else(|| "png: кадр не помещается в адресное пространство".to_string())?;
+        let mut buf = vec![0u8; size];
         let info = reader.next_frame(&mut buf).map_err(|e| format!("png: {}", e))?;
         let channels = usize::from(info.color_type.samples());
         let mut sink = Sink::new(w, h, max_w, max_h);

@@ -171,7 +171,15 @@ pub fn parse_listing(body: &[u8], requested: &str) -> anyhow::Result<Listing> {
                 tag.clear();
             }
             Event::Text(e) => {
-                let text = e.unescape().unwrap_or_default().into_owned();
+                // Раскодировать и раскрыть сущности (&amp;, &#x2F;) — два
+                // разных шага: первый снимает кодировку документа, второй
+                // работает уже по тексту. Сущности в ключах бакета реальны —
+                // слэши и амперсанды в именах продуктов приезжают экранированными.
+                let raw = e.xml10_content().unwrap_or_default();
+                let text = match quick_xml::escape::unescape(&raw) {
+                    Ok(unescaped) => unescaped.into_owned(),
+                    Err(_) => raw.into_owned(),
+                };
                 match tag.as_str() {
                     // Prefix встречается и вне CommonPrefixes — там это эхо
                     // запроса, а не элемент листинга.

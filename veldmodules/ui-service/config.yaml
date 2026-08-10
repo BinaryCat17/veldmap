@@ -10,19 +10,22 @@ rust:
     log: "0.4"
     anyhow: "1.0"
     iced_runtime:
-      version: "0.13"
+      version: "0.14"
       default-features: false
     iced_graphics:
-      version: "0.13"
+      version: "0.14"
       default-features: false
     iced_core:
-      version: "0.13"
+      version: "0.14"
       default-features: false
     iced_widget:
-      version: "0.13"
+      version: "0.14"
       default-features: false
     iced_renderer:
-      version: "0.13"
+      version: "0.14"
       default-features: false
       features: ["tiny-skia"]
-    cosmic-text: "0.12"
+    cosmic-text: "0.15"
+    # Каретка в text_input адресуется графемами, а разложенный текст — глифами
+    # (см. RealParagraph::grapheme_position).
+    unicode-segmentation: "1"

@@ -16,7 +16,8 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     // состояние обычно уже существует с реальным размером холста.
     let plugin = state.plugins.entry(plugin_id.clone()).or_insert_with(PluginUiState::new);
 
-    // Store the module's current view; rendering happens below and on frame ticks.
+    // Разметка запоминается, а рисуется ниже — и потом ещё на кадровых тиках:
+    // статичный view диффов не даёт, и без тиков не перерисовался бы никогда.
     if let Some(layout) = req.layout {
         veldsdk::log::info!(target: "handlers", "Новый view от '{}'", plugin_id);
         plugin.layout = layout;
@@ -24,16 +25,12 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
         *plugin.needs_redrawing.borrow_mut() = true;
     }
 
-    // plugin borrow ends here before rendering
-    let _ = plugin;
-
     render_plugin_if_needed(state, &plugin_id, surface_format);
 }
 
-/// Render a plugin if it has pending changes and a surface handle.
-/// Shared by handle_set_view (layout updates) and handle_ui_event (frame ticks):
-/// a static layout produces no set_view diffs, so frame ticks must also be able
-/// to trigger rendering or a never-changing UI would never be drawn.
+/// Рисует плагин, если ему есть что показать и есть куда. Общая точка для
+/// смены разметки (`handle_set_view`) и для кадрового тика (`handle_ui_event`):
+/// разметка может не меняться неделю, а ввод обрабатывать всё равно нужно.
 fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i32) {
     // plugins и renderer — разные поля State, заимствуются одновременно.
     let Some(plugin) = state.plugins.get(plugin_id) else { return };
@@ -46,9 +43,9 @@ fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i
         }
     }
 
-    // Dispatch messages captured by iced during this render (button presses etc.)
-    // immediately: deferring them to the next set_view would deadlock, because the
-    // plugin only sends set_view after reacting to these very messages.
+    // Пойманное iced'ом за этот кадр (нажатия и ввод) уходит владельцу сразу.
+    // Отложить до следующего set_view нельзя: его-то плагин и пришлёт в ответ
+    // на эти самые сообщения — получилось бы взаимное ожидание.
     let pending = plugin.pending_messages.borrow_mut().drain(..).collect::<Vec<_>>();
     for msg in pending {
         dispatch_event(UiEventResponse {
@@ -94,8 +91,8 @@ pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
         veldsdk::log::error!(target: "handlers", "process_ui_event failed for {}: {}", plugin_id, e);
     }
 
-    // On each frame tick render the plugin if it has pending changes: input-driven
-    // redraws and animation (scroll inertia) are the renderer's own responsibility.
+    // Перерисовка от ввода и анимация (инерция прокрутки) — забота рендерера,
+    // и обе живут кадровым тиком.
     if is_frame {
         let surface_format = state.surface_format;
         render_plugin_if_needed(state, &plugin_id, surface_format);
@@ -136,7 +133,7 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
                     }
                 }
 
-                // Process scroll inertia
+                // Инерция прокрутки.
                 {
                     let mut vel = plugin.scroll_velocity.borrow_mut();
                     if vel.x.abs() > 0.1 || vel.y.abs() > 0.1 {
@@ -181,11 +178,12 @@ fn process_ui_event(state: &mut State, plugin_id: &str, req_event: app_proto::Ui
                     .push(Event::Keyboard(crate::module::keyboard::convert_key_event(&k, mods)));
             }
             _ => {
-                let iced_ev = convert_event(ev, *plugin.scale_factor.borrow());
-                if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = iced_ev {
-                    *plugin.cursor_position.borrow_mut() = position;
+                if let Some(iced_ev) = convert_event(ev, *plugin.scale_factor.borrow()) {
+                    if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = iced_ev {
+                        *plugin.cursor_position.borrow_mut() = position;
+                    }
+                    plugin.pending_events.borrow_mut().push(iced_ev);
                 }
-                plugin.pending_events.borrow_mut().push(iced_ev);
             }
         }
     }
@@ -205,15 +203,23 @@ fn dispatch_event(event: UiEventResponse) {
     crate::emit::on_ui_event(&event, &event.plugin_id);
 }
 
-fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Event {
+/// Мышь в терминах iced. Прокрутка, кадровый тик и клавиатура сюда не доходят
+/// — их разбирает `process_ui_event` сам.
+///
+/// `None` — события такого рода у нас нет. Подставить вместо него какое-нибудь
+/// нельзя: `RedrawRequested`, например, для iced не «ничего не произошло», а
+/// команда зафиксировать состояние виджетов (см. `render_plugin`).
+fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Option<Event> {
     match ev {
-        app_proto::ui_event::Event::CursorMoved(c) => Event::Mouse(iced_core::mouse::Event::CursorMoved { position: Point::new(c.x / sf, c.y / sf) }),
+        app_proto::ui_event::Event::CursorMoved(c) => {
+            Some(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: Point::new(c.x / sf, c.y / sf) }))
+        }
         app_proto::ui_event::Event::Click(c) => {
             let button = match c.button { 1 => iced_core::mouse::Button::Left, 2 => iced_core::mouse::Button::Right, 3 => iced_core::mouse::Button::Middle, _ => iced_core::mouse::Button::Left };
-            if c.pressed { Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)) }
-            else { Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)) }
+            Some(if c.pressed { Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)) }
+                 else { Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)) })
         }
-        _ => Event::Window(iced_core::window::Event::RedrawRequested(std::time::Instant::now())),
+        _ => None,
     }
 }
 
@@ -226,7 +232,16 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
         return Ok(());
     }
 
-    let events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
+    // Кадр закрывается событием перерисовки, и без него не обойтись: виджеты
+    // iced по нему запоминают своё состояние (наведение, нажатие, фокус ввода)
+    // — `update` его только вычисляет, а `draw` берёт уже запомненное. Молчание
+    // здесь означает «состояние неизвестно», и рисуется всё как `Disabled`:
+    // кнопка без фона и рамки, вкладка голым текстом.
+    //
+    // Идёт последним: запоминается то состояние, до которого довёл весь
+    // обработанный в этом кадре ввод.
+    let mut events = std::mem::take(&mut *plugin.pending_events.borrow_mut());
+    events.push(Event::Window(iced_core::window::Event::RedrawRequested(std::time::Instant::now())));
     veldsdk::log::trace!(target: "render", "Processing {} events", events.len());
 
     let sf = *plugin.scale_factor.borrow();
@@ -280,7 +295,7 @@ fn render_plugin(plugin: &PluginUiState, renderer: &mut GpuRenderer, plugin_id: 
     veldsdk::log::trace!(target: "render", "Caching UI");
     plugin.interface_cache.replace(ui.into_cache());
 
-    // Store captured messages; dispatched right after render in render_plugin_if_needed
+    // Отправляет их вызывающий, сразу после рендера.
     if !captured_messages.is_empty() {
         veldsdk::log::info!(target: "render", "Captured {} UI messages", captured_messages.len());
     }

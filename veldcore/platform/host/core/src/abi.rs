@@ -76,7 +76,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // veld_random_bytes(ptr, len) — хостовая энтропия: у wasm нет своего
     // источника случайности (uuid и пр. собираются на стороне SDK).
     linker.func_wrap("env", "veld_random_bytes", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| {
-        use rand::RngCore;
+        use rand::Rng;
         let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return };
         if let Some(target) = mem.data_mut(&mut caller).get_mut(ptr as usize..(ptr + len) as usize) {
             rand::rng().fill_bytes(target);
@@ -382,7 +382,10 @@ fn tagged_response(result: anyhow::Result<Vec<u8>>) -> Vec<u8> {
 }
 
 /// Helper: write response back to WASM via veld_alloc
-async fn write_response_back(caller: &mut Caller<'_, HostState>, res_buf: &[u8]) -> anyhow::Result<u64> {
+/// Тип ошибки здесь wasmtime'овский, а не anyhow: это возврат хостовой функции
+/// прямо в гостя, и его сигнатуру задаёт `func_wrap_async`. Внутри хоста
+/// ошибки остаются anyhow — граница проходит ровно по этой функции.
+async fn write_response_back(caller: &mut Caller<'_, HostState>, res_buf: &[u8]) -> wasmtime::Result<u64> {
     if let Some(Extern::Func(alloc_func)) = caller.get_export("veld_alloc") {
         if let Ok(typed_alloc) = alloc_func.typed::<u64, u64>(&caller) {
             if let Ok(res_ptr) = typed_alloc.call_async(&mut *caller, res_buf.len() as u64).await {

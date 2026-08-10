@@ -1,14 +1,13 @@
 use crate::module::state::{State, ViewKind};
 use crate::proto::data_provider::SearchResponse;
-use crate::proto::ui_service::proto::UiEventResponse;
 
-pub fn on_search_input(state: &mut State, event: UiEventResponse) {
+pub fn on_search_input(state: &mut State, query: String) {
     if let Some((_, search)) = state.active_search_mut() {
-        search.query = event.value;
+        search.query = query;
     }
 }
 
-pub fn on_search(state: &mut State, _event: UiEventResponse) {
+pub fn on_search(state: &mut State) {
     let Some((view, search)) = state.active_search_mut() else { return };
     let query = search.query.clone();
     if query.is_empty() {

@@ -57,7 +57,7 @@ impl PluginSpec {
         store.set_epoch_deadline(1);
         store.epoch_deadline_callback(move |_| {
             if watch.load(Ordering::SeqCst) {
-                Err(anyhow::anyhow!("killed"))
+                Err(wasmtime::Error::msg("killed"))
             } else {
                 Ok(UpdateDeadline::Continue(1))
             }
@@ -158,7 +158,7 @@ impl WasmActor {
     /// переиспользуется, поэтому цена — новый Store с чистой линейной памятью
     /// плюс init. Её и печатает лог: подниматься дорого — это про компиляцию,
     /// а её здесь нет.
-    async fn revive(&mut self, trap: anyhow::Error) {
+    async fn revive(&mut self, trap: wasmtime::Error) {
         let started = std::time::Instant::now();
         if self.doomed.load(Ordering::SeqCst) {
             log::info!(target: "tasks", "Plugin '{}' killed mid-handler, reviving", self.spec.name);
@@ -194,7 +194,6 @@ impl WasmActor {
 /// в диспетчере (`Dispatcher::instance_of`).
 pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Result<()> {
     let mut config = Config::new();
-    config.async_support(true);
     // Без этого вызов wasm нельзя прервать ничем: движок не проверяет условий
     // выхода, пока модуль не вернёт управление сам.
     config.epoch_interruption(true);

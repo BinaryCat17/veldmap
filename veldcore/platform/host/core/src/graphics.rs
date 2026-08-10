@@ -223,7 +223,9 @@ impl GraphicsDevice {
         }
 
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None, bind_group_layouts: &bgl_refs.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            // Слоты layout'а необязательные: пропуск в середине списка теперь
+            // выражается как None, а не сдвигом остальных.
+            label: None, bind_group_layouts: &bgl_refs.iter().map(|l| Some(l.as_ref())).collect::<Vec<_>>(),
             immediate_size: 0,
         });
 
@@ -292,7 +294,8 @@ impl GraphicsDevice {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader, entry_point: Some(&req.vertex_entry),
-                buffers: &wgpu_vertex_layouts, compilation_options: Default::default(),
+                buffers: &wgpu_vertex_layouts.iter().cloned().map(Some).collect::<Vec<_>>(),
+                compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader, entry_point: Some(&req.fragment_entry),

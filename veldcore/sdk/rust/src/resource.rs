@@ -12,7 +12,7 @@
 //! Прямые вызовы `abi::resource_free`/`resource_grant_*` в прикладном коде — признак
 //! того, что обряд переписан заново: ровно так копии и расходились формой.
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, Read, Seek, SeekFrom};
 
 use crate::proto::core::{ResourceHandle, ResourceOpened};
 
@@ -224,6 +224,26 @@ impl Read for ResourceReader {
         buf[..n].copy_from_slice(&self.window[from..from + n]);
         self.pos += n as u64;
         Ok(n)
+    }
+}
+
+/// Читатель уже буферизован своим окном, поэтому `BufRead` он реализует сам, а
+/// не через обёртку `BufReader`: та завела бы второй буфер поверх первого и
+/// копировала бы окно в него целиком.
+impl BufRead for ResourceReader {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if !self.fill()? {
+            return Ok(&[]);
+        }
+        let from = (self.pos - self.window_at) as usize;
+        Ok(&self.window[from..])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        // Клампим по размеру ресурса: контракт `BufRead` запрещает потреблять
+        // больше отданного, но нарушение здесь — тихий выход за конец, а не
+        // ошибка, поэтому границу держим сами.
+        self.pos = (self.pos + amt as u64).min(self.len);
     }
 }
 

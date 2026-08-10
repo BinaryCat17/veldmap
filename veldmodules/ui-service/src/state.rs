@@ -7,7 +7,7 @@ use iced_core::{Point, Event};
 use iced_runtime::user_interface;
 use crate::module::renderer::GpuRenderer;
 
-/// Response message waiting to be dispatched to plugin
+/// Сообщение виджета, ждущее отправки владельцу поверхности.
 #[derive(Clone)]
 pub struct PendingMessage {
     pub method: String,
@@ -48,7 +48,8 @@ pub struct PluginUiState {
     pub fps_window: RefCell<(u32, f32)>,
 
 
-    /// Messages captured from iced UI events, waiting to be dispatched
+    /// Пойманное iced'ом за этот кадр; рассылается сразу после рендера
+    /// (см. handlers::render_plugin_if_needed).
     pub pending_messages: RefCell<Vec<PendingMessage>>,
     /// Render-таргет, делегированный владельцем окна через set_surface.
     /// Не наш ресурс: освобождает его владелец окна, поэтому здесь голый id,

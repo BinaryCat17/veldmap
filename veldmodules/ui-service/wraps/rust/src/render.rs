@@ -6,18 +6,19 @@ use veldsdk::prost::Message;
 
 use super::widgets::Element;
 
-/// Ship the module's current view to the renderer.
-/// The layout is sent whole; unchanged layouts are skipped by content hash.
-/// Change detection beyond that (what to redraw, when) is the renderer's job.
+/// Отправляет текущий view модуля рендереру.
+///
+/// Разметка едет целиком; неизменившаяся не едет вовсе — отсекается по хэшу
+/// содержимого. Что и когда перерисовывать, решает уже рендерер.
 ///
 /// `publish` — стаб топика `ui-service/on_set_view` из кодогена вызывающего
 /// модуля: `render::render(id, root, &mut hash, crate::calls::ui_service::on_set_view)`.
 /// Wrap-крейт не публикует сам: он один на всех потребителей и не знает, кто
 /// из них объявил `ui-service: calls: [on_set_view]` у себя в schema.yaml, —
 /// а публикация в обход объявления сделала бы граф связей в схемах неполным.
-pub fn render(
+pub fn render<M>(
     plugin_id: &str,
-    root: Element<()>,
+    root: Element<M>,
     last_hash: &mut u64,
     publish: impl FnOnce(&crate::proto::SetViewRequest),
 ) {

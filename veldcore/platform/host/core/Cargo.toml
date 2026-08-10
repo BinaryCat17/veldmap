@@ -1,23 +1,23 @@
 [package]
 name = "veldmap-host-core"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-wasmtime = "41.0"
-wasmtime-wasi = "41.0"
-tokio = { version = "1.49", features = ["full"] }
+wasmtime = { version = "45.0", features = ["anyhow"] }
+wasmtime-wasi = "45.0"
+tokio = { version = "1.53", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 prost = "0.14"
 anyhow = "1.0"
 log = "0.4"
-env_filter = "1"
+env_filter = "2"
 regex = "1.10"
 uuid = { version = "1.0", features = ["v4"] }
-wgpu = "28.0"
+wgpu = "30.0"
 dashmap = "6.0"
 async-trait = "0.1"
 chrono = "0.4"
-rand = "0.9"
+rand = "0.10"
 veldmap-host-bindings = { path = "../generated" }

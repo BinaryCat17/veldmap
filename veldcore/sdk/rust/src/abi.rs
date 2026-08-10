@@ -7,7 +7,11 @@ use prost::Message;
 
 // ── VELD MICROKERNEL ABI ───────────────────────────────────────
 
-extern "C" {
+// Имя wasm-модуля импортов объявлено явно: хост регистрирует эти функции
+// именно в "env" (см. host-side `abi.rs::register`), и подразумеваемое
+// умолчание здесь — совпадение, на которое опираться нельзя.
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
     fn veld_host_publish(ptr: u64, len: u64);
     fn veld_host_log(level: u64, target_ptr: u64, target_len: u64, ptr: u64, len: u64);
     fn veld_get_config(ptr: u64, len: u64) -> u64;
@@ -43,7 +47,7 @@ extern "C" {
 // write_response_back). vec![0u8; size] гарантирует capacity == size,
 // иначе from_raw_parts в veld_free_wasm был бы UB.
 #[doc(hidden)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn veld_alloc(size: u64) -> u64 {
     let mut buf: Vec<u8> = vec![0u8; size as usize];
     let ptr = buf.as_mut_ptr();
@@ -52,9 +56,9 @@ pub extern "C" fn veld_alloc(size: u64) -> u64 {
 }
 
 #[doc(hidden)]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
-    let _ = Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize);
+    let _ = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
 }
 
 // ── Шина событий ───────────────────────────────────────────────
@@ -67,8 +71,8 @@ unsafe fn take_host_bytes(packed: u64) -> Option<Vec<u8>> {
     }
     let ptr = (packed & 0xFFFF_FFFF) as *mut u8;
     let len = (packed >> 32) as usize;
-    let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
-    veld_free_wasm(ptr as u64, len as u64);
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe { veld_free_wasm(ptr as u64, len as u64) };
     Some(bytes)
 }
 
@@ -76,7 +80,7 @@ unsafe fn take_host_bytes(packed: u64) -> Option<Vec<u8>> {
 /// тег (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст),
 /// см. host-side `abi.rs::tagged_response`.
 unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
-    let buf = take_host_bytes(packed).ok_or_else(|| anyhow::anyhow!("{} failed", what))?;
+    let buf = unsafe { take_host_bytes(packed) }.ok_or_else(|| anyhow::anyhow!("{} failed", what))?;
     match buf.split_first() {
         Some((0, payload)) => Ok(payload.to_vec()),
         Some((1, msg)) => Err(anyhow::anyhow!(String::from_utf8_lossy(msg).into_owned())),

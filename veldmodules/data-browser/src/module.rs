@@ -1,4 +1,5 @@
 pub mod handlers;
+pub mod message;
 pub mod state;
 pub mod view;
 pub mod components;
@@ -6,7 +7,9 @@ pub mod styles;
 
 // -- Types --
 pub use handlers::Config;
+pub use message::Msg;
 pub use state::State;
+use veld_ui_service_wrap::UiMessage;
 
 // -- Init --
 pub fn hook_init(config: Config) -> anyhow::Result<State> {
@@ -38,26 +41,29 @@ pub fn hook_event(state: &State) {
 }
 
 // -- UI-события (ui-service/on_ui_event, адресовано нам через target) --
-// Один топик, много методов: ui-service возвращает нажатую кнопку эхом в
-// UiEventResponse.method, дальше это внутренняя проводка модуля, а не часть
-// bus-контракта — см. handlers::ui_methods.
+// Один топик на все виджеты: ui-service возвращает нажатое эхом парой строк и
+// смысла их не знает. Разбор — единственное место, где строки снова становятся
+// сообщением; дальше по модулю едет уже `Msg`.
 pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::UiEventResponse) {
-    use handlers::ui_methods::*;
-    match event.method.as_str() {
-        ON_NAV_BROWSE => handlers::nav::on_nav_browse(state, event),
-        ON_NAV_SEARCH => handlers::nav::on_nav_search(state, event),
-        ON_NAV_DOWNLOADED => handlers::nav::on_nav_downloaded(state, event),
-        ON_TAB_SELECT => handlers::nav::on_tab_select(state, event),
-        ON_TAB_CLOSE => handlers::nav::on_tab_close(state, event),
-        ON_BROWSE => handlers::browse::on_browse(state, event),
-        ON_BROWSE_UP => handlers::browse::on_browse_up(state, event),
-        ON_SEARCH => handlers::search::on_search(state, event),
-        ON_SEARCH_INPUT => handlers::search::on_search_input(state, event),
-        ON_DOWNLOAD_PRESSED => handlers::library::on_download_pressed(state, event),
-        ON_VIEW_LOCAL_PRESSED => handlers::preview::on_view_local_pressed(state, event),
-        ON_VIEW_REMOTE_PRESSED => handlers::preview::on_view_remote_pressed(state, event),
-        ON_DELETE_PRESSED => handlers::library::on_delete_pressed(state, event),
-        other => veldsdk::log::warn!(target: "handlers", "unknown UI method: {}", other),
+    let Some(message) = Msg::decode(&event.method, &event.value) else {
+        veldsdk::log::warn!(target: "handlers", "непонятное сообщение разметки: '{}' = '{}'", event.method, event.value);
+        return;
+    };
+
+    match message {
+        Msg::NavBrowse => handlers::nav::on_nav_browse(state),
+        Msg::NavSearch => handlers::nav::on_nav_search(state),
+        Msg::NavDownloaded => handlers::nav::on_nav_downloaded(state),
+        Msg::TabSelect(id) => handlers::nav::on_tab_select(state, id),
+        Msg::TabClose(id) => handlers::nav::on_tab_close(state, id),
+        Msg::Browse(path) => handlers::browse::on_browse(state, path),
+        Msg::BrowseUp => handlers::browse::on_browse_up(state),
+        Msg::Search => handlers::search::on_search(state),
+        Msg::SearchInput(query) => handlers::search::on_search_input(state, query),
+        Msg::Download(identifier) => handlers::library::on_download_pressed(state, identifier),
+        Msg::ViewLocal(name) => handlers::preview::on_view_local_pressed(state, name),
+        Msg::ViewRemote(identifier) => handlers::preview::on_view_remote_pressed(state, identifier),
+        Msg::Delete(name) => handlers::library::on_delete_pressed(state, name),
     }
 }
 

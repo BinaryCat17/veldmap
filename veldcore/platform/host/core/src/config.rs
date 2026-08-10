@@ -107,7 +107,10 @@ pub fn load_dotenv(path: &Path) {
         if key.is_empty() || std::env::var_os(key).is_some() {
             continue;
         }
-        std::env::set_var(key, value);
+        // Правка окружения безопасна только пока процесс однопоточен: другой
+        // поток, читающий getenv в этот момент, получает гонку. Здесь это так —
+        // .env читается до создания рантайма и загрузки сервисов.
+        unsafe { std::env::set_var(key, value) };
     }
 }
 

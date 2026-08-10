@@ -127,9 +127,9 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .height(convert_length(&t.height))
                 .align_x(convert_horizontal_alignment(t.horizontal_alignment()))
                 .align_y(convert_vertical_alignment(t.vertical_alignment()))
-                .shaping(match t.shaping {
-                    1 => iced_core::text::Shaping::Advanced,
-                    _ => iced_core::text::Shaping::Basic,
+                .shaping(match t.shaping() {
+                    proto::Shaping::ShapeAdvanced => iced_core::text::Shaping::Advanced,
+                    proto::Shaping::ShapeBasic => iced_core::text::Shaping::Basic,
                 })
                 .wrapping(match t.wrapping() {
                     proto::Wrapping::NoWrap => iced_core::text::Wrapping::None,
@@ -149,7 +149,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             let content = if let Some(child) = &b.child {
                 convert_widget(child)
             } else {
-                iced_widget::Space::with_width(0.0).into()
+                iced_widget::Space::new().into()
             };
 
             let mut btn = button(content)
@@ -182,18 +182,22 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                     }
                 }
                 Some(proto::button::StyleVariant::StyleCustom(custom)) => {
-                    let active = convert_widget_style(&Some(custom.active.clone().unwrap_or_default()));
-                    let hovered = convert_widget_style(&Some(custom.hovered.clone().unwrap_or_default()));
-                    let pressed = convert_widget_style(&Some(custom.pressed.clone().unwrap_or_default()));
-                    let disabled = convert_widget_style(&Some(custom.disabled.clone().unwrap_or_default()));
+                    let active = custom.active.clone().unwrap_or_default();
+                    let hovered = custom.hovered.clone().unwrap_or_default();
+                    let pressed = custom.pressed.clone().unwrap_or_default();
+                    let disabled = custom.disabled.clone().unwrap_or_default();
 
-                    btn = btn.style(move |_theme: &Theme, status| {
-                         match status {
-                             iced_widget::button::Status::Active => active,
-                             iced_widget::button::Status::Hovered => hovered,
-                             iced_widget::button::Status::Pressed => pressed,
-                             iced_widget::button::Status::Disabled => disabled,
-                         }
+                    // Перевод в стиль iced идёт внутри замыкания, а не рядом:
+                    // цвет текста в стиле может быть не задан, и тогда его
+                    // берёт тема, — а тему видно только здесь.
+                    btn = btn.style(move |theme: &Theme, status| {
+                         let style = match status {
+                             iced_widget::button::Status::Active => &active,
+                             iced_widget::button::Status::Hovered => &hovered,
+                             iced_widget::button::Status::Pressed => &pressed,
+                             iced_widget::button::Status::Disabled => &disabled,
+                         };
+                         convert_widget_style(style, theme.palette().text)
                     });
                 }
                 None => {
@@ -217,7 +221,8 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             if let Some(h) = &t.on_input {
                 if !h.method.is_empty() {
                     let method = h.method.clone();
-                    // The typed text replaces the handler's value at runtime.
+                    // Значение подставит рендерер — набранный текст; из
+                    // разметки едет только имя метода.
                     input = input.on_input(move |v| UiMessage { method: method.clone(), value: v });
                 }
             }
@@ -231,7 +236,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             input.into()
         }
         Some(proto::widget::Type::Container(c)) => {
-            let mut cont = container(if let Some(child) = &c.child { convert_widget(child) } else { iced_widget::Space::with_width(0.0).into() })
+            let mut cont = container(if let Some(child) = &c.child { convert_widget(child) } else { iced_widget::Space::new().into() })
                 .padding(convert_padding(&c.padding))
                 .width(convert_length(&c.width))
                 .height(convert_length(&c.height))
@@ -254,7 +259,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             cont.into()
         }
         Some(proto::widget::Type::Scrollable(s)) => {
-            let content = if let Some(child) = &s.content { convert_widget(child) } else { Space::with_width(0.0).into() };
+            let content = if let Some(child) = &s.content { convert_widget(child) } else { Space::new().into() };
             let bar = iced_widget::scrollable::Scrollbar::default();
             let direction = match s.direction() {
                 proto::ScrollDirection::ScrollHorizontal => iced_widget::scrollable::Direction::Horizontal(bar),
@@ -268,9 +273,12 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .into()
         }
         Some(proto::widget::Type::ProgressBar(p)) => {
+            // length/girth, а не width/height: полоса умеет быть вертикальной,
+            // и «длина» у неё вдоль своей оси. Горизонтальная — по умолчанию,
+            // так что длина здесь ширина, толщина — высота.
             progress_bar(p.range_start..=p.range_end, p.value)
-                .width(convert_length(&p.width))
-                .height(convert_length(&p.height))
+                .length(convert_length(&p.width))
+                .girth(convert_length(&p.height))
                 .into()
         }
         Some(proto::widget::Type::Stack(s)) => {
@@ -283,20 +291,19 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             let content = if let Some(c) = &t.content {
                 convert_widget(c)
             } else {
-                Space::with_width(0.0).into()
+                Space::new().into()
             };
             
-            let position = match t.position {
-                1 => iced_widget::tooltip::Position::Top,
-                2 => iced_widget::tooltip::Position::Bottom,
-                3 => iced_widget::tooltip::Position::Left,
-                4 => iced_widget::tooltip::Position::Right,
-                _ => iced_widget::tooltip::Position::Top,
+            let position = match t.position() {
+                proto::TooltipPosition::TooltipTop => iced_widget::tooltip::Position::Top,
+                proto::TooltipPosition::TooltipBottom => iced_widget::tooltip::Position::Bottom,
+                proto::TooltipPosition::TooltipLeft => iced_widget::tooltip::Position::Left,
+                proto::TooltipPosition::TooltipRight => iced_widget::tooltip::Position::Right,
             };
 
             tooltip(content, text(t.tooltip.clone()), position)
                 .gap(t.gap)
-                .padding(t.padding.as_ref().map(|p| p.top).unwrap_or(5.0))
+                .padding(t.padding)
                 .into()
         }
         Some(proto::widget::Type::Image(img)) => {
@@ -309,7 +316,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             }.into()
         }
         Some(proto::widget::Type::Space(s)) => {
-            Space::new(convert_length(&s.width), convert_length(&s.height)).into()
+            Space::new().width(convert_length(&s.width)).height(convert_length(&s.height)).into()
         }
         // Виджет без ветки конвертации молча стал бы пустой колонкой, поэтому
         // сюда попадает только `type: None` — сообщение без содержимого.
@@ -378,21 +385,27 @@ fn convert_alignment(a: proto::Alignment) -> Option<alignment::Alignment> {
 
 fn convert_color(c: &Option<proto::Color>) -> Color {
     match c {
-        Some(c) => Color::from_rgba(c.r, c.g, c.b, c.a),
+        Some(c) => convert_color_value(c),
         None => Color::BLACK,
     }
 }
 
-fn convert_widget_style(style: &Option<proto::WidgetStyle>) -> iced_widget::button::Style {
-    if let Some(s) = style {
-        iced_widget::button::Style {
-            background: s.background.as_ref().map(convert_background),
-            text_color: s.text_color.as_ref().map(|c| convert_color(&Some(c.clone()))).unwrap_or(Color::BLACK),
-            border: convert_border(&s.border),
-            shadow: convert_shadow(&s.shadow),
-        }
-    } else {
-        iced_widget::button::Style::default()
+fn convert_color_value(c: &proto::Color) -> Color {
+    Color::from_rgba(c.r, c.g, c.b, c.a)
+}
+
+/// Внешний вид виджета в одном состоянии. `inherited_text` — цвет текста темы:
+/// им рисуется содержимое, если стиль своего цвета не назвал.
+fn convert_widget_style(style: &proto::WidgetStyle, inherited_text: Color) -> iced_widget::button::Style {
+    iced_widget::button::Style {
+        background: style.background.as_ref().map(convert_background),
+        text_color: style.text_color.as_ref().map(convert_color_value).unwrap_or(inherited_text),
+        border: convert_border(&style.border),
+        shadow: iced_core::Shadow::default(),
+        // Кнопка не прилипает к пиксельной сетке: её границы приходят из
+        // раскладки клиента, и подтягивание их к целым пикселям разъезжается
+        // с уже посчитанной геометрией соседей.
+        snap: false,
     }
 }
 
@@ -404,39 +417,13 @@ fn convert_background(bg: &proto::Background) -> iced_core::Background {
 }
 
 fn convert_border(b: &Option<proto::Border>) -> iced_core::Border {
-    if let Some(b) = b {
-        iced_core::Border {
+    match b {
+        Some(b) => iced_core::Border {
             color: convert_color(&b.color),
             width: b.width,
-            radius: convert_radius(&b.radius).into(),
-        }
-    } else {
-        iced_core::Border::default()
-    }
-}
-
-fn convert_radius(r: &Option<proto::Radius>) -> iced_core::border::Radius {
-    if let Some(r) = r {
-        iced_core::border::Radius {
-            top_left: r.top_left,
-            top_right: r.top_right,
-            bottom_right: r.bottom_right,
-            bottom_left: r.bottom_left,
-        }
-    } else {
-        iced_core::border::Radius::from(0.0)
-    }
-}
-
-fn convert_shadow(s: &Option<proto::Shadow>) -> iced_core::Shadow {
-    if let Some(s) = s {
-        iced_core::Shadow {
-            color: convert_color(&s.color),
-            offset: iced_core::Vector::new(s.offset_x, s.offset_y),
-            blur_radius: s.blur_radius,
-        }
-    } else {
-        iced_core::Shadow::default()
+            radius: b.radius.into(),
+        },
+        None => iced_core::Border::default(),
     }
 }
 
@@ -452,7 +439,7 @@ impl<'a, Message, Theme> iced_widget::core::Widget<Message, Theme, GpuRenderer> 
     }
 
     fn layout(
-        &self,
+        &mut self,
         _tree: &mut iced_widget::core::widget::Tree,
         _renderer: &GpuRenderer,
         limits: &iced_widget::core::layout::Limits,

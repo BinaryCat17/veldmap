@@ -7,8 +7,9 @@
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, container, image, Element, Length, Padding, Alignment};
 use crate::module::state::PreviewState;
+use crate::module::Msg;
 
-pub fn view(preview: &PreviewState) -> Element<()> {
+pub fn view(preview: &PreviewState) -> Element<Msg> {
     // Пока картинки нет — на экране одна строка состояния: ждём, не смогли
     // или нечего показывать.
     let status = if preview.is_loading() {
@@ -39,7 +40,7 @@ pub fn view(preview: &PreviewState) -> Element<()> {
         // Виджет занимает всё отведённое место, а пропорции картинки соблюдает
         // ui-service: размеры текстуры знает хост (см. converter::contain).
         container(
-            image::<()>(crate::proto::ui_service::core::ResourceHandle {
+            image::<Msg>(crate::proto::ui_service::core::ResourceHandle {
                 id: preview.texture.as_ref().map(|t| t.id()).unwrap_or_default(),
                 size: 0,
             })

@@ -1,5 +1,4 @@
 use crate::module::state::{State, ViewId, ViewKind};
-use crate::proto::ui_service::proto::UiEventResponse;
 
 /// Запрашивает листинг пути у названного вида и переводит его в loading.
 /// Единственная точка входа — и для навигации в папку, и для «вверх», и для
@@ -20,19 +19,15 @@ pub fn request_path(state: &mut State, view: ViewId, path: String) {
     }, &correlation_id);
 }
 
-/// Браузинг запрошен (через UI событие). Путь берётся из value — это
-/// нажатие на папку; пусто — перечитать текущий.
-pub fn on_browse(state: &mut State, event: UiEventResponse) {
+/// Перейти в папку. Пустой путь — перечитать текущую: так же приходит и
+/// «обновить», у которого своего пути нет.
+pub fn on_browse(state: &mut State, path: String) {
     let Some((view, browse)) = state.active_browse_mut() else { return };
-    let target = if event.value.is_empty() {
-        browse.current_path.clone()
-    } else {
-        event.value
-    };
+    let target = if path.is_empty() { browse.current_path.clone() } else { path };
     request_path(state, view, target);
 }
 
-pub fn on_browse_up(state: &mut State, _event: UiEventResponse) {
+pub fn on_browse_up(state: &mut State) {
     let Some((view, browse)) = state.active_browse_mut() else { return };
     let mut path = browse.current_path.clone();
 

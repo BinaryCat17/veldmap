@@ -67,34 +67,11 @@ impl Color {
 }
 
 #[derive(Clone, Copy, Default)]
-pub struct Radius {
-    pub top_left: f32,
-    pub top_right: f32,
-    pub bottom_right: f32,
-    pub bottom_left: f32,
-}
-
-impl Radius {
-    pub fn new(r: f32) -> Self { Self { top_left: r, top_right: r, bottom_right: r, bottom_left: r } }
-    pub(crate) fn to_proto(self) -> proto::Radius {
-        proto::Radius {
-            top_left: self.top_left,
-            top_right: self.top_right,
-            bottom_right: self.bottom_right,
-            bottom_left: self.bottom_left,
-        }
-    }
-}
-
-impl From<f32> for Radius {
-    fn from(r: f32) -> Self { Radius::new(r) }
-}
-
-#[derive(Clone, Copy, Default)]
 pub struct Border {
     pub color: Color,
     pub width: f32,
-    pub radius: Radius,
+    /// Скругление одно на все четыре угла — см. `Border` в types.proto.
+    pub radius: f32,
 }
 
 impl Border {
@@ -102,30 +79,13 @@ impl Border {
         proto::Border {
             color: Some(self.color.to_proto()),
             width: self.width,
-            radius: Some(self.radius.to_proto()),
+            radius: self.radius,
         }
     }
-    pub fn with_radius(radius: impl Into<Radius>) -> Self {
-        Self { radius: radius.into(), ..Default::default() }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct Shadow {
-    pub color: Color,
-    pub offset_x: f32,
-    pub offset_y: f32,
-    pub blur_radius: f32,
-}
-
-impl Shadow {
-    pub(crate) fn to_proto(self) -> proto::Shadow {
-        proto::Shadow {
-            color: Some(self.color.to_proto()),
-            offset_x: self.offset_x,
-            offset_y: self.offset_y,
-            blur_radius: self.blur_radius,
-        }
+    /// Рамка без самой рамки: одно скругление. Так задаётся форма виджета,
+    /// у которого есть фон, но нет обводки.
+    pub fn with_radius(radius: f32) -> Self {
+        Self { radius, ..Default::default() }
     }
 }
 
@@ -151,9 +111,9 @@ impl From<Color> for Background {
 #[derive(Clone, Default)]
 pub struct WidgetStyle {
     pub background: Option<Background>,
+    /// `None` — цвет текста берётся у темы (см. `WidgetStyle` в types.proto).
     pub text_color: Option<Color>,
     pub border: Border,
-    pub shadow: Shadow,
 }
 
 impl WidgetStyle {
@@ -162,7 +122,6 @@ impl WidgetStyle {
             background: self.background.map(|b| b.to_proto()),
             text_color: self.text_color.map(|c| c.to_proto()),
             border: Some(self.border.to_proto()),
-            shadow: Some(self.shadow.to_proto()),
         }
     }
 }

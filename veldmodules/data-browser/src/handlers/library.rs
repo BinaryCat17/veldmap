@@ -5,7 +5,6 @@
 //! в запрос к ней, а состояние получает рассылкой.
 
 use crate::proto::data_library::{DownloadRequest, ItemRequest, LibraryState as LibraryStateMsg};
-use crate::proto::ui_service::proto::UiEventResponse;
 
 use crate::module::state::State;
 use crate::module::state::library::status_of;
@@ -13,8 +12,7 @@ use crate::proto::data_library::LibraryStatus;
 
 /// Пользователь нажал «скачать». Повторное нажатие на идущую закачку —
 /// пауза: скачанное сохраняется, следующее нажатие продолжит с него.
-pub fn on_download_pressed(state: &mut State, event: UiEventResponse) {
-    let identifier = event.value;
+pub fn on_download_pressed(state: &mut State, identifier: String) {
     if identifier.is_empty() { return; }
 
     let downloading = state.library.by_identifier(&identifier)
@@ -31,8 +29,7 @@ pub fn on_download_pressed(state: &mut State, event: UiEventResponse) {
 
 /// Пользователь нажал «удалить» — на любой записи библиотеки (полной,
 /// недокачанной или заявленной одним лишь намерением).
-pub fn on_delete_pressed(_state: &mut State, event: UiEventResponse) {
-    let name = event.value;
+pub fn on_delete_pressed(_state: &mut State, name: String) {
     if name.is_empty() { return; }
 
     crate::calls::data_library::on_delete(&ItemRequest { name });

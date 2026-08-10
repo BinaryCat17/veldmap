@@ -105,7 +105,7 @@ pub mod calls {
     }
     {% endfor %}
 }
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn init() -> i32 {
     let _ = veldsdk::logging::init();
     let input = veldsdk::abi::load_input();
@@ -132,7 +132,7 @@ pub extern "C" fn init() -> i32 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn handle_event() -> i32 {
     use prost::Message;
     use veldsdk::proto::core::EventEnvelope;
@@ -193,7 +193,7 @@ pub extern "C" fn handle_event() -> i32 {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_subscriptions() -> i32 {
     const SUBS: &[&str] = &[
         {% for h in handlers %}
@@ -212,7 +212,7 @@ pub extern "C" fn get_subscriptions() -> i32 {
 /// отсюда при загрузке плагина (см. `plugins::load_services`), а не из
 /// имени файла или манифеста — так имя не может разойтись между schema.yaml
 /// и конфигурацией хоста.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn get_service_name() -> i32 {
     veldsdk::abi::store_output(SERVICE_NAME.as_bytes().to_vec());
     0

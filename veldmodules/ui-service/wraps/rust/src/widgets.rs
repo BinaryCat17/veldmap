@@ -35,7 +35,79 @@ impl<M, T: Into<Element<M>>> Keyed<M> for T {
     }
 }
 
+/// Сообщение разметки: то, что виджет скажет модулю при нажатии или вводе.
+///
+/// По шине едет пара строк — имя метода и значение (`proto::Handler`);
+/// ui-service возвращает их эхом, смысла их не зная. Трейт держит перевод в эту
+/// пару и обратно в одном месте, и этим связывает два конца: у отправителя тип
+/// сообщения проверяет компилятор, а у получателя `decode` отвечает `None` на
+/// всё, чего в наборе нет, — вместо молчаливого несовпадения двух списков строк.
+pub trait UiMessage: Sized {
+    /// Имя метода и значение. Имя должно быть устойчивым — по нему сообщение
+    /// возвращается обратно.
+    fn encode(&self) -> (String, String);
+    /// Обратный разбор. `None` — такого сообщения в наборе нет или значение
+    /// не разбирается.
+    fn decode(method: &str, value: &str) -> Option<Self>;
+}
+
 // --- Builder Structs ---
+//
+// Сеттеры, у которых во всех билдерах одно и то же тело, объявляются макросом:
+// написанные по разу на виджет, они заводят десяток мест, которые могут
+// разойтись. Макрос, а не трейт: трейту нужен доступ к приватному полю чужого
+// билдера, то есть тот же список имён — только длиннее.
+
+/// `width`/`height` — у всех, кто просит место у раскладки.
+macro_rules! sizing {
+    ($($ty:ident),+ $(,)?) => { $(
+        impl<M> $ty<M> {
+            pub fn width(mut self, w: Length) -> Self {
+                self.widget.width = Some(w.to_proto());
+                self
+            }
+            pub fn height(mut self, h: Length) -> Self {
+                self.widget.height = Some(h.to_proto());
+                self
+            }
+        }
+    )+ };
+}
+
+/// Отступ от границ виджета до его содержимого.
+macro_rules! padded {
+    ($($ty:ident),+ $(,)?) => { $(
+        impl<M> $ty<M> {
+            pub fn padding(mut self, p: impl Into<Padding>) -> Self {
+                self.widget.padding = Some(p.into().to_proto());
+                self
+            }
+        }
+    )+ };
+}
+
+/// Носители нескольких детей.
+macro_rules! parent {
+    ($($ty:ident),+ $(,)?) => { $(
+        impl<M> $ty<M> {
+            pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
+                let child: Element<M> = child.into();
+                self.widget.children.push(child.widget);
+                self
+            }
+            pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
+                for child in children {
+                    self.widget.children.push(child.widget);
+                }
+                self
+            }
+        }
+    )+ };
+}
+
+sizing!(Column, Row, Stack, Text, Button, Container, Scrollable, ProgressBar, Image);
+padded!(Column, Row, Button, Container);
+parent!(Column, Row, Stack);
 
 pub struct Column<M> {
     widget: proto::Column,
@@ -53,41 +125,14 @@ impl<M> Column<M> {
             _marker: std::marker::PhantomData
         }
     }
-    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
-        let e: Element<M> = child.into();
-        self.widget.children.push(e.widget);
-        self
-    }
-    pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
-        for child in children { self.widget.children.push(child.widget); }
-        self
-    }
+    /// Зазор между детьми.
     pub fn spacing(mut self, s: f32) -> Self {
         self.widget.spacing = s;
         self
     }
+    /// Как дети стоят поперёк колонки, то есть по горизонтали.
     pub fn align_items(mut self, align: Alignment) -> Self {
         self.widget.align_items = align as i32;
-        self
-    }
-    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
-        self.widget.padding = Some(p.into().to_proto());
-        self
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
-    pub fn max_width(mut self, w: f32) -> Self {
-        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
-        self
-    }
-    pub fn max_height(mut self, h: f32) -> Self {
-        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
         self
     }
 }
@@ -121,41 +166,14 @@ impl<M> Row<M> {
             _marker: std::marker::PhantomData
         }
     }
-    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
-        let e: Element<M> = child.into();
-        self.widget.children.push(e.widget);
-        self
-    }
-    pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
-        for child in children { self.widget.children.push(child.widget); }
-        self
-    }
+    /// Зазор между детьми.
     pub fn spacing(mut self, s: f32) -> Self {
         self.widget.spacing = s;
         self
     }
+    /// Как дети стоят поперёк строки, то есть по вертикали.
     pub fn align_items(mut self, align: Alignment) -> Self {
         self.widget.align_items = align as i32;
-        self
-    }
-    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
-        self.widget.padding = Some(p.into().to_proto());
-        self
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
-    pub fn max_width(mut self, w: f32) -> Self {
-        self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
-        self
-    }
-    pub fn max_height(mut self, h: f32) -> Self {
-        self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
         self
     }
 }
@@ -185,12 +203,11 @@ impl<M> Text<M> {
                 content: content.into(),
                 size: 16.0,
                 color: Some(proto::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
-                bold: false,
                 horizontal_alignment: 0,
                 vertical_alignment: 0,
                 width: None,
                 height: None,
-                shaping: 0,
+                shaping: proto::Shaping::ShapeBasic as i32,
                 font_family: String::new(),
                 wrapping: proto::Wrapping::WrapWord as i32,
             },
@@ -205,14 +222,6 @@ impl<M> Text<M> {
         self.widget.color = Some(color.to_proto());
         self
     }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
     pub fn horizontal_alignment(mut self, align: Alignment) -> Self {
         self.widget.horizontal_alignment = align as i32;
         self
@@ -221,13 +230,15 @@ impl<M> Text<M> {
         self.widget.vertical_alignment = align as i32;
         self
     }
-    pub fn shaping(mut self, advanced: bool) -> Self {
-        self.widget.shaping = if advanced { 1 } else { 0 };
+    /// Сложность разбора строки; умолчание — простой (см. `Shaping`).
+    pub fn shaping(mut self, shaping: proto::Shaping) -> Self {
+        self.widget.shaping = shaping as i32;
         self
     }
-    /// Одна строка: подпись, а не абзац. Обязательно для всего, что может не
-    /// поместиться в свою ширину, — иначе длинное имя без пробелов переносится
-    /// по букве и растёт в высоту, ломая раскладку вокруг (см. `Wrapping`).
+    /// Одна строка: подпись, а не абзац. Ширину строка от этого не теряет —
+    /// не поместившееся уедет за отведённое место, и обрежет его только
+    /// скроллируемый предок. Тексту, который обязан остаться в своей рамке,
+    /// нужен не этот метод, а `wrapping(WRAP_WORD_OR_GLYPH)` (см. `Wrapping`).
     pub fn single_line(mut self) -> Self {
         self.widget.wrapping = proto::Wrapping::NoWrap as i32;
         self
@@ -259,6 +270,17 @@ pub fn text<M>(content: impl Into<String>) -> Text<M> {
     Text::new(content)
 }
 
+/// Глиф иконочного шрифта. Отдельный билдер, а не `text(..).font_family(..)`
+/// на каждом call-сайте: имя шрифта — деталь ui-service (он регистрирует его в
+/// `GpuRenderer::new`), и знать её вызывающему незачем. Однострочность здесь
+/// не выбор оформления, а свойство глифа: переносить в нём нечего.
+///
+/// Возвращает `Text`, а не готовый `Element`, — цвет и размер иконки
+/// дописываются обычной цепочкой.
+pub fn icon<M>(glyph: impl Into<String>) -> Text<M> {
+    Text::new(glyph).font_family(super::style::FONT_ICONS).single_line()
+}
+
 pub struct Button<M> {
     widget: proto::Button,
     _marker: std::marker::PhantomData<M>,
@@ -275,22 +297,14 @@ impl<M> Button<M> {
             padding: None,
         }, _marker: std::marker::PhantomData }
     }
-    /// Dispatch a press to the named input method of the owning module.
-    pub fn on_press(mut self, method: impl Into<String>) -> Self {
-        self.widget.on_press = Some(proto::Handler { method: method.into(), value: String::new() });
-        self
-    }
-    /// Like `on_press`, with a payload delivered in `UiEventResponse.value`.
-    pub fn on_press_with(mut self, method: impl Into<String>, value: impl Into<String>) -> Self {
-        self.widget.on_press = Some(proto::Handler { method: method.into(), value: value.into() });
-        self
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
+    /// Что модуль получит при нажатии. Кнопка без сообщения не нажимается —
+    /// хост рисует её стилем `disabled`.
+    pub fn on_press(mut self, message: M) -> Self
+    where
+        M: UiMessage,
+    {
+        let (method, value) = message.encode();
+        self.widget.on_press = Some(proto::Handler { method, value });
         self
     }
     pub fn style(mut self, style: impl Into<Style>) -> Self {
@@ -305,10 +319,6 @@ impl<M> Button<M> {
                 }));
             }
         }
-        self
-    }
-    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
-        self.widget.padding = Some(p.into().to_proto());
         self
     }
 }
@@ -344,16 +354,27 @@ impl<M> TextInput<M> {
             _marker: std::marker::PhantomData,
         }
     }
-    /// Dispatch typed text to the named input method (the renderer fills value).
-    pub fn on_input(mut self, method: impl Into<String>) -> Self {
-        self.widget.on_input = Some(proto::Handler { method: method.into(), value: String::new() });
+    /// Что модуль получит на каждое изменение текста. Принимает не готовое
+    /// сообщение, а способ его собрать: набранное подставит рендерер, а здесь
+    /// нужно только имя метода — за ним и зовём конструктор с пустой строкой.
+    pub fn on_input(mut self, message: impl FnOnce(String) -> M) -> Self
+    where
+        M: UiMessage,
+    {
+        let (method, _) = message(String::new()).encode();
+        self.widget.on_input = Some(proto::Handler { method, value: String::new() });
         self
     }
-    /// Dispatch Enter/submit to the named input method.
-    pub fn on_submit(mut self, method: impl Into<String>) -> Self {
-        self.widget.on_submit = Some(proto::Handler { method: method.into(), value: String::new() });
+    /// Что модуль получит по Enter.
+    pub fn on_submit(mut self, message: M) -> Self
+    where
+        M: UiMessage,
+    {
+        let (method, value) = message.encode();
+        self.widget.on_submit = Some(proto::Handler { method, value });
         self
     }
+    /// Только ширина: высоту поле ввода берёт из размера шрифта и отступов.
     pub fn width(mut self, w: Length) -> Self {
         self.widget.width = Some(w.to_proto());
         self
@@ -396,24 +417,14 @@ impl<M> Container<M> {
             _marker: std::marker::PhantomData,
         }
     }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
+    /// Потолок ширины: виджет займёт не больше, сколько бы места ему ни дали.
+    /// Ограничить так можно кого угодно — тем `Container` и полезен.
     pub fn max_width(mut self, w: f32) -> Self {
         self.widget.max_width = Some(proto::Length { value: Some(proto::length::Value::Fixed(w)) });
         self
     }
     pub fn max_height(mut self, h: f32) -> Self {
         self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
-        self
-    }
-    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
-        self.widget.padding = Some(p.into().to_proto());
         self
     }
     pub fn background(mut self, background: impl Into<Background>) -> Self {
@@ -468,14 +479,6 @@ impl<M> Scrollable<M> {
             _marker: std::marker::PhantomData,
         }
     }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
     /// Ось прокрутки. Горизонтальная нужна там, где содержимое шире места и
     /// сжимать его нельзя: полоса вкладок, длинная строка команд.
     pub fn direction(mut self, direction: proto::ScrollDirection) -> Self {
@@ -515,14 +518,6 @@ impl<M> ProgressBar<M> {
             _marker: std::marker::PhantomData,
         }
     }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
 }
 
 impl<M> From<ProgressBar<M>> for Element<M> {
@@ -552,12 +547,6 @@ impl<M> Space<M> {
             },
             _marker: std::marker::PhantomData,
         }
-    }
-    pub fn with_width(w: f32) -> Self {
-        Self::new(Length::Fixed(w), Length::Shrink)
-    }
-    pub fn with_height(h: f32) -> Self {
-        Self::new(Length::Shrink, Length::Fixed(h))
     }
 }
 
@@ -590,23 +579,6 @@ impl<M> Stack<M> {
             _marker: std::marker::PhantomData,
         }
     }
-    pub fn push(mut self, child: impl Into<Element<M>>) -> Self {
-        let e: Element<M> = child.into();
-        self.widget.children.push(e.widget);
-        self
-    }
-    pub fn extend(mut self, children: impl IntoIterator<Item = Element<M>>) -> Self {
-        for child in children { self.widget.children.push(child.widget); }
-        self
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
-    }
 }
 
 impl<M> From<Stack<M>> for Element<M> {
@@ -627,34 +599,27 @@ pub struct Tooltip<M> {
     _marker: std::marker::PhantomData<M>,
 }
 
-#[derive(Clone, Copy)]
-pub enum TooltipPosition {
-    Top = 1,
-    Bottom = 2,
-    Left = 3,
-    Right = 4,
-}
-
 impl<M> Tooltip<M> {
-    pub fn new(content: impl Into<Element<M>>, label: impl Into<String>, position: TooltipPosition) -> Self {
+    pub fn new(content: impl Into<Element<M>>, label: impl Into<String>, position: proto::TooltipPosition) -> Self {
         Self {
             widget: proto::Tooltip {
                 content: Some(Box::new(content.into().widget)),
                 tooltip: label.into(),
-                position: position as u32,
+                position: position as i32,
                 gap: 5.0,
-                padding: Some(proto::Padding::default()),
-                ..Default::default()
+                padding: 5.0,
             },
             _marker: std::marker::PhantomData,
         }
     }
+    /// Зазор между подсказкой и тем, к чему она относится.
     pub fn gap(mut self, gap: f32) -> Self {
         self.widget.gap = gap;
         self
     }
-    pub fn padding(mut self, p: impl Into<Padding>) -> Self {
-        self.widget.padding = Some(p.into().to_proto());
+    /// Отступ внутри самой подсказки — одинаковый со всех сторон.
+    pub fn padding(mut self, padding: f32) -> Self {
+        self.widget.padding = padding;
         self
     }
 }
@@ -668,7 +633,7 @@ impl<M> From<Tooltip<M>> for Element<M> {
     }
 }
 
-pub fn tooltip<M>(content: impl Into<Element<M>>, label: impl Into<String>, position: TooltipPosition) -> Tooltip<M> {
+pub fn tooltip<M>(content: impl Into<Element<M>>, label: impl Into<String>, position: proto::TooltipPosition) -> Tooltip<M> {
     Tooltip::new(content, label, position)
 }
 
@@ -687,14 +652,6 @@ impl<M> Image<M> {
             },
             _marker: std::marker::PhantomData,
         }
-    }
-    pub fn width(mut self, w: Length) -> Self {
-        self.widget.width = Some(w.to_proto());
-        self
-    }
-    pub fn height(mut self, h: Length) -> Self {
-        self.widget.height = Some(h.to_proto());
-        self
     }
 }
 

@@ -1,6 +1,6 @@
 use iced_core::{Transformation, Size, Point, Pixels, Font, Color};
-use iced_core::text::{LineHeight, Highlighter, highlighter, Paragraph};
-use cosmic_text::{FontSystem, SwashCache, Buffer, Metrics, Shaping};
+use iced_core::text::{LineHeight, Highlighter, highlighter};
+use cosmic_text::{FontSystem, SwashCache, Buffer, Metrics};
 use std::collections::HashMap;
 
 use std::cell::RefCell;
@@ -32,6 +32,32 @@ impl Drop for ScopeGuard {
     }
 }
 
+/// Шрифтовое хозяйство, положенное в область видимости `ScopeGuard`. Вне её
+/// (`None`) текст не разложить и не перемерить — и то, и другое iced зовёт
+/// статически, без доступа к рендереру.
+fn with_font_context<R>(
+    f: impl FnOnce(&mut FontSystem, &mut SwashCache, &HashMap<String, String>, &str) -> R,
+) -> Option<R> {
+    FONT_SYSTEM.with(|fs_cell| {
+        SWASH_CACHE.with(|sc_cell| {
+            FONT_MAP.with(|fm_cell| {
+                DEFAULT_FAMILY.with(|df_cell| {
+                    match (*fs_cell.borrow(), *sc_cell.borrow(), *fm_cell.borrow(), *df_cell.borrow()) {
+                        (Some(mut fs), Some(mut sc), Some(fm), Some(df)) => {
+                            // SAFETY: указатели живут ровно пока жив ScopeGuard,
+                            // а он держит заимствования у GpuRenderer на весь
+                            // кадр; параллельного доступа нет — модуль
+                            // однопоточный.
+                            Some(unsafe { f(fs.as_mut(), sc.as_mut(), fm.as_ref(), df.as_ref()) })
+                        }
+                        _ => None,
+                    }
+                })
+            })
+        })
+    })
+}
+
 /// Раскладывает строку в буфер cosmic-text. Единственный вызывающий —
 /// `build_paragraph`, и через него на неё выходят оба пути текста.
 ///
@@ -46,6 +72,7 @@ fn shape_text(
     bounds_width: f32,
     family: &str,
     shaping: iced_core::text::Shaping,
+    wrapping: iced_core::text::Wrapping,
     origin: &str,
 ) -> Buffer {
     let mut size = size.0;
@@ -61,10 +88,13 @@ fn shape_text(
     }
 
     let mut buffer = Buffer::new(font_system, Metrics::new(size, line_height));
+    set_wrap_width(&mut buffer, font_system, bounds_width);
 
-    if bounds_width.is_finite() {
-        buffer.set_size(font_system, Some(bounds_width), None);
-    }
+    // Правило переноса задаётся буферу явно: у cosmic-text по умолчанию
+    // WordOrGlyph, то есть длинное слово без пробелов рвётся по букве и растёт
+    // в высоту. Однострочную подпись это ломает молча — измерение и отрисовка
+    // остаются согласованными, просто занимают не ту форму.
+    buffer.set_wrap(font_system, iced_graphics::text::to_wrap(wrapping));
 
     let attrs = if family.is_empty() {
         cosmic_text::Attrs::new().family(cosmic_text::Family::SansSerif)
@@ -72,14 +102,60 @@ fn shape_text(
         cosmic_text::Attrs::new().family(cosmic_text::Family::Name(family))
     };
 
-    let shaping = match shaping {
-        iced_core::text::Shaping::Basic => Shaping::Basic,
-        iced_core::text::Shaping::Advanced => Shaping::Advanced,
-    };
+    // Перевод шейпинга берётся у самого iced: `Shaping::Auto` решается по
+    // содержимому строки, и своя копия этого правила разошлась бы с тем, по
+    // которому iced мерил текст.
+    let shaping = iced_graphics::text::to_shaping(shaping, content);
 
-    buffer.set_text(font_system, content, attrs, shaping);
+    // Выравнивание буферу не передаётся: по горизонтали текст ставит сам iced,
+    // отдавая в `fill_paragraph` уже выровненный левый верхний угол.
+    buffer.set_text(font_system, content, &attrs, shaping, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
+}
+
+/// Ширина, по которой буфер переносит строки. Высота не задаётся никогда: с
+/// конечной высотой cosmic-text отдаёт в `layout_runs` только видимые строки, и
+/// параграф отчитался бы о меньшем размере, чем занимает.
+///
+/// Общая для первой раскладки и для `Paragraph::resize` — переносить по разным
+/// правилам один и тот же текст нельзя.
+fn set_wrap_width(buffer: &mut Buffer, font_system: &mut FontSystem, width: f32) {
+    buffer.set_size(font_system, width.is_finite().then_some(width), None);
+}
+
+/// Границы чернил и высота разложенного буфера — то, чем параграф отвечает на
+/// `min_bounds`.
+///
+/// По горизонтали меряются растровые образы глифов, а не их advance: у
+/// наклонного или свисающего глифа чернила выходят за перо, и без этого текст
+/// обрезался бы по краю.
+fn measure(buffer: &Buffer, font_system: &mut FontSystem, swash_cache: &mut SwashCache) -> (f32, f32, f32) {
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut line_count = 0;
+
+    for run in buffer.layout_runs() {
+        line_count += 1;
+        for glyph in run.glyphs {
+            let physical = glyph.physical((0.0, 0.0), 1.0);
+            if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
+                let left = glyph.x + image.placement.left as f32;
+                min_x = min_x.min(left);
+                max_x = max_x.max(left + image.placement.width as f32);
+            } else {
+                min_x = min_x.min(glyph.x);
+                max_x = max_x.max(glyph.x + glyph.w);
+            }
+        }
+    }
+
+    if !min_x.is_finite() {
+        min_x = 0.0;
+        max_x = 0.0;
+    }
+
+    (min_x, max_x, line_count as f32 * buffer.metrics().line_height)
 }
 
 /// Переводит запрошенное iced-семейство в реальное семейство из fontdb.
@@ -165,8 +241,9 @@ pub struct GpuRenderer {
     current_atlas_x: u32,
     current_atlas_y: u32,
     row_height: u32,
-    atlas_dirty_y_min: u32,
-    atlas_dirty_y_max: u32,
+    /// Появились ли в атласе новые глифы с последней выгрузки. Именно флаг, а
+    /// не диапазон строк: выгружается атлас всегда целиком (см. `atlas_data`).
+    atlas_dirty: bool,
     font_map: HashMap<String, String>,
     default_family: String,
     pub current_sf: f32,
@@ -226,8 +303,7 @@ impl GpuRenderer {
             current_atlas_x: 6,
             current_atlas_y: 6,
             row_height: 1,
-            atlas_dirty_y_min: 0,
-            atlas_dirty_y_max: 2048,
+            atlas_dirty: true,
             font_map,
             default_family,
             current_sf: 1.0,
@@ -266,25 +342,21 @@ impl GpuRenderer {
     }
 
     /// Атлас грузится целиком: dzn (Vulkan поверх DX12 в WSL) не принимает
-    /// частичную запись текстуры. Диапазон `atlas_dirty_y_*` поэтому отвечает
-    /// только на вопрос «менялся ли атлас» (`is_atlas_dirty`), а оконная
-    /// выгрузка по нему была вторым, никем не вызываемым путём.
+    /// частичную запись текстуры.
     pub fn atlas_data_full(&self) -> &[u8] {
         &self.atlas_data
     }
 
     pub fn is_atlas_dirty(&self) -> bool {
-        self.atlas_dirty_y_min < self.atlas_dirty_y_max
+        self.atlas_dirty
     }
 
     pub fn mark_atlas_clean(&mut self) {
-        self.atlas_dirty_y_min = self.atlas_height;
-        self.atlas_dirty_y_max = 0;
+        self.atlas_dirty = false;
     }
 
     pub fn mark_atlas_dirty(&mut self) {
-        self.atlas_dirty_y_min = 0;
-        self.atlas_dirty_y_max = self.atlas_height;
+        self.atlas_dirty = true;
     }
 
     fn transform_rect(&self, rect: [f32; 4]) -> [f32; 4] {
@@ -378,7 +450,8 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
         let bc = quad.border.color;
         let border_color = [bc.r, bc.g, bc.b, bc.a];
 
-        // РИСУЕМ ВСЁ ЗА ОДИН ПРОХОД (Фон + Рамка)
+        // Фон и рамка — одним прямоугольником: и то, и другое считает шейдер
+        // по расстоянию до скруглённой границы, второй проход ему не нужен.
         self.add_quad(
             [
                 quad.bounds.x,
@@ -394,8 +467,24 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
             border_color,
         );
     }
-    fn clear(&mut self) {
+    /// Сброс перед кадром. `new_bounds` не запоминается: область кадра сервис
+    /// уже знает из `update_params` (там она в физических пикселях, вместе с
+    /// масштабом), и второй источник тех же границ разошёлся бы с первым.
+    fn reset(&mut self, _new_bounds: iced_core::Rectangle) {
         GpuRenderer::clear(self);
+    }
+    /// Загрузка растровых картинок средствами iced не поддерживается: картинки
+    /// в сервис приходят готовыми текстурами по гранту (`WgpuImage`), а не
+    /// байтами файла. Обратный вызов обязателен — виджет ждёт ответа, поэтому
+    /// отвечаем отказом, а не молчанием.
+    fn allocate_image(
+        &mut self,
+        _handle: &iced_core::image::Handle,
+        callback: impl FnOnce(Result<iced_core::image::Allocation, iced_core::image::Error>)
+            + Send
+            + 'static,
+    ) {
+        callback(Err(unsupported_image()));
     }
     fn start_layer(&mut self, bounds: iced_core::Rectangle) {
         self.scissor_stack.push(bounds);
@@ -438,19 +527,42 @@ impl GpuRenderer {
     }
 }
 
+/// Один и тот же отказ на оба пути загрузки картинки — см. `allocate_image`.
+fn unsupported_image() -> iced_core::image::Error {
+    iced_core::image::Error::Invalid(std::sync::Arc::new(std::io::Error::other(
+        "ui-service рисует только текстуры по гранту (WgpuImage)",
+    )))
+}
+
 impl iced_core::image::Renderer for GpuRenderer {
     type Handle = iced_core::image::Handle;
-    fn measure_image(&self, _handle: &iced_core::image::Handle) -> Size<u32> {
-        Size::new(100, 100)
+    fn load_image(
+        &self,
+        _handle: &iced_core::image::Handle,
+    ) -> Result<iced_core::image::Allocation, iced_core::image::Error> {
+        Err(unsupported_image())
     }
-    fn draw_image(&mut self, _handle: iced_core::Image, _at: iced_core::Rectangle) {}
+    /// `None` — «размер неизвестен», а не «нулевой»: iced по нему решает
+    /// отложить раскладку, а не сжать картинку в точку.
+    fn measure_image(&self, _handle: &iced_core::image::Handle) -> Option<Size<u32>> {
+        None
+    }
+    fn draw_image(
+        &mut self,
+        _image: iced_core::Image,
+        _bounds: iced_core::Rectangle,
+        _clip_bounds: iced_core::Rectangle,
+    ) {
+    }
 }
 
 pub struct RealParagraph {
     pub buffer: Option<Buffer>,
-    pub horizontal_alignment: iced_core::alignment::Horizontal,
-    pub vertical_alignment: iced_core::alignment::Vertical,
-    pub bounds: Size,
+    /// Условия, при которых буфер был разложен. Хранятся целиком, а не по
+    /// отдельным полям: iced спрашивает их обратно все (`Paragraph::size`,
+    /// `font`, `align_x`, `wrapping`, …), и по ним же сверяет, не устарела ли
+    /// раскладка. Разложить по одному правилу, а отчитаться по другому нельзя.
+    pub config: iced_core::Text<(), Font>,
     pub min_x: f32,
     pub max_x: f32,
     pub visual_height: f32,
@@ -460,9 +572,17 @@ impl Default for RealParagraph {
     fn default() -> Self {
         Self {
             buffer: None,
-            horizontal_alignment: iced_core::alignment::Horizontal::Left,
-            vertical_alignment: iced_core::alignment::Vertical::Top,
-            bounds: Size::INFINITY,
+            config: iced_core::Text {
+                content: (),
+                bounds: Size::INFINITE,
+                size: Pixels(16.0),
+                line_height: LineHeight::default(),
+                font: Font::DEFAULT,
+                align_x: iced_core::text::Alignment::Default,
+                align_y: iced_core::alignment::Vertical::Top,
+                shaping: iced_core::text::Shaping::Basic,
+                wrapping: iced_core::text::Wrapping::default(),
+            },
             min_x: 0.0,
             max_x: 0.0,
             visual_height: 0.0,
@@ -496,43 +616,15 @@ fn build_paragraph(
         text.bounds.width,
         &font_family,
         text.shaping,
+        text.wrapping,
         origin,
     );
 
-    // Границы по горизонтали берутся из растровых образов глифов, а не из их
-    // advance: у наклонного или свисающего глифа чернила выходят за перо, и
-    // без этого текст обрезался бы по краю.
-    let mut min_x = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut line_count = 0;
-
-    for run in buffer.layout_runs() {
-        line_count += 1;
-        for glyph in run.glyphs {
-            let physical = glyph.physical((0.0, 0.0), 1.0);
-            if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
-                let left = glyph.x + image.placement.left as f32;
-                min_x = min_x.min(left);
-                max_x = max_x.max(left + image.placement.width as f32);
-            } else {
-                min_x = min_x.min(glyph.x);
-                max_x = max_x.max(glyph.x + glyph.w);
-            }
-        }
-    }
-
-    if !min_x.is_finite() {
-        min_x = 0.0;
-        max_x = 0.0;
-    }
-
-    let visual_height = line_count as f32 * buffer.metrics().line_height;
+    let (min_x, max_x, visual_height) = measure(&buffer, font_system, swash_cache);
 
     RealParagraph {
         buffer: Some(buffer),
-        horizontal_alignment: text.horizontal_alignment,
-        vertical_alignment: text.vertical_alignment,
-        bounds: text.bounds,
+        config: text.with_content(()),
         min_x,
         max_x,
         visual_height,
@@ -545,47 +637,80 @@ impl iced_core::text::Paragraph for RealParagraph {
     /// хозяйство приезжает сюда через `ScopeGuard` (thread-local). Вся работа —
     /// в `build_paragraph`, общем с путём отрисовки.
     fn with_text(text: iced_core::Text<&str, Self::Font>) -> Self {
-        FONT_SYSTEM.with(|fs_cell| {
-            SWASH_CACHE.with(|sc_cell| {
-                FONT_MAP.with(|fm_cell| {
-                    DEFAULT_FAMILY.with(|df_cell| {
-                        match (*fs_cell.borrow_mut(), *sc_cell.borrow_mut(), *fm_cell.borrow(), *df_cell.borrow()) {
-                            (Some(mut fs), Some(mut sc), Some(fm), Some(df)) => unsafe {
-                                build_paragraph(fs.as_mut(), sc.as_mut(), fm.as_ref(), df.as_ref(), text, "with_text")
-                            },
-                            // Без ScopeGuard параграф не рендерится.
-                            _ => Self::default(),
-                        }
-                    })
-                })
-            })
-        })
+        // Без ScopeGuard параграф не рендерится.
+        with_font_context(|fs, sc, fm, df| build_paragraph(fs, sc, fm, df, text, "with_text"))
+            .unwrap_or_default()
     }
     fn with_spans<Link>(
         _: iced_core::Text<&[iced_core::text::Span<'_, Link, Self::Font>], Self::Font>,
     ) -> Self {
         Self::default()
     }
+    /// Тот же текст в новых границах: строки переносятся заново, шейпинг —
+    /// нет. Мерить после этого обязательно: `min_bounds` считается по
+    /// разложенным строкам, и от новой ширины он меняется вместе с ними.
     fn resize(&mut self, size: Size) {
-        self.bounds = size;
-        if let Some(buffer) = &mut self.buffer {
-            FONT_SYSTEM.with(|fs_cell| {
-                if let Some(mut fs_ptr) = *fs_cell.borrow_mut() {
-                    let font_system = unsafe { fs_ptr.as_mut() };
-                    buffer.set_size(font_system, Some(size.width), Some(size.height));
-                    buffer.shape_until_scroll(font_system, false);
-                }
-            });
+        self.config.bounds = size;
+        let Some(buffer) = &mut self.buffer else { return };
+        let measured = with_font_context(|fs, sc, _, _| {
+            set_wrap_width(buffer, fs, size.width);
+            buffer.shape_until_scroll(fs, false);
+            measure(buffer, fs, sc)
+        });
+        if let Some((min_x, max_x, visual_height)) = measured {
+            self.min_x = min_x;
+            self.max_x = max_x;
+            self.visual_height = visual_height;
         }
     }
-    fn compare(&self, _: iced_core::Text<(), Self::Font>) -> iced_core::text::Difference {
-        iced_core::text::Difference::None
+    /// Насколько разложенное разошлось с тем, что просят нарисовать.
+    ///
+    /// Единственный сигнал, по которому iced переразложит текст: сравнивать
+    /// нечего только для того текста, что уже разложен по этим самым правилам.
+    /// Вечное `None` означало бы, что при смене ширины (окно сузили, соседний
+    /// столбец разъехался) строка так и осталась разложена по прежней.
+    fn compare(&self, text: iced_core::Text<(), Self::Font>) -> iced_core::text::Difference {
+        use iced_core::text::Difference;
+        let laid_out = &self.config;
+
+        if laid_out.size != text.size
+            || laid_out.line_height != text.line_height
+            || laid_out.font != text.font
+            || laid_out.shaping != text.shaping
+            || laid_out.wrapping != text.wrapping
+            || laid_out.align_x != text.align_x
+            || laid_out.align_y != text.align_y
+        {
+            Difference::Shape
+        } else if laid_out.bounds != text.bounds {
+            Difference::Bounds
+        } else {
+            Difference::None
+        }
     }
-    fn horizontal_alignment(&self) -> iced_core::alignment::Horizontal {
-        self.horizontal_alignment
+    fn size(&self) -> Pixels {
+        self.config.size
     }
-    fn vertical_alignment(&self) -> iced_core::alignment::Vertical {
-        self.vertical_alignment
+    fn font(&self) -> Self::Font {
+        self.config.font
+    }
+    fn line_height(&self) -> LineHeight {
+        self.config.line_height
+    }
+    fn align_x(&self) -> iced_core::text::Alignment {
+        self.config.align_x
+    }
+    fn align_y(&self) -> iced_core::alignment::Vertical {
+        self.config.align_y
+    }
+    fn wrapping(&self) -> iced_core::text::Wrapping {
+        self.config.wrapping
+    }
+    fn shaping(&self) -> iced_core::text::Shaping {
+        self.config.shaping
+    }
+    fn bounds(&self) -> Size {
+        self.config.bounds
     }
     fn min_bounds(&self) -> Size {
         if self.buffer.is_some() {
@@ -594,17 +719,64 @@ impl iced_core::text::Paragraph for RealParagraph {
             Size::ZERO
         }
     }
+    /// Разложенного по кускам текста (`with_spans`) сервис не строит, поэтому и
+    /// попасть мышью не во что.
     fn hit_span(&self, _: Point) -> Option<usize> {
         None
     }
     fn span_bounds(&self, _: usize) -> Vec<iced_core::Rectangle> {
         Vec::new()
     }
-    fn hit_test(&self, _: Point) -> Option<iced_core::text::Hit> {
-        None
+    /// Куда указывает мышь: какому байту содержимого соответствует точка. По
+    /// этому `text_input` ставит каретку туда, куда щёлкнули, а без ответа не
+    /// двигает её вовсе.
+    fn hit_test(&self, point: Point) -> Option<iced_core::text::Hit> {
+        let buffer = self.buffer.as_ref()?;
+        // Точка приходит в системе, в которой параграф мерился, — от левого
+        // края чернил; буфер же отсчитывает от пера (см. `fill_paragraph`).
+        let cursor = buffer.hit(point.x + self.min_x, point.y)?;
+        Some(iced_core::text::Hit::CharOffset(cursor.index))
     }
-    fn grapheme_position(&self, _: usize, _: usize) -> Option<Point> {
-        None
+    /// Где стоит каретка перед графемой номер `index` строки `line`. Без ответа
+    /// `text_input` рисует её в начале поля, куда бы её ни увели.
+    ///
+    /// Считается по глифам, а не по числу знаков: одна графема может занимать
+    /// несколько глифов и наоборот, а нужна позиция на экране.
+    fn grapheme_position(&self, line: usize, index: usize) -> Option<Point> {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let run = self.buffer.as_ref()?.layout_runs().nth(line)?;
+
+        // Глиф, на котором счётчик графем догоняет искомую. Глифы одного
+        // кластера делят `start`, поэтому пересчитывается он на смене кластера.
+        let mut cluster_start = None;
+        let mut cluster_graphemes = 0;
+        let mut seen = 0;
+
+        let glyph = run
+            .glyphs
+            .iter()
+            .find(|glyph| {
+                if Some(glyph.start) != cluster_start {
+                    cluster_graphemes = run.text[glyph.start..glyph.end].graphemes(false).count();
+                    cluster_start = Some(glyph.start);
+                    seen += cluster_graphemes;
+                }
+                seen >= index
+            })
+            .or_else(|| run.glyphs.last())?;
+
+        // Каретка внутри кластера из нескольких графем — доля его ширины.
+        let advance = if index == 0 {
+            0.0
+        } else {
+            glyph.w * (1.0 - seen.saturating_sub(index) as f32 / cluster_graphemes.max(1) as f32)
+        };
+
+        Some(Point::new(
+            glyph.x + glyph.x_offset * glyph.font_size + advance - self.min_x,
+            glyph.y - glyph.y_offset * glyph.font_size,
+        ))
     }
 }
 
@@ -615,7 +787,10 @@ impl iced_core::text::Editor for DummyEditor {
     fn bounds(&self) -> Size {
         Size::ZERO
     }
-    fn selection(&self) -> Option<String> {
+    fn selection(&self) -> iced_core::text::editor::Selection {
+        iced_core::text::editor::Selection::Caret(Point::ORIGIN)
+    }
+    fn copy(&self) -> Option<String> {
         None
     }
     fn with_text(_: &str) -> Self {
@@ -625,9 +800,13 @@ impl iced_core::text::Editor for DummyEditor {
         true
     }
     fn cursor(&self) -> iced_core::text::editor::Cursor {
-        iced_core::text::editor::Cursor::Caret(Point::ORIGIN)
+        iced_core::text::editor::Cursor {
+            position: iced_core::text::editor::Position { line: 0, column: 0 },
+            selection: None,
+        }
     }
-    fn line(&self, _: usize) -> Option<&str> {
+    fn move_to(&mut self, _: iced_core::text::editor::Cursor) {}
+    fn line(&self, _: usize) -> Option<iced_core::text::editor::Line<'_>> {
         None
     }
     fn line_count(&self) -> usize {
@@ -656,18 +835,23 @@ impl iced_core::text::Editor for DummyEditor {
         H: Highlighter,
     {
     }
-    fn cursor_position(&self) -> (usize, usize) {
-        (0, 0)
-    }
 }
 
 impl iced_core::text::Renderer for GpuRenderer {
     type Font = Font;
     type Paragraph = RealParagraph;
     type Editor = DummyEditor;
+    // Иконочного шрифта у сервиса нет: виджеты, которым он нужен (checkbox,
+    // pick_list, скроллбар со стрелками), в наборе не объявлены. Пробел здесь
+    // честнее подстановки чужого глифа — он ничего не рисует.
     const ICON_FONT: Font = Font::DEFAULT;
     const CHECKMARK_ICON: char = ' ';
     const ARROW_DOWN_ICON: char = ' ';
+    const SCROLL_UP_ICON: char = ' ';
+    const SCROLL_DOWN_ICON: char = ' ';
+    const SCROLL_LEFT_ICON: char = ' ';
+    const SCROLL_RIGHT_ICON: char = ' ';
+    const ICED_LOGO: char = ' ';
 
     fn default_font(&self) -> Font {
         Font::DEFAULT
@@ -684,13 +868,16 @@ impl iced_core::text::Renderer for GpuRenderer {
         _clip: iced_core::Rectangle,
     ) {
         if let Some(buffer) = &p.buffer {
-            let y_offset = match p.vertical_alignment {
-                iced_core::alignment::Vertical::Center => (p.min_bounds().height) / 2.0,
-                iced_core::alignment::Vertical::Bottom => p.min_bounds().height,
-                _ => 0.0,
-            };
-
-            let adjusted_pos = Point::new(pos.x - p.min_x, pos.y - y_offset);
+            // `pos` — уже выровненный левый верхний угол текста: выравнивание
+            // по обеим осям считает сам iced (`Rectangle::anchor`), зная и
+            // отведённое место, и `min_bounds` параграфа. Поправлять его здесь
+            // ещё раз значит применить выравнивание дважды.
+            //
+            // По горизонтали вычитается `min_x`: чернила первого глифа могут
+            // начинаться левее пера (наклонный или свисающий глиф), а место под
+            // текст меряется по чернилам — иначе строка уезжает вправо на эту
+            // разницу.
+            let adjusted_pos = Point::new(pos.x - p.min_x, pos.y);
             self.prepare_glyphs(buffer);
             self.draw_buffer(buffer, adjusted_pos, color);
         }
@@ -720,17 +907,7 @@ impl iced_core::text::Renderer for GpuRenderer {
             &mut self.swash_cache,
             &self.font_map,
             &self.default_family,
-            iced_core::Text {
-                content: text.content.as_str(),
-                bounds: text.bounds,
-                size: text.size,
-                line_height: text.line_height,
-                font: text.font,
-                horizontal_alignment: text.horizontal_alignment,
-                vertical_alignment: text.vertical_alignment,
-                shaping: text.shaping,
-                wrapping: text.wrapping,
-            },
+            text.with_content(text.content.as_str()),
             "fill_text",
         );
 
@@ -767,8 +944,6 @@ impl GpuRenderer {
     }
 
     fn prepare_glyphs(&mut self, buffer: &Buffer) {
-        let mut atlas_modified = false;
-
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {
                 let physical_glyph = glyph.physical((0.0, 0.0), self.current_sf);
@@ -848,15 +1023,10 @@ impl GpuRenderer {
 
                         self.current_atlas_x += width + 2;
                         self.row_height = self.row_height.max(height);
-                        self.atlas_dirty_y_min = self.atlas_dirty_y_min.min(y);
-                        self.atlas_dirty_y_max = self.atlas_dirty_y_max.max(y + height);
-                        atlas_modified = true;
+                        self.atlas_dirty = true;
                     }
                 }
             }
         }
-
-        if atlas_modified {
-            }
     }
 }

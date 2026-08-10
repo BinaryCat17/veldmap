@@ -4,10 +4,10 @@ use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{text, text_input, button, Element, Length};
 use crate::module::state::{SearchState, State};
 use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::handlers::ui_methods::{ON_DOWNLOAD_PRESSED, ON_DELETE_PRESSED, ON_VIEW_REMOTE_PRESSED, ON_SEARCH_INPUT, ON_SEARCH};
+use crate::module::Msg;
 
-pub fn view(state: &State, search_state: &SearchState) -> Element<()> {
-    let body: Element<()> = if let Some(err) = &search_state.error {
+pub fn view(state: &State, search_state: &SearchState) -> Element<Msg> {
+    let body: Element<Msg> = if let Some(err) = &search_state.error {
         column![text(format!("Error: {}", err)).size(16.0)].into()
     } else if search_state.request.is_pending() {
         column![text("Searching...").size(16.0)].into()
@@ -25,21 +25,21 @@ pub fn view(state: &State, search_state: &SearchState) -> Element<()> {
         items_or_message(&items, ItemActions {
             browse: None, // Папки не поддерживаются
             view_local: None,
-            view_remote: Some(ON_VIEW_REMOTE_PRESSED),
-            download: Some(ON_DOWNLOAD_PRESSED),
-            delete: Some(ON_DELETE_PRESSED),
+            view_remote: Some(Msg::ViewRemote),
+            download: Some(Msg::Download),
+            delete: Some(Msg::Delete),
         }, empty_message)
     };
 
-    let title: Element<()> = text("Search Copernicus Data Space").size(20.0).into();
-    let search_row: Element<()> = row![
+    let title: Element<Msg> = text("Search Copernicus Data Space").size(20.0).into();
+    let search_row: Element<Msg> = row![
         crate::module::styles::apply_search_input(
             text_input("Search query...", &search_state.query)
         )
             .width(Length::Fill)
-            .on_input(ON_SEARCH_INPUT)
-            .on_submit(ON_SEARCH),
-        crate::module::styles::apply_primary(button(text("Search"))).on_press(ON_SEARCH)
+            .on_input(Msg::SearchInput)
+            .on_submit(Msg::Search),
+        crate::module::styles::apply_primary(button(text("Search"))).on_press(Msg::Search)
     ]
     .spacing(10.0)
     .width(Length::Fill)

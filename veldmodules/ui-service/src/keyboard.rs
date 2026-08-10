@@ -30,7 +30,7 @@ pub fn convert_key_event(ev: &KeyEvent, modifiers: Modifiers) -> keyboard::Event
     let named = code.and_then(named_from_code);
     let text = if ev.pressed && !ev.text.is_empty() { Some(ev.text.as_str()) } else { None };
 
-    // Logical key: служебная клавиша → Named; печатный текст → Character.
+    // Логическая клавиша: служебная → Named, печатный текст → Character.
     // Если текст пуст или содержит только control-символы (так выглядит
     // Ctrl+C на Linux: text = "\x03"), для сочетаний с Ctrl/Alt/Super
     // восстанавливаем ASCII-символ из физического кода — иначе хоткеи
@@ -52,19 +52,26 @@ pub fn convert_key_event(ev: &KeyEvent, modifiers: Modifiers) -> keyboard::Event
         _ => Location::Standard,
     };
 
+    let physical_key = code.map(key::Physical::Code)
+        .unwrap_or(key::Physical::Unidentified(key::NativeCode::Xkb(ev.key_code)));
+
     if ev.pressed {
         keyboard::Event::KeyPressed {
             modified_key: logical.clone(),
             key: logical,
-            physical_key: code.map(key::Physical::Code)
-                .unwrap_or(key::Physical::Unidentified(key::NativeCode::Xkb(ev.key_code))),
+            physical_key,
             location,
             modifiers,
             text: text.map(SmolStr::from),
+            // Автоповтор хост не различает: KeyEvent несёт только код, текст и
+            // модификаторы (см. app.proto). Все нажатия приходят как первые.
+            repeat: false,
         }
     } else {
         keyboard::Event::KeyReleased {
+            modified_key: logical.clone(),
             key: logical,
+            physical_key,
             location,
             modifiers,
         }

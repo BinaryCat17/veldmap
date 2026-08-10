@@ -1,12 +1,12 @@
 //! components/list_screen.rs — каркас экрана со списком.
 //!
-//! К списку файлов отношения не имеет (жил в browser_list по историческим
-//! причинам): это обёртка целой страницы, одинаковая на Browse/Search/
-//! Downloaded — заголовочные строки сверху, скроллируемое тело снизу.
-//! Отличается у экранов только содержимое, не геометрия.
+//! К списку файлов отношения не имеет: это обёртка целой страницы, одинаковая
+//! на Browse/Search/Downloaded — заголовочные строки сверху, скроллируемое тело
+//! снизу. Отличается у экранов только содержимое, не геометрия.
 
 use veld_ui_service_wrap::column;
 use crate::proto::ui_service::{container, scrollable, Element, Length, Padding};
+use crate::module::Msg;
 
 /// Колонку заголовка собирает сама (а не принимает готовый `Element`) —
 /// каждый вложенный `column![]` без явного `.width(Fill)` схлопывается по
@@ -15,7 +15,7 @@ use crate::proto::ui_service::{container, scrollable, Element, Length, Padding};
 /// и его трогать не надо, но конкретно на экранном контейнере он неуместен.
 /// Раз этот вызов — единственное место, где вложенная колонка вообще
 /// создаётся, промахнуться мимо Fill здесь больше негде.
-pub fn list_screen(header_rows: Vec<Element<()>>, body: Element<()>) -> Element<()> {
+pub fn list_screen(header_rows: Vec<Element<Msg>>, body: Element<Msg>) -> Element<Msg> {
     // Правый паддинг у тела, а не у всей колонки — резервирует место под
     // полосу прокрутки: у `scrollable` в этом фреймворке нет своего API для
     // отступа скроллбара (в отличие от iced, где это Properties::margin), он

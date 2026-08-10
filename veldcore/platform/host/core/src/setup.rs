@@ -61,6 +61,7 @@ pub async fn init_wgpu<'a>(
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(surface),
                 force_fallback_adapter: true,
+                ..Default::default()
             }).await.map_err(|e| anyhow::anyhow!("Adapter error: {}", e))?
         }
     };
@@ -93,6 +94,10 @@ pub async fn init_wgpu<'a>(
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
+        // Auto — единственное значение, работающее для любого формата из
+        // `caps.formats`; широкий охват и HDR потребовали бы другого
+        // кодирования на выходе, чего шейдеры модулей не делают.
+        color_space: wgpu::SurfaceColorSpace::Auto,
         width: window_width,
         height: window_height,
         present_mode,
