@@ -17,7 +17,8 @@ use veldsdk::OwnedResource;
 
 use anyhow::anyhow;
 
-use crate::module::camera::{Camera, Mat4, Vec3};
+use crate::module::camera::{Camera, Mat4};
+use crate::module::geodesy::World;
 use crate::module::mesh::{Mesh, Vertex};
 use crate::module::outlines::Outlines;
 
@@ -32,7 +33,7 @@ const DEPTH_FORMAT: TextureFormat = TextureFormat::TexDepth32Float;
 #[derive(Clone, Copy)]
 struct CameraUniform {
     view_proj: Mat4,
-    eye: Vec3,
+    eye: World,
     _pad: f32,
 }
 
@@ -51,6 +52,7 @@ pub struct Device {
     body: PipelineId,
     grid: PipelineId,
     outline: PipelineId,
+    picked: PipelineId,
     /// Формат таргета, под который собраны пайплайны. Сменится — пересобирать.
     pub format: i32,
     body_indices: std::ops::Range<u32>,
@@ -59,7 +61,9 @@ pub struct Device {
     /// поиск, а Земля строится один раз.
     outline_vertices: GrowingBuffer,
     outline_indices: GrowingBuffer,
-    outline_count: u32,
+    /// Куски индексного буфера под обычные контуры и под выделенные.
+    outline_plain: std::ops::Range<u32>,
+    outline_picked: std::ops::Range<u32>,
 }
 
 impl Device {
@@ -98,8 +102,13 @@ impl Device {
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
         // Контуры устроены ровно как сетка и отличаются от неё только цветом.
+        // Выделенный — от остальных тем же и ровно настолько же.
         let outline = pipeline(
             "Globe Outline", &shader, "fs_outline", &camera_layout, format,
+            PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
+        )?;
+        let picked = pipeline(
+            "Globe Picked", &shader, "fs_picked", &camera_layout, format,
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
 
@@ -112,6 +121,7 @@ impl Device {
             body,
             grid,
             outline,
+            picked,
             format,
             body_indices: mesh.surface,
             grid_indices: mesh.grid,
@@ -121,7 +131,8 @@ impl Device {
             outline_indices: GrowingBuffer::new(
                 buffer_usage::INDEX, "индексы контуров", INITIAL_OUTLINE_BUFFER,
             ),
-            outline_count: 0,
+            outline_plain: 0..0,
+            outline_picked: 0..0,
         })
     }
 
@@ -130,7 +141,8 @@ impl Device {
     pub fn set_outlines(&mut self, outlines: &Outlines) -> anyhow::Result<()> {
         self.outline_vertices.write(&outlines.vertices)?;
         self.outline_indices.write(&outlines.indices)?;
-        self.outline_count = outlines.count();
+        self.outline_plain = outlines.plain.clone();
+        self.outline_picked = outlines.picked.clone();
         Ok(())
     }
 }
@@ -194,16 +206,23 @@ pub fn render(device: &Device, target: &Target, camera: &Camera) -> anyhow::Resu
     // Контуры последними: они поверх сетки. Глубину линии не пишут, поэтому
     // между собой они разбираются только очередью записи, и решает её порядок
     // здесь.
-    if let (true, Some(vertices), Some(indices)) = (
-        device.outline_count > 0,
-        device.outline_vertices.id(),
-        device.outline_indices.id(),
-    ) {
-        recorder.set_pipeline(&device.outline);
-        recorder.set_bind_group(0, &device.camera_bind_group);
+    if let (Some(vertices), Some(indices)) =
+        (device.outline_vertices.id(), device.outline_indices.id())
+    {
         recorder.set_vertex_buffer(0, vertices, 0, device.outline_vertices.filled());
         recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, device.outline_indices.filled());
-        recorder.draw_indexed(0..device.outline_count, 0, 0..1);
+
+        for (pipeline, range) in [
+            (&device.outline, &device.outline_plain),
+            (&device.picked, &device.outline_picked),
+        ] {
+            if range.is_empty() {
+                continue;
+            }
+            recorder.set_pipeline(pipeline);
+            recorder.set_bind_group(0, &device.camera_bind_group);
+            recorder.draw_indexed(range.clone(), 0, 0..1);
+        }
     }
 
     recorder.submit_with_depth(&target.view, &target.depth_view)

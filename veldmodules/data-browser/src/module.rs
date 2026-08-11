@@ -1,3 +1,4 @@
+pub mod footprint;
 pub mod handlers;
 pub mod message;
 pub mod state;
@@ -56,6 +57,8 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::Page(page) => handlers::listing::on_page(state, page),
         Msg::SearchQuery(query) => handlers::search::on_query(state, query),
         Msg::SearchMission(mission) => handlers::search::on_mission(state, mission),
+        Msg::SearchPeriod(period) => handlers::search::on_period(state, period),
+        Msg::SearchCloud(cloud) => handlers::search::on_cloud(state, cloud),
         Msg::RunSearch => handlers::search::run(state),
         Msg::Enter(path) => handlers::browse::on_enter(state, path),
         Msg::Up => handlers::browse::on_up(state),
@@ -66,6 +69,7 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::Zoom(zoom) => handlers::preview::on_zoom(state, zoom),
         Msg::GlobeResized(size) => handlers::globe::on_resized(state, size),
         Msg::GlobePointer(event) => handlers::globe::on_pointer(state, event),
+        Msg::GlobeShow(identifier) => handlers::search::show(state, identifier),
     }
 }
 
@@ -81,6 +85,7 @@ pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
     if handlers::preview::on_resource_opened(state, &opened) { return; }
     veldsdk::resource::discard("on_open_result", opened);
 }
+pub use handlers::globe::on_probed;
 pub use handlers::search::on_search_result;
 pub use handlers::browse::on_list_path_result;
 pub use handlers::window::on_window_resized;

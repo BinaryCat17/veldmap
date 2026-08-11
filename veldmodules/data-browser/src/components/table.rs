@@ -29,7 +29,9 @@ const COLUMNS: [Length; 8] = [
 ];
 
 const ICON: f32 = 34.0;
-const FORMAT: f32 = 56.0;
+/// Под тип продукта, а не под расширение файла: у радара он длинный
+/// (`IW_GRDH_1SDV`), и по трём буквам «png» такую колонку не смеришь.
+const FORMAT: f32 = 80.0;
 const DATE: f32 = 88.0;
 const SIZE: f32 = 84.0;
 const STATUS: f32 = 104.0;
@@ -209,7 +211,17 @@ fn entry_line(row_data: &Row, depth: usize, context: Context<'_>) -> Element<Msg
     let cells = grid([
         glyph(row_glyph(row_data), if row_data.is_folder { theme::ACCENT } else { theme::INK_FAINT }),
         name,
-        text::<Msg>(row_data.format()).size(theme::TEXT_TAG).color(theme::INK_FAINT).single_line().into(),
+        // Моноширинным и с усечением по месту: это код, а не слово, и обрезать
+        // его молча нельзя — ячейка обрежет по границе, и значение упрётся в
+        // соседнюю колонку без единого знака о том, что оно неполное.
+        mono::<Msg>(format::ellipsize(
+            &row_data.format(),
+            format::mono_fit(FORMAT - CELL_PADDING * 2.0, theme::TEXT_TAG),
+        ))
+        .size(theme::TEXT_TAG)
+        .color(theme::INK_FAINT)
+        .single_line()
+        .into(),
         text::<Msg>(format::date(row_data.date, context.now))
             .size(theme::TEXT_SMALL)
             .color(theme::INK_DIM)
@@ -391,6 +403,11 @@ fn menu_items(row: &Row, here: &str) -> Vec<super::menu::Item> {
     use super::menu::Item;
     let mut items = Vec::new();
 
+    // Место на Земле знает только каталог, поэтому пункт есть у найденного и
+    // нет у скачанного: у файла на диске контура не осталось.
+    if row.located && !row.identifier.is_empty() {
+        items.push(Item::new("Показать на шаре", Msg::GlobeShow(row.identifier.clone())));
+    }
     // Показывать папку, которая и так открыта, незачем: пункт вёл бы туда,
     // где пользователь уже стоит.
     if !row.folder().is_empty() && !here.trim_end_matches('/').ends_with(row.folder()) {

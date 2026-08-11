@@ -6,10 +6,10 @@
 
 use veld_ui_service_wrap::row;
 use crate::proto::ui_service::{
-    container, icon, text, text_input, Alignment, Element, FontWeight, Length, Padding,
+    container, icon, text_input, Alignment, Element, Length, Padding,
 };
-use crate::module::components::{format, list_screen, Row, Screen};
-use crate::module::state::search::MISSIONS;
+use crate::module::components::{controls, format, list_screen, Row, Screen};
+use crate::module::state::listing::Menu;
 use crate::module::state::{SearchState, State};
 use crate::module::{theme, Msg};
 
@@ -21,6 +21,7 @@ pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
         .iter()
         .map(|product| Row {
             kind: product.product_type.clone(),
+            located: !product.footprint.is_empty(),
             ..Row::remote(
                 &state.library,
                 product.identifier.clone(),
@@ -36,7 +37,11 @@ pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
             title: "Поиск снимков",
             subtitle: subtitle(search, rows.len()),
             path: None,
-            empty: "Ничего не нашлось — попробуйте другую миссию или часть имени",
+            // Пока ответа нет, «ничего не нашлось» — неправда: ещё ищем.
+            empty: match search.request.is_pending() {
+                true => "Спрашиваем каталог…",
+                false => "Ничего не нашлось — попробуйте другую миссию или часть имени",
+            },
             controls: Some(bar(search)),
             rows,
         },
@@ -64,8 +69,13 @@ fn subtitle(search: &SearchState, found: usize) -> String {
     }
 }
 
-/// Полоса запроса: часть имени и миссия. Отправляют её и ввод, и выбор миссии —
-/// поиск идёт по сети, и делать его на каждую букву нельзя.
+/// Полоса запроса: часть имени, миссия, окно съёмки и облачность. Отправляет
+/// запрос всё, кроме самого ввода: поиск идёт по сети, и делать его на каждую
+/// букву нельзя — поле ждёт Enter.
+///
+/// Облачность спрашивается не всегда: у радара её нет, и условие по ней вернуло
+/// бы пусто (см. [`Mission::clouded`]). Рычаг, который может только обнулить
+/// выдачу, лучше не показывать вовсе.
 fn bar(search: &SearchState) -> Element<Msg> {
     let field = container(
         row![
@@ -89,21 +99,15 @@ fn bar(search: &SearchState) -> Element<Msg> {
     .align_y(Alignment::Center)
     .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 });
 
-    let mut controls: Vec<Element<Msg>> = vec![field.into()];
-    for (value, label) in MISSIONS {
-        let chosen = search.mission == value;
+    let opened = &search.listing.menu;
+    let mut controls: Vec<Element<Msg>> = vec![
+        field.into(),
+        controls::chip("Миссия:", search.mission, Menu::Mission, opened, &[], Msg::SearchMission),
+        controls::chip("Съёмка:", search.period, Menu::Period, opened, &[], Msg::SearchPeriod),
+    ];
+    if search.mission.clouded() {
         controls.push(
-            theme::surface_button(
-                text::<Msg>(label.to_string())
-                    .size(theme::TEXT_LABEL)
-                    .weight(if chosen { FontWeight::WeightBold } else { FontWeight::WeightNormal })
-                    .single_line(),
-                chosen,
-            )
-            .height(Length::Fixed(theme::CONTROL_HEIGHT))
-            .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 })
-            .on_press(Msg::SearchMission(value.to_string()))
-            .into(),
+            controls::chip("Облачность:", search.cloud, Menu::Cloud, opened, &[], Msg::SearchCloud),
         );
     }
 

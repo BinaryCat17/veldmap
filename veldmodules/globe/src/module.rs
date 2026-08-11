@@ -128,8 +128,33 @@ pub fn on_camera(state: &mut State, command: crate::proto::globe::CameraCommand)
     match command.command {
         Some(Command::Orbit(orbit)) => state.camera.orbit(orbit.dx, orbit.dy),
         Some(Command::Zoom(zoom)) => state.camera.zoom(zoom.delta),
+        // Наводка без точки — это наводка в никуда: молча смотреть в центр
+        // координат хуже, чем не двигаться вовсе.
+        Some(Command::Focus(focus)) => match focus.at {
+            Some(at) => state.camera.focus(at.lat, at.lon, focus.radius_deg),
+            None => veldsdk::log::warn!(target: "handlers", "наводка без точки"),
+        },
         None => {}
     }
+}
+
+/// Что под указателем. Отвечаем всегда: «мимо Земли» — такой же ответ, как
+/// точка, и спрашивающий вправе его получить. Без места под рендер ответ тот
+/// же: кадра нет — значит нет и точки кадра, про которую спрашивают.
+pub fn on_probe(state: &mut State, probe: crate::proto::globe::Probe) {
+    let at = state.target.as_ref().and_then(|target| {
+        let aspect = target.width as f32 / target.height.max(1) as f32;
+        let (eye, direction) = state.camera.ray(probe.x, probe.y, aspect);
+        geodesy::intersect(eye, direction).map(|point| {
+            let (lat, lon) = geodesy::surface_at(point);
+            crate::proto::globe::GeoPoint { lat, lon }
+        })
+    });
+
+    crate::emit::on_probed(
+        &crate::proto::globe::Probed { at },
+        &veldsdk::correlation(),
+    );
 }
 
 /// Что очертить на поверхности. Набор целиком заменяет прежний.

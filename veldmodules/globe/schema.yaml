@@ -15,6 +15,15 @@ interface:
     # Что очертить на поверхности. Набор целиком, а не правка к нему.
     on_outlines:
       type: module/Outlines
+    # Что под указателем. Обратный ход проекции: считать его может только тот,
+    # у кого камера.
+    on_probe:
+      type: module/Probe
+
+  outputs:
+    on_probed:
+      type: module/Probed
+      replies_to: on_probe
 
 dependencies:
   # Кадровый тик — им и рисуем. Не по приходу команд: тогда пришлось бы

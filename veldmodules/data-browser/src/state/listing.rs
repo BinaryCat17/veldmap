@@ -169,6 +169,12 @@ pub enum Menu {
     Filter,
     Grouping,
     Sorting,
+    /// Меню полосы запроса у поиска. Живут здесь вместе с остальными потому,
+    /// что раскрытое меню бывает одно на вид, а полоса запроса стоит в том же
+    /// виде, что и полоса отбора.
+    Mission,
+    Period,
+    Cloud,
     /// Меню строки, названной своим ключом (см. `Row::key`).
     Row(String),
 }
@@ -182,6 +188,9 @@ impl Menu {
             Menu::Filter => "filter".to_string(),
             Menu::Grouping => "grouping".to_string(),
             Menu::Sorting => "sorting".to_string(),
+            Menu::Mission => "mission".to_string(),
+            Menu::Period => "period".to_string(),
+            Menu::Cloud => "cloud".to_string(),
             Menu::Row(row) => format!("row:{}", row),
         }
     }
@@ -191,6 +200,9 @@ impl Menu {
             "filter" => Menu::Filter,
             "grouping" => Menu::Grouping,
             "sorting" => Menu::Sorting,
+            "mission" => Menu::Mission,
+            "period" => Menu::Period,
+            "cloud" => Menu::Cloud,
             // Неизвестное имя — закрытое меню: показывать нечего, а падать тут
             // не за что.
             other => match other.strip_prefix("row:") {

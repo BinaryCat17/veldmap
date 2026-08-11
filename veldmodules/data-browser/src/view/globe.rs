@@ -5,7 +5,8 @@
 
 use veld_ui_service_wrap::{column, row, viewport};
 
-use crate::proto::ui_service::{container, text, Alignment, Element, Length, Padding};
+use crate::proto::ui_service::{container, mono, text, Alignment, Element, Length, Padding};
+use crate::module::components::format;
 use crate::module::state::{GlobeState, State};
 use crate::module::{theme, Msg};
 
@@ -13,7 +14,12 @@ use crate::module::{theme, Msg};
 /// вправе её растянуть.
 const CAPTION_HEIGHT: f32 = 30.0;
 
-pub fn view(_state: &State, globe: &GlobeState) -> Element<Msg> {
+/// Сколько знаков имени выбранного снимка помещается в подпись. Числом, а не
+/// шириной: полоса тянется вместе с окном, и мерить в ней нечего — а имя
+/// продукта длиной под семьдесят знаков и без того не показать целиком.
+const PICKED_CHARS: usize = 46;
+
+pub fn view(state: &State, globe: &GlobeState) -> Element<Msg> {
     // Текстуру область получает от нас же: мы её выделили в ответ на
     // предыдущий on_resized. На первом кадре её ещё нет — место занимается
     // пустым, и это нормально: следующим событием оно придёт.
@@ -29,14 +35,26 @@ pub fn view(_state: &State, globe: &GlobeState) -> Element<Msg> {
     column![
         container(area).width(Length::Fill).height(Length::Fill),
         theme::hairline(theme::LINE),
-        caption(globe),
+        caption(state, globe),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-fn caption(globe: &GlobeState) -> Element<Msg> {
+/// Полоса под областью: чем управляют слева, что выбрано справа.
+///
+/// Выбранное вытесняет размер места: пока не выбрано ничего, размер — то
+/// единственное, что можно сказать о безымянной области, а как только снимок
+/// назван, он и есть ответ на вопрос «на что я смотрю».
+fn caption(state: &State, globe: &GlobeState) -> Element<Msg> {
+    let picked: Option<Element<Msg>> = state.picked().map(|product| {
+        mono::<Msg>(format::ellipsize(&product.name, PICKED_CHARS))
+            .size(theme::TEXT_SMALL)
+            .color(theme::INK_SOFT)
+            .single_line()
+            .into()
+    });
     let label = match &globe.surface {
         Some(surface) => format!("{}×{}", surface.width, surface.height),
         None => "область ещё не размечена".to_string(),
@@ -44,13 +62,15 @@ fn caption(globe: &GlobeState) -> Element<Msg> {
 
     container(
         row![
-            text::<Msg>("Тащите — вращает, колесо — приближает".to_string())
+            text::<Msg>("Тащите — вращает, колесо — приближает, щелчок — выбирает".to_string())
                 .size(theme::TEXT_LABEL)
                 .color(theme::INK_DIM)
                 .single_line(),
             container(veld_ui_service_wrap::space::<Msg>(Length::Fill, Length::Fixed(0.0)))
                 .width(Length::Fill),
-            text::<Msg>(label).size(theme::TEXT_LABEL).color(theme::INK_FAINT).single_line(),
+            picked.unwrap_or_else(|| {
+                text::<Msg>(label).size(theme::TEXT_LABEL).color(theme::INK_FAINT).single_line().into()
+            }),
         ]
         .width(Length::Fill)
         .height(Length::Fill)

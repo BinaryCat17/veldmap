@@ -28,9 +28,10 @@
 //! растянуть ось Z до шара значило бы ровно то искажение, ради которого всё это
 //! и заведено.
 //!
-//! Считается в f64 в метрах, наружу отдаётся f32: на радиусе Земли шаг f32 —
-//! около 0.8 м, чего хватает виду с орбиты, но не хватило бы промежуточным
-//! величинам вроде радиуса кривизны.
+//! Считается всё в f64: на радиусе Земли шаг f32 — около 0.8 м, чего хватает
+//! вершине в буфере, но не хватает ни промежуточным величинам вроде радиуса
+//! кривизны, ни лучу, который потом переводят обратно в градусы. Поэтому f32
+//! здесь ровно один и на самом краю — [`position`].
 
 /// Большая полуось WGS84, метры.
 pub const SEMI_MAJOR_M: f64 = 6_378_137.0;
@@ -61,8 +62,10 @@ impl Geodetic {
     }
 }
 
-/// Точка эллипсоида в мировых координатах.
-pub fn position(point: Geodetic) -> World {
+/// Точка эллипсоида в мировых координатах, f64 — тем, кто считает ею дальше:
+/// в вершинном буфере хватает f32, а лучу и обратному переходу к градусам —
+/// нет (см. [`intersect`]).
+pub fn world(point: Geodetic) -> [f64; 3] {
     let unit = unit(point.lat_deg, point.lon_deg);
 
     // Радиус кривизны первого вертикала: расстояние от точки до оси вращения,
@@ -75,7 +78,67 @@ pub fn position(point: Geodetic) -> World {
     let equatorial = curvature + point.height_m;
     let polar = curvature * (1.0 - ECCENTRICITY_SQ) + point.height_m;
 
-    scale([unit[0] * equatorial, unit[1] * equatorial, unit[2] * polar])
+    [
+        unit[0] * equatorial / SEMI_MAJOR_M,
+        unit[1] * equatorial / SEMI_MAJOR_M,
+        unit[2] * polar / SEMI_MAJOR_M,
+    ]
+}
+
+/// То же в раскладке вершинного буфера.
+pub fn position(point: Geodetic) -> World {
+    let point = world(point);
+    [point[0] as f32, point[1] as f32, point[2] as f32]
+}
+
+/// Где луч встречает поверхность. `None` — мимо: за краем силуэта Земли нет.
+///
+/// Считается на шаре: сжатие эллипсоида — это сжатие одной оси, и, сжав вместе
+/// с ним луч, задачу сводим к пересечению с единичной сферой. Иначе пришлось бы
+/// решать то же квадратное уравнение с тремя разными коэффициентами и с тем же
+/// ответом.
+pub fn intersect(origin: [f64; 3], direction: [f64; 3]) -> Option<[f64; 3]> {
+    // Полярная полуось короче экваториальной ровно на сжатие — во столько же
+    // растягиваем ось Z, чтобы эллипсоид стал шаром.
+    let stretch = 1.0 / (1.0 - FLATTENING);
+    let start = [origin[0], origin[1], origin[2] * stretch];
+    let along = [direction[0], direction[1], direction[2] * stretch];
+
+    let a = dot(along, along);
+    let b = 2.0 * dot(start, along);
+    let c = dot(start, start) - 1.0;
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+
+    // Ближний корень: дальний лежит на изнанке, и её не видно.
+    let t = (-b - discriminant.sqrt()) / (2.0 * a);
+    (t > 0.0).then(|| {
+        [
+            origin[0] + direction[0] * t,
+            origin[1] + direction[1] * t,
+            origin[2] + direction[2] * t,
+        ]
+    })
+}
+
+/// Широта с долготой точки, лежащей **на поверхности**, — обратное к
+/// [`world`].
+///
+/// Только для поверхности: у точки над ней широта отделяется от высоты лишь
+/// итерациями, потому что нормаль, вдоль которой отсчитана высота, зависит от
+/// самой широты. Спрашивают отсюда ровно про поверхность (см. [`intersect`]).
+pub fn surface_at(point: [f64; 3]) -> (f64, f64) {
+    // Нормаль к эллипсоиду наклонена круче радиуса-вектора ровно во столько
+    // раз, во сколько сжата полярная ось, — отсюда деление на (1 − e²). У шара
+    // множителя не было бы, и обе широты совпали бы.
+    let lat = (point[2] / ((1.0 - ECCENTRICITY_SQ) * point[0].hypot(point[1]))).atan();
+    (lat.to_degrees(), point[1].atan2(point[0]).to_degrees())
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// Единичная нормаль к эллипсоиду — она же местная вертикаль, она же то, чем
@@ -102,10 +165,3 @@ fn unit(lat_deg: f64, lon_deg: f64) -> [f64; 3] {
     [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat]
 }
 
-fn scale(metres: [f64; 3]) -> World {
-    [
-        (metres[0] / SEMI_MAJOR_M) as f32,
-        (metres[1] / SEMI_MAJOR_M) as f32,
-        (metres[2] / SEMI_MAJOR_M) as f32,
-    ]
-}

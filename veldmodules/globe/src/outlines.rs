@@ -5,8 +5,12 @@
 //! Отдельный буфер нужен не формату, а времени жизни: Земля строится раз, а
 //! контуры меняются с каждым ответом на поиск.
 //!
-//! Все контуры лежат в одной паре буферов и рисуются одним вызовом: различать
-//! их между собой пока нечем — ни выделения, ни наведения в списке нет.
+//! Все контуры лежат в одной паре буферов, а рисуются двумя вызовами: цветов у
+//! них два — обычный и выделенный, — и это единственное, чем они друг от друга
+//! отличаются. Отсюда и раскладка: сначала все обычные, потом все выделенные,
+//! так что каждому вызову достаётся сплошной кусок индексов.
+
+use std::ops::Range;
 
 use crate::module::geodesy::Geodetic;
 use crate::module::mesh::{self, Vertex};
@@ -26,20 +30,30 @@ const MAX_EDGE_DEG: f64 = 1.0;
 pub struct Outlines {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Куски индексного буфера под каждый из двух вызовов. Выделенные —
+    /// последние: глубину линии не пишут, и кто поверх кого, решает порядок
+    /// отрисовки, а выделенный обязан быть виден поверх накрывших его соседей.
+    pub plain: Range<u32>,
+    pub picked: Range<u32>,
 }
 
 impl Outlines {
     pub fn build(outlines: &[Outline]) -> Self {
-        let mut built = Self { vertices: Vec::new(), indices: Vec::new() };
-        for outline in outlines {
+        let mut built =
+            Self { vertices: Vec::new(), indices: Vec::new(), plain: 0..0, picked: 0..0 };
+
+        for outline in outlines.iter().filter(|outline| !outline.selected) {
             built.push(outline);
         }
-        built
-    }
+        built.plain = 0..built.indices.len() as u32;
 
-    /// Сколько индексов вышло — весь диапазон отрисовки.
-    pub fn count(&self) -> u32 {
-        self.indices.len() as u32
+        let picked_start = built.indices.len() as u32;
+        for outline in outlines.iter().filter(|outline| outline.selected) {
+            built.push(outline);
+        }
+        built.picked = picked_start..built.indices.len() as u32;
+
+        built
     }
 
     /// Один замкнутый контур отрезками.

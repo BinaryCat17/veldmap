@@ -19,6 +19,10 @@ pub fn on_new_search(state: &mut State) {
         Some(id) => state.focus(id),
         None => {
             state.open(ViewKind::Search(SearchState::default()));
+            // Пустой запрос — это «самое свежее», ровно как обещает подсказка
+            // поля. Без него открытая вкладка пишет «ничего не нашлось» про то,
+            // чего никто не искал.
+            super::search::run(state);
         }
     }
 }

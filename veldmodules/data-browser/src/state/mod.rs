@@ -38,6 +38,10 @@ pub struct State {
     pub speed: f32,
     /// Прошлый замер: когда и сколько было скачано.
     pub measured: Option<(i64, u64)>,
+    /// Что сейчас очерчено на шаре. Не в состоянии вкладки глобуса: контуры —
+    /// свойство найденного, а не экрана, и уезжают они к рисующему независимо
+    /// от того, открыта ли вкладка (см. handlers::search::show_on_globe).
+    pub shown: Option<globe::Shown>,
 
     // -- Маршруты ответов --
     //
@@ -52,6 +56,9 @@ pub struct State {
     pub listings: Correlator<ViewId>,
     /// data-provider/on_search_result.
     pub searches: Correlator<ViewId>,
+    /// globe/on_probe — «что под указателем». Не таблица, а последний вопрос:
+    /// ответ на предыдущий уже не нужен, указатель с тех пор уехал.
+    pub probe: veldsdk::Latest,
 }
 
 impl State {
@@ -68,9 +75,11 @@ impl State {
             tab_menu: false,
             speed: 0.0,
             measured: None,
+            shown: None,
             previews: Correlator::new(),
             listings: Correlator::new(),
             searches: Correlator::new(),
+            probe: veldsdk::Latest::default(),
         };
 
         // Стартовая вкладка — из конфига; умолчание и поведение при неизвестном
@@ -138,6 +147,10 @@ impl State {
         self.views.iter().find(|view| view.id == id).map(|view| &view.kind)
     }
 
+    pub fn get(&self, id: ViewId) -> Option<&ViewKind> {
+        self.views.iter().find(|view| view.id == id).map(|view| &view.kind)
+    }
+
     pub fn get_mut(&mut self, id: ViewId) -> Option<&mut ViewKind> {
         self.views.iter_mut().find(|view| view.id == id).map(|view| &mut view.kind)
     }
@@ -198,6 +211,15 @@ impl State {
             ViewKind::Preview(preview) => Some(preview),
             _ => None,
         }
+    }
+
+    /// Выбранный на шаре снимок. `None` — не выбран ни один или закрыли вид, из
+    /// которого он взялся: контуры на шаре его переживают, а сам он — нет.
+    pub fn picked(&self) -> Option<&crate::proto::data_provider::DataProduct> {
+        let shown = self.shown.as_ref()?;
+        let selected = shown.selected.as_ref()?;
+        let ViewKind::Search(search) = self.get(shown.view)? else { return None };
+        search.results.iter().find(|product| &product.identifier == selected)
     }
 }
 

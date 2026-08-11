@@ -52,6 +52,10 @@ pub struct Row {
     /// Чем запись считает каталог: у снимка это тип продукта («S2MSI2A»).
     /// Пусто — каталог не сказал, и вид выводится из имени (см. [`Row::format`]).
     pub kind: String,
+    /// Есть ли у записи место на Земле — то есть можно ли показать её на шаре.
+    /// У файла на диске его нет: контур приходит от каталога вместе с выдачей и
+    /// в библиотеку не попадает.
+    pub located: bool,
     pub status: RowStatus,
 }
 
@@ -110,6 +114,7 @@ impl Row {
             size: 0,
             date: 0,
             kind: String::new(),
+            located: false,
             status,
         }
     }
@@ -129,6 +134,7 @@ impl Row {
             size: if entry.total > 0 { entry.total } else { entry.done },
             date: entry.modified,
             kind: String::new(),
+            located: false,
             status,
         }
     }
@@ -153,6 +159,7 @@ impl Row {
                 size,
                 date,
                 kind: String::new(),
+                located: false,
                 status: RowStatus::Remote,
             },
         }

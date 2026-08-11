@@ -11,6 +11,7 @@
 //! разметка; у ввода и у области её подставляет рендерер.
 
 use crate::module::state::listing::{Choice, Filter, Grouping, Menu, Sorting};
+use crate::module::state::search::{Cloud, Mission, Period};
 use crate::module::state::ViewId;
 use crate::proto::ui_service::{PointerEvent, UiEventResponse, ViewportSize};
 use veld_ui_service_wrap::{Payload, UiMessage};
@@ -46,8 +47,11 @@ pub enum Msg {
     // что вообще нашлось.
     /// Набранное в поле запроса.
     SearchQuery(String),
-    /// Миссия, по которой сузить запрос; пусто — не сужать.
-    SearchMission(String),
+    /// Чем сузить запрос. Каждое из трёх отправляет его заново: выбор сделан
+    /// одним нажатием, и спрашивать после него ещё и подтверждения не за что.
+    SearchMission(Mission),
+    SearchPeriod(Period),
+    SearchCloud(Cloud),
     /// Отправить запрос каталогу.
     RunSearch,
 
@@ -78,6 +82,10 @@ pub enum Msg {
     GlobeResized(ViewportSize),
     /// Указатель над областью, в тех же пикселях.
     GlobePointer(PointerEvent),
+    /// Показать снимок на шаре — по ключу провайдера. Единственное сообщение
+    /// глобуса, у которого нагрузка своя: приходит оно не от области, а из
+    /// меню строки списка.
+    GlobeShow(String),
 }
 
 impl UiMessage for Msg {
@@ -97,7 +105,9 @@ impl UiMessage for Msg {
             Msg::Query(query) => ("query", query.clone()),
             Msg::Page(page) => ("page", page.to_string()),
             Msg::SearchQuery(query) => ("search_query", query.clone()),
-            Msg::SearchMission(mission) => ("search_mission", mission.clone()),
+            Msg::SearchMission(mission) => ("search_mission", mission.key().to_string()),
+            Msg::SearchPeriod(period) => ("search_period", period.key().to_string()),
+            Msg::SearchCloud(cloud) => ("search_cloud", cloud.key().to_string()),
             Msg::RunSearch => ("run_search", String::new()),
             Msg::Enter(path) => ("enter", path.clone()),
             Msg::Up => ("up", String::new()),
@@ -110,6 +120,7 @@ impl UiMessage for Msg {
             // нагрузку подставит рендерер.
             Msg::GlobeResized(_) => ("globe_resized", String::new()),
             Msg::GlobePointer(_) => ("globe_pointer", String::new()),
+            Msg::GlobeShow(identifier) => ("globe_show", identifier.clone()),
         };
         (method.to_string(), value)
     }
@@ -137,7 +148,9 @@ impl UiMessage for Msg {
             "query" => Msg::Query(value.to_string()),
             "page" => Msg::Page(value.parse().ok()?),
             "search_query" => Msg::SearchQuery(value.to_string()),
-            "search_mission" => Msg::SearchMission(value.to_string()),
+            "search_mission" => Msg::SearchMission(Mission::from_key(value)?),
+            "search_period" => Msg::SearchPeriod(Period::from_key(value)?),
+            "search_cloud" => Msg::SearchCloud(Cloud::from_key(value)?),
             "run_search" => Msg::RunSearch,
             "enter" => Msg::Enter(value.to_string()),
             "up" => Msg::Up,
@@ -148,6 +161,7 @@ impl UiMessage for Msg {
             "zoom" => Msg::Zoom(value.parse().ok()?),
             "globe_resized" => Msg::GlobeResized(event.size()?.clone()),
             "globe_pointer" => Msg::GlobePointer(event.pointer()?.clone()),
+            "globe_show" => Msg::GlobeShow(value.to_string()),
             _ => return None,
         })
     }

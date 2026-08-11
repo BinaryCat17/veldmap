@@ -26,14 +26,15 @@ const GLYPH_RIGHT: &str = "\u{f054}";
 /// меняет, хуже отсутствующего: он обещает выбор и молчит в ответ. Знает это
 /// вид — он один и знает, откуда собраны его строки (см. `list_screen`).
 pub fn toolbar(listing: &ListingState, counts: &[usize], groupable: bool) -> Element<Msg> {
+    let open = &listing.menu;
     let mut controls: Vec<Element<Msg>> = vec![
         field(listing),
-        chip("Состояние:", listing.filter, Menu::Filter, listing, counts, Msg::Filter),
+        chip("Состояние:", listing.filter, Menu::Filter, open, counts, Msg::Filter),
     ];
     if groupable {
-        controls.push(chip("Группировка:", listing.grouping, Menu::Grouping, listing, &[], Msg::Group));
+        controls.push(chip("Группировка:", listing.grouping, Menu::Grouping, open, &[], Msg::Group));
     }
-    controls.push(chip("Сортировка:", listing.sorting, Menu::Sorting, listing, &[], Msg::Sort));
+    controls.push(chip("Сортировка:", listing.sorting, Menu::Sorting, open, &[], Msg::Sort));
 
     row(controls)
         .spacing(7.0)
@@ -71,15 +72,18 @@ fn field(listing: &ListingState) -> Element<Msg> {
 
 /// Чип со значением и выпадающим списком. Счётчики показывает только тот, кому
 /// их дали: у порядка и группировки считать нечего.
-fn chip<C: Choice>(
+///
+/// `opened` — меню, раскрытое в этом виде: их много, а раскрыто одно, и знать
+/// чипу нужно только это.
+pub fn chip<C: Choice>(
     caption: &str,
     current: C,
     menu: Menu,
-    listing: &ListingState,
+    opened: &Menu,
     counts: &[usize],
     make: fn(C) -> Msg,
 ) -> Element<Msg> {
-    let open = listing.menu == menu;
+    let open = *opened == menu;
     let anchor = theme::surface_button(
         row![
             text::<Msg>(caption.to_string()).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line(),
