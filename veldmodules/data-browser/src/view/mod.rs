@@ -10,7 +10,7 @@ pub mod search;
 
 use veld_ui_service_wrap::{column, row, Keyed};
 use crate::proto::ui_service::{
-    button, container, icon, popover, progress_bar, space, text, Alignment, Color, Element,
+    container, icon, popover, progress_bar, space, text, Alignment, Color, Element,
     FontWeight, Length, Padding, ScrollDirection, scrollable,
 };
 use crate::module::components::{format, menu};
@@ -83,15 +83,13 @@ fn tab_strip(state: &State) -> Element<Msg> {
         // Крестик — отдельная кнопка внутри вкладки: нажатие на неё до самой
         // вкладки не доходит, поэтому «закрыть» не выбирает заодно и вкладку.
         let tab = theme::tab(
-            button(
-                row![
-                    label,
-                    theme::chrome_icon(button(icon::<Msg>(GLYPH_CLOSE).size(9.0).color(theme::INK_FAINT)))
-                        .on_press(Msg::TabClose(view.id)),
-                ]
-                .spacing(4.0)
-                .align_items(Alignment::Center),
-            ),
+            row![
+                label,
+                theme::chrome_icon(icon::<Msg>(GLYPH_CLOSE).size(9.0).color(theme::INK_FAINT))
+                    .on_press(Msg::TabClose(view.id)),
+            ]
+            .spacing(4.0)
+            .align_items(Alignment::Center),
             active,
         )
         .height(Length::Fill)
@@ -116,7 +114,7 @@ fn tab_strip(state: &State) -> Element<Msg> {
         .align_items(Alignment::End);
 
     let opener = popover(
-        theme::chrome_icon(button(icon::<Msg>(GLYPH_PLUS).size(11.0).color(theme::INK_DIM)))
+        theme::chrome_icon(icon::<Msg>(GLYPH_PLUS).size(11.0).color(theme::INK_DIM))
             .width(Length::Fixed(TAB_STRIP_HEIGHT))
             .height(Length::Fill)
             .on_press(Msg::TabMenu(!state.tab_menu)),

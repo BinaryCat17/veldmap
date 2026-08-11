@@ -24,7 +24,8 @@ pub fn on_open(state: &mut State, req: OpenRequest) {
         return fail(reply_to, format!("'{}' скачан не полностью", req.name));
     }
 
-    let path = entry.path.clone();
+    // Недокачанное отсечено выше, значит файл лежит под своим именем.
+    let path = crate::module::storage::file_path(&req.name);
     // Внешний id вернём в ответе; собственный — это ключ ожидания, по нему
     // же ответ и опознаётся как «открытие файла», а не чтение сидкара.
     let correlation_id = state.pending_reads.begin(ReadPurpose::File(OpenFor {

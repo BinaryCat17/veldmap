@@ -6,7 +6,7 @@
 
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{
-    button, container, icon, space, text, Alignment, Element, Length, Padding,
+    container, icon, text, Alignment, Element, Length, Padding,
 };
 use crate::module::{theme, Msg};
 
@@ -75,14 +75,13 @@ pub fn panel(items: Vec<Item>) -> Element<Msg> {
 fn line(item: Item) -> Element<Msg> {
     // Место под пометку и счётчик остаётся, даже когда их нет: без этого
     // подписи соседних пунктов начинались бы в разных местах.
-    let nothing = || space::<Msg>(Length::Fixed(0.0), Length::Fixed(0.0)).into();
     let mark: Element<Msg> = match item.mark {
         Some(glyph) => icon::<Msg>(glyph).size(9.0).color(theme::ACCENT).into(),
-        None => nothing(),
+        None => theme::nothing(),
     };
     let count: Element<Msg> = match item.count {
         Some(count) => text::<Msg>(count.to_string()).size(theme::TEXT_SMALL).color(theme::INK_DIM).single_line().into(),
-        None => nothing(),
+        None => theme::nothing(),
     };
 
     let content = row![
@@ -96,7 +95,7 @@ fn line(item: Item) -> Element<Msg> {
     .width(Length::Fill)
     .align_items(Alignment::Center);
 
-    theme::menu_item(button(content), item.selected, item.danger)
+    theme::menu_item(content, item.selected, item.danger)
         .width(Length::Fill)
         .on_press(item.message)
         .into()

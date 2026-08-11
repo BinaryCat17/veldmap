@@ -34,7 +34,7 @@ dependencies:
   # ни сидкаров — приходит уже выведенное состояние записей.
   data-library:
     subs: [on_state, on_open_result]
-    calls: [on_list, on_download, on_cancel, on_delete, on_open]
+    calls: [on_list, on_download, on_pause, on_delete, on_open]
   # Превью картинок: ресурс открывает библиотека или провайдер, мы отдаём его
   # загрузчику, он возвращает GPU-текстуру и передаёт нам владение; ответ
   # различим по correlation_id (broadcast-конвенция шины).

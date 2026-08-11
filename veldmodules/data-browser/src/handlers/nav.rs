@@ -70,10 +70,8 @@ pub fn on_tab_close(state: &mut State, id: ViewId) {
 
 /// Открывает превью новой вкладкой: смотреть два снимка по очереди, не теряя
 /// первый, — обычное дело, а вкладка ровно для этого и есть.
-pub fn open_preview(state: &mut State, label: String) -> ViewId {
-    let mut preview = PreviewState::default();
-    preview.current_path = label;
-    state.open(ViewKind::Preview(preview))
+pub fn open_preview(state: &mut State, label: String, entry: Option<String>) -> ViewId {
+    state.open(ViewKind::Preview(PreviewState { label, entry, ..Default::default() }))
 }
 
 /// Запрашивает всё, чем живёт стартовая вкладка. Отдельно от `State::new`:

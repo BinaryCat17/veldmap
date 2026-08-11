@@ -6,7 +6,7 @@
 
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{
-    button, container, image, mono, scrollable, text, Alignment, Element, FontWeight, Length,
+    container, image, mono, scrollable, text, Alignment, Element, FontWeight, Length,
     Padding, ScrollDirection,
 };
 use crate::module::components::format;
@@ -95,40 +95,29 @@ fn picture(preview: &PreviewState, width: Length, height: Length) -> Element<Msg
 /// Имя снимка и масштаб.
 fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
     let name = mono::<Msg>(format::ellipsize(
-        &preview.current_path,
+        &preview.label,
         format::mono_fit(state.logical_width() - PANEL_WIDTH - 160.0, theme::TEXT_LABEL),
     ))
     .size(theme::TEXT_LABEL)
     .color(theme::INK);
 
     let step = |label: &str, zoom: f32| {
-        theme::surface_button(
-            button(
-                container(text::<Msg>(label.to_string()).size(theme::TEXT_LABEL).single_line())
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .center_x()
-                    .center_y(),
-            ),
-            false,
-        )
-        .width(Length::Fixed(27.0))
-        .height(Length::Fixed(27.0))
-        .on_press(Msg::Zoom(zoom))
+        theme::surface_button(text::<Msg>(label.to_string()).size(theme::TEXT_LABEL).single_line(), false)
+            .width(Length::Fixed(27.0))
+            .height(Length::Fixed(27.0))
+            .on_press(Msg::Zoom(zoom))
     };
 
     // Текущий масштаб — он же кнопка возврата к вписанному: отдельной кнопке
     // «вписать» тут места нет, а подпись и так говорит, что показано сейчас.
     let current = theme::surface_button(
-        button(
-            text::<Msg>(if preview.zoom > 0.0 {
-                format!("{:.0}%", preview.zoom * 100.0)
-            } else {
-                "вписан".to_string()
-            })
-            .size(theme::TEXT_LABEL)
-            .single_line(),
-        ),
+        text::<Msg>(if preview.zoom > 0.0 {
+            format!("{:.0}%", preview.zoom * 100.0)
+        } else {
+            "вписан".to_string()
+        })
+        .size(theme::TEXT_LABEL)
+        .single_line(),
         false,
     )
     .height(Length::Fixed(27.0))
@@ -150,13 +139,12 @@ fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
 }
 
 /// Свойства снимка: то, что о нём известно, не открывая файл заново. Размер и
-/// время — из библиотеки: смотрят здесь то, что она и отдала.
+/// время — из библиотеки, и только у скачанного: за удалённым записи нет, а
+/// придумывать её здесь было бы вторым источником правды о диске.
 fn properties(state: &State, preview: &PreviewState) -> Element<Msg> {
-    let entry = state
-        .library
-        .entries
-        .iter()
-        .find(|entry| entry.name == preview.current_path);
+    let entry = preview.entry.as_ref().and_then(|name| {
+        state.library.entries.iter().find(|entry| &entry.name == name)
+    });
 
     let mut lines: Vec<Element<Msg>> = vec![
         text::<Msg>("Свойства снимка".to_string())

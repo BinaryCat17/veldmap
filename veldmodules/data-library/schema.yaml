@@ -7,7 +7,9 @@ interface:
       type: module/LibraryRequest
     on_download:
       type: module/DownloadRequest
-    on_cancel:
+    # Пауза и отказ от начатого — разные топики: первый оставляет `.part`
+    # точкой возобновления, второй не оставляет ничего.
+    on_pause:
       type: module/ItemRequest
     on_delete:
       type: module/ItemRequest

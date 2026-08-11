@@ -56,7 +56,6 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::Enter(path) => handlers::browse::on_enter(state, path),
         Msg::Up => handlers::browse::on_up(state),
         Msg::Download(identifier) => handlers::library::on_download_pressed(state, identifier),
-        Msg::Cancel(name) => handlers::library::on_cancel_pressed(state, name),
         Msg::Delete(name) => handlers::library::on_delete_pressed(state, name),
         Msg::Preview(name) => handlers::preview::on_view_local_pressed(state, name),
         Msg::PreviewRemote(identifier) => handlers::preview::on_view_remote_pressed(state, identifier),

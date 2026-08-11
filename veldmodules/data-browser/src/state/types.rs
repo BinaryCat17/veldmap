@@ -74,7 +74,7 @@ impl ViewKind {
                 name => ellipsize(name),
             },
             ViewKind::Downloaded(_) => "Скачанное".to_string(),
-            ViewKind::Preview(preview) => match last_segment(&preview.current_path) {
+            ViewKind::Preview(preview) => match last_segment(&preview.label) {
                 "" => "Просмотр".to_string(),
                 name => ellipsize(name),
             },

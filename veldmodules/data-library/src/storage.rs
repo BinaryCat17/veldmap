@@ -28,6 +28,13 @@ pub fn part_path(name: &str) -> String {
     format!("{}/{}{}", DATA_DIR, name, PART_SUFFIX)
 }
 
+/// Где лежат данные записи: недокачанные — под `.part`, доведённые — под самим
+/// именем. Одна функция на оба случая, потому что выбор между ними — это один
+/// факт (доведена ли закачка), а не два независимых.
+pub fn data_path(name: &str, is_partial: bool) -> String {
+    if is_partial { part_path(name) } else { file_path(name) }
+}
+
 /// Имя, под которым продукт ложится на диск — последний сегмент ключа
 /// провайдера. И старт закачки, и вывод записи обязаны считать его одинаково,
 /// поэтому функция одна.
@@ -57,11 +64,12 @@ pub struct OriginSidecar {
 pub const PROVIDER_NAME: &str = "data-provider";
 
 /// Факт о файле на диске — ровно то, что вернул fs/on_list, без домыслов.
+///
+/// Имени здесь нет: оно ключ записи в снимке, и второе его место означало бы
+/// две правды об одном. Пути тоже нет — он выводится из имени и `is_partial`
+/// (см. [`data_path`]), а хранить его рядом значит завести способ сказать
+/// «доведена» и «лежит под .part» по-разному.
 pub struct LocalFile {
-    /// Путь фактической записи, включая `.part`. Именно он идёт в fs/on_delete.
-    pub path: String,
-    /// Имя записи — без `.part`, то же, что будет после докачки.
-    pub name: String,
     pub size: u64,
     pub is_partial: bool,
     /// Время файла на диске, unix-секунды; 0 — файловая система его не отдала.
@@ -69,18 +77,14 @@ pub struct LocalFile {
 }
 
 impl LocalFile {
-    /// Разбирает запись листинга. `None` — это сидкар, а не файл: он описывает
-    /// запись, а не является ею.
-    pub fn from_entry(name: &str, size: u64, modified: i64) -> Option<Self> {
+    /// Разбирает запись листинга в пару «имя записи → что под ним лежит».
+    /// `None` — это сидкар, а не файл: он описывает запись, а не является ею.
+    pub fn from_entry(name: &str, size: u64, modified: i64) -> Option<(String, Self)> {
         if name.ends_with(ORIGIN_SUFFIX) {
             return None;
         }
-        Some(Self {
-            path: file_path(name),
-            name: name.strip_suffix(PART_SUFFIX).unwrap_or(name).to_string(),
-            size,
-            is_partial: name.ends_with(PART_SUFFIX),
-            modified,
-        })
+        let is_partial = name.ends_with(PART_SUFFIX);
+        let entry = Self { size, is_partial, modified };
+        Some((name.strip_suffix(PART_SUFFIX).unwrap_or(name).to_string(), entry))
     }
 }

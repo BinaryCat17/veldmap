@@ -44,8 +44,9 @@ pub enum Msg {
     // -- Записи --
     /// Скачать, докачать или приостановить — по ключу провайдера.
     Download(String),
-    /// Отменить закачку — по имени записи библиотеки.
-    Cancel(String),
+    /// Выбросить запись: удалить скачанное или отказаться от начатого. Одно
+    /// сообщение на оба, потому что оставляют они после себя одно и то же —
+    /// ничего; разными их делает только подпись в меню.
     Delete(String),
     /// Смотреть скачанное — по имени записи библиотеки.
     Preview(String),
@@ -73,7 +74,6 @@ impl UiMessage for Msg {
             Msg::Enter(path) => ("enter", path.clone()),
             Msg::Up => ("up", String::new()),
             Msg::Download(identifier) => ("download", identifier.clone()),
-            Msg::Cancel(name) => ("cancel", name.clone()),
             Msg::Delete(name) => ("delete", name.clone()),
             Msg::Preview(name) => ("preview", name.clone()),
             Msg::PreviewRemote(identifier) => ("preview_remote", identifier.clone()),
@@ -102,7 +102,6 @@ impl UiMessage for Msg {
             "enter" => Msg::Enter(value.to_string()),
             "up" => Msg::Up,
             "download" => Msg::Download(value.to_string()),
-            "cancel" => Msg::Cancel(value.to_string()),
             "delete" => Msg::Delete(value.to_string()),
             "preview" => Msg::Preview(value.to_string()),
             "preview_remote" => Msg::PreviewRemote(value.to_string()),

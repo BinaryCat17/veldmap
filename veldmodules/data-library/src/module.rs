@@ -25,8 +25,15 @@ use storage::{LocalFile, OriginSidecar};
 pub struct Config {}
 
 pub struct State {
-    /// Что лежит на диске. Единственный писатель — catalog::on_list_result.
-    pub snapshot: Vec<LocalFile>,
+    /// Что лежит на диске: имя записи → что под ним найдено. Единственный
+    /// писатель — catalog::on_list_result.
+    ///
+    /// Ключ — имя записи, а не имя файла: `foo` и `foo.part` — это одна запись
+    /// каталога в двух состояниях, и держать их двумя строками значит завести
+    /// два ответа на вопрос «что с этой записью». Список именно так и делал:
+    /// запись выезжала наружу дважды, а её состояние выбиралось порядком
+    /// обхода каталога.
+    pub snapshot: HashMap<String, LocalFile>,
     /// Содержимое сидкаров по имени записи. Кэш диска, а не отдельная истина:
     /// листинг подрезает его под то, что реально лежит в каталоге, поэтому
     /// удалённый мимо приложения файл не воскреснет записью о намерении.
@@ -92,7 +99,7 @@ pub struct SidecarWrite {
 
 pub fn hook_init(_config: Config) -> anyhow::Result<State> {
     let state = State {
-        snapshot: Vec::new(),
+        snapshot: HashMap::new(),
         origins: HashMap::new(),
         downloads: HashMap::new(),
         pending_list: veldsdk::Correlator::new(),
@@ -106,7 +113,7 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 impl State {
     /// Запись на диске с данным именем (полная или недокачанная).
     pub fn entry_for(&self, name: &str) -> Option<&LocalFile> {
-        self.snapshot.iter().find(|f| f.name == name)
+        self.snapshot.get(name)
     }
 
     /// Идущая закачка записи вместе с её task_id (нужен для отмены).
@@ -140,6 +147,6 @@ pub fn on_read_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
         None => veldsdk::resource::discard("fs/on_read_result", opened),
     }
 }
-pub use download::{on_download, on_cancel, on_delete, on_delete_result,
+pub use download::{on_download, on_pause, on_delete, on_delete_result,
                    on_signed, on_fs_download_progress, on_fs_download_result};
 pub use open::on_open;

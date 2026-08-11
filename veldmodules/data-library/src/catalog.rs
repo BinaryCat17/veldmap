@@ -1,5 +1,7 @@
 //! Снимок каталога и сидкары: чтение диска и вывод состояния библиотеки.
 
+use std::collections::{BTreeSet, HashMap};
+
 use crate::module::{ReadPurpose, SidecarWrite, State};
 use crate::module::storage::{self, LocalFile, OriginSidecar};
 use crate::proto::data_library::{LibraryEntry, LibraryRequest, LibraryState, LibraryStatus};
@@ -31,9 +33,21 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
         return;
     }
 
-    state.snapshot = response.entries.iter()
+    // Свёртка по имени, а не список файлов: `foo` и `foo.part` — одна запись.
+    // Побеждает `.part`: он говорит, что с записью происходит сейчас, а файл
+    // под тем же именем остался от прошлой попытки и будет им заменён. Пара
+    // эта появляется только мимо приложения — перекачка сносит доведённый файл
+    // до старта (см. download::on_download), — но выбор всё равно должен быть
+    // назван здесь, а не выпадать из порядка обхода каталога.
+    let mut snapshot: HashMap<String, LocalFile> = HashMap::new();
+    for (name, file) in response.entries.iter()
         .filter_map(|e| LocalFile::from_entry(&e.name, e.size, e.modified))
-        .collect();
+    {
+        if file.is_partial || !snapshot.contains_key(&name) {
+            snapshot.insert(name, file);
+        }
+    }
+    state.snapshot = snapshot;
 
     // origins — кэш диска, а не независимая истина: подрезаем под то, что
     // реально лежит в каталоге, иначе файл, удалённый мимо приложения, остался
@@ -128,23 +142,27 @@ pub fn on_write_result(state: &mut State, response: FsWriteResult) {
     }
 }
 
-/// Удаляет запись вместе с её сидкаром — иначе `.origin` остался бы сиротой
-/// и файл воскрес бы записью о намерении.
+/// Удаляет данные записи, оставляя сидкар: так перекачка сносит доведённый
+/// файл, не теряя того, откуда он взялся.
+pub fn delete_data(state: &mut State, name: &str) {
+    // Чего в снимке нет вовсе, удаляем как `.part`: это единственное, что
+    // могло остаться от закачки, сорвавшейся между листингами.
+    let is_partial = state.entry_for(name).map(|file| file.is_partial).unwrap_or(true);
+    let path = storage::data_path(name, is_partial);
+    let correlation_id = state.pending_delete.begin(path.clone());
+    crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
+}
+
+/// Удаляет запись целиком — вместе с её сидкаром, иначе `.origin` остался бы
+/// сиротой и файл воскрес бы записью о намерении.
 pub fn delete_entry(state: &mut State, name: &str) {
     state.origins.remove(name);
     // Сидкар удаляем без учёта: ответ на него никого не интересует — судьбу
-    // записи решает удаление самих данных ниже.
+    // записи решает удаление самих данных.
     crate::calls::fs::on_delete(&FsDeleteRequest {
         path: storage::origin_path(name),
     }, "");
-
-    // Недокачанный лежит под `.part`, готовый — под своим именем.
-    let path = match state.entry_for(name) {
-        Some(entry) => entry.path.clone(),
-        None => storage::part_path(name),
-    };
-    let correlation_id = state.pending_delete.begin(path.clone());
-    crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
+    delete_data(state, name);
 }
 
 // ── Вывод состояния ────────────────────────────────────────────
@@ -161,30 +179,31 @@ fn publish_error(error: &str) {
 /// Выводит записи из трёх источников. Ни один не является надмножеством
 /// остальных: закачка может идти до появления файла, а сидкар — остаться
 /// без данных.
+///
+/// Имена собираются множеством, а не списком с проверкой на вхождение: имя —
+/// ключ записи, и второй раз оно означало бы вторую запись того же файла.
+/// Упорядоченным — порядок записей заодно и получается, сортировать нечего.
 fn entries(state: &State) -> Vec<LibraryEntry> {
-    let mut names: Vec<String> = state.snapshot.iter().map(|f| f.name.clone()).collect();
-    for name in state.origins.keys() {
-        if !names.contains(name) { names.push(name.clone()); }
-    }
-    for dl in state.downloads.values() {
-        if !names.contains(&dl.name) { names.push(dl.name.clone()); }
-    }
-    names.sort();
+    let names: BTreeSet<&str> = state.snapshot.keys()
+        .chain(state.origins.keys())
+        .map(String::as_str)
+        .chain(state.downloads.values().map(|dl| dl.name.as_str()))
+        .collect();
 
     names.into_iter().map(|name| {
-        let known_total = state.total_bytes(&name);
-        let entry = state.entry_for(&name);
+        let known_total = state.total_bytes(name);
+        let file = state.entry_for(name);
 
-        let (status, done, total) = if let Some((_, dl)) = state.active_download(&name) {
+        let (status, done, total) = if let Some((_, dl)) = state.active_download(name) {
             // Пока закачка жива, байты только отсюда: снимок диска обновляется
             // лишь на терминальных событиях и во время закачки заведомо отстал.
             let total = if dl.total > 0 { dl.total } else { known_total };
             (LibraryStatus::LibDownloading, dl.done, total)
-        } else if let Some(e) = entry {
-            if e.is_partial {
-                (LibraryStatus::LibPaused, e.size, known_total)
+        } else if let Some(file) = file {
+            if file.is_partial {
+                (LibraryStatus::LibPaused, file.size, known_total)
             } else {
-                (LibraryStatus::LibComplete, e.size, e.size)
+                (LibraryStatus::LibComplete, file.size, file.size)
             }
         } else {
             // Сидкар есть, данных нет — намерение пользователя, которое не
@@ -193,9 +212,9 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
         };
 
         LibraryEntry {
-            identifier: state.identifier_of(&name).unwrap_or_default().to_string(),
-            modified: entry.map(|e| e.modified).unwrap_or(0),
-            name,
+            identifier: state.identifier_of(name).unwrap_or_default().to_string(),
+            modified: file.map(|file| file.modified).unwrap_or(0),
+            name: name.to_string(),
             done,
             total,
             status: status as i32,

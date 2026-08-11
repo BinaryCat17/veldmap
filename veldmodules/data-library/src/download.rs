@@ -10,7 +10,7 @@
 
 use crate::module::{Download, State};
 use crate::module::storage;
-use crate::module::catalog::{self, delete_entry, write_sidecar};
+use crate::module::catalog::{self, delete_data, delete_entry, write_sidecar};
 use crate::proto::data_library::{DownloadRequest, ItemRequest};
 use crate::proto::data_provider::{SignRequest, SignedUrl};
 use veldsdk::proto::network::{FsDownloadProgress, FsDownloadRequest, FsDownloadResponse};
@@ -35,11 +35,20 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
     let known_total = state.origins.get(&name).and_then(|o| o.total_bytes);
     write_sidecar(state, &name, &req.identifier, known_total);
 
+    // Перекачка доведённого файла сносит его до старта. Качальщик пишет в
+    // `.part` и переименовывает его только в конце, поэтому иначе рядом с
+    // готовым файлом лёг бы второй, недокачанный, под тем же именем записи —
+    // а «одно имя, одна запись» держится ровно тем, что такой пары на диске
+    // не бывает. Отсюда и предупреждение в меню: перекачка необратима.
+    if state.entry_for(&name).is_some_and(|file| !file.is_partial) {
+        delete_data(state, &name);
+    }
+
     // Засеваем тем, что уже известно, а не нулями: у недокачанной записи
     // закачка продолжится с лежащих на диске байт, и «0 B» на возобновлении
-    // было бы враньём. Берём размер ТОЛЬКО у недокачанной: у полной записи
-    // `.part` нет, перекачка идёт с нуля.
-    let done = state.entry_for(&name).filter(|e| e.is_partial).map(|e| e.size).unwrap_or(0);
+    // было бы враньём. У доведённой `.part` нет — она только что снесена, и
+    // перекачка идёт с нуля.
+    let done = state.entry_for(&name).filter(|file| file.is_partial).map(|file| file.size).unwrap_or(0);
     let total = state.total_bytes(&name);
 
     // Операцию именуем мы: этим же id мы спросим подпись, попросим закачку и
@@ -81,17 +90,23 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
     }, &correlation_id);
 }
 
-/// Отмена — она же пауза: `.part` остаётся на диске ровно там, где его бросил
-/// обрыв, и следующее «скачать» продолжит с оборванного байта. Убиваем сами:
-/// операция наша. Прибирать за собой здесь нечего — терминальный
+/// Пауза: `.part` остаётся на диске ровно там, где его бросил обрыв, и
+/// следующее «скачать» продолжит с оборванного байта. Убиваем сами: операция
+/// наша. Прибирать за собой здесь нечего — терминальный
 /// `on_fs_download_result` придёт всё равно, его за убитого качальщика
 /// опубликует хост.
-pub fn on_cancel(state: &mut State, req: ItemRequest) {
+///
+/// Отказаться от начатого — это не сюда, а в `on_delete`: остановка с
+/// сохранением и остановка с выбрасыванием — разные вещи, и топика на них
+/// два, а не один с двумя смыслами.
+pub fn on_pause(state: &mut State, req: ItemRequest) {
     let Some((task_id, _)) = state.active_download(&req.name) else { return };
     crate::cancel::network::on_fs_download(&task_id.to_string());
 }
 
 /// Удалить запись — полную, недокачанную или заявленную одним лишь сидкаром.
+/// Идущую закачку это заодно и отменяет: отказ от начатого выражается тем же
+/// топиком, потому что оставить после себя он обязан то же самое — ничего.
 pub fn on_delete(state: &mut State, req: ItemRequest) {
     // Файл прямо сейчас качается — host держит `.part` открытым на запись,
     // удалять поверх активной записи нельзя. Убиваем закачку и помечаем запись

@@ -201,6 +201,9 @@ impl Menu {
     }
 }
 
+/// Умолчание собирается из умолчаний полей: у каждого оно своё и названо там,
+/// где живёт сам тип, — вторая копия этого списка расходилась бы с ними молча.
+#[derive(Default)]
 pub struct ListingState {
     pub filter: Filter,
     pub grouping: Grouping,
@@ -211,19 +214,6 @@ pub struct ListingState {
     /// «страница 3» списка из одной строки — не состояние, а недоразумение.
     pub page: usize,
     pub menu: Menu,
-}
-
-impl Default for ListingState {
-    fn default() -> Self {
-        Self {
-            filter: Filter::default(),
-            grouping: Grouping::default(),
-            sorting: Sorting::default(),
-            query: String::new(),
-            page: 0,
-            menu: Menu::Closed,
-        }
-    }
 }
 
 impl ListingState {

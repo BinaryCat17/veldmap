@@ -225,23 +225,7 @@ impl Scrollbar {
     }
 }
 
-/// Кнопка во всех своих состояниях. `disabled` — та, у которой нет `on_press`:
-/// hover и нажатие до неё не доходят (см. `Button` в types.proto).
-#[derive(Clone, Default)]
-pub struct ButtonStyle {
-    pub active: WidgetStyle,
-    pub hovered: WidgetStyle,
-    pub pressed: WidgetStyle,
-    pub disabled: WidgetStyle,
-}
-
-impl ButtonStyle {
-    pub(crate) fn to_proto(self) -> proto::ButtonStyle {
-        proto::ButtonStyle {
-            active: Some(self.active.to_proto()),
-            hovered: Some(self.hovered.to_proto()),
-            pressed: Some(self.pressed.to_proto()),
-            disabled: Some(self.disabled.to_proto()),
-        }
-    }
-}
+// Отдельного типа под «стиль кнопки» здесь нет: состояния коробки называются
+// по одному (`Container::hovered`/`pressed`/`disabled`), и незваное вырождается
+// к покою. Набор из четырёх лиц, заполняемый целиком, заставлял бы повторять
+// вид кнопки четырежды — и три копии из четырёх были бы одинаковыми.

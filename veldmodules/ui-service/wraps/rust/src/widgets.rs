@@ -2,7 +2,7 @@
 //! Стили и геометрия — в style.rs.
 
 use crate::proto;
-use super::style::{Alignment, Background, ButtonStyle, Length, Padding};
+use super::style::{Alignment, Background, Length, Padding};
 
 pub struct Element<M> {
     pub widget: proto::Widget,
@@ -105,8 +105,8 @@ macro_rules! parent {
     )+ };
 }
 
-sizing!(Column, Row, Stack, Text, Button, Container, Scrollable, ProgressBar, Image);
-padded!(Column, Row, Button, Container);
+sizing!(Column, Row, Stack, Text, Container, Scrollable, ProgressBar, Image);
+padded!(Column, Row, Container);
 parent!(Column, Row, Stack);
 
 pub struct Column<M> {
@@ -295,47 +295,6 @@ pub fn icon<M>(glyph: impl Into<String>) -> Text<M> {
     Text::new(glyph).font_family(super::style::FONT_ICONS).single_line()
 }
 
-pub struct Button<M> {
-    widget: proto::Button,
-    _marker: std::marker::PhantomData<M>,
-}
-
-impl<M> Button<M> {
-    pub fn new(content: impl Into<Element<M>>) -> Self {
-        Self { widget: proto::Button {
-            child: Some(Box::new(content.into().widget)),
-            ..Default::default()
-        }, _marker: std::marker::PhantomData }
-    }
-    /// Что модуль получит при нажатии. Кнопка без сообщения не нажимается —
-    /// хост рисует её стилем `disabled`.
-    pub fn on_press(mut self, message: M) -> Self
-    where
-        M: UiMessage,
-    {
-        let (method, value) = message.encode();
-        self.widget.on_press = Some(proto::Handler { method, value });
-        self
-    }
-    pub fn style(mut self, style: ButtonStyle) -> Self {
-        self.widget.style = Some(style.to_proto());
-        self
-    }
-}
-
-impl<M> From<Button<M>> for Element<M> {
-    fn from(b: Button<M>) -> Self {
-        proto::Widget {
-            r#type: Some(proto::widget::Type::Button(Box::new(b.widget))),
-            ..Default::default()
-        }.into()
-    }
-}
-
-pub fn button<M>(content: impl Into<Element<M>>) -> Button<M> {
-    Button::new(content)
-}
-
 pub struct TextInput<M> {
     widget: proto::TextInput,
     _marker: std::marker::PhantomData<M>,
@@ -466,6 +425,45 @@ impl<M> Container<M> {
     pub fn center_y(mut self) -> Self {
         self.widget.align_y = Alignment::Center as i32;
         self
+    }
+
+    // -- Нажимаемость --
+    //
+    // Отдельной кнопки в протоколе нет: кнопка — это коробка, на которую можно
+    // нажать (см. `Interaction` в types.proto). Любой из методов ниже её и
+    // заводит, поэтому назвать можно только то, что отличается от покоя.
+
+    /// Что модуль получит при нажатии. Коробка со стилями, но без сообщения —
+    /// выключенная кнопка: рендерер рисует её `disabled` и нажатие не пускает.
+    pub fn on_press(mut self, message: M) -> Self
+    where
+        M: UiMessage,
+    {
+        let (method, value) = message.encode();
+        self.interaction().on_press = Some(proto::Handler { method, value });
+        self
+    }
+
+    /// Вид под курсором; не назван — как в покое.
+    pub fn hovered(mut self, style: super::style::WidgetStyle) -> Self {
+        self.interaction().hovered = Some(style.to_proto());
+        self
+    }
+
+    /// Вид под нажатой кнопкой мыши; не назван — как под курсором.
+    pub fn pressed(mut self, style: super::style::WidgetStyle) -> Self {
+        self.interaction().pressed = Some(style.to_proto());
+        self
+    }
+
+    /// Вид выключенной; не назван — как в покое.
+    pub fn disabled(mut self, style: super::style::WidgetStyle) -> Self {
+        self.interaction().disabled = Some(style.to_proto());
+        self
+    }
+
+    fn interaction(&mut self) -> &mut proto::Interaction {
+        self.widget.interaction.get_or_insert_with(Default::default)
     }
 }
 

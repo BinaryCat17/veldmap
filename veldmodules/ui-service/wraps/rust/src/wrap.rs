@@ -15,13 +15,13 @@ pub mod render;
 // Явные реэкспорты затеняют одноимённые proto-сообщения из глоба выше:
 // снаружи Column — билдер, а сырой proto::Column доступен через crate::proto.
 pub use style::{
-    Alignment, Background, Border, ButtonStyle, Color, Length, Padding, ProgressBarStyle,
+    Alignment, Background, Border, Color, Length, Padding, ProgressBarStyle,
     Scrollbar, Shadow, TextInputStyle, WidgetStyle,
 };
 pub use widgets::{
-    Button, Column, Container, Element, Image, Keyed, Popover, ProgressBar, Row, Scrollable,
+    Column, Container, Element, Image, Keyed, Popover, ProgressBar, Row, Scrollable,
     Space, Stack, Text, TextInput, Tooltip, UiMessage,
-    button, column, container, icon, image, mono, popover, progress_bar, row, scrollable,
+    column, container, icon, image, mono, popover, progress_bar, row, scrollable,
     space, stack, text, text_input, tooltip,
 };
 

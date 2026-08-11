@@ -5,8 +5,8 @@
 //! написанный где-то ещё, — ошибка: набор их конечен и живёт здесь.
 
 use crate::proto::ui_service::{
-    Border, Background, ButtonStyle, Color, Padding, ProgressBarStyle, Scrollbar, Shadow,
-    TextInputStyle, WidgetStyle, Button, Container, Element, Length, container, space,
+    Border, Background, Color, Padding, ProgressBarStyle, Scrollbar, Shadow,
+    TextInputStyle, WidgetStyle, Container, Element, Length, container, space,
 };
 
 // --- Палитра ---
@@ -101,101 +101,96 @@ fn outline(color: Color, radius: f32) -> Border {
     Border { color, width: 1.0, radius }
 }
 
-/// Кнопка из двух своих состояний. `pressed` повторяет `active`: нажатие видно
-/// по тому, что оно делает, а мигание фоном только спорит с наведением.
-/// `disabled` — тоже: о недоступности говорит содержимое кнопки (бледная
-/// стрелка на краю пагинации), а не её рамка; там, где действия нет вовсе,
-/// нет и кнопки.
-fn pair(active: WidgetStyle, hovered: WidgetStyle) -> ButtonStyle {
-    ButtonStyle {
-        disabled: active.clone(),
-        pressed: active.clone(),
-        active,
-        hovered,
-    }
+/// Общее начало всех нажимаемых ролей: коробка с видом в покое и под курсором.
+///
+/// Содержимое стоит по центру. Коробка кнопки почти всегда крупнее своей
+/// подписи — от фиксированного размера или от чужой высоты в ряду, — и глиф,
+/// прижатый к её углу, читается как ошибка вёрстки. Тому, чьё содержимое и так
+/// тянется на всю коробку (строка списка, пункт меню), центрирование ничего не
+/// меняет, так что случая назвать это иначе не возникает.
+///
+/// `pressed` и `disabled` не называются нигде: нажатие видно по тому, что оно
+/// делает, а о недоступности говорит содержимое (бледная стрелка на краю
+/// пагинации). Незваное вырождается к покою — см. `Interaction` в types.proto.
+fn clickable<M>(content: impl Into<Element<M>>, rest: WidgetStyle, hovered: WidgetStyle) -> Container<M> {
+    container(content).style(rest).hovered(hovered).center_x().center_y()
 }
 
 // --- Роли ---
 
 /// Вкладка. Активная — цвета страницы, то есть продолжение показанного ниже;
 /// остальные сливаются с хромом.
-pub fn tab<M>(button: Button<M>, active: bool) -> Button<M> {
-    let style = if active {
-        pair(face(PAGE, INK, Border::with_radius(RADIUS)), face(PAGE, INK, Border::with_radius(RADIUS)))
+pub fn tab<M>(content: impl Into<Element<M>>, active: bool) -> Container<M> {
+    let border = Border::with_radius(RADIUS);
+    let (rest, hovered) = if active {
+        (face(PAGE, INK, border), face(PAGE, INK, border))
     } else {
-        pair(
-            face(Color::TRANSPARENT, INK_DIM, Border::with_radius(RADIUS)),
-            face(HOVER, INK, Border::with_radius(RADIUS)),
-        )
+        (face(Color::TRANSPARENT, INK_DIM, border), face(HOVER, INK, border))
     };
-    button.style(style).padding(Padding { top: 4.0, bottom: 4.0, left: 10.0, right: 8.0 })
+    clickable(content, rest, hovered).padding(Padding { top: 4.0, bottom: 4.0, left: 10.0, right: 8.0 })
 }
 
 /// Кнопка-иконка на хроме: «+» в полосе вкладок, крестик вкладки.
-pub fn chrome_icon<M>(button: Button<M>) -> Button<M> {
-    button
-        .style(pair(
-            face(Color::TRANSPARENT, INK_DIM, Border::with_radius(RADIUS_SMALL)),
-            face(Color::rgb8(0xE7, 0xDF, 0xCB), INK, Border::with_radius(RADIUS_SMALL)),
-        ))
-        .padding(4.0)
+pub fn chrome_icon<M>(content: impl Into<Element<M>>) -> Container<M> {
+    clickable(
+        content,
+        face(Color::TRANSPARENT, INK_DIM, Border::with_radius(RADIUS_SMALL)),
+        face(Color::rgb8(0xE7, 0xDF, 0xCB), INK, Border::with_radius(RADIUS_SMALL)),
+    )
+    .padding(4.0)
 }
 
 /// Кнопка-поверхность: чип фильтра, «вверх», страница пагинации, кнопка строки.
 /// `raised` — открытый чип или выбранная страница: он держится нажатым.
-pub fn surface_button<M>(button: Button<M>, raised: bool) -> Button<M> {
+pub fn surface_button<M>(content: impl Into<Element<M>>, raised: bool) -> Container<M> {
     let border = outline(if raised { LINE_STRONG } else { LINE }, RADIUS);
     let background = if raised { HOVER } else { SURFACE };
-    button.style(pair(
-        face(background, INK_MUTED, border),
-        face(HOVER, INK, border),
-    ))
+    clickable(content, face(background, INK_MUTED, border), face(HOVER, INK, border))
 }
 
 /// Выбранная страница пагинации — единственная кнопка с акцентной заливкой.
-pub fn page_button<M>(button: Button<M>, current: bool) -> Button<M> {
+pub fn page_button<M>(content: impl Into<Element<M>>, current: bool) -> Container<M> {
+    let step = Padding { top: 0.0, bottom: 0.0, left: 7.0, right: 7.0 };
     if !current {
-        return surface_button(button, false).padding(Padding { top: 0.0, bottom: 0.0, left: 7.0, right: 7.0 });
+        return surface_button(content, false).padding(step);
     }
     let border = outline(ACCENT_LINE, RADIUS_SMALL);
-    button
-        .style(pair(face(ACCENT_WASH, INK, border), face(ACCENT_WASH, INK, border)))
-        .padding(Padding { top: 0.0, bottom: 0.0, left: 7.0, right: 7.0 })
+    clickable(content, face(ACCENT_WASH, INK, border), face(ACCENT_WASH, INK, border)).padding(step)
 }
 
 /// Строка списка. Своего фона у неё нет — она лежит на странице; видно её
 /// только под курсором и по черте снизу.
-pub fn row_button<M>(button: Button<M>) -> Button<M> {
-    button
-        .style(pair(
-            face(Color::TRANSPARENT, INK_SOFT, Border::default()),
-            face(ROW_HOVER, INK_SOFT, Border::default()),
-        ))
-        .padding(Padding { top: 0.0, bottom: 0.0, left: GUTTER, right: GUTTER })
+pub fn row_button<M>(content: impl Into<Element<M>>) -> Container<M> {
+    clickable(
+        content,
+        face(Color::TRANSPARENT, INK_SOFT, Border::default()),
+        face(ROW_HOVER, INK_SOFT, Border::default()),
+    )
+    .padding(Padding { top: 0.0, bottom: 0.0, left: GUTTER, right: GUTTER })
 }
 
 /// Пункт выпадающего меню. `danger` — удаление: единственное, что подписано
 /// цветом, потому что единственное необратимое.
-pub fn menu_item<M>(button: Button<M>, selected: bool, danger: bool) -> Button<M> {
+pub fn menu_item<M>(content: impl Into<Element<M>>, selected: bool, danger: bool) -> Container<M> {
     let text = if danger { DANGER } else { INK };
     let background = if selected { HOVER } else { Color::TRANSPARENT };
-    button
-        .style(pair(
-            face(background, text, Border::with_radius(RADIUS_SMALL)),
-            face(HOVER, text, Border::with_radius(RADIUS_SMALL)),
-        ))
-        .padding(Padding { top: 6.0, bottom: 6.0, left: 9.0, right: 9.0 })
+    clickable(
+        content,
+        face(background, text, Border::with_radius(RADIUS_SMALL)),
+        face(HOVER, text, Border::with_radius(RADIUS_SMALL)),
+    )
+    .padding(Padding { top: 6.0, bottom: 6.0, left: 9.0, right: 9.0 })
 }
 
 /// Сегмент пути. Нажимаемый, но не кнопка на вид: рамка и фон у каждого
 /// сегмента превратили бы строку пути в ряд кнопок, а это одна строка.
-pub fn crumb<M>(button: Button<M>) -> Button<M> {
-    button
-        .style(pair(
-            face(Color::TRANSPARENT, ACCENT, Border::with_radius(4.0)),
-            face(HOVER, ACCENT, Border::with_radius(4.0)),
-        ))
-        .padding(Padding { top: 2.0, bottom: 2.0, left: 3.0, right: 3.0 })
+pub fn crumb<M>(content: impl Into<Element<M>>) -> Container<M> {
+    clickable(
+        content,
+        face(Color::TRANSPARENT, ACCENT, Border::with_radius(4.0)),
+        face(HOVER, ACCENT, Border::with_radius(4.0)),
+    )
+    .padding(Padding { top: 2.0, bottom: 2.0, left: 3.0, right: 3.0 })
 }
 
 /// Коробка управляющего элемента: поле фильтра, строка пути. Та же
@@ -247,6 +242,13 @@ pub fn progress(color: Color) -> ProgressBarStyle {
 }
 
 // --- Готовые мелочи ---
+
+/// Пустое место нулевого размера — им занимают то, о чём сказать нечего:
+/// ячейку без значения в сетке таблицы, пометку у пункта меню без неё. Место
+/// остаётся за ним, поэтому соседи не съезжают.
+pub fn nothing<M>() -> Element<M> {
+    space::<M>(Length::Fixed(0.0), Length::Fixed(0.0)).into()
+}
 
 /// Волосяная линия во всю ширину: ею разделены полосы хрома и строки списка.
 /// Отдельным виджетом, а не рамкой: рамка в этом протоколе одна на все четыре

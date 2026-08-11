@@ -1,11 +1,13 @@
 //! components/controls.rs — управление списком: отбор, путь и страницы.
 //!
-//! Всё, что стоит вокруг таблицы и меняет не данные, а показ. Одинаково у трёх
-//! видов: список один и тот же, значит и рычаги к нему те же.
+//! Всё, что стоит вокруг таблицы и меняет не данные, а показ. Список у трёх
+//! видов один и тот же, поэтому и рычаги к нему одни — с оговоркой, что рычаг
+//! показывается там, где он что-то меняет: путь есть только у каталога,
+//! группировка бессмысленна ровно там, где путь есть.
 
 use veld_ui_service_wrap::{row, Keyed};
 use crate::proto::ui_service::{
-    button, container, icon, mono, popover, space, text, text_input, Alignment, Element,
+    container, icon, mono, popover, space, text, text_input, Alignment, Element,
     FontWeight, Length, Padding,
 };
 use crate::module::components::{arrange::Arranged, menu};
@@ -18,19 +20,27 @@ const GLYPH_UP: &str = "\u{f062}";
 const GLYPH_LEFT: &str = "\u{f053}";
 const GLYPH_RIGHT: &str = "\u{f054}";
 
-/// Полоса отбора: поле фильтра и три чипа.
-pub fn toolbar(listing: &ListingState, counts: &[usize]) -> Element<Msg> {
-    row![
+/// Полоса отбора: поле фильтра и чипы.
+///
+/// `groupable` — есть ли что складывать по папкам. Рычаг, который ничего не
+/// меняет, хуже отсутствующего: он обещает выбор и молчит в ответ. Знает это
+/// вид — он один и знает, откуда собраны его строки (см. `list_screen`).
+pub fn toolbar(listing: &ListingState, counts: &[usize], groupable: bool) -> Element<Msg> {
+    let mut controls: Vec<Element<Msg>> = vec![
         field(listing),
         chip("Состояние:", listing.filter, Menu::Filter, listing, counts, Msg::Filter),
-        chip("Группировка:", listing.grouping, Menu::Grouping, listing, &[], Msg::Group),
-        chip("Сортировка:", listing.sorting, Menu::Sorting, listing, &[], Msg::Sort),
-    ]
-    .spacing(7.0)
-    .width(Length::Fill)
-    .align_items(Alignment::Center)
-    .padding(Padding { top: 0.0, bottom: 10.0, left: theme::GUTTER, right: theme::GUTTER })
-    .into()
+    ];
+    if groupable {
+        controls.push(chip("Группировка:", listing.grouping, Menu::Grouping, listing, &[], Msg::Group));
+    }
+    controls.push(chip("Сортировка:", listing.sorting, Menu::Sorting, listing, &[], Msg::Sort));
+
+    row(controls)
+        .spacing(7.0)
+        .width(Length::Fill)
+        .align_items(Alignment::Center)
+        .padding(Padding { top: 0.0, bottom: 10.0, left: theme::GUTTER, right: theme::GUTTER })
+        .into()
 }
 
 /// Поле фильтра: лупа и ввод в одной коробке. Лупа внутри неё, а не рядом, —
@@ -71,19 +81,17 @@ fn chip<C: Choice>(
 ) -> Element<Msg> {
     let open = listing.menu == menu;
     let anchor = theme::surface_button(
-        button(
-            row![
-                text::<Msg>(caption.to_string()).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line(),
-                text::<Msg>(current.label().to_string())
-                    .size(theme::TEXT_LABEL)
-                    .color(theme::INK)
-                    .weight(FontWeight::WeightMedium)
-                    .single_line(),
-                icon::<Msg>(GLYPH_CARET).size(8.0).color(theme::INK_FAINT),
-            ]
-            .spacing(7.0)
-            .align_items(Alignment::Center),
-        ),
+        row![
+            text::<Msg>(caption.to_string()).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line(),
+            text::<Msg>(current.label().to_string())
+                .size(theme::TEXT_LABEL)
+                .color(theme::INK)
+                .weight(FontWeight::WeightMedium)
+                .single_line(),
+            icon::<Msg>(GLYPH_CARET).size(8.0).color(theme::INK_FAINT),
+        ]
+        .spacing(7.0)
+        .align_items(Alignment::Center),
         open,
     )
     .height(Length::Fixed(theme::CONTROL_HEIGHT))
@@ -116,11 +124,11 @@ pub fn path(current: &str) -> Element<Msg> {
     // Корень назван как папка, а не пустым местом: он такой же шаг пути, и
     // вернуться в него — обычный переход, а не особый случай.
     let mut crumbs: Vec<Element<Msg>> = vec![
-        theme::crumb(button(
+        theme::crumb(
             mono::<Msg>("корень")
                 .size(theme::TEXT_SMALL)
                 .color(if current.is_empty() { theme::INK } else { theme::ACCENT }),
-        ))
+        )
         .on_press(Msg::Enter(String::new()))
         .key("root")
         .into(),
@@ -134,18 +142,18 @@ pub fn path(current: &str) -> Element<Msg> {
         prefix.push('/');
         let last = index + 1 == segments.len();
         crumbs.push(
-            theme::crumb(button(
+            theme::crumb(
                 mono::<Msg>((*segment).to_string())
                     .size(theme::TEXT_SMALL)
                     .color(if last { theme::INK } else { theme::ACCENT }),
-            ))
+            )
             .on_press(Msg::Enter(prefix.clone()))
             .key(prefix.clone()),
         );
     }
 
     row![
-        theme::surface_button(button(icon::<Msg>(GLYPH_UP).size(11.0).color(theme::INK_MUTED)), false)
+        theme::surface_button(icon::<Msg>(GLYPH_UP).size(11.0).color(theme::INK_MUTED), false)
             .width(Length::Fixed(theme::CONTROL_HEIGHT))
             .height(Length::Fixed(theme::CONTROL_HEIGHT))
             .on_press(Msg::Up),
@@ -173,23 +181,21 @@ const STEP_WIDTH: f32 = 26.0;
 /// не теряется при переходе.
 pub fn pager(arranged: &Arranged<'_>) -> Element<Msg> {
     let step = |glyph: &str, to: usize, enabled: bool| {
-        let button = theme::surface_button(
-            button(icon::<Msg>(glyph).size(9.0).color(if enabled { theme::INK_SOFT } else { theme::LINE_STRONG })),
+        let step = theme::surface_button(
+            icon::<Msg>(glyph).size(9.0).color(if enabled { theme::INK_SOFT } else { theme::LINE_STRONG }),
             false,
         )
         .width(Length::Fixed(STEP_WIDTH))
         .height(Length::Fixed(STEP_HEIGHT));
-        if enabled { button.on_press(Msg::Page(to)) } else { button }
+        if enabled { step.on_press(Msg::Page(to)) } else { step }
     };
 
     let pages = (0..arranged.pages).map(|index| {
         theme::page_button(
-            button(
-                text::<Msg>((index + 1).to_string())
-                    .size(theme::TEXT_LABEL)
-                    .color(theme::INK_MUTED)
-                    .single_line(),
-            ),
+            text::<Msg>((index + 1).to_string())
+                .size(theme::TEXT_LABEL)
+                .color(theme::INK_MUTED)
+                .single_line(),
             index == arranged.page,
         )
         .height(Length::Fixed(STEP_HEIGHT))

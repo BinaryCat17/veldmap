@@ -20,23 +20,17 @@ pub fn on_download_pressed(state: &mut State, identifier: String) {
         .map(|e| e.name.clone());
 
     if let Some(name) = downloading {
-        crate::calls::data_library::on_cancel(&ItemRequest { name });
+        crate::calls::data_library::on_pause(&ItemRequest { name });
         return;
     }
 
     crate::calls::data_library::on_download(&DownloadRequest { identifier });
 }
 
-/// Отменить идущую закачку. Отдельно от «паузы»: пауза — это то же нажатие на
-/// кнопку скачивания, а отмена приходит из меню строки и адресуется записью.
-pub fn on_cancel_pressed(_state: &mut State, name: String) {
-    if name.is_empty() { return; }
-
-    crate::calls::data_library::on_cancel(&ItemRequest { name });
-}
-
 /// Пользователь нажал «удалить» — на любой записи библиотеки (полной,
-/// недокачанной или заявленной одним лишь намерением).
+/// недокачанной или заявленной одним лишь намерением). Идущую закачку это
+/// заодно отменяет; отдельного «отменить» нет, потому что оставить после себя
+/// он обязан то же самое — ничего (см. меню строки в components::table).
 pub fn on_delete_pressed(_state: &mut State, name: String) {
     if name.is_empty() { return; }
 
@@ -73,10 +67,7 @@ fn measure_speed(state: &mut State) {
         return;
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0);
+    let now = crate::module::components::format::now();
 
     if let Some((measured_at, measured_done)) = state.measured {
         let seconds = now - measured_at;

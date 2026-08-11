@@ -143,52 +143,6 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             txt = txt.font(convert_font(&t.font_family, t.weight()));
             txt.into()
         }
-        Some(proto::widget::Type::Button(b)) => {
-            let content = if let Some(child) = &b.child {
-                convert_widget(child)
-            } else {
-                iced_widget::Space::new().into()
-            };
-
-            let mut btn = button(content)
-                .width(convert_length(&b.width))
-                .height(convert_length(&b.height))
-                .padding(convert_padding(&b.padding));
-            
-            // Нажимаемость — это наличие обработчика: iced сам рисует кнопку
-            // без него состоянием Disabled.
-            if let Some(h) = &b.on_press {
-                if !h.method.is_empty() {
-                    btn = btn.on_press(UiMessage { method: h.method.clone(), value: h.value.clone() });
-                }
-            }
-
-            match &b.style {
-                Some(style) => {
-                    let active = style.active.clone().unwrap_or_default();
-                    let hovered = style.hovered.clone().unwrap_or_default();
-                    let pressed = style.pressed.clone().unwrap_or_default();
-                    let disabled = style.disabled.clone().unwrap_or_default();
-
-                    // Перевод в стиль iced идёт внутри замыкания, а не рядом:
-                    // цвет текста в стиле может быть не задан, и тогда его
-                    // берёт тема, — а тему видно только здесь.
-                    btn = btn.style(move |theme: &Theme, status| {
-                         let style = match status {
-                             iced_widget::button::Status::Active => &active,
-                             iced_widget::button::Status::Hovered => &hovered,
-                             iced_widget::button::Status::Pressed => &pressed,
-                             iced_widget::button::Status::Disabled => &disabled,
-                         };
-                         convert_button_style(style, theme.palette().text)
-                    });
-                }
-                // Стиль не задан — рисуем темой.
-                None => btn = btn.style(iced_widget::button::primary),
-            }
-
-            btn.into()
-        }
         Some(proto::widget::Type::TextInput(t)) => {
             let mut size = t.size;
             if size <= 0.0 {
@@ -250,10 +204,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             input.into()
         }
         Some(proto::widget::Type::Container(c)) => {
+            let (width, height) = (convert_length(&c.width), convert_length(&c.height));
             let mut cont = container(if let Some(child) = &c.child { convert_widget(child) } else { iced_widget::Space::new().into() })
                 .padding(convert_padding(&c.padding))
-                .width(convert_length(&c.width))
-                .height(convert_length(&c.height))
+                .width(width)
+                .height(height)
                 .max_width(convert_length_val(&c.max_width))
                 .max_height(convert_length_val(&c.max_height))
                 .clip(c.clip);
@@ -261,12 +216,53 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             if let Some(ax) = convert_alignment(c.align_x()) { cont = cont.align_x(ax); }
             if let Some(ay) = convert_alignment(c.align_y()) { cont = cont.align_y(ay); }
 
-            if let Some(style) = &c.style {
-                let style = convert_widget_style(style);
-                cont = cont.style(move |_theme: &Theme| style);
+            let Some(interaction) = &c.interaction else {
+                // Ненажимаемая коробка: рисуем её саму, стилем в покое.
+                if let Some(style) = &c.style {
+                    let style = convert_widget_style(style);
+                    cont = cont.style(move |_theme: &Theme| style);
+                }
+                return cont.into();
+            };
+
+            // Нажимаемая — та же коробка внутри кнопки iced: отступ,
+            // выравнивание и обрезка остаются у коробки (у кнопки их либо нет,
+            // либо они беднее), а кнопке достаётся отклик и фон. Размер стоит
+            // на обеих: коробка по нему раскладывается, а кнопка по нему же
+            // просит место у родителя — `Fill` на одной из них двоих ничего бы
+            // не значил.
+            let mut btn = button(cont)
+                .width(width)
+                .height(height)
+                .padding(iced_core::Padding::ZERO);
+
+            if let Some(handler) = &interaction.on_press
+                && !handler.method.is_empty()
+            {
+                btn = btn.on_press(UiMessage { method: handler.method.clone(), value: handler.value.clone() });
             }
 
-            cont.into()
+            // Незаданное состояние вырождается к покою, а не к пустому стилю:
+            // «не сказано» здесь значит «как обычно», иначе каждая роль
+            // повторяла бы свой вид четырежды.
+            let rest = c.style.clone().unwrap_or_default();
+            let hovered = interaction.hovered.clone().unwrap_or_else(|| rest.clone());
+            let pressed = interaction.pressed.clone().unwrap_or_else(|| hovered.clone());
+            let disabled = interaction.disabled.clone().unwrap_or_else(|| rest.clone());
+
+            // Перевод в стиль iced идёт внутри замыкания, а не рядом: цвет
+            // текста в стиле может быть не задан, и тогда его берёт тема, — а
+            // тему видно только здесь.
+            btn.style(move |theme: &Theme, status| {
+                let style = match status {
+                    iced_widget::button::Status::Active => &rest,
+                    iced_widget::button::Status::Hovered => &hovered,
+                    iced_widget::button::Status::Pressed => &pressed,
+                    iced_widget::button::Status::Disabled => &disabled,
+                };
+                convert_button_style(style, theme.palette().text)
+            })
+            .into()
         }
         Some(proto::widget::Type::Scrollable(s)) => {
             let content = if let Some(child) = &s.content { convert_widget(child) } else { Space::new().into() };

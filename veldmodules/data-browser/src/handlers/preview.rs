@@ -29,7 +29,7 @@ pub fn on_view_local_pressed(state: &mut State, name: String) {
     if name.is_empty() { return; }
 
     // Один correlation_id на оба шага: по нему же отменяется декодирование.
-    let correlation_id = begin_open(state, name.clone());
+    let correlation_id = begin_open(state, name.clone(), Some(name.clone()));
     crate::calls::data_library::on_open(&crate::proto::data_library::OpenRequest {
         name,
     }, &correlation_id);
@@ -42,7 +42,8 @@ pub fn on_view_local_pressed(state: &mut State, name: String) {
 pub fn on_view_remote_pressed(state: &mut State, identifier: String) {
     if identifier.is_empty() { return; }
 
-    let correlation_id = begin_open(state, identifier.clone());
+    // Записи библиотеки за таким снимком нет: он ещё в хранилище.
+    let correlation_id = begin_open(state, identifier.clone(), None);
     crate::calls::data_provider::on_open(&crate::proto::data_provider::OpenRequest {
         identifier,
     }, &correlation_id);
@@ -50,8 +51,8 @@ pub fn on_view_remote_pressed(state: &mut State, identifier: String) {
 
 /// Общее начало обоих путей: новая вкладка и корреляция, по которой её найдёт
 /// ответ.
-fn begin_open(state: &mut State, label: String) -> String {
-    let view = super::nav::open_preview(state, label);
+fn begin_open(state: &mut State, label: String, entry: Option<String>) -> String {
+    let view = super::nav::open_preview(state, label, entry);
     let correlation_id = state.preview_mut(view)
         .expect("вид только что открыт")
         .begin();
@@ -64,7 +65,7 @@ fn begin_open(state: &mut State, label: String) -> String {
 /// формат) нужна и после того, как пользователь ушёл на другую вкладку.
 fn fail(state: &mut State, view: ViewId, error: String) {
     let Some(preview) = state.preview_mut(view) else { return };
-    veldsdk::log::warn!(target: "handlers", "превью '{}': {}", preview.current_path, error);
+    veldsdk::log::warn!(target: "handlers", "превью '{}': {}", preview.label, error);
     preview.error = Some(error);
 }
 
@@ -126,7 +127,7 @@ fn start_decode(state: &mut State, view: ViewId, resource: veldsdk::ResourceHand
     preview.file = Some(veldsdk::OwnedResource::new(resource.clone()));
     // Загрузчик получил безымянный ресурс — назвать источник в логах и в
     // списке задач можем только мы.
-    let label = preview.current_path.clone();
+    let label = preview.label.clone();
 
     crate::calls::image_loader::on_load(&LoadImageRequest {
         resource: Some(resource),

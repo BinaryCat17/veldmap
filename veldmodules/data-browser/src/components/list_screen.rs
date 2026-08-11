@@ -17,7 +17,9 @@ pub struct Screen<'a> {
     pub title: &'a str,
     /// Строка под заголовком: сколько всего и откуда.
     pub subtitle: String,
-    /// Путь текущей папки; пусто — пути у вида нет.
+    /// Путь текущей папки; пусто — пути у вида нет. Он же признак «показана
+    /// одна папка»: строки такого вида все лежат в ней, и это меняет не только
+    /// заголовок, но и то, какие рычаги к списку имеют смысл.
     pub path: Option<&'a str>,
     /// Что показать вместо таблицы, когда строк нет: у пустого поиска и у
     /// пустой папки причины разные.
@@ -80,7 +82,11 @@ pub fn view(screen: Screen<'_>, listing: &ListingState, width: f32) -> Element<M
     if let Some(path) = screen.path {
         screen_rows.push(controls::path(path));
     }
-    screen_rows.push(controls::toolbar(listing, &counts));
+    // Складывать по папкам есть смысл там, где строки собраны отовсюду.
+    // Наличие пути ровно это и означает: вид с путём показывает содержимое
+    // одной папки, все его строки лежат в ней, и заголовок над ними был бы
+    // ровно один. Второго признака под это заводить не нужно — этот уже есть.
+    screen_rows.push(controls::toolbar(listing, &counts, screen.path.is_none()));
     screen_rows.push(table::header());
     screen_rows.push(body);
     if arranged.pages > 1 {

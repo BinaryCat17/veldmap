@@ -11,7 +11,13 @@ pub struct PreviewState {
     pub texture: Option<veldsdk::OwnedResource>,
     /// Открытый ресурс с файлом: наш, живёт только пока идёт декодирование.
     pub file: Option<veldsdk::OwnedResource>,
-    pub current_path: String,
+    /// Чем снимок подписан — на вкладке, в тулбаре и в логе. Только подпись:
+    /// адресовать по ней ничего нельзя, потому что у скачанного и удалённого
+    /// снимка это разные вещи — имя записи и ключ провайдера.
+    pub label: String,
+    /// Запись библиотеки, если снимок открыт из скачанного. `None` — он лежит
+    /// в хранилище, и того, что знает про него диск (размер, время), нет.
+    pub entry: Option<String>,
     /// Запрос на показ: актуален он или уже нет. Кому принадлежит ответ,
     /// отвечает таблица маршрутов модуля (`State::previews`) — вкладку могли
     /// закрыть, и тогда спрашивать здесь уже некого.
@@ -58,7 +64,8 @@ impl PreviewState {
         self.texture = None;
         self.close_file();
         self.error = None;
-        self.current_path.clear();
+        self.label.clear();
+        self.entry = None;
         self.source_size = None;
         self.preview_size = None;
         self.zoom = 0.0;
