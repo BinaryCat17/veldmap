@@ -57,12 +57,22 @@ fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+// Цель рендера — sRGB-формата, и записанное GPU кодирует сам, то есть шейдер
+// обязан отдавать линейное. Из вершин оно и приходит (см. Vertex::color), а
+// вот текстуры — атлас глифов и чужие картинки — лежат в UNORM и хранят
+// sRGB-числа: их приходится линеаризовать здесь. Альфа остаётся как есть —
+// она не цвет и кодированию не подлежит.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let cutoff = step(c, vec3<f32>(0.04045));
+    return mix(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, cutoff);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Mode 2.0 = External Image
     if (in.mode > 1.5) {
         let tex_sample = textureSample(t_diffuse, s_diffuse, in.tex_coords);
-        return vec4<f32>(tex_sample.rgb, in.color.a * tex_sample.a);
+        return vec4<f32>(srgb_to_linear(tex_sample.rgb), in.color.a * tex_sample.a);
     }
 
     // Mode 1.0 = SDF Quad, Mode 0.0 = Text/Texture (Atlas)
@@ -102,6 +112,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (is_grayscale) {
         return vec4<f32>(in.color.rgb, in.color.a * tex_sample.a);
     } else {
-        return vec4<f32>(tex_sample.rgb, in.color.a * tex_sample.a);
+        return vec4<f32>(srgb_to_linear(tex_sample.rgb), in.color.a * tex_sample.a);
     }
 }

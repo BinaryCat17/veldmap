@@ -29,8 +29,16 @@ pub fn on_list(state: &State, req: FsListRequest, caller: Caller) {
                         // сторона (data-browser) сама решает, как показать недокачанное;
                         // здесь это просто ещё одно имя файла.
                         if let Some(name) = entry.file_name().to_str() {
-                            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                            entries.push(FsEntry { name: name.to_string(), size });
+                            // Размер и время — из одного metadata: два вызова
+                            // читают каталог дважды и могут разойтись.
+                            let metadata = entry.metadata().ok();
+                            let size = metadata.as_ref().map(|meta| meta.len()).unwrap_or(0);
+                            let modified = metadata
+                                .and_then(|meta| meta.modified().ok())
+                                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|since| since.as_secs() as i64)
+                                .unwrap_or(0);
+                            entries.push(FsEntry { name: name.to_string(), size, modified });
                         }
                     }
                     FsListResult { entries, error: String::new() }

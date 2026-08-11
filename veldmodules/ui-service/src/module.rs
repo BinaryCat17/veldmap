@@ -6,6 +6,7 @@ mod renderer;
 mod converter;
 mod graphics;
 mod keyboard;
+mod popover;
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {

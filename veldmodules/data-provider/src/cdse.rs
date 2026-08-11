@@ -2,7 +2,7 @@
 //!
 //! Как устроен бакет — в s3.rs; здесь только жизненный цикл запросов и задач.
 
-use crate::proto::data_provider::{ListPathRequest, ListPathResponse, SignRequest, SignedUrl};
+use crate::proto::data_provider::{ListEntry, ListPathRequest, ListPathResponse, SignRequest, SignedUrl};
 use aws_smithy_runtime_api::client::identity::Identity;
 use super::{s3, Config, PendingList, State};
 
@@ -123,8 +123,14 @@ pub fn on_http_result(
         Err(format!("HTTP error: {}", response.status))
     };
 
-    let (items, next_token, error) = match listing {
-        Ok(listing) => (listing.items, listing.next_token, String::new()),
+    let (entries, next_token, error) = match listing {
+        Ok(listing) => (
+            listing.entries.into_iter()
+                .map(|entry| ListEntry { key: entry.identifier, size: entry.size, modified: entry.modified })
+                .collect(),
+            listing.next_token,
+            String::new(),
+        ),
         Err(error) => {
             log::warn!(target: "handlers", "Листинг '{}' не удался: {}", pending.path, error);
             (Vec::new(), String::new(), error)
@@ -132,7 +138,7 @@ pub fn on_http_result(
     };
 
     crate::emit::on_list_path_result(&ListPathResponse {
-        items,
+        entries,
         next_token,
         error,
     }, &pending.correlation_id);

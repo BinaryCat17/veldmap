@@ -6,7 +6,11 @@ use crate::proto;
 /// Логические имена шрифтов ui-service — строковый контракт между ним и
 /// клиентами разметки. Регистрация файлов шрифтов — в ui-service (state.rs),
 /// здесь — единственное место имён для клиентов; литералы не разносить.
-pub const FONT_DEFAULT: &str = "JetBrains Mono";
+///
+/// `UI` — шрифт подписей и заголовков, он же дефолтный; `MONO` — там, где
+/// важна одинаковая ширина знака: имена файлов, размеры, пути; `ICONS` — глифы.
+pub const FONT_UI: &str = "UI";
+pub const FONT_MONO: &str = "Mono";
 pub const FONT_ICONS: &str = "Icons";
 
 #[derive(Clone, Copy, Default)]
@@ -61,8 +65,18 @@ pub struct Color {
 impl Color {
     pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
     pub const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    pub const TRANSPARENT: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
     pub fn from_rgb(r: f32, g: f32, b: f32) -> Self { Self { r, g, b, a: 1.0 } }
     pub fn from_rgba(r: f32, g: f32, b: f32, a: f32) -> Self { Self { r, g, b, a } }
+    /// Цвет так, как его называют в макете: `#2E2A22` → `rgb8(0x2E, 0x2A, 0x22)`.
+    /// Числа остаются в sRGB — в линейное их переводит рендерер (см. `Vertex`).
+    pub const fn rgb8(r: u8, g: u8, b: u8) -> Self {
+        Self { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
+    }
+    /// Тот же цвет полупрозрачным — для теней и подсветок.
+    pub const fn with_alpha(self, a: f32) -> Self {
+        Self { a, ..self }
+    }
     pub(crate) fn to_proto(self) -> proto::Color { proto::Color { r: self.r, g: self.g, b: self.b, a: self.a } }
 }
 
@@ -108,12 +122,32 @@ impl From<Color> for Background {
     fn from(c: Color) -> Self { Background::Color(c) }
 }
 
+/// Тень под виджетом. Нулевая — её нет.
+#[derive(Clone, Copy, Default)]
+pub struct Shadow {
+    pub color: Color,
+    pub offset: (f32, f32),
+    pub blur: f32,
+}
+
+impl Shadow {
+    pub(crate) fn to_proto(self) -> proto::Shadow {
+        proto::Shadow {
+            color: Some(self.color.to_proto()),
+            offset_x: self.offset.0,
+            offset_y: self.offset.1,
+            blur: self.blur,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct WidgetStyle {
     pub background: Option<Background>,
     /// `None` — цвет текста берётся у темы (см. `WidgetStyle` в types.proto).
     pub text_color: Option<Color>,
     pub border: Border,
+    pub shadow: Option<Shadow>,
 }
 
 impl WidgetStyle {
@@ -122,6 +156,71 @@ impl WidgetStyle {
             background: self.background.map(|b| b.to_proto()),
             text_color: self.text_color.map(|c| c.to_proto()),
             border: Some(self.border.to_proto()),
+            shadow: self.shadow.map(|s| s.to_proto()),
+        }
+    }
+}
+
+/// Полоса прогресса: дорожка, заполненная часть, общая рамка.
+#[derive(Clone, Copy, Default)]
+pub struct ProgressBarStyle {
+    pub track: Option<Background>,
+    pub bar: Option<Background>,
+    pub border: Border,
+}
+
+impl ProgressBarStyle {
+    pub(crate) fn to_proto(self) -> proto::ProgressBarStyle {
+        proto::ProgressBarStyle {
+            track: self.track.map(|b| b.to_proto()),
+            bar: self.bar.map(|b| b.to_proto()),
+            border: Some(self.border.to_proto()),
+        }
+    }
+}
+
+/// Поле ввода в трёх состояниях — см. `TextInputStyle` в types.proto.
+#[derive(Clone, Default)]
+pub struct TextInputStyle {
+    pub active: WidgetStyle,
+    pub hovered: WidgetStyle,
+    pub focused: WidgetStyle,
+    pub placeholder: Color,
+    pub selection: Color,
+}
+
+impl TextInputStyle {
+    pub(crate) fn to_proto(self) -> proto::TextInputStyle {
+        proto::TextInputStyle {
+            active: Some(self.active.to_proto()),
+            hovered: Some(self.hovered.to_proto()),
+            focused: Some(self.focused.to_proto()),
+            placeholder: Some(self.placeholder.to_proto()),
+            selection: Some(self.selection.to_proto()),
+        }
+    }
+}
+
+/// Полоса прокрутки: геометрия и цвета.
+#[derive(Clone, Copy, Default)]
+pub struct Scrollbar {
+    pub width: f32,
+    pub scroller_width: f32,
+    pub margin: f32,
+    pub rail: Option<Background>,
+    pub scroller: Option<Background>,
+    pub radius: f32,
+}
+
+impl Scrollbar {
+    pub(crate) fn to_proto(self) -> proto::Scrollbar {
+        proto::Scrollbar {
+            width: self.width,
+            scroller_width: self.scroller_width,
+            margin: self.margin,
+            rail: self.rail.map(|b| b.to_proto()),
+            scroller: self.scroller.map(|b| b.to_proto()),
+            radius: self.radius,
         }
     }
 }

@@ -1,0 +1,241 @@
+//! state/listing.rs — то, чем список отличается от самого себя: отбор,
+//! группировка, порядок, страница и открытое меню.
+//!
+//! Одно на все три вида: сетевой каталог, поиск и скачанное — это один и тот же
+//! список из разных источников, и настройки показа у них общие по устройству, а
+//! не по совпадению. Своя копия у каждого вида, потому что настройка
+//! принадлежит вкладке: в соседней открыта другая папка со своим отбором.
+
+use crate::module::components::RowStatus;
+
+/// Значение выпадающего списка: конечный набор, который ездит в разметку и
+/// обратно строкой. Один трейт на все три списка — иначе у каждого свои
+/// `all/label/parse`, и они расходятся.
+pub trait Choice: Copy + PartialEq + Sized + 'static {
+    /// Все значения по порядку — им же выложено меню.
+    const ALL: &'static [Self];
+    /// Ключ в сообщении разметки: имя, а не индекс, чтобы порядок в меню можно
+    /// было менять.
+    fn key(self) -> &'static str;
+    /// Подпись в меню — полная.
+    fn title(self) -> &'static str;
+    /// Подпись на самом чипе — короче: рядом уже написано, чего она касается.
+    fn label(self) -> &'static str;
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|choice| choice.key() == key)
+    }
+}
+
+/// Отбор по состоянию записи.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    #[default]
+    All,
+    Downloading,
+    Interrupted,
+    OnDisk,
+    Remote,
+}
+
+impl Filter {
+    pub fn matches(self, status: &RowStatus) -> bool {
+        match self {
+            Filter::All => true,
+            Filter::Downloading => matches!(status, RowStatus::Downloading { .. }),
+            Filter::Interrupted => matches!(status, RowStatus::Paused { .. }),
+            Filter::OnDisk => matches!(status, RowStatus::Complete | RowStatus::Partial { .. }),
+            Filter::Remote => matches!(status, RowStatus::Remote),
+        }
+    }
+}
+
+impl Choice for Filter {
+    const ALL: &'static [Self] = &[Filter::All, Filter::Downloading, Filter::Interrupted, Filter::OnDisk, Filter::Remote];
+
+    fn key(self) -> &'static str {
+        match self {
+            Filter::All => "all",
+            Filter::Downloading => "downloading",
+            Filter::Interrupted => "interrupted",
+            Filter::OnDisk => "on-disk",
+            Filter::Remote => "remote",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Filter::All => "Все",
+            Filter::Downloading => "Скачиваются",
+            Filter::Interrupted => "Прервано",
+            Filter::OnDisk => "На диске",
+            Filter::Remote => "В хранилище",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Filter::All => "все",
+            Filter::Downloading => "скачиваются",
+            Filter::Interrupted => "прервано",
+            Filter::OnDisk => "на диске",
+            Filter::Remote => "в хранилище",
+        }
+    }
+}
+
+/// Во что складывать строки одной папки.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Grouping {
+    #[default]
+    None,
+    /// Заголовок на папку целиком — одна ступень.
+    Folder,
+    /// Заголовок на каждый сегмент пути — сколько их, столько и ступеней.
+    Tree,
+}
+
+impl Choice for Grouping {
+    const ALL: &'static [Self] = &[Grouping::None, Grouping::Folder, Grouping::Tree];
+
+    fn key(self) -> &'static str {
+        match self {
+            Grouping::None => "none",
+            Grouping::Folder => "folder",
+            Grouping::Tree => "tree",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Grouping::None => "Без группировки",
+            Grouping::Folder => "По папкам",
+            Grouping::Tree => "Полное дерево",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Grouping::None => "нет",
+            Grouping::Folder => "по папкам",
+            Grouping::Tree => "дерево",
+        }
+    }
+}
+
+/// Порядок строк.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sorting {
+    #[default]
+    Newest,
+    Name,
+    Size,
+}
+
+impl Choice for Sorting {
+    const ALL: &'static [Self] = &[Sorting::Newest, Sorting::Name, Sorting::Size];
+
+    fn key(self) -> &'static str {
+        match self {
+            Sorting::Newest => "newest",
+            Sorting::Name => "name",
+            Sorting::Size => "size",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Sorting::Newest => "Сначала новые",
+            Sorting::Name => "По имени",
+            Sorting::Size => "По размеру",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Sorting::Newest => "новые",
+            Sorting::Name => "имя",
+            Sorting::Size => "размер",
+        }
+    }
+}
+
+/// Какое меню сейчас раскрыто. Одно поле, а не флаг на каждое: два раскрытых
+/// меню сразу — состояние, которого не бывает, и выражать его нечем.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub enum Menu {
+    #[default]
+    Closed,
+    Filter,
+    Grouping,
+    Sorting,
+    /// Меню строки, названной своим ключом (см. `Row::key`).
+    Row(String),
+}
+
+impl Menu {
+    /// Ключ в сообщении разметки. Меню строки названо её ключом — им же оно и
+    /// адресуется, второго имени у строки нет.
+    pub fn key(&self) -> String {
+        match self {
+            Menu::Closed => "closed".to_string(),
+            Menu::Filter => "filter".to_string(),
+            Menu::Grouping => "grouping".to_string(),
+            Menu::Sorting => "sorting".to_string(),
+            Menu::Row(row) => format!("row:{}", row),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Menu {
+        match key {
+            "filter" => Menu::Filter,
+            "grouping" => Menu::Grouping,
+            "sorting" => Menu::Sorting,
+            // Неизвестное имя — закрытое меню: показывать нечего, а падать тут
+            // не за что.
+            other => match other.strip_prefix("row:") {
+                Some(row) => Menu::Row(row.to_string()),
+                None => Menu::Closed,
+            },
+        }
+    }
+}
+
+pub struct ListingState {
+    pub filter: Filter,
+    pub grouping: Grouping,
+    pub sorting: Sorting,
+    /// Отбор по имени — то, что набрано в поле фильтра.
+    pub query: String,
+    /// Страница, считая с нуля. Любая правка отбора возвращает на первую:
+    /// «страница 3» списка из одной строки — не состояние, а недоразумение.
+    pub page: usize,
+    pub menu: Menu,
+}
+
+impl Default for ListingState {
+    fn default() -> Self {
+        Self {
+            filter: Filter::default(),
+            grouping: Grouping::default(),
+            sorting: Sorting::default(),
+            query: String::new(),
+            page: 0,
+            menu: Menu::Closed,
+        }
+    }
+}
+
+impl ListingState {
+    /// Смена отбора: меню закрывается, страница сбрасывается. Общий хвост у
+    /// всех трёх списков — вызывается после присвоения самого значения.
+    pub fn refine(&mut self) {
+        self.page = 0;
+        self.menu = Menu::Closed;
+    }
+
+    /// Раскрыть меню или закрыть его же — повторное нажатие на чип.
+    pub fn toggle(&mut self, menu: Menu) {
+        self.menu = if self.menu == menu { Menu::Closed } else { menu };
+    }
+}

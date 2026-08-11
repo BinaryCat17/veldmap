@@ -26,8 +26,9 @@ const BUCKET: &str = "eodata";
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Сколько объектов просить за раз. Листинг постраничный, продолжение — через
-/// continuation-token (см. `Listing::next_token`).
-const PAGE_SIZE: &str = "20";
+/// continuation-token (см. `Listing::next_token`): страница здесь — размер
+/// одного ответа хранилища, а не то, что видит пользователь.
+const PAGE_SIZE: &str = "200";
 
 /// Подписанный запрос: адрес и заголовки к нему.
 pub struct Request {
@@ -37,11 +38,18 @@ pub struct Request {
 
 /// Разобранный листинг одного уровня.
 pub struct Listing {
-    /// Идентификаторы — папки (с завершающим `/`) и объекты вперемешку,
-    /// в том виде, в каком их принимают функции этого модуля.
-    pub items: Vec<String>,
+    /// Папки (с завершающим `/`) и объекты вперемешку, в том виде, в каком их
+    /// принимают функции этого модуля.
+    pub entries: Vec<Entry>,
     /// Пусто — страница последняя.
     pub next_token: String,
+}
+
+/// Элемент листинга: ключ и то, что каталог о нём сообщил.
+pub struct Entry {
+    pub identifier: String,
+    pub size: u64,
+    pub modified: i64,
 }
 
 /// Ключ объекта в бакете из идентификатора продукта.
@@ -150,23 +158,34 @@ pub fn parse_listing(body: &[u8], requested: &str) -> anyhow::Result<Listing> {
     let mut reader = Reader::from_reader(body);
     reader.config_mut().trim_text(true);
 
-    let mut items = Vec::new();
+    let mut entries: Vec<Entry> = Vec::new();
     let mut next_token = String::new();
     let mut buf = Vec::new();
     let mut tag = String::new();
     let mut in_common_prefixes = false;
+    // Собираемый объект: Key, Size и LastModified приходят разными событиями,
+    // и до `</Contents>` элемент неполон.
+    let mut object: Option<Entry> = None;
 
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
                 tag = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                if tag == "CommonPrefixes" {
-                    in_common_prefixes = true;
+                match tag.as_str() {
+                    "CommonPrefixes" => in_common_prefixes = true,
+                    "Contents" => object = Some(Entry { identifier: String::new(), size: 0, modified: 0 }),
+                    _ => {}
                 }
             }
             Event::End(e) => {
-                if e.local_name().as_ref() == b"CommonPrefixes" {
-                    in_common_prefixes = false;
+                match e.local_name().as_ref() {
+                    b"CommonPrefixes" => in_common_prefixes = false,
+                    b"Contents" => {
+                        if let Some(entry) = object.take() {
+                            push(&mut entries, entry, requested);
+                        }
+                    }
+                    _ => {}
                 }
                 tag.clear();
             }
@@ -180,12 +199,18 @@ pub fn parse_listing(body: &[u8], requested: &str) -> anyhow::Result<Listing> {
                     Ok(unescaped) => unescaped.into_owned(),
                     Err(_) => raw.into_owned(),
                 };
-                match tag.as_str() {
+                match (tag.as_str(), &mut object) {
                     // Prefix встречается и вне CommonPrefixes — там это эхо
-                    // запроса, а не элемент листинга.
-                    "Prefix" if in_common_prefixes => push(&mut items, &text, requested),
-                    "Key" => push(&mut items, &text, requested),
-                    "NextContinuationToken" => next_token = text,
+                    // запроса, а не элемент листинга. У папки нет ни размера,
+                    // ни времени: за ней стоит общий префикс ключей, а не
+                    // объект.
+                    ("Prefix", _) if in_common_prefixes => {
+                        push(&mut entries, Entry { identifier: identifier(&text), size: 0, modified: 0 }, requested);
+                    }
+                    ("Key", Some(entry)) => entry.identifier = identifier(&text),
+                    ("Size", Some(entry)) => entry.size = text.parse().unwrap_or(0),
+                    ("LastModified", Some(entry)) => entry.modified = parse_timestamp(&text),
+                    ("NextContinuationToken", _) => next_token = text,
                     _ => {}
                 }
             }
@@ -195,12 +220,38 @@ pub fn parse_listing(body: &[u8], requested: &str) -> anyhow::Result<Listing> {
         buf.clear();
     }
 
-    Ok(Listing { items, next_token })
+    Ok(Listing { entries, next_token })
 }
 
-fn push(items: &mut Vec<String>, key: &str, requested: &str) {
-    let item = identifier(key);
-    if item != requested {
-        items.push(item);
+/// Сам запрошенный путь S3 возвращает в листинге своим же элементом — в списке
+/// содержимого папке незачем быть собой.
+fn push(entries: &mut Vec<Entry>, entry: Entry, requested: &str) {
+    if entry.identifier != requested && !entry.identifier.is_empty() {
+        entries.push(entry);
     }
+}
+
+/// `2024-05-04T08:23:58.000Z` → unix-секунды. Смещения в ответах S3 не бывает:
+/// время всегда всемирное, поэтому разбираются только цифры на своих местах.
+/// Непонятная строка — ноль, то есть «время неизвестно»: подписи у файла не
+/// будет, но листинг из-за этого пропадать не должен.
+fn parse_timestamp(text: &str) -> i64 {
+    let number = |range: std::ops::Range<usize>| text.get(range).and_then(|part| part.parse::<i64>().ok());
+    let (Some(year), Some(month), Some(day)) = (number(0..4), number(5..7), number(8..10)) else {
+        return 0;
+    };
+    let (Some(hour), Some(minute), Some(second)) = (number(11..13), number(14..16), number(17..19)) else {
+        return 0;
+    };
+
+    // Алгоритм Хиннанта: сдвиг эры на 1 марта делает год без високосного дня
+    // непрерывным, и день эпохи считается без таблиц и без цикла по годам.
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+
+    days * 86_400 + hour * 3_600 + minute * 60 + second
 }

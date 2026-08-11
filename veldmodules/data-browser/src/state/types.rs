@@ -4,6 +4,7 @@
 //! Browse — это две независимые папки, а не один экран с общей переменной.
 
 use super::browse::BrowseState;
+use super::listing::ListingState;
 use super::preview::PreviewState;
 use super::search::SearchState;
 
@@ -33,10 +34,24 @@ impl std::str::FromStr for ViewId {
 pub enum ViewKind {
     Search(SearchState),
     Browse(BrowseState),
-    /// Своего состояния нет: экран целиком выводится из `LibraryState`, а он
-    /// один на модуль и приходит рассылкой (см. state::library).
-    Downloaded,
+    /// Строки берутся из `LibraryState` — он один на модуль и приходит
+    /// рассылкой (см. state::library); своё здесь только то, как их показать.
+    Downloaded(ListingState),
     Preview(PreviewState),
+}
+
+impl ViewKind {
+    /// Настройки показа списка — они есть у всех видов, кроме превью, и
+    /// правятся одними и теми же сообщениями. Без этого каждое из них
+    /// разбирало бы `ViewKind` заново, по-своему и с тремя ветками.
+    pub fn listing_mut(&mut self) -> Option<&mut ListingState> {
+        match self {
+            ViewKind::Search(search) => Some(&mut search.listing),
+            ViewKind::Browse(browse) => Some(&mut browse.listing),
+            ViewKind::Downloaded(listing) => Some(listing),
+            ViewKind::Preview(_) => None,
+        }
+    }
 }
 
 pub struct View {
@@ -53,14 +68,14 @@ impl ViewKind {
     /// Заголовок вкладки — последний сегмент пути, обрезанный до `TITLE_LIMIT`.
     pub fn title(&self) -> String {
         match self {
-            ViewKind::Search(_) => "Search".to_string(),
+            ViewKind::Search(_) => "Поиск снимков".to_string(),
             ViewKind::Browse(browse) => match last_segment(&browse.current_path) {
-                "" => "/".to_string(),
+                "" => "Каталог".to_string(),
                 name => ellipsize(name),
             },
-            ViewKind::Downloaded => "Local Files".to_string(),
+            ViewKind::Downloaded(_) => "Скачанное".to_string(),
             ViewKind::Preview(preview) => match last_segment(&preview.current_path) {
-                "" => "Preview".to_string(),
+                "" => "Просмотр".to_string(),
                 name => ellipsize(name),
             },
         }
@@ -72,12 +87,6 @@ fn last_segment(path: &str) -> &str {
     path.split('/').filter(|part| !part.is_empty()).next_back().unwrap_or("")
 }
 
-/// Обрезает хвост, а не середину: имена снимков различаются как раз началом
-/// (миссия, уровень, дата), и голова информативнее хвоста.
 fn ellipsize(name: &str) -> String {
-    if name.chars().count() <= TITLE_LIMIT {
-        return name.to_string();
-    }
-    let head: String = name.chars().take(TITLE_LIMIT - 1).collect();
-    format!("{}…", head)
+    crate::module::components::format::ellipsize(name, TITLE_LIMIT)
 }

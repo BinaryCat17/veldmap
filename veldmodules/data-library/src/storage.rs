@@ -64,12 +64,14 @@ pub struct LocalFile {
     pub name: String,
     pub size: u64,
     pub is_partial: bool,
+    /// Время файла на диске, unix-секунды; 0 — файловая система его не отдала.
+    pub modified: i64,
 }
 
 impl LocalFile {
     /// Разбирает запись листинга. `None` — это сидкар, а не файл: он описывает
     /// запись, а не является ею.
-    pub fn from_entry(name: &str, size: u64) -> Option<Self> {
+    pub fn from_entry(name: &str, size: u64, modified: i64) -> Option<Self> {
         if name.ends_with(ORIGIN_SUFFIX) {
             return None;
         }
@@ -78,6 +80,7 @@ impl LocalFile {
             name: name.strip_suffix(PART_SUFFIX).unwrap_or(name).to_string(),
             size,
             is_partial: name.ends_with(PART_SUFFIX),
+            modified,
         })
     }
 }

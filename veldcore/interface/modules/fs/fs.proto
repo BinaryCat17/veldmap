@@ -29,6 +29,8 @@ message FsListRequest {
 message FsEntry {
   string name = 1;
   uint64 size = 2;
+  // Время изменения, unix-секунды; 0 — файловая система его не отдала.
+  int64 modified = 3;
 }
 
 message FsListResult {

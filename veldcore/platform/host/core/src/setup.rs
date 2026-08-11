@@ -10,9 +10,7 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
         crate::config::load_config_with_path::<crate::CoreConfig, _>(&format!("{}/core.json", config_dir))
             .unwrap_or_default();
 
-    let log_path = host_config.runtime_dir.join(
-        host_config.logs.as_deref().unwrap_or("logs/host.log")
-    );
+    let log_path = host_config.log_path();
 
     crate::logging::init(crate::logging::Options {
         log_filter: &core_config.log_filter,

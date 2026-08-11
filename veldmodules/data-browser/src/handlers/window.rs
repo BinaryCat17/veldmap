@@ -11,7 +11,14 @@ use crate::module::state::State;
 use veldsdk::proto::app::WindowResized;
 
 pub fn on_window_resized(state: &mut State, ev: WindowResized) {
+    // Первое объявление окна — самый ранний момент, когда спрашивать других
+    // уже можно: к нему все плагины загружены и подписаны (см. runners/desktop,
+    // `announce`). До него запросы стартовой вкладки некому доставить.
+    if state.window == (0, 0) {
+        super::nav::bootstrap(state);
+    }
     state.window = (ev.width, ev.height);
+    state.scale = ev.scale_factor;
     state.window_surface = veld_ui_service_wrap::surface::delegate(
         &ev,
         state.window_surface,

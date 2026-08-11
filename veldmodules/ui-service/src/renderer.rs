@@ -66,17 +66,12 @@ fn with_font_context<R>(
 /// `Family::Name("")` не совпадает ни с чем.
 fn shape_text(
     font_system: &mut FontSystem,
-    content: &str,
-    size: Pixels,
-    line_height: LineHeight,
-    bounds_width: f32,
+    text: &iced_core::Text<&str, Font>,
     family: &str,
-    shaping: iced_core::text::Shaping,
-    wrapping: iced_core::text::Wrapping,
     origin: &str,
 ) -> Buffer {
-    let mut size = size.0;
-    let mut line_height = line_height.to_absolute(Pixels(size)).0;
+    let mut size = text.size.0;
+    let mut line_height = text.line_height.to_absolute(Pixels(size)).0;
 
     if size <= 0.0 {
         veldsdk::log::error!(target: "handlers", "Cosmic-text {}: invalid font size: {}. Resetting to 16.0", origin, size);
@@ -88,30 +83,50 @@ fn shape_text(
     }
 
     let mut buffer = Buffer::new(font_system, Metrics::new(size, line_height));
-    set_wrap_width(&mut buffer, font_system, bounds_width);
+    set_wrap_width(&mut buffer, font_system, text.bounds.width);
 
     // Правило переноса задаётся буферу явно: у cosmic-text по умолчанию
     // WordOrGlyph, то есть длинное слово без пробелов рвётся по букве и растёт
     // в высоту. Однострочную подпись это ломает молча — измерение и отрисовка
     // остаются согласованными, просто занимают не ту форму.
-    buffer.set_wrap(font_system, iced_graphics::text::to_wrap(wrapping));
+    buffer.set_wrap(font_system, iced_graphics::text::to_wrap(text.wrapping));
 
-    let attrs = if family.is_empty() {
-        cosmic_text::Attrs::new().family(cosmic_text::Family::SansSerif)
+    let family = if family.is_empty() {
+        cosmic_text::Family::SansSerif
     } else {
-        cosmic_text::Attrs::new().family(cosmic_text::Family::Name(family))
+        cosmic_text::Family::Name(family)
     };
+    let attrs = cosmic_text::Attrs::new().family(family).weight(to_weight(text.font.weight));
 
     // Перевод шейпинга берётся у самого iced: `Shaping::Auto` решается по
     // содержимому строки, и своя копия этого правила разошлась бы с тем, по
     // которому iced мерил текст.
-    let shaping = iced_graphics::text::to_shaping(shaping, content);
+    let shaping = iced_graphics::text::to_shaping(text.shaping, text.content);
 
     // Выравнивание буферу не передаётся: по горизонтали текст ставит сам iced,
     // отдавая в `fill_paragraph` уже выровненный левый верхний угол.
-    buffer.set_text(font_system, content, &attrs, shaping, None);
+    buffer.set_text(font_system, text.content, &attrs, shaping, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
+}
+
+/// Начертание для cosmic-text. Своя копия перевода: у iced он есть, но только
+/// внутри `to_attributes`, который вместе с весом задаёт и семейство —
+/// а семейство здесь уже разрешено через `font_map` и статическим именем,
+/// которого требует `to_attributes`, не является.
+fn to_weight(weight: iced_core::font::Weight) -> cosmic_text::Weight {
+    use iced_core::font::Weight;
+    match weight {
+        Weight::Thin => cosmic_text::Weight::THIN,
+        Weight::ExtraLight => cosmic_text::Weight::EXTRA_LIGHT,
+        Weight::Light => cosmic_text::Weight::LIGHT,
+        Weight::Normal => cosmic_text::Weight::NORMAL,
+        Weight::Medium => cosmic_text::Weight::MEDIUM,
+        Weight::Semibold => cosmic_text::Weight::SEMIBOLD,
+        Weight::Bold => cosmic_text::Weight::BOLD,
+        Weight::ExtraBold => cosmic_text::Weight::EXTRA_BOLD,
+        Weight::Black => cosmic_text::Weight::BLACK,
+    }
 }
 
 /// Ширина, по которой буфер переносит строки. Высота не задаётся никогда: с
@@ -197,6 +212,10 @@ const ATLAS_PADDING: u32 = 2;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
     pub pos: [f32; 2],
+    /// Цвет в линейном пространстве. Разметка называет цвета так же, как их
+    /// называют в макете и в CSS, — в sRGB; цель рендера при этом sRGB-формата,
+    /// и GPU кодирует записанное сам. Отдать ему sRGB-число как есть значит
+    /// закодировать его дважды: `#1E1E24` рисуется светло-серым.
     pub color: [f32; 4],
     pub uv: [f32; 2],
     pub local_pos: [f32; 2],
@@ -439,15 +458,14 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
         background: impl Into<iced_core::Background>,
     ) {
         let color = match background.into() {
-            iced_core::Background::Color(c) => [c.r, c.g, c.b, c.a],
+            iced_core::Background::Color(c) => c.into_linear(),
             _ => [1.0, 1.0, 1.0, 1.0],
         };
 
         let radius = quad.border.radius.top_left;
 
         let bw = quad.border.width;
-        let bc = quad.border.color;
-        let border_color = [bc.r, bc.g, bc.b, bc.a];
+        let border_color = quad.border.color.into_linear();
 
         // Фон и рамка — одним прямоугольником: и то, и другое считает шейдер
         // по расстоянию до скруглённой границы, второй проход ему не нужен.
@@ -610,17 +628,7 @@ fn build_paragraph(
 ) -> RealParagraph {
     let font_family = resolve_family(font_system.db(), font_map, default_family, &text.font.family);
 
-    let buffer = shape_text(
-        font_system,
-        text.content,
-        text.size,
-        text.line_height,
-        text.bounds.width,
-        &font_family,
-        text.shaping,
-        text.wrapping,
-        origin,
-    );
+    let buffer = shape_text(font_system, &text, &font_family, origin);
 
     let (min_x, max_x, visual_height) = measure(&buffer, font_system, swash_cache);
 
@@ -919,7 +927,7 @@ impl iced_core::text::Renderer for GpuRenderer {
 
 impl GpuRenderer {
     fn draw_buffer(&mut self, buffer: &Buffer, pos: Point, color: Color) {
-        let text_color = [color.r, color.g, color.b, color.a];
+        let text_color = color.into_linear();
 
         for run in buffer.layout_runs() {
             for glyph in run.glyphs {

@@ -1,14 +1,18 @@
 //! Переиспользуемые куски UI. Один файл — один компонент; экраны целиком
 //! лежат в `view/`, а не здесь.
 //!
-//! `row` — не рендер, а модель: в каком состоянии файл и что с ним можно
-//! сделать. Лежит рядом с `file_list`, потому что тот матчится на `RowStatus`
-//! исчерпывающе — это одна вещь, разъезжаться им нельзя.
+//! `row` — не рендер, а модель: в каком состоянии запись и что о ней известно.
+//! Лежит рядом с `table`, потому что тот матчится на `RowStatus` исчерпывающе —
+//! это одна вещь, разъезжаться им нельзя. `arrange` между ними: он решает, что
+//! и в каком порядке показывать, и не знает ни одного виджета.
 
-pub mod row;
-pub mod file_list;
+pub mod arrange;
+pub mod controls;
+pub mod format;
 pub mod list_screen;
+pub mod menu;
+pub mod row;
+pub mod table;
 
-pub use row::{Row, RowStatus, downloaded_rows};
-pub use file_list::{render_list, items_or_message, ItemActions};
-pub use list_screen::list_screen;
+pub use list_screen::Screen;
+pub use row::{downloaded_rows, Row, RowStatus};

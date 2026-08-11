@@ -22,6 +22,33 @@ impl LibraryState {
         if identifier.is_empty() { return None; }
         self.entries.iter().find(|e| e.identifier == identifier)
     }
+
+    /// Сколько записей лежит под этим путём каталога. Так папка сетевого
+    /// каталога узнаёт, есть ли у неё что-то на диске: своего ответа на это у
+    /// каталога нет, а у библиотеки есть — в ключе каждой записи стоит путь,
+    /// откуда её скачали.
+    pub fn count_under(&self, prefix: &str) -> usize {
+        if prefix.is_empty() { return 0; }
+        self.entries.iter().filter(|entry| entry.identifier.starts_with(prefix)).count()
+    }
+
+    /// Сколько байт лежит на диске — считая недокачанное, оно тоже занимает
+    /// место.
+    pub fn stored(&self) -> u64 {
+        self.entries.iter().map(|entry| entry.done).sum()
+    }
+
+    /// Идущие закачки: сколько их, сколько сделано и сколько всего. Одним
+    /// проходом, потому что показываются они тоже вместе — одной строкой
+    /// состояния.
+    pub fn downloading(&self) -> (usize, u64, u64) {
+        self.entries
+            .iter()
+            .filter(|entry| status_of(entry) == LibraryStatus::LibDownloading)
+            .fold((0, 0, 0), |(count, done, total), entry| {
+                (count + 1, done + entry.done, total + entry.total)
+            })
+    }
 }
 
 /// Статус записи как enum, а не как сырой i32 из protobuf.

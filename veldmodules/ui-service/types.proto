@@ -22,6 +22,7 @@ message Widget {
         ProgressBar progress_bar = 10;
         Stack stack = 11;
         Tooltip tooltip = 12;
+        Popover popover = 14;
     }
     // Устойчивое имя ребёнка внутри своего родителя. Состояние виджета
     // (позиция скролла, каретка и выделение в поле ввода) живёт у рендерера и
@@ -62,6 +63,9 @@ message Tooltip {
     // Одно число, а не Padding: подсказка отступает от своего содержимого
     // одинаково со всех сторон, и разные значения по сторонам ей задать нечем.
     float padding = 5;
+    // Вид самой подсказки; `text_color` — цвет её надписи.
+    WidgetStyle style = 6;
+    float text_size = 7;
 }
 
 // С какой стороны от содержимого встаёт подсказка.
@@ -72,12 +76,43 @@ enum TooltipPosition {
     TOOLTIP_RIGHT = 3;
 }
 
+// Панель, всплывающая у своего якоря: меню кнопки, выпадающий список.
+//
+// Открыта или закрыта — решает клиент, а не сервис: состояние меню живёт там
+// же, где остальное состояние экрана, и знать про него сервису нечего.
+//
+// Панель не занимает места в раскладке и не режется прокруткой: она рисуется
+// поверх всего, как подсказка. Поэтому меню строки списка не обязано считать
+// свои координаты — их знает якорь.
+message Popover {
+    Widget anchor = 1;
+    Widget panel = 2;
+    bool open = 3;
+    // Каким краем панель равняется на якорь: START — левым к левому,
+    // END — правым к правому.
+    Alignment align_x = 4;
+    // Зазор между якорем и панелью.
+    float gap = 5;
+    // Что клиент получит, когда мимо панели щёлкнут: без этого открытое меню
+    // нечем закрыть. Событие при этом гасится — щелчок «мимо меню» закрывает
+    // его и не нажимает то, что под ним.
+    Handler on_dismiss = 6;
+}
+
 message ProgressBar {
     float range_start = 1;
     float range_end = 2;
     float value = 3;
     Length width = 4;
     Length height = 5;
+    ProgressBarStyle style = 6;
+}
+
+// Полоса прогресса: дорожка, заполненная часть и общая рамка.
+message ProgressBarStyle {
+    Background track = 1;
+    Background bar = 2;
+    Border border = 3;
 }
 
 message Scrollable {
@@ -87,6 +122,22 @@ message Scrollable {
     // Ось прокрутки. Горизонтальная — единственный способ сказать «содержимое
     // шире места»: без неё дети сжимаются до нуля, а не уезжают за край.
     ScrollDirection direction = 4;
+    Scrollbar scrollbar = 5;
+}
+
+// Полоса прокрутки: геометрия и цвета. Одна на обе оси — вид у них общий, а
+// разные значения по осям задать было бы нечем.
+message Scrollbar {
+    // Ширина дорожки; 0 — умолчание рендерера.
+    float width = 1;
+    // Ширина бегунка внутри дорожки; 0 — во всю её ширину.
+    float scroller_width = 2;
+    // Отступ дорожки от края содержимого.
+    float margin = 3;
+    Background rail = 4;
+    Background scroller = 5;
+    // Скругление бегунка и дорожки.
+    float radius = 6;
 }
 
 enum ScrollDirection {
@@ -118,7 +169,10 @@ message Row {
 message Text {
     string content = 1;
     float size = 2;
-    Color color = 3;
+    // Не задан — текст рисуется цветом, который назвал носитель (кнопка,
+    // контейнер, подсказка). «Не сказано» значит «как всё вокруг», а не
+    // «чёрный»: иначе каждая подпись повторяла бы цвет своей роли.
+    optional Color color = 3;
     Alignment horizontal_alignment = 4;
     Alignment vertical_alignment = 5;
     Length width = 6;
@@ -127,6 +181,18 @@ message Text {
     string font_family = 9;
     // Что делать, когда текст не помещается в отведённую ширину.
     Wrapping wrapping = 10;
+    // Насыщенность начертания. Работает, пока в семействе есть такое лицо:
+    // синтетического жирного нет, недостающее подменяется ближайшим.
+    FontWeight weight = 11;
+}
+
+// Начертания, которые различает разметка. Полный набор весов шрифту не нужен:
+// подпись бывает обычной, выделенной или заголовочной, а промежуточные веса
+// в интерфейсе неотличимы друг от друга.
+enum FontWeight {
+    WEIGHT_NORMAL = 0;
+    WEIGHT_MEDIUM = 1;
+    WEIGHT_BOLD = 2;
 }
 
 // Сложность разбора строки. Продвинутый шейпинг нужен письменностям с
@@ -168,6 +234,14 @@ message Background {
     }
 }
 
+// Тень под виджетом. Нулевое размытие при нулевом смещении — тени нет.
+message Shadow {
+    Color color = 1;
+    float offset_x = 2;
+    float offset_y = 3;
+    float blur = 4;
+}
+
 // Внешний вид виджета в одном из его состояний.
 //
 // `text_color` не задан — текст внутри рисуется цветом темы: «не сказано» тут
@@ -176,6 +250,7 @@ message WidgetStyle {
     optional Background background = 1;
     optional Color text_color = 2;
     optional Border border = 3;
+    optional Shadow shadow = 4;
 }
 
 message ButtonStyle {
@@ -209,6 +284,19 @@ message TextInput {
     Length width = 5;
     Padding padding = 6;
     float size = 7;
+    TextInputStyle style = 8;
+    string font_family = 9;
+}
+
+// Поле ввода в трёх своих состояниях. Фон, рамка и цвет набранного — общий
+// `WidgetStyle` (его `text_color` и есть цвет значения); подсказка и выделение
+// от состояния не зависят и заданы один раз.
+message TextInputStyle {
+    WidgetStyle active = 1;
+    WidgetStyle hovered = 2;
+    WidgetStyle focused = 3;
+    Color placeholder = 4;
+    Color selection = 5;
 }
 
 message WgpuImage {
@@ -231,7 +319,13 @@ message Container {
     Length max_height = 6;
     Alignment align_x = 7;
     Alignment align_y = 8;
-    Background background = 9;
+    // Состояние у контейнера одно (он ни на что не реагирует), поэтому и стиль
+    // один — тот же `WidgetStyle`, что у кнопки в каждом её состоянии.
+    WidgetStyle style = 9;
+    // Обрезать содержимое по своим границам. Нужен там, где ребёнок может
+    // оказаться шире отведённого: без него текст, не поместившийся в колонку,
+    // рисуется поверх соседней (см. `Wrapping`).
+    bool clip = 10;
 }
 
 message Padding {

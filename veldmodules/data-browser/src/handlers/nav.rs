@@ -3,20 +3,18 @@
 use crate::module::state::{BrowseState, PreviewState, SearchState, State, ViewId, ViewKind};
 use crate::proto::data_library::LibraryRequest;
 
-/// Кнопки шапки показывают уже открытый вид такого рода, а не заводят второй:
-/// Search и Downloaded смысла размножать не имеют — их содержимое от вкладки
-/// не зависит. Browse размножать смысл есть (две папки рядом), но заводит
-/// вторую вкладку тот, кто этого явно просит, а не общая кнопка «Browse».
-pub fn on_nav_browse(state: &mut State) {
-    if let Some(id) = state.find(|kind| matches!(kind, ViewKind::Browse(_))) {
-        state.focus(id);
-        return;
-    }
+/// Каталог всегда открывается новой вкладкой: две папки рядом — обычное дело,
+/// и ровно для этого вкладки и есть.
+pub fn on_new_browse(state: &mut State) {
+    state.tab_menu = false;
     let id = state.open(ViewKind::Browse(BrowseState::default()));
     super::browse::request_path(state, id, String::new());
 }
 
-pub fn on_nav_search(state: &mut State) {
+/// Поиск и скачанное показывают уже открытую вкладку, а не заводят вторую: их
+/// содержимое от вкладки не зависит, и второй такой же список — просто копия.
+pub fn on_new_search(state: &mut State) {
+    state.tab_menu = false;
     match state.find(|kind| matches!(kind, ViewKind::Search(_))) {
         Some(id) => state.focus(id),
         None => {
@@ -25,11 +23,12 @@ pub fn on_nav_search(state: &mut State) {
     }
 }
 
-pub fn on_nav_downloaded(state: &mut State) {
-    match state.find(|kind| matches!(kind, ViewKind::Downloaded)) {
+pub fn on_new_downloaded(state: &mut State) {
+    state.tab_menu = false;
+    match state.find(|kind| matches!(kind, ViewKind::Downloaded(_))) {
         Some(id) => state.focus(id),
         None => {
-            state.open(ViewKind::Downloaded);
+            state.open(ViewKind::Downloaded(Default::default()));
             // Перечитываем каталог: это единственный момент, когда его просят
             // показать явно. В остальное время библиотека рассылает изменения
             // сама, и своей версии правды о скачанном мы не держим.
@@ -38,7 +37,17 @@ pub fn on_nav_downloaded(state: &mut State) {
     }
 }
 
+/// Меню полосы вкладок. Раскрытое меню списка при этом закрывается — открытым
+/// бывает только одно.
+pub fn on_tab_menu(state: &mut State, open: bool) {
+    state.tab_menu = open;
+    if let Some(listing) = state.active_listing_mut() {
+        listing.menu = crate::module::state::listing::Menu::Closed;
+    }
+}
+
 pub fn on_tab_select(state: &mut State, id: ViewId) {
+    state.tab_menu = false;
     state.focus(id);
 }
 
@@ -65,6 +74,24 @@ pub fn open_preview(state: &mut State, label: String) -> ViewId {
     let mut preview = PreviewState::default();
     preview.current_path = label;
     state.open(ViewKind::Preview(preview))
+}
+
+/// Запрашивает всё, чем живёт стартовая вкладка. Отдельно от `State::new`:
+/// там модуль ещё не на шине, и публиковать некуда.
+pub fn bootstrap(state: &mut State) {
+    request_library();
+
+    // Стартовая вкладка каталога пуста, пока её не спросили: содержимое
+    // приходит ответом, а не лежит в состоянии.
+    let empty: Vec<ViewId> = state
+        .views()
+        .iter()
+        .filter(|view| matches!(view.kind, ViewKind::Browse(_)))
+        .map(|view| view.id)
+        .collect();
+    for id in empty {
+        super::browse::request_path(state, id, String::new());
+    }
 }
 
 /// Попросить библиотеку перечитать каталог. Ответ придёт обычной рассылкой

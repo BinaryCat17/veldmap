@@ -32,7 +32,7 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
     }
 
     state.snapshot = response.entries.iter()
-        .filter_map(|e| LocalFile::from_entry(&e.name, e.size))
+        .filter_map(|e| LocalFile::from_entry(&e.name, e.size, e.modified))
         .collect();
 
     // origins — кэш диска, а не независимая истина: подрезаем под то, что
@@ -194,6 +194,7 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
 
         LibraryEntry {
             identifier: state.identifier_of(&name).unwrap_or_default().to_string(),
+            modified: entry.map(|e| e.modified).unwrap_or(0),
             name,
             done,
             total,

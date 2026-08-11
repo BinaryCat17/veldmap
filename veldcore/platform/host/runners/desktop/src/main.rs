@@ -1,5 +1,6 @@
 #![recursion_limit = "512"]
 
+mod capture;
 mod compositor;
 use compositor::Compositor;
 
@@ -97,6 +98,12 @@ struct Running {
     /// Состояние модификаторов: winit шлёт его отдельно от KeyboardInput,
     /// поэтому трекаем здесь и прикладываем к каждому KeyEvent.
     key_modifiers: winit::keyboard::ModifiersState,
+    /// Отладочный прогон по сценарию (VELDMAP_SCRIPT); `None` — обычный запуск.
+    script: Option<capture::Script>,
+    /// Сценарий дошёл до `exit`. Закрывает окно цикл событий, а не кадр:
+    /// `event_loop` виден только обработчику, и завершаться посреди отрисовки
+    /// нечестно — кадр надо дорисовать.
+    exit_requested: bool,
 }
 
 impl Running {
@@ -160,6 +167,10 @@ impl Running {
 
         let compositor = Compositor::new(&device, surface_format);
         let format_proto = ctx.graphics.get_surface_format_proto();
+        // Снимки ложатся туда же, где логи: и то и другое — про последний запуск.
+        let script = capture::Script::from_env(
+            ctx.config.log_path().parent().unwrap_or(std::path::Path::new(".")),
+        );
 
         Ok(Self {
             window,
@@ -177,6 +188,8 @@ impl Running {
             cursor_dirty: false,
             last_frame_time: std::time::Instant::now(),
             key_modifiers: winit::keyboard::ModifiersState::empty(),
+            script,
+            exit_requested: false,
         })
     }
 
@@ -297,18 +310,59 @@ impl Running {
             }
         }
 
-        // Показ кадра теперь тоже операция очереди, а не самой текстуры —
-        // поэтому отправка и показ идут под одним захватом: между ними чужой
-        // submit в тот же свопчейн недопустим.
+        // Показ кадра — операция очереди, а не самой текстуры, поэтому
+        // отправка и показ идут под одним захватом: между ними чужой submit
+        // в тот же свопчейн недопустим.
         {
             let queue = self.queue.lock().unwrap();
             queue.submit(Some(encoder.finish()));
             queue.present(frame);
         }
 
+        self.play_script();
+
         // Модули рендерят в ответ на Frame-события: цикл кадров живёт
         // на хосте (темп задаёт present_mode/vsync).
         self.window.request_redraw();
+    }
+
+    /// Отыгрывает шаги отладочного сценария, чей срок настал. Идёт после
+    /// показа кадра: снимок обязан застать уже отрисованное состояние, а не
+    /// то, что было до render-опов этого кадра.
+    fn play_script(&mut self) {
+        let Some(script) = &mut self.script else { return };
+        let due = script.due();
+        for action in due {
+            match action {
+                capture::Action::Move { x, y } => {
+                    self.cursor_pos = (x, y);
+                    self.cursor_dirty = true;
+                }
+                capture::Action::Click => {
+                    for pressed in [true, false] {
+                        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Click(
+                            app::ClickEvent { button: 1, pressed, x: self.cursor_pos.0, y: self.cursor_pos.1 },
+                        ));
+                    }
+                }
+                capture::Action::Shot { path } => {
+                    let queue = self.queue.lock().unwrap();
+                    let frame = capture::FrameSource {
+                        device: &self.device,
+                        queue: &queue,
+                        compositor: &self.compositor,
+                        surface: self.hw.surface.as_ref().map(|(_, bind_group)| bind_group),
+                        size: self.hw.size,
+                        format: self.surface_config.format,
+                    };
+                    match capture::shoot(frame, &path) {
+                        Ok(()) => log::info!(target: "render", "Снимок: {}", path.display()),
+                        Err(e) => log::error!(target: "render", "Снимок '{}' не сделан: {:#}", path.display(), e),
+                    }
+                }
+                capture::Action::Exit => self.exit_requested = true,
+            }
+        }
     }
 }
 
@@ -336,6 +390,13 @@ impl ApplicationHandler for App<'_> {
                 log::error!(target: "render", "Runner failed to start: {:#}", e);
                 event_loop.exit();
             }
+        }
+    }
+
+    /// Сценарий дошёл до `exit` — закрываемся здесь, между кадрами.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.running.as_ref().is_some_and(|r| r.exit_requested) {
+            event_loop.exit();
         }
     }
 

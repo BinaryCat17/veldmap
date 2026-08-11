@@ -3,6 +3,7 @@
 pub mod search;
 pub mod browse;
 pub mod library;
+pub mod listing;
 pub mod nav;
 pub mod preview;
 pub mod window;

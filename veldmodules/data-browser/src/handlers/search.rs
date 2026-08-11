@@ -1,28 +1,12 @@
+//! Приём результатов поиска.
+//!
+//! Запроса отсюда пока не уходит: `data-provider/on_search` — заглушка, ответа
+//! на него нет (см. README, «Известные ограничения»). Обработчик ответа тем не
+//! менее живой и обязателен — он объявлен подпиской в схеме, и появится поиск
+//! у провайдера раньше, чем у нас найдётся, чем его вызвать.
+
 use crate::module::state::{State, ViewKind};
 use crate::proto::data_provider::SearchResponse;
-
-pub fn on_search_input(state: &mut State, query: String) {
-    if let Some((_, search)) = state.active_search_mut() {
-        search.query = query;
-    }
-}
-
-pub fn on_search(state: &mut State) {
-    let Some((view, search)) = state.active_search_mut() else { return };
-    let query = search.query.clone();
-    if query.is_empty() {
-        return;
-    }
-
-    search.error = None;
-    let correlation_id = search.request.begin();
-    state.searches.insert(correlation_id.clone(), view);
-
-    crate::calls::data_provider::on_search(&crate::proto::data_provider::SearchRequest {
-        query,
-        filters: vec![],
-    }, &correlation_id);
-}
 
 /// Результат поиска. Чей он — знает таблица маршрутов; свой устаревший
 /// (запрос успели сменить) отбрасываем так же, как чужой.

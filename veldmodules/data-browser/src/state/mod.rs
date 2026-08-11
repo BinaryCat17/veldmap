@@ -25,6 +25,19 @@ pub struct State {
     /// Размер окна в физических пикселях (app/window_resized). Нужен как
     /// потолок для превью: рисовать картинку крупнее окна незачем.
     pub window: (u32, u32),
+    /// Масштаб интерфейса оттуда же. Вместе с размером даёт ширину окна в
+    /// точках разметки — по ней считается, сколько знаков имени влезает в свою
+    /// колонку (см. components::table).
+    pub scale: f32,
+    /// Раскрыто ли меню «плюса» в полосе вкладок. Не в `ListingState`: полоса
+    /// вкладок общая, а списков много.
+    pub tab_menu: bool,
+    /// Скорость закачки, байт в секунду: выводится из двух соседних состояний
+    /// библиотеки (см. handlers::library). Своего поля у библиотеки под это
+    /// нет — она рассылает то, что есть сейчас, а не то, как быстро оно росло.
+    pub speed: f32,
+    /// Прошлый замер: когда и сколько было скачано.
+    pub measured: Option<(i64, u64)>,
 
     // -- Маршруты ответов --
     //
@@ -51,6 +64,10 @@ impl State {
             error: None,
             window_surface: None,
             window: (0, 0),
+            scale: 1.0,
+            tab_menu: false,
+            speed: 0.0,
+            measured: None,
             previews: Correlator::new(),
             listings: Correlator::new(),
             searches: Correlator::new(),
@@ -61,7 +78,7 @@ impl State {
         let kind = match config.initial_view.as_deref() {
             None | Some("search") => ViewKind::Search(search::SearchState::default()),
             Some("browse") => ViewKind::Browse(browse::BrowseState::default()),
-            Some("downloaded") => ViewKind::Downloaded,
+            Some("downloaded") => ViewKind::Downloaded(listing::ListingState::default()),
             Some(other) => {
                 veldsdk::log::warn!(target: "system", "unknown initial_view '{}', falling back to Search", other);
                 ViewKind::Search(search::SearchState::default())
@@ -135,18 +152,22 @@ impl State {
     //
     // Источник события виджета — активный вид: виден ровно он.
 
+    /// Ширина окна в точках разметки — то, чем меряется место под колонки.
+    pub fn logical_width(&self) -> f32 {
+        self.window.0 as f32 / self.scale.max(1.0)
+    }
+
+    /// Настройки показа активного списка: их правят сообщения, одинаковые для
+    /// всех трёх видов.
+    pub fn active_listing_mut(&mut self) -> Option<&mut listing::ListingState> {
+        let id = self.active?;
+        self.get_mut(id)?.listing_mut()
+    }
+
     pub fn active_browse_mut(&mut self) -> Option<(ViewId, &mut browse::BrowseState)> {
         let id = self.active?;
         match self.get_mut(id)? {
             ViewKind::Browse(browse) => Some((id, browse)),
-            _ => None,
-        }
-    }
-
-    pub fn active_search_mut(&mut self) -> Option<(ViewId, &mut search::SearchState)> {
-        let id = self.active?;
-        match self.get_mut(id)? {
-            ViewKind::Search(search) => Some((id, search)),
             _ => None,
         }
     }
@@ -164,6 +185,7 @@ impl State {
 pub mod search;
 pub mod browse;
 pub mod library;
+pub mod listing;
 pub mod preview;
 
 pub use browse::BrowseState;

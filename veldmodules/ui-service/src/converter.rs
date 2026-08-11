@@ -122,7 +122,6 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             }
             let mut txt = text(t.content.clone())
                 .size(size)
-                .color(convert_color(&t.color))
                 .width(convert_length(&t.width))
                 .height(convert_length(&t.height))
                 .align_x(convert_horizontal_alignment(t.horizontal_alignment()))
@@ -138,11 +137,10 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                     proto::Wrapping::WrapWord => iced_core::text::Wrapping::Word,
                 });
 
-            if !t.font_family.is_empty() {
-                let family = intern_font_family(&t.font_family);
-                txt = txt.font(Font { family: Family::Name(family), ..Font::DEFAULT });
+            if let Some(color) = &t.color {
+                txt = txt.color(convert_color_value(color));
             }
-
+            txt = txt.font(convert_font(&t.font_family, t.weight()));
             txt.into()
         }
         Some(proto::widget::Type::Button(b)) => {
@@ -182,7 +180,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                              iced_widget::button::Status::Pressed => &pressed,
                              iced_widget::button::Status::Disabled => &disabled,
                          };
-                         convert_widget_style(style, theme.palette().text)
+                         convert_button_style(style, theme.palette().text)
                     });
                 }
                 // Стиль не задан — рисуем темой.
@@ -200,8 +198,40 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             let mut input = iced_widget::text_input(&t.placeholder, &t.value)
                 .width(convert_length(&t.width))
                 .padding(convert_padding(&t.padding))
+                .font(convert_font(&t.font_family, proto::FontWeight::WeightNormal))
                 .size(size);
-            
+
+            if let Some(style) = &t.style {
+                let active = style.active.clone().unwrap_or_default();
+                let hovered = style.hovered.clone().unwrap_or_default();
+                let focused = style.focused.clone().unwrap_or_default();
+                let placeholder = convert_color(&style.placeholder);
+                let selection = convert_color(&style.selection);
+
+                input = input.style(move |theme: &Theme, status| {
+                    let state = match status {
+                        iced_widget::text_input::Status::Active => &active,
+                        iced_widget::text_input::Status::Hovered => &hovered,
+                        iced_widget::text_input::Status::Focused { .. } => &focused,
+                        // Выключенным поле не бывает: без `on_input` оно
+                        // только для чтения, и рисовать его иначе не за что.
+                        iced_widget::text_input::Status::Disabled => &active,
+                    };
+                    let base = convert_widget_style(state);
+                    let value = base.text_color.unwrap_or(theme.palette().text);
+                    iced_widget::text_input::Style {
+                        background: base.background.unwrap_or(iced_core::Background::Color(Color::TRANSPARENT)),
+                        border: base.border,
+                        // Иконка полю не задаётся ни разу — своей она рисуется
+                        // цветом подсказки, как и placeholder.
+                        icon: placeholder,
+                        placeholder,
+                        value,
+                        selection,
+                    }
+                });
+            }
+
             if let Some(h) = &t.on_input {
                 if !h.method.is_empty() {
                     let method = h.method.clone();
@@ -225,45 +255,78 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .width(convert_length(&c.width))
                 .height(convert_length(&c.height))
                 .max_width(convert_length_val(&c.max_width))
-                .max_height(convert_length_val(&c.max_height));
-            
+                .max_height(convert_length_val(&c.max_height))
+                .clip(c.clip);
+
             if let Some(ax) = convert_alignment(c.align_x()) { cont = cont.align_x(ax); }
             if let Some(ay) = convert_alignment(c.align_y()) { cont = cont.align_y(ay); }
 
-            if let Some(bg) = &c.background {
-                let background = convert_background(bg);
-                cont = cont.style(move |_theme: &Theme| {
-                    iced_widget::container::Style {
-                        background: Some(background),
-                        ..Default::default()
-                    }
-                });
+            if let Some(style) = &c.style {
+                let style = convert_widget_style(style);
+                cont = cont.style(move |_theme: &Theme| style);
             }
-            
+
             cont.into()
         }
         Some(proto::widget::Type::Scrollable(s)) => {
             let content = if let Some(child) = &s.content { convert_widget(child) } else { Space::new().into() };
-            let bar = iced_widget::scrollable::Scrollbar::default();
+            let mut bar = iced_widget::scrollable::Scrollbar::default();
+            if let Some(geometry) = &s.scrollbar {
+                if geometry.width > 0.0 {
+                    bar = bar.width(geometry.width);
+                }
+                if geometry.scroller_width > 0.0 {
+                    bar = bar.scroller_width(geometry.scroller_width);
+                }
+                bar = bar.margin(geometry.margin);
+            }
             let direction = match s.direction() {
                 proto::ScrollDirection::ScrollHorizontal => iced_widget::scrollable::Direction::Horizontal(bar),
                 proto::ScrollDirection::ScrollBoth => iced_widget::scrollable::Direction::Both { vertical: bar, horizontal: bar },
                 proto::ScrollDirection::ScrollVertical => iced_widget::scrollable::Direction::Vertical(bar),
             };
-            scrollable(content)
+            let mut scroll = scrollable(content)
                 .direction(direction)
                 .width(convert_length(&s.width))
-                .height(convert_length(&s.height))
-                .into()
+                .height(convert_length(&s.height));
+
+            if let Some(look) = &s.scrollbar {
+                let rail = convert_rail(look);
+                // Клиент называет только дорожку — остальное (подложка, вид
+                // авто-прокрутки) остаётся темы: пересказывать её целиком ради
+                // двух цветов значит завести второй набор умолчаний.
+                //
+                // Дорожка выглядит одинаково в покое и под курсором: она узкая,
+                // и подсветка на ней читается как рябь, а не как отклик.
+                scroll = scroll.style(move |theme: &Theme, status| iced_widget::scrollable::Style {
+                    vertical_rail: rail,
+                    horizontal_rail: rail,
+                    ..iced_widget::scrollable::default(theme, status)
+                });
+            }
+
+            scroll.into()
         }
         Some(proto::widget::Type::ProgressBar(p)) => {
             // length/girth, а не width/height: полоса умеет быть вертикальной,
             // и «длина» у неё вдоль своей оси. Горизонтальная — по умолчанию,
             // так что длина здесь ширина, толщина — высота.
-            progress_bar(p.range_start..=p.range_end, p.value)
+            let mut bar = progress_bar(p.range_start..=p.range_end, p.value)
                 .length(convert_length(&p.width))
-                .girth(convert_length(&p.height))
-                .into()
+                .girth(convert_length(&p.height));
+
+            if let Some(style) = &p.style {
+                let style = iced_widget::progress_bar::Style {
+                    background: style.track.as_ref().map(convert_background)
+                        .unwrap_or(iced_core::Background::Color(Color::TRANSPARENT)),
+                    bar: style.bar.as_ref().map(convert_background)
+                        .unwrap_or(iced_core::Background::Color(Color::TRANSPARENT)),
+                    border: convert_border(&style.border),
+                };
+                bar = bar.style(move |_theme: &Theme| style);
+            }
+
+            bar.into()
         }
         Some(proto::widget::Type::Stack(s)) => {
             stack(s.children.iter().map(convert_widget))
@@ -277,7 +340,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             } else {
                 Space::new().into()
             };
-            
+
             let position = match t.position() {
                 proto::TooltipPosition::TooltipTop => iced_widget::tooltip::Position::Top,
                 proto::TooltipPosition::TooltipBottom => iced_widget::tooltip::Position::Bottom,
@@ -285,10 +348,41 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 proto::TooltipPosition::TooltipRight => iced_widget::tooltip::Position::Right,
             };
 
-            tooltip(content, text(t.tooltip.clone()), position)
-                .gap(t.gap)
-                .padding(t.padding)
-                .into()
+            let mut label = text(t.tooltip.clone());
+            if t.text_size > 0.0 {
+                label = label.size(t.text_size);
+            }
+            // Цвет надписи — из стиля подсказки: рисует её контейнер оверлея,
+            // и свой цвет текста он передаёт содержимому сам.
+            let mut hint = tooltip(content, label, position).gap(t.gap).padding(t.padding);
+            if let Some(style) = &t.style {
+                let style = convert_widget_style(style);
+                hint = hint.style(move |_theme: &Theme| style);
+            }
+            hint.into()
+        }
+        Some(proto::widget::Type::Popover(p)) => {
+            let anchor = p.anchor.as_ref().map_or_else(|| Space::new().into(), |w| convert_widget(w));
+            let panel = p.panel.as_ref().map_or_else(|| Space::new().into(), |w| convert_widget(w));
+            let mut popover = crate::module::popover::Popover::new(anchor, panel)
+                .open(p.open)
+                .gap(p.gap)
+                // У панели два края, а не три: центрировать её относительно
+                // якоря незачем — меню равняется по той стороне, с которой
+                // ему хватает места.
+                .align(match p.align_x() {
+                    proto::Alignment::End => crate::module::popover::Align::End,
+                    proto::Alignment::Start | proto::Alignment::Center => crate::module::popover::Align::Start,
+                });
+            if let Some(handler) = &p.on_dismiss
+                && !handler.method.is_empty()
+            {
+                popover = popover.on_dismiss(UiMessage {
+                    method: handler.method.clone(),
+                    value: handler.value.clone(),
+                });
+            }
+            popover.into()
         }
         Some(proto::widget::Type::Image(img)) => {
             let handle = img.handle.clone().unwrap_or_default();
@@ -378,18 +472,74 @@ fn convert_color_value(c: &proto::Color) -> Color {
     Color::from_rgba(c.r, c.g, c.b, c.a)
 }
 
-/// Внешний вид виджета в одном состоянии. `inherited_text` — цвет текста темы:
-/// им рисуется содержимое, если стиль своего цвета не назвал.
-fn convert_widget_style(style: &proto::WidgetStyle, inherited_text: Color) -> iced_widget::button::Style {
-    iced_widget::button::Style {
+/// Внешний вид виджета в одном состоянии. Носитель здесь контейнер, потому что
+/// его стиль в iced — самый общий: те же поля, что у кнопки и у подсказки, но
+/// цвет текста необязателен, а «не сказано» и означает «как обычный текст».
+fn convert_widget_style(style: &proto::WidgetStyle) -> iced_widget::container::Style {
+    iced_widget::container::Style {
         background: style.background.as_ref().map(convert_background),
-        text_color: style.text_color.as_ref().map(convert_color_value).unwrap_or(inherited_text),
+        text_color: style.text_color.as_ref().map(convert_color_value),
         border: convert_border(&style.border),
-        shadow: iced_core::Shadow::default(),
-        // Кнопка не прилипает к пиксельной сетке: её границы приходят из
+        shadow: convert_shadow(&style.shadow),
+        // Виджет не прилипает к пиксельной сетке: его границы приходят из
         // раскладки клиента, и подтягивание их к целым пикселям разъезжается
         // с уже посчитанной геометрией соседей.
         snap: false,
+    }
+}
+
+/// То же для кнопки: цвет текста у неё обязателен, и незаданный берётся у темы
+/// (`inherited_text`).
+fn convert_button_style(style: &proto::WidgetStyle, inherited_text: Color) -> iced_widget::button::Style {
+    let base = convert_widget_style(style);
+    iced_widget::button::Style {
+        background: base.background,
+        text_color: base.text_color.unwrap_or(inherited_text),
+        border: base.border,
+        shadow: base.shadow,
+        snap: base.snap,
+    }
+}
+
+fn convert_shadow(shadow: &Option<proto::Shadow>) -> iced_core::Shadow {
+    match shadow {
+        Some(s) => iced_core::Shadow {
+            color: convert_color(&s.color),
+            offset: iced_core::Vector::new(s.offset_x, s.offset_y),
+            blur_radius: s.blur,
+        },
+        None => iced_core::Shadow::default(),
+    }
+}
+
+/// Дорожка полосы прокрутки вместе с бегунком.
+fn convert_rail(bar: &proto::Scrollbar) -> iced_widget::scrollable::Rail {
+    let border = iced_core::Border { radius: bar.radius.into(), ..Default::default() };
+    iced_widget::scrollable::Rail {
+        background: bar.rail.as_ref().map(convert_background),
+        border,
+        scroller: iced_widget::scrollable::Scroller {
+            background: bar.scroller.as_ref().map(convert_background)
+                .unwrap_or(iced_core::Background::Color(Color::TRANSPARENT)),
+            border,
+        },
+    }
+}
+
+/// Шрифт текста: логическое имя семейства (пустое — дефолтное) и начертание.
+fn convert_font(family: &str, weight: proto::FontWeight) -> Font {
+    Font {
+        family: if family.is_empty() {
+            Font::DEFAULT.family
+        } else {
+            Family::Name(intern_font_family(family))
+        },
+        weight: match weight {
+            proto::FontWeight::WeightNormal => iced_core::font::Weight::Normal,
+            proto::FontWeight::WeightMedium => iced_core::font::Weight::Medium,
+            proto::FontWeight::WeightBold => iced_core::font::Weight::Bold,
+        },
+        ..Font::DEFAULT
     }
 }
 

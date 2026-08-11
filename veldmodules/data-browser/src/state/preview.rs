@@ -17,6 +17,15 @@ pub struct PreviewState {
     /// закрыть, и тогда спрашивать здесь уже некого.
     pub request: veldsdk::Latest,
     pub error: Option<String>,
+    /// Размеры исходного изображения и готового превью — их сообщает
+    /// image-loader вместе с текстурой. Своего способа их узнать у нас нет:
+    /// текстура превью уже уменьшена, а исходник мы не читали.
+    pub source_size: Option<(u32, u32)>,
+    pub preview_size: Option<(u32, u32)>,
+    /// Масштаб показа: 0 — вписать в окно, иначе доля от натурального размера
+    /// превью. Ноль отдельным значением, а не «1.0 и так вписано»: вписанный
+    /// снимок меняет размер вместе с окном, а масштабированный — нет.
+    pub zoom: f32,
 }
 
 impl PreviewState {
@@ -50,6 +59,9 @@ impl PreviewState {
         self.close_file();
         self.error = None;
         self.current_path.clear();
+        self.source_size = None;
+        self.preview_size = None;
+        self.zoom = 0.0;
 
         self.request.abandon()
     }

@@ -34,9 +34,20 @@ message ListPathRequest {
 }
 
 message ListPathResponse {
-  repeated string items = 1;
+  repeated ListEntry entries = 1;
   string next_token = 2;
   string error = 3;
+}
+
+// Элемент листинга. Размер и время у объекта каталог сообщает сам, а у папки
+// их нет вовсе: папка в S3 — это общий префикс ключей, и ни размера, ни даты
+// за ней не стоит; узнать их можно только обойдя её содержимое.
+message ListEntry {
+  // Путь продукта с префиксом бакета; со слэшем на конце — папка.
+  string key = 1;
+  uint64 size = 2;
+  // Unix-секунды; 0 — каталог времени не сообщил.
+  int64 modified = 3;
 }
 
 // --- Подпись ---

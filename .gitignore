@@ -9,6 +9,8 @@ build
 
 # Temporary and log files
 *.log
+# Логи и снимки кадра отладочного прогона (см. capture.rs) — всё про последний запуск
+runtime/logs/
 .env
 .DS_Store
 

@@ -27,6 +27,14 @@ pub struct HostConfig {
     pub plugin_raw_configs: HashMap<String, String>,
 }
 
+impl HostConfig {
+    /// Файл лога — и умолчание к нему. Спрашивают его двое (логгер и раннер,
+    /// кладущий снимки кадра рядом), поэтому путь собирается здесь.
+    pub fn log_path(&self) -> std::path::PathBuf {
+        self.runtime_dir.join(self.logs.as_deref().unwrap_or("logs/host.log"))
+    }
+}
+
 /// services.json больше не перечисляет модули по имени (не источник истины —
 /// см. `plugins::load_services`, где имя каждого плагина спрашивается у него
 /// самого через ABI). Конфиг конкретного плагина ищется по имени файла

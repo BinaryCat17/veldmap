@@ -1,6 +1,8 @@
 pub struct BrowseState {
     pub current_path: String,
     pub items: Vec<BrowseItem>,
+    /// Как показывать этот список — отбор, порядок, страница.
+    pub listing: super::listing::ListingState,
     /// Последняя ошибка list_path от data-provider (пусто, если запрос успешен)
     pub error: Option<String>,
     /// Ожидание ответа на data-provider/on_list_path. Актуален только
@@ -16,6 +18,10 @@ pub struct BrowseItem {
     pub identifier: String,
     pub name: String,
     pub is_folder: bool,
+    /// Размер объекта в байтах; 0 — папка или размер неизвестен.
+    pub size: u64,
+    /// Время объекта, unix-секунды; 0 — неизвестно.
+    pub modified: i64,
 }
 
 impl Default for BrowseState {
@@ -23,6 +29,7 @@ impl Default for BrowseState {
         Self {
             current_path: String::new(),
             items: Vec::new(),
+            listing: Default::default(),
             error: None,
             request: veldsdk::Latest::new(),
         }

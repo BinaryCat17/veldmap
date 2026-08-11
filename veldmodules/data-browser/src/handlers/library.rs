@@ -27,6 +27,14 @@ pub fn on_download_pressed(state: &mut State, identifier: String) {
     crate::calls::data_library::on_download(&DownloadRequest { identifier });
 }
 
+/// Отменить идущую закачку. Отдельно от «паузы»: пауза — это то же нажатие на
+/// кнопку скачивания, а отмена приходит из меню строки и адресуется записью.
+pub fn on_cancel_pressed(_state: &mut State, name: String) {
+    if name.is_empty() { return; }
+
+    crate::calls::data_library::on_cancel(&ItemRequest { name });
+}
+
 /// Пользователь нажал «удалить» — на любой записи библиотеки (полной,
 /// недокачанной или заявленной одним лишь намерением).
 pub fn on_delete_pressed(_state: &mut State, name: String) {
@@ -48,4 +56,38 @@ pub fn on_state(state: &mut State, msg: LibraryStateMsg) {
     }
     state.error = None;
     state.library.entries = msg.entries;
+    measure_speed(state);
+}
+
+/// Скорость закачки — из двух соседних состояний: сколько байт прибавилось за
+/// сколько секунд. Своего поля под неё у библиотеки нет, и быть не должно —
+/// она рассылает то, что есть сейчас, а не то, как быстро оно росло.
+///
+/// Замер сбрасывается, когда качать нечего: скорость закончившейся закачки —
+/// это уже не скорость, а последнее увиденное число.
+fn measure_speed(state: &mut State) {
+    let (count, done, _) = state.library.downloading();
+    if count == 0 {
+        state.speed = 0.0;
+        state.measured = None;
+        return;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0);
+
+    if let Some((measured_at, measured_done)) = state.measured {
+        let seconds = now - measured_at;
+        // Того же мгновения мало: разделив на ноль секунд, получим не скорость,
+        // а бесконечность. Прошлый замер при этом сохраняется — следующее
+        // состояние сравнится уже с ним.
+        if seconds > 0 {
+            state.speed = done.saturating_sub(measured_done) as f32 / seconds as f32;
+            state.measured = Some((now, done));
+        }
+        return;
+    }
+    state.measured = Some((now, done));
 }

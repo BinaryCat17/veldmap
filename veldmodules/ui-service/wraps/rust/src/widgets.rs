@@ -202,7 +202,7 @@ impl<M> Text<M> {
             widget: proto::Text {
                 content: content.into(),
                 size: 16.0,
-                color: Some(proto::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+                color: None,
                 horizontal_alignment: 0,
                 vertical_alignment: 0,
                 width: None,
@@ -210,6 +210,7 @@ impl<M> Text<M> {
                 shaping: proto::Shaping::ShapeBasic as i32,
                 font_family: String::new(),
                 wrapping: proto::Wrapping::WrapWord as i32,
+                weight: proto::FontWeight::WeightNormal as i32,
             },
             _marker: std::marker::PhantomData
         }
@@ -255,6 +256,11 @@ impl<M> Text<M> {
         self.widget.font_family = name.into();
         self
     }
+    /// Насыщенность начертания — см. `FontWeight` в types.proto.
+    pub fn weight(mut self, weight: proto::FontWeight) -> Self {
+        self.widget.weight = weight as i32;
+        self
+    }
 }
 
 impl<M> From<Text<M>> for Element<M> {
@@ -268,6 +274,14 @@ impl<M> From<Text<M>> for Element<M> {
 
 pub fn text<M>(content: impl Into<String>) -> Text<M> {
     Text::new(content)
+}
+
+/// Моноширинный текст: имя файла, размер, путь, время. Отдельный билдер по той
+/// же причине, что и `icon`, — имя шрифта знает ui-service, а не call-сайт.
+/// Однострочность здесь не выбор оформления: колонка такого текста считается по
+/// знакам, и перенос сделал бы её ширину неправдой.
+pub fn mono<M>(content: impl Into<String>) -> Text<M> {
+    Text::new(content).font_family(super::style::FONT_MONO).single_line()
 }
 
 /// Глиф иконочного шрифта. Отдельный билдер, а не `text(..).font_family(..)`
@@ -373,6 +387,15 @@ impl<M> TextInput<M> {
         self.widget.size = size;
         self
     }
+    pub fn style(mut self, style: super::style::TextInputStyle) -> Self {
+        self.widget.style = Some(style.to_proto());
+        self
+    }
+    /// Логическое имя шрифта — как у `Text::font_family`.
+    pub fn font_family(mut self, name: impl Into<String>) -> Self {
+        self.widget.font_family = name.into();
+        self
+    }
 }
 
 impl<M> From<TextInput<M>> for Element<M> {
@@ -413,8 +436,19 @@ impl<M> Container<M> {
         self.widget.max_height = Some(proto::Length { value: Some(proto::length::Value::Fixed(h)) });
         self
     }
+    /// Фон без остального стиля — самый частый случай `style`.
     pub fn background(mut self, background: impl Into<Background>) -> Self {
-        self.widget.background = Some(background.into().to_proto());
+        let style = self.widget.style.get_or_insert_with(Default::default);
+        style.background = Some(background.into().to_proto());
+        self
+    }
+    pub fn style(mut self, style: super::style::WidgetStyle) -> Self {
+        self.widget.style = Some(style.to_proto());
+        self
+    }
+    /// Обрезать содержимое по своим границам — см. `Container.clip`.
+    pub fn clip(mut self) -> Self {
+        self.widget.clip = true;
         self
     }
     pub fn align_x(mut self, align: Alignment) -> Self {
@@ -461,6 +495,7 @@ impl<M> Scrollable<M> {
                 width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 direction: proto::ScrollDirection::ScrollVertical as i32,
+                scrollbar: None,
             },
             _marker: std::marker::PhantomData,
         }
@@ -469,6 +504,11 @@ impl<M> Scrollable<M> {
     /// сжимать его нельзя: полоса вкладок, длинная строка команд.
     pub fn direction(mut self, direction: proto::ScrollDirection) -> Self {
         self.widget.direction = direction as i32;
+        self
+    }
+    /// Вид и ширина полосы прокрутки.
+    pub fn scrollbar(mut self, bar: super::style::Scrollbar) -> Self {
+        self.widget.scrollbar = Some(bar.to_proto());
         self
     }
 }
@@ -500,6 +540,7 @@ impl<M> ProgressBar<M> {
                 value,
                 width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 height: Some(proto::Length { value: Some(proto::length::Value::Fixed(12.0)) }),
+                style: None,
             },
             _marker: std::marker::PhantomData,
         }
@@ -512,6 +553,13 @@ impl<M> From<ProgressBar<M>> for Element<M> {
             r#type: Some(proto::widget::Type::ProgressBar(p.widget)),
             ..Default::default()
         }.into()
+    }
+}
+
+impl<M> ProgressBar<M> {
+    pub fn style(mut self, style: super::style::ProgressBarStyle) -> Self {
+        self.widget.style = Some(style.to_proto());
+        self
     }
 }
 
@@ -594,6 +642,8 @@ impl<M> Tooltip<M> {
                 position: position as i32,
                 gap: 5.0,
                 padding: 5.0,
+                style: None,
+                text_size: 0.0,
             },
             _marker: std::marker::PhantomData,
         }
@@ -606,6 +656,15 @@ impl<M> Tooltip<M> {
     /// Отступ внутри самой подсказки — одинаковый со всех сторон.
     pub fn padding(mut self, padding: f32) -> Self {
         self.widget.padding = padding;
+        self
+    }
+    /// Вид самой подсказки; `text_color` стиля — цвет её надписи.
+    pub fn style(mut self, style: super::style::WidgetStyle) -> Self {
+        self.widget.style = Some(style.to_proto());
+        self
+    }
+    pub fn text_size(mut self, size: f32) -> Self {
+        self.widget.text_size = size;
         self
     }
 }
@@ -621,6 +680,63 @@ impl<M> From<Tooltip<M>> for Element<M> {
 
 pub fn tooltip<M>(content: impl Into<Element<M>>, label: impl Into<String>, position: proto::TooltipPosition) -> Tooltip<M> {
     Tooltip::new(content, label, position)
+}
+
+/// Всплывающая у якоря панель — см. `Popover` в types.proto.
+pub struct Popover<M> {
+    widget: proto::Popover,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Popover<M> {
+    pub fn new(anchor: impl Into<Element<M>>, panel: impl Into<Element<M>>) -> Self {
+        Self {
+            widget: proto::Popover {
+                anchor: Some(Box::new(anchor.into().widget)),
+                panel: Some(Box::new(panel.into().widget)),
+                ..Default::default()
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+    /// Открыта ли панель. Состояние меню принадлежит клиенту — сервис его не
+    /// помнит и сам не переключает.
+    pub fn open(mut self, open: bool) -> Self {
+        self.widget.open = open;
+        self
+    }
+    /// Каким краем панель равняется на якорь.
+    pub fn align_x(mut self, align: Alignment) -> Self {
+        self.widget.align_x = align as i32;
+        self
+    }
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.widget.gap = gap;
+        self
+    }
+    /// Что придёт, когда щёлкнут мимо панели: открытое меню иначе нечем
+    /// закрыть.
+    pub fn on_dismiss(mut self, message: M) -> Self
+    where
+        M: UiMessage,
+    {
+        let (method, value) = message.encode();
+        self.widget.on_dismiss = Some(proto::Handler { method, value });
+        self
+    }
+}
+
+impl<M> From<Popover<M>> for Element<M> {
+    fn from(p: Popover<M>) -> Self {
+        proto::Widget {
+            r#type: Some(proto::widget::Type::Popover(Box::new(p.widget))),
+            ..Default::default()
+        }.into()
+    }
+}
+
+pub fn popover<M>(anchor: impl Into<Element<M>>, panel: impl Into<Element<M>>) -> Popover<M> {
+    Popover::new(anchor, panel)
 }
 
 pub struct Image<M> {

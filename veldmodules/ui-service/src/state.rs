@@ -68,8 +68,15 @@ impl State {
             plugins: HashMap::new(),
             // Имена шрифтов — контракт с клиентами разметки; для них они
             // объявлены константами в veld-ui-service-wrap (style::FONT_*).
-            renderer: GpuRenderer::new("JetBrains Mono", vec![
-                ("JetBrains Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
+            //
+            // У одного имени бывает несколько файлов: начертания — это разные
+            // лица одного семейства, и выбирает между ними уже вес текста
+            // (Text.weight). Без своего файла вес подменяется ближайшим.
+            renderer: GpuRenderer::new("UI", vec![
+                ("UI", include_bytes!("../../../runtime/assets/AlegreyaSans-Regular.ttf")),
+                ("UI", include_bytes!("../../../runtime/assets/AlegreyaSans-Medium.ttf")),
+                ("UI", include_bytes!("../../../runtime/assets/AlegreyaSans-Bold.ttf")),
+                ("Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
                 ("Icons", include_bytes!("../../../runtime/assets/SymbolsNerdFontMono-Regular.ttf")),
             ]),
             surface_format,

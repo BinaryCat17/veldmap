@@ -1,51 +1,36 @@
-//! View для экрана поиска
+//! view/search.rs — поиск снимков.
+//!
+//! Экран тот же, что у каталога и скачанного: отличается только источником
+//! строк. Пока провайдер не отвечает на запрос поиска, источник пуст — и это
+//! сказано в самом экране, а не подразумевается пустой таблицей.
 
-use veld_ui_service_wrap::{column, row};
-use crate::proto::ui_service::{text, text_input, button, Element, Length};
+use crate::proto::ui_service::Element;
+use crate::module::components::{format, list_screen, Row, Screen};
 use crate::module::state::{SearchState, State};
-use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::{styles, Msg};
+use crate::module::Msg;
 
-pub fn view(state: &State, search_state: &SearchState) -> Element<Msg> {
-    let body: Element<Msg> = if let Some(err) = &search_state.error {
-        column![text(format!("Error: {}", err)).size(16.0)].into()
-    } else if search_state.request.is_pending() {
-        column![text("Searching...").size(16.0)].into()
-    } else {
-        let items: Vec<Row> = search_state.results.iter()
-            .map(|p| Row::remote(&state.library, p.path.clone(), p.name.clone()))
-            .collect();
+pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
+    let rows: Vec<Row> = search
+        .results
+        .iter()
+        .map(|product| Row::remote(&state.library, product.path.clone(), product.name.clone(), 0, 0))
+        .collect();
 
-        let empty_message = if search_state.query.is_empty() {
-            "Enter search query and press Search"
-        } else {
-            "No results found"
-        };
-
-        items_or_message(&items, ItemActions {
-            browse: None, // Каталог поиск не отдаёт — только продукты
-            // Найденное может быть уже скачано: тогда смотрим его с диска,
-            // как на Browse, — строка тут та же и состояние у неё то же.
-            view_local: Some(Msg::ViewLocal),
-            view_remote: Some(Msg::ViewRemote),
-            download: Some(Msg::Download),
-            delete: Some(Msg::Delete),
-        }, empty_message)
+    let subtitle = match &search.error {
+        Some(error) => error.clone(),
+        None if search.request.is_pending() => "идёт поиск…".to_string(),
+        None => format!("{} {}", rows.len(), format::plural(rows.len(), ["снимок", "снимка", "снимков"])),
     };
 
-    let title: Element<Msg> = text("Search Copernicus Data Space").size(20.0).into();
-    let search_row: Element<Msg> = row![
-        styles::apply_search_input(
-            text_input("Search query...", &search_state.query)
-        )
-            .width(Length::Fill)
-            .on_input(Msg::SearchInput)
-            .on_submit(Msg::Search),
-        styles::apply_primary(button(text("Search"))).on_press(Msg::Search)
-    ]
-    .spacing(10.0)
-    .width(Length::Fill)
-    .into();
-
-    list_screen(vec![title, search_row], body)
+    list_screen::view(
+        Screen {
+            title: "Поиск снимков",
+            subtitle,
+            path: None,
+            empty: "Поиск по каталогу ещё не реализован — обход доступен в сетевом каталоге",
+            rows,
+        },
+        &search.listing,
+        state.logical_width(),
+    )
 }

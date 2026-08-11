@@ -3,7 +3,7 @@ pub mod message;
 pub mod state;
 pub mod view;
 pub mod components;
-pub mod styles;
+pub mod theme;
 
 // -- Types --
 pub use handlers::Config;
@@ -21,21 +21,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
 // уходит по сети — дедуп по хэшу внутри render(). --
 static LAST_UI_HASH: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
 
-/// Библиотеку спрашиваем один раз, на первом же событии: до ответа мы не знаем,
-/// что уже скачано, а сама она рассылает только изменения.
-///
-/// Первым приходит app/on_window_resized — раннер объявляет размер окна, а
-/// готовность следом (см. runners/desktop, `announce`). К этому моменту все
-/// плагины уже загружены и подписаны, так что запрос доедет до библиотеки.
-///
-/// Флаг снаружи State: hook_event получает его по ссылке, да и относится это к
-/// жизни модуля, а не к тому, что он показывает.
-static LIBRARY_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 pub fn hook_event(state: &State) {
-    if !LIBRARY_REQUESTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        handlers::nav::request_library();
-    }
     let root = view::build_root(state);
     veld_ui_service_wrap::render::render(
         root,
@@ -55,19 +41,26 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
     };
 
     match message {
-        Msg::NavBrowse => handlers::nav::on_nav_browse(state),
-        Msg::NavSearch => handlers::nav::on_nav_search(state),
-        Msg::NavDownloaded => handlers::nav::on_nav_downloaded(state),
         Msg::TabSelect(id) => handlers::nav::on_tab_select(state, id),
         Msg::TabClose(id) => handlers::nav::on_tab_close(state, id),
-        Msg::Browse(path) => handlers::browse::on_browse(state, path),
-        Msg::BrowseUp => handlers::browse::on_browse_up(state),
-        Msg::Search => handlers::search::on_search(state),
-        Msg::SearchInput(query) => handlers::search::on_search_input(state, query),
+        Msg::TabMenu(open) => handlers::nav::on_tab_menu(state, open),
+        Msg::NewBrowse => handlers::nav::on_new_browse(state),
+        Msg::NewSearch => handlers::nav::on_new_search(state),
+        Msg::NewDownloaded => handlers::nav::on_new_downloaded(state),
+        Msg::OpenMenu(menu) => handlers::listing::on_menu(state, menu),
+        Msg::Filter(filter) => handlers::listing::on_filter(state, filter),
+        Msg::Group(grouping) => handlers::listing::on_group(state, grouping),
+        Msg::Sort(sorting) => handlers::listing::on_sort(state, sorting),
+        Msg::Query(query) => handlers::listing::on_query(state, query),
+        Msg::Page(page) => handlers::listing::on_page(state, page),
+        Msg::Enter(path) => handlers::browse::on_enter(state, path),
+        Msg::Up => handlers::browse::on_up(state),
         Msg::Download(identifier) => handlers::library::on_download_pressed(state, identifier),
-        Msg::ViewLocal(name) => handlers::preview::on_view_local_pressed(state, name),
-        Msg::ViewRemote(identifier) => handlers::preview::on_view_remote_pressed(state, identifier),
+        Msg::Cancel(name) => handlers::library::on_cancel_pressed(state, name),
         Msg::Delete(name) => handlers::library::on_delete_pressed(state, name),
+        Msg::Preview(name) => handlers::preview::on_view_local_pressed(state, name),
+        Msg::PreviewRemote(identifier) => handlers::preview::on_view_remote_pressed(state, identifier),
+        Msg::Zoom(zoom) => handlers::preview::on_zoom(state, zoom),
     }
 }
 

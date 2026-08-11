@@ -1,47 +1,55 @@
-//! View для экрана браузера
+//! view/browse.rs — сетевой каталог.
+//!
+//! Своего здесь только источник строк и подпись: показывает их общий экран
+//! списка (см. components::list_screen).
 
-use veld_ui_service_wrap::{column, row};
-use crate::proto::ui_service::{text, button, icon, Element, Alignment};
+use crate::proto::ui_service::Element;
+use crate::module::components::{format, list_screen, Row, RowStatus, Screen};
 use crate::module::state::{BrowseState, State};
-use crate::module::components::{Row, items_or_message, list_screen, ItemActions};
-use crate::module::{styles, Msg};
+use crate::module::Msg;
 
-pub fn view(state: &State, browse_state: &BrowseState) -> Element<Msg> {
-    let body: Element<Msg> = if let Some(err) = &browse_state.error {
-        column![text(format!("Error: {}", err)).size(16.0)].into()
-    } else {
-        // Папки не сверяем с локальными файлами — это ключ remote-префикса,
-        // а не имя файла.
-        let items: Vec<Row> = browse_state.items.iter().map(|i| if i.is_folder {
-            Row::folder(i.identifier.clone(), i.name.clone())
-        } else {
-            Row::remote(&state.library, i.identifier.clone(), i.name.clone())
-        }).collect();
+pub fn view(state: &State, browse: &BrowseState) -> Element<Msg> {
+    let rows: Vec<Row> = browse
+        .items
+        .iter()
+        .map(|item| {
+            if item.is_folder {
+                // Папка каталога: сколько её содержимого уже на диске, знает
+                // библиотека — у самого каталога такого ответа нет.
+                let done = state.library.count_under(&item.identifier);
+                let status = if done > 0 { RowStatus::Partial { done } } else { RowStatus::Remote };
+                Row::folder_row(item.identifier.clone(), item.name.clone(), status)
+            } else {
+                Row::remote(&state.library, item.identifier.clone(), item.name.clone(), item.size, item.modified)
+            }
+        })
+        .collect();
 
-        items_or_message(&items, ItemActions {
-            browse: Some(Msg::Browse),
-            view_local: Some(Msg::ViewLocal),
-            view_remote: Some(Msg::ViewRemote),
-            download: Some(Msg::Download),
-            delete: Some(Msg::Delete),
-        }, "No items found")
+    let subtitle = match &browse.error {
+        Some(error) => error.clone(),
+        None if browse.request.is_pending() => "загружается…".to_string(),
+        None => {
+            let folders = rows.iter().filter(|row| row.is_folder).count();
+            let files = rows.len() - folders;
+            format!(
+                "{} {}, {} {}",
+                folders,
+                format::plural(folders, ["папка", "папки", "папок"]),
+                files,
+                format::plural(files, ["файл", "файла", "файлов"]),
+            )
+        }
     };
 
-    let title_row: Element<Msg> = if browse_state.request.is_pending() {
-        row![
-            text(format!("Browse: {}", browse_state.current_path)).size(20.0),
-            icon("\u{f110}").color(styles::COLOR_TEXT_DIM),
-            text("Loading...").size(14.0).color(styles::COLOR_TEXT_DIM),
-        ].spacing(8.0).align_items(Alignment::Center).into()
-    } else {
-        text(format!("Browse: {}", browse_state.current_path)).size(20.0).into()
-    };
-
-    let up_button: Element<Msg> = styles::apply_primary(button(
-        row![icon("\u{f062}"), text("Up")]
-            .spacing(6.0)
-            .align_items(Alignment::Center)
-    )).on_press(Msg::BrowseUp).into();
-
-    list_screen(vec![title_row, up_button], body)
+    list_screen::view(
+        Screen {
+            title: "Сетевой каталог",
+            subtitle,
+            path: Some(&browse.current_path),
+            empty: if browse.request.is_pending() { "Загружается…" } else { "Папка пуста" },
+            rows,
+        },
+        &browse.listing,
+        state.logical_width(),
+    )
 }

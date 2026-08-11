@@ -161,6 +161,10 @@ pub fn on_load_result(state: &mut State, result: LoadImageResult) {
     // загрузчика. Закрывать здесь нечего.
     let Some(preview) = state.preview_mut(view) else { return };
     preview.close_file();
+    // Размеры — единственное, что о снимке известно помимо самой картинки:
+    // исходник мы не читали, а текстура уже уменьшена загрузчиком.
+    preview.source_size = (result.source_width > 0).then_some((result.source_width, result.source_height));
+    preview.preview_size = (result.width > 0).then_some((result.width, result.height));
 
     // ui-service строит view/bind group этой текстуры по read-гранту —
     // тот же ритуал, что grant_write оконной поверхности (surface.rs).
@@ -176,6 +180,15 @@ pub fn on_load_result(state: &mut State, result: LoadImageResult) {
             }
         }
         Err(error) => fail(state, view, error),
+    }
+}
+
+/// Масштаб показа активного снимка. Ноль — вписать в окно; остальное —
+/// доля от натурального размера превью.
+pub fn on_zoom(state: &mut State, zoom: f32) {
+    let Some(id) = state.active_id() else { return };
+    if let Some(preview) = state.preview_mut(id) {
+        preview.zoom = zoom.clamp(0.0, 8.0);
     }
 }
 
