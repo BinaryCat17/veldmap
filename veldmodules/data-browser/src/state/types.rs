@@ -4,6 +4,7 @@
 //! Browse — это две независимые папки, а не один экран с общей переменной.
 
 use super::browse::BrowseState;
+use super::globe::GlobeState;
 use super::listing::ListingState;
 use super::preview::PreviewState;
 use super::search::SearchState;
@@ -38,6 +39,8 @@ pub enum ViewKind {
     /// рассылкой (см. state::library); своё здесь только то, как их показать.
     Downloaded(ListingState),
     Preview(PreviewState),
+    /// Шар рисует отдельный модуль; здесь только место под него и жест.
+    Globe(GlobeState),
 }
 
 impl ViewKind {
@@ -49,7 +52,7 @@ impl ViewKind {
             ViewKind::Search(search) => Some(&mut search.listing),
             ViewKind::Browse(browse) => Some(&mut browse.listing),
             ViewKind::Downloaded(listing) => Some(listing),
-            ViewKind::Preview(_) => None,
+            ViewKind::Preview(_) | ViewKind::Globe(_) => None,
         }
     }
 }
@@ -78,6 +81,7 @@ impl ViewKind {
                 "" => "Просмотр".to_string(),
                 name => ellipsize(name),
             },
+            ViewKind::Globe(_) => "Глобус".to_string(),
         }
     }
 }

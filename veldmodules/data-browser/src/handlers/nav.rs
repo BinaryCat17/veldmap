@@ -37,6 +37,19 @@ pub fn on_new_downloaded(state: &mut State) {
     }
 }
 
+/// Глобус, как поиск и скачанное, показывает уже открытую вкладку: шар один,
+/// и второй такой же — просто вторая камера над тем же местом. К тому же
+/// каждая вкладка держит своё место под рендер, а рисующий модуль один.
+pub fn on_new_globe(state: &mut State) {
+    state.tab_menu = false;
+    match state.find(|kind| matches!(kind, ViewKind::Globe(_))) {
+        Some(id) => state.focus(id),
+        None => {
+            state.open(ViewKind::Globe(Default::default()));
+        }
+    }
+}
+
 /// Меню полосы вкладок. Раскрытое меню списка при этом закрывается — открытым
 /// бывает только одно.
 pub fn on_tab_menu(state: &mut State, open: bool) {
@@ -51,9 +64,10 @@ pub fn on_tab_select(state: &mut State, id: ViewId) {
     state.focus(id);
 }
 
-/// Закрытие вкладки — единственный выход из вида, поэтому уборка за ним тоже
-/// одна: превью гасит декодирование, если оно ещё идёт. Ресурсы вида (файл и
-/// текстура) освобождаются вместе с ним — их держит `OwnedResource`.
+/// Закрытие вкладки — единственный выход из вида, поэтому здесь и уборка за
+/// ним. Ресурсы вида (файл, текстура) освобождаются вместе с ним сами — их
+/// держит `OwnedResource`; убирать приходится ровно то, о чём знает кто-то
+/// ещё: незаконченная работа и отданное чужому модулю место.
 ///
 /// Учёт запроса при этом не снимается: ответ по нему придёт всё равно и придёт
 /// нам во владение, а опознать его как свой можно только по таблице маршрутов
@@ -61,10 +75,19 @@ pub fn on_tab_select(state: &mut State, id: ViewId) {
 pub fn on_tab_close(state: &mut State, id: ViewId) {
     let Some(view) = state.close(id) else { return };
 
-    if let ViewKind::Preview(mut preview) = view.kind {
-        if let Some(correlation_id) = preview.reset() {
-            crate::cancel::image_loader::on_load(&correlation_id);
+    match view.kind {
+        ViewKind::Preview(mut preview) => {
+            if let Some(correlation_id) = preview.reset() {
+                crate::cancel::image_loader::on_load(&correlation_id);
+            }
         }
+        // Место под шар освободится своим Drop, но глобусу об этом надо
+        // сказать: у него остался view этой текстуры, и молча освобождённую он
+        // продолжил бы рисовать до конца процесса.
+        ViewKind::Globe(globe) => {
+            veldsdk::surface::revoke(globe.surface, crate::calls::globe::on_set_surface);
+        }
+        _ => {}
     }
 }
 

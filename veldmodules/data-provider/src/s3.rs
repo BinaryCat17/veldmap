@@ -209,7 +209,7 @@ pub fn parse_listing(body: &[u8], requested: &str) -> anyhow::Result<Listing> {
                     }
                     ("Key", Some(entry)) => entry.identifier = identifier(&text),
                     ("Size", Some(entry)) => entry.size = text.parse().unwrap_or(0),
-                    ("LastModified", Some(entry)) => entry.modified = parse_timestamp(&text),
+                    ("LastModified", Some(entry)) => entry.modified = super::time::parse(&text),
                     ("NextContinuationToken", _) => next_token = text,
                     _ => {}
                 }
@@ -229,29 +229,4 @@ fn push(entries: &mut Vec<Entry>, entry: Entry, requested: &str) {
     if entry.identifier != requested && !entry.identifier.is_empty() {
         entries.push(entry);
     }
-}
-
-/// `2024-05-04T08:23:58.000Z` → unix-секунды. Смещения в ответах S3 не бывает:
-/// время всегда всемирное, поэтому разбираются только цифры на своих местах.
-/// Непонятная строка — ноль, то есть «время неизвестно»: подписи у файла не
-/// будет, но листинг из-за этого пропадать не должен.
-fn parse_timestamp(text: &str) -> i64 {
-    let number = |range: std::ops::Range<usize>| text.get(range).and_then(|part| part.parse::<i64>().ok());
-    let (Some(year), Some(month), Some(day)) = (number(0..4), number(5..7), number(8..10)) else {
-        return 0;
-    };
-    let (Some(hour), Some(minute), Some(second)) = (number(11..13), number(14..16), number(17..19)) else {
-        return 0;
-    };
-
-    // Алгоритм Хиннанта: сдвиг эры на 1 марта делает год без високосного дня
-    // непрерывным, и день эпохи считается без таблиц и без цикла по годам.
-    let year = year - i64::from(month <= 2);
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468;
-
-    days * 86_400 + hour * 3_600 + minute * 60 + second
 }

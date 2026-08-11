@@ -47,6 +47,7 @@ pub fn view(state: &State, browse: &BrowseState) -> Element<Msg> {
             subtitle,
             path: Some(&browse.current_path),
             empty: if browse.request.is_pending() { "Загружается…" } else { "Папка пуста" },
+            controls: None,
             rows,
         },
         &browse.listing,

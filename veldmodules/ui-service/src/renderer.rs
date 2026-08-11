@@ -247,15 +247,25 @@ pub enum DrawCmd {
         height: u32,
     },
     ExternalImage {
-        bounds: iced_core::Rectangle,
         texture_id: u64,
+        /// Сколько индексов занимает картинка. Прямоугольника здесь нет
+        /// намеренно: он уже лежит в вершинах, а команда только называет их
+        /// диапазон — вторая копия геометрии разошлась бы с первой молча.
         index_count: u32,
+        /// Содержимое текстуры меняется само, без участия разметки. Кадр с
+        /// такой картинкой нельзя пропустить по совпадению геометрии: геометрия
+        /// как раз и совпадёт, а показанное устареет (см. `render_plugin`).
+        live: bool,
     },
 }
 
 pub struct GpuRenderer {
     pub vertices: Vec<Vertex>,
-    pub indices: Vec<u16>,
+    /// Индексы 32-битные, а не 16-битные: у разметки нет естественного потолка
+    /// в 65 536 вершин — таблица во весь экран это уже тысячи квадов, а каждый
+    /// глиф — свой, — и упирались бы в него молча, завёрнутым номером вершины
+    /// и мусорной геометрией вместо кадра.
+    pub indices: Vec<u32>,
     pub draw_commands: Vec<DrawCmd>,
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
@@ -422,7 +432,7 @@ impl GpuRenderer {
             border_color,
         };
 
-        let base = self.vertices.len() as u16;
+        let base = self.vertices.len() as u32;
         self.vertices.push(v(x, y, u1, v1, 0.0, 0.0));
         self.vertices.push(v(x + w, y, u2, v1, rw, 0.0));
         self.vertices.push(v(x + w, y + h, u2, v2, rw, rh));
@@ -438,7 +448,9 @@ impl GpuRenderer {
 
     /// Чужая текстура во весь отведённый прямоугольник: UV 0..1 — целиком,
     /// цвет белый — шейдер умножает на него сэмпл.
-    pub fn draw_wgpu_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64) {
+    ///
+    /// `live` — про содержимое, а не про геометрию: см. `DrawCmd::ExternalImage`.
+    pub fn draw_external_image(&mut self, bounds: iced_core::Rectangle, texture_id: u64, live: bool) {
         self.push_quad_data(
             [bounds.x, bounds.y, bounds.width, bounds.height],
             [1.0, 1.0, 1.0, 1.0],
@@ -447,7 +459,16 @@ impl GpuRenderer {
         );
 
         self.draw_commands
-            .push(DrawCmd::ExternalImage { bounds, texture_id, index_count: 6 });
+            .push(DrawCmd::ExternalImage { texture_id, index_count: 6, live });
+    }
+
+    /// Есть ли в нарисованном кадре живая текстура. Спрашивают об этом дважды и
+    /// о разных кадрах: о нарисованном — стоит ли его отправлять (совпадение
+    /// геометрии тут ничего не значит), о прошлом — стоит ли рисовать
+    /// следующий. Поэтому вопрос задан списку команд, а не отдельному флагу:
+    /// флагов было бы два, и они разъехались бы.
+    pub fn has_live_image(commands: &[DrawCmd]) -> bool {
+        commands.iter().any(|cmd| matches!(cmd, DrawCmd::ExternalImage { live: true, .. }))
     }
 }
 

@@ -35,6 +35,7 @@ impl OwnedResource {
 
     pub fn handle(&self) -> ResourceHandle { self.handle.clone() }
     pub fn id(&self) -> u64 { self.handle.id }
+    pub fn size(&self) -> u64 { self.handle.size }
 
     /// Владение по голому id — для протоколов, где размер ресурса не несёт
     /// смысла (буферы, текстуры): на хосте они и живут как чистые id.

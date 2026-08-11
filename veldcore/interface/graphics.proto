@@ -20,6 +20,23 @@ enum TextureFormat {
     TEX_R32_FLOAT = 4;
     TEX_RGBA16_FLOAT = 5;
     TEX_RGBA32_FLOAT = 6;
+    // Буфер глубины. Заливать в него изображение нельзя: пишет в него только
+    // растеризатор, а читается он либо как depth-сэмпл (SAMPLE_DEPTH), либо
+    // никак. Выделяется тем же alloc_texture, что и цветная текстура.
+    TEX_DEPTH32_FLOAT = 7;
+}
+
+// Условие прохождения теста глубины: сравнивается глубина фрагмента с той,
+// что уже лежит в буфере.
+enum CompareFunction {
+    CMP_NEVER = 0;
+    CMP_LESS = 1;
+    CMP_EQUAL = 2;
+    CMP_LESS_EQUAL = 3;
+    CMP_GREATER = 4;
+    CMP_NOT_EQUAL = 5;
+    CMP_GREATER_EQUAL = 6;
+    CMP_ALWAYS = 7;
 }
 
 enum VertexFormat {
@@ -198,6 +215,18 @@ message BlendState {
     BlendComponent alpha = 2;
 }
 
+// Работа с буфером глубины. Формат назван здесь второй раз (первый — при
+// выделении самой текстуры) не по недосмотру: пайплайн компилируется до того,
+// как у него появляется таргет, и вывести формат ему неоткуда. Расхождение
+// ловится при отрисовке.
+message DepthStencilState {
+    TextureFormat format = 1;
+    // Записывать ли глубину прошедших тест фрагментов. Прозрачному слою поверх
+    // непрозрачного она не нужна: он должен видеть то, что под ним.
+    bool depth_write_enabled = 2;
+    CompareFunction depth_compare = 3;
+}
+
 message CreateRenderPipeline {
     uint64 shader_id = 1;
     string vertex_entry = 2;
@@ -211,6 +240,10 @@ message CreateRenderPipeline {
     TextureFormat target_format = 10;
     BlendState blend = 11; // не задан — альфа-блендинг по умолчанию
     string label = 12;
+    // Не задан — теста глубины нет вовсе, и приложить буфер глубины к такому
+    // пайплайну нельзя. Плоскому интерфейсу он и не нужен: порядок там задаёт
+    // сама разметка.
+    DepthStencilState depth_stencil = 13;
 }
 
 message ResourceRequest {
@@ -298,8 +331,14 @@ message CommandBuffer {
 }
 
 // Кадр команд, исполняемый хостовым циклом кадра в указанный texture view.
-// Таргет переписывается целиком: pass начинается с очистки в прозрачный.
+// Таргет переписывается целиком: pass начинается с очистки цвета в прозрачный,
+// а глубины — в дальнюю плоскость. Догрузить в таргет прошлое содержимое
+// нечем: кадр — это один pass, и накопление за несколько submit'ов в один
+// таргет означало бы, что порядок между ними кто-то должен гарантировать.
 message Submit {
     uint64 target_texture_view_id = 1;
     CommandBuffer command_buffer = 2;
+    // View текстуры глубины; 0 — теста глубины в этом кадре нет. Размер
+    // обязан совпадать с таргетом, а формат — с тем, что назвали пайплайны.
+    uint64 depth_texture_view_id = 3;
 }

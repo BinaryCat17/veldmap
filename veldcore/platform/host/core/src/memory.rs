@@ -150,6 +150,14 @@ impl MemoryManager {
             return 0;
         }
         let format = proto_to_wgpu(format_proto);
+        // COPY_DST добавляется всем, кроме буфера глубины: копировать в него
+        // нечего (см. `upload_image`), а объявленное лишнее право сужает выбор
+        // раскладки, которую драйвер вправе дать текстуре.
+        let mut final_usage = wgpu::TextureUsages::from_bits_truncate(usage)
+            | wgpu::TextureUsages::TEXTURE_BINDING;
+        if !crate::format::is_depth(format_proto) {
+            final_usage |= wgpu::TextureUsages::COPY_DST;
+        }
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("memory-tex"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -157,9 +165,7 @@ impl MemoryManager {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::from_bits_truncate(usage)
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+            usage: final_usage,
             view_formats: &[],
         });
         self.registry.register(
@@ -224,6 +230,10 @@ impl MemoryManager {
     pub fn upload_image(&self, region_id: ResourceId, data: &[u8]) -> anyhow::Result<()> {
         self.registry.payload(region_id, |payload| match payload {
             ResourcePayload::Gpu(GpuObject::Texture { texture, width, height, format }) => {
+                if crate::format::is_depth(*format) {
+                    return Err(anyhow::anyhow!(
+                        "resource {} is a depth buffer: only the rasterizer writes it", region_id));
+                }
                 let expected = (bytes_per_pixel(*format) * *width) as u64 * (*height as u64);
                 if (data.len() as u64) < expected {
                     return Err(anyhow::anyhow!(

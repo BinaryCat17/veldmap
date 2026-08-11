@@ -24,6 +24,10 @@ pub struct Screen<'a> {
     /// Что показать вместо таблицы, когда строк нет: у пустого поиска и у
     /// пустой папки причины разные.
     pub empty: &'a str,
+    /// Рычаги, которые есть только у этого вида, — над общей полосой отбора.
+    /// Общее у трёх видов то, как они показывают строки; откуда строки берутся,
+    /// у каждого своё, и спрашивают они об этом по-разному.
+    pub controls: Option<Element<Msg>>,
     pub rows: Vec<Row>,
 }
 
@@ -81,6 +85,9 @@ pub fn view(screen: Screen<'_>, listing: &ListingState, width: f32) -> Element<M
     let mut screen_rows: Vec<Element<Msg>> = vec![heading.into()];
     if let Some(path) = screen.path {
         screen_rows.push(controls::path(path));
+    }
+    if let Some(own) = screen.controls {
+        screen_rows.push(own);
     }
     // Складывать по папкам есть смысл там, где строки собраны отовсюду.
     // Наличие пути ровно это и означает: вид с путём показывает содержимое

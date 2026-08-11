@@ -1,11 +1,18 @@
 use crate::proto::ui_service as proto;
 use veldsdk::OwnedResource;
-use veldsdk::graphics::{BindGroupId, BindGroupLayoutId, PipelineId, TextureViewId};
+use veldsdk::graphics::{
+    buffer_usage, BindGroupId, BindGroupLayoutId, GrowingBuffer, PipelineId, TextureViewId,
+};
 use std::collections::HashMap;
 use iced_core::{Point, Event};
 use iced_runtime::user_interface;
 use crate::module::renderer::GpuRenderer;
 use crate::module::converter::UiMessage;
+
+/// С чего начинаются буферы геометрии. Дальше они растут под кадр, поэтому это
+/// не потолок, а «столько понадобится точно»: обычный экран разметки
+/// укладывается в мегабайт и не перевыделяет буфер ни разу.
+const GEOMETRY_BUFFER: u64 = 1024 * 1024;
 
 /// Всё, что сервис помнит об одном клиенте: его разметка, состояние ввода и
 /// ресурсы устройства, живущие дольше кадра.
@@ -27,8 +34,9 @@ pub struct PluginUiState {
     /// Последнее отправленное в iced состояние модификаторов: text_input
     /// хранит modifiers у себя и обновляет их только по ModifiersChanged.
     pub keyboard_modifiers: iced_core::keyboard::Modifiers,
-    pub vertex_buffer: Option<OwnedResource>,
-    pub index_buffer: Option<OwnedResource>,
+    /// Геометрия кадра: растёт под то, сколько на экране строк и глифов.
+    pub vertex_buffer: GrowingBuffer,
+    pub index_buffer: GrowingBuffer,
     /// Uniform-буфер (memory ABI): наш, освобождается Drop'ом.
     pub uniform_buffer_region: Option<OwnedResource>,
     pub uniform_bind_group: Option<BindGroupId>,
@@ -43,27 +51,29 @@ pub struct PluginUiState {
     pub target_view: Option<(u64, TextureViewId)>,
 
     pub monitor_fps: u32,
-    /// FPS-счётчик: (кадры, накопленные секунды) с последнего отчёта.
-    /// Раз в 5 секунд средний FPS уходит в лог с флагом PERF.
-    pub fps_window: (u32, f32),
+    /// Темп разбора кадров, раз в несколько секунд в trace.log.
+    pub frames: crate::module::frames::FrameMeter,
 
     /// Пойманное iced'ом за этот кадр; рассылается сразу после рендера
     /// (см. handlers::render_plugin_if_needed).
     pub pending_messages: Vec<UiMessage>,
-    /// Render-таргет, делегированный владельцем окна через set_surface.
-    /// Не наш ресурс: освобождает его владелец окна, поэтому здесь голый id,
+    /// Render-таргет, делегированный владельцем через set_surface.
+    /// Не наш ресурс: освобождает его владелец, поэтому здесь голый id,
     /// а не OwnedResource.
     pub surface_handle: Option<u64>,
+    /// Формат делегированной текстуры — под него собран `ui_pipeline`.
+    /// Приезжает вместе с самой текстурой и хранится рядом с ней: у разных
+    /// клиентов места под рендер разные, и общего формата у них нет.
+    pub surface_format: i32,
 }
 
 pub struct State {
     pub plugins: HashMap<String, PluginUiState>,
     pub renderer: GpuRenderer,
-    pub surface_format: i32,
 }
 
 impl State {
-    pub fn new(surface_format: i32) -> Self {
+    pub fn new() -> Self {
         Self {
             plugins: HashMap::new(),
             // Имена шрифтов — контракт с клиентами разметки; для них они
@@ -79,8 +89,13 @@ impl State {
                 ("Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
                 ("Icons", include_bytes!("../../../runtime/assets/SymbolsNerdFontMono-Regular.ttf")),
             ]),
-            surface_format,
         }
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -97,8 +112,8 @@ impl PluginUiState {
             scroll_velocity: Point::ORIGIN,
             pending_events: Vec::new(),
             keyboard_modifiers: iced_core::keyboard::Modifiers::empty(),
-            vertex_buffer: None,
-            index_buffer: None,
+            vertex_buffer: GrowingBuffer::new(buffer_usage::VERTEX, "вершины", GEOMETRY_BUFFER),
+            index_buffer: GrowingBuffer::new(buffer_usage::INDEX, "индексы", GEOMETRY_BUFFER),
             uniform_buffer_region: None,
             uniform_bind_group: None,
             uniform_layout: None,
@@ -108,9 +123,10 @@ impl PluginUiState {
             external_bind_groups: HashMap::new(),
             target_view: None,
             monitor_fps: 60,
-            fps_window: (0, 0.0),
+            frames: crate::module::frames::FrameMeter::new(),
             pending_messages: Vec::new(),
             surface_handle: None,
+            surface_format: 0,
         }
     }
 }

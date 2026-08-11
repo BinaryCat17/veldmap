@@ -5,10 +5,37 @@ use iced_core::{Element, Theme, Length, Color, alignment, Size, Font, font::Fami
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Сработавший виджет по дороге к владельцу разметки. Ровно то же, что уедет
+/// по шине (`UiEventResponse`), поэтому и нагрузка та же: набор её видов
+/// объявлен один раз — в протоколе.
 #[derive(Clone, Debug)]
 pub struct UiMessage {
     pub method: String,
-    pub value: String,
+    pub payload: proto::ui_event_response::Payload,
+}
+
+impl UiMessage {
+    /// Сообщение, чью нагрузку назвала сама разметка.
+    ///
+    /// Пустое имя метода означает «обработчика нет»: такие сюда доходят
+    /// (виджет объявлен без реакции), и отсеивает их отправка.
+    pub fn declared(handler: &proto::Handler) -> Self {
+        Self::text(handler.method.clone(), handler.value.clone())
+    }
+
+    /// Строковая нагрузка: названная разметкой либо подставленная рендерером
+    /// (набранный текст).
+    pub fn text(method: String, value: String) -> Self {
+        Self { method, payload: proto::ui_event_response::Payload::Value(value) }
+    }
+
+    pub fn pointer(method: String, pointer: proto::PointerEvent) -> Self {
+        Self { method, payload: proto::ui_event_response::Payload::Pointer(pointer) }
+    }
+
+    pub fn sized(method: String, size: proto::ViewportSize) -> Self {
+        Self { method, payload: proto::ui_event_response::Payload::Size(size) }
+    }
 }
 
 /// Все дети одного рода — условие, при котором колонку можно диффить по
@@ -191,13 +218,13 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                     let method = h.method.clone();
                     // Значение подставит рендерер — набранный текст; из
                     // разметки едет только имя метода.
-                    input = input.on_input(move |v| UiMessage { method: method.clone(), value: v });
+                    input = input.on_input(move |v| UiMessage::text(method.clone(), v));
                 }
             }
 
             if let Some(h) = &t.on_submit {
                 if !h.method.is_empty() {
-                    input = input.on_submit(UiMessage { method: h.method.clone(), value: h.value.clone() });
+                    input = input.on_submit(UiMessage::declared(h));
                 }
             }
 
@@ -239,7 +266,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             if let Some(handler) = &interaction.on_press
                 && !handler.method.is_empty()
             {
-                btn = btn.on_press(UiMessage { method: handler.method.clone(), value: handler.value.clone() });
+                btn = btn.on_press(UiMessage::declared(handler));
             }
 
             // Незаданное состояние вырождается к покою, а не к пустому стилю:
@@ -373,10 +400,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             if let Some(handler) = &p.on_dismiss
                 && !handler.method.is_empty()
             {
-                popover = popover.on_dismiss(UiMessage {
-                    method: handler.method.clone(),
-                    value: handler.value.clone(),
-                });
+                popover = popover.on_dismiss(UiMessage::declared(handler));
             }
             popover.into()
         }
@@ -388,6 +412,25 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 width: convert_length(&img.width),
                 height: convert_length(&img.height),
             }.into()
+        }
+        Some(proto::widget::Type::Viewport(v)) => {
+            let texture_id = v.texture.as_ref().map_or(0, |handle| handle.id);
+            let mut area = crate::module::viewport::Viewport::new(
+                texture_id,
+                convert_length(&v.width),
+                convert_length(&v.height),
+            );
+            if let Some(h) = &v.on_resized
+                && !h.method.is_empty()
+            {
+                area = area.on_resized(h.method.clone());
+            }
+            if let Some(h) = &v.on_pointer
+                && !h.method.is_empty()
+            {
+                area = area.on_pointer(h.method.clone());
+            }
+            area.into()
         }
         Some(proto::widget::Type::Space(s)) => {
             Space::new().width(convert_length(&s.width)).height(convert_length(&s.height)).into()
@@ -587,7 +630,7 @@ impl<'a, Message, Theme> iced_widget::core::Widget<Message, Theme, GpuRenderer> 
         _cursor: iced_widget::core::mouse::Cursor,
         _viewport: &iced_widget::core::Rectangle,
     ) {
-        renderer.draw_wgpu_image(contain(layout.bounds(), self.handle.id), self.handle.id);
+        renderer.draw_external_image(contain(layout.bounds(), self.handle.id), self.handle.id, false);
     }
 }
 

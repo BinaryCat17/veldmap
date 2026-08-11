@@ -83,11 +83,17 @@ pub async fn init_wgpu<'a>(
         .find(|f| f.is_srgb())
         .unwrap_or(caps.formats[0]);
 
-    let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-        wgpu::PresentMode::Mailbox
-    } else {
-        wgpu::PresentMode::Fifo
-    };
+    // Ожидание вертикальной синхронизации — оно же и темп всего приложения:
+    // кадровый цикл раннера упирается в `get_current_texture`, а из его витков
+    // растут кадровые тики модулей.
+    //
+    // Без него цикл крутится со скоростью GPU (на этой машине — за две сотни
+    // кадров в секунду при экране в 60), и лишние кадры не просто рисуются
+    // впустую. Тик — событие шины, очередь подписчика не ограничена, и модуль,
+    // которому кадр обходится дороже витка цикла, отстаёт безвозвратно:
+    // очередь растёт, а с ней и задержка между нажатием и увиденным.
+    // Ограничитель здесь ровно один, и это экран.
+    let present_mode = wgpu::PresentMode::Fifo;
 
     let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,

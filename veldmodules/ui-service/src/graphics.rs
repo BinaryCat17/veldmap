@@ -19,9 +19,6 @@ use veldsdk::OwnedResource;
 
 use anyhow::anyhow;
 
-const VERTEX_BUFFER_SIZE: u64 = 8 * 1024 * 1024;
-const INDEX_BUFFER_SIZE: u64 = 2 * 1024 * 1024;
-
 /// Рисует UI в render-таргет, делегированный владельцем окна (его текстура,
 /// выданная нам write-lease'ом). View текстуры кэшируется по её id: на resize
 /// владелец выделяет новый таргет, id меняется, и прежний view заменяется.
@@ -32,7 +29,6 @@ pub fn render_ui(
     width: u32,
     height: u32,
     scale_factor: f32,
-    surface_format: i32,
 ) -> anyhow::Result<()> {
     veldsdk::log::trace!(target: "graphics", "START {}x{} into texture {}", width, height, target_texture);
 
@@ -42,7 +38,7 @@ pub fn render_ui(
         plugin.target_view = Some((target_texture, view));
     }
 
-    ensure_resources(plugin, renderer, surface_format)?;
+    ensure_resources(plugin, renderer)?;
     evict_unused_bind_groups(&mut plugin.external_bind_groups, renderer);
 
     let mut recorder = RenderRecorder::new();
@@ -90,34 +86,16 @@ fn render_geometry(
     width: u32,
     height: u32,
 ) -> anyhow::Result<()> {
-    let vertex_size = std::mem::size_of::<crate::module::renderer::Vertex>();
-
-    if plugin.vertex_buffer.is_none() {
-        let id = resource_alloc_buffer(VERTEX_BUFFER_SIZE, buffer_usage::VERTEX, false)
-            .ok_or_else(|| anyhow!("Failed to allocate vertex buffer"))?;
-        plugin.vertex_buffer = Some(OwnedResource::new(ResourceHandle { id, size: VERTEX_BUFFER_SIZE, ..Default::default() }));
-    }
-
-    if plugin.index_buffer.is_none() {
-        let id = resource_alloc_buffer(INDEX_BUFFER_SIZE, buffer_usage::INDEX, false)
-            .ok_or_else(|| anyhow!("Failed to allocate index buffer"))?;
-        plugin.index_buffer = Some(OwnedResource::new(ResourceHandle { id, size: INDEX_BUFFER_SIZE, ..Default::default() }));
-    }
-
-    if let (Some(v_h), Some(i_h)) = (&plugin.vertex_buffer, &plugin.index_buffer) {
-        let v_data = unsafe { std::slice::from_raw_parts(renderer.vertices.as_ptr() as *const u8, renderer.vertices.len() * vertex_size) };
-        resource_write(v_h.id(), 0, v_data)?;
-
-        let i_data = unsafe { std::slice::from_raw_parts(renderer.indices.as_ptr() as *const u8, renderer.indices.len() * 2) };
-        resource_write(i_h.id(), 0, i_data)?;
-    }
+    plugin.vertex_buffer.write(&renderer.vertices)?;
+    plugin.index_buffer.write(&renderer.indices)?;
+    let (vertex_bytes, index_bytes) = (plugin.vertex_buffer.filled(), plugin.index_buffer.filled());
 
     // Без пайплайна или буферов рисовать нечем — кадр просто пропускается.
     // Кэш bind group'ов берётся отдельным полем: остальные здесь заимствованы
     // на чтение, и одолжить ради него весь plugin было бы нельзя.
     let external_bind_groups = &mut plugin.external_bind_groups;
-    if let (Some(pipeline), Some(v_h), Some(i_h), Some(uniform_bg)) =
-        (&plugin.ui_pipeline, &plugin.vertex_buffer, &plugin.index_buffer, &plugin.uniform_bind_group)
+    if let (Some(pipeline), Some(vertices), Some(indices), Some(uniform_bg)) =
+        (&plugin.ui_pipeline, plugin.vertex_buffer.id(), plugin.index_buffer.id(), &plugin.uniform_bind_group)
     {
         recorder.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
 
@@ -126,8 +104,8 @@ fn render_geometry(
             match cmd {
                 DrawCmd::Quads { count } => {
                     recorder.set_pipeline(pipeline);
-                    recorder.set_vertex_buffer(0, v_h.id(), 0, (renderer.vertices.len() * vertex_size) as u64);
-                    recorder.set_index_buffer(i_h.id(), IndexFormat::IdxUint16, 0, (renderer.indices.len() * 2) as u64);
+                    recorder.set_vertex_buffer(0, vertices, 0, vertex_bytes);
+                    recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, index_bytes);
                     recorder.set_bind_group(1, uniform_bg);
                     if let Some(atlas_bg) = renderer.atlas_bind_group.as_ref() {
                         recorder.set_bind_group(0, atlas_bg);
@@ -202,10 +180,10 @@ fn get_external_bind_group(cache: &mut HashMap<u64, BindGroupId>, renderer: &Gpu
 
 /// Ленивое создание всего, что живёт дольше кадра: layout'ы, пайплайн, буферы,
 /// атлас. Каждый шаг проверяет своё и ничего не пересоздаёт.
-pub fn ensure_resources(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
+pub fn ensure_resources(plugin: &mut PluginUiState, renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     ensure_atlas_layout(renderer)?;
     ensure_uniform_layout(plugin)?;
-    ensure_pipeline(plugin, renderer, surface_format)?;
+    ensure_pipeline(plugin, renderer)?;
     ensure_uniform_buffer(plugin)?;
     ensure_atlas_texture(renderer)?;
     ensure_atlas_bind_group(renderer)?;
@@ -231,7 +209,7 @@ fn ensure_uniform_layout(plugin: &mut PluginUiState) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ensure_pipeline(plugin: &mut PluginUiState, renderer: &GpuRenderer, surface_format: i32) -> anyhow::Result<()> {
+fn ensure_pipeline(plugin: &mut PluginUiState, renderer: &GpuRenderer) -> anyhow::Result<()> {
     if plugin.ui_pipeline.is_none() {
         let shader = gfx::create_shader(include_str!("shaders.wgsl"), "UI Shader")?;
 
@@ -244,7 +222,7 @@ fn ensure_pipeline(plugin: &mut PluginUiState, renderer: &GpuRenderer, surface_f
             label: "UI Pipeline".into(),
             vertex_entry: "vs_main".into(),
             fragment_entry: "fs_main".into(),
-            target_format: surface_format,
+            target_format: plugin.surface_format,
             vertex_layouts: vec![VertexBufferLayout {
                 array_stride: std::mem::size_of::<crate::module::renderer::Vertex>() as u64,
                 step_mode: StepMode::StepVertex as i32,

@@ -265,31 +265,42 @@ impl Running {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         // 1) Render-опы модулей — в их таргеты (обычно текстура окна).
+        // Что за аттачменты у op'а и годятся ли они, решает graphics: правила
+        // ролей и размеров живут там. Здесь остаётся открыть pass.
         let graphics = self.ctx.graphics.clone();
         for op in graphics.take_pending_ops() {
-            let target = graphics.get_gpu(op.target_view_id, op.instance_id);
-            // Размеры целевой текстуры (не окна): по ним клампятся
-            // viewport и scissor. Записаны в view при создании.
-            if let Ok(veldmap_host_core::registry::GpuObject::TextureView {
-                view: target_view, width: target_w, height: target_h,
-            }) = target {
-                let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Module Render Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    ..Default::default()
-                });
-                let _ = veldmap_host_core::graphics::execute_render_commands(
-                    &mut rp, &op.command_buffer, &graphics, target_w, target_h, op.instance_id,
-                );
-            } else {
-                log::warn!(target: "render", "Render op targets unknown view {}", op.target_view_id);
-            }
+            let at = match graphics.resolve_attachments(&op) {
+                Ok(at) => at,
+                Err(e) => {
+                    log::warn!(target: "render", "Render op dropped: {:#}", e);
+                    continue;
+                }
+            };
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Module Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &at.target,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    depth_slice: None,
+                })],
+                // Глубина очищается в дальнюю плоскость: кадр рисуется с нуля,
+                // как и цвет. Трафарета у буфера нет — формат бесстенсильный.
+                depth_stencil_attachment: at.depth.as_ref().map(|view| {
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }
+                }),
+                ..Default::default()
+            });
+            let _ = veldmap_host_core::graphics::execute_render_commands(
+                &mut rp, &op.command_buffer, &graphics, at.width, at.height, op.instance_id,
+            );
         }
 
         // 2) Блит приаттаченной поверхности в свопчейн.
@@ -310,20 +321,38 @@ impl Running {
             }
         }
 
-        // Показ кадра — операция очереди, а не самой текстуры, поэтому
-        // отправка и показ идут под одним захватом: между ними чужой submit
-        // в тот же свопчейн недопустим.
-        {
+        // Отправка идёт под захватом очереди: сабмитят в неё и чтения ресурсов
+        // с blocking-пула, а порядок между ними важен.
+        //
+        // Показ — уже без захвата, и это не мелочь: при vsync он ждёт развёртки,
+        // то есть почти весь кадр. Под тем же замком это ожидание встаёт поперёк
+        // любой записи плагина в GPU-буфер (`MemoryManager::write` берёт очередь
+        // ради `write_buffer`), и модуль перестаёт успевать за кадровым циклом —
+        // а очереди шины неограниченные, поэтому отставание не теряется, а
+        // копится, и ввод доезжает секундами позже.
+        //
+        // Порядок кадров от захвата не зависит: в свопчейн пишет только этот
+        // цикл, и он однопоточный, так что чужому submit между отправкой и
+        // показом взяться неоткуда.
+        let queue = {
             let queue = self.queue.lock().unwrap();
             queue.submit(Some(encoder.finish()));
-            queue.present(frame);
-        }
+            queue.clone()
+        };
+        queue.present(frame);
 
         self.play_script();
 
         // Модули рендерят в ответ на Frame-события: цикл кадров живёт
         // на хосте (темп задаёт present_mode/vsync).
         self.window.request_redraw();
+    }
+
+    /// Левая кнопка сценария там, где сейчас стоит его курсор.
+    fn publish_button(&self, pressed: bool) {
+        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Click(
+            app::ClickEvent { button: 1, pressed, x: self.cursor_pos.0, y: self.cursor_pos.1 },
+        ));
     }
 
     /// Отыгрывает шаги отладочного сценария, чей срок настал. Идёт после
@@ -339,12 +368,15 @@ impl Running {
                     self.cursor_dirty = true;
                 }
                 capture::Action::Click => {
-                    for pressed in [true, false] {
-                        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Click(
-                            app::ClickEvent { button: 1, pressed, x: self.cursor_pos.0, y: self.cursor_pos.1 },
-                        ));
-                    }
+                    self.publish_button(true);
+                    self.publish_button(false);
                 }
+                capture::Action::Button { pressed } => self.publish_button(pressed),
+                capture::Action::Scroll { dx, dy } => publish_ui_event(
+                    &self.app_pub,
+                    &self.hw.owner,
+                    app::ui_event::Event::Scroll(app::ScrollEvent { delta_x: dx, delta_y: dy }),
+                ),
                 capture::Action::Shot { path } => {
                     let queue = self.queue.lock().unwrap();
                     let frame = capture::FrameSource {

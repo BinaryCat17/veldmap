@@ -35,8 +35,8 @@ pub fn hook_event(state: &State) {
 // смысла их не знает. Разбор — единственное место, где строки снова становятся
 // сообщением; дальше по модулю едет уже `Msg`.
 pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::UiEventResponse) {
-    let Some(message) = Msg::decode(&event.method, &event.value) else {
-        veldsdk::log::warn!(target: "handlers", "непонятное сообщение разметки: '{}' = '{}'", event.method, event.value);
+    let Some(message) = Msg::decode(&event) else {
+        veldsdk::log::warn!(target: "handlers", "непонятное сообщение разметки: '{}'", event.method);
         return;
     };
 
@@ -47,12 +47,16 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::NewBrowse => handlers::nav::on_new_browse(state),
         Msg::NewSearch => handlers::nav::on_new_search(state),
         Msg::NewDownloaded => handlers::nav::on_new_downloaded(state),
+        Msg::NewGlobe => handlers::nav::on_new_globe(state),
         Msg::OpenMenu(menu) => handlers::listing::on_menu(state, menu),
         Msg::Filter(filter) => handlers::listing::on_filter(state, filter),
         Msg::Group(grouping) => handlers::listing::on_group(state, grouping),
         Msg::Sort(sorting) => handlers::listing::on_sort(state, sorting),
         Msg::Query(query) => handlers::listing::on_query(state, query),
         Msg::Page(page) => handlers::listing::on_page(state, page),
+        Msg::SearchQuery(query) => handlers::search::on_query(state, query),
+        Msg::SearchMission(mission) => handlers::search::on_mission(state, mission),
+        Msg::RunSearch => handlers::search::run(state),
         Msg::Enter(path) => handlers::browse::on_enter(state, path),
         Msg::Up => handlers::browse::on_up(state),
         Msg::Download(identifier) => handlers::library::on_download_pressed(state, identifier),
@@ -60,6 +64,8 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::Preview(name) => handlers::preview::on_view_local_pressed(state, name),
         Msg::PreviewRemote(identifier) => handlers::preview::on_view_remote_pressed(state, identifier),
         Msg::Zoom(zoom) => handlers::preview::on_zoom(state, zoom),
+        Msg::GlobeResized(size) => handlers::globe::on_resized(state, size),
+        Msg::GlobePointer(event) => handlers::globe::on_pointer(state, event),
     }
 }
 

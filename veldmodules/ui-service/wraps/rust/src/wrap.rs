@@ -2,14 +2,12 @@
 //! wrap.rs — фасад: реэкспорты proto-типов и подмодулей.
 //!   style.rs   — цвета, отступы, размеры, стили виджетов;
 //!   widgets.rs — Element и билдеры виджетов (column/row/text/…);
-//!   surface.rs — делегирование поверхности окна рендереру;
 //!   render.rs  — отправка layout в ui-service.
 
 pub use super::proto::*;
 
 pub mod style;
 pub mod widgets;
-pub mod surface;
 pub mod render;
 
 // Явные реэкспорты затеняют одноимённые proto-сообщения из глоба выше:
@@ -19,10 +17,10 @@ pub use style::{
     Scrollbar, Shadow, TextInputStyle, WidgetStyle,
 };
 pub use widgets::{
-    Column, Container, Element, Image, Keyed, Popover, ProgressBar, Row, Scrollable,
-    Space, Stack, Text, TextInput, Tooltip, UiMessage,
+    Column, Container, Element, Image, Keyed, Payload, Popover, ProgressBar, Row,
+    Scrollable, Space, Stack, Text, TextInput, Tooltip, UiMessage, Viewport,
     column, container, icon, image, mono, popover, progress_bar, row, scrollable,
-    space, stack, text, text_input, tooltip,
+    space, stack, text, text_input, tooltip, viewport,
 };
 
 #[macro_export]

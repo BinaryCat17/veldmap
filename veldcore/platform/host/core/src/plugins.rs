@@ -294,12 +294,13 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
         config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
 
-        // Инъектируемые хостом ключи едут в init тем же JSON, что и конфиг
-        // из файла: один канал, и типизированный Config модуля видит всё
-        // (адресный veld_get_config для этого не нужен).
-        let mut init_config = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&service_config_str)
+        // Конфиг модуля едет в init одним JSON, как он записан в файле.
+        // Инъектируемых хостом ключей здесь нет: всё, что модуль узнаёт от
+        // платформы, приезжает ему топиком — а значит адресно, вовремя и
+        // столько раз, сколько меняется. Формат поверхности окна, например,
+        // едет вместе с самой поверхностью (`core.SurfaceDelegated`).
+        let init_config = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&service_config_str)
             .unwrap_or_default();
-        init_config.insert("surface_format".to_string(), ctx.graphics.get_surface_format_proto().into());
 
         spec.name = name.clone();
         spec.config = config_map;

@@ -2,6 +2,7 @@
 
 pub mod search;
 pub mod browse;
+pub mod globe;
 pub mod library;
 pub mod listing;
 pub mod nav;

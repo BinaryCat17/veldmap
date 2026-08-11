@@ -1,5 +1,7 @@
+pub mod catalogue;
 pub mod cdse;
 pub mod s3;
+pub mod time;
 
 use aws_smithy_runtime_api::client::identity::Identity;
 
@@ -12,21 +14,32 @@ pub struct Config {
 #[derive(Clone)]
 pub struct State {
     pub identity: Identity,
-    /// Запрос листинга, ожидающий S3-ответа: id генерируется в on_list_path
-    /// для внутреннего вызова network, снимается в on_http_result.
-    pub pending_http: veldsdk::Correlator<PendingList>,
+    /// Запросы, ожидающие HTTP-ответа: id генерируется, когда мы зовём network,
+    /// и снимается в on_http_result.
+    pub pending_http: veldsdk::Correlator<Pending>,
     /// Открываемые удалённые ресурсы: correlation_id → имя заказчика, которому
     /// уйдёт владение (см. cdse::on_open).
     pub opening: veldsdk::Correlator<String>,
 }
 
-/// Контекст запроса на листинг: path — для дедупликации "самого себя" из
-/// S3-листинга, correlation_id — внешний id вызывающего (data-browser),
-/// эхом возвращается в ListPathResponse.
+/// Что мы спросили у сети и кому отвечать.
+///
+/// Хранилище и каталог отвечают в один и тот же топик, поэтому вид запроса
+/// записан здесь, а не выводится из ответа: догадываться по содержимому значит
+/// однажды разобрать листинг как поиск.
 #[derive(Clone)]
-pub struct PendingList {
-    pub path: String,
+pub struct Pending {
+    /// Внешний id заказчика (data-browser); эхом возвращается в его ответ.
     pub correlation_id: String,
+    pub what: Asked,
+}
+
+#[derive(Clone)]
+pub enum Asked {
+    /// Листинг пути. Сам путь нужен, чтобы отсеять из ответа S3 запрошенный
+    /// префикс — в списке содержимого папке незачем быть собой.
+    List(String),
+    Search,
 }
 
 // Re-export handlers to match the expected names in generated code

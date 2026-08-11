@@ -71,9 +71,23 @@ impl RenderRecorder {
     }
 
     /// Отдаёт записанные команды хосту; исполнятся на следующем кадре.
+    ///
+    /// Без буфера глубины: плоской отрисовке порядок задаёт сама
+    /// последовательность команд. Объёмной — [`Self::submit_with_depth`].
     pub fn submit(self, target: &TextureViewId) -> anyhow::Result<()> {
+        self.finish(target, None)
+    }
+
+    /// То же с тестом глубины. Буфер обязан совпадать с таргетом по размеру,
+    /// а его формат — с тем, что назвали `depth_stencil` пайплайнов кадра.
+    pub fn submit_with_depth(self, target: &TextureViewId, depth: &TextureViewId) -> anyhow::Result<()> {
+        self.finish(target, Some(depth))
+    }
+
+    fn finish(self, target: &TextureViewId, depth: Option<&TextureViewId>) -> anyhow::Result<()> {
         let submit = Submit {
             target_texture_view_id: target.id(),
+            depth_texture_view_id: depth.map_or(0, TextureViewId::id),
             command_buffer: Some(CommandBuffer { commands: self.commands }),
         };
         crate::abi::graphics_execute(submit.encode_to_vec())?;

@@ -24,7 +24,6 @@ fn client(topic: &str) -> Option<String> {
 
 pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     let Some(plugin_id) = client("set_view") else { return };
-    let surface_format = state.surface_format;
 
     // Владелец окна делегирует поверхность (set_surface) в ответ на
     // app/window_resized ещё до app/ready, так что к первому set_view его
@@ -40,19 +39,19 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
         plugin.needs_redrawing = true;
     }
 
-    render_plugin_if_needed(state, &plugin_id, surface_format);
+    render_plugin_if_needed(state, &plugin_id);
 }
 
 /// Рисует плагин, если ему есть что показать и есть куда. Общая точка для
 /// смены разметки (`handle_set_view`) и для кадрового тика (`handle_ui_event`):
 /// разметка может не меняться неделю, а ввод обрабатывать всё равно нужно.
-fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i32) {
+fn render_plugin_if_needed(state: &mut State, plugin_id: &str) {
     // plugins и renderer — разные поля State, заимствуются одновременно.
     let Some(plugin) = state.plugins.get_mut(plugin_id) else { return };
     let needs_render = plugin.needs_redrawing || plugin.is_layout_dirty;
 
     if let (Some(handle), true) = (plugin.surface_handle, needs_render) {
-        if let Err(e) = render_plugin(plugin, &mut state.renderer, plugin_id, surface_format, handle) {
+        if let Err(e) = render_plugin(plugin, &mut state.renderer, plugin_id, handle) {
             veldsdk::log::error!(target: "handlers", "render_plugin failed: {}", e);
         }
     }
@@ -67,10 +66,19 @@ fn render_plugin_if_needed(state: &mut State, plugin_id: &str, surface_format: i
 
 /// Делегирование render-таргета владельцем окна: с этого момента ui-service
 /// принимает события модуля и рендерит его view в переданную текстуру.
-pub fn handle_set_surface(state: &mut State, req: SetSurfaceRequest) {
+///
+/// Формат приезжает вместе с текстурой и остаётся при ней: пайплайн собирается
+/// под него, а сменится текстура — сменится и он.
+pub fn handle_set_surface(state: &mut State, req: veldsdk::proto::core::SurfaceDelegated) {
     let Some(plugin_id) = client("set_surface") else { return };
+    // Пустая поверхность — отзыв: рисовать этому модулю больше некуда. Его
+    // разметку и кэш держим — она принадлежит ему, а не месту, и вернувшись со
+    // своей поверхностью он продолжит с того же состояния.
     let Some(surface) = req.surface else {
-        veldsdk::log::warn!(target: "handlers", "set_surface для '{}' пришёл без поверхности", plugin_id);
+        veldsdk::log::info!(target: "handlers", "Поверхность '{}' отозвана", plugin_id);
+        if let Some(plugin) = state.plugins.get_mut(&plugin_id) {
+            plugin.surface_handle = None;
+        }
         return;
     };
     veldsdk::log::info!(target: "handlers", "Поверхность '{}': текстура {} ({}x{})", plugin_id, surface.id, req.width, req.height);
@@ -79,11 +87,15 @@ pub fn handle_set_surface(state: &mut State, req: SetSurfaceRequest) {
     plugin.canvas_size = (req.width, req.height);
     plugin.scale_factor = if req.scale_factor > 0.0 { req.scale_factor } else { 1.0 };
     plugin.surface_handle = Some(surface.id);
+    // Пайплайн собран под прежний формат: сменился он — пересобирать.
+    if plugin.surface_format != req.format {
+        plugin.surface_format = req.format;
+        plugin.ui_pipeline = None;
+    }
     // Кэш view привязан к texture_id и инвалидируется его сменой.
     plugin.needs_redrawing = true;
 
-    let surface_format = state.surface_format;
-    render_plugin_if_needed(state, &plugin_id, surface_format);
+    render_plugin_if_needed(state, &plugin_id);
 }
 
 pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
@@ -104,9 +116,32 @@ pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
     // Перерисовка от ввода и анимация (инерция прокрутки) — забота рендерера,
     // и обе живут кадровым тиком.
     if is_frame {
-        let surface_format = state.surface_format;
-        render_plugin_if_needed(state, &plugin_id, surface_format);
+        render_plugin_if_needed(state, &plugin_id);
     }
+}
+
+/// Сырая дельта окна в скорость прокрутки: степень сильно сжимает разброс,
+/// множитель задаёт размах. Так один щелчок колеса и рывок тачпада получают
+/// сравнимый ход, хотя приезжают числами разного порядка.
+fn smooth(delta: f32) -> f32 {
+    delta.signum() * delta.abs().powf(SCROLL_CURVE) * SCROLL_REACH
+}
+
+const SCROLL_CURVE: f32 = 1.0 / 6.0;
+const SCROLL_REACH: f32 = 24.0;
+
+/// Один щелчок колеса — 120 единиц: так его называет окно (`main.rs`), и так
+/// его называет всякая оконная система со времён Windows.
+const RAW_WHEEL_NOTCH: f32 = 120.0;
+
+/// Во столько пикселей сглаженного потока обходится один щелчок колеса.
+///
+/// Это ровно вся сумма приращений, которую выдаст инерция: трение гасит
+/// скорость, ничего к ней не добавляя. Величина считается здесь, рядом со
+/// сглаживанием: ей меряется прокрутка снаружи (см. `Viewport`), и названная
+/// где-нибудь ещё она отстала бы от него молча.
+pub fn wheel_notch() -> f32 {
+    smooth(RAW_WHEEL_NOTCH)
 }
 
 fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_proto::UiEvent) {
@@ -119,23 +154,16 @@ fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_
                 vel.y = 0.0;
             }
 
-            let factor = 24.0;
-            let dy = s.delta_y.signum() * s.delta_y.abs().powf(1.0 / 6.0) * factor;
-            let dx = s.delta_x.signum() * s.delta_x.abs().powf(1.0 / 6.0) * factor;
-
-            vel.x = (vel.x + dx).clamp(-3000.0, 3000.0);
-            vel.y = (vel.y + dy).clamp(-3000.0, 3000.0);
+            vel.x = (vel.x + smooth(s.delta_x)).clamp(-3000.0, 3000.0);
+            vel.y = (vel.y + smooth(s.delta_y)).clamp(-3000.0, 3000.0);
         }
         app_proto::ui_event::Event::Frame(f) => {
             plugin.monitor_fps = f.monitor_fps;
 
-            // FPS-счётчик: копим кадры и раз в 5 секунд отчитываемся.
-            plugin.fps_window.0 += 1;
-            plugin.fps_window.1 += f.dt;
-            let (frames, seconds) = plugin.fps_window;
-            if seconds >= 5.0 {
-                veldsdk::log::info!(target: "perf", "{}: {:.1} FPS в среднем за {:.1}с", plugin_id, frames as f32 / seconds, seconds);
-                plugin.fps_window = (0, 0.0);
+            // Темп разбора кадров. Отладочная величина, поэтому debug: в
+            // консоли ей делать нечего, а в trace.log она попадёт.
+            if let Some(report) = plugin.frames.tick() {
+                veldsdk::log::debug!(target: "perf", "{}: {}", plugin_id, report);
             }
 
             // Инерция прокрутки.
@@ -155,7 +183,14 @@ fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_
 
             // Скопившийся ввод обрабатывается рендером этого же кадра:
             // render_plugin скармливает pending_events iced'у в ui.update().
-            if !plugin.pending_events.is_empty() || plugin.is_layout_dirty {
+            //
+            // Живая текстура в прошлом кадре — тоже повод рисовать: её владелец
+            // перерисовывает её сам, а наша разметка при этом не меняется, и по
+            // ней об устаревании показанного не узнать.
+            if !plugin.pending_events.is_empty()
+                || plugin.is_layout_dirty
+                || GpuRenderer::has_live_image(&plugin.last_draw_commands)
+            {
                 plugin.needs_redrawing = true;
             }
         }
@@ -173,9 +208,6 @@ fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_
         }
         _ => {
             if let Some(iced_ev) = convert_event(ev, plugin.scale_factor) {
-                if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = iced_ev {
-                    plugin.cursor_position = position;
-                }
                 plugin.pending_events.push(iced_ev);
             }
         }
@@ -189,9 +221,9 @@ fn dispatch_event(plugin_id: &str, message: converter::UiMessage) {
     if message.method.is_empty() {
         return;
     }
-    veldsdk::log::info!(target: "handlers", "UI message -> '{}/{}' (value: '{}')", plugin_id, message.method, message.value);
+    veldsdk::log::trace!(target: "handlers", "UI message -> '{}/{}'", plugin_id, message.method);
     crate::emit::on_ui_event(
-        &UiEventResponse { method: message.method, value: message.value },
+        &UiEventResponse { method: message.method, payload: Some(message.payload) },
         plugin_id,
     );
 }
@@ -208,7 +240,7 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Option<Event> {
             Some(Event::Mouse(iced_core::mouse::Event::CursorMoved { position: Point::new(c.x / sf, c.y / sf) }))
         }
         app_proto::ui_event::Event::Click(c) => {
-            let button = match c.button { 1 => iced_core::mouse::Button::Left, 2 => iced_core::mouse::Button::Right, 3 => iced_core::mouse::Button::Middle, _ => iced_core::mouse::Button::Left };
+            let button = crate::module::pointer::from_index(c.button)?;
             Some(if c.pressed { Event::Mouse(iced_core::mouse::Event::ButtonPressed(button)) }
                  else { Event::Mouse(iced_core::mouse::Event::ButtonReleased(button)) })
         }
@@ -216,7 +248,11 @@ fn convert_event(ev: app_proto::ui_event::Event, sf: f32) -> Option<Event> {
     }
 }
 
-fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, surface_format: i32, target_texture: u64) -> anyhow::Result<()> {
+fn cursor_at(position: Point) -> iced_core::mouse::Cursor {
+    iced_core::mouse::Cursor::Available(position)
+}
+
+fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_id: &str, target_texture: u64) -> anyhow::Result<()> {
     veldsdk::log::trace!(target: "render", "START for {}", plugin_id);
     let (width, height) = plugin.canvas_size;
     veldsdk::log::trace!(target: "render", "canvas size: {}x{}", width, height);
@@ -239,7 +275,6 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
 
     let sf = plugin.scale_factor;
     renderer.update_params(width, height, sf);
-    let cursor = iced_core::mouse::Cursor::Available(plugin.cursor_position);
     let viewport = Viewport::with_physical_size(Size::new(width, height), sf.into());
     let mut captured_messages = Vec::new();
 
@@ -260,21 +295,51 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
 
     veldsdk::log::trace!(target: "render", "Updating UI with {} events", events.len());
     let mut clipboard = iced_core::clipboard::Null;
-    let _ = ui.update(&events, cursor, renderer, &mut clipboard, &mut captured_messages);
+
+    // Курсор iced получает параметром `update`, а не вычитывает из событий,
+    // поэтому вся переданная пачка видит одну позицию. Отдать её разом значит
+    // оценить нажатие там, где курсор оказался к концу кадра: за кадр он
+    // успевает уехать, и под ним к этому моменту уже другая кнопка.
+    //
+    // Поэтому пачка режется по движениям: каждый отрезок идёт со своей
+    // позицией, а само движение — с новой, вместе с тем, что за ним следует.
+    let mut at = plugin.cursor_position;
+    let mut batch: Vec<Event> = Vec::new();
+    for event in events {
+        if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = event {
+            if !batch.is_empty() {
+                let _ = ui.update(&batch, cursor_at(at), renderer, &mut clipboard, &mut captured_messages);
+                batch.clear();
+            }
+            at = position;
+        }
+        batch.push(event);
+    }
+    let _ = ui.update(&batch, cursor_at(at), renderer, &mut clipboard, &mut captured_messages);
+    // Позиция переживает кадр: следующий начинается там, где кончился этот, а
+    // движения может и не быть вовсе.
+    plugin.cursor_position = at;
 
     veldsdk::log::trace!(target: "render", "Drawing UI");
-    ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor);
+    ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor_at(at));
 
     // Геометрия кадра сверяется с прошлой: разметка могла не измениться, а
     // нарисоваться иначе — от наведения, каретки или инерции прокрутки.
+    //
+    // Живая текстура из-под этой проверки выведена, и обойти проверку —
+    // единственный способ её показать: геометрия у неё как раз и совпадает от
+    // кадра к кадру, а меняется то, что внутри неё. Пропусти мы кадр — в окне
+    // остался бы прошлый композит, и вид, который владелец продолжает рисовать,
+    // замер бы на экране.
     let commands_changed = plugin.last_draw_commands != renderer.draw_commands
         || plugin.last_vertices != renderer.vertices
         || renderer.is_atlas_dirty();
-    veldsdk::log::trace!(target: "render", "commands_changed={}, is_layout_dirty={}", commands_changed, plugin.is_layout_dirty);
+    let has_live = GpuRenderer::has_live_image(&renderer.draw_commands);
+    veldsdk::log::trace!(target: "render", "commands_changed={}, is_layout_dirty={}, live={}", commands_changed, plugin.is_layout_dirty, has_live);
 
-    if commands_changed || plugin.is_layout_dirty {
+    if commands_changed || plugin.is_layout_dirty || has_live {
         veldsdk::log::trace!(target: "render", "Rendering into target texture {}", target_texture);
-        crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf, surface_format)?;
+        crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf)?;
 
         plugin.last_draw_commands = renderer.draw_commands.clone();
         plugin.last_vertices = renderer.vertices.clone();

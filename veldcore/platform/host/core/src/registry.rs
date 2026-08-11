@@ -81,9 +81,10 @@ impl Lease {
 #[derive(Clone)]
 pub enum GpuObject {
     Texture { texture: Arc<wgpu::Texture>, width: u32, height: u32, format: i32 },
-    /// Размеры — исходной текстуры: кадровый цикл клампит по ним viewport и
-    /// scissor, и знать размеры окна для этого ему не нужно.
-    TextureView { view: Arc<wgpu::TextureView>, width: u32, height: u32 },
+    /// Размеры и формат — исходной текстуры: кадровый цикл клампит по размерам
+    /// viewport и scissor (знать размеры окна для этого ему не нужно), а по
+    /// формату отличает цветной аттачмент от буфера глубины.
+    TextureView { view: Arc<wgpu::TextureView>, width: u32, height: u32, format: i32 },
     Sampler(Arc<wgpu::Sampler>),
     BindGroupLayout(Arc<wgpu::BindGroupLayout>),
     RenderPipeline(Arc<wgpu::RenderPipeline>),

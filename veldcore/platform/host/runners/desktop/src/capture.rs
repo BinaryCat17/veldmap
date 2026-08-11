@@ -12,7 +12,9 @@
 //! # <мс от старта окна> <действие> [аргументы]
 //! 1500 move 640 300
 //! 1600 click
-//! 1800 shot browse
+//! 1700 press          # нажать и держать — дальше move тащит
+//! 1800 release
+//! 1900 shot browse
 //! 2000 exit
 //! ```
 
@@ -29,6 +31,13 @@ pub enum Action {
     Move { x: f32, y: f32 },
     /// Нажать и отпустить левую кнопку там, где стоит курсор.
     Click,
+    /// Только нажать или только отпустить. Порознь они нужны затем, для чего
+    /// щелчка мало: перетаскивание — это нажатие, движения и отпускание, и
+    /// проверяется оно только так.
+    Button { pressed: bool },
+    /// Колесо, в тех же единицах, в которых его шлёт окно. Своим шагом, а не
+    /// через `Move`: приближение и прокрутка списка иначе не проверяются.
+    Scroll { dx: f32, dy: f32 },
     /// Снимок кадра. Путь собран при разборе сценария: каталог знает он, а не
     /// кадровый цикл.
     Shot { path: PathBuf },
@@ -106,6 +115,12 @@ fn parse_step(line: &str, logs: &Path) -> Option<(Duration, Action)> {
     let action = match words.next()? {
         "move" => Action::Move { x: words.next()?.parse().ok()?, y: words.next()?.parse().ok()? },
         "click" => Action::Click,
+        "press" => Action::Button { pressed: true },
+        "release" => Action::Button { pressed: false },
+        "scroll" => Action::Scroll {
+            dx: words.next()?.parse().ok()?,
+            dy: words.next()?.parse().ok()?,
+        },
         "shot" => Action::Shot { path: logs.join(format!("{}.png", words.next()?)) },
         "exit" => Action::Exit,
         _ => return None,

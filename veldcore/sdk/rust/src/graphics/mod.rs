@@ -6,7 +6,9 @@
 //! типом идентификатора, чтобы их нельзя было перепутать, — и записываются
 //! render-команды через [`RenderRecorder`].
 
+mod buffer;
 mod recorder;
+pub use buffer::GrowingBuffer;
 pub use recorder::RenderRecorder;
 
 /// Контракт `veldmap.graphics` живёт в общем дереве протокола, здесь — только
@@ -17,8 +19,8 @@ pub use proto::{
     TextureFormat, VertexFormat, IndexFormat, FilterMode, StepMode,
     PrimitiveTopology, BlendFactor, BlendOperation, FrontFace, CullMode,
     BufferBindingType, SamplerBindingType, TextureSampleType, TextureViewDimension,
-    VertexAttribute, VertexBufferLayout, BlendComponent, BlendState,
-    BindGroupLayoutEntry, BindGroupEntry, CreateRenderPipeline,
+    CompareFunction, VertexAttribute, VertexBufferLayout, BlendComponent, BlendState,
+    BindGroupLayoutEntry, BindGroupEntry, CreateRenderPipeline, DepthStencilState,
 };
 
 use prost::Message;

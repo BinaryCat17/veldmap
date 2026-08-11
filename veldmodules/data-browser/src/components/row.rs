@@ -49,6 +49,9 @@ pub struct Row {
     pub size: u64,
     /// Время файла, unix-секунды; 0 — неизвестно.
     pub date: i64,
+    /// Чем запись считает каталог: у снимка это тип продукта («S2MSI2A»).
+    /// Пусто — каталог не сказал, и вид выводится из имени (см. [`Row::format`]).
+    pub kind: String,
     pub status: RowStatus,
 }
 
@@ -82,11 +85,15 @@ impl Row {
         }
     }
 
-    /// Колонка «формат»: расширение прописными. У папки формата нет, и вместо
-    /// него сказано, что это папка, — строчными, потому что это не расширение.
+    /// Колонка «формат»: то, чем запись назвал каталог, а без этого —
+    /// расширение прописными. У папки формата нет, и вместо него сказано, что
+    /// это папка, — строчными, потому что это не расширение.
     pub fn format(&self) -> String {
         if self.is_folder {
             return "папка".to_string();
+        }
+        if !self.kind.is_empty() {
+            return self.kind.clone();
         }
         match self.title.rfind('.') {
             Some(dot) => self.title[dot + 1..].to_uppercase(),
@@ -102,6 +109,7 @@ impl Row {
             is_folder: true,
             size: 0,
             date: 0,
+            kind: String::new(),
             status,
         }
     }
@@ -120,6 +128,7 @@ impl Row {
             is_folder: false,
             size: if entry.total > 0 { entry.total } else { entry.done },
             date: entry.modified,
+            kind: String::new(),
             status,
         }
     }
@@ -143,6 +152,7 @@ impl Row {
                 is_folder: false,
                 size,
                 date,
+                kind: String::new(),
                 status: RowStatus::Remote,
             },
         }

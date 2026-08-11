@@ -21,7 +21,7 @@ pub struct State {
     pub error: Option<String>,
     /// Render-таргет нашего окна: аллоцируется в ответ на app/window_resized
     /// и делегируется рендереру (см. handlers::window).
-    pub window_surface: Option<u64>,
+    pub window_surface: Option<veldsdk::surface::Delegated>,
     /// Размер окна в физических пикселях (app/window_resized). Нужен как
     /// потолок для превью: рисовать картинку крупнее окна незачем.
     pub window: (u32, u32),
@@ -172,6 +172,25 @@ impl State {
         }
     }
 
+    pub fn active_search_mut(&mut self) -> Option<(ViewId, &mut search::SearchState)> {
+        let id = self.active?;
+        match self.get_mut(id)? {
+            ViewKind::Search(search) => Some((id, search)),
+            _ => None,
+        }
+    }
+
+    /// Глобус активного вида. `None` — сверху не он: события области приходят
+    /// только от видимой вкладки, но между отправкой и приходом её могли
+    /// сменить.
+    pub fn active_globe_mut(&mut self) -> Option<&mut globe::GlobeState> {
+        let id = self.active?;
+        match self.get_mut(id)? {
+            ViewKind::Globe(globe) => Some(globe),
+            _ => None,
+        }
+    }
+
     /// Превью названного вида. `None` — вкладку закрыли, пока ответ шёл;
     /// приехавший ресурс всё равно наш, освобождает его вызывающий.
     pub fn preview_mut(&mut self, id: ViewId) -> Option<&mut preview::PreviewState> {
@@ -184,11 +203,13 @@ impl State {
 
 pub mod search;
 pub mod browse;
+pub mod globe;
 pub mod library;
 pub mod listing;
 pub mod preview;
 
 pub use browse::BrowseState;
+pub use globe::GlobeState;
 pub use library::LibraryState;
 pub use preview::PreviewState;
 pub use search::SearchState;

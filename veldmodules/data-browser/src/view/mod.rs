@@ -5,6 +5,7 @@
 
 pub mod browse;
 pub mod downloaded;
+pub mod globe;
 pub mod preview;
 pub mod search;
 
@@ -23,6 +24,7 @@ const GLYPH_FOLDER: &str = "\u{f07b}";
 const GLYPH_SEARCH: &str = "\u{f002}";
 const GLYPH_DOWNLOAD: &str = "\u{f019}";
 const GLYPH_IMAGE: &str = "\u{f1c5}";
+const GLYPH_GLOBE: &str = "\u{f0ac}";
 
 /// Высота полосы вкладок и строки состояния. Фиксированы, а не выведены из
 /// содержимого: это хром постоянного размера, и ни одна вкладка не вправе
@@ -36,6 +38,7 @@ pub fn build_root(state: &State) -> Element<Msg> {
         Some(ViewKind::Search(view)) => search::view(state, view),
         Some(ViewKind::Downloaded(listing)) => downloaded::view(state, listing),
         Some(ViewKind::Preview(view)) => preview::view(state, view),
+        Some(ViewKind::Globe(view)) => globe::view(state, view),
         // Закрыть последнюю вкладку — законное состояние, а не ошибка.
         None => container(text::<Msg>("Все вкладки закрыты".to_string()).size(theme::TEXT_BODY).color(theme::INK_DIM))
             .width(Length::Fill)
@@ -122,6 +125,7 @@ fn tab_strip(state: &State) -> Element<Msg> {
             menu::Item::new("Сетевой каталог", Msg::NewBrowse).glyph(GLYPH_FOLDER),
             menu::Item::new("Поиск снимков", Msg::NewSearch).glyph(GLYPH_SEARCH),
             menu::Item::new("Скачанное", Msg::NewDownloaded).glyph(GLYPH_DOWNLOAD),
+            menu::Item::new("Глобус", Msg::NewGlobe).glyph(GLYPH_GLOBE),
         ]),
     )
     .open(state.tab_menu)
@@ -211,5 +215,6 @@ fn glyph(kind: &ViewKind) -> &'static str {
         ViewKind::Browse(_) => GLYPH_FOLDER,
         ViewKind::Downloaded(_) => GLYPH_DOWNLOAD,
         ViewKind::Preview(_) => GLYPH_IMAGE,
+        ViewKind::Globe(_) => GLYPH_GLOBE,
     }
 }

@@ -24,8 +24,21 @@ use proto::{
 
 pub struct PendingRenderOp {
     pub target_view_id: u64,
+    /// 0 — теста глубины в этом кадре нет.
+    pub depth_view_id: u64,
     pub command_buffer: CommandBuffer,
     pub instance_id: u32,
+}
+
+/// Разрешённые аттачменты одного render-op'а — всё, что нужно, чтобы открыть
+/// pass. Собираются здесь, а не в раннере: правила, отличающие цветной таргет
+/// от буфера глубины, живут рядом с самим предикатом (`format::is_depth`).
+pub struct Attachments {
+    pub target: Arc<wgpu::TextureView>,
+    /// Размеры таргета — по ним кадровый цикл клампит viewport и scissor.
+    pub width: u32,
+    pub height: u32,
+    pub depth: Option<Arc<wgpu::TextureView>>,
 }
 
 // ── GraphicsDevice ─────────────────────────────────────────────
@@ -108,10 +121,10 @@ impl GraphicsDevice {
     // ── GPU object creation ───────────────────────────────────
 
     pub fn create_texture_view(&self, texture_id: ResourceId, owner_id: u32) -> anyhow::Result<ResourceId> {
-        let (texture, width, height, _) = self.get_texture_info(texture_id, owner_id)
+        let (texture, width, height, format) = self.get_texture_info(texture_id, owner_id)
             .ok_or_else(|| anyhow::anyhow!("Texture region {} not found or access denied", texture_id))?;
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Ok(self.insert_gpu(GpuObject::TextureView { view: Arc::new(view), width, height }, owner_id))
+        Ok(self.insert_gpu(GpuObject::TextureView { view: Arc::new(view), width, height, format }, owner_id))
     }
 
     pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, owner_id: u32) -> ResourceId {
@@ -289,6 +302,27 @@ impl GraphicsDevice {
             },
         }).or(Some(wgpu::BlendState::ALPHA_BLENDING));
 
+        // Формат проверяется здесь, а не отдаётся wgpu: у него это ошибка
+        // валидации, а её обработчик по умолчанию роняет процесс — тогда как
+        // модулю достаточно узнать, что пайплайн не собрался.
+        let depth_stencil = match req.depth_stencil.as_ref() {
+            Some(d) if !crate::format::is_depth(d.format) => {
+                return Err(anyhow::anyhow!(
+                    "depth_stencil names format {}, which is not a depth format", d.format));
+            }
+            // Трафарета и сдвига глубины в протоколе нет: ни того, ни другого
+            // пока не просит ни один пайплайн, а завести их можно только вместе
+            // с тем, кто ими пользуется.
+            Some(d) => Some(wgpu::DepthStencilState {
+                format: proto_to_wgpu(d.format),
+                depth_write_enabled: Some(d.depth_write_enabled),
+                depth_compare: Some(crate::format::compare_to_wgpu(d.depth_compare)),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            None => None,
+        };
+
         let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: if req.label.is_empty() { None } else { Some(&req.label) },
             layout: Some(&pipeline_layout),
@@ -331,7 +365,7 @@ impl GraphicsDevice {
                 },
                 unclipped_depth: false, polygon_mode: wgpu::PolygonMode::Fill, conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -414,20 +448,60 @@ impl GraphicsDevice {
 
     // ── Execute (queue render commands for the frame loop) ────
 
+    /// Буфер глубины требует того же права, что и цветной таргет: pass его
+    /// очищает и в него пишет, а это запись.
     pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<()> {
         let req = Submit::decode(&payload[..])?;
-        // Check write access to the target view before queueing
         if !self.registry.check_access(req.target_texture_view_id, requestor_id, Access::Write) {
             return Err(anyhow::anyhow!("Access denied to target view {}", req.target_texture_view_id));
+        }
+        if req.depth_texture_view_id != 0
+            && !self.registry.check_access(req.depth_texture_view_id, requestor_id, Access::Write)
+        {
+            return Err(anyhow::anyhow!("Access denied to depth view {}", req.depth_texture_view_id));
         }
         if let Some(cb) = req.command_buffer {
             self.pending_ops.lock().unwrap().push(PendingRenderOp {
                 target_view_id: req.target_texture_view_id,
+                depth_view_id: req.depth_texture_view_id,
                 command_buffer: cb,
                 instance_id: requestor_id,
             });
         }
         Ok(())
+    }
+
+    /// Разрешает аттачменты op'а и проверяет то, что wgpu проверил бы сам —
+    /// но ошибкой валидации, роняющей процесс: роль текстуры (цвет или
+    /// глубина) и совпадение размеров.
+    pub fn resolve_attachments(&self, op: &PendingRenderOp) -> anyhow::Result<Attachments> {
+        let view = |id: u64| match self.get_gpu(id, op.instance_id) {
+            Ok(GpuObject::TextureView { view, width, height, format }) => Ok((view, width, height, format)),
+            _ => Err(anyhow::anyhow!("view {} is unknown or not a texture view", id)),
+        };
+
+        let (target, width, height, format) = view(op.target_view_id)?;
+        if crate::format::is_depth(format) {
+            return Err(anyhow::anyhow!(
+                "view {} is a depth buffer and cannot be a colour target", op.target_view_id));
+        }
+
+        let depth = match op.depth_view_id {
+            0 => None,
+            id => {
+                let (depth_view, dw, dh, dformat) = view(id)?;
+                if !crate::format::is_depth(dformat) {
+                    return Err(anyhow::anyhow!("view {} is not a depth buffer", id));
+                }
+                if (dw, dh) != (width, height) {
+                    return Err(anyhow::anyhow!(
+                        "depth buffer {} is {}x{}, target is {}x{}", id, dw, dh, width, height));
+                }
+                Some(depth_view)
+            }
+        };
+
+        Ok(Attachments { target, width, height, depth })
     }
 }
 

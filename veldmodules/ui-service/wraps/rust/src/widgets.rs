@@ -37,18 +37,57 @@ impl<M, T: Into<Element<M>>> Keyed<M> for T {
 
 /// Сообщение разметки: то, что виджет скажет модулю при нажатии или вводе.
 ///
-/// По шине едет пара строк — имя метода и значение (`proto::Handler`);
-/// ui-service возвращает их эхом, смысла их не зная. Трейт держит перевод в эту
-/// пару и обратно в одном месте, и этим связывает два конца: у отправителя тип
-/// сообщения проверяет компилятор, а у получателя `decode` отвечает `None` на
-/// всё, чего в наборе нет, — вместо молчаливого несовпадения двух списков строк.
+/// В разметке оно объявляется парой строк (`proto::Handler`) — именем метода и
+/// значением; ui-service возвращает имя эхом, смысла его не зная. Трейт держит
+/// перевод туда и обратно в одном месте, и этим связывает два конца: у
+/// отправителя тип сообщения проверяет компилятор, а у получателя `decode`
+/// отвечает `None` на всё, чего в наборе нет, — вместо молчаливого
+/// несовпадения двух списков строк.
+///
+/// Разбирается при этом не значение из разметки, а то, что приехало: у события
+/// с данными нагрузку подставляет рендерер (см. [`Payload`]).
 pub trait UiMessage: Sized {
     /// Имя метода и значение. Имя должно быть устойчивым — по нему сообщение
     /// возвращается обратно.
     fn encode(&self) -> (String, String);
-    /// Обратный разбор. `None` — такого сообщения в наборе нет или значение
-    /// не разбирается.
-    fn decode(method: &str, value: &str) -> Option<Self>;
+    /// Обратный разбор. `None` — такого сообщения в наборе нет или нагрузка
+    /// не того вида.
+    fn decode(event: &proto::UiEventResponse) -> Option<Self>;
+}
+
+/// Чтение нагрузки события. Вид её у каждого метода свой и заранее известен
+/// тому, кто объявил обработчик, поэтому спрашивают здесь именно тот, которого
+/// ждут: «не тот вид» неотличимо от «нет нагрузки» и в обоих случаях означает
+/// одно — разобрать нечего.
+pub trait Payload {
+    /// Строка: названная разметкой либо подставленная рендерером (набранный
+    /// текст). Пусто — нагрузка другого вида.
+    fn value(&self) -> &str;
+    fn pointer(&self) -> Option<&proto::PointerEvent>;
+    fn size(&self) -> Option<&proto::ViewportSize>;
+}
+
+impl Payload for proto::UiEventResponse {
+    fn value(&self) -> &str {
+        match &self.payload {
+            Some(proto::ui_event_response::Payload::Value(value)) => value,
+            _ => "",
+        }
+    }
+
+    fn pointer(&self) -> Option<&proto::PointerEvent> {
+        match &self.payload {
+            Some(proto::ui_event_response::Payload::Pointer(pointer)) => Some(pointer),
+            _ => None,
+        }
+    }
+
+    fn size(&self) -> Option<&proto::ViewportSize> {
+        match &self.payload {
+            Some(proto::ui_event_response::Payload::Size(size)) => Some(size),
+            _ => None,
+        }
+    }
 }
 
 // --- Builder Structs ---
@@ -105,7 +144,7 @@ macro_rules! parent {
     )+ };
 }
 
-sizing!(Column, Row, Stack, Text, Container, Scrollable, ProgressBar, Image);
+sizing!(Column, Row, Stack, Text, Container, Scrollable, ProgressBar, Image, Viewport);
 padded!(Column, Row, Container);
 parent!(Column, Row, Stack);
 
@@ -766,4 +805,79 @@ impl<M> From<Image<M>> for Element<M> {
 
 pub fn image<M>(handle: veldsdk::proto::core::ResourceHandle) -> Image<M> {
     Image::new(handle)
+}
+
+/// Место, которое модуль рисует своим рендерером (см. `Viewport` в types.proto).
+///
+/// Заполняет отведённое ему место целиком и перерисовывается каждый кадр, а
+/// взамен рассказывает владельцу две вещи: сколько места ему досталось и что
+/// делает над ним указатель.
+pub struct Viewport<M> {
+    widget: proto::Viewport,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Viewport<M> {
+    /// Без текстуры: место занимается, но остаётся пустым — столько времени,
+    /// сколько владельцу нужно, чтобы ответить на первый `on_resized`.
+    pub fn new() -> Self {
+        Self {
+            widget: proto::Viewport {
+                texture: None,
+                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                on_resized: None,
+                on_pointer: None,
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Что показывать. Владелец текстуры обязан выдать рендереру право чтения
+    /// (`grant_read` на «ui-service») — тем же обрядом, что у превью.
+    pub fn texture(mut self, handle: veldsdk::proto::core::ResourceHandle) -> Self {
+        self.widget.texture = Some(handle);
+        self
+    }
+
+    /// Что модуль получит, когда области достанется новый размер. Как и у поля
+    /// ввода, принимается способ собрать сообщение, а не готовое: нагрузку
+    /// подставит рендерер, отсюда едет только имя метода.
+    pub fn on_resized(mut self, message: impl FnOnce(proto::ViewportSize) -> M) -> Self
+    where
+        M: UiMessage,
+    {
+        let (method, _) = message(proto::ViewportSize::default()).encode();
+        self.widget.on_resized = Some(proto::Handler { method, value: String::new() });
+        self
+    }
+
+    /// Что модуль получит на движение, нажатие, отпускание и прокрутку.
+    pub fn on_pointer(mut self, message: impl FnOnce(proto::PointerEvent) -> M) -> Self
+    where
+        M: UiMessage,
+    {
+        let (method, _) = message(proto::PointerEvent::default()).encode();
+        self.widget.on_pointer = Some(proto::Handler { method, value: String::new() });
+        self
+    }
+}
+
+impl<M> Default for Viewport<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<M> From<Viewport<M>> for Element<M> {
+    fn from(v: Viewport<M>) -> Self {
+        proto::Widget {
+            r#type: Some(proto::widget::Type::Viewport(v.widget)),
+            ..Default::default()
+        }.into()
+    }
+}
+
+pub fn viewport<M>() -> Viewport<M> {
+    Viewport::new()
 }

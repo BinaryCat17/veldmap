@@ -24,6 +24,7 @@ pub fn view(state: &State, listing: &ListingState) -> Element<Msg> {
             ),
             path: None,
             empty: "Ничего не скачано",
+            controls: None,
             rows,
         },
         listing,
