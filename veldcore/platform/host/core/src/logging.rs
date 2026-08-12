@@ -102,9 +102,11 @@ impl Log for Logger {
         }
 
         let message = format!("{}", record.args());
+        // Время локальное — со смещением, а не с «Z»: суффикс UTC у локальной
+        // метки означал бы, что каждая строка лога врёт на часовой пояс.
         let line = format!(
             "[{}] <{}> {:5} {}\n",
-            chrono::Local::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%z"),
             target,
             record.level(),
             message
@@ -165,6 +167,41 @@ impl Dedup {
         }
         self.seen.insert(key, now);
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dedup_suppresses_repeats_within_interval() {
+        let mut dedup = Dedup { min_interval: Duration::from_secs(3600), seen: HashMap::new() };
+        assert!(!dedup.suppress("net", "повтор"));
+        assert!(dedup.suppress("net", "повтор"));
+        // Тот же текст из другой подсистемы — другое событие.
+        assert!(!dedup.suppress("fs", "повтор"));
+    }
+
+    #[test]
+    fn zero_interval_never_suppresses() {
+        let mut dedup = Dedup { min_interval: Duration::ZERO, seen: HashMap::new() };
+        assert!(!dedup.suppress("net", "повтор"));
+        assert!(!dedup.suppress("net", "повтор"));
+    }
+
+    #[test]
+    fn target_normalization() {
+        // Свои записи приводятся к veldmap::host::<подсистема>.
+        assert_eq!(Logger::target("network", Some("veldmap_host_core::plugins")), "veldmap::host::network");
+        // Таргет не указан — подсистема берётся из хвоста пути модуля.
+        assert_eq!(
+            Logger::target("veldmap_host_core::plugins", Some("veldmap_host_core::plugins")),
+            "veldmap::host::plugins"
+        );
+        // Уже приведённый (лог wasm-модуля) и чужой крейт не трогаются.
+        assert_eq!(Logger::target("veldmap::globe::render", None), "veldmap::globe::render");
+        assert_eq!(Logger::target("wgpu_core::instance", Some("wgpu_core::instance")), "wgpu_core::instance");
     }
 }
 

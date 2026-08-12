@@ -253,3 +253,45 @@ fn normalize(v: Vec3) -> Vec3 {
     let len = dot(v, v).sqrt();
     if len == 0.0 { v } else { [v[0] / len, v[1] / len, v[2] / len] }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `visible_deg` и `height_for` — прямая и обратная одна другой; на этом
+    /// стоит и темп жеста, и наводка «чтобы поместился контур». README
+    /// заявляет их парой — здесь пара сходится числом.
+    #[test]
+    fn height_inverts_visible_arc() {
+        for radius_deg in [0.5, 2.0, 10.0, 30.0, 55.0] {
+            let camera = Camera {
+                at: Geodetic { lat_deg: 0.0, lon_deg: 0.0, height_m: height_for(radius_deg) },
+            };
+            assert!(
+                (camera.visible_deg() - radius_deg).abs() < 1e-6,
+                "радиус {}° увиделся как {}°", radius_deg, camera.visible_deg()
+            );
+        }
+    }
+
+    /// Долгота сворачивается в −180..180, широта упирается в предохранитель у
+    /// полюса — жест не копит витки и не опрокидывает камеру.
+    #[test]
+    fn orbit_stays_in_bounds() {
+        let mut camera = Camera::default();
+        for _ in 0..500 {
+            camera.orbit(0.37, 0.29);
+            assert!(camera.at.lon_deg >= -180.0 && camera.at.lon_deg < 180.0, "{}", camera.at.lon_deg);
+            assert!(camera.at.lat_deg.abs() <= MAX_LAT_DEG);
+        }
+    }
+
+    #[test]
+    fn zoom_respects_height_range() {
+        let mut camera = Camera::default();
+        camera.zoom(1e4);
+        assert_eq!(camera.at.height_m, HEIGHT_RANGE_M.0);
+        camera.zoom(-1e4);
+        assert_eq!(camera.at.height_m, HEIGHT_RANGE_M.1);
+    }
+}

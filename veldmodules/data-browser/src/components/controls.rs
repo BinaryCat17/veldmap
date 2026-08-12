@@ -14,11 +14,6 @@ use crate::module::components::{arrange::Arranged, menu};
 use crate::module::state::listing::{Choice, ListingState, Menu};
 use crate::module::{theme, Msg};
 
-const GLYPH_SEARCH: &str = "\u{f002}";
-const GLYPH_CARET: &str = "\u{f0d7}";
-const GLYPH_UP: &str = "\u{f062}";
-const GLYPH_LEFT: &str = "\u{f053}";
-const GLYPH_RIGHT: &str = "\u{f054}";
 
 /// Полоса отбора: поле фильтра и чипы.
 ///
@@ -28,7 +23,7 @@ const GLYPH_RIGHT: &str = "\u{f054}";
 pub fn toolbar(listing: &ListingState, counts: &[usize], groupable: bool) -> Element<Msg> {
     let open = &listing.menu;
     let mut controls: Vec<Element<Msg>> = vec![
-        field(listing),
+        search_field("Фильтр по имени", &listing.query, Msg::Query, None),
         chip("Состояние:", listing.filter, Menu::Filter, open, counts, Msg::Filter),
     ];
     if groupable {
@@ -44,19 +39,31 @@ pub fn toolbar(listing: &ListingState, counts: &[usize], groupable: bool) -> Ele
         .into()
 }
 
-/// Поле фильтра: лупа и ввод в одной коробке. Лупа внутри неё, а не рядом, —
-/// иначе она читается как отдельная кнопка.
-fn field(listing: &ListingState) -> Element<Msg> {
+/// Поле с лупой: ввод в одной коробке со значком. Лупа внутри неё, а не
+/// рядом, — иначе она читается как отдельная кнопка. Одна сборка на оба поля
+/// приложения: фильтр списка и запрос к каталогу различаются только подписью,
+/// сообщением ввода и тем, ждёт ли поле Enter (`on_submit`).
+pub fn search_field(
+    placeholder: &str,
+    value: &str,
+    on_input: fn(String) -> Msg,
+    on_submit: Option<Msg>,
+) -> Element<Msg> {
+    let mut input = text_input::<Msg>(placeholder, value)
+        .style(theme::field())
+        .font_family(veld_ui_service_wrap::style::FONT_UI)
+        .size(theme::TEXT_BODY)
+        .padding(Padding::ZERO)
+        .width(Length::Fill)
+        .on_input(on_input);
+    if let Some(message) = on_submit {
+        input = input.on_submit(message);
+    }
+
     container(
         row![
-            icon::<Msg>(GLYPH_SEARCH).size(11.0).color(theme::INK_FAINT),
-            text_input::<Msg>("Фильтр по имени", &listing.query)
-                .style(theme::field())
-                .font_family(veld_ui_service_wrap::style::FONT_UI)
-                .size(theme::TEXT_BODY)
-                .padding(Padding::ZERO)
-                .width(Length::Fill)
-                .on_input(Msg::Query),
+            icon::<Msg>(theme::glyph::SEARCH).size(11.0).color(theme::INK_FAINT),
+            input,
         ]
         .spacing(8.0)
         .width(Length::Fill)
@@ -92,7 +99,7 @@ pub fn chip<C: Choice>(
                 .color(theme::INK)
                 .weight(FontWeight::WeightMedium)
                 .single_line(),
-            icon::<Msg>(GLYPH_CARET).size(8.0).color(theme::INK_FAINT),
+            icon::<Msg>(theme::glyph::CARET).size(8.0).color(theme::INK_FAINT),
         ]
         .spacing(7.0)
         .align_items(Alignment::Center),
@@ -157,7 +164,7 @@ pub fn path(current: &str) -> Element<Msg> {
     }
 
     row![
-        theme::surface_button(icon::<Msg>(GLYPH_UP).size(11.0).color(theme::INK_MUTED), false)
+        theme::surface_button(icon::<Msg>(theme::glyph::UP).size(11.0).color(theme::INK_MUTED), false)
             .width(Length::Fixed(theme::CONTROL_HEIGHT))
             .height(Length::Fixed(theme::CONTROL_HEIGHT))
             .on_press(Msg::Up),
@@ -212,9 +219,9 @@ pub fn pager(arranged: &Arranged<'_>) -> Element<Msg> {
         // Распорка: подпись слева, страницы справа.
         space::<Msg>(Length::Fill, Length::Fixed(0.0)),
     ]
-    .push(step(GLYPH_LEFT, arranged.page.saturating_sub(1), arranged.page > 0))
+    .push(step(theme::glyph::LEFT, arranged.page.saturating_sub(1), arranged.page > 0))
     .extend(pages)
-    .push(step(GLYPH_RIGHT, arranged.page + 1, arranged.page + 1 < arranged.pages))
+    .push(step(theme::glyph::RIGHT, arranged.page + 1, arranged.page + 1 < arranged.pages))
     .spacing(8.0)
     .width(Length::Fill)
     .align_items(Alignment::Center)

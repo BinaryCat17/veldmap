@@ -92,7 +92,7 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
         // будет: операция кончается здесь.
         finish(state, view, &correlation_id);
         if let Some(handle) = &opened.handle {
-            drop(veldsdk::OwnedResource::new(handle.clone()));
+            veldsdk::resource::release(handle.clone());
         }
         return true;
     }
@@ -152,7 +152,7 @@ pub fn on_load_result(state: &mut State, result: LoadImageResult) {
     if !current {
         // Показывать уже нечего, но текстура наша — владение передано нам.
         if let Some(handle) = result.handle {
-            drop(veldsdk::OwnedResource::new(handle));
+            veldsdk::resource::release(handle);
         }
         return;
     }

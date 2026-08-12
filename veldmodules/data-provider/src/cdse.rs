@@ -54,9 +54,7 @@ pub fn on_open(state: &mut State, request: crate::proto::data_provider::OpenRequ
 pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
     let correlation_id = veldsdk::correlation();
     let Some(owner) = state.opening.take(&correlation_id) else { return };
-    let result = veldsdk::resource::accept(&opened)
-        .and_then(|handle| veldsdk::resource::hand_off(handle, &owner));
-    crate::emit::on_open_result(&veldsdk::resource::opened(result), &correlation_id);
+    crate::emit::on_open_result(&veldsdk::resource::relay(&opened, &owner), &correlation_id);
 }
 
 //  inputs ---------------------------------------------------------------------------------------------------------------------------
@@ -89,19 +87,16 @@ pub fn on_search(state: &mut State, request: SearchRequest) {
 /// нет: закачку ведёт тот, кто её попросил, он же её владелец у платформы
 /// и он же её отменяет.
 pub fn on_sign(state: &mut State, req: SignRequest) {
-    let error = if req.identifier.is_empty() {
-        "пустой identifier: подписывать нечего".to_string()
+    let signed = if req.identifier.is_empty() {
+        SignedUrl {
+            error: "пустой identifier: подписывать нечего".to_string(),
+            ..Default::default()
+        }
     } else {
-        String::new()
+        let object = s3::object(&state.identity, &req.identifier);
+        SignedUrl { url: object.url, headers: object.headers, error: String::new() }
     };
-
-    let object = (!req.identifier.is_empty()).then(|| s3::object(&state.identity, &req.identifier));
-    let (url, headers) = match object {
-        Some(o) => (o.url, o.headers),
-        None => (String::new(), Default::default()),
-    };
-
-    crate::emit::on_signed(&SignedUrl { url, headers, error }, &veldsdk::correlation());
+    crate::emit::on_signed(&signed, &veldsdk::correlation());
 }
 
 pub fn on_list_path(
@@ -114,7 +109,7 @@ pub fn on_list_path(
         what: Asked::List(request.path),
     });
 
-    log::info!(target: "handlers", "Requesting S3 list: {}", listing.url);
+    log::info!(target: "handlers", "Листинг S3: {}", listing.url);
 
     crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
         url: listing.url,
@@ -142,7 +137,7 @@ pub fn on_http_result(
             let listing = if ok {
                 s3::parse_listing(&response.body, &path).map_err(|error| error.to_string())
             } else {
-                Err(format!("HTTP error: {}", response.status))
+                Err(format!("хранилище ответило {}", response.status))
             };
 
             let (entries, next_token, error) = match listing {

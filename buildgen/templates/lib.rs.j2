@@ -108,18 +108,12 @@ pub mod calls {
 #[unsafe(no_mangle)]
 pub extern "C" fn init() -> i32 {
     let _ = veldsdk::logging::init();
+    // Конфиг приезжает входом вызова: хост кладёт его и при загрузке, и при
+    // каждом воскрешении (см. plugins::PluginSpec::run_init) — второго пути нет.
     let input = veldsdk::abi::load_input();
-
-    let config_json = if input.is_empty() {
-        match veldsdk::abi::get_config("config") {
-            Some(c) => c,
-            None => return 1,
-        }
-    } else {
-        match String::from_utf8(input) {
-            Ok(s) => s,
-            Err(_) => return 1,
-        }
+    let config_json = match String::from_utf8(input) {
+        Ok(s) if !s.is_empty() => s,
+        _ => return 1,
     };
 
     let config: {{ rust.config }} = match serde_json::from_str(&config_json) {

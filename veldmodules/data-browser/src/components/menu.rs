@@ -15,7 +15,6 @@ use crate::module::{theme, Msg};
 const WIDTH: f32 = 214.0;
 
 /// Галочка выбранного значения.
-const GLYPH_TICK: &str = "\u{f00c}";
 
 pub struct Item {
     label: String,
@@ -37,7 +36,7 @@ impl Item {
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
         if selected {
-            self.mark = Some(GLYPH_TICK);
+            self.mark = Some(theme::glyph::TICK);
         }
         self
     }

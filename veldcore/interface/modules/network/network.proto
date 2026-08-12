@@ -35,7 +35,9 @@ message FsDownloadResponse {
 
 // Событие прогресса скачивания (топик network/fs_download_progress).
 message FsDownloadProgress {
-  float progress = 1;  // 0.0 to 1.0
+  // Доли здесь нет: она выводится из байт, и второе число рядом с ними могло
+  // бы только разойтись. Тег 1 занимала именно она — заново не занимать.
+  reserved 1;
   uint64 downloaded_bytes = 2;
   uint64 total_bytes = 3;  // 0, если сервер не прислал Content-Length
 }

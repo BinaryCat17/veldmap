@@ -75,6 +75,15 @@ pub async fn init_wgpu<'a>(
     }).await?;
 
     let device_arc = Arc::new(device);
+    // Ошибка валидации wgpu по умолчанию роняет процесс. Всё предсказуемое
+    // хост отсекает заранее (лимиты текстур, роли аттачментов, порядок команд),
+    // но исчерпывающим этот список не бывает — а обещание изоляции держит
+    // именно хост: модуль после ошибки трапается и воскресает, хосту же
+    // падать из-за бага одного модуля нельзя. Поэтому неперехваченное
+    // становится строкой в логе, а не паникой кадрового цикла.
+    device_arc.on_uncaptured_error(Arc::new(|error: wgpu::Error| {
+        log::error!(target: "render", "wgpu: {}", error);
+    }));
     let queue_arc = Arc::new(Mutex::new(queue));
 
     let caps = surface.get_capabilities(&adapter);

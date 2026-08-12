@@ -205,6 +205,16 @@ impl Dispatcher {
         if recipients.is_empty() {
             // A published message with no receiver is almost always a wiring bug.
             log::warn!(target: "dispatcher", "[DISPATCHER] Publish to '{}' (target '{}') dropped: no matching subscriber", topic, target);
+            // Учёт, открытый этой же публикацией, некому закрыть: исполнителя
+            // нет, и терминального ответа не будет. Закрываем сами — тем же
+            // синтезированным ответом, что и при убийстве, — иначе запись
+            // висит вечно, а заказчик ждёт конца, который не придёт.
+            if accounted {
+                self.tasks.complete(correlation);
+                if let Some(terminal) = veldmap_host_bindings::flow::terminal_reply_of(topic) {
+                    self.publish_from(terminal, Vec::new(), 0, correlation, "");
+                }
+            }
             return;
         }
 

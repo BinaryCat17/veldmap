@@ -34,9 +34,7 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
     // статичный view диффов не даёт, и без тиков не перерисовался бы никогда.
     if let Some(layout) = req.layout {
         veldsdk::log::info!(target: "handlers", "Новый view от '{}'", plugin_id);
-        plugin.layout = layout;
-        plugin.is_layout_dirty = true;
-        plugin.needs_redrawing = true;
+        plugin.set_layout(layout);
     }
 
     render_plugin_if_needed(state, &plugin_id);
@@ -48,7 +46,9 @@ pub fn handle_set_view(state: &mut State, req: SetViewRequest) {
 fn render_plugin_if_needed(state: &mut State, plugin_id: &str) {
     // plugins и renderer — разные поля State, заимствуются одновременно.
     let Some(plugin) = state.plugins.get_mut(plugin_id) else { return };
-    let needs_render = plugin.needs_redrawing || plugin.is_layout_dirty;
+    // Смену разметки отдельно не проверяем: везде, где ставится
+    // `is_layout_dirty`, поднимается и этот флаг (set_layout, кадровый тик).
+    let needs_render = plugin.needs_redrawing;
 
     if let (Some(handle), true) = (plugin.surface_handle, needs_render) {
         if let Err(e) = render_plugin(plugin, &mut state.renderer, plugin_id, handle) {
@@ -222,10 +222,7 @@ fn dispatch_event(plugin_id: &str, message: converter::UiMessage) {
         return;
     }
     veldsdk::log::trace!(target: "handlers", "UI message -> '{}/{}'", plugin_id, message.method);
-    crate::emit::on_ui_event(
-        &UiEventResponse { method: message.method, payload: Some(message.payload) },
-        plugin_id,
-    );
+    crate::emit::on_ui_event(&message, plugin_id);
 }
 
 /// Мышь в терминах iced. Прокрутка, кадровый тик и клавиатура сюда не доходят
@@ -341,8 +338,11 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
         veldsdk::log::trace!(target: "render", "Rendering into target texture {}", target_texture);
         crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf)?;
 
-        plugin.last_draw_commands = renderer.draw_commands.clone();
-        plugin.last_vertices = renderer.vertices.clone();
+        // Снимок кадра для диффа — обменом, а не клонированием: рендерер
+        // пересобирает геометрию каждый кадр с нуля (clear в начале сборки),
+        // а клонировать тысячи вершин на каждом изменившемся кадре дорого.
+        std::mem::swap(&mut plugin.last_draw_commands, &mut renderer.draw_commands);
+        std::mem::swap(&mut plugin.last_vertices, &mut renderer.vertices);
         plugin.is_layout_dirty = false;
     }
 

@@ -72,3 +72,30 @@ impl<T> Correlator<T> {
         self.pending.values()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn take_answers_whose_id_exactly_once() {
+        let mut table = Correlator::new();
+        let first = table.begin("окно каталога");
+        let second = table.begin("окно поиска");
+        assert_ne!(first, second, "операции обязаны именоваться различимо");
+
+        assert_eq!(table.take(&first), Some("окно каталога"));
+        // Снятое с учёта не опознаётся второй раз — как и чужая корреляция.
+        assert_eq!(table.take(&first), None);
+        assert_eq!(table.take("чужая"), None);
+        assert_eq!(table.take(&second), Some("окно поиска"));
+    }
+
+    #[test]
+    fn peek_keeps_the_entry() {
+        let mut table = Correlator::new();
+        let id = table.begin(0u32);
+        *table.peek(&id).expect("контекст на учёте") += 1;
+        assert_eq!(table.take(&id), Some(1));
+    }
+}

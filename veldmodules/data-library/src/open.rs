@@ -45,9 +45,7 @@ pub struct OpenFor {
 /// учёта ожидание, см. module::on_read_result). Владение уходит заказчику:
 /// дальше он читает ресурс как хочет и сам решает, когда закрыть.
 pub fn on_file_opened(target: OpenFor, opened: &ResourceOpened) {
-    let result = resource::accept(opened)
-        .and_then(|handle| resource::hand_off(handle, &target.owner));
-    crate::emit::on_open_result(&resource::opened(result), &target.reply_to);
+    crate::emit::on_open_result(&resource::relay(opened, &target.owner), &target.reply_to);
 }
 
 fn fail(correlation_id: String, error: String) {

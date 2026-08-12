@@ -5,6 +5,7 @@ pub mod correlator;
 pub mod latest;
 pub mod resource;
 pub mod surface;
+pub mod time;
 
 /// Мост `log` → ABI хоста. Ставится сгенерированным клеем модуля; прикладной
 /// код пишет обычными макросами крейта `log` (реэкспортирован ниже).

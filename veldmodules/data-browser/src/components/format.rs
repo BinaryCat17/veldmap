@@ -60,33 +60,16 @@ pub fn date(when: i64, now: i64) -> String {
     if when <= 0 {
         return String::new();
     }
-    let (year, month, day) = civil_from_unix(when);
+    let (year, month, day) = veldsdk::time::civil_from_unix(when);
     let clock = format!("{:02}:{:02}", when.div_euclid(3600).rem_euclid(24), when.div_euclid(60).rem_euclid(60));
 
     let today = now.div_euclid(DAY);
     match today - when.div_euclid(DAY) {
         0 => format!("сегодня, {}", clock),
         1 => format!("вчера, {}", clock),
-        _ if year == civil_from_unix(now).0 => format!("{} {}, {}", day, MONTHS[month as usize - 1], clock),
+        _ if year == veldsdk::time::civil_from_unix(now).0 => format!("{} {}, {}", day, MONTHS[month as usize - 1], clock),
         _ => format!("{} {} {}", day, MONTHS[month as usize - 1], year),
     }
-}
-
-/// Unix-секунды → год, месяц, день. Алгоритм Хиннанта: сдвиг эры на 1 марта
-/// делает год без високосного дня непрерывным, и все три числа считаются без
-/// таблиц и без цикла по годам.
-fn civil_from_unix(seconds: i64) -> (i64, u32, u32) {
-    let days = seconds.div_euclid(DAY) + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
-    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 } as u32;
-    (year + i64::from(month <= 2), month, day)
 }
 
 /// Обрезает середину: у имён снимков различаются и начало (миссия, дата), и

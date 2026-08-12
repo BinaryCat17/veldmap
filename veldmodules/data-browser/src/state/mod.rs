@@ -30,7 +30,8 @@ pub struct State {
     /// колонку (см. components::table).
     pub scale: f32,
     /// Раскрыто ли меню «плюса» в полосе вкладок. Не в `ListingState`: полоса
-    /// вкладок общая, а списков много.
+    /// вкладок общая, а списков много. Взаимоисключение с меню списка держит
+    /// [`State::close_menus`] — раскрытым бывает только одно.
     pub tab_menu: bool,
     /// Скорость закачки, байт в секунду: выводится из двух соседних состояний
     /// библиотеки (см. handlers::library). Своего поля у библиотеки под это
@@ -175,6 +176,16 @@ impl State {
     pub fn active_listing_mut(&mut self) -> Option<&mut listing::ListingState> {
         let id = self.active?;
         self.get_mut(id)?.listing_mut()
+    }
+
+    /// Закрывает всё раскрытое: меню полосы вкладок и меню активного списка.
+    /// Одним движением, потому что раскрытым бывает только одно, — а держать
+    /// это правило присвоениями по обработчикам значит однажды забыть одно.
+    pub fn close_menus(&mut self) {
+        self.tab_menu = false;
+        if let Some(listing) = self.active_listing_mut() {
+            listing.menu = listing::Menu::Closed;
+        }
     }
 
     pub fn active_browse_mut(&mut self) -> Option<(ViewId, &mut browse::BrowseState)> {

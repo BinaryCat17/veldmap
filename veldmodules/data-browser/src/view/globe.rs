@@ -10,9 +10,6 @@ use crate::module::components::format;
 use crate::module::state::{GlobeState, State};
 use crate::module::{theme, Msg};
 
-/// Высота строки под областью. Фиксирована, как и весь хром: содержимое не
-/// вправе её растянуть.
-const CAPTION_HEIGHT: f32 = 30.0;
 
 /// Сколько знаков имени выбранного снимка помещается в подпись. Числом, а не
 /// шириной: полоса тянется вместе с окном, и мерить в ней нечего — а имя
@@ -79,6 +76,6 @@ fn caption(state: &State, globe: &GlobeState) -> Element<Msg> {
     )
     .background(theme::CHROME)
     .width(Length::Fill)
-    .height(Length::Fixed(CAPTION_HEIGHT))
+    .height(Length::Fixed(theme::BAR_HEIGHT))
     .into()
 }

@@ -10,35 +10,86 @@ use prost::Message;
 // Имя wasm-модуля импортов объявлено явно: хост регистрирует эти функции
 // именно в "env" (см. host-side `abi.rs::register`), и подразумеваемое
 // умолчание здесь — совпадение, на которое опираться нельзя.
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn veld_host_publish(ptr: u64, len: u64);
-    fn veld_host_log(level: u64, target_ptr: u64, target_len: u64, ptr: u64, len: u64);
-    fn veld_get_config(ptr: u64, len: u64) -> u64;
-    fn veld_random_bytes(ptr: u64, len: u64);
-    fn veld_resource_create(ptr: u64, len: u64) -> u64;
-    fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
+#[cfg(target_arch = "wasm32")]
+mod host {
+    #[link(wasm_import_module = "env")]
+    unsafe extern "C" {
+        pub fn veld_host_publish(ptr: u64, len: u64);
+        pub fn veld_host_log(level: u64, target_ptr: u64, target_len: u64, ptr: u64, len: u64);
+        pub fn veld_get_config(ptr: u64, len: u64) -> u64;
+        pub fn veld_random_bytes(ptr: u64, len: u64);
+        pub fn veld_resource_create(ptr: u64, len: u64) -> u64;
+        pub fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
 
-    fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64) -> u64;
-    fn veld_resource_upload_image(id: u64, ptr: u64, len: u64) -> u64;
-    fn veld_resource_read(id: u64, offset: u64, size: u64) -> u64;
+        pub fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64) -> u64;
+        pub fn veld_resource_upload_image(id: u64, ptr: u64, len: u64) -> u64;
+        pub fn veld_resource_read(id: u64, offset: u64, size: u64) -> u64;
 
-    fn veld_resource_texture_size(id: u64) -> u64;
+        pub fn veld_resource_texture_size(id: u64) -> u64;
 
-    fn veld_task_kill(ptr: u64, len: u64) -> u64;
+        pub fn veld_task_kill(ptr: u64, len: u64) -> u64;
 
-    fn veld_resource_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
-    fn veld_resource_alloc_cpu(size: u64) -> u64;
-    fn veld_resource_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
-    fn veld_resource_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
-    fn veld_resource_grant_read(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
-    fn veld_resource_grant_write(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
-    fn veld_resource_free(region_id: u64) -> u64;
+        pub fn veld_resource_alloc_buffer(size: u64, usage: u64, mapped: u64) -> u64;
+        pub fn veld_resource_alloc_cpu(size: u64) -> u64;
+        pub fn veld_resource_alloc_texture(width: u64, height: u64, format: u64, usage: u64) -> u64;
+        pub fn veld_resource_transfer(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+        pub fn veld_resource_grant_read(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+        pub fn veld_resource_grant_write(region_id: u64, name_ptr: u64, name_len: u64) -> u64;
+        pub fn veld_resource_free(region_id: u64) -> u64;
 
-    fn veld_input_len() -> u64;
-    fn veld_input_copy(p: u64, n: u64);
-    fn veld_output_set(p: u64, n: u64);
+        pub fn veld_input_len() -> u64;
+        pub fn veld_input_copy(p: u64, n: u64);
+        pub fn veld_output_set(p: u64, n: u64);
+    }
 }
+
+// Нативные заглушки хостовых функций — для `cargo test`: юнит-тесты чистой
+// логики (календарь, Correlator, кодек сообщений разметки) линкуются нативно,
+// где хоста нет. Ведут себя как хост, у которого кончилось всё: аллокации не
+// выдаются, ресурсы не находятся, публикации уходят в никуда. Единственное
+// исключение — энтропия: она детерминированная и ненулевая, потому что на ней
+// стоит уникальность корреляций, которую тесты и проверяют.
+//
+// `unsafe fn`, как и настоящие импорты: call-сайты не отличают заглушку от
+// хоста ни формой, ни требованиями.
+#[cfg(not(target_arch = "wasm32"))]
+mod host {
+    #![allow(clippy::missing_safety_doc)]
+
+    pub unsafe fn veld_host_publish(_ptr: u64, _len: u64) {}
+    pub unsafe fn veld_host_log(_level: u64, _tp: u64, _tl: u64, _p: u64, _l: u64) {}
+    pub unsafe fn veld_get_config(_ptr: u64, _len: u64) -> u64 { 0 }
+
+    pub unsafe fn veld_random_bytes(ptr: u64, len: u64) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEED: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+        let bytes = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) };
+        for chunk in bytes.chunks_mut(8) {
+            let value = SEED.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed).to_le_bytes();
+            chunk.copy_from_slice(&value[..chunk.len()]);
+        }
+    }
+
+    pub unsafe fn veld_resource_create(_ptr: u64, _len: u64) -> u64 { 0 }
+    pub unsafe fn veld_graphics_execute(_ptr: u64, _len: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_write(_id: u64, _offset: u64, _ptr: u64, _len: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_upload_image(_id: u64, _ptr: u64, _len: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_read(_id: u64, _offset: u64, _size: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_texture_size(_id: u64) -> u64 { 0 }
+    pub unsafe fn veld_task_kill(_ptr: u64, _len: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_alloc_buffer(_size: u64, _usage: u64, _mapped: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_alloc_cpu(_size: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_alloc_texture(_w: u64, _h: u64, _f: u64, _u: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_transfer(_id: u64, _np: u64, _nl: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_grant_read(_id: u64, _np: u64, _nl: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_grant_write(_id: u64, _np: u64, _nl: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_free(_id: u64) -> u64 { 0 }
+    pub unsafe fn veld_input_len() -> u64 { 0 }
+    pub unsafe fn veld_input_copy(_p: u64, _n: u64) {}
+    pub unsafe fn veld_output_set(_p: u64, _n: u64) {}
+}
+
+use host::*;
 
 // ── WASM MEMORY EXPORTS ────────────────────────────────────────
 

@@ -261,7 +261,7 @@ def check_generator():
 
 def generate_code():
     """Run generate.py for every discovered module (using absolute paths)."""
-    print("\n[0/2] Generating module bindings...")
+    print("\n[1/4] Generating module bindings...")
     started     = time.monotonic()
     build_dir   = os.path.dirname(os.path.abspath(__file__))
     venv_python = ensure_venv()
@@ -345,8 +345,8 @@ def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None =
     check_generator()
     generate_code()
 
-    # 1. WASM modules
-    print(f"\n[1/2] Building WASM modules ({profile})...")
+    # 2. WASM modules
+    print(f"\n[2/4] Building WASM modules ({profile})...")
     os.makedirs(PLUGINS_DIR, exist_ok=True)
 
     BUILDERS = {
@@ -365,8 +365,8 @@ def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None =
         artefact = builder(module, profile, cargo_args)
         print(f"  {artefact} -> build/plugins/ — {elapsed(module_started)}")
 
-    # 2. Native host
-    print(f"\n[2/2] Building native host ({profile})...")
+    # 3. Native host
+    print(f"\n[3/4] Building native host ({profile})...")
     host_started = time.monotonic()
     host_args = list(cargo_args)
     if windows:
@@ -378,10 +378,56 @@ def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None =
          ] + host_args, cwd=os.path.dirname(CORE_MANIFEST))
     print(f"  готов за {elapsed(host_started)}")
 
+    # 4. Юнит-тесты чистой логики (нативные)
+    test_rust_units()
+
     if windows:
         _deploy_windows(profile, dist_dir)
 
     return started
+
+
+def _has_unit_tests(module: dict) -> bool:
+    """Есть ли в исходниках модуля юнит-тесты (`#[cfg(test)]`)."""
+    src = os.path.join(module["dir"], "src")
+    for root, _dirs, files in os.walk(src):
+        for name in files:
+            if not name.endswith(".rs"):
+                continue
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                if "#[cfg(test)]" in f.read():
+                    return True
+    return False
+
+
+def test_rust_units():
+    """Юнит-тесты чистой логики: календарь, кодек сообщений, геодезия, Dedup.
+
+    Компилируются и бегут нативно — хоста им не нужно, хостовые ABI-функции
+    подменяются заглушками SDK (см. veldsdk::abi, cfg(not(target_arch =
+    "wasm32"))). Это единственная механическая проверка Rust-кода помимо
+    «компилируется»: интерфейс по-прежнему проверяется запуском (см. CLAUDE.md),
+    но парные функции — encode/decode, прямая/обратная — сходятся здесь.
+
+    `--release`, чтобы у veldcore тесты переиспользовали кэш обычной сборки.
+    Модули гоняются только те, где тесты есть: остальным незачем компилировать
+    нативный вариант крейта.
+    """
+    print("\n[4/4] Rust unit tests...")
+    started = time.monotonic()
+
+    run(["cargo", "test", "--release", "-q", "-p", "veldsdk", "-p", "veldmap-host-core"],
+        cwd=os.path.join(PROJECT_ROOT, "veldcore"))
+
+    tested = ["veldsdk", "veldmap-host-core"]
+    for module in discover_modules():
+        if module["language"] != "rust" or not _has_unit_tests(module):
+            continue
+        run(["cargo", "test", "--release", "-q", "-p", module["package"]],
+            cwd=os.path.join(module["dir"], "generated"))
+        tested.append(module["name"])
+
+    print(f"  {', '.join(tested)} — {elapsed(started)}")
 
 
 # ── Windows deployment ─────────────────────────────────────────────────────────

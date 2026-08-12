@@ -158,6 +158,10 @@ impl GraphicsDevice {
             _ => return Err(anyhow::anyhow!("Object {} is not a BGL", layout_id)),
         };
 
+        // Два прохода не случайны: wgpu::BindGroupEntry держит &-ссылки, а
+        // ссылаться можно только на то, что переживёт вызов create_bind_group.
+        // Первый проход собирает владеющие Arc'и в keep_*, второй строит
+        // entries ссылками в них.
         let mut keep_buffers: Vec<(u32, Arc<wgpu::Buffer>)> = Vec::new();
         let mut keep_views: Vec<(u32, Arc<wgpu::TextureView>)> = Vec::new();
         let mut keep_samplers: Vec<(u32, Arc<wgpu::Sampler>)> = Vec::new();
@@ -507,6 +511,11 @@ impl GraphicsDevice {
 
 // ── Render command execution ───────────────────────────────────
 
+/// Ошибка в state-команде обрывает весь op, а не пропускает одну команду:
+/// draw после пропущенного `SetPipeline`/`SetBindGroup` исполнился бы с чужим
+/// состоянием — в лучшем случае мусор на экране, в худшем ошибка валидации
+/// wgpu. Уже закодированное в pass остаётся (кадр выйдет неполным), но
+/// последовательность — валидной.
 pub fn execute_render_commands<'a>(
     rp: &mut wgpu::RenderPass<'a>,
     command_buffer: &'a CommandBuffer,
@@ -515,38 +524,54 @@ pub fn execute_render_commands<'a>(
     target_height: u32,
     requestor_id: u32,
 ) -> anyhow::Result<()> {
+    // Валидная последовательность начинается с пайплайна: draw без него —
+    // ошибка валидации, а её обработчик по умолчанию роняет процесс.
+    let mut pipeline_bound = false;
     for render_cmd in &command_buffer.commands {
         let cmd = match &render_cmd.command { Some(c) => c, None => continue };
         match cmd {
             RenderCommand::SetPipeline(p) => {
-                // Не pipeline (другой GPU-объект, байтовый ресурс, чужой или
-                // освобождённый id) — команда молча пропускается.
-                if let Ok(GpuObject::RenderPipeline(pipeline)) = gpu.get_gpu(p.pipeline_id, requestor_id) {
-                    rp.set_pipeline(pipeline.as_ref());
+                match gpu.get_gpu(p.pipeline_id, requestor_id) {
+                    Ok(GpuObject::RenderPipeline(pipeline)) => {
+                        rp.set_pipeline(pipeline.as_ref());
+                        pipeline_bound = true;
+                    }
+                    _ => anyhow::bail!("объект {} не pipeline либо недоступен", p.pipeline_id),
                 }
             }
             RenderCommand::SetBindGroup(bg) => {
-                if let Ok(GpuObject::BindGroup(bind_group)) = gpu.get_gpu(bg.bind_group_id, requestor_id) {
-                    rp.set_bind_group(bg.index, bind_group.as_ref(), &[]);
+                match gpu.get_gpu(bg.bind_group_id, requestor_id) {
+                    Ok(GpuObject::BindGroup(bind_group)) => {
+                        rp.set_bind_group(bg.index, bind_group.as_ref(), &[]);
+                    }
+                    _ => anyhow::bail!("объект {} не bind group либо недоступен", bg.bind_group_id),
                 }
             }
             RenderCommand::SetVertexBuffer(vb) => {
-                if let Some(buffer) = gpu.get_buffer(vb.buffer_id, requestor_id) {
-                    let end = if vb.size > 0 { (vb.offset + vb.size).min(buffer.size()) } else { buffer.size() };
-                    rp.set_vertex_buffer(vb.slot, buffer.slice(vb.offset..end));
-                }
+                let Some(buffer) = gpu.get_buffer(vb.buffer_id, requestor_id) else {
+                    anyhow::bail!("объект {} не буфер либо недоступен", vb.buffer_id);
+                };
+                let end = if vb.size > 0 { (vb.offset + vb.size).min(buffer.size()) } else { buffer.size() };
+                rp.set_vertex_buffer(vb.slot, buffer.slice(vb.offset..end));
             }
             RenderCommand::SetIndexBuffer(ib) => {
                 let format = if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
-                if let Some(buffer) = gpu.get_buffer(ib.buffer_id, requestor_id) {
-                    let end = if ib.size > 0 { (ib.offset + ib.size).min(buffer.size()) } else { buffer.size() };
-                    rp.set_index_buffer(buffer.slice(ib.offset..end), format);
-                }
+                let Some(buffer) = gpu.get_buffer(ib.buffer_id, requestor_id) else {
+                    anyhow::bail!("объект {} не буфер либо недоступен", ib.buffer_id);
+                };
+                let end = if ib.size > 0 { (ib.offset + ib.size).min(buffer.size()) } else { buffer.size() };
+                rp.set_index_buffer(buffer.slice(ib.offset..end), format);
             }
             RenderCommand::Draw(d) => {
+                if !pipeline_bound {
+                    anyhow::bail!("draw до первого SetPipeline");
+                }
                 rp.draw(d.first_vertex..(d.first_vertex + d.vertex_count), d.first_instance..(d.first_instance + d.instance_count));
             }
             RenderCommand::DrawIndexed(di) => {
+                if !pipeline_bound {
+                    anyhow::bail!("draw до первого SetPipeline");
+                }
                 rp.draw_indexed(di.first_index..(di.first_index + di.index_count), di.base_vertex, di.first_instance..(di.first_instance + di.instance_count));
             }
             RenderCommand::SetViewport(v) => {

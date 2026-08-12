@@ -11,7 +11,9 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use aws_sigv4::http_request::{sign, SignableRequest, SigningSettings};
+use aws_sigv4::http_request::{
+    sign, PercentEncodingMode, SignableRequest, SigningSettings, UriPathNormalizationMode,
+};
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
 use quick_xml::events::Event;
@@ -118,12 +120,20 @@ fn signed(identity: &Identity, path: &str, query: &[(&str, &str)]) -> Request {
         None => url.path().to_string(),
     };
 
+    // Умолчания SigningSettings — не для S3: он канонизирует путь с одинарным
+    // процентным кодированием и без нормализации сегментов, а умолчания дают
+    // двойное и с нормализацией. На безопасном алфавите ключей Sentinel
+    // канонизации совпадают, но ключ с пробелом, «+» или `..` дал бы 403.
+    let mut settings = SigningSettings::default();
+    settings.percent_encoding_mode = PercentEncodingMode::Single;
+    settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+
     let params = v4::SigningParams::builder()
         .identity(identity)
         .region(REGION)
         .name("s3")
         .time(SystemTime::now())
-        .settings(SigningSettings::default())
+        .settings(settings)
         .build()
         .expect("параметры подписи заполнены целиком");
 

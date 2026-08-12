@@ -228,7 +228,11 @@ impl Running {
         publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Frame(app::FrameEvent {
             dt,
             actual_fps: if dt > 0.0 { 1.0 / dt } else { 0.0 },
-            monitor_fps: 60,
+            // По запросу у окна, а не константой: окно могли перенести на
+            // другой экран, а поле контракта не должно врать на 144 Гц.
+            monitor_fps: self.window.current_monitor()
+                .and_then(|monitor| monitor.refresh_rate_millihertz())
+                .map_or(60, |mhz| (mhz + 500) / 1000),
         }));
 
         // Атомарный свап поверхности, если владелец приаттачил новую.
@@ -298,9 +302,11 @@ impl Running {
                 }),
                 ..Default::default()
             });
-            let _ = veldmap_host_core::graphics::execute_render_commands(
+            if let Err(e) = veldmap_host_core::graphics::execute_render_commands(
                 &mut rp, &op.command_buffer, &graphics, at.width, at.height, op.instance_id,
-            );
+            ) {
+                log::warn!(target: "render", "Render op interrupted: {:#}", e);
+            }
         }
 
         // 2) Блит приаттаченной поверхности в свопчейн.

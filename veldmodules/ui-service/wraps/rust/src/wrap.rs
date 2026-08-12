@@ -18,9 +18,9 @@ pub use style::{
 };
 pub use widgets::{
     Column, Container, Element, Image, Keyed, Payload, Popover, ProgressBar, Row,
-    Scrollable, Space, Stack, Text, TextInput, Tooltip, UiMessage, Viewport,
+    Scrollable, Space, Text, TextInput, Tooltip, UiMessage, Viewport,
     column, container, icon, image, mono, popover, progress_bar, row, scrollable,
-    space, stack, text, text_input, tooltip, viewport,
+    space, text, text_input, tooltip, viewport,
 };
 
 #[macro_export]
@@ -37,9 +37,3 @@ macro_rules! row {
     };
 }
 
-#[macro_export]
-macro_rules! stack {
-    ($($x:expr),* $(,)?) => {
-        $crate::Stack::new()$(.push($x))*
-    };
-}

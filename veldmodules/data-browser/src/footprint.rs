@@ -104,3 +104,52 @@ fn arc(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> f64 {
 fn wrap(degrees: f64) -> f64 {
     degrees - 360.0 * ((degrees + 180.0) / 360.0).floor()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::data_provider::GeoPoint;
+
+    fn ring(points: &[(f64, f64)]) -> Ring {
+        Ring {
+            points: points.iter().map(|&(lat, lon)| GeoPoint { lat, lon }).collect(),
+        }
+    }
+
+    #[test]
+    fn covers_a_plain_square() {
+        let rings = [ring(&[(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)])];
+        assert!(covers(&rings, 15.0, 15.0));
+        assert!(!covers(&rings, 25.0, 15.0));
+        assert!(!covers(&rings, 15.0, 25.0));
+    }
+
+    /// Контур через 180-й меридиан: точка на самом шве — внутри, точки по ту
+    /// сторону его краёв — снаружи. Ровно тот случай, ради которого разница
+    /// долгот всюду считается через `wrap`.
+    #[test]
+    fn covers_across_the_seam() {
+        let rings = [ring(&[(10.0, 175.0), (10.0, -175.0), (20.0, -175.0), (20.0, 175.0)])];
+        assert!(covers(&rings, 15.0, 180.0));
+        assert!(covers(&rings, 15.0, -178.0));
+        assert!(!covers(&rings, 15.0, 170.0));
+        assert!(!covers(&rings, 15.0, -170.0));
+    }
+
+    /// Рамка разрезанного швом контура — на шве, а не на противоположной
+    /// стороне Земли, куда усреднились бы сырые долготы.
+    #[test]
+    fn frame_stays_on_the_seam() {
+        let rings = [ring(&[(10.0, 175.0), (10.0, -175.0), (20.0, -175.0), (20.0, 175.0)])];
+        let frame = frame(&rings).expect("у контура есть геометрия");
+        assert!((frame.lat - 15.0).abs() < 1e-9);
+        assert!(frame.lon.abs() > 179.0, "центр на шве, а не на нулевом меридиане: {}", frame.lon);
+        assert!(frame.radius_deg > 5.0 && frame.radius_deg < 12.0, "{}", frame.radius_deg);
+    }
+
+    #[test]
+    fn frame_of_nothing_is_none() {
+        assert!(frame(&[]).is_none());
+        assert!(frame(&[ring(&[])]).is_none());
+    }
+}

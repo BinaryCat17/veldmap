@@ -26,8 +26,9 @@ pub struct Preview {
     pub rgba: Vec<u8>,
 }
 
-/// Проверка «работу пора прекращать», опрашиваемая между порциями. Декодер
-/// не знает, откуда берётся отмена (см. module.rs), — ему нужен только ответ.
+/// Превью из ресурса: формат определяется по содержимому, дальше — свой
+/// декодер на формат. Об отмене здесь ничего нет намеренно: убитый декод
+/// снимают трапом посреди любой строки (см. module.rs).
 pub fn preview(resource_id: u64, len: u64, max_w: u32, max_h: u32) -> Result<Preview, String> {
     let mut reader = ResourceReader::new(resource_id, len);
     let mut head = [0u8; 32];
@@ -40,6 +41,8 @@ pub fn preview(resource_id: u64, len: u64, max_w: u32, max_h: u32) -> Result<Pre
         ImageFormat::Png => png(reader, max_w, max_h),
         ImageFormat::Jpeg => jpeg(reader, max_w, max_h),
         ImageFormat::Tiff => tiff(reader, max_w, max_h),
+        // Полнокадровые форматы: набор обязан совпадать с features крейта
+        // `image` в config.yaml — фича без рукава молча даст «не поддерживается».
         ImageFormat::Gif | ImageFormat::Bmp | ImageFormat::WebP => full(reader, format, max_w, max_h),
         other => Err(format!("формат {:?} не поддерживается", other)),
     }
@@ -214,7 +217,9 @@ fn tiff_samples(data: tiff::decoder::DecodingResult) -> Result<Vec<u8>, String> 
 // ── Форматы без потокового пути ────────────────────────────────
 
 fn full(reader: ResourceReader, format: ImageFormat, max_w: u32, max_h: u32) -> Result<Preview, String> {
-    let decoder = image::ImageReader::with_format(std::io::BufReader::new(reader), format)
+    // Без BufReader: читатель уже буферизован своим окном и сам реализует
+    // BufRead — обёртка завела бы второй буфер и копировала окно в него целиком.
+    let decoder = image::ImageReader::with_format(reader, format)
         .into_decoder()
         .map_err(|e| format!("{:?}: {}", format, e))?;
     let (w, h) = image::ImageDecoder::dimensions(&decoder);

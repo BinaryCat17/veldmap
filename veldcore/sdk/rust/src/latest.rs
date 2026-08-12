@@ -97,3 +97,36 @@ impl Latest {
         Some(id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_one_wins() {
+        let mut latest = Latest::new();
+        let first = latest.begin();
+        let second = latest.begin();
+
+        // Вытесненный — свой, но устаревший; чужого не бывает своим.
+        assert_eq!(latest.status(&first), Reply::Stale);
+        assert_eq!(latest.status(&second), Reply::Current);
+        assert_eq!(latest.status("нечто чужое"), Reply::Foreign);
+
+        // Терминальный ответ снимает с учёта: повтор уже не опознаётся.
+        assert_eq!(latest.settle(&second), Reply::Current);
+        assert_eq!(latest.settle(&second), Reply::Foreign);
+        assert_eq!(latest.settle(&first), Reply::Stale);
+        assert!(!latest.is_pending());
+    }
+
+    #[test]
+    fn abandoned_is_still_recognized() {
+        let mut latest = Latest::new();
+        let id = latest.begin();
+        assert_eq!(latest.abandon(), Some(id.clone()));
+        assert!(!latest.is_pending());
+        // Ответ на брошенный обязан опознаться: в нём мог приехать ресурс.
+        assert_eq!(latest.settle(&id), Reply::Stale);
+    }
+}

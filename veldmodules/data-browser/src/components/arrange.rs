@@ -27,6 +27,10 @@ pub struct Arranged<'a> {
     pub pages: usize,
     /// Страница, которая показана: та, что просили, но не дальше последней.
     pub page: usize,
+    /// Сколько записей в каждом состоянии (по `Filter::ALL`) — счётчики меню
+    /// отбора. Считаются до отбора: иначе «Все» показывало бы столько же,
+    /// сколько выбранное.
+    pub counts: Vec<usize>,
 }
 
 impl Arranged<'_> {
@@ -41,21 +45,22 @@ impl Arranged<'_> {
     }
 }
 
-/// Сколько записей в каждом состоянии — счётчики в меню отбора. Считаются до
-/// отбора: иначе «Все» показывало бы столько же, сколько выбранное.
-pub fn counts(rows: &[Row], listing: &ListingState) -> Vec<usize> {
+pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
     use crate::module::state::listing::{Choice, Filter};
-    let matching: Vec<&Row> = rows.iter().filter(|row| matches_query(row, &listing.query)).collect();
-    Filter::ALL
+
+    // Отбор по имени — один проход на всё: им пользуются и счётчики меню, и
+    // сам список, а зовётся это на каждую пересборку view.
+    let query = listing.query.to_lowercase();
+    let matching: Vec<&Row> = rows.iter().filter(|row| matches_query(row, &query)).collect();
+
+    let counts = Filter::ALL
         .iter()
         .map(|filter| matching.iter().filter(|row| filter.matches(&row.status)).count())
-        .collect()
-}
+        .collect();
 
-pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
-    let mut selected: Vec<&Row> = rows
-        .iter()
-        .filter(|row| listing.filter.matches(&row.status) && matches_query(row, &listing.query))
+    let mut selected: Vec<&Row> = matching
+        .into_iter()
+        .filter(|row| listing.filter.matches(&row.status))
         .collect();
 
     sort(&mut selected, listing);
@@ -69,13 +74,13 @@ pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
         .take(PAGE_SIZE)
         .collect();
 
-    Arranged { lines: group(shown, listing.grouping), total, pages, page }
+    Arranged { lines: group(shown, listing.grouping), total, pages, page, counts }
 }
 
 /// Отбор по имени — по вхождению, без учёта регистра: пользователь помнит
-/// кусок имени, а не его начало.
+/// кусок имени, а не его начало. `query` уже в нижнем регистре.
 fn matches_query(row: &Row, query: &str) -> bool {
-    query.is_empty() || row.title.to_lowercase().contains(&query.to_lowercase())
+    query.is_empty() || row.title.to_lowercase().contains(query)
 }
 
 fn sort(rows: &mut [&Row], listing: &ListingState) {

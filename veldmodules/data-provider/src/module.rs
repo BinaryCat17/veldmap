@@ -11,7 +11,6 @@ pub struct Config {
     pub secret_key: String,
 }
 
-#[derive(Clone)]
 pub struct State {
     pub identity: Identity,
     /// Запросы, ожидающие HTTP-ответа: id генерируется, когда мы зовём network,
@@ -27,14 +26,12 @@ pub struct State {
 /// Хранилище и каталог отвечают в один и тот же топик, поэтому вид запроса
 /// записан здесь, а не выводится из ответа: догадываться по содержимому значит
 /// однажды разобрать листинг как поиск.
-#[derive(Clone)]
 pub struct Pending {
     /// Внешний id заказчика (data-browser); эхом возвращается в его ответ.
     pub correlation_id: String,
     pub what: Asked,
 }
 
-#[derive(Clone)]
 pub enum Asked {
     /// Листинг пути. Сам путь нужен, чтобы отсеять из ответа S3 запрошенный
     /// префикс — в списке содержимого папке незачем быть собой.
@@ -42,7 +39,8 @@ pub enum Asked {
     Search,
 }
 
-// Re-export handlers to match the expected names in generated code
+// Реэкспорт обработчиков: имена совпадают с ключами топиков в schema.yaml,
+// по ним их зовёт сгенерированный клей.
 pub use cdse::{
     module_init as hook_init,
 

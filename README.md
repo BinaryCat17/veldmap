@@ -43,9 +43,10 @@ python3 buildgen/build.py          # релизная сборка: кодоге
 python3 buildgen/run-native.py     # запуск
 ```
 
-Сборка проходит четыре этапа: тесты кодогенератора, генерация
+Сборка проходит пять этапов: тесты кодогенератора, генерация
 `generated/`-крейтов из схем, компиляция wasm-модулей в `build/plugins/`,
-компиляция нативного хоста.
+компиляция нативного хоста и юнит-тесты Rust (нативные, для чистой логики —
+подробнее в [CLAUDE.md](CLAUDE.md#сборка-и-проверка)).
 
 Кодогенерация переписывает файл, только если его содержимое изменилось: cargo
 сверяет исходники по mtime, и перезапись тем же текстом заставляла бы
@@ -60,7 +61,6 @@ python3 buildgen/build.py clean                         # удалить все 
 buildgen/.venv/bin/python -m pytest buildgen/tests      # только тесты кодогенератора
 python3 buildgen/build.py --windows --dist-dir <путь>   # кросс-сборка + деплой
 python3 buildgen/run-native.py --debug                  # запуск отладочной сборки
-python3 buildgen/run-native.py --backend gl             # другой бэкенд wgpu
 python3 buildgen/run-native.py --config <каталог>       # другой каталог конфигов
 ```
 

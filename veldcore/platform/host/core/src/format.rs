@@ -11,13 +11,22 @@ use veldmap_host_bindings::proto::graphics::TextureFormat;
 ///
 /// У буфера глубины её нет: залить в него нечего (см. [`is_depth`]), и вызвать
 /// это на нём означало бы, что заливка дошла туда, куда не должна была.
+///
+/// Match без запасного рукава — здесь и ниже: формат, добавленный в протокол,
+/// обязан получить свою строку в этих таблицах, иначе он молча считался бы
+/// четырёхбайтным RGBA. С полным перечислением забытый вариант — ошибка
+/// компиляции хоста, а не тихая деградация.
 pub fn bytes_per_pixel(format_proto: i32) -> u32 {
     match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
         TextureFormat::TexR8Unorm => 1,
         TextureFormat::TexR32Float => 4,
         TextureFormat::TexRgba16Float => 8,
         TextureFormat::TexRgba32Float => 16,
-        _ => 4,
+        TextureFormat::TexRgba8Unorm
+        | TextureFormat::TexRgba8UnormSrgb
+        | TextureFormat::TexBgra8UnormSrgb => 4,
+        // Недостижимо: заливку в глубину отсекает upload_image (см. is_depth).
+        TextureFormat::TexDepth32Float => 4,
     }
 }
 
@@ -33,6 +42,7 @@ pub fn is_depth(format_proto: i32) -> bool {
 
 pub fn proto_to_wgpu(format_proto: i32) -> wgpu::TextureFormat {
     match TextureFormat::try_from(format_proto).unwrap_or(TextureFormat::TexRgba8Unorm) {
+        TextureFormat::TexRgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
         TextureFormat::TexR32Float => wgpu::TextureFormat::R32Float,
         TextureFormat::TexRgba16Float => wgpu::TextureFormat::Rgba16Float,
         TextureFormat::TexRgba32Float => wgpu::TextureFormat::Rgba32Float,
@@ -40,10 +50,12 @@ pub fn proto_to_wgpu(format_proto: i32) -> wgpu::TextureFormat {
         TextureFormat::TexBgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
         TextureFormat::TexRgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
         TextureFormat::TexDepth32Float => wgpu::TextureFormat::Depth32Float,
-        _ => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
 
+/// Обратный ход. Запасной рукав здесь неустраним: слева весь wgpu-энум, а не
+/// наш протокол, — но каждый формат, названный в proto_to_wgpu, обязан иметь
+/// здесь свою строку.
 pub fn wgpu_to_proto(fmt: wgpu::TextureFormat) -> i32 {
     match fmt {
         wgpu::TextureFormat::R32Float => TextureFormat::TexR32Float as i32,
@@ -54,6 +66,55 @@ pub fn wgpu_to_proto(fmt: wgpu::TextureFormat) -> i32 {
         wgpu::TextureFormat::Rgba8UnormSrgb => TextureFormat::TexRgba8UnormSrgb as i32,
         wgpu::TextureFormat::Depth32Float => TextureFormat::TexDepth32Float as i32,
         _ => TextureFormat::TexRgba8Unorm as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Все форматы протокола: перечислением, чтобы новый вариант, добавленный
+    /// в enum, не остался за бортом теста.
+    const ALL: [TextureFormat; 8] = [
+        TextureFormat::TexRgba8Unorm,
+        TextureFormat::TexRgba8UnormSrgb,
+        TextureFormat::TexBgra8UnormSrgb,
+        TextureFormat::TexR8Unorm,
+        TextureFormat::TexR32Float,
+        TextureFormat::TexRgba16Float,
+        TextureFormat::TexRgba32Float,
+        TextureFormat::TexDepth32Float,
+    ];
+
+    #[test]
+    fn proto_wgpu_roundtrip() {
+        for format in ALL {
+            assert_eq!(
+                wgpu_to_proto(proto_to_wgpu(format as i32)),
+                format as i32,
+                "{:?} должен пережить перевод туда и обратно",
+                format
+            );
+        }
+    }
+
+    #[test]
+    fn depth_is_exactly_one_format() {
+        for format in ALL {
+            assert_eq!(
+                is_depth(format as i32),
+                format == TextureFormat::TexDepth32Float,
+                "{:?}", format
+            );
+        }
+    }
+
+    #[test]
+    fn pixel_lengths() {
+        assert_eq!(bytes_per_pixel(TextureFormat::TexR8Unorm as i32), 1);
+        assert_eq!(bytes_per_pixel(TextureFormat::TexRgba8Unorm as i32), 4);
+        assert_eq!(bytes_per_pixel(TextureFormat::TexRgba16Float as i32), 8);
+        assert_eq!(bytes_per_pixel(TextureFormat::TexRgba32Float as i32), 16);
     }
 }
 

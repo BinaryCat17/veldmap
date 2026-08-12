@@ -2,12 +2,43 @@
 //!
 //! Роль, а не оформление: разметка просит «вкладку», «чип», «строку списка»
 //! или «панель меню», а как они выглядят, знает только этот файл. Цвет,
-//! написанный где-то ещё, — ошибка: набор их конечен и живёт здесь.
+//! написанный где-то ещё в разметке, — ошибка: набор их конечен и живёт здесь.
+//!
+//! Рендереры чужих областей (globe.wgsl) — не разметка: как выглядит их
+//! содержимое, решает рисующий, и цвета в контракте нет намеренно. Свои
+//! константы они держат согласованными с этой палитрой — сменив её, загляните
+//! и туда.
 
 use crate::proto::ui_service::{
     Border, Background, Color, Padding, ProgressBarStyle, Scrollbar, Shadow,
     TextInputStyle, WidgetStyle, Container, Element, Length, container, space,
 };
+
+// --- Глифы ---
+//
+// Словарь иконок (шрифт Icons) — один на приложение: вкладка, меню и таблица
+// подписывают одну сущность одним знаком, и сменившийся глиф не должен
+// разводить их между собой.
+pub mod glyph {
+    pub const PLUS: &str = "\u{f067}";
+    pub const CLOSE: &str = "\u{f00d}";
+    pub const FOLDER: &str = "\u{f07b}";
+    pub const SEARCH: &str = "\u{f002}";
+    pub const DOWNLOAD: &str = "\u{f019}";
+    pub const IMAGE: &str = "\u{f1c5}";
+    pub const GLOBE: &str = "\u{f0ac}";
+    pub const FILE: &str = "\u{f016}";
+    pub const ENTER: &str = "\u{f061}";
+    pub const PAUSE: &str = "\u{f04c}";
+    pub const PLAY: &str = "\u{f04b}";
+    pub const EYE: &str = "\u{f06e}";
+    pub const MORE: &str = "\u{f141}";
+    pub const CARET: &str = "\u{f0d7}";
+    pub const UP: &str = "\u{f062}";
+    pub const LEFT: &str = "\u{f053}";
+    pub const RIGHT: &str = "\u{f054}";
+    pub const TICK: &str = "\u{f00c}";
+}
 
 // --- Палитра ---
 //
@@ -71,6 +102,9 @@ pub const CONTROL_HEIGHT: f32 = 31.0;
 pub const ROW_BUTTON: f32 = 23.0;
 /// Отступ содержимого от краёв экрана.
 pub const GUTTER: f32 = 16.0;
+/// Высота однострочной полосы хрома: строка состояния, подпись под областью.
+/// Одна на всех — полосы одного роста читаются как один язык.
+pub const BAR_HEIGHT: f32 = 30.0;
 
 // --- Размеры текста ---
 

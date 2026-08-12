@@ -1,20 +1,21 @@
 use crate::proto::ui_service as proto;
 use crate::module::renderer::GpuRenderer;
-use iced_widget::{column, row, text, button, container, scrollable, progress_bar, stack, tooltip, Space};
+use iced_widget::{column, row, text, button, container, scrollable, progress_bar, tooltip, Space};
 use iced_core::{Element, Theme, Length, Color, alignment, Size, Font, font::Family};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// Сработавший виджет по дороге к владельцу разметки. Ровно то же, что уедет
-/// по шине (`UiEventResponse`), поэтому и нагрузка та же: набор её видов
-/// объявлен один раз — в протоколе.
-#[derive(Clone, Debug)]
-pub struct UiMessage {
-    pub method: String,
-    pub payload: proto::ui_event_response::Payload,
-}
+/// Размер текста, когда разметка его не назвала (или назвала негодным).
+/// Число протокола, а не файла: билдер wrap-крейта пишет его же по умолчанию
+/// (widgets.rs), и всё, что рендерит текст, берёт умолчание отсюда.
+pub const DEFAULT_TEXT_SIZE: f32 = 16.0;
 
-impl UiMessage {
+/// Сработавший виджет по дороге к владельцу разметки — само сообщение шины:
+/// типа-двойника с теми же полями у него нет, набор видов нагрузки объявлен
+/// ровно один раз, в протоколе.
+pub type UiMessage = proto::UiEventResponse;
+
+impl proto::UiEventResponse {
     /// Сообщение, чью нагрузку назвала сама разметка.
     ///
     /// Пустое имя метода означает «обработчика нет»: такие сюда доходят
@@ -26,15 +27,15 @@ impl UiMessage {
     /// Строковая нагрузка: названная разметкой либо подставленная рендерером
     /// (набранный текст).
     pub fn text(method: String, value: String) -> Self {
-        Self { method, payload: proto::ui_event_response::Payload::Value(value) }
+        Self { method, payload: Some(proto::ui_event_response::Payload::Value(value)) }
     }
 
     pub fn pointer(method: String, pointer: proto::PointerEvent) -> Self {
-        Self { method, payload: proto::ui_event_response::Payload::Pointer(pointer) }
+        Self { method, payload: Some(proto::ui_event_response::Payload::Pointer(pointer)) }
     }
 
     pub fn sized(method: String, size: proto::ViewportSize) -> Self {
-        Self { method, payload: proto::ui_event_response::Payload::Size(size) }
+        Self { method, payload: Some(proto::ui_event_response::Payload::Size(size)) }
     }
 }
 
@@ -144,8 +145,8 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         Some(proto::widget::Type::Text(t)) => {
             let mut size = t.size;
             if size <= 0.0 {
-                veldsdk::log::error!(target: "handlers", "Text widget has invalid size: {}. Resetting to 16.0", size);
-                size = 16.0;
+                veldsdk::log::error!(target: "handlers", "Text widget has invalid size: {}. Resetting to {}", size, DEFAULT_TEXT_SIZE);
+                size = DEFAULT_TEXT_SIZE;
             }
             let mut txt = text(t.content.clone())
                 .size(size)
@@ -173,8 +174,8 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         Some(proto::widget::Type::TextInput(t)) => {
             let mut size = t.size;
             if size <= 0.0 {
-                veldsdk::log::error!(target: "handlers", "TextInput widget has invalid size: {}. Resetting to 16.0", size);
-                size = 16.0;
+                veldsdk::log::error!(target: "handlers", "TextInput widget has invalid size: {}. Resetting to {}", size, DEFAULT_TEXT_SIZE);
+                size = DEFAULT_TEXT_SIZE;
             }
             let mut input = iced_widget::text_input(&t.placeholder, &t.value)
                 .width(convert_length(&t.width))
@@ -350,12 +351,6 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             }
 
             bar.into()
-        }
-        Some(proto::widget::Type::Stack(s)) => {
-            stack(s.children.iter().map(convert_widget))
-                .width(convert_length(&s.width))
-                .height(convert_length(&s.height))
-                .into()
         }
         Some(proto::widget::Type::Tooltip(t)) => {
             let content = if let Some(c) = &t.content {

@@ -101,6 +101,30 @@ pub mod texture_usage {
     pub const RENDER_ATTACHMENT: u32 = 1 << 4;
 }
 
+// ── Байты для GPU ──────────────────────────────────────────────
+
+/// Срез `Copy`-значений байтами. Раскладку задаёт `#[repr(C)]` у типов,
+/// уезжающих на GPU. Единственное место этого unsafe: переписанный на
+/// call-сайте, он множится вместе с местами записи.
+pub fn bytes_of<T: Copy>(data: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+    }
+}
+
+/// Буфер, залитый срезом целиком: выделение, запись и владелец одной
+/// операцией. Для геометрии, собираемой один раз; растущей каждый кадр —
+/// [`GrowingBuffer`].
+pub fn upload<T: Copy>(what: &str, data: &[T], usage: u32) -> anyhow::Result<crate::OwnedResource> {
+    let bytes = bytes_of(data);
+    let size = bytes.len() as u64;
+    let id = crate::abi::resource_alloc_buffer(size, usage, false)
+        .ok_or_else(|| anyhow::anyhow!("не выделился буфер: {} ({} байт)", what, size))?;
+    let region = crate::OwnedResource::new(crate::ResourceHandle { id, size });
+    crate::abi::resource_write(region.id(), 0, bytes)?;
+    Ok(region)
+}
+
 // ── Создание ресурсов ──────────────────────────────────────────
 
 fn create(command: resource_request::Command) -> anyhow::Result<u64> {
@@ -160,6 +184,59 @@ pub fn texture_entry(binding: u32, view: &TextureViewId) -> BindGroupEntry {
 
 pub fn sampler_entry(binding: u32, sampler: &SamplerId) -> BindGroupEntry {
     BindGroupEntry { binding, resource: Some(proto::bind_group_entry::Resource::SamplerId(sampler.id())) }
+}
+
+/// Uniform-буфер вместе со своим layout'ом и bind group'ой — обряд один у
+/// всех, кто отдаёт шейдеру блок констант. Буфер уходит во владельца до
+/// создания bind group (сорвись она — буфер освободит Drop, а голый id повис
+/// бы на хосте); layout возвращается вызывающему, потому что переживает bind
+/// group — на него ссылаются пайплайны.
+pub fn uniform_binding(
+    label: &str,
+    size: u64,
+    visibility: u32,
+) -> anyhow::Result<(crate::OwnedResource, BindGroupLayoutId, BindGroupId)> {
+    let id = crate::abi::resource_alloc_buffer(size, buffer_usage::UNIFORM, false)
+        .ok_or_else(|| anyhow::anyhow!("не выделился uniform-буфер ({}, {} байт)", label, size))?;
+    let region = crate::OwnedResource::new(crate::ResourceHandle { id, size });
+    let layout = create_bind_group_layout(
+        &format!("{} BGL", label),
+        vec![uniform_buffer_layout_entry(0, visibility)],
+    )?;
+    let group = create_bind_group(
+        &format!("{} BG", label),
+        &layout,
+        vec![buffer_entry(0, region.id())],
+    )?;
+    Ok((region, layout, group))
+}
+
+/// Атрибуты, лежащие в вершине подряд, без зазоров: смещения выводятся из
+/// форматов, локации — из порядка. Ровно так `#[repr(C)]` раскладывает
+/// структуру из f32-полей, поэтому второй записи раскладки — таблицы ручных
+/// смещений — не существует. `array_stride` вызывающий берёт из
+/// `size_of::<Vertex>()`: несовпадение суммы с ним значит, что структура
+/// разошлась со списком форматов.
+pub fn packed_attributes(formats: &[VertexFormat]) -> Vec<VertexAttribute> {
+    let mut offset = 0;
+    formats
+        .iter()
+        .enumerate()
+        .map(|(location, format)| {
+            let attribute = VertexAttribute {
+                format: *format as i32,
+                offset,
+                shader_location: location as u32,
+            };
+            offset += match format {
+                VertexFormat::VtxFloat32 | VertexFormat::VtxUint32 => 4,
+                VertexFormat::VtxFloat32x2 => 8,
+                VertexFormat::VtxFloat32x3 => 12,
+                VertexFormat::VtxFloat32x4 => 16,
+            };
+            attribute
+        })
+        .collect()
 }
 
 // ── Конструкторы записей layout ────────────────────────────────

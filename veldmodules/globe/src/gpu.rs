@@ -5,11 +5,11 @@
 //! текстуры и буфер глубины под неё, которые размером и определяются. Владелец
 //! перевыделяет место — пересобирается только второе.
 
-use veldsdk::abi::{resource_alloc_buffer, resource_alloc_texture, resource_write};
+use veldsdk::abi::{resource_alloc_texture, resource_write};
 use veldsdk::graphics::{
     self as gfx, buffer_usage, texture_usage, BindGroupId, BindGroupLayoutId, CompareFunction,
     CreateRenderPipeline, CullMode, DepthStencilState, GrowingBuffer, IndexFormat, PipelineId,
-    PrimitiveTopology, RenderRecorder, StepMode, TextureFormat, TextureViewId, VertexAttribute,
+    PrimitiveTopology, RenderRecorder, StepMode, TextureFormat, TextureViewId,
     VertexBufferLayout, VertexFormat, VISIBILITY_FRAGMENT, VISIBILITY_VERTEX,
 };
 use veldsdk::proto::core::ResourceHandle;
@@ -72,19 +72,13 @@ impl Device {
     pub fn create(format: i32) -> anyhow::Result<Self> {
         let mesh = Mesh::build();
 
-        let vertices = upload("вершины", &mesh.vertices, buffer_usage::VERTEX)?;
-        let indices = upload("индексы", &mesh.indices, buffer_usage::INDEX)?;
+        let vertices = gfx::upload("вершины", &mesh.vertices, buffer_usage::VERTEX)?;
+        let indices = gfx::upload("индексы", &mesh.indices, buffer_usage::INDEX)?;
 
-        let size = std::mem::size_of::<CameraUniform>() as u64;
-        let camera_id = resource_alloc_buffer(size, buffer_usage::UNIFORM, false)
-            .ok_or_else(|| anyhow!("не выделился буфер камеры"))?;
-        let camera = OwnedResource::new(ResourceHandle { id: camera_id, size });
-
-        let camera_layout = gfx::create_bind_group_layout("Globe Camera BGL", vec![
-            gfx::uniform_buffer_layout_entry(0, VISIBILITY_VERTEX | VISIBILITY_FRAGMENT),
-        ])?;
-        let camera_bind_group = gfx::create_bind_group(
-            "Globe Camera BG", &camera_layout, vec![gfx::buffer_entry(0, camera.id())],
+        let (camera, camera_layout, camera_bind_group) = gfx::uniform_binding(
+            "Globe Camera",
+            std::mem::size_of::<CameraUniform>() as u64,
+            VISIBILITY_VERTEX | VISIBILITY_FRAGMENT,
         )?;
 
         let shader = gfx::create_shader(include_str!("globe.wgsl"), "Globe Shader")?;
@@ -161,6 +155,13 @@ pub struct Target {
 }
 
 impl Target {
+    /// Соотношение сторон места. Одна формула на проекцию и обратный луч
+    /// (`Camera::ray`): посчитанные порознь, они сходились бы, только пока
+    /// кто-то держит две копии одинаковыми.
+    pub fn aspect(&self) -> f32 {
+        self.width as f32 / self.height.max(1) as f32
+    }
+
     pub fn create(texture_id: u64, width: u32, height: u32) -> anyhow::Result<Self> {
         let view = gfx::create_texture_view(texture_id)?;
 
@@ -179,13 +180,12 @@ impl Target {
 /// Исполнит записанное кадровый цикл хоста — здесь работа только ставится в
 /// очередь на этот таргет.
 pub fn render(device: &Device, target: &Target, camera: &Camera) -> anyhow::Result<()> {
-    let aspect = target.width as f32 / target.height.max(1) as f32;
     let uniform = CameraUniform {
-        view_proj: camera.view_projection(aspect),
+        view_proj: camera.view_projection(target.aspect()),
         eye: camera.eye(),
         _pad: 0.0,
     };
-    resource_write(device.camera.id(), 0, as_bytes(std::slice::from_ref(&uniform)))?;
+    resource_write(device.camera.id(), 0, gfx::bytes_of(std::slice::from_ref(&uniform)))?;
 
     let mut recorder = RenderRecorder::new();
     recorder.set_viewport(0.0, 0.0, target.width as f32, target.height as f32, 0.0, 1.0);
@@ -250,18 +250,11 @@ fn pipeline(
         vertex_layouts: vec![VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as u64,
             step_mode: StepMode::StepVertex as i32,
-            attributes: vec![
-                VertexAttribute {
-                    format: VertexFormat::VtxFloat32x3 as i32,
-                    offset: 0,
-                    shader_location: 0,
-                },
-                VertexAttribute {
-                    format: VertexFormat::VtxFloat32x3 as i32,
-                    offset: std::mem::size_of::<[f32; 3]>() as u64,
-                    shader_location: 1,
-                },
-            ],
+            // Позиция и нормаль — как поля Vertex, смещения выводятся.
+            attributes: gfx::packed_attributes(&[
+                VertexFormat::VtxFloat32x3,
+                VertexFormat::VtxFloat32x3,
+            ]),
         }],
         bind_group_layout_ids: vec![camera_layout.id()],
         primitive_topology: topology as i32,
@@ -278,21 +271,3 @@ fn pipeline(
     })
 }
 
-/// Выделяет буфер и заливает в него срез целиком.
-fn upload<T: Copy>(what: &str, data: &[T], usage: u32) -> anyhow::Result<OwnedResource> {
-    let bytes = as_bytes(data);
-    let size = bytes.len() as u64;
-    let id = resource_alloc_buffer(size, usage, false)
-        .ok_or_else(|| anyhow!("не выделился буфер: {} ({} байт)", what, size))?;
-    let region = OwnedResource::new(ResourceHandle { id, size });
-    resource_write(region.id(), 0, bytes)?;
-    Ok(region)
-}
-
-/// Срез `Copy`-значений байтами. Раскладку задаёт `#[repr(C)]` у тех типов,
-/// которые уезжают в шейдер, — остальные здесь простые массивы.
-fn as_bytes<T: Copy>(data: &[T]) -> &[u8] {
-    unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-    }
-}

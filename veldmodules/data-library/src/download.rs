@@ -101,7 +101,13 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
 /// два, а не один с двумя смыслами.
 pub fn on_pause(state: &mut State, req: ItemRequest) {
     let Some((task_id, _)) = state.active_download(&req.name) else { return };
-    crate::cancel::network::on_fs_download(&task_id.to_string());
+    let task_id = task_id.to_string();
+    // Убивать бывает нечего: закачка ещё ждёт подписи, и задачи у платформы
+    // нет. Терминального события тогда не будет, снимаем запись сами — иначе
+    // пришедшая подпись запустила бы «поставленную на паузу» закачку.
+    if !crate::cancel::network::on_fs_download(&task_id) {
+        finish(state, &task_id);
+    }
 }
 
 /// Удалить запись — полную, недокачанную или заявленную одним лишь сидкаром.
@@ -118,7 +124,11 @@ pub fn on_delete(state: &mut State, req: ItemRequest) {
         if let Some(dl) = state.downloads.get_mut(&task_id) {
             dl.delete_when_done = true;
         }
-        crate::cancel::network::on_fs_download(&task_id);
+        // Убивать было нечего — закачка ещё ждёт подписи (см. on_pause).
+        // Отложенное удаление срабатывает здесь же: finish читает флаг.
+        if !crate::cancel::network::on_fs_download(&task_id) {
+            finish(state, &task_id);
+        }
         return;
     }
     delete_entry(state, &req.name);
@@ -136,7 +146,6 @@ pub fn on_delete_result(state: &mut State, response: veldsdk::proto::fs::FsDelet
 }
 
 pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
-    // event.progress игнорируем — доля выводится из байт у того, кто рисует.
     let Some(dl) = state.downloads.get_mut(&veldsdk::correlation()) else { return };
     dl.done = event.downloaded_bytes;
     dl.total = event.total_bytes;

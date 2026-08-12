@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use crate::module::state::PluginUiState;
 use crate::module::renderer::{GpuRenderer, DrawCmd};
 use veldsdk::graphics::{
-    self as gfx, buffer_usage, texture_usage, BindGroupId, CreateRenderPipeline, CullMode,
+    self as gfx, texture_usage, BindGroupId, CreateRenderPipeline, CullMode,
     FilterMode, FrontFace, IndexFormat, PrimitiveTopology, RenderRecorder, StepMode,
-    TextureFormat, VertexAttribute, VertexBufferLayout, VertexFormat,
+    TextureFormat, VertexBufferLayout, VertexFormat,
     VISIBILITY_FRAGMENT, VISIBILITY_VERTEX,
 };
-use veldsdk::abi::{resource_write, resource_upload_image, resource_alloc_buffer, resource_alloc_texture};
+use veldsdk::abi::{resource_write, resource_upload_image, resource_alloc_texture};
 use veldsdk::proto::core::ResourceHandle;
 use veldsdk::OwnedResource;
 
@@ -49,8 +49,7 @@ pub fn render_ui(
     // раскладки в clip space.
     if let Some(u) = plugin.uniform_buffer_region.as_ref() {
         let res_data: [f32; 2] = [logical_w, logical_h];
-        let data = unsafe { std::slice::from_raw_parts(res_data.as_ptr() as *const u8, 8) };
-        resource_write(u.id(), 0, data)?;
+        resource_write(u.id(), 0, gfx::bytes_of(&res_data))?;
     }
 
     // Новые глифы с прошлого кадра.
@@ -182,9 +181,9 @@ fn get_external_bind_group(cache: &mut HashMap<u64, BindGroupId>, renderer: &Gpu
 /// атлас. Каждый шаг проверяет своё и ничего не пересоздаёт.
 pub fn ensure_resources(plugin: &mut PluginUiState, renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     ensure_atlas_layout(renderer)?;
-    ensure_uniform_layout(plugin)?;
+    // До пайплайна: он ссылается на uniform-layout при сборке.
+    ensure_uniform_binding(plugin)?;
     ensure_pipeline(plugin, renderer)?;
-    ensure_uniform_buffer(plugin)?;
     ensure_atlas_texture(renderer)?;
     ensure_atlas_bind_group(renderer)?;
     Ok(())
@@ -200,12 +199,17 @@ fn ensure_atlas_layout(renderer: &mut GpuRenderer) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn ensure_uniform_layout(plugin: &mut PluginUiState) -> anyhow::Result<()> {
-    if plugin.uniform_layout.is_none() {
-        plugin.uniform_layout = Some(gfx::create_bind_group_layout("UI Uniform BGL", vec![
-            gfx::uniform_buffer_layout_entry(0, VISIBILITY_VERTEX | VISIBILITY_FRAGMENT),
-        ])?);
+/// Uniform-буфер (8 байт размера холста, выровненных до 16) вместе с layout
+/// и bind group — обряд SDK, дисциплина владения там же.
+fn ensure_uniform_binding(plugin: &mut PluginUiState) -> anyhow::Result<()> {
+    if plugin.uniform_bind_group.is_some() {
+        return Ok(());
     }
+    let (region, layout, group) =
+        gfx::uniform_binding("UI Uniform", 16, VISIBILITY_VERTEX | VISIBILITY_FRAGMENT)?;
+    plugin.uniform_buffer_region = Some(region);
+    plugin.uniform_layout = Some(layout);
+    plugin.uniform_bind_group = Some(group);
     Ok(())
 }
 
@@ -226,17 +230,19 @@ fn ensure_pipeline(plugin: &mut PluginUiState, renderer: &GpuRenderer) -> anyhow
             vertex_layouts: vec![VertexBufferLayout {
                 array_stride: std::mem::size_of::<crate::module::renderer::Vertex>() as u64,
                 step_mode: StepMode::StepVertex as i32,
-                attributes: vec![
-                    VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 0, shader_location: 0 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32x4 as i32, offset: 8, shader_location: 1 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 24, shader_location: 2 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 32, shader_location: 3 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32x2 as i32, offset: 40, shader_location: 4 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 48, shader_location: 5 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 52, shader_location: 6 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32 as i32, offset: 56, shader_location: 7 },
-                    VertexAttribute { format: VertexFormat::VtxFloat32x4 as i32, offset: 60, shader_location: 8 },
-                ],
+                // Форматы — по полям Vertex (renderer.rs), в их порядке;
+                // смещения выводятся, а не пишутся руками.
+                attributes: gfx::packed_attributes(&[
+                    VertexFormat::VtxFloat32x2, // pos
+                    VertexFormat::VtxFloat32x4, // color
+                    VertexFormat::VtxFloat32x2, // uv
+                    VertexFormat::VtxFloat32x2, // local_pos
+                    VertexFormat::VtxFloat32x2, // rect_size
+                    VertexFormat::VtxFloat32,   // radius
+                    VertexFormat::VtxFloat32,   // mode
+                    VertexFormat::VtxFloat32,   // border_width
+                    VertexFormat::VtxFloat32x4, // border_color
+                ]),
             }],
             bind_group_layout_ids: bgl_ids,
             primitive_topology: PrimitiveTopology::TopologyTriangleList as i32,
@@ -246,27 +252,6 @@ fn ensure_pipeline(plugin: &mut PluginUiState, renderer: &GpuRenderer) -> anyhow
         })?;
         plugin.ui_pipeline = Some(pipeline);
     }
-    Ok(())
-}
-
-/// Uniform-буфер и bind group поверх него. Буфер сразу заворачивается во
-/// владельца: сорвись создание bind group — освободит его Drop, а голый id
-/// остался бы висеть на хосте.
-fn ensure_uniform_buffer(plugin: &mut PluginUiState) -> anyhow::Result<()> {
-    if plugin.uniform_bind_group.is_some() {
-        return Ok(());
-    }
-    let Some(layout) = plugin.uniform_layout.as_ref() else { return Ok(()) };
-
-    let id = resource_alloc_buffer(16, buffer_usage::UNIFORM, false)
-        .ok_or_else(|| anyhow!("Failed to allocate uniform buffer"))?;
-    let region = OwnedResource::new(ResourceHandle { id, size: 16, ..Default::default() });
-    let bind_group = gfx::create_bind_group(
-        "UI Uniform BG", layout, vec![gfx::buffer_entry(0, region.id())],
-    )?;
-
-    plugin.uniform_buffer_region = Some(region);
-    plugin.uniform_bind_group = Some(bind_group);
     Ok(())
 }
 

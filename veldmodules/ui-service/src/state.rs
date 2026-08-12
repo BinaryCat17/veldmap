@@ -129,4 +129,14 @@ impl PluginUiState {
             surface_format: 0,
         }
     }
+
+    /// Разметка сменилась. Оба флага — одним движением: `is_layout_dirty`
+    /// гасится диффом геометрии, `needs_redrawing` — самим рендером, и
+    /// поставленные порознь они однажды рассогласуются (перерисовка обязана
+    /// следовать за сменой разметки всегда).
+    pub fn set_layout(&mut self, layout: proto::Layout) {
+        self.layout = layout;
+        self.is_layout_dirty = true;
+        self.needs_redrawing = true;
+    }
 }

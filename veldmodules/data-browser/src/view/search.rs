@@ -5,15 +5,12 @@
 //! остальные виды показывают то, что у них уже есть, а этот сначала спрашивает.
 
 use veld_ui_service_wrap::row;
-use crate::proto::ui_service::{
-    container, icon, text_input, Alignment, Element, Length, Padding,
-};
+use crate::proto::ui_service::{Alignment, Element, Length, Padding};
 use crate::module::components::{controls, format, list_screen, Row, Screen};
 use crate::module::state::listing::Menu;
 use crate::module::state::{SearchState, State};
 use crate::module::{theme, Msg};
 
-const GLYPH_SEARCH: &str = "\u{f002}";
 
 pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
     let rows: Vec<Row> = search
@@ -77,31 +74,18 @@ fn subtitle(search: &SearchState, found: usize) -> String {
 /// бы пусто (см. [`Mission::clouded`]). Рычаг, который может только обнулить
 /// выдачу, лучше не показывать вовсе.
 fn bar(search: &SearchState) -> Element<Msg> {
-    let field = container(
-        row![
-            icon::<Msg>(GLYPH_SEARCH).size(11.0).color(theme::INK_FAINT),
-            text_input::<Msg>("Часть имени снимка; пусто — самое свежее", &search.query)
-                .style(theme::field())
-                .font_family(veld_ui_service_wrap::style::FONT_UI)
-                .size(theme::TEXT_BODY)
-                .padding(Padding::ZERO)
-                .width(Length::Fill)
-                .on_input(Msg::SearchQuery)
-                .on_submit(Msg::RunSearch),
-        ]
-        .spacing(8.0)
-        .width(Length::Fill)
-        .align_items(Alignment::Center),
-    )
-    .style(theme::control_box())
-    .width(Length::Fill)
-    .height(Length::Fixed(theme::CONTROL_HEIGHT))
-    .align_y(Alignment::Center)
-    .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 });
+    // Ввод сам по себе ничего не запускает: запрос идёт по сети, поле ждёт
+    // Enter (`on_submit`).
+    let field = controls::search_field(
+        "Часть имени снимка; пусто — самое свежее",
+        &search.query,
+        Msg::SearchQuery,
+        Some(Msg::RunSearch),
+    );
 
     let opened = &search.listing.menu;
     let mut controls: Vec<Element<Msg>> = vec![
-        field.into(),
+        field,
         controls::chip("Миссия:", search.mission, Menu::Mission, opened, &[], Msg::SearchMission),
         controls::chip("Съёмка:", search.period, Menu::Period, opened, &[], Msg::SearchPeriod),
     ];

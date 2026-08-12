@@ -8,9 +8,7 @@ def main():
     parser = argparse.ArgumentParser(description="VeldMap Run Script")
     parser.add_argument("--debug", action="store_true", help="Run debug build")
     parser.add_argument("--config", default="runtime/config", help="Path to config directory")
-    parser.add_argument("--vulkan", action="store_true", help="Force Vulkan backend")
-    parser.add_argument("--backend", default=None, help="Force specific WGPU backend (vulkan, gl, dx12, etc.)")
-    
+
     # Собираем известные аргументы и все остальные для проброса
     args, extra_args = parser.parse_known_args()
     
@@ -28,15 +26,11 @@ def main():
     # подхватывает сам хост (config::load_dotenv) — так подстановка работает
     # при любом запуске бинарника, а не только через этот лаунчер.
 
-    # Use Vulkan backend (with dzn support)
-    if args.backend:
-        env["WGPU_BACKEND"] = args.backend
-    elif args.vulkan or args.backend is None:
-        env["WGPU_BACKEND"] = "vulkan"
-    
-    # Enable non-conformant Vulkan drivers (dzn)
-    env["WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER"] = "1"
-    
+    # Бэкенд GPU здесь не выбирается: раннер собирает wgpu-инстанс с жёстким
+    # Vulkan (и с разрешением non-conformant драйверов вроде dzn) — см.
+    # runners/desktop/src/main.rs. Переменные WGPU_* он не читает, и флаг
+    # выбора бэкенда был бы мёртвым органом управления.
+
     # Фильтр логов задаётся в runtime/config/core.json (log_filter) — здесь
     # RUST_LOG намеренно не выставляется: заданная переменная перекрывает
     # конфиг целиком, и правки core.json переставали действовать.

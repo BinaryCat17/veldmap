@@ -96,7 +96,11 @@ pub fn on_set_surface(state: &mut State, req: SurfaceDelegated) {
         match Device::create(req.format) {
             Ok(device) => state.device = Some(device),
             Err(error) => {
+                // Прежний таргет бросаем по той же причине, что и при отказе
+                // ниже: владелец уже освободил его текстуру, выделяя эту, и
+                // держать view — значит держать её живой без зрителей.
                 veldsdk::log::error!(target: "handlers", "ресурсы устройства: {:#}", error);
+                state.target = None;
                 return;
             }
         }
@@ -143,8 +147,7 @@ pub fn on_camera(state: &mut State, command: crate::proto::globe::CameraCommand)
 /// же: кадра нет — значит нет и точки кадра, про которую спрашивают.
 pub fn on_probe(state: &mut State, probe: crate::proto::globe::Probe) {
     let at = state.target.as_ref().and_then(|target| {
-        let aspect = target.width as f32 / target.height.max(1) as f32;
-        let (eye, direction) = state.camera.ray(probe.x, probe.y, aspect);
+        let (eye, direction) = state.camera.ray(probe.x, probe.y, target.aspect());
         geodesy::intersect(eye, direction).map(|point| {
             let (lat, lon) = geodesy::surface_at(point);
             crate::proto::globe::GeoPoint { lat, lon }

@@ -305,6 +305,12 @@ impl MemoryManager {
         match source {
             Source::Bytes(data) => Ok(data),
             Source::Range(source) => source.read_at(offset, size),
+            // Чтение из GPU-буфера — два пути с одним смыслом: дождаться
+            // очереди, отобразить диапазон в память и скопировать. MAP_READ
+            // читается на месте; всякий другой буфер сначала копируется в
+            // staging (маппить можно только созданное под маппинг). Пустой
+            // submit перед ожиданием проталкивает недосабмиченное — иначе
+            // poll ждать нечего, а в буфере лежит прошлое.
             Source::Buffer(buffer) => {
                 {
                     let q = self.queue.lock().unwrap();

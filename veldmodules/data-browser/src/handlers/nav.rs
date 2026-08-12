@@ -6,7 +6,7 @@ use crate::proto::data_library::LibraryRequest;
 /// Каталог всегда открывается новой вкладкой: две папки рядом — обычное дело,
 /// и ровно для этого вкладки и есть.
 pub fn on_new_browse(state: &mut State) {
-    state.tab_menu = false;
+    state.close_menus();
     let id = state.open(ViewKind::Browse(BrowseState::default()));
     super::browse::request_path(state, id, String::new());
 }
@@ -14,7 +14,7 @@ pub fn on_new_browse(state: &mut State) {
 /// Поиск и скачанное показывают уже открытую вкладку, а не заводят вторую: их
 /// содержимое от вкладки не зависит, и второй такой же список — просто копия.
 pub fn on_new_search(state: &mut State) {
-    state.tab_menu = false;
+    state.close_menus();
     match state.find(|kind| matches!(kind, ViewKind::Search(_))) {
         Some(id) => state.focus(id),
         None => {
@@ -28,7 +28,7 @@ pub fn on_new_search(state: &mut State) {
 }
 
 pub fn on_new_downloaded(state: &mut State) {
-    state.tab_menu = false;
+    state.close_menus();
     match state.find(|kind| matches!(kind, ViewKind::Downloaded(_))) {
         Some(id) => state.focus(id),
         None => {
@@ -45,7 +45,7 @@ pub fn on_new_downloaded(state: &mut State) {
 /// и второй такой же — просто вторая камера над тем же местом. К тому же
 /// каждая вкладка держит своё место под рендер, а рисующий модуль один.
 pub fn on_new_globe(state: &mut State) {
-    state.tab_menu = false;
+    state.close_menus();
     match state.find(|kind| matches!(kind, ViewKind::Globe(_))) {
         Some(id) => state.focus(id),
         None => {
@@ -55,16 +55,14 @@ pub fn on_new_globe(state: &mut State) {
 }
 
 /// Меню полосы вкладок. Раскрытое меню списка при этом закрывается — открытым
-/// бывает только одно.
+/// бывает только одно (см. State::close_menus).
 pub fn on_tab_menu(state: &mut State, open: bool) {
+    state.close_menus();
     state.tab_menu = open;
-    if let Some(listing) = state.active_listing_mut() {
-        listing.menu = crate::module::state::listing::Menu::Closed;
-    }
 }
 
 pub fn on_tab_select(state: &mut State, id: ViewId) {
-    state.tab_menu = false;
+    state.close_menus();
     state.focus(id);
 }
 
@@ -90,6 +88,11 @@ pub fn on_tab_close(state: &mut State, id: ViewId) {
         // продолжил бы рисовать до конца процесса.
         ViewKind::Globe(globe) => {
             veldsdk::surface::revoke(globe.surface, crate::calls::globe::on_set_surface);
+        }
+        // Контуры этого поиска могли уйти на шар — выделение там гаснет,
+        // выбор по щелчку отключается (см. search::on_source_closed).
+        ViewKind::Search(search) => {
+            super::search::on_source_closed(state, id, &search);
         }
         _ => {}
     }

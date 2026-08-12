@@ -113,23 +113,28 @@ pub fn write_sidecar(state: &mut State, name: &str, identifier: &str, total_byte
     state.origins.insert(name.to_string(), sidecar.clone());
 
     let Ok(json) = serde_json::to_vec(&sidecar) else { return };
-    let Some(region) = veldsdk::abi::resource_alloc_cpu(json.len() as u64) else { return };
-    if let Err(e) = veldsdk::abi::resource_write(region, 0, &json) {
+    let Some(region_id) = veldsdk::abi::resource_alloc_cpu(json.len() as u64) else { return };
+    // Во владельца — сразу после выделения: сорвись запись, регион освободит
+    // Drop, а голый id остался бы висеть на хосте до конца процесса.
+    let region = veldsdk::OwnedResource::from_raw_id(region_id);
+    if let Err(e) = veldsdk::abi::resource_write(region.id(), 0, &json) {
         veldsdk::log::warn!(target: "handlers", "сидкар {} не записан: {}", name, e);
         return;
     }
 
-    // Гранта на "fs" не нужно (и он бы не сработал: fs — хостовый нативный
-    // модуль, не wasm-плагин, dispatcher.instance_of его не резолвит). on_write
-    // проверяет доступ по requestor_id — паблишеру события, то есть нам же,
-    // а мы и так владелец региона.
+    // Гранта на "fs" не нужно: on_write проверяет доступ по requestor_id —
+    // паблишеру события, то есть нам же, а мы и так владелец региона.
     let correlation_id = state.pending_sidecar_writes.begin(SidecarWrite {
-        region,
+        region: region.id(),
         name: name.to_string(),
     });
     crate::calls::fs::on_write(&FsWriteRequest {
         path: storage::origin_path(name),
-        handle: Some(veldsdk::proto::core::ResourceHandle { id: region, size: json.len() as u64 }),
+        // Владение уезжает в таблицу ожидания: освободит его on_write_result.
+        handle: Some(veldsdk::proto::core::ResourceHandle {
+            id: region.into_handle().id,
+            size: json.len() as u64,
+        }),
     }, &correlation_id);
 }
 

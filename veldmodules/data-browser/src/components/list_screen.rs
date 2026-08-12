@@ -35,7 +35,6 @@ pub struct Screen<'a> {
 /// имени влезает в свою колонку.
 pub fn view(screen: Screen<'_>, listing: &ListingState, width: f32) -> Element<Msg> {
     let arranged = arrange::arrange(&screen.rows, listing);
-    let counts = arrange::counts(&screen.rows, listing);
     let name_width = (width - table::FIXED_WIDTH).max(120.0);
 
     let heading = row![
@@ -93,7 +92,7 @@ pub fn view(screen: Screen<'_>, listing: &ListingState, width: f32) -> Element<M
     // Наличие пути ровно это и означает: вид с путём показывает содержимое
     // одной папки, все его строки лежат в ней, и заголовок над ними был бы
     // ровно один. Второго признака под это заводить не нужно — этот уже есть.
-    screen_rows.push(controls::toolbar(listing, &counts, screen.path.is_none()));
+    screen_rows.push(controls::toolbar(listing, &arranged.counts, screen.path.is_none()));
     screen_rows.push(table::header());
     screen_rows.push(body);
     if arranged.pages > 1 {

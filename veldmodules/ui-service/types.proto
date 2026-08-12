@@ -22,7 +22,9 @@ message Widget {
         Container container = 8;
         Scrollable scrollable = 9;
         ProgressBar progress_bar = 10;
-        Stack stack = 11;
+        // 11 занимал Stack; номер не занимается заново, чтобы старая разметка
+        // не разобралась во что-то другое. Слой поверх слоя даёт Popover —
+        // оверлеем, не занимая места в раскладке.
         Tooltip tooltip = 12;
         Popover popover = 14;
         Viewport viewport = 15;
@@ -50,12 +52,6 @@ message Widget {
 message Handler {
     string method = 1;
     string value = 2;
-}
-
-message Stack {
-    repeated Widget children = 1;
-    Length width = 2;
-    Length height = 3;
 }
 
 message Tooltip {
@@ -442,12 +438,17 @@ message Color {
 // Fire-and-forget: модуль шлёт свой текущий view целиком, а когда его рисовать,
 // решает рендерер.
 message SetViewRequest {
+    // Тег 1 занимал plugin_id; отправителя теперь штампует хост, а номер не
+    // занимается заново, чтобы старый конверт не разобрался во что-то другое.
+    reserved 1;
     Layout layout = 2;
 }
 
 // Сработавший виджет, как его объявили в разметке (см. Handler). Едет обратно
 // автору разметки адресным топиком, поэтому получателя в себе не несёт.
 message UiEventResponse {
+    // Тег 1 занимал plugin_id — как у SetViewRequest: адресата несёт конверт.
+    reserved 1;
     string method = 2;
     // Нагрузка события. Обычно её назвала сама разметка (`Handler.value`), но у
     // виджетов, чьё событие несёт данные, её подставляет рендерер: набранный

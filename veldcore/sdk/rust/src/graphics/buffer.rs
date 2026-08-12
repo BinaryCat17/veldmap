@@ -36,9 +36,7 @@ impl GrowingBuffer {
     /// Пустой срез буфер не выделяет: рисовать по нему всё равно нечего, а
     /// первый непустой кадр выделит его сам.
     pub fn write<T: Copy>(&mut self, data: &[T]) -> anyhow::Result<()> {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-        };
+        let bytes = super::bytes_of(data);
         self.filled = bytes.len() as u64;
         if bytes.is_empty() {
             return Ok(());

@@ -115,9 +115,17 @@ impl Actor for WasmActor {
         // это трап на ближайшем тике эпохи, посреди любой работы и без всякой
         // раскрутки: ресурсы убитого возвращает хост, а состояние модуля
         // теряется вместе со стором.
+        //
+        // Записи уже нет — операцию убили в окне между публикацией и этой
+        // доставкой. Тогда событие не доставляется вовсе: терминальный ответ
+        // за убитого уже опубликовал хост, и исполненный сейчас запрос
+        // прислал бы заказчику второй конец той же операции (нативная
+        // сторона это окно закрывает так же — см. util::Tasks::spawn).
         if ev.accounted {
             let doomed = self.doomed.clone();
-            self.tasks.arm(&ev.correlation, move |victim| victim.doomed = Some(doomed));
+            if !self.tasks.arm(&ev.correlation, move |victim| victim.doomed = Some(doomed)) {
+                return;
+            }
         }
 
         // handle_event() декодирует вход как EventEnvelope, восстанавливая
@@ -189,9 +197,9 @@ impl WasmActor {
 
 /// Загружает все *.wasm из `plugins_dir`. Имя каждого плагина на шине — то,
 /// что он сам сообщает через `get_service_name` (единственный источник
-/// истины: см. [[veldmap-plugin-identity]]), а не имя файла и не запись в
-/// каком-либо манифесте. Instance id локальных wasm-сервисов регистрируются
-/// в диспетчере (`Dispatcher::instance_of`).
+/// истины), а не имя файла и не запись в каком-либо манифесте. Instance id
+/// локальных wasm-сервисов регистрируются в диспетчере
+/// (`Dispatcher::instance_of`).
 pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Result<()> {
     let mut config = Config::new();
     // Без этого вызов wasm нельзя прервать ничем: движок не проверяет условий
@@ -290,9 +298,10 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             }
         };
 
-        let mut config_map = ctx.config.plugin_configs.get(&name).cloned().unwrap_or_default();
-        config_map.insert("config".to_string(), serde_json::Value::String(service_config_str.clone()));
-        config_map.insert("plugin_name".to_string(), serde_json::Value::String(name.clone()));
+        // Для veld_get_config — разобранные ключи конфига модуля, как они
+        // лежат в <name>.json. Служебных инъекций здесь нет: конфиг целиком
+        // едет в init входом вызова, а имя модуль знает сам (SERVICE_NAME).
+        let config_map = ctx.config.plugin_configs.get(&name).cloned().unwrap_or_default();
 
         // Конфиг модуля едет в init одним JSON, как он записан в файле.
         // Инъектируемых хостом ключей здесь нет: всё, что модуль узнаёт от

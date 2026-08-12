@@ -102,7 +102,6 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
         // троттлинга ниже.
         if resuming {
             bus::emit::on_fs_download_progress(&*ctx.publisher, &FsDownloadProgress {
-                progress: if total_size > 0 { downloaded as f32 / total_size as f32 } else { 0.0 },
                 downloaded_bytes: downloaded,
                 total_bytes: total_size,
             }, &correlation_id);
@@ -132,7 +131,6 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
                                 if percent > last_percent {
                                     last_percent = percent;
                                     bus::emit::on_fs_download_progress(&*ctx.publisher, &FsDownloadProgress {
-                                        progress: downloaded as f32 / total_size as f32,
                                         downloaded_bytes: downloaded,
                                         total_bytes: total_size,
                                     }, &correlation_id);
@@ -140,7 +138,6 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
                             } else if downloaded - last_reported_bytes >= BYTES_THROTTLE {
                                 last_reported_bytes = downloaded;
                                 bus::emit::on_fs_download_progress(&*ctx.publisher, &FsDownloadProgress {
-                                    progress: 0.0,
                                     downloaded_bytes: downloaded,
                                     total_bytes: 0,
                                 }, &correlation_id);

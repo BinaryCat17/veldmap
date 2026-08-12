@@ -18,19 +18,11 @@ use crate::module::components::{format, menu};
 use crate::module::state::{State, ViewKind};
 use crate::module::{theme, Msg};
 
-const GLYPH_PLUS: &str = "\u{f067}";
-const GLYPH_CLOSE: &str = "\u{f00d}";
-const GLYPH_FOLDER: &str = "\u{f07b}";
-const GLYPH_SEARCH: &str = "\u{f002}";
-const GLYPH_DOWNLOAD: &str = "\u{f019}";
-const GLYPH_IMAGE: &str = "\u{f1c5}";
-const GLYPH_GLOBE: &str = "\u{f0ac}";
 
-/// Высота полосы вкладок и строки состояния. Фиксированы, а не выведены из
-/// содержимого: это хром постоянного размера, и ни одна вкладка не вправе
-/// растянуть его собой.
+/// Высота полосы вкладок. Фиксирована, а не выведена из содержимого: это хром
+/// постоянного размера, и ни одна вкладка не вправе растянуть его собой.
+/// Строка состояния — обычная полоса хрома (theme::BAR_HEIGHT).
 const TAB_STRIP_HEIGHT: f32 = 38.0;
-const STATUS_HEIGHT: f32 = 30.0;
 
 pub fn build_root(state: &State) -> Element<Msg> {
     let body: Element<Msg> = match state.active() {
@@ -88,7 +80,7 @@ fn tab_strip(state: &State) -> Element<Msg> {
         let tab = theme::tab(
             row![
                 label,
-                theme::chrome_icon(icon::<Msg>(GLYPH_CLOSE).size(9.0).color(theme::INK_FAINT))
+                theme::chrome_icon(icon::<Msg>(theme::glyph::CLOSE).size(9.0).color(theme::INK_FAINT))
                     .on_press(Msg::TabClose(view.id)),
             ]
             .spacing(4.0)
@@ -117,15 +109,15 @@ fn tab_strip(state: &State) -> Element<Msg> {
         .align_items(Alignment::End);
 
     let opener = popover(
-        theme::chrome_icon(icon::<Msg>(GLYPH_PLUS).size(11.0).color(theme::INK_DIM))
+        theme::chrome_icon(icon::<Msg>(theme::glyph::PLUS).size(11.0).color(theme::INK_DIM))
             .width(Length::Fixed(TAB_STRIP_HEIGHT))
             .height(Length::Fill)
             .on_press(Msg::TabMenu(!state.tab_menu)),
         menu::panel(vec![
-            menu::Item::new("Сетевой каталог", Msg::NewBrowse).glyph(GLYPH_FOLDER),
-            menu::Item::new("Поиск снимков", Msg::NewSearch).glyph(GLYPH_SEARCH),
-            menu::Item::new("Скачанное", Msg::NewDownloaded).glyph(GLYPH_DOWNLOAD),
-            menu::Item::new("Глобус", Msg::NewGlobe).glyph(GLYPH_GLOBE),
+            menu::Item::new("Сетевой каталог", Msg::NewBrowse).glyph(theme::glyph::FOLDER),
+            menu::Item::new("Поиск снимков", Msg::NewSearch).glyph(theme::glyph::SEARCH),
+            menu::Item::new("Скачанное", Msg::NewDownloaded).glyph(theme::glyph::DOWNLOAD),
+            menu::Item::new("Глобус", Msg::NewGlobe).glyph(theme::glyph::GLOBE),
         ]),
     )
     .open(state.tab_menu)
@@ -204,17 +196,17 @@ fn status_bar(state: &State) -> Element<Msg> {
     )
     .background(theme::CHROME)
     .width(Length::Fill)
-    .height(Length::Fixed(STATUS_HEIGHT))
+    .height(Length::Fixed(theme::BAR_HEIGHT))
     .into()
 }
 
 /// Глиф вида — тот же, которым он подписан в меню открытия.
 fn glyph(kind: &ViewKind) -> &'static str {
     match kind {
-        ViewKind::Search(_) => GLYPH_SEARCH,
-        ViewKind::Browse(_) => GLYPH_FOLDER,
-        ViewKind::Downloaded(_) => GLYPH_DOWNLOAD,
-        ViewKind::Preview(_) => GLYPH_IMAGE,
-        ViewKind::Globe(_) => GLYPH_GLOBE,
+        ViewKind::Search(_) => theme::glyph::SEARCH,
+        ViewKind::Browse(_) => theme::glyph::FOLDER,
+        ViewKind::Downloaded(_) => theme::glyph::DOWNLOAD,
+        ViewKind::Preview(_) => theme::glyph::IMAGE,
+        ViewKind::Globe(_) => theme::glyph::GLOBE,
     }
 }

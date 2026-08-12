@@ -48,9 +48,10 @@ pub fn on_page(state: &mut State, page: usize) {
 /// Раскрыть меню, закрыть открытое (`Menu::Closed`) или переключить то же
 /// самое — повторное нажатие на чип.
 pub fn on_menu(state: &mut State, menu: Menu) {
-    // Меню полосы вкладок закрывается вместе с любым другим: два раскрытых
-    // меню сразу — состояние, которого не бывает.
-    state.tab_menu = false;
+    // Всё раскрытое закрывается разом (см. State::close_menus), и только
+    // потом переключается своё: два раскрытых меню сразу — состояние,
+    // которого не бывает.
+    state.close_menus();
     if let Some(listing) = state.active_listing_mut() {
         listing.toggle(menu);
     }

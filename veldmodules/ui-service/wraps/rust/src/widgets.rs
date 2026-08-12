@@ -144,9 +144,14 @@ macro_rules! parent {
     )+ };
 }
 
-sizing!(Column, Row, Stack, Text, Container, Scrollable, ProgressBar, Image, Viewport);
+/// Размер текста по умолчанию — то же число, что `DEFAULT_TEXT_SIZE` у
+/// конвертера ui-service: это умолчание протокола, а не билдера, но крейты
+/// разные, и разделить константу им негде.
+const DEFAULT_TEXT_SIZE: f32 = 16.0;
+
+sizing!(Column, Row, Text, Container, Scrollable, ProgressBar, Image, Viewport);
 padded!(Column, Row, Container);
-parent!(Column, Row, Stack);
+parent!(Column, Row);
 
 pub struct Column<M> {
     widget: proto::Column,
@@ -240,7 +245,7 @@ impl<M> Text<M> {
         Self {
             widget: proto::Text {
                 content: content.into(),
-                size: 16.0,
+                size: DEFAULT_TEXT_SIZE,
                 color: None,
                 horizontal_alignment: 0,
                 vertical_alignment: 0,
@@ -345,7 +350,7 @@ impl<M> TextInput<M> {
             widget: proto::TextInput {
                 placeholder: placeholder.to_string(),
                 value: value.to_string(),
-                size: 16.0,
+                size: DEFAULT_TEXT_SIZE,
                 padding: Some(proto::Padding { top: 5.0, bottom: 5.0, left: 10.0, right: 10.0 }),
                 ..Default::default()
             },
@@ -632,37 +637,6 @@ impl<M> From<Space<M>> for Element<M> {
 
 pub fn space<M>(width: Length, height: Length) -> Space<M> {
     Space::new(width, height)
-}
-
-pub struct Stack<M> {
-    widget: proto::Stack,
-    _marker: std::marker::PhantomData<M>,
-}
-
-impl<M> Stack<M> {
-    pub fn new() -> Self {
-        Self {
-            widget: proto::Stack {
-                width: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
-                height: Some(proto::Length { value: Some(proto::length::Value::Shrink(true)) }),
-                ..Default::default()
-            },
-            _marker: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<M> From<Stack<M>> for Element<M> {
-    fn from(s: Stack<M>) -> Self {
-        proto::Widget {
-            r#type: Some(proto::widget::Type::Stack(s.widget)),
-            ..Default::default()
-        }.into()
-    }
-}
-
-pub fn stack<M>(children: impl IntoIterator<Item = Element<M>>) -> Stack<M> {
-    Stack::new().extend(children)
 }
 
 pub struct Tooltip<M> {

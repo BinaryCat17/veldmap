@@ -74,8 +74,8 @@ fn shape_text(
     let mut line_height = text.line_height.to_absolute(Pixels(size)).0;
 
     if size <= 0.0 {
-        veldsdk::log::error!(target: "handlers", "Cosmic-text {}: invalid font size: {}. Resetting to 16.0", origin, size);
-        size = 16.0;
+        veldsdk::log::error!(target: "handlers", "Cosmic-text {}: invalid font size: {}. Resetting to {}", origin, size, crate::module::converter::DEFAULT_TEXT_SIZE);
+        size = crate::module::converter::DEFAULT_TEXT_SIZE;
     }
     if line_height <= 0.0 {
         veldsdk::log::error!(target: "handlers", "Cosmic-text {}: invalid line height: {}. Resetting to {}", origin, line_height, size * 1.2);
@@ -208,6 +208,10 @@ const MODE_IMAGE: f32 = 2.0;
 /// без зазора в глиф затекает сосед; тем же отступом начинается первая строка.
 const ATLAS_PADDING: u32 = 2;
 
+/// Сторона глифового атласа. Из неё выводится и размер его CPU-копии —
+/// порознь эти числа могли бы только разойтись.
+const ATLAS_SIDE: u32 = 2048;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
@@ -325,9 +329,9 @@ impl GpuRenderer {
             atlas_bind_group: None,
             atlas_layout: None,
             glyph_cache: HashMap::new(),
-            atlas_width: 2048,
-            atlas_height: 2048,
-            atlas_data: vec![0; 2048 * 2048 * 4],
+            atlas_width: ATLAS_SIDE,
+            atlas_height: ATLAS_SIDE,
+            atlas_data: vec![0; (ATLAS_SIDE * ATLAS_SIDE * 4) as usize],
             current_atlas_x: ATLAS_PADDING,
             current_atlas_y: ATLAS_PADDING,
             row_height: 1,
@@ -616,7 +620,7 @@ impl Default for RealParagraph {
             config: iced_core::Text {
                 content: (),
                 bounds: Size::INFINITE,
-                size: Pixels(16.0),
+                size: Pixels(crate::module::converter::DEFAULT_TEXT_SIZE),
                 line_height: LineHeight::default(),
                 font: Font::DEFAULT,
                 align_x: iced_core::text::Alignment::Default,
@@ -888,7 +892,7 @@ impl iced_core::text::Renderer for GpuRenderer {
         Font::DEFAULT
     }
     fn default_size(&self) -> Pixels {
-        Pixels(16.0)
+        Pixels(crate::module::converter::DEFAULT_TEXT_SIZE)
     }
 
     fn fill_paragraph(

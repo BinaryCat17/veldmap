@@ -38,7 +38,7 @@ pub const SEMI_MAJOR_M: f64 = 6_378_137.0;
 
 /// Сжатие WGS84. Полярный радиус меньше экваториального на 21 км — те самые
 /// 0.34%, из-за которых геодезическая широта не равна геоцентрической.
-pub const FLATTENING: f64 = 1.0 / 298.257_223_563;
+const FLATTENING: f64 = 1.0 / 298.257_223_563;
 
 /// Квадрат первого эксцентриситета, `e² = 2f − f²`.
 const ECCENTRICITY_SQ: f64 = FLATTENING * (2.0 - FLATTENING);
@@ -163,5 +163,47 @@ fn unit(lat_deg: f64, lon_deg: f64) -> [f64; 3] {
     let (sin_lat, cos_lat) = lat_deg.to_radians().sin_cos();
     let (sin_lon, cos_lon) = lon_deg.to_radians().sin_cos();
     [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `world` и `surface_at` — обратные друг другу на поверхности: точка,
+    /// уехавшая в декартовы и вернувшаяся, обязана назвать те же градусы.
+    /// Расхождение здесь — те самые «десятки километров», от которых модуль
+    /// и заведён одним.
+    #[test]
+    fn surface_roundtrip() {
+        for &(lat, lon) in &[(0.0, 0.0), (45.0, 60.0), (-33.9, 151.2), (78.0, -179.5)] {
+            let (back_lat, back_lon) = surface_at(world(Geodetic::surface(lat, lon)));
+            assert!((back_lat - lat).abs() < 1e-9, "{} → {}", lat, back_lat);
+            assert!((back_lon - lon).abs() < 1e-9, "{} → {}", lon, back_lon);
+        }
+    }
+
+    /// Эллипсоид, а не шар: на 45° точка поверхности заметно ниже, чем была бы
+    /// на сфере. Сожмись это в шар — тест поймает первым.
+    #[test]
+    fn flattening_is_real() {
+        let point = world(Geodetic::surface(45.0, 0.0));
+        assert!(point[2] < 45.0_f64.to_radians().sin() - 1e-4, "z = {}", point[2]);
+        // А на экваторе и полюсе — точные полуоси.
+        assert!((world(Geodetic::surface(0.0, 0.0))[0] - 1.0).abs() < 1e-12);
+        let polar = world(Geodetic::surface(90.0, 0.0))[2];
+        assert!(((1.0 - polar) * SEMI_MAJOR_M - 21_384.7).abs() < 1.0, "сжатие ~21.4 км: {}", polar);
+    }
+
+    #[test]
+    fn ray_hits_and_misses() {
+        // Взгляд с двух радиусов в центр: пересечение — подэкваторная точка.
+        let hit = intersect([2.0, 0.0, 0.0], [-1.0, 0.0, 0.0]).expect("луч в центр");
+        let (lat, lon) = surface_at(hit);
+        assert!(lat.abs() < 1e-9 && lon.abs() < 1e-9);
+        // Луч вбок Земли не касается.
+        assert!(intersect([2.0, 0.0, 0.0], [0.0, 1.0, 0.0]).is_none());
+        // Поверхность за спиной — не пересечение.
+        assert!(intersect([2.0, 0.0, 0.0], [1.0, 0.0, 0.0]).is_none());
+    }
 }
 

@@ -8,7 +8,7 @@
 use crate::module::footprint;
 use crate::module::state::globe::Shown;
 use crate::module::state::listing::Menu;
-use crate::module::state::search::{Cloud, Mission, Period};
+use crate::module::state::search::{Cloud, Mission, Period, SearchState};
 use crate::module::state::{State, ViewId, ViewKind};
 use crate::proto::data_provider::{DataProduct, SearchRequest, SearchResponse};
 use crate::proto::globe::{
@@ -109,22 +109,31 @@ pub fn on_search_result(
 /// когда ему дадут место.
 fn show_on_globe(state: &mut State, view: ViewId) {
     // Выбранное переживает новый поиск, только если само в нём осталось: контур
-    // ушёл с шара — значит, выбрано больше ничего.
+    // ушёл с шара — значит, выбрано больше ничего. `shown` до успеха не
+    // трогаем: ранний выход не должен разводить его с нарисованным.
     let selected = state
         .shown
-        .take()
+        .as_ref()
         .filter(|shown| shown.view == view)
-        .and_then(|shown| shown.selected);
+        .and_then(|shown| shown.selected.clone());
 
     let Some(ViewKind::Search(search)) = state.get_mut(view) else { return };
     let selected = selected
         .filter(|id| search.results.iter().any(|product| &product.identifier == id));
 
-    let outlines = search
+    crate::calls::globe::on_outlines(&Outlines {
+        outlines: outlines_of(search, selected.as_deref()),
+    });
+    state.shown = Some(Shown { view, selected });
+}
+
+/// Контуры результатов; у выбранного — признак выделения.
+fn outlines_of(search: &SearchState, selected: Option<&str>) -> Vec<Outline> {
+    search
         .results
         .iter()
         .flat_map(|product| {
-            let picked = selected.as_deref() == Some(product.identifier.as_str());
+            let picked = selected == Some(product.identifier.as_str());
             product.footprint.iter().map(move |ring| Outline {
                 points: ring
                     .points
@@ -134,10 +143,19 @@ fn show_on_globe(state: &mut State, view: ViewId) {
                 selected: picked,
             })
         })
-        .collect();
+        .collect()
+}
 
-    crate::calls::globe::on_outlines(&Outlines { outlines });
-    state.shown = Some(Shown { view, selected });
+/// Вкладка-источник закрывается. Контуры остаются на шаре — они свойство
+/// найденного, а не вкладки, — но выбирать среди них больше нечего: выделение
+/// гаснет, а `Shown` снимается, и щелчки по шару перестают что-либо значить.
+/// Иначе подсветка горела бы вечно: снять её мог только выбор в этом же виде.
+pub fn on_source_closed(state: &mut State, id: ViewId, search: &SearchState) {
+    if state.shown.as_ref().is_none_or(|shown| shown.view != id) {
+        return;
+    }
+    state.shown = None;
+    crate::calls::globe::on_outlines(&Outlines { outlines: outlines_of(search, None) });
 }
 
 /// Выбрать снимок, накрывающий точку. `None` — щелчок пришёлся мимо Земли.

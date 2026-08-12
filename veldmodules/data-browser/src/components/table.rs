@@ -54,15 +54,6 @@ const INDENT: f32 = 12.0;
 const HEADER_HEIGHT: f32 = 22.0;
 
 /// Глифы Font Awesome (шрифт Icons).
-const GLYPH_FOLDER: &str = "\u{f07b}";
-const GLYPH_IMAGE: &str = "\u{f1c5}";
-const GLYPH_FILE: &str = "\u{f016}";
-const GLYPH_ENTER: &str = "\u{f061}";
-const GLYPH_DOWNLOAD: &str = "\u{f019}";
-const GLYPH_PAUSE: &str = "\u{f04c}";
-const GLYPH_PLAY: &str = "\u{f04b}";
-const GLYPH_EYE: &str = "\u{f06e}";
-const GLYPH_MORE: &str = "\u{f141}";
 
 /// Расширения, у которых есть превью, — по ним же выбрана иконка строки.
 const IMAGE_FORMATS: [&str; 7] = ["png", "jpg", "jpeg", "tif", "tiff", "jp2", "webp"];
@@ -170,7 +161,7 @@ pub fn body(lines: &[Line<'_>], context: Context<'_>) -> Element<Msg> {
 fn group_line(title: &str, meta: &str, depth: usize, context: Context<'_>) -> Element<Msg> {
     let indent = indent(depth);
     let cells = grid([
-        glyph(GLYPH_FOLDER, theme::ACCENT),
+        glyph(theme::glyph::FOLDER, theme::ACCENT),
         text::<Msg>(format::ellipsize(title, format::mono_fit(context.name_width - indent, theme::TEXT_LABEL)))
             .size(theme::TEXT_LABEL)
             .color(theme::INK)
@@ -278,11 +269,11 @@ fn glyph(glyph: &str, color: Color) -> Element<Msg> {
 
 fn row_glyph(row: &Row) -> &'static str {
     if row.is_folder {
-        GLYPH_FOLDER
+        theme::glyph::FOLDER
     } else if IMAGE_FORMATS.contains(&row.format().to_lowercase().as_str()) {
-        GLYPH_IMAGE
+        theme::glyph::IMAGE
     } else {
-        GLYPH_FILE
+        theme::glyph::FILE
     }
 }
 
@@ -332,11 +323,11 @@ fn primary(row: &Row) -> Option<(&'static str, &'static str, Msg)> {
     let local = || (!row.name.is_empty()).then(|| row.name.clone());
 
     Some(match &row.status {
-        RowStatus::Downloading { .. } => (GLYPH_PAUSE, "Пауза", Msg::Download(remote()?)),
-        RowStatus::Paused { .. } => (GLYPH_PLAY, "Продолжить", Msg::Download(remote()?)),
-        _ if row.is_folder => (GLYPH_ENTER, "Перейти", Msg::Enter(remote()?)),
-        RowStatus::Remote => (GLYPH_DOWNLOAD, "Скачать", Msg::Download(remote()?)),
-        RowStatus::Complete => (GLYPH_EYE, "Открыть", Msg::Preview(local()?)),
+        RowStatus::Downloading { .. } => (theme::glyph::PAUSE, "Пауза", Msg::Download(remote()?)),
+        RowStatus::Paused { .. } => (theme::glyph::PLAY, "Продолжить", Msg::Download(remote()?)),
+        _ if row.is_folder => (theme::glyph::ENTER, "Перейти", Msg::Enter(remote()?)),
+        RowStatus::Remote => (theme::glyph::DOWNLOAD, "Скачать", Msg::Download(remote()?)),
+        RowStatus::Complete => (theme::glyph::EYE, "Открыть", Msg::Preview(local()?)),
         // Про папку, часть которой скачана, главная кнопка сказать не может:
         // «скачать остальное» библиотека не умеет, а «открыть» тут нечего.
         RowStatus::Partial { .. } => return None,
@@ -368,7 +359,7 @@ fn actions(entry: &Row, context: Context<'_>) -> Element<Msg> {
     if !items.is_empty() {
         let menu = Menu::Row(entry.key().to_string());
         let open = context.listing.menu == menu;
-        let anchor = theme::surface_button(row_glyph_icon(GLYPH_MORE), open)
+        let anchor = theme::surface_button(row_glyph_icon(theme::glyph::MORE), open)
             .width(Length::Fixed(theme::ROW_BUTTON))
             .height(Length::Fixed(theme::ROW_BUTTON))
             .on_press(Msg::OpenMenu(menu));
