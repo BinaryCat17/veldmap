@@ -28,3 +28,4 @@ runtime/data
 .claude
 __pycache__
 .pytest_cache
+rustc-ice*
