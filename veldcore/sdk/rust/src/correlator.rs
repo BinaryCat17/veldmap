@@ -71,6 +71,12 @@ impl<T> Correlator<T> {
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.pending.values()
     }
+
+    /// Не осталось ли ожиданий — «все ответы пришли» для пачки запросов,
+    /// которую ждут целиком (так сборка наложения собирает все растры разом).
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
 }
 
 #[cfg(test)]

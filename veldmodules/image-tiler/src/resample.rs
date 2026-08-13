@@ -13,6 +13,11 @@
 //! границе ячейки входит в обе с весом своей доли. Увеличение работает тем
 //! же кодом, но по смыслу это размазывание — честная заглушка, когда
 //! источник мельче цели.
+//!
+//! Цвет в обоих усредняется с весом альфы: у прозрачного пикселя цвета нет,
+//! и поровну усреднённый он протекал бы чёрным в кромку данных (поля гранул —
+//! прозрачный чёрный, см. ключевание nodata). Сплошь непрозрачный вход это
+//! не меняет ни на байт: вес каждого слагаемого просто умножается на 255.
 
 /// Шаг пирамиды: RGBA8 `w`×`h` → `ceil(w/2)`×`ceil(h/2)`, каждый целевой
 /// пиксель — среднее своего блока 2×2 (у правого и нижнего краёв блок
@@ -32,20 +37,26 @@ pub fn halve(src: &[u8], w: u32, h: u32) -> Vec<u8> {
         for dx in 0..dw {
             let x0 = dx * 2;
             let x1 = (x0 + 2).min(w);
-            let mut acc = [0u32; 4];
+            let mut rgb = [0u32; 3];
+            let mut alpha = 0u32;
             for y in y0..y1 {
                 for x in x0..x1 {
                     let px = ((y as usize) * (w as usize) + (x as usize)) * 4;
-                    for c in 0..4 {
-                        acc[c] += u32::from(src[px + c]);
+                    let a = u32::from(src[px + 3]);
+                    for c in 0..3 {
+                        rgb[c] += u32::from(src[px + c]) * a;
                     }
+                    alpha += a;
                 }
             }
             let area = (y1 - y0) * (x1 - x0);
             let out_px = ((dy as usize) * (dw as usize) + (dx as usize)) * 4;
-            for c in 0..4 {
-                out[out_px + c] = ((acc[c] + area / 2) / area) as u8;
+            for c in 0..3 {
+                // Блок целиком прозрачен — цвета у него нет; ноль держит
+                // выход детерминированным.
+                out[out_px + c] = if alpha == 0 { 0 } else { ((rgb[c] + alpha / 2) / alpha) as u8 };
             }
+            out[out_px + 3] = ((alpha + area / 2) / area) as u8;
         }
     }
     out
@@ -72,7 +83,9 @@ pub fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
     for (dy, (y0, y1)) in y_spans.iter().enumerate() {
         for (dx, (x0, x1)) in x_spans.iter().enumerate() {
-            let mut acc = [0f64; 4];
+            let mut rgb = [0f64; 3];
+            // Σ альфа·вес: числитель альфы и он же — знаменатель цвета.
+            let mut alpha = 0f64;
             let mut area = 0f64;
             let mut sy = y0.floor() as u32;
             while (sy as f64) < *y1 {
@@ -83,19 +96,28 @@ pub fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
                     let wx = overlap(sx, *x0, *x1);
                     let px = row + (sx as usize) * 4;
                     let w = wx * wy;
-                    for c in 0..4 {
-                        acc[c] += f64::from(src[px + c]) * w;
+                    let aw = f64::from(src[px + 3]) * w;
+                    for c in 0..3 {
+                        rgb[c] += f64::from(src[px + c]) * aw;
                     }
+                    alpha += aw;
                     area += w;
                     sx += 1;
                 }
                 sy += 1;
             }
             let out_px = (dy * (dw as usize) + dx) * 4;
-            for c in 0..4 {
-                // Площадь не бывает нулём: спаны не пусты по построению.
-                out[out_px + c] = (acc[c] / area).round().clamp(0.0, 255.0) as u8;
+            for c in 0..3 {
+                // Ячейка целиком прозрачна — цвета у неё нет; ноль держит
+                // выход детерминированным.
+                out[out_px + c] = if alpha == 0.0 {
+                    0
+                } else {
+                    (rgb[c] / alpha).round().clamp(0.0, 255.0) as u8
+                };
             }
+            // Площадь не бывает нулём: спаны не пусты по построению.
+            out[out_px + 3] = (alpha / area).round().clamp(0.0, 255.0) as u8;
         }
     }
     out
@@ -193,5 +215,21 @@ mod tests {
         // (0 + 1) / 2 = 0.5 → 1: округление, а не отбрасывание.
         let src = [0, 0, 0, 255, 1, 1, 1, 255];
         assert_eq!(&halve(&src, 2, 1)[..3], &[1, 1, 1]);
+    }
+
+    #[test]
+    fn transparent_does_not_bleed_into_colour() {
+        // Блок 2×2: два белых и два прозрачных чёрных (поле гранулы). Цвет
+        // остаётся белым, полупрозрачность несёт одна альфа.
+        let src = [255, 255, 255, 255, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0];
+        assert_eq!(halve(&src, 2, 2), vec![255, 255, 255, 128]);
+        assert_eq!(resample(&src, 2, 2, 1, 1), vec![255, 255, 255, 128]);
+    }
+
+    #[test]
+    fn fully_transparent_block_stays_empty() {
+        let src = [9, 9, 9, 0, 9, 9, 9, 0];
+        assert_eq!(halve(&src, 2, 1), vec![0, 0, 0, 0]);
+        assert_eq!(resample(&src, 2, 1, 1, 1), vec![0, 0, 0, 0]);
     }
 }

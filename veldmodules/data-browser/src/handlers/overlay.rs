@@ -87,10 +87,19 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
     }, &correlation);
 }
 
-/// Снять наложение с шара. Пустой набор — глобус освободит ресурсы.
+/// Снять наложение с шара. Отправленный набор глобус освобождает сам (пустой
+/// набор — та же замена целиком); растры сборки, оборванной на середине, до
+/// него не доехали, и освободить их можем только мы.
 pub fn clear(state: &mut State) {
-    if state.overlay.take().is_some_and(|overlay| overlay.sent) {
+    let Some(overlay) = state.overlay.take() else { return };
+    if overlay.sent {
         crate::calls::globe::on_overlay(&Overlays { overlays: Vec::new() });
+        return;
+    }
+    if let Some(assembly) = overlay.assembly {
+        for (_, handle) in assembly.collected {
+            veldsdk::resource::release(handle);
+        }
     }
 }
 
@@ -141,39 +150,36 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
         return;
     }
 
-    overlay.assembly = Some(Assembly {
+    let mut assembly = Assembly {
         utm: response.utm,
-        pending: response.rasters.len(),
+        opens: veldsdk::Correlator::new(),
         collected: Vec::new(),
-    });
+    };
     for raster in response.rasters {
-        let correlation = state.overlay_opens.begin(raster.role);
+        let correlation = assembly.opens.begin(raster.role);
         crate::calls::data_provider::on_open(&crate::proto::data_provider::OpenRequest {
             identifier: raster.identifier,
         }, &correlation);
     }
+    overlay.assembly = Some(assembly);
 }
 
-/// Открытие растра наложения. `false` — ответ не наш.
+/// Открытие растра наложения. `false` — ответ не наш: чужой либо от сборки,
+/// которой больше нет, — смена наложения уронила маршруты вместе с ней, и
+/// приехавший ресурс добьёт общий discard (см. module::on_open_result).
 pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     let correlation = veldsdk::correlation();
-    let Some(role) = state.overlay_opens.take(&correlation) else { return false };
-
-    // Наложение успели сменить или снять: ресурс наш, но класть его некуда.
     let Some(assembly) = state.overlay.as_mut().and_then(|o| o.assembly.as_mut()) else {
-        if let Some(handle) = &opened.handle {
-            veldsdk::resource::release(handle.clone());
-        }
-        return true;
+        return false;
     };
+    let Some(role) = assembly.opens.take(&correlation) else { return false };
 
-    assembly.pending -= 1;
     match veldsdk::resource::accept(opened) {
         Ok(handle) => assembly.collected.push((role, handle)),
         // Роль пропускается: наложение живёт тем, что открылось.
         Err(error) => veldsdk::log::warn!(target: "handlers", "растр наложения: {}", error),
     }
-    if assembly.pending == 0 {
+    if assembly.opens.is_empty() {
         send(state);
     }
     true

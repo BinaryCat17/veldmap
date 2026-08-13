@@ -115,12 +115,66 @@ pub fn produce(
     let samples = decoded.data_u8();
     drop(data);
 
-    let rgba = to_rgba(&samples, channels, (dw as usize) * (dh as usize));
+    let mut rgba = to_rgba(&samples, channels, (dw as usize) * (dh as usize));
     drop(samples);
+
+    // У файлов без собственной альфы поля гранулы приезжают нулём: у
+    // Sentinel-2 ноль зарезервирован под «нет данных» (валидные значения —
+    // 1..255). Прозрачность здесь, а не у потребителей: тайл — готовый RGBA.
+    if matches!(channels, 1 | 3) {
+        key_margins(&mut rgba, dw, dh);
+    }
 
     let mut cascade = Cascade::new(base, dw, dh);
     cascade.push_rows(&rgba, dh, emit)?;
     cascade.finish(emit)
+}
+
+/// Прозрачность полей: заливка от краёв кадра по нулевым пикселям. Выбить
+/// весь чёрный нельзя — настоящему чёрному в произвольном JP2 никто не
+/// запрещал быть, — а поле гранулы от него отличается ровно тем, что
+/// примыкает к краю. Внутренние нули остаются цветом.
+fn key_margins(rgba: &mut [u8], w: u32, h: u32) {
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let zero = |rgba: &[u8], px: usize| rgba[px * 4..px * 4 + 3] == [0, 0, 0];
+
+    let mut seen = vec![false; w * h];
+    let mut queue: Vec<usize> = Vec::new();
+    let mut push = |rgba: &[u8], seen: &mut [bool], queue: &mut Vec<usize>, px: usize| {
+        if !seen[px] && zero(rgba, px) {
+            seen[px] = true;
+            queue.push(px);
+        }
+    };
+
+    for x in 0..w {
+        push(rgba, &mut seen, &mut queue, x);
+        push(rgba, &mut seen, &mut queue, (h - 1) * w + x);
+    }
+    for y in 0..h {
+        push(rgba, &mut seen, &mut queue, y * w);
+        push(rgba, &mut seen, &mut queue, y * w + w - 1);
+    }
+
+    while let Some(px) = queue.pop() {
+        rgba[px * 4 + 3] = 0;
+        let (x, y) = (px % w, px / w);
+        if x > 0 {
+            push(rgba, &mut seen, &mut queue, px - 1);
+        }
+        if x + 1 < w {
+            push(rgba, &mut seen, &mut queue, px + 1);
+        }
+        if y > 0 {
+            push(rgba, &mut seen, &mut queue, px - w);
+        }
+        if y + 1 < h {
+            push(rgba, &mut seen, &mut queue, px + w);
+        }
+    }
 }
 
 /// Пик памяти прохода при декоде в w×h: сам файл, f32-плоскости декодера
@@ -268,5 +322,20 @@ mod tests {
         // уровень 2 — в бюджете.
         assert!(estimate(120 << 20, 10980, 10980) > DECODE_BUDGET);
         assert!(estimate(120 << 20, 2745, 2745) <= DECODE_BUDGET);
+    }
+
+    #[test]
+    fn margins_key_edge_connected_zeros_only() {
+        // 3×3: нулевой угол — поле, нулевой центр — настоящий чёрный.
+        let mut rgba = Vec::new();
+        for v in [0u8, 5, 5, 5, 0, 5, 5, 5, 5] {
+            rgba.extend_from_slice(&[v, v, v, 255]);
+        }
+        key_margins(&mut rgba, 3, 3);
+        let alphas: Vec<u8> = rgba.chunks(4).map(|px| px[3]).collect();
+        assert_eq!(alphas, vec![0, 255, 255, 255, 255, 255, 255, 255, 255]);
+        // Цвет ключёванного не трогается: усреднение взвешено по альфе, и
+        // кромёжный пиксель не обязан быть чёрным заранее.
+        assert_eq!(&rgba[..3], &[0, 0, 0]);
     }
 }

@@ -33,13 +33,27 @@ pub fn scan(keys: &[String]) -> Vec<(String, Role)> {
         rasters.push((tci.clone(), Role::Detailed));
     }
 
-    // Sentinel-1: квиклук в preview/. Подробные measurement-растры новых
-    // продуктов сжаты Zstd, которого декодер тайлов пока не умеет, — их
-    // сюда не кладём, чтобы наложение не начиналось с отказа.
+    // Sentinel-1: квиклук в preview/, подробный — measurement-COG. Только
+    // продукты -COG: их тайловый GeoTIFF с копиями читается точечно, а
+    // полосным гигантам старых GRD подробная роль стоила бы прохода по
+    // всему файлу через сеть. Ко-поляризация (vv/hh) предпочтительнее
+    // кросс-: на её амплитуде читаются и суша, и море.
     if rasters.is_empty() {
         if let Some(quicklook) = keys.iter().find(|key| key.ends_with("/preview/quick-look.png"))
         {
             rasters.push((quicklook.clone(), Role::Preview));
+        }
+        let cog = |key: &str| {
+            key.contains("_COG.SAFE/")
+                && key.contains("/measurement/")
+                && (key.ends_with(".tiff") || key.ends_with(".tif"))
+        };
+        let measurement = keys
+            .iter()
+            .find(|key| cog(key) && (key.contains("-vv-") || key.contains("-hh-")))
+            .or_else(|| keys.iter().find(|key| cog(key)));
+        if let Some(measurement) = measurement {
+            rasters.push((measurement.clone(), Role::Detailed));
         }
     }
 
@@ -82,7 +96,8 @@ mod tests {
     }
 
     #[test]
-    fn sentinel1_yields_quicklook_only() {
+    fn sentinel1_plain_grd_yields_quicklook_only() {
+        // Не-COG: measurement — полосный гигант, подробной роли не получает.
         let keys = keys(&[
             "eodata/…/S1C_IW_GRDH.SAFE/preview/quick-look.png",
             "eodata/…/S1C_IW_GRDH.SAFE/measurement/s1c-iw-grd-vv.tiff",
@@ -91,6 +106,21 @@ mod tests {
         let rasters = scan(&keys);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
+    }
+
+    #[test]
+    fn sentinel1_grd_cog_yields_copol_measurement() {
+        let keys = keys(&[
+            "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/preview/quick-look.png",
+            "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/measurement/s1c-iw-grd-vh-20260812t153507-002-cog.tiff",
+            "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/measurement/s1c-iw-grd-vv-20260812t153507-001-cog.tiff",
+            "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/manifest.safe",
+        ]);
+        let rasters = scan(&keys);
+        assert_eq!(rasters.len(), 2);
+        assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
+        // Из двух поляризаций подробной выбрана ко- (vv), не первая по списку.
+        assert!(rasters[1].0.contains("-vv-") && rasters[1].1 == Role::Detailed);
     }
 
     #[test]

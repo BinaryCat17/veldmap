@@ -305,17 +305,67 @@ def generate_code():
 
 # ── Module builders (one per language) ────────────────────────────────────────
 
+_WASM_CC_ENV: dict | None = None
+
+def wasm_cc_env() -> dict:
+    """Окружение cc-rs для C-зависимостей wasm-модулей (zstd-sys у image-tiler).
+
+    `cc` берёт компилятор из PATH, а первый найденный clang бывает без
+    бэкенда wasm32 (наборы вроде esp-clang). Кандидаты пробуются один раз за
+    сборку; уже выставленные переменные cc-rs уважаются. Не нашлось —
+    печатается предупреждение, и C-зависимость откажет своей ошибкой:
+    чисто-Rust модулям компилятор не нужен вовсе.
+    """
+    global _WASM_CC_ENV
+    if _WASM_CC_ENV is not None:
+        return _WASM_CC_ENV
+    target = WASM_TARGET.replace("-", "_")
+    if os.environ.get(f"CC_{target}") or os.environ.get(f"CC_{WASM_TARGET}"):
+        _WASM_CC_ENV = {}
+        return _WASM_CC_ENV
+
+    env = {}
+    for cc in ("clang", "/usr/bin/clang", "clang-19", "clang-18", "clang-17"):
+        try:
+            targets = subprocess.check_output(
+                [cc, "--print-targets"], text=True, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if "wasm32" in targets:
+            env[f"CC_{target}"] = cc
+            # Без freestanding заголовки clang в hosted-режиме дотягиваются
+            # include_next'ом до хостового glibc, которого у wasm-цели нет;
+            # libc-часть докрывает wasm-shim самого zstd-sys.
+            env[f"CFLAGS_{target}"] = "-ffreestanding"
+            break
+    if env:
+        # Архиватор статических библиотек — llvm-ar: бинутилсовый ar про
+        # wasm-объекты не знает.
+        for ar in ("llvm-ar", "llvm-ar-19", "llvm-ar-18", "llvm-ar-17"):
+            if shutil.which(ar):
+                env[f"AR_{target}"] = ar
+                break
+    else:
+        print("  WARNING: clang с бэкендом wasm32 не найден — "
+              "C-зависимости wasm-модулей не соберутся")
+    _WASM_CC_ENV = env
+    return env
+
+
 def build_rust_module(module: dict, profile: str, cargo_args: list):
     """Build a standalone Rust WASM module and deploy to PLUGINS_DIR."""
     package       = module["package"]
     generated_dir = os.path.join(module["dir"], "generated")
     manifest      = os.path.join(generated_dir, "Cargo.toml")
 
+    extra = wasm_cc_env()
+    env = {**os.environ, **extra} if extra else None
+
     run(["cargo", "build",
          "--manifest-path", manifest,
          "-p", package,
          "--target", WASM_TARGET,
-         ] + cargo_args, cwd=generated_dir)
+         ] + cargo_args, cwd=generated_dir, env=env)
 
     # Wrap-крейт листового модуля ни от кого не зависит и без явной проверки
     # никогда не компилируется — ошибки в его typed-стабах молчали бы.
@@ -324,7 +374,7 @@ def build_rust_module(module: dict, profile: str, cargo_args: list):
         run(["cargo", "check",
              "--manifest-path", wrap_manifest,
              "--target", WASM_TARGET,
-             ] + cargo_args, cwd=os.path.dirname(wrap_manifest))
+             ] + cargo_args, cwd=os.path.dirname(wrap_manifest), env=env)
 
     wasm_name   = package.replace("-", "_") + ".wasm"
     source_path = os.path.join(generated_dir, "target", WASM_TARGET, profile, wasm_name)

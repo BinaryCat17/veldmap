@@ -12,7 +12,13 @@ rust:
     # Потоковые декодеры: пирамида строится по строкам/чанкам, память не
     # зависит от высоты файла (см. src/cascade.rs).
     png: "0.18"
-    tiff: "0.11"
+    # Фича zstd — компрессия measurement-COG Sentinel-1 (GRD). Она тянет
+    # C-шный zstd-sys: в wasm он собирается штатно (wasm-shim в составе
+    # крейта), но компилятором обязан быть clang с бэкендом wasm32 — его
+    # находит build.py::wasm_cc_env.
+    tiff:
+      version: "0.11"
+      features: ["zstd"]
     # default-features = false: по умолчанию тянется rayon, а потоков в wasm нет.
     jpeg-decoder:
       version: "0.3"

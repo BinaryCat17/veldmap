@@ -13,9 +13,9 @@
 //! длины, головы и хвоста при разной середине — для кэша превью этого
 //! достаточно, и это осознанная граница.
 //!
-//! Суффикс кодирует раскладку тайлов (`-t512q`: сторона и кодек QOI): смена
-//! любой из констант меняет ключ, и старые каталоги кэша просто стареют до
-//! вытеснения — без версий и миграций.
+//! Суффикс кодирует раскладку и правила производства (`-t512q2`: сторона
+//! тайла, кодек QOI, ревизия декодирования): смена любого меняет ключ, и
+//! старые каталоги кэша просто стареют до вытеснения — без версий и миграций.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -24,7 +24,13 @@ use super::pyramid::TILE;
 /// Сколько байт берётся с каждого края.
 const SAMPLE: u64 = 64 * 1024;
 
-/// Отпечаток ресурса: `<fnv64 hex>-t<TILE>q`.
+/// Ревизия правил декодирования. Поднимается правкой, меняющей содержимое
+/// тайлов при тех же байтах источника — растяг широких форматов, ключевание
+/// «нет данных», взвешивание ужатия, — иначе рядом с новыми тайлами из кэша
+/// всплывали бы старые той же самой картинки.
+const DECODE_REV: u32 = 2;
+
+/// Отпечаток ресурса: `<fnv64 hex>-t<TILE>q<DECODE_REV>`.
 pub fn fingerprint(resource_id: u64, len: u64) -> Result<String, String> {
     let mut reader = veldsdk::ResourceReader::new(resource_id, len);
 
@@ -41,7 +47,7 @@ pub fn fingerprint(resource_id: u64, len: u64) -> Result<String, String> {
         hash.update(&tail);
     }
 
-    Ok(format!("{:016x}-t{}q", hash.finish(), TILE))
+    Ok(format!("{:016x}-t{}q{}", hash.finish(), TILE, DECODE_REV))
 }
 
 fn read_exact_at(reader: &mut veldsdk::ResourceReader, from: u64, size: u64) -> Result<Vec<u8>, String> {
@@ -82,7 +88,7 @@ fn of_slices(len: u64, head: &[u8], tail: &[u8]) -> String {
     hash.update(&len.to_le_bytes());
     hash.update(head);
     hash.update(tail);
-    format!("{:016x}-t{}q", hash.finish(), TILE)
+    format!("{:016x}-t{}q{}", hash.finish(), TILE, DECODE_REV)
 }
 
 #[cfg(test)]
@@ -109,7 +115,7 @@ mod tests {
     }
 
     #[test]
-    fn suffix_pins_layout() {
-        assert!(of_slices(1, b"a", b"").ends_with(&format!("-t{}q", TILE)));
+    fn suffix_pins_layout_and_decode_revision() {
+        assert!(of_slices(1, b"a", b"").ends_with(&format!("-t{}q{}", TILE, DECODE_REV)));
     }
 }

@@ -9,6 +9,10 @@
 //! Последовательный путь (полосы или тайлы без копий): один проход по чанкам
 //! сверху вниз, ряд чанков собирается в полнокровную группу строк и уезжает
 //! в каскад — дальше всё как у PNG.
+//!
+//! Сэмплы шире байта (u16, i16, f32 — радар, DEM) идут в RGBA через растяг по
+//! выборке файла, «нет данных» — прозрачностью; правила — в radiometry.rs,
+//! здесь только выбор выборки (см. [`mapping`]).
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
@@ -19,7 +23,8 @@ use tiff::tags::Tag;
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::{self, TILE};
 use super::super::resample::resample;
-use super::{to_rgba, Info, Kind};
+use super::radiometry::{percentile_stretch, Mapping, Samples};
+use super::{Info, Kind};
 
 /// Потолок области источника, читаемой ради одного тайла (в пикселях).
 /// При обычных для COG копиях-половинах область — до 1024², а больше 4096²
@@ -105,6 +110,11 @@ pub fn produce_direct<R: Read + Seek>(
 ) -> Result<(), String> {
     let mut decoder = Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
 
+    // Выборка растяга — из самой мелкой копии: она дешёвая и одна на все
+    // уровни, а значит один и тот же растяг у всех тайлов файла.
+    let stats = layout.overviews.iter().min_by_key(|o| o.width).map_or(0, |o| o.image);
+    let mapping = mapping(&mut decoder, stats)?;
+
     let lw = pyramid::level_size(info.width, level);
     let lh = pyramid::level_size(info.height, level);
     let (image, sw, sh) = pick_source(info, layout, lw);
@@ -157,7 +167,7 @@ pub fn produce_direct<R: Read + Seek>(
         let mut region = vec![0u8; (rw as usize) * (rh as usize) * 4];
         for cy in sy0 / ch..=(sy0 + rh - 1) / ch {
             for cx in sx0 / cw..=(sx0 + rw - 1) / cw {
-                let (data, dw, dh) = chunks.get(&mut decoder, cy * across + cx, channels)?;
+                let (data, dw, dh) = chunks.get(&mut decoder, cy * across + cx, channels, &mapping)?;
                 let (chunk_x, chunk_y) = (cx * cw, cy * ch);
                 let ix0 = sx0.max(chunk_x);
                 let iy0 = sy0.max(chunk_y);
@@ -211,6 +221,7 @@ impl ChunkCache {
         decoder: &mut Decoder<R>,
         index: u32,
         channels: usize,
+        mapping: &Mapping,
     ) -> Result<(&[u8], u32, u32), String> {
         if let Some(at) = self.entries.iter().position(|(i, ..)| *i == index) {
             let (_, data, dw, dh) = &self.entries[at];
@@ -219,8 +230,7 @@ impl ChunkCache {
 
         let (dw, dh) = decoder.chunk_data_dimensions(index);
         let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
-        let samples = samples(data)?;
-        let rgba = to_rgba(&samples, channels, (dw as usize) * (dh as usize));
+        let rgba = mapping.rgba(&typed(&data)?, channels, (dw as usize) * (dh as usize));
 
         // Свежий остаётся при любом бюджете: без него не собрать текущий тайл.
         self.bytes += rgba.len();
@@ -239,6 +249,9 @@ impl ChunkCache {
 
 pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emit: Emit) -> Result<(), String> {
     let mut decoder = Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
+    // Копий нет — выборка растяга из базового IFD; байтовым файлам она не
+    // стоит ни одного лишнего чтения.
+    let mapping = mapping(&mut decoder, 0)?;
     ensure_chunky(&mut decoder)?;
     let channels = channels(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
     let (cw, ch) = decoder.chunk_dimensions();
@@ -268,8 +281,7 @@ pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emi
             let index = cy * across + cx;
             let (dw, dh) = decoder.chunk_data_dimensions(index);
             let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
-            let samples = samples(data)?;
-            let rgba = to_rgba(&samples, channels, (dw as usize) * (dh as usize));
+            let rgba = mapping.rgba(&typed(&data)?, channels, (dw as usize) * (dh as usize));
             let run = (dw as usize) * 4;
             for y in 0..dh.min(rows) as usize {
                 let dst = (y * (info.width as usize) + (cx * cw) as usize) * 4;
@@ -304,20 +316,91 @@ fn channels(color: tiff::ColorType) -> Result<usize, String> {
     }
 }
 
-/// Сэмплы чанка в 8 битах на канал. У 16-битных снимков берётся старший байт:
-/// для тайлов этого достаточно, а радиометрическое растягивание — отдельная
-/// задача, и придумывать её за пользователя тут нечего.
-fn samples(data: DecodingResult) -> Result<Vec<u8>, String> {
+/// Сэмплы чанка в типизированном виде — то, что умеет разложить показ.
+/// Остальные разрядности — отказ: файла с ними в каталоге не встречалось,
+/// а поддержка «на всякий случай» не проверяется ничем.
+fn typed(data: &DecodingResult) -> Result<Samples<'_>, String> {
     use tiff::decoder::DecodingResult as R;
-    match data {
-        R::U8(v) => Ok(v),
-        R::U16(v) => Ok(v.into_iter().map(|s| (s >> 8) as u8).collect()),
-        other => Err(format!("tiff: разрядность сэмплов не поддерживается ({})", match other {
-            R::U32(_) => "u32",
-            R::U64(_) => "u64",
-            R::F32(_) => "f32",
-            R::F64(_) => "f64",
-            _ => "знаковая",
-        })),
+    Ok(match data {
+        R::U8(v) => Samples::U8(v),
+        R::U16(v) => Samples::U16(v),
+        R::I16(v) => Samples::I16(v),
+        R::F32(v) => Samples::F32(v),
+        other => {
+            return Err(format!(
+                "tiff: разрядность сэмплов не поддерживается ({})",
+                match other {
+                    R::U32(_) => "u32",
+                    R::U64(_) => "u64",
+                    R::F16(_) => "f16",
+                    R::F64(_) => "f64",
+                    _ => "знаковая",
+                }
+            ))
+        }
+    })
+}
+
+/// Сколько значений хватает выборке растяга на файл: перцентили по миллиону
+/// не отличимы от перцентилей по всем, а сортировка остаётся мгновенной.
+const STAT_SAMPLES: usize = 1 << 20;
+
+/// Маппинг показа файла: байтам — тождество, широким форматам — растяг
+/// перцентилей (см. radiometry.rs). Выборка — до четырёх чанков вразброс из
+/// IFD `stats` (у COG — самая мелкая копия, у прохода — базовый), прорежена
+/// до [`STAT_SAMPLES`]. Выбор детерминирован: одному файлу — один растяг,
+/// какие тайлы и в каком порядке ни спроси.
+///
+/// Декодер после возврата стоит на IFD `stats` — вызывающий сам наводит его
+/// на нужный образ.
+fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Mapping, String> {
+    // GDAL_NODATA пишется в базовый IFD — читается до пере-наводки.
+    let nodata = decoder
+        .get_tag_ascii_string(Tag::GdalNodata)
+        .ok()
+        .and_then(|s| s.trim().trim_end_matches('\0').parse::<f32>().ok());
+    let bits = match decoder.colortype().map_err(|e| format!("tiff: {}", e))? {
+        tiff::ColorType::Gray(bits)
+        | tiff::ColorType::GrayA(bits)
+        | tiff::ColorType::RGB(bits)
+        | tiff::ColorType::RGBA(bits) => bits,
+        other => return Err(format!("tiff: цветовая модель {:?} не поддерживается", other)),
+    };
+    if bits <= 8 {
+        return Ok(Mapping::identity(nodata));
+    }
+
+    decoder.seek_to_image(stats).map_err(|e| format!("tiff: {}", e))?;
+    ensure_chunky(decoder)?;
+    let (w, h) = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
+    let (cw, ch) = decoder.chunk_dimensions();
+    if cw == 0 || ch == 0 {
+        return Err("tiff: нулевой размер чанка".to_string());
+    }
+    if u64::from(cw) * u64::from(ch) * 4 > BAND_CAP {
+        return Err(format!("tiff: чанк {}×{} не влезает в бюджет памяти", cw, ch));
+    }
+
+    let total = w.div_ceil(cw) * h.div_ceil(ch);
+    let mut picks = [0, total / 3, 2 * total / 3, total.saturating_sub(1)].to_vec();
+    picks.dedup();
+
+    let mut values = Vec::new();
+    for &index in &picks {
+        let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
+        let samples = typed(&data)?;
+        let step = (samples.len() * picks.len() / STAT_SAMPLES).max(1);
+        for i in (0..samples.len()).step_by(step) {
+            let v = samples.get(i);
+            if v.is_finite() && Some(v) != nodata {
+                values.push(v);
+            }
+        }
+    }
+    match percentile_stretch(&mut values) {
+        Some((lo, hi)) => Ok(Mapping::stretched(lo, hi, nodata)),
+        // Вся выборка — «нет данных»: растягивать нечего, а прозрачным файл
+        // сделает само ключевание.
+        None => Ok(Mapping::identity(nodata)),
     }
 }

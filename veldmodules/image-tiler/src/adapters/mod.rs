@@ -20,6 +20,7 @@ pub mod full;
 pub mod jp2;
 pub mod jpeg;
 pub mod png;
+pub mod radiometry;
 pub mod tiff;
 
 /// Потолок стороны источника. Полосы каскада растут от ширины
