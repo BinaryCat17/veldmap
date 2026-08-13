@@ -1,0 +1,43 @@
+name: image-tiler
+version: 0.1.0
+
+# Ресурс с растром → тайлы пирамиды. Модуль полностью без состояния между
+# запросами: durable-состояние — тайловый кэш на диске, и им владеет
+# tile-cache, сюда приходят только его промахи. Про источник тайлер знает
+# минимум: ресурс открыл и закроет заказчик, а файл за ним, сеть или
+# память — не видно и не нужно.
+interface:
+  inputs:
+    # Быстрый: отпечаток содержимого и заголовок формата, без декодирования.
+    on_describe:
+      type: module/DescribeRequest
+    # Долгий: у формата без произвольного доступа — полный проход по файлу.
+    # Обслуживается целиком в одном обработчике, поэтому у убитого посреди
+    # прохода не остаётся ничего, кроме уже отданных тайлов и кэша на диске.
+    on_produce:
+      type: module/ProduceRequest
+      cancellable: true
+  outputs:
+    on_described:
+      type: module/Described
+      replies_to: on_describe
+    # Тайлы уезжают по мере готовности — на этом стоит прогрессивность
+    # показа. Не «on_tile»: так зовётся выход tile-cache, а подписчик обоих
+    # различает обработчики локальным именем топика.
+    on_produced:
+      type: module/TileResult
+      replies_to: on_produce
+    on_produce_progress:
+      type: module/ProduceProgress
+      replies_to: on_produce
+    on_produce_done:
+      type: module/ProduceDone
+      replies_to: on_produce
+      terminal: true
+
+dependencies:
+  # Всё произведённое пишется в кэш, чтобы второй запрос по этому источнику
+  # слова «проход» уже не знал. Fire-and-forget: подтверждений не ждём,
+  # потерянная запись — будущий промах кэша, а не поломка.
+  tile-cache:
+    calls: [on_store]

@@ -8,9 +8,9 @@
 use veldsdk::abi::{resource_alloc_texture, resource_write};
 use veldsdk::graphics::{
     self as gfx, buffer_usage, texture_usage, BindGroupId, BindGroupLayoutId, CompareFunction,
-    CreateRenderPipeline, CullMode, DepthStencilState, GrowingBuffer, IndexFormat, PipelineId,
-    PrimitiveTopology, RenderRecorder, StepMode, TextureFormat, TextureViewId,
-    VertexBufferLayout, VertexFormat, VISIBILITY_FRAGMENT, VISIBILITY_VERTEX,
+    CreateRenderPipeline, CullMode, DepthStencilState, FilterMode, GrowingBuffer, IndexFormat,
+    PipelineId, PrimitiveTopology, RenderRecorder, SamplerId, StepMode, TextureFormat,
+    TextureViewId, VertexBufferLayout, VertexFormat, VISIBILITY_FRAGMENT, VISIBILITY_VERTEX,
 };
 use veldsdk::proto::core::ResourceHandle;
 use veldsdk::OwnedResource;
@@ -42,6 +42,51 @@ struct CameraUniform {
 /// а просто неиспользуемой видеопамятью.
 const INITIAL_OUTLINE_BUFFER: u64 = 64 * 1024;
 
+/// С чего начинается буфер варп-сеток наложений: десятки ячеек по несколько
+/// сотен вершин.
+const INITIAL_OVERLAY_BUFFER: u64 = 256 * 1024;
+
+/// Вершина варп-сетки наложения: точка мира и координата в текстуре носителя.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OverlayVertex {
+    pub position: World,
+    pub uv: [f32; 2],
+}
+
+/// Собранные патчи наложений: общий вершинный буфер и отрисовки диапазонами —
+/// по одной на носителя. Пересобирается не кадром, а сменой состава (см.
+/// module.rs): камера двигает только uniform, мир патчей от неё не зависит.
+pub struct OverlayBatch {
+    vertices: GrowingBuffer,
+    pub draws: Vec<(BindGroupId, std::ops::Range<u32>)>,
+}
+
+impl OverlayBatch {
+    pub fn new() -> Self {
+        Self {
+            vertices: GrowingBuffer::new(
+                buffer_usage::VERTEX,
+                "вершины наложений",
+                INITIAL_OVERLAY_BUFFER,
+            ),
+            draws: Vec::new(),
+        }
+    }
+
+    /// Заливает пересобранные патчи. Пустой набор законен: наложения сняты
+    /// или их тайлы ещё не приехали.
+    pub fn fill(
+        &mut self,
+        vertices: &[OverlayVertex],
+        draws: Vec<(BindGroupId, std::ops::Range<u32>)>,
+    ) -> anyhow::Result<()> {
+        self.vertices.write(vertices)?;
+        self.draws = draws;
+        Ok(())
+    }
+}
+
 pub struct Device {
     vertices: OwnedResource,
     indices: OwnedResource,
@@ -53,6 +98,10 @@ pub struct Device {
     grid: PipelineId,
     outline: PipelineId,
     picked: PipelineId,
+    /// Наложения: варп-сетки с текстурой тайла-носителя.
+    overlay: PipelineId,
+    overlay_layout: BindGroupLayoutId,
+    overlay_sampler: SamplerId,
     /// Формат таргета, под который собраны пайплайны. Сменится — пересобирать.
     pub format: i32,
     body_indices: std::ops::Range<u32>,
@@ -106,6 +155,43 @@ impl Device {
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
 
+        // Наложения: своя вершина (точка + UV) и привязка тайла, глубина как у
+        // сетки — лежат на поверхности, спор за неё решает порядок отрисовки.
+        let overlay_layout = gfx::create_bind_group_layout(
+            "Overlay Tile BGL",
+            vec![
+                gfx::texture_layout_entry(0, VISIBILITY_FRAGMENT),
+                gfx::sampler_layout_entry(1, VISIBILITY_FRAGMENT),
+            ],
+        )?;
+        // Linear в обе стороны: уровень выбран по экранному пикселю, ужатие в
+        // кадре не глубже двух крат, тайлы sRGB — усреднение честное.
+        let overlay_sampler = gfx::create_sampler(FilterMode::FiltLinear, FilterMode::FiltLinear)?;
+        let overlay = gfx::create_render_pipeline(CreateRenderPipeline {
+            shader_id: shader.id(),
+            label: "Globe Overlay".into(),
+            vertex_entry: "vs_overlay".into(),
+            fragment_entry: "fs_overlay".into(),
+            target_format: format,
+            vertex_layouts: vec![VertexBufferLayout {
+                array_stride: std::mem::size_of::<OverlayVertex>() as u64,
+                step_mode: StepMode::StepVertex as i32,
+                attributes: gfx::packed_attributes(&[
+                    VertexFormat::VtxFloat32x3,
+                    VertexFormat::VtxFloat32x2,
+                ]),
+            }],
+            bind_group_layout_ids: vec![camera_layout.id(), overlay_layout.id()],
+            primitive_topology: PrimitiveTopology::TopologyTriangleList as i32,
+            cull_mode: CullMode::None as i32,
+            depth_stencil: Some(DepthStencilState {
+                format: DEPTH_FORMAT as i32,
+                depth_write_enabled: false,
+                depth_compare: CompareFunction::CmpLessEqual as i32,
+            }),
+            ..Default::default()
+        })?;
+
         Ok(Self {
             vertices,
             indices,
@@ -116,6 +202,9 @@ impl Device {
             grid,
             outline,
             picked,
+            overlay,
+            overlay_layout,
+            overlay_sampler,
             format,
             body_indices: mesh.surface,
             grid_indices: mesh.grid,
@@ -138,6 +227,15 @@ impl Device {
         self.outline_plain = outlines.plain.clone();
         self.outline_picked = outlines.picked.clone();
         Ok(())
+    }
+
+    /// Привязка тайла-носителя: его view и общий сэмплер.
+    pub fn overlay_bind_group(&self, view: &TextureViewId) -> anyhow::Result<BindGroupId> {
+        gfx::create_bind_group(
+            "Overlay Tile BG",
+            &self.overlay_layout,
+            vec![gfx::texture_entry(0, view), gfx::sampler_entry(1, &self.overlay_sampler)],
+        )
     }
 }
 
@@ -179,7 +277,12 @@ impl Target {
 ///
 /// Исполнит записанное кадровый цикл хоста — здесь работа только ставится в
 /// очередь на этот таргет.
-pub fn render(device: &Device, target: &Target, camera: &Camera) -> anyhow::Result<()> {
+pub fn render(
+    device: &Device,
+    target: &Target,
+    camera: &Camera,
+    overlays: &OverlayBatch,
+) -> anyhow::Result<()> {
     let uniform = CameraUniform {
         view_proj: camera.view_projection(target.aspect()),
         eye: camera.eye(),
@@ -198,6 +301,22 @@ pub fn render(device: &Device, target: &Target, camera: &Camera) -> anyhow::Resu
     recorder.set_pipeline(&device.body);
     recorder.set_bind_group(0, &device.camera_bind_group);
     recorder.draw_indexed(device.body_indices.clone(), 0, 0..1);
+
+    // Наложения — после тела (его глубина заслоняет дальнюю сторону), но до
+    // сетки и контуров: линии обязаны читаться поверх снимка.
+    if !overlays.draws.is_empty() {
+        if let Some(buffer) = overlays.vertices.id() {
+            recorder.set_pipeline(&device.overlay);
+            recorder.set_bind_group(0, &device.camera_bind_group);
+            recorder.set_vertex_buffer(0, buffer, 0, overlays.vertices.filled());
+            for (bind, range) in &overlays.draws {
+                recorder.set_bind_group(1, bind);
+                recorder.draw(range.clone(), 0..1);
+            }
+            // Дальше рисуют Земля и линии — их буферы возвращаются на место.
+            recorder.set_vertex_buffer(0, device.vertices.id(), 0, 0);
+        }
+    }
 
     recorder.set_pipeline(&device.grid);
     recorder.set_bind_group(0, &device.camera_bind_group);

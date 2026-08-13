@@ -52,10 +52,6 @@ pub struct Row {
     /// Чем запись считает каталог: у снимка это тип продукта («S2MSI2A»).
     /// Пусто — каталог не сказал, и вид выводится из имени (см. [`Row::format`]).
     pub kind: String,
-    /// Есть ли у записи место на Земле — то есть можно ли показать её на шаре.
-    /// У файла на диске его нет: контур приходит от каталога вместе с выдачей и
-    /// в библиотеку не попадает.
-    pub located: bool,
     pub status: RowStatus,
 }
 
@@ -90,14 +86,15 @@ impl Row {
     }
 
     /// Колонка «формат»: то, чем запись назвал каталог, а без этого —
-    /// расширение прописными. У папки формата нет, и вместо него сказано, что
-    /// это папка, — строчными, потому что это не расширение.
+    /// расширение прописными. Тип от каталога старше устройства записи:
+    /// продукт-папка подписывается своим типом, а «папка» — строчными,
+    /// потому что это не расширение, — остаётся безымянным.
     pub fn format(&self) -> String {
-        if self.is_folder {
-            return "папка".to_string();
-        }
         if !self.kind.is_empty() {
             return self.kind.clone();
+        }
+        if self.is_folder {
+            return "папка".to_string();
         }
         match self.title.rfind('.') {
             Some(dot) => self.title[dot + 1..].to_uppercase(),
@@ -114,7 +111,6 @@ impl Row {
             size: 0,
             date: 0,
             kind: String::new(),
-            located: false,
             status,
         }
     }
@@ -134,7 +130,6 @@ impl Row {
             size: if entry.total > 0 { entry.total } else { entry.done },
             date: entry.modified,
             kind: String::new(),
-            located: false,
             status,
         }
     }
@@ -159,7 +154,6 @@ impl Row {
                 size,
                 date,
                 kind: String::new(),
-                located: false,
                 status: RowStatus::Remote,
             },
         }

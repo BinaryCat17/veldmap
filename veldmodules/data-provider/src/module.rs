@@ -1,5 +1,7 @@
 pub mod catalogue;
 pub mod cdse;
+pub mod imagery;
+pub mod mgrs;
 pub mod s3;
 pub mod time;
 
@@ -37,6 +39,12 @@ pub enum Asked {
     /// префикс — в списке содержимого папке незачем быть собой.
     List(String),
     Search,
+    /// Растры продукта: поддерево листается страницами, найденные ключи
+    /// копятся здесь, пока хранилище не отдаст последнюю.
+    Imagery { identifier: String, keys: Vec<String> },
+    /// Продукт по точному имени — обратный ход поиска. Имя хранится для
+    /// объяснения пустого ответа: каталог на «не нашлось» отвечает молча.
+    Locate { name: String },
 }
 
 // Реэкспорт обработчиков: имена совпадают с ключами топиков в schema.yaml,
@@ -49,6 +57,8 @@ pub use cdse::{
     on_list_path,
     on_search,
     on_open,
+    on_imagery,
+    on_locate,
 
     // subs
     on_http_result,

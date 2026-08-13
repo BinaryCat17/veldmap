@@ -46,7 +46,7 @@ def test_accounted_operations_are_exactly_the_declared_ones(gen, real_schemas):
     """Что именно хост учитывает как задачу.
 
     Список короткий намеренно: отменяемым объявляет себя тот, кому нечего
-    терять при убийстве (у image-loader состояния между вызовами нет вовсе).
+    терять при убийстве (у image-tiler состояния между вызовами нет вовсе).
     Новая строка здесь — это новая убиваемая операция, и появиться она должна
     осознанно.
     """
@@ -57,7 +57,7 @@ def test_accounted_operations_are_exactly_the_declared_ones(gen, real_schemas):
         flow.extend(entries)
 
     assert sorted((e["request"], e["terminal"]) for e in flow) == [
-        ("image-loader/on_load",   "image-loader/on_load_result"),
+        ("image-tiler/on_produce", "image-tiler/on_produce_done"),
         ("network/on_fs_download", "network/on_fs_download_result"),
         ("network/on_http",        "network/on_http_result"),
     ]
@@ -84,7 +84,12 @@ def test_intermediate_replies_are_exactly_the_declared_ones(gen, real_schemas):
                     for _, _, schema, _ in real_schemas
                     for topic in gen.intermediate_replies_of(schema)}
 
-    assert sorted(intermediate) == ["network/on_fs_download_progress"]
+    assert sorted(intermediate) == [
+        "image-tiler/on_produce_progress",
+        "image-tiler/on_produced",
+        "network/on_fs_download_progress",
+        "tile-cache/on_tile",
+    ]
 
 
 def test_targeted_topics_are_declared_deliberately(gen, real_schemas):

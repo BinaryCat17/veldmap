@@ -93,3 +93,38 @@ fn fs_outline(in: VsOut) -> @location(0) vec4<f32> {
 fn fs_picked(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(ACCENT, line_alpha(in));
 }
+
+// --- Наложения ---
+// Варп-сетка тайла-носителя: позиции уже в мире, интерполяцию между узлами
+// делает GPU. Тайл — sRGB-текстура, сэмплер отдаёт линейное, а таргет —
+// UNORM с sRGB-числами (см. заголовок), поэтому перед записью значение
+// кодируется обратно — тем же правилом, что у канвы превью.
+
+struct OverlayVsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_overlay(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>) -> OverlayVsOut {
+    var out: OverlayVsOut;
+    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
+    out.uv = uv;
+    return out;
+}
+
+@group(1) @binding(0) var overlay_texture: texture_2d<f32>;
+@group(1) @binding(1) var overlay_sampler: sampler;
+
+fn encode_srgb(linear: vec3<f32>) -> vec3<f32> {
+    let lo = linear * 12.92;
+    let hi = 1.055 * pow(linear, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, linear <= vec3<f32>(0.0031308));
+}
+
+@fragment
+fn fs_overlay(in: OverlayVsOut) -> @location(0) vec4<f32> {
+    let sampled = textureSample(overlay_texture, overlay_sampler, in.uv);
+    // Альфа проходит как есть: прозрачные поля квиклуков показывают Землю.
+    return vec4<f32>(encode_srgb(sampled.rgb), sampled.a);
+}

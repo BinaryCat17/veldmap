@@ -269,17 +269,11 @@ impl Running {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         // 1) Render-опы модулей — в их таргеты (обычно текстура окна).
-        // Что за аттачменты у op'а и годятся ли они, решает graphics: правила
-        // ролей и размеров живут там. Здесь остаётся открыть pass.
+        // Опы приходят уже разрешёнными: аттачменты и объекты команд проверены
+        // на submit и живы — их держит сам op. Здесь остаётся открыть pass.
         let graphics = self.ctx.graphics.clone();
         for op in graphics.take_pending_ops() {
-            let at = match graphics.resolve_attachments(&op) {
-                Ok(at) => at,
-                Err(e) => {
-                    log::warn!(target: "render", "Render op dropped: {:#}", e);
-                    continue;
-                }
-            };
+            let at = &op.attachments;
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Module Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -302,11 +296,9 @@ impl Running {
                 }),
                 ..Default::default()
             });
-            if let Err(e) = veldmap_host_core::graphics::execute_render_commands(
-                &mut rp, &op.command_buffer, &graphics, at.width, at.height, op.instance_id,
-            ) {
-                log::warn!(target: "render", "Render op interrupted: {:#}", e);
-            }
+            veldmap_host_core::graphics::execute_render_commands(
+                &mut rp, &op.commands, at.width, at.height,
+            );
         }
 
         // 2) Блит приаттаченной поверхности в свопчейн.

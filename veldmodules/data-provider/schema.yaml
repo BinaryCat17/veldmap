@@ -15,6 +15,14 @@ interface:
       type: module/SearchRequest
     on_open:
       type: module/OpenRequest
+    # Растры продукта для наложения: роли файлов и рамка привязки. Отвечает
+    # листингом поддерева продукта и знанием раскладки .SAFE.
+    on_imagery:
+      type: module/ImageryRequest
+    # Продукт каталога по ключу хранилища: подъём к корню продукта — раскладка
+    # бакета, запрос по точному имени — каталог. Обратный ход поиска.
+    on_locate:
+      type: module/LocateRequest
 
   outputs:
     on_signed:
@@ -29,6 +37,12 @@ interface:
     on_search_result:
       type: module/SearchResponse
       replies_to: on_search
+    on_imagery_result:
+      type: module/ImageryResponse
+      replies_to: on_imagery
+    on_locate_result:
+      type: module/LocateResponse
+      replies_to: on_locate
 
 dependencies:
   # Открытие удалённого ресурса (подписать умеем только мы) и HTTP для

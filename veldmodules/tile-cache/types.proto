@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package veldmap.tile_cache;
+
+import "core.proto";
+
+// --- Tile Cache ---
+// Дисковый кэш тайлов пирамид: ключ → тайлы уровня, RGBA8 sRGB текстурами.
+//
+// Ключ — отпечаток содержимого источника из Described производителя
+// (image-tiler). Чтение по ключу безопасно по построению: соврав ключом,
+// заказчик навредит только себе; записи же приходят только от производителя,
+// который выводит ключ сам, — отравить кэш чужими тайлами неоткуда.
+
+message QueryRequest {
+  string fingerprint = 1;
+  uint32 level = 2;
+  // Прямоугольник сетки тайлов: [x0..x1) × [y0..y1).
+  uint32 x0 = 3;
+  uint32 y0 = 4;
+  uint32 x1 = 5;
+  uint32 y1 = 6;
+  // Чем назвать запрос в логах.
+  string label = 7;
+}
+
+// Промежуточный ответ: по одному на найденный тайл.
+message TileResult {
+  uint32 level = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+  veldmap.core.ResourceHandle texture = 4;  // RGBA8 sRGB; владение — заказчику
+  // Фактические размеры: краевые тайлы короче стороны тайла.
+  uint32 width = 5;
+  uint32 height = 6;
+}
+
+message TileAddr {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+message QueryDone {
+  // Чего в кэше не оказалось — за этим к производителю (image-tiler).
+  repeated TileAddr misses = 1;
+  string error = 2;  // "" = успех; промахи ошибкой не являются
+}
+
+// Пополнение кэша производителем. Кодированный тайл ложится на диск как
+// есть; формат кодека закреплён суффиксом ключа, а не полем, — смена кодека
+// меняет ключ, и старые каталоги просто стареют до вытеснения.
+message StoreTile {
+  string fingerprint = 1;
+  uint32 level = 2;
+  uint32 x = 3;
+  uint32 y = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+  bytes qoi = 7;
+}

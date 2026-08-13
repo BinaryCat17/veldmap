@@ -43,6 +43,9 @@ pub struct State {
     /// свойство найденного, а не экрана, и уезжают они к рисующему независимо
     /// от того, открыта ли вкладка (см. handlers::search::show_on_globe).
     pub shown: Option<globe::Shown>,
+    /// Наложение снимка на шар — то, что собирается или уже показано
+    /// (см. handlers::overlay). Одно: показывают выбранный продукт.
+    pub overlay: Option<overlay::OverlayState>,
 
     // -- Маршруты ответов --
     //
@@ -50,8 +53,9 @@ pub struct State {
     // «чей это id» должно иметь один ответ. Перебор по видам на этот вопрос не
     // отвечает — вид могли закрыть, пока ответ шёл, а приехавший в нём ресурс
     // всё равно наш, и опознать его можно только здесь.
-    /// Превью: одна корреляция на оба шага цепочки — открытие ресурса
-    /// (data-library или data-provider) и декодирование (image-loader).
+    /// Превью: открытие ресурса (data-library или data-provider). Дальше
+    /// показ ведёт канва, и правда о нём приходит рассылкой on_view_state,
+    /// адресованной именем вида, — корреляций там нет.
     pub previews: Correlator<ViewId>,
     /// data-provider/on_list_path_result.
     pub listings: Correlator<ViewId>,
@@ -60,6 +64,13 @@ pub struct State {
     /// globe/on_probe — «что под указателем». Не таблица, а последний вопрос:
     /// ответ на предыдущий уже не нужен, указатель с тех пор уехал.
     pub probe: veldsdk::Latest,
+    /// data-provider/on_open_result для растров наложения: корреляция → роль
+    /// растра (см. handlers::overlay).
+    pub overlay_opens: Correlator<i32>,
+    /// data-provider/on_locate_result — продукт по ключу для «показать на
+    /// шаре» из каталога и загрузок. Последний вопрос, как probe: показывают
+    /// один продукт, и второй щелчок отменяет первый.
+    pub locates: veldsdk::Latest,
 }
 
 impl State {
@@ -77,10 +88,13 @@ impl State {
             speed: 0.0,
             measured: None,
             shown: None,
+            overlay: None,
             previews: Correlator::new(),
             listings: Correlator::new(),
             searches: Correlator::new(),
             probe: veldsdk::Latest::default(),
+            overlay_opens: Correlator::new(),
+            locates: veldsdk::Latest::default(),
         };
 
         // Стартовая вкладка — из конфига; умолчание и поведение при неизвестном
@@ -112,7 +126,7 @@ impl State {
     }
 
     /// Убирает вид из набора и отдаёт его вызывающему: закрытие превью гасит
-    /// декодирование, а публиковать состояние не вправе — исходящая связь
+    /// показ у канвы, а публиковать состояние не вправе — исходящая связь
     /// модуля должна быть видна в схеме (см. handlers::nav).
     pub fn close(&mut self, id: ViewId) -> Option<View> {
         let at = self.views.iter().position(|view| view.id == id)?;
@@ -224,6 +238,17 @@ impl State {
         }
     }
 
+    /// Превью активного вида — адресат событий канвы: жесты и место приходят
+    /// только от видимой вкладки, но между отправкой и приходом её могли
+    /// сменить.
+    pub fn active_preview_mut(&mut self) -> Option<(ViewId, &mut preview::PreviewState)> {
+        let id = self.active?;
+        match self.get_mut(id)? {
+            ViewKind::Preview(preview) => Some((id, preview)),
+            _ => None,
+        }
+    }
+
     /// Выбранный на шаре снимок. `None` — не выбран ни один или закрыли вид, из
     /// которого он взялся: контуры на шаре его переживают, а сам он — нет.
     pub fn picked(&self) -> Option<&crate::proto::data_provider::DataProduct> {
@@ -239,6 +264,7 @@ pub mod browse;
 pub mod globe;
 pub mod library;
 pub mod listing;
+pub mod overlay;
 pub mod preview;
 
 pub use browse::BrowseState;

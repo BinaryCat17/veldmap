@@ -15,6 +15,10 @@ interface:
     # Что очертить на поверхности. Набор целиком, а не правка к нему.
     on_outlines:
       type: module/Outlines
+    # Что наложить на поверхность. Тоже набор целиком; ресурсы растров
+    # приходят во владение, тайлы модуль добывает конвейером сам.
+    on_overlay:
+      type: module/Overlays
     # Что под указателем. Обратный ход проекции: считать его может только тот,
     # у кого камера.
     on_probe:
@@ -34,3 +38,12 @@ dependencies:
   # и однажды не поставить).
   app:
     subs: [on_ui_event]
+  # Тайлы наложений — тот же конвейер, что у канвы превью: описание и
+  # производство у тайлера, готовое у кэша. Убиваются здесь только свои
+  # produce — устаревший уровень и снятое наложение (как в image-view).
+  image-tiler:
+    subs: [on_described, on_produced, on_produce_progress, on_produce_done]
+    calls: [on_describe, on_produce]
+  tile-cache:
+    subs: [on_tile, on_query_done]
+    calls: [on_query]

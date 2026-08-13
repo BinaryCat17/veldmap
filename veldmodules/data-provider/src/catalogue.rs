@@ -48,6 +48,22 @@ pub fn search(request: &SearchRequest) -> String {
     url.into()
 }
 
+/// Адрес запроса одного продукта по точному имени — обратный ход поиска: имя
+/// корня продукта уже известно из ключа хранилища, нужен сам продукт с
+/// футпринтом и атрибутами. Точное равенство, а не `contains`: имя продукта —
+/// ключ каталога, и подстрочное совпадение здесь означало бы чужой продукт.
+pub fn locate(name: &str) -> String {
+    let mut url = Url::parse(&format!("https://{}{}", HOST, PATH))
+        .expect("адрес каталога собирается из констант");
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("$filter", &format!("Name eq {}", literal(name)));
+        pairs.append_pair("$expand", "Attributes");
+        pairs.append_pair("$top", "1");
+    }
+    url.into()
+}
+
 /// Условия запроса через `and`. Пустое поле условия не добавляет, поэтому
 /// запрос без единого заполненного поля — это «всё подряд», и от бесконечности
 /// его удерживает только `$top`.
@@ -139,10 +155,12 @@ fn product(product: Product) -> DataProduct {
         attribute(name).and_then(|value| value.as_str()).unwrap_or_default().to_string()
     };
 
+    // Путь каталога начинается со слэша, а идентификатор у нас — без:
+    // с ним `s3::key` увидел бы пустое имя бакета.
+    let identifier = product.s3_path.trim_start_matches('/').to_string();
+    let folder = !super::s3::is_single_object(&identifier);
     DataProduct {
-        // Путь каталога начинается со слэша, а идентификатор у нас — без:
-        // с ним `s3::key` увидел бы пустое имя бакета.
-        identifier: product.s3_path.trim_start_matches('/').to_string(),
+        identifier,
         name: product.name,
         acquired: product.content_date.map(|date| super::time::parse(&date.start)).unwrap_or(0),
         size: product.size,
@@ -151,6 +169,7 @@ fn product(product: Product) -> DataProduct {
         product_type: text("productType"),
         cloud_cover: attribute("cloudCover").and_then(|value| value.as_f64()),
         online: product.online,
+        folder,
     }
 }
 

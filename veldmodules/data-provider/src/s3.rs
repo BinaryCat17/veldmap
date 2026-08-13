@@ -80,6 +80,40 @@ fn identifier(key: &str) -> String {
     format!("{}/{}", BUCKET, key)
 }
 
+/// Продукт лежит одним объектом, а не каталогом. Хранилище кладёт продукты
+/// двумя способами: развёрнутым каталогом (.SAFE, .SEN3, гранулы без
+/// суффикса) или одним архивом/файлом (вспомогательные данные, климатика), и
+/// каталог CDSE этого различия не сообщает — оно видно только по имени
+/// контейнерного формата. Ошибка на одиночном формате вне списка безопасна:
+/// «перейти» в такой продукт показывает пустую папку и «вверх», а не 404.
+pub fn is_single_object(identifier: &str) -> bool {
+    let name = identifier.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let Some((_, suffix)) = name.rsplit_once('.') else { return false };
+    matches!(
+        suffix.to_ascii_lowercase().as_str(),
+        "tgz" | "zip" | "tar" | "gz" | "nc" | "n1" | "e1" | "e2" | "hdf" | "h5" | "dbl"
+    )
+}
+
+/// Корень продукта, внутри которого лежит ключ: самый мелкий (первый слева)
+/// сегмент с контейнерным суффиксом каталога — .SAFE у Sentinel-1/2, .SEN3 у
+/// Sentinel-3. Без такого сегмента продуктом считается сам ключ: одиночные
+/// объекты (архивы, климатика) и продукты-папки без суффикса (Landsat, RTC)
+/// и есть свои корни, а угадывать глубже по одному ключу не из чего.
+pub fn product_root(identifier: &str) -> &str {
+    let trimmed = identifier.trim_end_matches('/');
+    let mut offset = 0;
+    for segment in trimmed.split('/') {
+        let end = offset + segment.len();
+        let suffix = segment.rsplit_once('.').map(|(_, suffix)| suffix.to_ascii_lowercase());
+        if matches!(suffix.as_deref(), Some("safe" | "sen3")) {
+            return &trimmed[..end];
+        }
+        offset = end + 1;
+    }
+    trimmed
+}
+
 /// GET объекта целиком или диапазоном — Range к подписи не относится и
 /// добавляется транспортом (network).
 pub fn object(identity: &Identity, identifier: &str) -> Request {
@@ -91,6 +125,23 @@ pub fn object(identity: &Identity, identifier: &str) -> Request {
 pub fn listing(identity: &Identity, path: &str, token: &str) -> Request {
     let prefix = key(path);
     let mut query = vec![("delimiter", "/"), ("list-type", "2"), ("max-keys", PAGE_SIZE)];
+    if !prefix.is_empty() {
+        query.push(("prefix", prefix));
+    }
+    if !token.is_empty() {
+        query.push(("continuation-token", token));
+    }
+    query.sort_by_key(|(name, _)| *name);
+
+    signed(identity, &format!("/{}/", BUCKET), &query)
+}
+
+/// Листинг поддерева целиком: без delimiter S3 разворачивает все ключи под
+/// префиксом. Так растры продукта находятся одним запросом на страницу —
+/// обходить .SAFE по уровням было бы четыре-пять запросов на гранулу.
+pub fn listing_deep(identity: &Identity, path: &str, token: &str) -> Request {
+    let prefix = key(path);
+    let mut query = vec![("list-type", "2"), ("max-keys", PAGE_SIZE)];
     if !prefix.is_empty() {
         query.push(("prefix", prefix));
     }
@@ -238,5 +289,52 @@ pub fn parse_listing(body: &[u8], requested: &str) -> anyhow::Result<Listing> {
 fn push(entries: &mut Vec<Entry>, entry: Entry, requested: &str) {
     if entry.identifier != requested && !entry.identifier.is_empty() {
         entries.push(entry);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_root_climbs_to_the_container() {
+        // Файл в глубине .SAFE — корень поднимается до самого продукта.
+        assert_eq!(
+            product_root(
+                "eodata/Sentinel-2/MSI/L1C/2026/08/12/S2B_MSIL1C_X.SAFE/GRANULE/L1C_T24LVP/IMG_DATA/T24LVP_TCI.jp2"
+            ),
+            "eodata/Sentinel-2/MSI/L1C/2026/08/12/S2B_MSIL1C_X.SAFE"
+        );
+        // Сам продукт (папкой, со слэшем листинга) — он и есть корень.
+        assert_eq!(
+            product_root("eodata/Sentinel-1/SAR/IW_GRDH_1S-COG/2026/08/12/S1C_IW_GRDH_1SDV_15A3_COG.SAFE/"),
+            "eodata/Sentinel-1/SAR/IW_GRDH_1S-COG/2026/08/12/S1C_IW_GRDH_1SDV_15A3_COG.SAFE"
+        );
+        // Без контейнерного суффикса подниматься не к чему: одиночный объект
+        // и папка без суффикса — сами себе продукты.
+        assert_eq!(
+            product_root("eodata/CLMS/Vegetation/ndvi_1999_v3.0.1.nc"),
+            "eodata/CLMS/Vegetation/ndvi_1999_v3.0.1.nc"
+        );
+        assert_eq!(
+            product_root("eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC/"),
+            "eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC"
+        );
+    }
+
+    #[test]
+    fn single_object_is_told_by_container_suffix() {
+        // Одиночные форматы: вспомогательные архивы, климатика.
+        assert!(is_single_object(
+            "eodata/Sentinel-2/AUX/GIP_R2ABCA/2026/08/13/S2C_OPER_GIP_R2ABCA_MPC_B00.TGZ"
+        ));
+        assert!(is_single_object("eodata/CLMS/Vegetation/ndvi_1999_v3.0.1.nc"));
+        assert!(is_single_object("eodata/Envisat/MER_FRS_1P.N1"));
+        // Каталоги: .SAFE и гранулы без контейнерного суффикса.
+        assert!(!is_single_object(
+            "eodata/Sentinel-1/SAR/IW_GRDH_1S/2026/08/12/S1C_IW_GRDH_1SSV_008959_011C6E_EDC8.SAFE"
+        ));
+        assert!(!is_single_object("eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC"));
+        assert!(!is_single_object("eodata/Landsat-5/TM/GTC_1P/1985/02/02/LS05_TM_GTC_1P_4A43"));
     }
 }

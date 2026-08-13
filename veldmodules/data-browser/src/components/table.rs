@@ -394,9 +394,10 @@ fn menu_items(row: &Row, here: &str) -> Vec<super::menu::Item> {
     use super::menu::Item;
     let mut items = Vec::new();
 
-    // Место на Земле знает только каталог, поэтому пункт есть у найденного и
-    // нет у скачанного: у файла на диске контура не осталось.
-    if row.located && !row.identifier.is_empty() {
+    // Показать на шаре можно всё, у чего есть ключ провайдера: у найденного
+    // продукт с контуром уже под рукой, у строки каталога или скачанного его
+    // восстанавливает провайдер по ключу (см. handlers::overlay).
+    if !row.identifier.is_empty() {
         items.push(Item::new("Показать на шаре", Msg::GlobeShow(row.identifier.clone())));
     }
     // Показывать папку, которая и так открыта, незачем: пункт вёл бы туда,

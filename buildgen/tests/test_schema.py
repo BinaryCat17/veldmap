@@ -133,11 +133,11 @@ def test_cancellable_request_yields_fully_qualified_topics(gen):
     # Таблица уезжает в хост как есть: в ней топики вида `<сервис>/<имя>`,
     # потому что диспетчер сравнивает именно их.
     schema = schema_with({"on_done": reply("on_work")}, cancellable=True,
-                         name="image-loader")
-    entries, errors = gen.flow_entries("image-loader", schema)
+                         name="worker")
+    entries, errors = gen.flow_entries("worker", schema)
     assert errors == []
-    assert entries == [{"request":  "image-loader/on_work",
-                        "terminal": "image-loader/on_done"}]
+    assert entries == [{"request":  "worker/on_work",
+                        "terminal": "worker/on_done"}]
 
 
 def test_non_cancellable_request_is_not_accounted(gen):

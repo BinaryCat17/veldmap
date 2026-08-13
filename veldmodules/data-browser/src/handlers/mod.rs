@@ -6,6 +6,7 @@ pub mod globe;
 pub mod library;
 pub mod listing;
 pub mod nav;
+pub mod overlay;
 pub mod preview;
 pub mod window;
 

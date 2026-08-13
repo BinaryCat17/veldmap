@@ -5,6 +5,10 @@ use crate::module::state::{State, ViewId, ViewKind};
 /// открытия вкладки (см. handlers::nav): три копии этих десяти строк
 /// расходились в мелочах.
 pub fn request_path(state: &mut State, view: ViewId, path: String) {
+    // Путь папки — всегда со слэшем; корень — пустой. Продукт из поиска
+    // приходит голым ключом (`eodata/…/S1C_….SAFE`), а листинг по префиксу
+    // без слэша показал бы саму папку вместо её содержимого.
+    let path = if path.is_empty() || path.ends_with('/') { path } else { path + "/" };
     let correlation_id = {
         let Some(ViewKind::Browse(browse)) = state.get_mut(view) else { return };
         browse.current_path = path.clone();

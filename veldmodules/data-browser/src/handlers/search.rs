@@ -7,7 +7,6 @@
 
 use crate::module::footprint;
 use crate::module::state::globe::Shown;
-use crate::module::state::listing::Menu;
 use crate::module::state::search::{Cloud, Mission, Period, SearchState};
 use crate::module::state::{State, ViewId, ViewKind};
 use crate::proto::data_provider::{DataProduct, SearchRequest, SearchResponse};
@@ -125,6 +124,15 @@ fn show_on_globe(state: &mut State, view: ViewId) {
         outlines: outlines_of(search, selected.as_deref()),
     });
     state.shown = Some(Shown { view, selected });
+
+    // Наложение — тем же правилом, что выделение: его продукт ушёл из
+    // выдачи — снимку больше не с чего быть на шаре. Правило действует на
+    // наложения из этого же вида: показанному из каталога чужая выдача не указ.
+    let alive: std::collections::HashSet<String> = {
+        let Some(ViewKind::Search(search)) = state.get(view) else { return };
+        search.results.iter().map(|product| product.identifier.clone()).collect()
+    };
+    super::overlay::keep_only(state, view, |identifier| alive.contains(identifier));
 }
 
 /// Контуры результатов; у выбранного — признак выделения.
@@ -150,12 +158,29 @@ fn outlines_of(search: &SearchState, selected: Option<&str>) -> Vec<Outline> {
 /// найденного, а не вкладки, — но выбирать среди них больше нечего: выделение
 /// гаснет, а `Shown` снимается, и щелчки по шару перестают что-либо значить.
 /// Иначе подсветка горела бы вечно: снять её мог только выбор в этом же виде.
+/// Наложение из выдачи этого вида уходит вместе с ним: продукта, из которого
+/// оно взялось, больше нет ни в одном списке (см. overlay::source_closed).
 pub fn on_source_closed(state: &mut State, id: ViewId, search: &SearchState) {
+    super::overlay::source_closed(state, id);
     if state.shown.as_ref().is_none_or(|shown| shown.view != id) {
         return;
     }
     state.shown = None;
     crate::calls::globe::on_outlines(&Outlines { outlines: outlines_of(search, None) });
+}
+
+/// Погасить выделение контура, не трогая сами контуры и выбор по щелчку.
+/// Нужно показу по ключу (см. overlay::on_locate_result): на шар лёг другой
+/// снимок, и подсвеченный контур прежнего рядом с ним — ложь о том, на что
+/// смотрят.
+pub fn deselect(state: &mut State) {
+    let Some(shown) = &state.shown else { return };
+    if shown.selected.is_none() {
+        return;
+    }
+    let view = shown.view;
+    state.shown = Some(Shown { view, selected: None });
+    show_on_globe(state, view);
 }
 
 /// Выбрать снимок, накрывающий точку. `None` — щелчок пришёлся мимо Земли.
@@ -185,34 +210,38 @@ pub fn pick(state: &mut State, at: Option<(f64, f64)>) {
     show_on_globe(state, view);
 }
 
-/// Показать снимок на шаре: выбрать его, навести на него камеру и открыть
-/// вкладку с шаром.
-pub fn show(state: &mut State, identifier: String) {
-    let Some((view, search)) = state.active_search_mut() else { return };
-    let Some(frame) = search
+/// Показать снимок из выдачи активного поиска: выбрать его, навести на него
+/// камеру, наложить его растры и открыть вкладку с шаром. `false` — активный
+/// вид не поиск или продукта в выдаче нет; тогда его восстанавливает по ключу
+/// провайдер (см. overlay::on_show_pressed).
+pub fn show(state: &mut State, identifier: &str) -> bool {
+    let Some((view, search)) = state.active_search_mut() else { return false };
+    let Some(product) = search
         .results
         .iter()
         .find(|product| product.identifier == identifier)
-        .and_then(|product| footprint::frame(&product.footprint))
+        .cloned()
     else {
-        // Показывать нечего: у снимка нет геометрии. Пункта меню у такой строки
-        // и не бывает, но между разметкой и нажатием выдача успевает смениться.
-        return;
+        return false;
     };
-    // Меню строки закрываем сами: уходим с этого экрана, а открытым оно
-    // осталось бы до возвращения.
-    search.listing.menu = Menu::Closed;
 
-    crate::calls::globe::on_camera(&CameraCommand {
-        command: Some(Command::Focus(Focus {
-            at: Some(GeoPoint { lat: frame.lat, lon: frame.lon }),
-            radius_deg: frame.radius_deg,
-        })),
-    });
+    // Наводка — при живом контуре: продукт без геометрии (вспомогательные
+    // данные) камере не указ, но наложение его растров всё равно пробуем —
+    // честный ответ «нет растров» придёт от провайдера.
+    if let Some(frame) = footprint::frame(&product.footprint) {
+        crate::calls::globe::on_camera(&CameraCommand {
+            command: Some(Command::Focus(Focus {
+                at: Some(GeoPoint { lat: frame.lat, lon: frame.lon }),
+                radius_deg: frame.radius_deg,
+            })),
+        });
+    }
 
-    state.shown = Some(Shown { view, selected: Some(identifier) });
+    state.shown = Some(Shown { view, selected: Some(identifier.to_string()) });
     show_on_globe(state, view);
+    super::overlay::show(state, &product, Some(view));
     super::nav::on_new_globe(state);
+    true
 }
 
 /// Насколько снимок велик — угловой радиус его контура. Без геометрии он

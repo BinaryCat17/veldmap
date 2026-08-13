@@ -1,0 +1,34 @@
+name: tile-cache
+version: 0.1.0
+
+# Тайловый кэш на диске: единственный владелец раскладки data/tiles.
+# Ключи непрозрачны — их выводит из содержимого источника производитель
+# (image-tiler), а сам кэш источников не читает и прав на них не имеет:
+# чтение здесь адресуется ключом, писать под ключ может только производитель.
+#
+# Отменяемых входов нет намеренно. Модуль ведёт межсобытийный учёт (ожидания
+# fs), а приговор отменяемой операции ставит трап всему инстансу, какой бы
+# обработчик ни шёл, — вместе со всеми чужими ожиданиями. Долгого здесь и
+# нет: запрос стоит нескольких чтений файлов.
+interface:
+  inputs:
+    on_query:
+      type: module/QueryRequest
+    # Пополнение от производителя, fire-and-forget: ответа нет, неудачная
+    # запись — будущий промах кэша, и она самовосстановима.
+    on_store:
+      type: module/StoreTile
+  outputs:
+    # Тайлы уезжают по мере чтения с диска, по одному.
+    on_tile:
+      type: module/TileResult
+      replies_to: on_query
+    on_query_done:
+      type: module/QueryDone
+      replies_to: on_query
+      terminal: true
+
+dependencies:
+  fs:
+    subs: [on_read_result, on_write_result, on_list_result, on_delete_result]
+    calls: [on_read, on_write, on_list, on_delete]

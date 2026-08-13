@@ -78,10 +78,13 @@ pub fn on_tab_close(state: &mut State, id: ViewId) {
     let Some(view) = state.close(id) else { return };
 
     match view.kind {
-        ViewKind::Preview(mut preview) => {
-            if let Some(correlation_id) = preview.reset() {
-                crate::cancel::image_loader::on_load(&correlation_id);
-            }
+        // Показ ведёт канва — ей и сказать, что вида больше нет: она убьёт
+        // своё производство и отпустит ресурс. Место освободится нашим Drop —
+        // после этого события, чтобы канва не рисовала в отозванное.
+        ViewKind::Preview(_) => {
+            crate::calls::image_view::on_close(&crate::proto::image_view::CloseView {
+                view: id.to_string(),
+            });
         }
         // Место под шар освободится своим Drop, но глобусу об этом надо
         // сказать: у него остался view этой текстуры, и молча освобождённую он

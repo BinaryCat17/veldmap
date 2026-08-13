@@ -22,12 +22,30 @@ use proto::{
 
 // ── Render command queue ───────────────────────────────────────
 
+/// Op в очереди держит Arc на всё, на что ссылается: аттачменты, пайплайн,
+/// bind group'ы, буферы. Модули живут своими акторами и вправе освободить
+/// объект следующим же сообщением — раньше, чем кадровый цикл доберётся до
+/// очереди; кадр, собранный до освобождения, обязан дорисоваться тем, из чего
+/// был собран. Разрешение id — только в submit (см. [`GraphicsDevice::execute`]),
+/// пока объекты заведомо живы: сам модуль ничего освободить не может, его
+/// вызов ещё не вернулся.
 pub struct PendingRenderOp {
-    pub target_view_id: u64,
-    /// 0 — теста глубины в этом кадре нет.
-    pub depth_view_id: u64,
-    pub command_buffer: CommandBuffer,
-    pub instance_id: u32,
+    pub attachments: Attachments,
+    pub commands: Vec<ResolvedCommand>,
+}
+
+/// Команда рендера с уже разрешёнными объектами. Числа скопированы из
+/// протокола как есть; клампы viewport и scissor остаются на исполнении —
+/// они свойство таргета, а не команды.
+pub enum ResolvedCommand {
+    SetPipeline(Arc<wgpu::RenderPipeline>),
+    SetBindGroup { index: u32, bind_group: Arc<wgpu::BindGroup> },
+    SetVertexBuffer { slot: u32, buffer: Arc<wgpu::Buffer>, offset: u64, size: u64 },
+    SetIndexBuffer { buffer: Arc<wgpu::Buffer>, offset: u64, size: u64, format: wgpu::IndexFormat },
+    Draw { first_vertex: u32, vertex_count: u32, first_instance: u32, instance_count: u32 },
+    DrawIndexed { first_index: u32, index_count: u32, base_vertex: i32, first_instance: u32, instance_count: u32 },
+    SetViewport { x: f32, y: f32, width: f32, height: f32, min_depth: f32, max_depth: f32 },
+    SetScissorRect { x: u32, y: u32, width: u32, height: u32 },
 }
 
 /// Разрешённые аттачменты одного render-op'а — всё, что нужно, чтобы открыть
@@ -454,6 +472,10 @@ impl GraphicsDevice {
 
     /// Буфер глубины требует того же права, что и цветной таргет: pass его
     /// очищает и в него пишет, а это запись.
+    ///
+    /// Разрешение всех id — здесь же, синхронно с вызовом модуля: ошибка
+    /// уходит ему ответом на submit, то есть туда, где ошиблись, а не warn'ом
+    /// кадрового цикла спустя произвольное число сообщений.
     pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<()> {
         let req = Submit::decode(&payload[..])?;
         if !self.registry.check_access(req.target_texture_view_id, requestor_id, Access::Write) {
@@ -465,32 +487,118 @@ impl GraphicsDevice {
             return Err(anyhow::anyhow!("Access denied to depth view {}", req.depth_texture_view_id));
         }
         if let Some(cb) = req.command_buffer {
-            self.pending_ops.lock().unwrap().push(PendingRenderOp {
-                target_view_id: req.target_texture_view_id,
-                depth_view_id: req.depth_texture_view_id,
-                command_buffer: cb,
-                instance_id: requestor_id,
-            });
+            let op = PendingRenderOp {
+                attachments: self.resolve_attachments(
+                    req.target_texture_view_id,
+                    req.depth_texture_view_id,
+                    requestor_id,
+                )?,
+                commands: self.resolve_commands(&cb, requestor_id)?,
+            };
+            self.pending_ops.lock().unwrap().push(op);
         }
         Ok(())
+    }
+
+    /// Команды протокола → команды с живыми объектами. Валидная
+    /// последовательность начинается с пайплайна: draw без него — ошибка
+    /// валидации wgpu, а её обработчик по умолчанию роняет процесс.
+    fn resolve_commands(
+        &self,
+        command_buffer: &CommandBuffer,
+        requestor_id: u32,
+    ) -> anyhow::Result<Vec<ResolvedCommand>> {
+        let buffer = |id: u64| {
+            self.get_buffer(id, requestor_id)
+                .ok_or_else(|| anyhow::anyhow!("объект {} не буфер либо недоступен", id))
+        };
+
+        let mut resolved = Vec::with_capacity(command_buffer.commands.len());
+        let mut pipeline_bound = false;
+        for render_cmd in &command_buffer.commands {
+            let cmd = match &render_cmd.command { Some(c) => c, None => continue };
+            resolved.push(match cmd {
+                RenderCommand::SetPipeline(p) => match self.get_gpu(p.pipeline_id, requestor_id) {
+                    Ok(GpuObject::RenderPipeline(pipeline)) => {
+                        pipeline_bound = true;
+                        ResolvedCommand::SetPipeline(pipeline)
+                    }
+                    _ => anyhow::bail!("объект {} не pipeline либо недоступен", p.pipeline_id),
+                },
+                RenderCommand::SetBindGroup(bg) => match self.get_gpu(bg.bind_group_id, requestor_id) {
+                    Ok(GpuObject::BindGroup(bind_group)) => {
+                        ResolvedCommand::SetBindGroup { index: bg.index, bind_group }
+                    }
+                    _ => anyhow::bail!("объект {} не bind group либо недоступен", bg.bind_group_id),
+                },
+                RenderCommand::SetVertexBuffer(vb) => ResolvedCommand::SetVertexBuffer {
+                    slot: vb.slot,
+                    buffer: buffer(vb.buffer_id)?,
+                    offset: vb.offset,
+                    size: vb.size,
+                },
+                RenderCommand::SetIndexBuffer(ib) => ResolvedCommand::SetIndexBuffer {
+                    buffer: buffer(ib.buffer_id)?,
+                    offset: ib.offset,
+                    size: ib.size,
+                    format: if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 },
+                },
+                RenderCommand::Draw(d) => {
+                    if !pipeline_bound {
+                        anyhow::bail!("draw до первого SetPipeline");
+                    }
+                    ResolvedCommand::Draw {
+                        first_vertex: d.first_vertex,
+                        vertex_count: d.vertex_count,
+                        first_instance: d.first_instance,
+                        instance_count: d.instance_count,
+                    }
+                }
+                RenderCommand::DrawIndexed(di) => {
+                    if !pipeline_bound {
+                        anyhow::bail!("draw до первого SetPipeline");
+                    }
+                    ResolvedCommand::DrawIndexed {
+                        first_index: di.first_index,
+                        index_count: di.index_count,
+                        base_vertex: di.base_vertex,
+                        first_instance: di.first_instance,
+                        instance_count: di.instance_count,
+                    }
+                }
+                RenderCommand::SetViewport(v) => ResolvedCommand::SetViewport {
+                    x: v.x, y: v.y, width: v.width, height: v.height,
+                    min_depth: v.min_depth, max_depth: v.max_depth,
+                },
+                RenderCommand::SetScissorRect(s) => ResolvedCommand::SetScissorRect {
+                    x: s.x, y: s.y, width: s.width, height: s.height,
+                },
+            });
+        }
+        Ok(resolved)
     }
 
     /// Разрешает аттачменты op'а и проверяет то, что wgpu проверил бы сам —
     /// но ошибкой валидации, роняющей процесс: роль текстуры (цвет или
     /// глубина) и совпадение размеров.
-    pub fn resolve_attachments(&self, op: &PendingRenderOp) -> anyhow::Result<Attachments> {
-        let view = |id: u64| match self.get_gpu(id, op.instance_id) {
+    fn resolve_attachments(
+        &self,
+        target_view_id: u64,
+        depth_view_id: u64,
+        requestor_id: u32,
+    ) -> anyhow::Result<Attachments> {
+        let view = |id: u64| match self.get_gpu(id, requestor_id) {
             Ok(GpuObject::TextureView { view, width, height, format }) => Ok((view, width, height, format)),
             _ => Err(anyhow::anyhow!("view {} is unknown or not a texture view", id)),
         };
 
-        let (target, width, height, format) = view(op.target_view_id)?;
+        let (target, width, height, format) = view(target_view_id)?;
         if crate::format::is_depth(format) {
             return Err(anyhow::anyhow!(
-                "view {} is a depth buffer and cannot be a colour target", op.target_view_id));
+                "view {} is a depth buffer and cannot be a colour target", target_view_id));
         }
 
-        let depth = match op.depth_view_id {
+        let depth = match depth_view_id {
             0 => None,
             id => {
                 let (depth_view, dw, dh, dformat) = view(id)?;
@@ -511,84 +619,57 @@ impl GraphicsDevice {
 
 // ── Render command execution ───────────────────────────────────
 
-/// Ошибка в state-команде обрывает весь op, а не пропускает одну команду:
-/// draw после пропущенного `SetPipeline`/`SetBindGroup` исполнился бы с чужим
-/// состоянием — в лучшем случае мусор на экране, в худшем ошибка валидации
-/// wgpu. Уже закодированное в pass остаётся (кадр выйдет неполным), но
-/// последовательность — валидной.
-pub fn execute_render_commands<'a>(
-    rp: &mut wgpu::RenderPass<'a>,
-    command_buffer: &'a CommandBuffer,
-    gpu: &'a GraphicsDevice,
+/// Кодирует разрешённый op в открытый pass. Ошибок здесь не бывает: всё, что
+/// могло не найтись, не нашлось бы ещё на submit, а объекты живы — их держит
+/// сам op. Клампы viewport и scissor — по размерам таргета: они свойство
+/// аттачмента, каким он был на submit, и приходят вместе с ним.
+pub fn execute_render_commands(
+    rp: &mut wgpu::RenderPass<'_>,
+    commands: &[ResolvedCommand],
     target_width: u32,
     target_height: u32,
-    requestor_id: u32,
-) -> anyhow::Result<()> {
-    // Валидная последовательность начинается с пайплайна: draw без него —
-    // ошибка валидации, а её обработчик по умолчанию роняет процесс.
-    let mut pipeline_bound = false;
-    for render_cmd in &command_buffer.commands {
-        let cmd = match &render_cmd.command { Some(c) => c, None => continue };
+) {
+    for cmd in commands {
         match cmd {
-            RenderCommand::SetPipeline(p) => {
-                match gpu.get_gpu(p.pipeline_id, requestor_id) {
-                    Ok(GpuObject::RenderPipeline(pipeline)) => {
-                        rp.set_pipeline(pipeline.as_ref());
-                        pipeline_bound = true;
-                    }
-                    _ => anyhow::bail!("объект {} не pipeline либо недоступен", p.pipeline_id),
-                }
+            ResolvedCommand::SetPipeline(pipeline) => rp.set_pipeline(pipeline.as_ref()),
+            ResolvedCommand::SetBindGroup { index, bind_group } => {
+                rp.set_bind_group(*index, bind_group.as_ref(), &[]);
             }
-            RenderCommand::SetBindGroup(bg) => {
-                match gpu.get_gpu(bg.bind_group_id, requestor_id) {
-                    Ok(GpuObject::BindGroup(bind_group)) => {
-                        rp.set_bind_group(bg.index, bind_group.as_ref(), &[]);
-                    }
-                    _ => anyhow::bail!("объект {} не bind group либо недоступен", bg.bind_group_id),
-                }
+            ResolvedCommand::SetVertexBuffer { slot, buffer, offset, size } => {
+                let end = if *size > 0 { (offset + size).min(buffer.size()) } else { buffer.size() };
+                rp.set_vertex_buffer(*slot, buffer.slice(*offset..end));
             }
-            RenderCommand::SetVertexBuffer(vb) => {
-                let Some(buffer) = gpu.get_buffer(vb.buffer_id, requestor_id) else {
-                    anyhow::bail!("объект {} не буфер либо недоступен", vb.buffer_id);
-                };
-                let end = if vb.size > 0 { (vb.offset + vb.size).min(buffer.size()) } else { buffer.size() };
-                rp.set_vertex_buffer(vb.slot, buffer.slice(vb.offset..end));
+            ResolvedCommand::SetIndexBuffer { buffer, offset, size, format } => {
+                let end = if *size > 0 { (offset + size).min(buffer.size()) } else { buffer.size() };
+                rp.set_index_buffer(buffer.slice(*offset..end), *format);
             }
-            RenderCommand::SetIndexBuffer(ib) => {
-                let format = if ib.index_format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
-                let Some(buffer) = gpu.get_buffer(ib.buffer_id, requestor_id) else {
-                    anyhow::bail!("объект {} не буфер либо недоступен", ib.buffer_id);
-                };
-                let end = if ib.size > 0 { (ib.offset + ib.size).min(buffer.size()) } else { buffer.size() };
-                rp.set_index_buffer(buffer.slice(ib.offset..end), format);
+            ResolvedCommand::Draw { first_vertex, vertex_count, first_instance, instance_count } => {
+                rp.draw(
+                    *first_vertex..(first_vertex + vertex_count),
+                    *first_instance..(first_instance + instance_count),
+                );
             }
-            RenderCommand::Draw(d) => {
-                if !pipeline_bound {
-                    anyhow::bail!("draw до первого SetPipeline");
-                }
-                rp.draw(d.first_vertex..(d.first_vertex + d.vertex_count), d.first_instance..(d.first_instance + d.instance_count));
+            ResolvedCommand::DrawIndexed { first_index, index_count, base_vertex, first_instance, instance_count } => {
+                rp.draw_indexed(
+                    *first_index..(first_index + index_count),
+                    *base_vertex,
+                    *first_instance..(first_instance + instance_count),
+                );
             }
-            RenderCommand::DrawIndexed(di) => {
-                if !pipeline_bound {
-                    anyhow::bail!("draw до первого SetPipeline");
-                }
-                rp.draw_indexed(di.first_index..(di.first_index + di.index_count), di.base_vertex, di.first_instance..(di.first_instance + di.instance_count));
+            ResolvedCommand::SetViewport { x, y, width, height, min_depth, max_depth } => {
+                let x = x.clamp(0.0, target_width as f32);
+                let y = y.clamp(0.0, target_height as f32);
+                let w = width.min(target_width as f32 - x);
+                let h = height.min(target_height as f32 - y);
+                if w > 0.0 && h > 0.0 { rp.set_viewport(x, y, w, h, *min_depth, *max_depth); }
             }
-            RenderCommand::SetViewport(v) => {
-                let x = v.x.clamp(0.0, target_width as f32);
-                let y = v.y.clamp(0.0, target_height as f32);
-                let w = v.width.min(target_width as f32 - x);
-                let h = v.height.min(target_height as f32 - y);
-                if w > 0.0 && h > 0.0 { rp.set_viewport(x, y, w, h, v.min_depth, v.max_depth); }
-            }
-            RenderCommand::SetScissorRect(s) => {
-                let x = s.x.min(target_width.saturating_sub(1));
-                let y = s.y.min(target_height.saturating_sub(1));
-                let w = s.width.min(target_width - x).max(1);
-                let h = s.height.min(target_height - y).max(1);
+            ResolvedCommand::SetScissorRect { x, y, width, height } => {
+                let x = (*x).min(target_width.saturating_sub(1));
+                let y = (*y).min(target_height.saturating_sub(1));
+                let w = (*width).min(target_width - x).max(1);
+                let h = (*height).min(target_height - y).max(1);
                 rp.set_scissor_rect(x, y, w, h);
             }
         }
     }
-    Ok(())
 }

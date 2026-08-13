@@ -71,8 +71,19 @@ pub enum Msg {
     Preview(String),
     /// Смотреть ещё не скачанное — по ключу провайдера.
     PreviewRemote(String),
-    /// Масштаб показа снимка: 0 — вписать в окно.
-    Zoom(f32),
+
+    // -- Канва превью --
+    //
+    // Нагрузку области подставляет рендерер (как у глобуса); кнопки тулбара
+    // едут своими сообщениями.
+    /// Области под кадр досталось новое место — в пикселях её текстуры.
+    PreviewResized(ViewportSize),
+    /// Указатель над канвой, в тех же пикселях.
+    PreviewPointer(PointerEvent),
+    /// Вписать снимок в канву.
+    PreviewFit,
+    /// Шаг масштаба вокруг центра: знак — направление.
+    PreviewZoom(f32),
 
     // -- Глобус --
     //
@@ -82,10 +93,12 @@ pub enum Msg {
     GlobeResized(ViewportSize),
     /// Указатель над областью, в тех же пикселях.
     GlobePointer(PointerEvent),
-    /// Показать снимок на шаре — по ключу провайдера. Единственное сообщение
-    /// глобуса, у которого нагрузка своя: приходит оно не от области, а из
-    /// меню строки списка.
+    /// Показать снимок на шаре — по ключу провайдера. Нагрузка своя: приходит
+    /// не от области, а из меню строки списка.
     GlobeShow(String),
+    /// Снять наложение с шара — кнопка в полосе вкладки глобуса. Контуры
+    /// выдачи остаются: снимается снимок, а не найденное.
+    GlobeClear,
 }
 
 /// Имена методов. Каждым пользуются ровно две ветви — encode и decode, — и
@@ -117,10 +130,14 @@ mod method {
     pub const DELETE: &str = "delete";
     pub const PREVIEW: &str = "preview";
     pub const PREVIEW_REMOTE: &str = "preview_remote";
-    pub const ZOOM: &str = "zoom";
+    pub const PREVIEW_RESIZED: &str = "preview_resized";
+    pub const PREVIEW_POINTER: &str = "preview_pointer";
+    pub const PREVIEW_FIT: &str = "preview_fit";
+    pub const PREVIEW_ZOOM: &str = "preview_zoom";
     pub const GLOBE_RESIZED: &str = "globe_resized";
     pub const GLOBE_POINTER: &str = "globe_pointer";
     pub const GLOBE_SHOW: &str = "globe_show";
+    pub const GLOBE_CLEAR: &str = "globe_clear";
 }
 
 impl UiMessage for Msg {
@@ -150,12 +167,17 @@ impl UiMessage for Msg {
             Msg::Delete(name) => (method::DELETE, name.clone()),
             Msg::Preview(name) => (method::PREVIEW, name.clone()),
             Msg::PreviewRemote(identifier) => (method::PREVIEW_REMOTE, identifier.clone()),
-            Msg::Zoom(zoom) => (method::ZOOM, zoom.to_string()),
+            // Нагрузку области подставляет рендерер — в разметке одни имена.
+            Msg::PreviewResized(_) => (method::PREVIEW_RESIZED, String::new()),
+            Msg::PreviewPointer(_) => (method::PREVIEW_POINTER, String::new()),
+            Msg::PreviewFit => (method::PREVIEW_FIT, String::new()),
+            Msg::PreviewZoom(direction) => (method::PREVIEW_ZOOM, direction.to_string()),
             // Значение здесь не едет вовсе: разметка объявляет только имя, а
             // нагрузку подставит рендерер.
             Msg::GlobeResized(_) => (method::GLOBE_RESIZED, String::new()),
             Msg::GlobePointer(_) => (method::GLOBE_POINTER, String::new()),
             Msg::GlobeShow(identifier) => (method::GLOBE_SHOW, identifier.clone()),
+            Msg::GlobeClear => (method::GLOBE_CLEAR, String::new()),
         };
         (method.to_string(), value)
     }
@@ -193,10 +215,14 @@ impl UiMessage for Msg {
             method::DELETE => Msg::Delete(value.to_string()),
             method::PREVIEW => Msg::Preview(value.to_string()),
             method::PREVIEW_REMOTE => Msg::PreviewRemote(value.to_string()),
-            method::ZOOM => Msg::Zoom(value.parse().ok()?),
+            method::PREVIEW_RESIZED => Msg::PreviewResized(event.size()?.clone()),
+            method::PREVIEW_POINTER => Msg::PreviewPointer(event.pointer()?.clone()),
+            method::PREVIEW_FIT => Msg::PreviewFit,
+            method::PREVIEW_ZOOM => Msg::PreviewZoom(value.parse().ok()?),
             method::GLOBE_RESIZED => Msg::GlobeResized(event.size()?.clone()),
             method::GLOBE_POINTER => Msg::GlobePointer(event.pointer()?.clone()),
             method::GLOBE_SHOW => Msg::GlobeShow(value.to_string()),
+            method::GLOBE_CLEAR => Msg::GlobeClear,
             _ => return None,
         })
     }
@@ -238,8 +264,10 @@ mod tests {
             Msg::Delete("запись".into()),
             Msg::Preview("запись".into()),
             Msg::PreviewRemote("продукт".into()),
-            Msg::Zoom(1.5),
+            Msg::PreviewFit,
+            Msg::PreviewZoom(1.0),
             Msg::GlobeShow("продукт".into()),
+            Msg::GlobeClear,
         ];
         messages.extend(Filter::ALL.iter().map(|choice| Msg::Filter(*choice)));
         messages.extend(Grouping::ALL.iter().map(|choice| Msg::Group(*choice)));
@@ -256,25 +284,44 @@ mod tests {
         }
     }
 
-    /// Нагрузку области подставляет рендерер — разбор этих двоих идёт не через
-    /// строку, а через свой вид Payload.
+    /// Нагрузку области подставляет рендерер — разбор этих сообщений идёт не
+    /// через строку, а через свой вид Payload. Области две — глобус и канва
+    /// превью, — и различает их только имя метода.
     #[test]
     fn viewport_payloads_are_carried_whole() {
         use crate::proto::ui_service::{PointerEvent, ViewportSize};
 
         let size = ViewportSize { width: 800, height: 600 };
-        let event = UiEventResponse {
-            method: method::GLOBE_RESIZED.to_string(),
-            payload: Some(Wire::Size(size.clone())),
-        };
-        assert!(matches!(Msg::decode(&event), Some(Msg::GlobeResized(carried)) if carried == size));
+        for (method, matches_size) in [
+            (method::GLOBE_RESIZED, true),
+            (method::PREVIEW_RESIZED, false),
+        ] {
+            let event = UiEventResponse {
+                method: method.to_string(),
+                payload: Some(Wire::Size(size.clone())),
+            };
+            match (Msg::decode(&event), matches_size) {
+                (Some(Msg::GlobeResized(carried)), true) => assert_eq!(carried, size),
+                (Some(Msg::PreviewResized(carried)), false) => assert_eq!(carried, size),
+                (decoded, _) => panic!("'{}' разобрался не тем: {:?}", method, decoded.map(|m| m.encode())),
+            }
+        }
 
         let pointer = PointerEvent::default();
-        let event = UiEventResponse {
-            method: method::GLOBE_POINTER.to_string(),
-            payload: Some(Wire::Pointer(pointer.clone())),
-        };
-        assert!(matches!(Msg::decode(&event), Some(Msg::GlobePointer(carried)) if carried == pointer));
+        for (method, is_globe) in [
+            (method::GLOBE_POINTER, true),
+            (method::PREVIEW_POINTER, false),
+        ] {
+            let event = UiEventResponse {
+                method: method.to_string(),
+                payload: Some(Wire::Pointer(pointer.clone())),
+            };
+            match (Msg::decode(&event), is_globe) {
+                (Some(Msg::GlobePointer(carried)), true) => assert_eq!(carried, pointer),
+                (Some(Msg::PreviewPointer(carried)), false) => assert_eq!(carried, pointer),
+                (decoded, _) => panic!("'{}' разобрался не тем: {:?}", method, decoded.map(|m| m.encode())),
+            }
+        }
     }
 
     /// Незнакомое имя — `None`: warn в module.rs, а не паника и не чужой смысл.

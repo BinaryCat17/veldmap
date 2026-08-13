@@ -161,11 +161,18 @@ pub fn opened(result: Result<ResourceHandle, String>) -> ResourceOpened {
     ResourceOpened { handle, error }
 }
 
-/// Ответ, которого никто не ждал: ресурс в нём всё равно наш, поэтому
-/// освобождаем — рассогласование должно стоить строчки в логе, а не утечки.
+/// Ответ, которого мы не ждём. На разделяемом топике ответов (fs/on_read_result
+/// слушают и data-library, и tile-cache) это прежде всего **чужой** ответ:
+/// broadcast-конвенция шины доставляет его всем подписчикам, и незнакомая
+/// корреляция — норма, а не рассогласование. Реже это наш же ответ с
+/// потерянным учётом — тогда ресурс в нём наш и утёк бы.
+///
+/// Освобождение покрывает оба случая одним движением: у своего ресурса free
+/// настоящий, у чужого — откажет проверкой владения на хосте и ничего не
+/// тронет. Лог поэтому debug, а не warn: warn выл бы на каждый чужой ответ.
 pub fn discard(topic: &str, opened: ResourceOpened) {
-    log::warn!(target: "handlers", "{} без учтённого запроса: {}",
-               topic, crate::abi::correlation());
+    log::debug!(target: "handlers", "{} не наш или без учтённого запроса: {}",
+                topic, crate::abi::correlation());
     if let Some(handle) = opened.handle {
         crate::abi::resource_free(handle.id);
     }

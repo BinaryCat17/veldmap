@@ -66,26 +66,32 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::Delete(name) => handlers::library::on_delete_pressed(state, name),
         Msg::Preview(name) => handlers::preview::on_view_local_pressed(state, name),
         Msg::PreviewRemote(identifier) => handlers::preview::on_view_remote_pressed(state, identifier),
-        Msg::Zoom(zoom) => handlers::preview::on_zoom(state, zoom),
+        Msg::PreviewResized(size) => handlers::preview::on_resized(state, size),
+        Msg::PreviewPointer(event) => handlers::preview::on_pointer(state, event),
+        Msg::PreviewFit => handlers::preview::on_fit(state),
+        Msg::PreviewZoom(direction) => handlers::preview::on_zoom_step(state, direction),
         Msg::GlobeResized(size) => handlers::globe::on_resized(state, size),
         Msg::GlobePointer(event) => handlers::globe::on_pointer(state, event),
-        Msg::GlobeShow(identifier) => handlers::search::show(state, identifier),
+        Msg::GlobeShow(identifier) => handlers::overlay::on_show_pressed(state, identifier),
+        Msg::GlobeClear => handlers::overlay::clear(state),
     }
 }
 
 // -- Sub handlers --
 pub use handlers::library::on_state;
-pub use handlers::preview::on_load_result;
+pub use handlers::preview::on_view_state;
 
 /// Ресурс открыт. Топиков два — библиотека отдаёт скачанный файл, провайдер
-/// открывает ещё не скачанный, — но сообщение одно и потребитель один, так
-/// что и обработчик один: дальше превью безразлично, откуда взялись байты.
-///
+/// открывает ещё не скачанный, — но сообщение одно, так что и обработчик
+/// один; чей это ответ — превью или растра наложения, — говорит таблица
+/// маршрутов, а не содержимое.
 pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
     if handlers::preview::on_resource_opened(state, &opened) { return; }
+    if handlers::overlay::on_opened(state, &opened) { return; }
     veldsdk::resource::discard("on_open_result", opened);
 }
 pub use handlers::globe::on_probed;
+pub use handlers::overlay::{on_imagery_result, on_locate_result};
 pub use handlers::search::on_search_result;
 pub use handlers::browse::on_list_path_result;
 pub use handlers::window::on_window_resized;

@@ -6,7 +6,7 @@
 
 use veld_ui_service_wrap::row;
 use crate::proto::ui_service::{Alignment, Element, Length, Padding};
-use crate::module::components::{controls, format, list_screen, Row, Screen};
+use crate::module::components::{controls, format, list_screen, Row, RowStatus, Screen};
 use crate::module::state::listing::Menu;
 use crate::module::state::{SearchState, State};
 use crate::module::{theme, Msg};
@@ -16,16 +16,33 @@ pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
     let rows: Vec<Row> = search
         .results
         .iter()
-        .map(|product| Row {
-            kind: product.product_type.clone(),
-            located: !product.footprint.is_empty(),
-            ..Row::remote(
-                &state.library,
-                product.identifier.clone(),
-                product.name.clone(),
-                product.size,
-                product.acquired,
-            )
+        .map(|product| {
+            // Каталог или объект — сказал провайдер (см. DataProduct.folder):
+            // GET по пути продукта-каталога — это 404, и «открыть» его значит
+            // перейти внутрь, теми же строками, что папки сетевого каталога;
+            // продукт-архив — обычный файл. Сколько содержимого каталога уже
+            // на диске, знает библиотека.
+            let row = if product.folder {
+                let done = state.library.count_under(&format!("{}/", product.identifier));
+                let status = if done > 0 { RowStatus::Partial { done } } else { RowStatus::Remote };
+                Row {
+                    size: product.size,
+                    date: product.acquired,
+                    ..Row::folder_row(product.identifier.clone(), product.name.clone(), status)
+                }
+            } else {
+                Row::remote(
+                    &state.library,
+                    product.identifier.clone(),
+                    product.name.clone(),
+                    product.size,
+                    product.acquired,
+                )
+            };
+            Row {
+                kind: product.product_type.clone(),
+                ..row
+            }
         })
         .collect();
 

@@ -1,48 +1,58 @@
-//! Вид предпросмотра: открыть файл ресурсом, отдать его image-loader,
-//! показать текстуру.
+//! Вид предпросмотра: открыть файл ресурсом, отдать его канве (image-view) и
+//! переводить жесты над ней в намерения камеры.
 //!
-//! Ресурс открываем мы, а не загрузчик: он не должен знать, лежит файл на
-//! диске или на той стороне сети — читаются они одинаково. Мы же его и
-//! закрываем, когда декодирование кончилось.
+//! Ресурс открываем мы, а не канва: она не должна знать, лежит файл на диске
+//! или на той стороне сети, — и не знает, потому что оба открывателя отвечают
+//! общим `core.ResourceOpened`, а дальше разницы нет. Владение уходит канве
+//! вместе с on_show: показ переживает наш обработчик.
 //!
-//! Отсюда и один обработчик на оба источника: и data-library, и data-provider
-//! отвечают общим `core.ResourceOpened`, а дальше разницы между ними нет.
+//! Жест наш, камера — её: какой кнопкой тащат и что делает колесо, видно
+//! только отсюда, а во что превращается сдвиг — знает только та, у кого
+//! камера (ровно то же разделение, что у глобуса).
 //!
-//! Каждый просмотр — своя вкладка со своим состоянием, поэтому «чей это
-//! ответ» и «актуален ли он» — два разных вопроса к двум разным местам:
-//! на первый отвечает таблица маршрутов `State::previews`, на второй —
-//! `Latest` внутри самого вида. Вкладку могли закрыть, пока ответ шёл,
-//! и тогда ответ наш, а показывать его негде.
-//!
-//! Формат не проверяем: его определяет по содержимому image-loader, и второй
-//! список расширений здесь был бы вторым источником правды (и разошёлся бы
-//! с первым). Нераспознанный файл вернётся ошибкой и покажется на экране.
+//! «Чей это ответ» и «актуален ли он» — два разных вопроса: на первый
+//! отвечает таблица маршрутов `State::previews`, на второй — `Latest` внутри
+//! вида. Вкладку могли закрыть, пока ответ шёл, и тогда ответ наш, а
+//! показывать его негде.
 
-use crate::module::state::{State, ViewId};
-use crate::proto::image_loader::{LoadImageRequest, LoadImageResult};
-use veldsdk::Reply;
+use crate::module::state::{State, ViewId, ViewKind};
+use crate::proto::image_view::{
+    camera_command::Command, CameraCommand, Canvas, Fit, Pan, ShowRequest, ViewState, ZoomAt,
+};
+use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
+use veldsdk::graphics::TextureFormat;
 use veldsdk::proto::core::ResourceOpened;
+
+/// Формат места под кадр. UNORM с sRGB-числами — тот же выбор и по той же
+/// причине, что у места глобуса: разметка сэмплит эту текстуру как обычную
+/// картинку и линеаризует сама.
+const SURFACE_FORMAT: TextureFormat = TextureFormat::TexRgba8Unorm;
+
+/// Во сколько раз шаг колеса меняет масштаб. Щелчок приезжает долями с
+/// инерцией, так что итоговое приближение — плавная степень этого числа.
+const ZOOM_PER_CLICK: f64 = 1.25;
+
+/// Шаг кнопок ± в тулбаре.
+const ZOOM_STEP: f32 = 1.5;
 
 /// Просмотр скачанного файла: открывает библиотека — файл её, и где он лежит,
 /// знает только она.
 pub fn on_view_local_pressed(state: &mut State, name: String) {
     if name.is_empty() { return; }
 
-    // Один correlation_id на оба шага: по нему же отменяется декодирование.
     let correlation_id = begin_open(state, name.clone(), Some(name.clone()));
     crate::calls::data_library::on_open(&crate::proto::data_library::OpenRequest {
         name,
     }, &correlation_id);
 }
 
-/// Просмотр ещё не скачанного файла. Ресурс открывает data-provider (подписать
-/// запрос к хранилищу может только он) и передаёт нам владение; дальше путь
-/// тот же, что у локального файла: read-грант загрузчику и декод по фрагментам
-/// — по проводу идёт только то, что декодер действительно прочитал.
+/// Просмотр ещё не скачанного. Ресурс открывает data-provider (подписать
+/// запрос к хранилищу может только он); дальше путь тот же, что у локального:
+/// по проводу идут только те окна файла, которые конвейер тайлов действительно
+/// прочитал.
 pub fn on_view_remote_pressed(state: &mut State, identifier: String) {
     if identifier.is_empty() { return; }
 
-    // Записи библиотеки за таким снимком нет: он ещё в хранилище.
     let correlation_id = begin_open(state, identifier.clone(), None);
     crate::calls::data_provider::on_open(&crate::proto::data_provider::OpenRequest {
         identifier,
@@ -50,7 +60,7 @@ pub fn on_view_remote_pressed(state: &mut State, identifier: String) {
 }
 
 /// Общее начало обоих путей: новая вкладка и корреляция, по которой её найдёт
-/// ответ.
+/// ответ открывателя.
 fn begin_open(state: &mut State, label: String, entry: Option<String>) -> String {
     let view = super::nav::open_preview(state, label, entry);
     let correlation_id = state.preview_mut(view)
@@ -60,144 +70,162 @@ fn begin_open(state: &mut State, label: String, entry: Option<String>) -> String
     correlation_id
 }
 
-/// Неудача превью: на экран и в лог. Экран видит только тот, кто в этот момент
-/// на него смотрит, — а причина отказа (истёкшая подпись, неподдерживаемый
-/// формат) нужна и после того, как пользователь ушёл на другую вкладку.
-fn fail(state: &mut State, view: ViewId, error: String) {
-    let Some(preview) = state.preview_mut(view) else { return };
-    veldsdk::log::warn!(target: "handlers", "превью '{}': {}", preview.label, error);
-    preview.error = Some(error);
-}
-
 /// Ресурс открыт — неважно кем: библиотекой (скачанный файл) или провайдером
-/// (ещё не скачанный, читается по сети). Дальше разницы нет.
+/// (читается по сети). Владение уходит канве вместе с именем вида; отсюда
+/// показ ведёт она. `false` — ответ не наш.
 ///
 /// Устаревший ответ (вкладку закрыли или запрос вытеснили) всё равно наш:
 /// ресурс уже принадлежит нам, и бросить его значит потерять и регион, и
-/// открытый на той стороне дескриптор. `false` — ответ не наш.
+/// открытый на той стороне дескриптор.
 pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     let correlation_id = veldsdk::correlation();
-    // Смотрим, не снимая с учёта: у актуального запроса впереди второй ответ —
-    // от загрузчика, и он приедет с той же корреляцией.
-    let Some(&mut view) = state.previews.peek(&correlation_id) else { return false };
+    let Some(view) = state.previews.take(&correlation_id) else { return false };
 
     let current = match state.preview_mut(view) {
-        Some(preview) => preview.request.status(&correlation_id) == Reply::Current,
+        Some(preview) => preview.request.settle(&correlation_id) == veldsdk::Reply::Current,
         // Вкладку закрыли, пока ответ шёл.
         None => false,
     };
 
     if !current {
-        // Показывать нечего, но ресурс уже наш, и второго ответа по нему не
-        // будет: операция кончается здесь.
-        finish(state, view, &correlation_id);
         if let Some(handle) = &opened.handle {
             veldsdk::resource::release(handle.clone());
         }
         return true;
     }
 
-    match veldsdk::resource::accept(opened) {
-        Ok(handle) => start_decode(state, view, handle, correlation_id),
+    let resource = match veldsdk::resource::accept(opened) {
+        Ok(handle) => handle,
         Err(error) => {
-            // Операция кончилась здесь: задачи на этой фазе ещё нет,
-            // закрывать нечего.
-            finish(state, view, &correlation_id);
             fail(state, view, error);
+            return true;
         }
-    }
+    };
+
+    // Передача владения — до on_show: получив событие, канва вправе сразу
+    // считать ресурс своим. При отказе хелпер уже освободил его сам.
+    let resource = match veldsdk::resource::hand_off(resource, "image-view") {
+        Ok(handle) => handle,
+        Err(error) => {
+            fail(state, view, error);
+            return true;
+        }
+    };
+
+    let Some(preview) = state.preview_mut(view) else { return true };
+    crate::calls::image_view::on_show(&ShowRequest {
+        view: view.to_string(),
+        resource: Some(resource),
+        label: preview.label.clone(),
+    });
     true
 }
 
-/// Отдаём открытый ресурс загрузчику. Владение остаётся у нас, поэтому и
-/// закрываем его мы — после ответа, каким бы он ни был.
-fn start_decode(state: &mut State, view: ViewId, resource: veldsdk::ResourceHandle, correlation_id: String) {
-    // Грант до постановки ресурса на хранение: при отказе хелпер уже
-    // освободил его сам, и второго ответа не будет.
-    if let Err(error) = veldsdk::resource::grant_read_or_free(resource.id, "image-loader") {
-        finish(state, view, &correlation_id);
-        fail(state, view, error);
-        return;
-    }
-
-    // Бокс превью — размер окна в физических пикселях: больше на экран всё
-    // равно не поместится, а декодировать в полный размер снимка незачем.
-    let (max_width, max_height) = state.window;
+/// Неудача открытия: на экран и в лог. Экран видит только тот, кто на него
+/// смотрит, а причина (истёкшая подпись, нет записи) нужна и после того, как
+/// пользователь ушёл на другую вкладку.
+fn fail(state: &mut State, view: ViewId, error: String) {
     let Some(preview) = state.preview_mut(view) else { return };
-    preview.file = Some(veldsdk::OwnedResource::new(resource.clone()));
-    // Загрузчик получил безымянный ресурс — назвать источник в логах и в
-    // списке задач можем только мы.
-    let label = preview.label.clone();
-
-    crate::calls::image_loader::on_load(&LoadImageRequest {
-        resource: Some(resource),
-        max_width,
-        max_height,
-        label,
-    }, &correlation_id);
+    veldsdk::log::warn!(target: "handlers", "превью '{}': {}", preview.label, error);
+    preview.error = Some(error);
 }
 
-/// Ответ image-loader — терминальный, снимаем запрос с учёта. Устаревший
-/// (пока ответ шёл, вкладку закрыли) — всё равно наш: текстуру освобождаем на
-/// месте, владение уже передано нам, и потерять её значит потерять
-/// видеопамять. Чужую не трогаем.
-pub fn on_load_result(state: &mut State, result: LoadImageResult) {
-    let correlation_id = veldsdk::correlation();
-    let Some(view) = state.previews.take(&correlation_id) else { return };
+/// Канве активного превью досталось новое место. Пока размер тот же, ничего
+/// не делаем — перевыделение сменило бы id текстуры на каждый пересчёт
+/// разметки (см. то же у глобуса).
+pub fn on_resized(state: &mut State, size: ViewportSize) {
+    let scale = state.scale;
+    let Some((view, preview)) = state.active_preview_mut() else { return };
 
-    let current = match state.preview_mut(view) {
-        Some(preview) => preview.request.settle(&correlation_id) == Reply::Current,
-        None => false,
-    };
-    if !current {
-        // Показывать уже нечего, но текстура наша — владение передано нам.
-        if let Some(handle) = result.handle {
-            veldsdk::resource::release(handle);
-        }
+    if veldsdk::surface::Delegated::covers(preview.surface.as_ref(), size.width, size.height) {
         return;
     }
 
-    // Файл больше не нужен: декодирование кончилось (успехом или нет).
-    // Учёт операции снял хост, приняв этот ответ: он терминальный по схеме
-    // загрузчика. Закрывать здесь нечего.
-    let Some(preview) = state.preview_mut(view) else { return };
-    preview.close_file();
-    // Размеры — единственное, что о снимке известно помимо самой картинки:
-    // исходник мы не читали, а текстура уже уменьшена загрузчиком.
-    preview.source_size = (result.source_width > 0).then_some((result.source_width, result.source_height));
-    preview.preview_size = (result.width > 0).then_some((result.width, result.height));
+    let key = view.to_string();
+    preview.surface = veldsdk::surface::delegate(
+        preview.surface.take(),
+        size.width,
+        size.height,
+        scale,
+        SURFACE_FORMAT as i32,
+        "image-view",
+        // Рисует канва, показывает разметка: право чтения — её рендереру.
+        &["ui-service"],
+        |surface| {
+            crate::calls::image_view::on_canvas(&Canvas {
+                view: key.clone(),
+                surface: Some(surface.clone()),
+            });
+        },
+    );
+}
 
-    // ui-service строит view/bind group этой текстуры по read-гранту —
-    // тот же ритуал, что grant_write оконной поверхности (surface.rs).
-    let accepted = veldsdk::resource::accept_parts(result.handle, &result.error)
-        .and_then(|handle| {
-            veldsdk::resource::grant_read_or_free(handle.id, "ui-service").map(|()| handle)
-        });
+/// Указатель над канвой: тащат — панорама, колесо — масштаб вокруг курсора.
+/// Правая и средняя кнопки свободны — как и у глобуса, занимать их «пока
+/// чем-нибудь» значит переучивать потом.
+pub fn on_pointer(state: &mut State, event: PointerEvent) {
+    let Some((view, preview)) = state.active_preview_mut() else { return };
+    if preview.surface.is_none() {
+        return;
+    }
+    let view = view.to_string();
 
-    match accepted {
-        Ok(handle) => {
-            if let Some(preview) = state.preview_mut(view) {
-                preview.texture = Some(veldsdk::OwnedResource::new(handle));
+    match event.action() {
+        PointerAction::PointerPressed if event.button == 1 => {
+            preview.dragging = Some(crate::module::state::preview::Drag { last: (event.x, event.y) });
+        }
+        PointerAction::PointerMoved => {
+            let Some(drag) = &mut preview.dragging else { return };
+            let (dx, dy) = (event.x - drag.last.0, event.y - drag.last.1);
+            drag.last = (event.x, event.y);
+            if dx != 0.0 || dy != 0.0 {
+                send(&view, Command::Pan(Pan { dx, dy }));
             }
         }
-        Err(error) => fail(state, view, error),
+        PointerAction::PointerReleased | PointerAction::PointerLeft => {
+            preview.dragging = None;
+        }
+        PointerAction::PointerScrolled => {
+            if event.scroll_y != 0.0 {
+                send(&view, Command::ZoomAt(ZoomAt {
+                    x: event.x,
+                    y: event.y,
+                    factor: ZOOM_PER_CLICK.powf(f64::from(event.scroll_y)) as f32,
+                }));
+            }
+        }
+        _ => {}
     }
 }
 
-/// Масштаб показа активного снимка. Ноль — вписать в окно; остальное —
-/// доля от натурального размера превью.
-pub fn on_zoom(state: &mut State, zoom: f32) {
-    let Some(id) = state.active_id() else { return };
-    if let Some(preview) = state.preview_mut(id) {
-        preview.zoom = zoom.clamp(0.0, 8.0);
-    }
+/// Кнопки тулбара: вписать и шаг масштаба вокруг центра канвы.
+pub fn on_fit(state: &mut State) {
+    let Some((view, _)) = state.active_preview_mut() else { return };
+    send(&view.to_string(), Command::Fit(Fit {}));
 }
 
-/// Конец операции: убрать маршрут и снять запрос с учёта у вида, если он ещё
-/// открыт. Оба факта об одном и том же, и разъехаться им нельзя.
-fn finish(state: &mut State, view: ViewId, correlation_id: &str) {
-    state.previews.take(correlation_id);
-    if let Some(preview) = state.preview_mut(view) {
-        preview.request.settle(correlation_id);
-    }
+pub fn on_zoom_step(state: &mut State, direction: f32) {
+    let Some((view, preview)) = state.active_preview_mut() else { return };
+    let Some(surface) = &preview.surface else { return };
+    let factor = if direction > 0.0 { ZOOM_STEP } else { 1.0 / ZOOM_STEP };
+    send(&view.to_string(), Command::ZoomAt(ZoomAt {
+        x: surface.width as f32 / 2.0,
+        y: surface.height as f32 / 2.0,
+        factor,
+    }));
+}
+
+/// Рассылка канвы о ходе показа. Чей это вид, сказано в самом сообщении;
+/// вкладку могли уже закрыть — тогда правда никому здесь не нужна.
+pub fn on_view_state(state: &mut State, view_state: ViewState) {
+    let Ok(view) = view_state.view.parse::<ViewId>() else { return };
+    let Some(ViewKind::Preview(preview)) = state.get_mut(view) else { return };
+    preview.view_state = Some(view_state);
+}
+
+fn send(view: &str, command: Command) {
+    crate::calls::image_view::on_camera(&CameraCommand {
+        view: view.to_string(),
+        command: Some(command),
+    });
 }

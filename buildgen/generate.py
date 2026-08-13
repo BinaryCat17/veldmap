@@ -248,7 +248,7 @@ def intermediate_replies_of(schema: dict) -> set[str]:
     Знание одностороннее, и это важно. «Не терминальный» — надёжный запрет:
     исполнитель пришлёт ещё. «Терминальный» разрешением снять с учёта не
     является: заказчик вправе продолжить ту же корреляцию следующим обменом
-    к другому сервису (см. data-browser: on_open_result → image-loader/on_load),
+    к другому сервису (см. data-library: on_signed → network/on_fs_download),
     и цепочка кончится не там, где кончился протокольный обмен.
     """
     requests, _ = correlated_topics(schema)
@@ -583,9 +583,9 @@ def generate_host_bindings(args, script_dir: str):
 
     # ── Таблица потока: по всему дереву, а не только по veldcore/interface ───
     # Учёт операций ведёт диспетчер, и топики wasm-модулей идут через него
-    # наравне с платформенными: отменяемый декод живёт в image-loader. Схемы
-    # модулей к этому моменту уже проверены (build.py генерирует их раньше),
-    # поэтому здесь они только читаются.
+    # наравне с платформенными: отменяемое производство тайлов живёт в
+    # image-tiler. Схемы модулей к этому моменту уже проверены (build.py
+    # генерирует их раньше), поэтому здесь они только читаются.
     project_root = os.path.normpath(os.path.join(script_dir, ".."))
     modules_root = os.path.join(project_root, "veldmodules")
     for entry in sorted(os.scandir(modules_root), key=lambda e: e.name):

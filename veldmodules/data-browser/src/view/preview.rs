@@ -1,13 +1,17 @@
 //! view/preview.rs — вид предпросмотра снимка.
 //!
+//! Сам кадр рисует канва (image-view) в делегированную ей текстуру; здесь —
+//! место под неё, тулбар с масштабом и панель свойств. Правда о показе
+//! (размеры источника, масштаб, ход производства) приходит рассылкой канвы и
+//! лежит в `PreviewState::view_state` — своей копии этой правды у нас нет.
+//!
 //! Выход отсюда — закрытие вкладки, поэтому своей кнопки «назад» нет: она
 //! знала бы, куда возвращаться, только назвав другой вид по имени, а
 //! открывают превью из любого.
 
-use veld_ui_service_wrap::{column, row};
+use veld_ui_service_wrap::{column, row, viewport};
 use crate::proto::ui_service::{
-    container, image, mono, scrollable, text, Alignment, Element, FontWeight, Length,
-    Padding, ScrollDirection,
+    container, mono, text, Alignment, Element, FontWeight, Length, Padding,
 };
 use crate::module::components::format;
 use crate::module::state::{PreviewState, State};
@@ -17,61 +21,25 @@ use crate::module::{theme, Msg};
 /// длины имени файла.
 const PANEL_WIDTH: f32 = 290.0;
 
-/// Шаг увеличения. Одинаковый в обе стороны, поэтому и делить, и умножать
-/// можно на него же.
-const ZOOM_STEP: f32 = 1.5;
-
 pub fn view(state: &State, preview: &PreviewState) -> Element<Msg> {
-    // Пока картинки нет — на экране одна строка состояния: ждём, не смогли
-    // или нечего показывать.
-    let status = if preview.is_loading() {
-        Some("Загружается…".to_string())
-    } else if let Some(error) = &preview.error {
-        Some(error.clone())
-    } else if preview.texture.is_none() {
-        Some("Показать нечего: снимок не открылся".to_string())
-    } else {
-        None
-    };
-
-    if let Some(status) = status {
-        return container(text::<Msg>(status).size(theme::TEXT_BODY).color(theme::INK_DIM))
+    // Отказ вытесняет канву: показывать поверх мёртвого кадра нечего, а
+    // причина отказа — единственное, что тут можно сообщить.
+    let body: Element<Msg> = match preview.failure() {
+        Some(error) => container(text::<Msg>(error.to_string()).size(theme::TEXT_BODY).color(theme::INK_DIM))
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x()
             .center_y()
             .padding(Padding::new(20.0))
-            .into();
-    }
-
-    let canvas: Element<Msg> = match (preview.zoom, preview.preview_size) {
-        // Вписанный снимок занимает всё место и меняется вместе с окном;
-        // масштабированный живёт своим размером и уезжает в прокрутку.
-        (zoom, Some((width, height))) if zoom > 0.0 => scrollable(
-            container(picture(preview, Length::Fixed(width as f32 * zoom), Length::Fixed(height as f32 * zoom)))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x()
-                .center_y()
-                .padding(Padding::new(20.0)),
-        )
-        .direction(ScrollDirection::ScrollBoth)
-        .scrollbar(theme::scrollbar())
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into(),
-        _ => container(picture(preview, Length::Fill, Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(Padding::new(20.0))
             .into(),
+        None => canvas(preview),
     };
 
     row![
         column![
             toolbar(state, preview),
             theme::hairline(theme::LINE_SOFT),
-            container(canvas).background(theme::CHROME).width(Length::Fill).height(Length::Fill),
+            container(body).background(theme::CHROME).width(Length::Fill).height(Length::Fill),
         ]
         .width(Length::Fill)
         .height(Length::Fill),
@@ -82,39 +50,52 @@ pub fn view(state: &State, preview: &PreviewState) -> Element<Msg> {
     .into()
 }
 
-fn picture(preview: &PreviewState, width: Length, height: Length) -> Element<Msg> {
-    image::<Msg>(crate::proto::ui_service::core::ResourceHandle {
-        id: preview.texture.as_ref().map(|texture| texture.id()).unwrap_or_default(),
-        size: 0,
-    })
-    .width(width)
-    .height(height)
-    .into()
+/// Место под кадр канвы. Текстуру область получает от нас же — мы выделили её
+/// в ответ на прошлый on_resized; на первом кадре её ещё нет, и место стоит
+/// пустым, пока событие не приедет.
+fn canvas(preview: &PreviewState) -> Element<Msg> {
+    let mut area = viewport::<Msg>()
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .on_resized(Msg::PreviewResized)
+        .on_pointer(Msg::PreviewPointer);
+    if let Some(surface) = &preview.surface {
+        area = area.texture(surface.handle());
+    }
+    container(area).width(Length::Fill).height(Length::Fill).into()
 }
 
-/// Имя снимка и масштаб.
+/// Имя снимка, ход показа и масштаб.
 fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
     let name = mono::<Msg>(format::ellipsize(
         &preview.label,
-        format::mono_fit(state.logical_width() - PANEL_WIDTH - 160.0, theme::TEXT_LABEL),
+        format::mono_fit(state.logical_width() - PANEL_WIDTH - 230.0, theme::TEXT_LABEL),
     ))
     .size(theme::TEXT_LABEL)
     .color(theme::INK);
 
-    let step = |label: &str, zoom: f32| {
+    // Ход показа — рядом с именем: канва рисует тайлы по мере готовности, и
+    // «читается…» здесь объясняет, почему часть кадра ещё пуста.
+    let status: Element<Msg> = match progress_line(preview) {
+        Some(line) => text::<Msg>(line).size(theme::TEXT_SMALL).color(theme::INK_DIM).single_line().into(),
+        None => theme::nothing(),
+    };
+
+    let step = |label: &str, direction: f32| {
         theme::surface_button(text::<Msg>(label.to_string()).size(theme::TEXT_LABEL).single_line(), false)
             .width(Length::Fixed(27.0))
             .height(Length::Fixed(27.0))
-            .on_press(Msg::Zoom(zoom))
+            .on_press(Msg::PreviewZoom(direction))
     };
 
-    // Текущий масштаб — он же кнопка возврата к вписанному: отдельной кнопке
-    // «вписать» тут места нет, а подпись и так говорит, что показано сейчас.
+    // Подпись масштаба — она же кнопка «вписать»: отдельной кнопке тут места
+    // нет, а подпись и так говорит, что показано сейчас.
+    let scale = preview.view_state.as_ref().map(|view| view.scale).unwrap_or_default();
     let current = theme::surface_button(
-        text::<Msg>(if preview.zoom > 0.0 {
-            format!("{:.0}%", preview.zoom * 100.0)
+        text::<Msg>(if scale > 0.0 {
+            format!("{:.0}%", scale * 100.0)
         } else {
-            "вписан".to_string()
+            "…".to_string()
         })
         .size(theme::TEXT_LABEL)
         .single_line(),
@@ -122,14 +103,14 @@ fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
     )
     .height(Length::Fixed(27.0))
     .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 })
-    .on_press(Msg::Zoom(0.0));
+    .on_press(Msg::PreviewFit);
 
-    let zoom = if preview.zoom > 0.0 { preview.zoom } else { 1.0 };
     row![
         container(name).width(Length::Fill).clip(),
-        step("−", zoom / ZOOM_STEP),
+        status,
+        step("−", -1.0),
         current,
-        step("+", zoom * ZOOM_STEP),
+        step("+", 1.0),
     ]
     .spacing(5.0)
     .width(Length::Fill)
@@ -138,9 +119,28 @@ fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
     .into()
 }
 
-/// Свойства снимка: то, что о нём известно, не открывая файл заново. Размер и
-/// время — из библиотеки, и только у скачанного: за удалённым записи нет, а
-/// придумывать её здесь было бы вторым источником правды о диске.
+/// Строка хода показа. `None` — показывать нечего: канва не занята.
+fn progress_line(preview: &PreviewState) -> Option<String> {
+    if preview.request.is_pending() {
+        return Some("открывается…".to_string());
+    }
+    let view = preview.view_state.as_ref()?;
+    if !view.busy {
+        return None;
+    }
+    if view.read_bytes > 0 && view.total_bytes > 0 {
+        return Some(format!(
+            "читается… {} из {}",
+            format::bytes(view.read_bytes),
+            format::bytes(view.total_bytes),
+        ));
+    }
+    Some("готовится…".to_string())
+}
+
+/// Свойства снимка: то, что о нём известно, не читая его здесь. Размеры — от
+/// канвы (описал тайлер); размер и время на диске — из библиотеки, и только у
+/// скачанного: за удалённым записи нет.
 fn properties(state: &State, preview: &PreviewState) -> Element<Msg> {
     let entry = preview.entry.as_ref().and_then(|name| {
         state.library.entries.iter().find(|entry| &entry.name == name)
@@ -155,8 +155,13 @@ fn properties(state: &State, preview: &PreviewState) -> Element<Msg> {
             .into(),
     ];
 
-    if let Some((width, height)) = preview.source_size {
-        lines.push(property("разрешение", format!("{} × {}", width, height)));
+    if let Some(view) = &preview.view_state {
+        if view.source_width > 0 {
+            lines.push(property("разрешение", format!("{} × {}", view.source_width, view.source_height)));
+        }
+        if view.scale > 0.0 {
+            lines.push(property("масштаб", format!("{:.0}%", view.scale * 100.0)));
+        }
     }
     if let Some(entry) = entry {
         if entry.done > 0 {
@@ -165,9 +170,6 @@ fn properties(state: &State, preview: &PreviewState) -> Element<Msg> {
         if entry.modified > 0 {
             lines.push(property("скачан", format::date(entry.modified, format::now())));
         }
-    }
-    if let Some((width, height)) = preview.preview_size {
-        lines.push(property("превью", format!("{} × {}", width, height)));
     }
 
     container(column(lines).spacing(8.0).width(Length::Fill))
