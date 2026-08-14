@@ -179,6 +179,35 @@ impl ProgressBarStyle {
     }
 }
 
+/// Ползунок: дорожка до ручки, дорожка после и сама ручка — см. `SliderStyle`
+/// в types.proto.
+#[derive(Clone, Copy, Default)]
+pub struct SliderStyle {
+    pub filled: Option<Background>,
+    pub rest: Option<Background>,
+    pub rail_width: f32,
+    pub rail_border: Border,
+    pub handle: Option<Background>,
+    pub handle_radius: f32,
+    pub handle_border_width: f32,
+    pub handle_border_color: Color,
+}
+
+impl SliderStyle {
+    pub(crate) fn to_proto(self) -> proto::SliderStyle {
+        proto::SliderStyle {
+            filled: self.filled.map(|b| b.to_proto()),
+            rest: self.rest.map(|b| b.to_proto()),
+            rail_width: self.rail_width,
+            rail_border: Some(self.rail_border.to_proto()),
+            handle: self.handle.map(|b| b.to_proto()),
+            handle_radius: self.handle_radius,
+            handle_border_width: self.handle_border_width,
+            handle_border_color: Some(self.handle_border_color.to_proto()),
+        }
+    }
+}
+
 /// Поле ввода в трёх состояниях — см. `TextInputStyle` в types.proto.
 #[derive(Clone, Default)]
 pub struct TextInputStyle {

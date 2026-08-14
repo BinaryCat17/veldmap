@@ -98,10 +98,11 @@ pub struct State {
     overlays: Vec<Overlay>,
     /// Текстуры тайлов наложений, общие всем наложениям, с бюджетом.
     tiles: TileStore,
-    /// Собранные варп-патчи и то, из чего они собраны: поколение хранилища и
-    /// выборы растров. Разошлось с нынешним — пересборка (см. build_patches).
+    /// Собранные варп-патчи и то, из чего они собраны: поколение хранилища,
+    /// выборы растров и прозрачность слоёв (она запечена в вершинах). Разошлось
+    /// с нынешним — пересборка (см. build_patches).
     batch: gpu::OverlayBatch,
-    built: Option<(u64, Vec<(String, overlay::Choice)>)>,
+    built: Option<(u64, Vec<(String, f32, overlay::Choice)>)>,
     /// Сколько раз патчи пересобирались — их вклад в сравнение кадра.
     patches: u64,
     /// Смены состава наложений (принятие, описание, снятие). Вместе с камерой
@@ -270,21 +271,51 @@ pub fn on_overlay(state: &mut State, msg: crate::proto::globe::Overlays) {
         drop_overlay(state, overlay);
     }
 
+    // Порядок слоёв — порядок сообщения, поэтому набор пересобирается по нему,
+    // а не дополняется. Иначе переставленный у отправителя список ничего бы не
+    // переставил: принятое наложение осталось бы на месте своего первого
+    // прихода, и «поднять снимок наверх» молча ничего не делало бы.
+    let order: Vec<String> = msg.overlays.iter().map(|overlay| overlay.key.clone()).collect();
     for incoming in msg.overlays {
         adopt_overlay(state, incoming);
     }
+    state.overlays.sort_by_key(|overlay| {
+        order.iter().position(|key| key == &overlay.key).unwrap_or(usize::MAX)
+    });
+
     state.epoch += 1;
     want_tiles(state);
 }
 
+/// Потолок аппетита одного уровня: половина бюджета на всех видимых сразу, а
+/// не каждому по половине. Иначе шесть слоёв, каждый со своей половиной,
+/// вымывали бы из памяти друг друга по кругу, и не дорисовался бы ни один.
+///
+/// Считается в одном месте, потому что спрашивают его двое — тот, кто просит
+/// тайлы, и тот, кто собирает патчи, — и разойтись им нельзя: заказанный
+/// уровень обязан быть тем же, который рисуют.
+fn cap_tiles(state: &State) -> u64 {
+    let visible = state.overlays.iter().filter(|overlay| !overlay.hidden).count().max(1) as u64;
+    (state.tiles.capacity_tiles(TILE_BYTES) / (2 * visible)).max(1)
+}
+
+/// Как показывать слой: прозрачность и скрытость. Не сказанная прозрачность —
+/// непрозрачный слой: нулевое умолчание proto3 означало бы, что отправитель,
+/// которому до неё нет дела, гасит снимок молчанием (см. types.proto).
+fn look(incoming: &crate::proto::globe::Overlay) -> (f32, bool) {
+    (incoming.opacity.unwrap_or(1.0).clamp(0.0, 1.0), incoming.hidden)
+}
+
 /// Принять одно наложение из сообщения. Ресурсы растров приходят во владение;
-/// то же наложение с теми же ресурсами — не событие.
+/// то же наложение с теми же ресурсами — не событие, но как его показывать,
+/// берётся из нового сообщения в любом случае.
 fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
     if incoming.key.is_empty() {
         veldsdk::log::warn!(target: "handlers", "наложение без ключа — ресурсы освобождаются");
         release_rasters(incoming.rasters);
         return;
     }
+    let (opacity, hidden) = look(&incoming);
 
     // Те же ресурсы под тем же ключом — наложение уже наше, хвост владения
     // остался у нас с прошлого сообщения.
@@ -294,9 +325,13 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         .filter_map(|raster| raster.resource.as_ref().map(|handle| handle.id))
         .collect();
     if let Some(index) = state.overlays.iter().position(|o| o.key == incoming.key) {
-        let existing: Vec<u64> =
-            state.overlays[index].rasters.iter().map(|raster| raster.resource.id()).collect();
-        if existing == incoming_ids {
+        if state.overlays[index].sources == incoming_ids {
+            // Растры те же — трогать нечего, кроме показа: слайдер
+            // прозрачности и «скрыть» шлют тот же набор, и переоткрывать под
+            // них ресурсы значило бы платить за движение ползунка декодом.
+            let overlay = &mut state.overlays[index];
+            overlay.opacity = opacity;
+            overlay.hidden = hidden;
             return;
         }
         let old = state.overlays.remove(index);
@@ -356,7 +391,15 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
     }
 
     veldsdk::log::info!(target: "handlers", "{}: наложение из {} растров", label, rasters.len());
-    state.overlays.push(Overlay { key: incoming.key, label, frame, rasters });
+    state.overlays.push(Overlay {
+        key: incoming.key,
+        label,
+        frame,
+        rasters,
+        sources: incoming_ids,
+        opacity,
+        hidden,
+    });
 }
 
 /// Конец наложения: производство убить, тайлы забыть (если отпечаток не живёт
@@ -547,11 +590,16 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
 fn want_tiles(state: &mut State) {
     let Some(target) = &state.target else { return };
     let mpp = state.camera.metres_per_pixel(target.height);
-    // Потолок аппетита одного уровня — половина бюджета: уровень целиком не
-    // имеет права вымыть из памяти всё остальное.
-    let cap = (state.tiles.capacity_tiles(TILE_BYTES) / 2).max(1);
+    let cap = cap_tiles(state);
 
-    let keys: Vec<String> = state.overlays.iter().map(|overlay| overlay.key.clone()).collect();
+    // Скрытые не просят ничего: тайл, которого не видно, вытеснил бы из
+    // бюджета тот, который видно.
+    let keys: Vec<String> = state
+        .overlays
+        .iter()
+        .filter(|overlay| !overlay.hidden)
+        .map(|overlay| overlay.key.clone())
+        .collect();
     for key in keys {
         let choices = state
             .overlays
@@ -687,16 +735,23 @@ fn build_patches(state: &mut State) {
     state.checked = Some(now);
 
     let mpp = state.camera.metres_per_pixel(target.height);
-    let cap = (state.tiles.capacity_tiles(TILE_BYTES) / 2).max(1);
+    let cap = cap_tiles(state);
 
-    let choices: Vec<(String, overlay::Choice)> = state
+    // Прозрачность едет в списке вместе с выбором, потому что она в патчах и
+    // запечена (вершиной): движение ползунка выборов не меняет, и без неё
+    // сравнение решило бы, что пересобирать нечего.
+    //
+    // Порядок списка — порядок отрисовки, а он и есть порядок набора: скрытые
+    // из него выпадают целиком.
+    let choices: Vec<(String, f32, overlay::Choice)> = state
         .overlays
         .iter()
+        .filter(|overlay| !overlay.hidden)
         .flat_map(|overlay| {
             overlay
                 .choices(mpp, cap)
                 .into_iter()
-                .map(|choice| (overlay.key.clone(), choice))
+                .map(|choice| (overlay.key.clone(), overlay.opacity, choice))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -707,7 +762,7 @@ fn build_patches(state: &mut State) {
     let mut vertices = Vec::new();
     let mut draws = Vec::new();
     let State { overlays, tiles, .. } = state;
-    for (key, choice) in &choices {
+    for (key, _, choice) in &choices {
         let Some(overlay) = overlays.iter().find(|o| &o.key == key) else { continue };
         overlay::patches(overlay, choice, tiles, &mut vertices, &mut draws);
     }

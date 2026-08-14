@@ -103,13 +103,19 @@ fn fs_picked(in: VsOut) -> @location(0) vec4<f32> {
 struct OverlayVsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
 };
 
 @vertex
-fn vs_overlay(@location(0) position: vec3<f32>, @location(1) uv: vec2<f32>) -> OverlayVsOut {
+fn vs_overlay(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) alpha: f32,
+) -> OverlayVsOut {
     var out: OverlayVsOut;
     out.clip = camera.view_proj * vec4<f32>(position, 1.0);
     out.uv = uv;
+    out.alpha = alpha;
     return out;
 }
 
@@ -125,6 +131,8 @@ fn encode_srgb(linear: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_overlay(in: OverlayVsOut) -> @location(0) vec4<f32> {
     let sampled = textureSample(overlay_texture, overlay_sampler, in.uv);
-    // Альфа проходит как есть: прозрачные поля квиклуков показывают Землю.
-    return vec4<f32>(encode_srgb(sampled.rgb), sampled.a);
+    // Альфа носителя проходит как есть — прозрачные поля квиклуков показывают
+    // Землю, — а прозрачность слоя её домножает: полупрозрачным становится то,
+    // что было видно, и не проступает то, чего не было.
+    return vec4<f32>(encode_srgb(sampled.rgb), sampled.a * in.alpha);
 }

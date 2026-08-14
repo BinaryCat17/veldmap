@@ -58,7 +58,7 @@ pub fn maybe_sweep(state: &mut State) {
     state.sweep = Some(Sweep { pending: 0, sources: Vec::new() });
 
     let correlation = state.pending_lists.begin(ListPurpose::Root);
-    crate::calls::fs::on_list(&FsListRequest { path: layout::ROOT.to_string() }, &correlation);
+    crate::calls::fs::on_list(&FsListRequest { path: layout::ROOT.to_string(), recursive: false }, &correlation);
 }
 
 pub fn on_list_result(state: &mut State, result: FsListResult) {
@@ -89,7 +89,7 @@ pub fn on_list_result(state: &mut State, result: FsListResult) {
             }
             for key in keys {
                 let correlation = state.pending_lists.begin(ListPurpose::Source(key.clone()));
-                crate::calls::fs::on_list(&FsListRequest { path: layout::source_dir(&key) }, &correlation);
+                crate::calls::fs::on_list(&FsListRequest { path: layout::source_dir(&key), recursive: false }, &correlation);
             }
         }
         ListPurpose::Source(key) => {

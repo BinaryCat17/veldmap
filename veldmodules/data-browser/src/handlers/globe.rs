@@ -16,7 +16,7 @@
 //! на Земле, а что там за снимок — решаем уже сами (см. `handlers::search`).
 
 use crate::module::state::globe::Drag;
-use crate::module::state::State;
+use crate::module::state::{State, ViewId};
 use crate::proto::globe::{camera_command::Command, CameraCommand, Orbit, Probe, Probed, Zoom};
 use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
 use veldsdk::graphics::TextureFormat;
@@ -40,9 +40,9 @@ const CLICK_SLOP: f32 = 4.0;
 /// перевыделение сменило бы id текстуры, а по нему рендерер решает, что таргет
 /// сменился, — и пересобирал бы под него буфер глубины на каждый пересчёт
 /// разметки.
-pub fn on_resized(state: &mut State, size: ViewportSize) {
+pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
     let scale = state.scale;
-    let Some(globe) = state.active_globe_mut() else { return };
+    let Some(globe) = state.globe_mut(view) else { return };
 
     if veldsdk::surface::Delegated::covers(globe.surface.as_ref(), size.width, size.height) {
         return;
@@ -64,13 +64,13 @@ pub fn on_resized(state: &mut State, size: ViewportSize) {
 
 /// Указатель над областью. Здесь он перестаёт быть указателем: дальше едет
 /// либо движение камеры, либо вопрос о месте под ним.
-pub fn on_pointer(state: &mut State, event: PointerEvent) {
+pub fn on_pointer(state: &mut State, view: ViewId, event: PointerEvent) {
     // Логируется до всех отказов: жест, до которого не дошло, отличим от жеста,
     // которого не было, только здесь.
     veldsdk::log::trace!(target: "handlers", "указатель: {:?} ({}, {}) кнопка {} колесо {}",
         event.action(), event.x, event.y, event.button, event.scroll_y);
 
-    let Some(globe) = state.active_globe_mut() else { return };
+    let Some(globe) = state.globe_mut(view) else { return };
     // Размер области — та мера, в долях которой считается жест. Без места
     // считать не от чего: событие пришло раньше, чем мы успели его выделить.
     let Some((width, height)) = globe.surface.as_ref().map(|s| (s.width as f32, s.height as f32))

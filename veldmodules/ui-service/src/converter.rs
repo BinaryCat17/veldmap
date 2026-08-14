@@ -21,21 +21,22 @@ impl proto::UiEventResponse {
     /// Пустое имя метода означает «обработчика нет»: такие сюда доходят
     /// (виджет объявлен без реакции), и отсеивает их отправка.
     pub fn declared(handler: &proto::Handler) -> Self {
-        Self::text(handler.method.clone(), handler.value.clone())
+        Self::text(handler.method.clone(), handler.key.clone(), handler.value.clone())
     }
 
     /// Строковая нагрузка: названная разметкой либо подставленная рендерером
-    /// (набранный текст).
-    pub fn text(method: String, value: String) -> Self {
-        Self { method, payload: Some(proto::ui_event_response::Payload::Value(value)) }
+    /// (набранный текст, значение ползунка). `key` при этом остаётся тем, чем
+    /// виджет назвала разметка, — см. `UiEventResponse.key`.
+    pub fn text(method: String, key: String, value: String) -> Self {
+        Self { method, key, payload: Some(proto::ui_event_response::Payload::Value(value)) }
     }
 
-    pub fn pointer(method: String, pointer: proto::PointerEvent) -> Self {
-        Self { method, payload: Some(proto::ui_event_response::Payload::Pointer(pointer)) }
+    pub fn pointer(method: String, key: String, pointer: proto::PointerEvent) -> Self {
+        Self { method, key, payload: Some(proto::ui_event_response::Payload::Pointer(pointer)) }
     }
 
-    pub fn sized(method: String, size: proto::ViewportSize) -> Self {
-        Self { method, payload: Some(proto::ui_event_response::Payload::Size(size)) }
+    pub fn sized(method: String, key: String, size: proto::ViewportSize) -> Self {
+        Self { method, key, payload: Some(proto::ui_event_response::Payload::Size(size)) }
     }
 }
 
@@ -216,10 +217,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
 
             if let Some(h) = &t.on_input {
                 if !h.method.is_empty() {
-                    let method = h.method.clone();
+                    let (method, key) = (h.method.clone(), h.key.clone());
                     // Значение подставит рендерер — набранный текст; из
-                    // разметки едет только имя метода.
-                    input = input.on_input(move |v| UiMessage::text(method.clone(), v));
+                    // разметки едет имя метода и имя самого поля.
+                    input = input
+                        .on_input(move |v| UiMessage::text(method.clone(), key.clone(), v));
                 }
             }
 
@@ -352,6 +354,61 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
 
             bar.into()
         }
+        Some(proto::widget::Type::Slider(s)) => {
+            // Обработчик у ползунка обязателен: без него он неотличим от полосы
+            // прогресса, но при этом ловит указатель и глотает прокрутку списка.
+            let Some(change) = s.on_change.as_ref().filter(|h| !h.method.is_empty()) else {
+                return Space::new().into();
+            };
+            let (method, key) = (change.method.clone(), change.key.clone());
+            let mut slider = iced_widget::slider(s.range_start..=s.range_end, s.value, move |v| {
+                UiMessage::text(method.clone(), key.clone(), v.to_string())
+            })
+            .width(convert_length(&s.width));
+
+            if s.height > 0.0 {
+                slider = slider.height(s.height);
+            }
+            if s.step > 0.0 {
+                slider = slider.step(s.step);
+            }
+            if let Some(h) = &s.on_release {
+                if !h.method.is_empty() {
+                    slider = slider.on_release(UiMessage::declared(h));
+                }
+            }
+
+            if let Some(style) = &s.style {
+                let ground = |background: &Option<proto::Background>| {
+                    background
+                        .as_ref()
+                        .map(convert_background)
+                        .unwrap_or(iced_core::Background::Color(Color::TRANSPARENT))
+                };
+                let style = iced_widget::slider::Style {
+                    rail: iced_widget::slider::Rail {
+                        backgrounds: (ground(&style.filled), ground(&style.rest)),
+                        width: style.rail_width,
+                        border: convert_border(&style.rail_border),
+                    },
+                    handle: iced_widget::slider::Handle {
+                        shape: iced_widget::slider::HandleShape::Circle {
+                            radius: style.handle_radius,
+                        },
+                        background: ground(&style.handle),
+                        border_width: style.handle_border_width,
+                        border_color: style
+                            .handle_border_color
+                            .as_ref()
+                            .map(convert_color_value)
+                            .unwrap_or(Color::TRANSPARENT),
+                    },
+                };
+                slider = slider.style(move |_theme: &Theme, _status| style);
+            }
+
+            slider.into()
+        }
         Some(proto::widget::Type::Tooltip(t)) => {
             let content = if let Some(c) = &t.content {
                 convert_widget(c)
@@ -424,6 +481,17 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 && !h.method.is_empty()
             {
                 area = area.on_pointer(h.method.clone());
+            }
+            // Имя области — то, которым её назвал любой из обработчиков:
+            // область одна, и разные имена у своих же событий означали бы, что
+            // это две разные области.
+            if let Some(key) = [&v.on_resized, &v.on_pointer]
+                .into_iter()
+                .flatten()
+                .map(|h| h.key.as_str())
+                .find(|key| !key.is_empty())
+            {
+                area = area.key(key.to_string());
             }
             area.into()
         }

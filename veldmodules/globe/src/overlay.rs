@@ -143,6 +143,20 @@ pub struct Overlay {
     pub label: String,
     pub frame: Frame,
     pub rasters: Vec<Raster>,
+    /// Ресурсы, которыми наложение прислали, — в том виде, в каком они пришли.
+    /// По ним и решается «то же самое наложение или другое»: сравнивать с
+    /// принятыми нельзя, потому что принято бывает меньше присланного (растр,
+    /// которому отказали в гранте, пропускается), и тогда набор расходился бы
+    /// сам с собой навсегда — каждая пересылка выглядела бы новым наложением.
+    pub sources: Vec<u64>,
+    /// Прозрачность слоя, 0..1. Доезжает до пикселя множителем к альфе
+    /// носителя, поэтому прозрачное поле квиклука так и остаётся прозрачным,
+    /// а не проступает вполсилы.
+    pub opacity: f32,
+    /// Слой скрыт: ни патчей, ни запросов тайлов. Уже добытые тайлы остаются в
+    /// хранилище на попечение вытеснения — показ обратно тогда мгновенный, а
+    /// платить за них памятью приходится только пока их не вытеснили.
+    pub hidden: bool,
 }
 
 /// Что рисовать у наложения прямо сейчас: какой растр и каким уровнем.
@@ -239,7 +253,7 @@ pub fn patches(
                 let uv = pyramid::cell_uv(cell, addr, stored.width, stored.height);
                 let bind = stored.bind.clone();
                 let from = vertices.len() as u32;
-                patch(&overlay.frame, meta, cell, uv, vertices);
+                patch(&overlay.frame, meta, cell, uv, overlay.opacity, vertices);
                 draws.push((bind, from..vertices.len() as u32));
                 break;
             }
@@ -249,11 +263,17 @@ pub fn patches(
 
 /// Варп-сетка одной ячейки: PATCH_SEGMENTS² квадов, узлы — точной проекцией
 /// привязки, UV — линейно по куску носителя.
+///
+/// Прозрачность едет вершиной, а не uniform'ом: все патчи наложений лежат в
+/// одном буфере и рисуются одним пайплайном, отличаясь только диапазоном
+/// вершин и bind group носителя, — своего uniform'а у слоя тут нет и не за что
+/// его завести.
 fn patch(
     frame: &Frame,
     meta: &Meta,
     cell: [f64; 4],
     uv: [f32; 4],
+    alpha: f32,
     vertices: &mut Vec<OverlayVertex>,
 ) {
     let segments = PATCH_SEGMENTS;
@@ -272,7 +292,7 @@ fn patch(
                 geodesy::position(Geodetic { lat_deg: lat, lon_deg: lon, height_m: HEIGHT_M });
             let u = uv[0] + (uv[2] - uv[0]) * tx as f32;
             let v = uv[1] + (uv[3] - uv[1]) * ty as f32;
-            nodes.push(OverlayVertex { position, uv: [u, v] });
+            nodes.push(OverlayVertex { position, uv: [u, v], alpha });
         }
     }
 
@@ -313,6 +333,9 @@ mod tests {
                 y1: 7_800_000.0,
             },
             rasters,
+            sources: Vec::new(),
+            opacity: 1.0,
+            hidden: false,
         }
     }
 

@@ -5,11 +5,19 @@ use veldsdk::Correlator;
 
 pub struct State {
     /// Открытые виды в порядке вкладок. Порядок — свойство разметки, а не
-    /// набора: закрытие соседа не должно менять, где стоит остальное.
+    /// набора: закрытие соседа не должно менять, где стоит остальное. Половина,
+    /// в которой вкладка лежит, — её собственное поле (см. `View::half`).
     views: Vec<View>,
-    /// Активный вид. `None` — все вкладки закрыты; это законное состояние,
-    /// а не ошибка, поэтому пустой экран рисуется явно.
-    active: Option<ViewId>,
+    /// Активный вид каждой половины. `None` — в половине пусто; это законное
+    /// состояние, а не ошибка: пустая половина предлагает, что в неё положить.
+    active: [Option<ViewId>; 2],
+    /// Половина, чья активная вкладка получает события виджетов. Событие
+    /// приходит от виджета, а не от половины, и назвать себя умеют не все —
+    /// поэтому у экрана есть одна половина, которая «сейчас под рукой».
+    focus: Half,
+    /// Разделён ли экран и где стоит вторая половина. `None` — не разделён, и
+    /// вторая половина не показывается, даже если в ней что-то осталось.
+    split: Option<Placement>,
     next_id: u64,
     /// Кэш состояния библиотеки — один на модуль: он приходит рассылкой и
     /// нужен всем видам сразу (см. state::library).
@@ -29,10 +37,13 @@ pub struct State {
     /// точках разметки — по ней считается, сколько знаков имени влезает в свою
     /// колонку (см. components::table).
     pub scale: f32,
-    /// Раскрыто ли меню «плюса» в полосе вкладок. Не в `ListingState`: полоса
-    /// вкладок общая, а списков много. Взаимоисключение с меню списка держит
-    /// [`State::close_menus`] — раскрытым бывает только одно.
-    pub tab_menu: bool,
+    /// Чей «плюс» раскрыт. Не в `ListingState`: полоса вкладок принадлежит
+    /// половине, а списков в ней много. Взаимоисключение со всеми прочими меню
+    /// держит [`State::close_menus`] — раскрытым бывает только одно.
+    pub tab_menu: Option<Half>,
+    /// У какой вкладки раскрыто её собственное меню: разделить, перенести,
+    /// закрыть.
+    pub tab_options: Option<ViewId>,
     /// Скорость закачки, байт в секунду: выводится из двух соседних состояний
     /// библиотеки (см. handlers::library). Своего поля у библиотеки под это
     /// нет — она рассылает то, что есть сейчас, а не то, как быстро оно росло.
@@ -43,9 +54,11 @@ pub struct State {
     /// свойство найденного, а не экрана, и уезжают они к рисующему независимо
     /// от того, открыта ли вкладка (см. handlers::search::show_on_globe).
     pub shown: Option<globe::Shown>,
-    /// Наложение снимка на шар — то, что собирается или уже показано
-    /// (см. handlers::overlay). Одно: показывают выбранный продукт.
-    pub overlay: Option<overlay::OverlayState>,
+    /// Наложения снимков на шар — то, что собирается или уже показано
+    /// (см. handlers::overlay). Порядок — порядок слоёв снизу вверх, тот же,
+    /// которым его понимает глобус; список «На просмотре» переворачивает его
+    /// сам, потому что «сверху новые» — свойство экрана, а не набора.
+    pub overlays: Vec<overlay::OverlayState>,
 
     // -- Маршруты ответов --
     //
@@ -53,15 +66,24 @@ pub struct State {
     // «чей это id» должно иметь один ответ. Перебор по видам на этот вопрос не
     // отвечает — вид могли закрыть, пока ответ шёл, а приехавший в нём ресурс
     // всё равно наш, и опознать его можно только здесь.
-    //
-    // Исключение — открытия растров наложения: их маршруты живут в самой
-    // сборке (см. overlay::Assembly) и умирают вместе с ней, потому что ответ
-    // прежней сборки не должен опознаваться новой; неопознанный ресурс
-    // добивает общий discard в module::on_open_result.
     /// Превью: открытие ресурса (data-library или data-provider). Дальше
     /// показ ведёт канва, и правда о нём приходит рассылкой on_view_state,
     /// адресованной именем вида, — корреляций там нет.
     pub previews: Correlator<ViewId>,
+    /// Растры наложений: открытие ресурса у провайдера. Контекст — ключ
+    /// наложения и роль растра; сборка помнит свои корреляции, чтобы снять их
+    /// отсюда, когда наложение убирают (см. overlay::Assembly).
+    pub opens: Correlator<(String, crate::proto::globe::OverlayRole)>,
+    /// data-provider/on_imagery_result — какие растры у продукта. Контекст —
+    /// ключ наложения, которое их ждёт.
+    pub imageries: Correlator<String>,
+    /// Тот же топик, но для превью: снимок, лежащий папкой, открыть напрямую
+    /// нельзя (GET по пути каталога отвечает 404), и растр внутри него
+    /// выбирает провайдер. Контекст — вкладка превью, которая его ждёт.
+    ///
+    /// Отдельной таблицей, а не общей с наложениями: ответ один и тот же, а
+    /// ждущих двое, и «чей это id» должно иметь ровно один ответ.
+    pub preview_imagery: Correlator<ViewId>,
     /// data-provider/on_list_path_result.
     pub listings: Correlator<ViewId>,
     /// data-provider/on_search_result.
@@ -79,19 +101,25 @@ impl State {
     pub fn new(config: crate::module::handlers::Config) -> anyhow::Result<Self> {
         let mut state = Self {
             views: Vec::new(),
-            active: None,
+            active: [None, None],
+            focus: Half::First,
+            split: None,
             next_id: 1,
             library: library::LibraryState::default(),
             error: None,
             window_surface: None,
             window: (0, 0),
             scale: 1.0,
-            tab_menu: false,
+            tab_menu: None,
+            tab_options: None,
             speed: 0.0,
             measured: None,
             shown: None,
-            overlay: None,
+            overlays: Vec::new(),
             previews: Correlator::new(),
+            opens: Correlator::new(),
+            imageries: Correlator::new(),
+            preview_imagery: Correlator::new(),
             listings: Correlator::new(),
             searches: Correlator::new(),
             probe: veldsdk::Latest::default(),
@@ -115,15 +143,24 @@ impl State {
 
     // -- Вкладки --
 
-    /// Открывает вид и делает его активным. Открытие — это всегда новая
-    /// вкладка: «переиспользовать похожую» решает вызывающий, у него для
-    /// этого есть [`Self::find`].
-    pub fn open(&mut self, kind: ViewKind) -> ViewId {
+    /// Открывает вид в названной половине и делает его в ней активным, а саму
+    /// половину — той, что под рукой. Открытие — это всегда новая вкладка:
+    /// «переиспользовать похожую» решает вызывающий, у него для этого есть
+    /// [`Self::find`].
+    pub fn open_in(&mut self, half: Half, kind: ViewKind) -> ViewId {
         let id = ViewId(self.next_id);
         self.next_id += 1;
-        self.views.push(View { id, kind });
-        self.active = Some(id);
+        self.views.push(View { id, kind, half });
+        self.active[half.index()] = Some(id);
+        self.focus = half;
         id
+    }
+
+    /// То же в половине, которая сейчас под рукой, — так открывается всё, что
+    /// заводят не глядя на разделение экрана: превью из строки, глобус по
+    /// показу снимка.
+    pub fn open(&mut self, kind: ViewKind) -> ViewId {
+        self.open_in(self.focus, kind)
     }
 
     /// Убирает вид из набора и отдаёт его вызывающему: закрытие превью гасит
@@ -132,35 +169,97 @@ impl State {
     pub fn close(&mut self, id: ViewId) -> Option<View> {
         let at = self.views.iter().position(|view| view.id == id)?;
         let view = self.views.remove(at);
-        if self.active == Some(id) {
-            // Соседняя вкладка: та, что заняла освободившийся индекс, иначе
-            // левая. Пустой набор оставляет активной None.
-            self.active = self
-                .views
-                .get(at)
-                .or_else(|| at.checked_sub(1).and_then(|left| self.views.get(left)))
-                .map(|view| view.id);
+        if self.active[view.half.index()] == Some(id) {
+            self.active[view.half.index()] = self.neighbour(view.half, at);
         }
         Some(view)
     }
 
+    /// Кто занимает место закрытой вкладки: следующая в той же половине, иначе
+    /// предыдущая. Пустая половина оставляет `None` — и предлагает, что в неё
+    /// положить.
+    ///
+    /// Считается по общему списку, а не по отфильтрованному: индексы в нём и
+    /// есть порядок вкладок, а соседство — это соседство внутри своей половины.
+    fn neighbour(&self, half: Half, at: usize) -> Option<ViewId> {
+        let right = self.views.iter().skip(at).find(|view| view.half == half);
+        let left = self.views.iter().take(at).rev().find(|view| view.half == half);
+        right.or(left).map(|view| view.id)
+    }
+
+    /// Делает вид активным в его половине, а её — той, что под рукой.
     pub fn focus(&mut self, id: ViewId) {
-        if self.views.iter().any(|view| view.id == id) {
-            self.active = Some(id);
+        let Some(view) = self.views.iter().find(|view| view.id == id) else { return };
+        let half = view.half;
+        self.active[half.index()] = Some(id);
+        self.focus = half;
+    }
+
+    /// Половина, чьи виджеты сейчас отвечают за события без адресата.
+    pub fn focused(&self) -> Half {
+        self.focus
+    }
+
+    /// Разделён ли экран и где стоит вторая половина.
+    pub fn split(&self) -> Option<Placement> {
+        self.split
+    }
+
+    /// Разделить экран: с названной стороны открывается пустая половина, а
+    /// вкладка, из меню которой позвали, остаётся там, где стояла. Уезжала бы
+    /// она — с экрана уходило бы то, на что смотрели, а делят его ровно затем,
+    /// чтобы это не уходило; заодно переезд стоил бы ей прокрутки и каретки:
+    /// состояние виджетов рендерер держит по месту в дереве разметки.
+    pub fn split_off(&mut self, id: ViewId, placement: Placement) {
+        self.split = Some(placement);
+        self.focus(id);
+    }
+
+    /// Свести половины обратно в одну: всё уезжает в первую, порядок вкладок
+    /// сохраняется — он свойство списка, а не половины.
+    pub fn unsplit(&mut self) {
+        self.split = None;
+        for view in &mut self.views {
+            view.half = Half::First;
         }
+        // Активной остаётся та, что была под рукой: на неё и смотрели. Если под
+        // рукой была пустая половина — первая же из оставшихся: вкладки есть, и
+        // «все вкладки закрыты» вместо них было бы неправдой.
+        self.active[0] = self.active[self.focus.index()]
+            .or(self.active[0])
+            .or(self.active[1])
+            .or_else(|| self.views.first().map(|view| view.id));
+        self.active[1] = None;
+        self.focus = Half::First;
+    }
+
+    /// Перенести вкладку в другую половину — и туда же перевести взгляд.
+    pub fn move_to(&mut self, id: ViewId, half: Half) {
+        let Some(at) = self.views.iter().position(|view| view.id == id) else { return };
+        let from = self.views[at].half;
+        if from == half {
+            return;
+        }
+        self.views[at].half = half;
+        if self.active[from.index()] == Some(id) {
+            self.active[from.index()] = self.neighbour(from, at);
+        }
+        self.active[half.index()] = Some(id);
+        self.focus = half;
     }
 
     pub fn views(&self) -> &[View] {
         &self.views
     }
 
-    pub fn active_id(&self) -> Option<ViewId> {
-        self.active
+    /// Вкладки одной половины, в порядке их списка.
+    pub fn views_in(&self, half: Half) -> impl Iterator<Item = &View> {
+        self.views.iter().filter(move |view| view.half == half)
     }
 
-    pub fn active(&self) -> Option<&ViewKind> {
-        let id = self.active?;
-        self.views.iter().find(|view| view.id == id).map(|view| &view.kind)
+    /// Активная вкладка названной половины — то, что в ней показано.
+    pub fn active_in(&self, half: Half) -> Option<ViewId> {
+        self.active[half.index()]
     }
 
     pub fn get(&self, id: ViewId) -> Option<&ViewKind> {
@@ -177,53 +276,67 @@ impl State {
         self.views.iter().find(|view| matches(&view.kind)).map(|view| view.id)
     }
 
-    // -- Доступ к состоянию активного вида --
+    // -- Доступ к состоянию названного вида --
     //
-    // Источник события виджета — активный вид: виден ровно он.
+    // Именно названного, а не активного: половин на экране две, и «активный
+    // вид» на вопрос «чей это щелчок» больше не отвечает. Кто именно — говорит
+    // само сообщение (см. `Msg::In`).
 
-    /// Ширина окна в точках разметки — то, чем меряется место под колонки.
+    /// Ширина окна в точках разметки.
     pub fn logical_width(&self) -> f32 {
         self.window.0 as f32 / self.scale.max(1.0)
     }
 
-    /// Настройки показа активного списка: их правят сообщения, одинаковые для
-    /// всех трёх видов.
-    pub fn active_listing_mut(&mut self) -> Option<&mut listing::ListingState> {
-        let id = self.active?;
+    /// Ширина половины — то, чем меряется место под колонки списка. Считать
+    /// его по окну нельзя: половина вдвое уже, а колонки от этого не худеют, и
+    /// тянущееся имя схлопнулось бы в ноль (см. `table::fit`).
+    ///
+    /// Делит только разделение вбок: снизу половина остаётся во всю ширину.
+    pub fn pane_width(&self) -> f32 {
+        match self.split {
+            Some(Placement::Right | Placement::Left) => self.logical_width() / 2.0,
+            Some(Placement::Below) | None => self.logical_width(),
+        }
+    }
+
+    /// Настройки показа списка: их правят сообщения, одинаковые для всех
+    /// списочных видов.
+    pub fn listing_mut(&mut self, id: ViewId) -> Option<&mut listing::ListingState> {
         self.get_mut(id)?.listing_mut()
     }
 
-    /// Закрывает всё раскрытое: меню полосы вкладок и меню активного списка.
-    /// Одним движением, потому что раскрытым бывает только одно, — а держать
-    /// это правило присвоениями по обработчикам значит однажды забыть одно.
+    /// Закрывает всё раскрытое: меню половин, меню вкладки и меню каждого
+    /// списка. Одним движением, потому что раскрытым бывает только одно, — а
+    /// держать это правило присвоениями по обработчикам значит однажды забыть
+    /// одно. По всем спискам, а не по активному: раскрытое в другой половине
+    /// осталось бы висеть.
     pub fn close_menus(&mut self) {
-        self.tab_menu = false;
-        if let Some(listing) = self.active_listing_mut() {
-            listing.menu = listing::Menu::Closed;
+        self.tab_menu = None;
+        self.tab_options = None;
+        for view in &mut self.views {
+            if let Some(listing) = view.kind.listing_mut() {
+                listing.menu = listing::Menu::Closed;
+            }
         }
     }
 
-    pub fn active_browse_mut(&mut self) -> Option<(ViewId, &mut browse::BrowseState)> {
-        let id = self.active?;
+    pub fn browse_mut(&mut self, id: ViewId) -> Option<&mut browse::BrowseState> {
         match self.get_mut(id)? {
-            ViewKind::Browse(browse) => Some((id, browse)),
+            ViewKind::Browse(browse) => Some(browse),
             _ => None,
         }
     }
 
-    pub fn active_search_mut(&mut self) -> Option<(ViewId, &mut search::SearchState)> {
-        let id = self.active?;
+    pub fn search_mut(&mut self, id: ViewId) -> Option<&mut search::SearchState> {
         match self.get_mut(id)? {
-            ViewKind::Search(search) => Some((id, search)),
+            ViewKind::Search(search) => Some(search),
             _ => None,
         }
     }
 
-    /// Глобус активного вида. `None` — сверху не он: события области приходят
-    /// только от видимой вкладки, но между отправкой и приходом её могли
-    /// сменить.
-    pub fn active_globe_mut(&mut self) -> Option<&mut globe::GlobeState> {
-        let id = self.active?;
+    /// Глобус названного вида. `None` — вкладку закрыли или подменили, пока
+    /// событие шло.
+    pub fn globe_mut(&mut self, id: ViewId) -> Option<&mut globe::GlobeState> {
         match self.get_mut(id)? {
             ViewKind::Globe(globe) => Some(globe),
             _ => None,
@@ -239,17 +352,6 @@ impl State {
         }
     }
 
-    /// Превью активного вида — адресат событий канвы: жесты и место приходят
-    /// только от видимой вкладки, но между отправкой и приходом её могли
-    /// сменить.
-    pub fn active_preview_mut(&mut self) -> Option<(ViewId, &mut preview::PreviewState)> {
-        let id = self.active?;
-        match self.get_mut(id)? {
-            ViewKind::Preview(preview) => Some((id, preview)),
-            _ => None,
-        }
-    }
-
     /// Выбранный на шаре снимок. `None` — не выбран ни один или закрыли вид, из
     /// которого он взялся: контуры на шаре его переживают, а сам он — нет.
     pub fn picked(&self) -> Option<&crate::proto::data_provider::DataProduct> {
@@ -257,6 +359,12 @@ impl State {
         let selected = shown.selected.as_ref()?;
         let ViewKind::Search(search) = self.get(shown.view)? else { return None };
         search.results.iter().find(|product| &product.identifier == selected)
+    }
+
+    /// Он же одним ключом — то, чем его узнаю́т списки: строку с этим ключом
+    /// они отмечают у себя. Пусто — не выбрано ничего.
+    pub fn picked_key(&self) -> &str {
+        self.picked().map(|product| product.identifier.as_str()).unwrap_or_default()
     }
 }
 

@@ -74,7 +74,7 @@ pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
         .take(PAGE_SIZE)
         .collect();
 
-    Arranged { lines: group(shown, listing.grouping), total, pages, page, counts }
+    Arranged { lines: group(shown, listing), total, pages, page, counts }
 }
 
 /// Отбор по имени — по вхождению, без учёта регистра: пользователь помнит
@@ -105,9 +105,15 @@ fn sort(rows: &mut [&Row], listing: &ListingState) {
 /// «по папкам» ступенька одна (вся папка целиком), у «дерева» их столько,
 /// сколько сегментов в пути. Заголовок открывается там, где путь разошёлся с
 /// предыдущим, — строки к этому моменту уже стоят по папкам (см. `sort`).
-fn group(rows: Vec<&Row>, grouping: Grouping) -> Vec<Line<'_>> {
+fn group<'a>(rows: Vec<&'a Row>, listing: &ListingState) -> Vec<Line<'a>> {
+    let grouping = listing.grouping;
     if grouping == Grouping::None {
-        return rows.into_iter().map(|row| Line::Entry { row, depth: 0 }).collect();
+        let mut lines = Vec::new();
+        for row in rows {
+            lines.push(Line::Entry { row, depth: 0 });
+            expand(row, listing, 0, &mut lines);
+        }
+        return lines;
     }
 
     // Пути считаются один раз на строку: их сравнивают и с предыдущей строкой,
@@ -136,8 +142,25 @@ fn group(rows: Vec<&Row>, grouping: Grouping) -> Vec<Line<'_>> {
         }
 
         lines.push(Line::Entry { row, depth: path.len() });
+        expand(row, listing, path.len(), &mut lines);
     }
     lines
+}
+
+/// Файлы раскрытого снимка — подстроками под ним. Ступенькой глубже, тем же
+/// `Line::Entry`: подстрока это такая же строка, и рисовать её отдельным родом
+/// значило бы завести вторую таблицу.
+///
+/// Отбор и сортировка их не касаются: файлы показывают состав снимка, а не
+/// участвуют в списке наравне с ним — иначе «показано 20 из 36» считало бы
+/// разное в зависимости от того, что раскрыто.
+fn expand<'a>(row: &'a Row, listing: &ListingState, depth: usize, lines: &mut Vec<Line<'a>>) {
+    if !listing.expanded.contains(row.key()) {
+        return;
+    }
+    for child in &row.children {
+        lines.push(Line::Entry { row: child, depth: depth + 1 });
+    }
 }
 
 /// Ступени, которые открывает эта папка.

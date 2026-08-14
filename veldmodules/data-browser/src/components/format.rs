@@ -72,6 +72,31 @@ pub fn date(when: i64, now: i64) -> String {
     }
 }
 
+/// Дата из набранного руками — обратная сторона [`date`]: `2026-08-13`, а
+/// заодно `13.08.2026`, потому что вводят и так. Возвращает полночь этого дня
+/// в unix-секундах; `None` — набрано ещё не число.
+///
+/// Разбор здесь, рядом с записью: это одна пара, и разойтись им негде.
+pub fn parse_date(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(['-', '.', '/']).collect();
+    let [first, month, last] = parts[..] else { return None };
+    let (year, day) = match first.len() {
+        4 => (first, last),
+        _ => (last, first),
+    };
+    let year: i64 = year.parse().ok()?;
+    let month: i64 = month.parse().ok()?;
+    let day: i64 = day.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || !(1970..=9999).contains(&year) {
+        return None;
+    }
+    Some(veldsdk::time::days_from_civil(year, month, day) * DAY)
+}
+
 /// Обрезает середину: у имён снимков различаются и начало (миссия, дата), и
 /// хвост (полоса, расширение), а совпадает как раз то, что посередине.
 pub fn ellipsize(text: &str, limit: usize) -> String {
@@ -117,4 +142,26 @@ pub fn plural(count: usize, forms: [&'static str; 3]) -> &'static str {
 pub fn mono_fit(width: f32, size: f32) -> usize {
     const ADVANCE: f32 = 0.6;
     (width / (size * ADVANCE)).max(0.0) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Пара с `date`: то, что она пишет днём, разбор возвращает обратно днём.
+    #[test]
+    fn дата_разбирается_обоими_привычными_способами() {
+        let day = parse_date("2026-08-13").expect("ISO");
+        assert_eq!(parse_date("13.08.2026"), Some(day));
+        assert_eq!(veldsdk::time::civil_from_unix(day), (2026, 8, 13));
+    }
+
+    /// Набранное наполовину — ещё не дата, и молча считать её нулём нельзя:
+    /// ноль в запросе значит «край не задан», а не «начало эпохи».
+    #[test]
+    fn недобранное_датой_не_становится() {
+        for text in ["", "2026-08-", "завтра", "2026-13-01", "2026-08-32", "1900-01-01"] {
+            assert_eq!(parse_date(text), None, "{}", text);
+        }
+    }
 }

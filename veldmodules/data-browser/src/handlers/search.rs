@@ -16,13 +16,13 @@ use crate::proto::globe::{
 
 /// Набранное в поле запроса. Сам запрос отсюда не уходит: искать на каждую
 /// букву значит слать в сеть десяток запросов на одно слово.
-pub fn on_query(state: &mut State, query: String) {
-    let Some((_, search)) = state.active_search_mut() else { return };
+pub fn on_query(state: &mut State, view: ViewId, query: String) {
+    let Some(search) = state.search_mut(view) else { return };
     search.query = query;
 }
 
-pub fn on_mission(state: &mut State, mission: Mission) {
-    let Some((_, search)) = state.active_search_mut() else { return };
+pub fn on_mission(state: &mut State, view: ViewId, mission: Mission) {
+    let Some(search) = state.search_mut(view) else { return };
     search.mission = mission;
     // Радар про облачность не спрашивают, и его чипа на полосе нет — а
     // оставшийся от прошлой миссии потолок обнулил бы выдачу молча, потому что
@@ -31,37 +31,48 @@ pub fn on_mission(state: &mut State, mission: Mission) {
         search.cloud = Cloud::default();
     }
     search.listing.refine();
-    run(state);
+    run(state, view);
 }
 
-pub fn on_period(state: &mut State, period: Period) {
-    let Some((_, search)) = state.active_search_mut() else { return };
+/// Край своего интервала. Запрос отсюда не уходит: дату набирают по знаку, и
+/// спрашивать каталог на каждый было бы то же, что искать на каждую букву.
+pub fn on_from(state: &mut State, view: ViewId, value: String) {
+    let Some(search) = state.search_mut(view) else { return };
+    search.from = value;
+}
+
+pub fn on_to(state: &mut State, view: ViewId, value: String) {
+    let Some(search) = state.search_mut(view) else { return };
+    search.to = value;
+}
+
+pub fn on_period(state: &mut State, view: ViewId, period: Period) {
+    let Some(search) = state.search_mut(view) else { return };
     search.period = period;
     search.listing.refine();
-    run(state);
+    run(state, view);
 }
 
-pub fn on_cloud(state: &mut State, cloud: Cloud) {
-    let Some((_, search)) = state.active_search_mut() else { return };
+pub fn on_cloud(state: &mut State, view: ViewId, cloud: Cloud) {
+    let Some(search) = state.search_mut(view) else { return };
     search.cloud = cloud;
     search.listing.refine();
-    run(state);
+    run(state, view);
 }
 
 /// Спросить каталог.
-pub fn run(state: &mut State) {
+pub fn run(state: &mut State, view: ViewId) {
     let now = crate::module::components::format::now();
-    let Some((view, search)) = state.active_search_mut() else { return };
+    let Some(search) = state.search_mut(view) else { return };
+    let (from, to) = search.window(now);
     let request = SearchRequest {
         mission: search.mission.collection().to_string(),
         name: search.query.clone(),
         // Область контракт принимает, но задать её пока нечем: под неё нужна
         // рамка на шаре, а её в интерфейсе нет.
         area: None,
-        from: search.period.since(now),
-        // Верхнего края у окна нет: ищут «за последнее время», а не «в
-        // промежутке» — второй край понадобится вместе с выбором дат.
-        to: 0,
+        from,
+        to,
         max_cloud: search.cloud.max(),
         limit: 0,
     };
@@ -125,14 +136,23 @@ fn show_on_globe(state: &mut State, view: ViewId) {
     });
     state.shown = Some(Shown { view, selected });
 
-    // Наложение — тем же правилом, что выделение: его продукт ушёл из
-    // выдачи — снимку больше не с чего быть на шаре. Правило действует на
-    // наложения из этого же вида: показанному из каталога чужая выдача не указ.
-    let alive: std::collections::HashSet<String> = {
+    // Наложение — тем же правилом, что выделение: его продукт ушёл из выдачи —
+    // снимку больше не с чего быть на шаре. Правило действует на наложения из
+    // этого же вида: показанному из каталога чужая выдача не указ.
+    //
+    // Но только когда выдача есть. Отказ каталога — это отсутствие ответа, а не
+    // пустой ответ: продукт от сетевой ошибки никуда не делся, и снимать из-за
+    // неё то, что человек положил на шар руками, значит терять его работу.
+    let alive: Option<std::collections::HashSet<String>> = {
         let Some(ViewKind::Search(search)) = state.get(view) else { return };
-        search.results.iter().map(|product| product.identifier.clone()).collect()
+        match search.error.is_some() {
+            true => None,
+            false => Some(search.results.iter().map(|p| p.identifier.clone()).collect()),
+        }
     };
-    super::overlay::keep_only(state, view, |identifier| alive.contains(identifier));
+    if let Some(alive) = alive {
+        super::overlay::keep_only(state, view, |identifier| alive.contains(identifier));
+    }
 }
 
 /// Контуры результатов; у выбранного — признак выделения.
@@ -156,17 +176,32 @@ fn outlines_of(search: &SearchState, selected: Option<&str>) -> Vec<Outline> {
 
 /// Вкладка-источник закрывается. Контуры остаются на шаре — они свойство
 /// найденного, а не вкладки, — но выбирать среди них больше нечего: выделение
-/// гаснет, а `Shown` снимается, и щелчки по шару перестают что-либо значить.
-/// Иначе подсветка горела бы вечно: снять её мог только выбор в этом же виде.
-/// Наложение из выдачи этого вида уходит вместе с ним: продукта, из которого
-/// оно взялось, больше нет ни в одном списке (см. overlay::source_closed).
+/// гаснет, и щелчки по шару перестают что-либо значить (`pick` не находит вида
+/// и выходит ни с чем). Иначе подсветка горела бы вечно: снять её мог только
+/// выбор в этом же виде.
+///
+/// `Shown` при этом остаётся: он единственный носитель факта «шар очерчен», и
+/// без него снять контуры было бы нечем — заново их не собрать, выдача ушла с
+/// вкладкой. Наложение из выдачи этого вида уходит вместе с ним: продукта, из
+/// которого оно взялось, больше нет ни в одном списке (см.
+/// overlay::source_closed).
 pub fn on_source_closed(state: &mut State, id: ViewId, search: &SearchState) {
     super::overlay::source_closed(state, id);
     if state.shown.as_ref().is_none_or(|shown| shown.view != id) {
         return;
     }
-    state.shown = None;
+    state.shown = Some(Shown { view: id, selected: None });
     crate::calls::globe::on_outlines(&Outlines { outlines: outlines_of(search, None) });
+}
+
+/// Снять контуры с шара. Единственный способ убрать их совсем: заводит их
+/// показ выдачи, а сменяет — только следующий показ, поэтому без этого они
+/// остались бы до конца запуска.
+pub fn clear_outlines(state: &mut State) {
+    if state.shown.take().is_none() {
+        return;
+    }
+    crate::calls::globe::on_outlines(&Outlines { outlines: Vec::new() });
 }
 
 /// Погасить выделение контура, не трогая сами контуры и выбор по щелчку.
@@ -210,12 +245,15 @@ pub fn pick(state: &mut State, at: Option<(f64, f64)>) {
     show_on_globe(state, view);
 }
 
-/// Показать снимок из выдачи активного поиска: выбрать его, навести на него
-/// камеру, наложить его растры и открыть вкладку с шаром. `false` — активный
-/// вид не поиск или продукта в выдаче нет; тогда его восстанавливает по ключу
+/// Показать снимок из выдачи названного поиска: выбрать его, навести на него
+/// камеру, наложить его растры и открыть вкладку с шаром. `false` — этот вид не
+/// поиск или продукта в его выдаче нет; тогда его восстанавливает по ключу
 /// провайдер (см. overlay::on_show_pressed).
-pub fn show(state: &mut State, identifier: &str) -> bool {
-    let Some((view, search)) = state.active_search_mut() else { return false };
+///
+/// Именно названного, а не активного: строку могли нажать в той половине
+/// экрана, что не под рукой, и выделять контур надо в её выдаче.
+pub fn show(state: &mut State, view: ViewId, identifier: &str) -> bool {
+    let Some(search) = state.search_mut(view) else { return false };
     let Some(product) = search
         .results
         .iter()

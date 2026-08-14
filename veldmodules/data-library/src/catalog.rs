@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::module::{ReadPurpose, SidecarWrite, State};
 use crate::module::storage::{self, LocalFile, OriginSidecar};
 use crate::proto::data_library::{LibraryEntry, LibraryRequest, LibraryState, LibraryStatus};
+use crate::proto::data_provider::{ProductRoots, ProductRootsRequest};
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsReadRequest, FsWriteRequest, FsWriteResult};
 
@@ -18,8 +19,12 @@ pub fn on_list(state: &mut State, _req: LibraryRequest) {
 /// Перечитать каталог; результатом станет рассылка состояния.
 pub fn rescan(state: &mut State) {
     let correlation_id = state.pending_list.begin(());
+    // Вглубь: снимок лежит папкой, и его файлы — записи каталога наравне с
+    // теми, что лежат в корне. Каталоги сами по себе записями не являются, и
+    // рекурсивный листинг их не отдаёт (см. `FsListRequest.recursive`).
     crate::calls::fs::on_list(&FsListRequest {
         path: storage::DATA_DIR.to_string(),
+        recursive: true,
     }, &correlation_id);
 }
 
@@ -84,6 +89,61 @@ pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListRes
             path: storage::origin_path(&name),
         }, &correlation_id);
     }
+
+    ask_product_roots(state);
+}
+
+/// Спрашивает провайдера, к каким снимкам относятся записи, у которых снимок не
+/// записан. Такими остаются файлы, скачанные мимо приложения или до того, как
+/// границу стали записывать, — сами по себе они из своего снимка выпадают.
+///
+/// Спрашиваем, а не выводим: граница снимка — раскладка бакета провайдера, и
+/// второй её носитель у нас разошёлся бы с первым на первой же новой миссии.
+/// Ответ ложится в сидкар: он и так единственное, что переживает рестарт, а
+/// спрашивать одно и то же на каждый листинг незачем.
+fn ask_product_roots(state: &mut State) {
+    let identifiers: Vec<String> = state
+        .origins
+        .values()
+        .filter(|origin| origin.product.is_empty() && !origin.identifier.is_empty())
+        .map(|origin| origin.identifier.clone())
+        .collect();
+    if identifiers.is_empty() {
+        return;
+    }
+    let correlation_id = state.pending_roots.begin();
+    crate::calls::data_provider::on_product_roots(
+        &ProductRootsRequest { identifiers },
+        &correlation_id,
+    );
+}
+
+/// Корни снимков приехали. Приписываем их записям и переписываем сидкары —
+/// каждый из них после этого сам отвечает, к какому снимку файл относится.
+///
+/// Ключа, ни в каком снимке не лежащего, в ответе нет вовсе; такая запись так и
+/// остаётся сама по себе, и спрашивать про неё второй раз мы всё равно будем —
+/// это дёшево (ответ без сети) и самолечится, если раскладку бакета уточнят.
+pub fn on_product_roots_result(state: &mut State, response: ProductRoots) {
+    let correlation_id = veldsdk::correlation();
+    if state.pending_roots.settle(&correlation_id) != veldsdk::Reply::Current { return }
+
+    let found: Vec<(String, String, Option<u64>, String)> = state
+        .origins
+        .iter()
+        .filter(|(_, origin)| origin.product.is_empty())
+        .filter_map(|(name, origin)| {
+            let root = response.roots.get(&origin.identifier)?;
+            Some((name.clone(), origin.identifier.clone(), origin.total_bytes, root.clone()))
+        })
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    for (name, identifier, total_bytes, product) in found {
+        write_sidecar(state, &name, &identifier, &product, total_bytes);
+    }
+    publish(state);
 }
 
 /// Сидкар записи `name` прочитан (ожидание уже снято с учёта, см.
@@ -100,15 +160,23 @@ pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened)
 
     state.origins.insert(name, sidecar);
     publish(state);
+    ask_product_roots(state);
 }
 
 /// Пишет сидкар. Он ложится на диск ДО старта закачки, поэтому переживает
 /// сбой, случившийся до появления первых байт.
-pub fn write_sidecar(state: &mut State, name: &str, identifier: &str, total_bytes: Option<u64>) {
+pub fn write_sidecar(
+    state: &mut State,
+    name: &str,
+    identifier: &str,
+    product: &str,
+    total_bytes: Option<u64>,
+) {
     let sidecar = OriginSidecar {
         provider: storage::PROVIDER_NAME.to_string(),
         identifier: identifier.to_string(),
         total_bytes,
+        product: product.to_string(),
     };
     state.origins.insert(name.to_string(), sidecar.clone());
 
@@ -223,6 +291,7 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
             done,
             total,
             status: status as i32,
+            product: state.product_of(name).unwrap_or_default().to_string(),
         }
     }).collect()
 }

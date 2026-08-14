@@ -4,31 +4,34 @@
 //! источником строк и полосой запроса над ними. Полоса нужна только здесь —
 //! остальные виды показывают то, что у них уже есть, а этот сначала спрашивает.
 
-use veld_ui_service_wrap::row;
-use crate::proto::ui_service::{Alignment, Element, Length, Padding};
-use crate::module::components::{controls, format, list_screen, Row, RowStatus, Screen};
+use crate::proto::ui_service::Element;
+use crate::module::components::{controls, format, list_screen, Row, RowKind, RowStatus, Screen};
 use crate::module::state::listing::Menu;
-use crate::module::state::{SearchState, State};
-use crate::module::{theme, Msg};
+use crate::module::state::search::Period;
+use crate::module::state::{SearchState, State, ViewId};
+use crate::module::{Msg, ViewMsg};
 
 
-pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
+pub fn view(state: &State, view: ViewId, search: &SearchState) -> Element<Msg> {
     let rows: Vec<Row> = search
         .results
         .iter()
         .map(|product| {
-            // Каталог или объект — сказал провайдер (см. DataProduct.folder):
-            // GET по пути продукта-каталога — это 404, и «открыть» его значит
-            // перейти внутрь, теми же строками, что папки сетевого каталога;
-            // продукт-архив — обычный файл. Сколько содержимого каталога уже
+            // В выдаче поиска снимок — каждая строка: каталог отвечает
+            // продуктами, а не файлами. Различает их только то, чем продукт
+            // лежит в хранилище (см. DataProduct.folder): GET по пути
+            // продукта-каталога — это 404, и «открыть» его значит перейти
+            // внутрь, теми же строками, что папки сетевого каталога;
+            // продукт-архив — обычный объект. Сколько содержимого каталога уже
             // на диске, знает библиотека.
+            let kind = RowKind::Product { folder: product.folder };
             let row = if product.folder {
                 let done = state.library.count_under(&format!("{}/", product.identifier));
                 let status = if done > 0 { RowStatus::Partial { done } } else { RowStatus::Remote };
                 Row {
                     size: product.size,
                     date: product.acquired,
-                    ..Row::folder_row(product.identifier.clone(), product.name.clone(), status)
+                    ..Row::container_row(product.identifier.clone(), product.name.clone(), status, kind)
                 }
             } else {
                 Row::remote(
@@ -37,18 +40,23 @@ pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
                     product.name.clone(),
                     product.size,
                     product.acquired,
+                    kind,
                 )
             };
             Row {
-                kind: product.product_type.clone(),
+                product_type: product.product_type.clone(),
+                // В выдаче строка и есть снимок — сама себе продукт.
+                product: product.identifier.clone(),
                 ..row
             }
         })
         .collect();
 
     list_screen::view(
+        view,
         Screen {
             title: "Поиск снимков",
+            picked: state.picked_key(),
             subtitle: subtitle(search, rows.len()),
             path: None,
             // Пока ответа нет, «ничего не нашлось» — неправда: ещё ищем.
@@ -56,11 +64,11 @@ pub fn view(state: &State, search: &SearchState) -> Element<Msg> {
                 true => "Спрашиваем каталог…",
                 false => "Ничего не нашлось — попробуйте другую миссию или часть имени",
             },
-            controls: Some(bar(search)),
+            controls: Some(bar(view, search)),
             rows,
         },
         &search.listing,
-        state.logical_width(),
+        state.pane_width(),
     )
 }
 
@@ -90,32 +98,43 @@ fn subtitle(search: &SearchState, found: usize) -> String {
 /// Облачность спрашивается не всегда: у радара её нет, и условие по ней вернуло
 /// бы пусто (см. [`Mission::clouded`]). Рычаг, который может только обнулить
 /// выдачу, лучше не показывать вовсе.
-fn bar(search: &SearchState) -> Element<Msg> {
+fn bar(view: ViewId, search: &SearchState) -> Element<Msg> {
     // Ввод сам по себе ничего не запускает: запрос идёт по сети, поле ждёт
     // Enter (`on_submit`).
     let field = controls::search_field(
         "Часть имени снимка; пусто — самое свежее",
         &search.query,
-        Msg::SearchQuery,
-        Some(Msg::RunSearch),
+        move |query| Msg::In(view, ViewMsg::SearchQuery(query)),
+        Some(Msg::In(view, ViewMsg::RunSearch)),
     );
 
     let opened = &search.listing.menu;
     let mut controls: Vec<Element<Msg>> = vec![
         field,
-        controls::chip("Миссия:", search.mission, Menu::Mission, opened, &[], Msg::SearchMission),
-        controls::chip("Съёмка:", search.period, Menu::Period, opened, &[], Msg::SearchPeriod),
+        controls::chip(view, "Миссия:", search.mission, Menu::Mission, opened, &[], move |choice| {
+            Msg::In(view, ViewMsg::SearchMission(choice))
+        }),
+        controls::chip(view, "Съёмка:", search.period, Menu::Period, opened, &[], move |choice| {
+            Msg::In(view, ViewMsg::SearchPeriod(choice))
+        }),
     ];
+    // Поля дат — только у своего интервала: у пресета краёв не спрашивают, и
+    // пустые поля рядом с «за неделю» обещали бы выбор, которого нет.
+    if search.period == Period::Custom {
+        controls.push(controls::date_field("с", &search.from, move |value| {
+            Msg::In(view, ViewMsg::SearchFrom(value))
+        }, Msg::In(view, ViewMsg::RunSearch)));
+        controls.push(controls::date_field("по", &search.to, move |value| {
+            Msg::In(view, ViewMsg::SearchTo(value))
+        }, Msg::In(view, ViewMsg::RunSearch)));
+    }
     if search.mission.clouded() {
         controls.push(
-            controls::chip("Облачность:", search.cloud, Menu::Cloud, opened, &[], Msg::SearchCloud),
+            controls::chip(view, "Облачность:", search.cloud, Menu::Cloud, opened, &[], move |choice| {
+                Msg::In(view, ViewMsg::SearchCloud(choice))
+            }),
         );
     }
 
-    row(controls)
-        .spacing(7.0)
-        .width(Length::Fill)
-        .align_items(Alignment::Center)
-        .padding(Padding { top: 0.0, bottom: 10.0, left: theme::GUTTER, right: theme::GUTTER })
-        .into()
+    controls::bar(controls)
 }

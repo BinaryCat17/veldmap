@@ -16,6 +16,7 @@
 //! показывать его негде.
 
 use crate::module::state::{State, ViewId, ViewKind};
+use crate::proto::data_provider::{ImageryResponse, ImageryRole};
 use crate::proto::image_view::{
     camera_command::Command, CameraCommand, Canvas, Fit, Pan, ShowRequest, ViewState, ZoomAt,
 };
@@ -37,10 +38,10 @@ const ZOOM_STEP: f32 = 1.5;
 
 /// Просмотр скачанного файла: открывает библиотека — файл её, и где он лежит,
 /// знает только она.
-pub fn on_view_local_pressed(state: &mut State, name: String) {
+pub fn on_view_local_pressed(state: &mut State, from: ViewId, name: String) {
     if name.is_empty() { return; }
 
-    let correlation_id = begin_open(state, name.clone(), Some(name.clone()));
+    let correlation_id = begin_open(state, from, name.clone(), Some(name.clone()));
     crate::calls::data_library::on_open(&crate::proto::data_library::OpenRequest {
         name,
     }, &correlation_id);
@@ -50,19 +51,77 @@ pub fn on_view_local_pressed(state: &mut State, name: String) {
 /// запрос к хранилищу может только он); дальше путь тот же, что у локального:
 /// по проводу идут только те окна файла, которые конвейер тайлов действительно
 /// прочитал.
-pub fn on_view_remote_pressed(state: &mut State, identifier: String) {
+pub fn on_view_remote_pressed(state: &mut State, from: ViewId, identifier: String) {
     if identifier.is_empty() { return; }
 
-    let correlation_id = begin_open(state, identifier.clone(), None);
+    let correlation_id = begin_open(state, from, identifier.clone(), None);
     crate::calls::data_provider::on_open(&crate::proto::data_provider::OpenRequest {
         identifier,
     }, &correlation_id);
 }
 
+/// Показать снимок, лежащий папкой. Прямо его не открыть: `GET` по пути
+/// каталога отвечает 404, а какой из лежащих внутри растров показывать —
+/// раскладка хранилища, и знает её только провайдер. Поэтому здесь лишний ход:
+/// спрашиваем растры, вкладку заводим сразу.
+///
+/// Вкладка заводится до ответа намеренно: ход к каталогу занимает секунды, и
+/// молчание в ответ на нажатие читается как «не сработало».
+pub fn on_view_product_pressed(state: &mut State, from: ViewId, identifier: String) {
+    if identifier.is_empty() { return; }
+
+    let half = super::nav::half_of(state, from);
+    let view = super::nav::open_preview(state, half, identifier.clone(), None);
+    let correlation_id = state.preview_mut(view).expect("вид только что открыт").begin();
+    state.preview_imagery.insert(correlation_id.clone(), view);
+    crate::calls::data_provider::on_imagery(
+        &crate::proto::data_provider::ImageryRequest { identifier },
+        &correlation_id,
+    );
+}
+
+/// Растры снимка приехали. `false` — ответ не наш (его ждало наложение).
+///
+/// Из двух ролей берём подробную: смотрят снимок затем, чтобы разглядеть, а
+/// квиклук для этого мал. Нет подробной — показываем что есть: маленькая
+/// картинка лучше пустой вкладки с отказом.
+pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool {
+    let correlation_id = veldsdk::correlation();
+    let Some(view) = state.preview_imagery.take(&correlation_id) else { return false };
+    let Some(preview) = state.preview_mut(view) else { return true };
+    if preview.request.settle(&correlation_id) != veldsdk::Reply::Current {
+        return true;
+    }
+
+    let raster = response
+        .rasters
+        .iter()
+        .find(|raster| raster.role == ImageryRole::ImageryDetailed as i32)
+        .or_else(|| response.rasters.first());
+    let Some(raster) = raster else {
+        preview.error = Some(match response.error.is_empty() {
+            true => "внутри снимка нечего показать".to_string(),
+            false => response.error.clone(),
+        });
+        return true;
+    };
+
+    let identifier = raster.identifier.clone();
+    preview.label = identifier.clone();
+    let correlation_id = preview.begin();
+    state.previews.insert(correlation_id.clone(), view);
+    crate::calls::data_provider::on_open(
+        &crate::proto::data_provider::OpenRequest { identifier },
+        &correlation_id,
+    );
+    true
+}
+
 /// Общее начало обоих путей: новая вкладка и корреляция, по которой её найдёт
 /// ответ открывателя.
-fn begin_open(state: &mut State, label: String, entry: Option<String>) -> String {
-    let view = super::nav::open_preview(state, label, entry);
+fn begin_open(state: &mut State, from: ViewId, label: String, entry: Option<String>) -> String {
+    let half = super::nav::half_of(state, from);
+    let view = super::nav::open_preview(state, half, label, entry);
     let correlation_id = state.preview_mut(view)
         .expect("вид только что открыт")
         .begin();
@@ -133,9 +192,9 @@ fn fail(state: &mut State, view: ViewId, error: String) {
 /// Канве активного превью досталось новое место. Пока размер тот же, ничего
 /// не делаем — перевыделение сменило бы id текстуры на каждый пересчёт
 /// разметки (см. то же у глобуса).
-pub fn on_resized(state: &mut State, size: ViewportSize) {
+pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
     let scale = state.scale;
-    let Some((view, preview)) = state.active_preview_mut() else { return };
+    let Some(preview) = state.preview_mut(view) else { return };
 
     if veldsdk::surface::Delegated::covers(preview.surface.as_ref(), size.width, size.height) {
         return;
@@ -163,8 +222,8 @@ pub fn on_resized(state: &mut State, size: ViewportSize) {
 /// Указатель над канвой: тащат — панорама, колесо — масштаб вокруг курсора.
 /// Правая и средняя кнопки свободны — как и у глобуса, занимать их «пока
 /// чем-нибудь» значит переучивать потом.
-pub fn on_pointer(state: &mut State, event: PointerEvent) {
-    let Some((view, preview)) = state.active_preview_mut() else { return };
+pub fn on_pointer(state: &mut State, view: ViewId, event: PointerEvent) {
+    let Some(preview) = state.preview_mut(view) else { return };
     if preview.surface.is_none() {
         return;
     }
@@ -199,13 +258,13 @@ pub fn on_pointer(state: &mut State, event: PointerEvent) {
 }
 
 /// Кнопки тулбара: вписать и шаг масштаба вокруг центра канвы.
-pub fn on_fit(state: &mut State) {
-    let Some((view, _)) = state.active_preview_mut() else { return };
+pub fn on_fit(state: &mut State, view: ViewId) {
+    let Some(_) = state.preview_mut(view) else { return };
     send(&view.to_string(), Command::Fit(Fit {}));
 }
 
-pub fn on_zoom_step(state: &mut State, direction: f32) {
-    let Some((view, preview)) = state.active_preview_mut() else { return };
+pub fn on_zoom_step(state: &mut State, view: ViewId, direction: f32) {
+    let Some(preview) = state.preview_mut(view) else { return };
     let Some(surface) = &preview.surface else { return };
     let factor = if direction > 0.0 { ZOOM_STEP } else { 1.0 / ZOOM_STEP };
     send(&view.to_string(), Command::ZoomAt(ZoomAt {

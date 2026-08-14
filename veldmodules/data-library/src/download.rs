@@ -19,7 +19,22 @@ use veldsdk::proto::network::{FsDownloadProgress, FsDownloadRequest, FsDownloadR
 /// хранения наша, и заказчику её знать незачем.
 pub fn on_download(state: &mut State, req: DownloadRequest) {
     if req.identifier.is_empty() { return; }
-    let name = storage::name_from_identifier(&req.identifier);
+
+    // Снимок, если его не назвали, берётся из уже записанного: перекачка того
+    // же файла приходит без него, а забыть, к какому снимку файл относится,
+    // значило бы вынуть его оттуда навсегда — заново эту границу нам не
+    // спросить, её знает провайдер. Ищем по ключу, а не по имени: имя из
+    // снимка и выводится, и до него ещё не добрались.
+    let product = match req.product.is_empty() {
+        true => state
+            .origins
+            .values()
+            .find(|origin| origin.identifier == req.identifier)
+            .map(|origin| origin.product.clone())
+            .unwrap_or_default(),
+        false => req.product.clone(),
+    };
+    let name = storage::name_from_identifier(&req.identifier, &product);
 
     // Повторное нажатие, пока идёт предыдущая попытка (в том числе пока она
     // ждёт подписи). Отсекаем здесь: id операции наш с самого начала, поэтому
@@ -33,7 +48,7 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
     // на диске уже будет известно, откуда файл, и запись о намерении не
     // пропадёт. total_bytes пишем, если он уже известен из прошлой попытки.
     let known_total = state.origins.get(&name).and_then(|o| o.total_bytes);
-    write_sidecar(state, &name, &req.identifier, known_total);
+    write_sidecar(state, &name, &req.identifier, &product, known_total);
 
     // Перекачка доведённого файла сносит его до старта. Качальщик пишет в
     // `.part` и переименовывает его только в конце, поэтому иначе рядом с
@@ -157,7 +172,11 @@ pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
     if event.total_bytes > 0 {
         let (identifier, name) = (dl.identifier.clone(), dl.name.clone());
         if state.total_bytes(&name) != event.total_bytes {
-            write_sidecar(state, &name, &identifier, Some(event.total_bytes));
+            // Снимок берётся из уже записанного сидкара: он приехал с запросом
+            // закачки, а здесь его взять неоткуда — и переписать пустым значило
+            // бы потерять то, к чему файл относится.
+            let product = state.product_of(&name).unwrap_or_default().to_string();
+            write_sidecar(state, &name, &identifier, &product, Some(event.total_bytes));
         }
     }
     catalog::publish(state);

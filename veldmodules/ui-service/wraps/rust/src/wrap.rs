@@ -14,13 +14,13 @@ pub mod render;
 // снаружи Column — билдер, а сырой proto::Column доступен через crate::proto.
 pub use style::{
     Alignment, Background, Border, Color, Length, Padding, ProgressBarStyle,
-    Scrollbar, Shadow, TextInputStyle, WidgetStyle,
+    Scrollbar, Shadow, SliderStyle, TextInputStyle, WidgetStyle,
 };
 pub use widgets::{
     Column, Container, Element, Image, Keyed, Payload, Popover, ProgressBar, Row,
-    Scrollable, Space, Text, TextInput, Tooltip, UiMessage, Viewport,
+    Scrollable, Slider, Space, Text, TextInput, Tooltip, UiMessage, Viewport,
     column, container, icon, image, mono, popover, progress_bar, row, scrollable,
-    space, text, text_input, tooltip, viewport,
+    slider, space, text, text_input, tooltip, viewport,
 };
 
 #[macro_export]

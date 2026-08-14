@@ -34,12 +34,15 @@ pub fn request_path(state: &mut State, view: ViewId, path: String) {
 /// Из вида, у которого каталога нет (скачанное, поиск), переход открывает
 /// каталог новой вкладкой: показать папку — это перейти в неё, а другого места
 /// для этого в приложении нет.
-pub fn on_enter(state: &mut State, path: String) {
-    let Some((view, browse)) = state.active_browse_mut() else {
+pub fn on_enter(state: &mut State, view: ViewId, path: String) {
+    let Some(browse) = state.browse_mut(view) else {
+        // Каталог открывается в той же половине, где нажали: показать папку
+        // рядом со списком, из которого её позвали, и есть смысл разделения.
         if !path.is_empty() {
-            super::nav::on_new_browse(state);
-            if let Some((view, _)) = state.active_browse_mut() {
-                request_path(state, view, path);
+            let half = super::nav::half_of(state, view);
+            super::nav::on_new_tab(state, half, crate::module::NewTab::Browse);
+            if let Some(opened) = state.active_in(half) {
+                request_path(state, opened, path);
             }
         }
         return;
@@ -48,8 +51,8 @@ pub fn on_enter(state: &mut State, path: String) {
     request_path(state, view, target);
 }
 
-pub fn on_up(state: &mut State) {
-    let Some((view, browse)) = state.active_browse_mut() else { return };
+pub fn on_up(state: &mut State, view: ViewId) {
+    let Some(browse) = state.browse_mut(view) else { return };
     let mut path = browse.current_path.clone();
 
     if path.ends_with('/') {
@@ -100,6 +103,7 @@ pub fn on_list_path_result(
     browse.items.extend(response.entries.into_iter().map(|entry| {
         crate::module::state::browse::BrowseItem {
             is_folder: entry.key.ends_with('/'),
+            product: entry.product,
             name: entry.key.split('/').filter(|part| !part.is_empty()).next_back().unwrap_or("").to_string(),
             identifier: entry.key,
             size: entry.size,

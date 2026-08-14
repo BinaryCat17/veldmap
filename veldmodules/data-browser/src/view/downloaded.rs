@@ -6,28 +6,42 @@
 use crate::proto::ui_service::Element;
 use crate::module::components::{downloaded_rows, format, list_screen, Screen};
 use crate::module::state::listing::ListingState;
-use crate::module::state::State;
+use crate::module::state::{State, ViewId};
 use crate::module::Msg;
 
-pub fn view(state: &State, listing: &ListingState) -> Element<Msg> {
+pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg> {
     let rows = downloaded_rows(&state.library);
     let on_disk: u64 = rows.iter().map(|row| row.stored()).sum();
 
+    // Снимки и одиночные файлы считаются порознь: строка «21 файл» над списком
+    // из трёх снимков называла бы не то, что в нём стоит.
+    let snapshots = rows.iter().filter(|row| row.kind.is_product()).count();
+    let files = rows.len() - snapshots;
+    let counts = [
+        (snapshots, ["снимок", "снимка", "снимков"]),
+        (files, ["файл", "файла", "файлов"]),
+    ];
+    let said: Vec<String> = counts
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, forms)| format!("{} {}", count, format::plural(*count, *forms)))
+        .collect();
+
     list_screen::view(
+        view,
         Screen {
             title: "Скачанное",
-            subtitle: format!(
-                "{} {} · {}",
-                rows.len(),
-                format::plural(rows.len(), ["файл", "файла", "файлов"]),
-                format::bytes(on_disk),
-            ),
+            picked: state.picked_key(),
+            subtitle: match said.is_empty() {
+                true => format::bytes(on_disk),
+                false => format!("{} · {}", said.join(", "), format::bytes(on_disk)),
+            },
             path: None,
             empty: "Ничего не скачано",
             controls: None,
             rows,
         },
         listing,
-        state.logical_width(),
+        state.pane_width(),
     )
 }

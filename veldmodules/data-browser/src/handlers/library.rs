@@ -12,7 +12,7 @@ use crate::proto::data_library::LibraryStatus;
 
 /// Пользователь нажал «скачать». Повторное нажатие на идущую закачку —
 /// пауза: скачанное сохраняется, следующее нажатие продолжит с него.
-pub fn on_download_pressed(state: &mut State, identifier: String) {
+pub fn on_download_pressed(state: &mut State, identifier: String, product: String) {
     if identifier.is_empty() { return; }
 
     let downloading = state.library.by_identifier(&identifier)
@@ -24,7 +24,7 @@ pub fn on_download_pressed(state: &mut State, identifier: String) {
         return;
     }
 
-    crate::calls::data_library::on_download(&DownloadRequest { identifier });
+    crate::calls::data_library::on_download(&DownloadRequest { identifier, product });
 }
 
 /// Пользователь нажал «удалить» — на любой записи библиотеки (полной,
@@ -35,6 +35,36 @@ pub fn on_delete_pressed(_state: &mut State, name: String) {
     if name.is_empty() { return; }
 
     crate::calls::data_library::on_delete(&ItemRequest { name });
+}
+
+/// Показать запись в файловом менеджере. Путь считает библиотека: раскладка
+/// хранения её, и знать её нам незачем.
+pub fn on_reveal_pressed(_state: &mut State, name: String) {
+    if name.is_empty() { return; }
+
+    crate::calls::data_library::on_reveal(&ItemRequest { name });
+}
+
+/// Выбросить снимок целиком. Библиотека про снимки не знает — она ведёт учёт
+/// файлам, — поэтому разворачиваем его здесь, в том же месте, где строку
+/// снимка и собрали (`downloaded_rows`), и просим удалить каждый её файл.
+///
+/// Отдельного «удали всё по снимку» в контракте нет намеренно: он потребовал
+/// бы от библиотеки знать границу снимка, а знает её провайдер, и второй
+/// носитель этого факта разошёлся бы с первым.
+pub fn on_delete_snapshot(state: &mut State, product: String) {
+    if product.is_empty() { return; }
+
+    let names: Vec<String> = state
+        .library
+        .entries
+        .iter()
+        .filter(|entry| entry.product == product)
+        .map(|entry| entry.name.clone())
+        .collect();
+    for name in names {
+        crate::calls::data_library::on_delete(&ItemRequest { name });
+    }
 }
 
 /// Библиотека прислала состояние — своё или в ответ на наш запрос. Второго

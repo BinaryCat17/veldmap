@@ -15,4 +15,4 @@ pub mod row;
 pub mod table;
 
 pub use list_screen::Screen;
-pub use row::{downloaded_rows, Row, RowStatus};
+pub use row::{downloaded_rows, folder_of, Row, RowKind, RowStatus};

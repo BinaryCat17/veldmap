@@ -15,6 +15,10 @@ interface:
       type: module/ItemRequest
     on_open:
       type: module/OpenRequest
+    # Показать запись в файловом менеджере. Тем же ItemRequest, потому что
+    # сказать нужно то же самое — какую запись; путь к ней знаем только мы.
+    on_reveal:
+      type: module/ItemRequest
 
   outputs:
     # Одно состояние на всех — и после on_list, и при любом изменении.
@@ -36,11 +40,17 @@ dependencies:
   # каталоге, её раскладка и её состояние наши, а владельцем операции платформа
   # делает того, кто публикует network/on_fs_download. Владея ею, мы её сами и
   # убиваем, без посредника.
+  # Он же отвечает, к какому снимку относится ключ: границу снимка задаёт
+  # раскладка бакета, и вывести её здесь не из чего. Спрашиваем только про
+  # записи, у которых снимок в сидкаре не записан.
   data-provider:
-    subs: [on_signed]
-    calls: [on_sign]
+    subs: [on_signed, on_product_roots_result]
+    calls: [on_sign, on_product_roots]
   # Собственно закачка, её прогресс и её единственный конец — в том числе у
   # убитой: пустой терминальный ответ за неё публикует хост.
   network:
     subs: [on_fs_download_progress, on_fs_download_result]
     calls: [on_fs_download]
+  # Рабочий стол есть только у платформы: путь считаем мы, показывает она.
+  app:
+    calls: [on_reveal_path]

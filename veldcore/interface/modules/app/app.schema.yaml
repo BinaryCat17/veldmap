@@ -15,6 +15,8 @@ interface:
   inputs:
     on_set_surface:
       type: app/SetSurface
+    on_reveal_path:
+      type: app/RevealPath
   outputs:
     on_ui_event:
       type: app/UIEvent

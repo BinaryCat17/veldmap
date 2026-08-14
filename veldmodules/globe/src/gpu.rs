@@ -46,12 +46,16 @@ const INITIAL_OUTLINE_BUFFER: u64 = 64 * 1024;
 /// сотен вершин.
 const INITIAL_OVERLAY_BUFFER: u64 = 256 * 1024;
 
-/// Вершина варп-сетки наложения: точка мира и координата в текстуре носителя.
+/// Вершина варп-сетки наложения: точка мира, координата в текстуре носителя и
+/// прозрачность своего слоя. Последняя одинакова у всех вершин наложения —
+/// вершиной она едет потому, что все наложения лежат в одном буфере и рисуются
+/// одним пайплайном (см. `overlay::patch`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OverlayVertex {
     pub position: World,
     pub uv: [f32; 2],
+    pub alpha: f32,
 }
 
 /// Собранные патчи наложений: общий вершинный буфер и отрисовки диапазонами —
@@ -179,6 +183,7 @@ impl Device {
                 attributes: gfx::packed_attributes(&[
                     VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32x2,
+                    VertexFormat::VtxFloat32,
                 ]),
             }],
             bind_group_layout_ids: vec![camera_layout.id(), overlay_layout.id()],

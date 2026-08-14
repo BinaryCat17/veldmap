@@ -5,10 +5,10 @@
 
 use veld_ui_service_wrap::{column, row, viewport};
 
-use crate::proto::ui_service::{container, mono, text, Alignment, Element, Length, Padding};
-use crate::module::components::format;
-use crate::module::state::{GlobeState, State};
-use crate::module::{theme, Msg};
+use crate::proto::ui_service::{container, mono, text, Alignment, Element, Length};
+use crate::module::components::{self, format};
+use crate::module::state::{GlobeState, State, ViewId};
+use crate::module::{theme, Msg, ViewMsg};
 
 
 /// Сколько знаков имени выбранного снимка помещается в подпись. Числом, а не
@@ -16,15 +16,15 @@ use crate::module::{theme, Msg};
 /// продукта длиной под семьдесят знаков и без того не показать целиком.
 const PICKED_CHARS: usize = 46;
 
-pub fn view(state: &State, globe: &GlobeState) -> Element<Msg> {
+pub fn view(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
     // Текстуру область получает от нас же: мы её выделили в ответ на
     // предыдущий on_resized. На первом кадре её ещё нет — место занимается
     // пустым, и это нормально: следующим событием оно придёт.
     let mut area = viewport::<Msg>()
         .width(Length::Fill)
         .height(Length::Fill)
-        .on_resized(Msg::GlobeResized)
-        .on_pointer(Msg::GlobePointer);
+        .on_resized(move |size| Msg::In(view, ViewMsg::GlobeResized(size)))
+        .on_pointer(move |pointer| Msg::In(view, ViewMsg::GlobePointer(pointer)));
     if let Some(surface) = &globe.surface {
         area = area.texture(surface.handle());
     }
@@ -32,7 +32,7 @@ pub fn view(state: &State, globe: &GlobeState) -> Element<Msg> {
     column![
         container(area).width(Length::Fill).height(Length::Fill),
         theme::hairline(theme::LINE),
-        caption(state, globe),
+        caption(state, view, globe),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
@@ -45,19 +45,25 @@ pub fn view(state: &State, globe: &GlobeState) -> Element<Msg> {
 /// ничего, размер — то единственное, что можно сказать о безымянной области,
 /// а как только снимок назван, он и есть ответ на вопрос «на что я смотрю».
 /// Рядом с именем — обратный ход: с шара к строке продукта в каталоге, а у
-/// наложения ещё и «снять» — единственное место, где показанное из каталога
-/// можно убрать (показанное из поиска уходит и со своей выдачей).
-fn caption(state: &State, globe: &GlobeState) -> Element<Msg> {
-    // Что назвать: выбранный контур, а без него — наложенный снимок. Обычно
+/// наложений «снять» — разом все. По одному их снимают в «На просмотре»; здесь
+/// кнопка на случай, когда той вкладки не открыто.
+fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
+    // Что назвать: выбранный контур, а без него — верхний слой на шаре. Обычно
     // это один и тот же продукт; расходятся они, когда щёлкнули по соседнему
     // контуру, и тогда именем отвечает выбор — он свежее.
+    //
+    // Верхний из тех, что видно: слоёв бывает несколько, назвать одной строкой
+    // можно только один, а собирающийся или скрытый назвал бы то, чего на шаре
+    // нет.
     let subject: Option<(&str, &str)> = state
         .picked()
         .map(|product| (product.name.as_str(), product.identifier.as_str()))
         .or_else(|| {
             state
-                .overlay
-                .as_ref()
+                .overlays
+                .iter()
+                .rev()
+                .find(|overlay| overlay.on_globe() && !overlay.hidden)
                 .map(|overlay| (overlay.label.as_str(), overlay.identifier.as_str()))
         });
 
@@ -71,7 +77,7 @@ fn caption(state: &State, globe: &GlobeState) -> Element<Msg> {
                     .single_line()
                     .into(),
             );
-            trailing.push(bar_button("В каталоге", Msg::Enter(folder_of(identifier))));
+            trailing.push(theme::bar_button("В каталоге").on_press(Msg::In(view, ViewMsg::Enter(components::folder_of(identifier).to_string()))).into());
         }
         None => {
             let label = match &globe.surface {
@@ -83,8 +89,10 @@ fn caption(state: &State, globe: &GlobeState) -> Element<Msg> {
             );
         }
     }
-    if state.overlay.is_some() {
-        trailing.push(bar_button("Снять с шара", Msg::GlobeClear));
+    // Контуры считаются наравне с растрами: очерченный шар — тоже «что-то на
+    // нём лежит», и снимать это надо тем же рычагом.
+    if !state.overlays.is_empty() || state.shown.is_some() {
+        trailing.push(theme::bar_button("Снять с шара").on_press(Msg::GlobeClear).into());
     }
 
     let mut line = row![
@@ -92,43 +100,17 @@ fn caption(state: &State, globe: &GlobeState) -> Element<Msg> {
             .size(theme::TEXT_LABEL)
             .color(theme::INK_DIM)
             .single_line(),
-        container(veld_ui_service_wrap::space::<Msg>(Length::Fill, Length::Fixed(0.0)))
-            .width(Length::Fill),
+        theme::spacer(),
     ];
     for element in trailing {
         line = line.push(element);
     }
 
-    container(
-        line.spacing(10.0)
+    theme::chrome_bar(
+        line.spacing(crate::module::view::BAR_SPACING)
             .width(Length::Fill)
             .height(Length::Fill)
-            .align_items(Alignment::Center)
-            .padding(Padding { top: 0.0, bottom: 0.0, left: 14.0, right: 14.0 }),
+            .align_items(Alignment::Center),
     )
-    .background(theme::CHROME)
-    .width(Length::Fill)
-    .height(Length::Fixed(theme::BAR_HEIGHT))
     .into()
-}
-
-/// Кнопка в полосе: подпись и действие, по росту полосы.
-fn bar_button(label: &str, message: Msg) -> Element<Msg> {
-    theme::surface_button(
-        text::<Msg>(label.to_string()).size(theme::TEXT_SMALL).single_line(),
-        false,
-    )
-    .padding(Padding { top: 3.0, bottom: 3.0, left: 8.0, right: 8.0 })
-    .on_press(message)
-    .into()
-}
-
-/// Папка, в которой лежит продукт, — туда ведёт «В каталоге»: там его строка.
-/// То же правило, что у меню строки (см. components::row::Row::folder).
-fn folder_of(identifier: &str) -> String {
-    let path = identifier.trim_end_matches('/');
-    match path.rfind('/') {
-        Some(cut) => path[..cut].to_string(),
-        None => String::new(),
-    }
 }

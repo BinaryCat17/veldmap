@@ -23,6 +23,11 @@ interface:
     # бакета, запрос по точному имени — каталог. Обратный ход поиска.
     on_locate:
       type: module/LocateRequest
+    # Корень снимка для ключей хранилища. Единственный вход, который ничего не
+    # спрашивает снаружи: граница снимка выводится из самого ключа
+    # (см. `s3::product_root`), и сеть для этого не нужна.
+    on_product_roots:
+      type: module/ProductRootsRequest
 
   outputs:
     on_signed:
@@ -43,6 +48,9 @@ interface:
     on_locate_result:
       type: module/LocateResponse
       replies_to: on_locate
+    on_product_roots_result:
+      type: module/ProductRoots
+      replies_to: on_product_roots
 
 dependencies:
   # Открытие удалённого ресурса (подписать умеем только мы) и HTTP для

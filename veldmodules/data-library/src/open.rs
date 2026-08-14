@@ -6,7 +6,7 @@
 //! ровно так же, как провайдер не знает про раскладку диска.
 
 use crate::module::{ReadPurpose, State};
-use crate::proto::data_library::OpenRequest;
+use crate::proto::data_library::{ItemRequest, OpenRequest};
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
 use veldsdk::resource;
@@ -50,4 +50,18 @@ pub fn on_file_opened(target: OpenFor, opened: &ResourceOpened) {
 
 fn fail(correlation_id: String, error: String) {
     crate::emit::on_open_result(&resource::opened(Err(error)), &correlation_id);
+}
+
+/// Показать запись в файловом менеджере. Путь считаем мы: раскладка хранения
+/// наша и наружу не выходит, — а показывает платформа, потому что рабочий стол
+/// есть только у неё.
+///
+/// Недокачанную показываем под её `.part`: это то, что на диске лежит на самом
+/// деле, и открывать вместо неё пустое место значило бы соврать.
+pub fn on_reveal(state: &mut State, req: ItemRequest) {
+    if req.name.is_empty() { return; }
+    let is_partial = state.entry_for(&req.name).is_some_and(|file| file.is_partial);
+    crate::calls::app::on_reveal_path(&veldsdk::proto::app::RevealPath {
+        path: crate::module::storage::data_path(&req.name, is_partial),
+    });
 }

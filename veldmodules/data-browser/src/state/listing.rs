@@ -226,6 +226,10 @@ pub struct ListingState {
     /// «страница 3» списка из одной строки — не состояние, а недоразумение.
     pub page: usize,
     pub menu: Menu,
+    /// Строки-снимки, раскрытые в свои файлы. Множество имён, а не флаг у
+    /// строки: строки пересобираются на каждый кадр из библиотеки, а «я это
+    /// раскрыл» — свойство экрана и переживает пересборку.
+    pub expanded: std::collections::HashSet<String>,
 }
 
 impl ListingState {
@@ -236,8 +240,10 @@ impl ListingState {
         self.menu = Menu::Closed;
     }
 
-    /// Раскрыть меню или закрыть его же — повторное нажатие на чип.
-    pub fn toggle(&mut self, menu: Menu) {
-        self.menu = if self.menu == menu { Menu::Closed } else { menu };
+    /// Раскрыть строку-снимок в её файлы или свернуть обратно.
+    pub fn expand(&mut self, key: String) {
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
+        }
     }
 }

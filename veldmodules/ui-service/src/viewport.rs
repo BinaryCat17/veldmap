@@ -31,6 +31,10 @@ pub struct Viewport {
     /// об этом знать не хочет.
     on_resized: Option<String>,
     on_pointer: Option<String>,
+    /// Чем владелец назвал саму область. Нагрузку события здесь изготавливает
+    /// виджет (указатель, размер), поэтому назвать себя область может только
+    /// отдельным полем — см. `UiEventResponse.key`.
+    key: String,
 }
 
 /// Состояние между кадрами. Всё три поля — про то, о чём владельцу уже
@@ -50,7 +54,14 @@ struct State {
 
 impl Viewport {
     pub fn new(texture_id: u64, width: Length, height: Length) -> Self {
-        Self { texture_id, width, height, on_resized: None, on_pointer: None }
+        Self {
+            texture_id,
+            width,
+            height,
+            on_resized: None,
+            on_pointer: None,
+            key: String::new(),
+        }
     }
 
     pub fn on_resized(mut self, method: String) -> Self {
@@ -60,6 +71,13 @@ impl Viewport {
 
     pub fn on_pointer(mut self, method: String) -> Self {
         self.on_pointer = Some(method);
+        self
+    }
+
+    /// Имя области у владельца. Оба обработчика называют её одинаково —
+    /// область одна, — поэтому имя ставится один раз, а не по разу на метод.
+    pub fn key(mut self, key: String) -> Self {
+        self.key = key;
         self
     }
 }
@@ -114,12 +132,14 @@ impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for Viewport {
                 state.reported = size;
                 shell.publish(UiMessage::sized(
                     method.clone(),
+                    self.key.clone(),
                     ViewportSize { width: size.0, height: size.1 },
                 ));
             }
         }
 
         let Some(method) = &self.on_pointer else { return };
+        let key = self.key.clone();
 
         // Координаты области: начало — её левый верхний угол, единица — пиксель
         // её текстуры. За краем они выходят за границы, и это законно: так
@@ -129,7 +149,7 @@ impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for Viewport {
         // оно называется нулём (см. `PointerEvent` в types.proto).
         let mut send = |action: PointerAction, at: Point, button: Option<u32>, scroll: (f32, f32)| {
             let (x, y) = local(at);
-            shell.publish(UiMessage::pointer(method.clone(), PointerEvent {
+            shell.publish(UiMessage::pointer(method.clone(), key.clone(), PointerEvent {
                 action: action as i32,
                 x,
                 y,

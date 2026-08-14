@@ -4,8 +4,8 @@
 
 use crate::proto::data_provider::{
     ImageryRaster, ImageryRequest, ImageryResponse, ImageryRole, ListEntry, ListPathRequest,
-    ListPathResponse, LocateRequest, LocateResponse, SearchRequest, SearchResponse, SignRequest,
-    SignedUrl, UtmFrame,
+    ListPathResponse, LocateRequest, LocateResponse, ProductRoots, ProductRootsRequest,
+    SearchRequest, SearchResponse, SignRequest, SignedUrl, UtmFrame,
 };
 use aws_smithy_runtime_api::client::identity::Identity;
 use super::{catalogue, imagery, mgrs, s3, Asked, Config, Pending, State};
@@ -169,6 +169,23 @@ fn imagery_response(identifier: &str, keys: &[String]) -> ImageryResponse {
 /// Продукт каталога по ключу хранилища. Подъём к корню — знание раскладки
 /// бакета (s3::product_root), дальше обычный запрос к каталогу, только по
 /// точному имени и за одним продуктом.
+/// Корни снимков для пачки ключей — ответ, для которого никуда идти не надо:
+/// границу снимка задаёт раскладка бакета, и видна она в самом ключе.
+///
+/// Ключи, не лежащие ни в каком снимке, в ответ не попадают вовсе
+/// (см. `ProductRoots.roots`).
+pub fn on_product_roots(_state: &mut State, request: ProductRootsRequest) {
+    let roots = request
+        .identifiers
+        .iter()
+        .filter_map(|identifier| {
+            let root = crate::module::s3::product_root(identifier)?;
+            Some((identifier.clone(), root.to_string()))
+        })
+        .collect();
+    crate::emit::on_product_roots_result(&ProductRoots { roots }, &veldsdk::correlation());
+}
+
 pub fn on_locate(state: &mut State, request: LocateRequest) {
     if request.identifier.is_empty() {
         crate::emit::on_locate_result(&LocateResponse {
@@ -178,7 +195,11 @@ pub fn on_locate(state: &mut State, request: LocateRequest) {
         return;
     }
 
-    let root = s3::product_root(&request.identifier);
+    // Корня нет — ключ лежит в пути к снимкам, а не в снимке; спрашиваем каталог
+    // по нему самому: имя одиночного объекта каталог знает, а имени у папки года
+    // нет, и ответом будет честное «не нашлось».
+    let trimmed = request.identifier.trim_end_matches('/');
+    let root = s3::product_root(trimmed).unwrap_or(trimmed);
     let name = root.rsplit('/').next().unwrap_or(root).to_string();
     let url = catalogue::locate(&name);
     let internal_id = state.pending_http.begin(Pending {
@@ -240,7 +261,14 @@ pub fn on_http_result(
             let (entries, next_token, error) = match listing {
                 Ok(listing) => (
                     listing.entries.into_iter()
-                        .map(|entry| ListEntry { key: entry.identifier, size: entry.size, modified: entry.modified })
+                        .map(|entry| ListEntry {
+                            product: s3::product_root(&entry.identifier)
+                                .unwrap_or_default()
+                                .to_string(),
+                            key: entry.identifier,
+                            size: entry.size,
+                            modified: entry.modified,
+                        })
                         .collect(),
                     listing.next_token,
                     String::new(),

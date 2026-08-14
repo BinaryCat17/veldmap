@@ -47,6 +47,10 @@ pub struct State {
 
     /// Ожидание fs/on_list — гасит устаревший ответ.
     pub pending_list: veldsdk::Correlator<()>,
+    /// Вопрос провайдеру «к каким снимкам относятся эти ключи». Актуален только
+    /// последний: сидкары дочитываются по одному, и каждый прочитанный делает
+    /// вопрос полнее — отвечать по устаревшему списку незачем.
+    pub pending_roots: veldsdk::Latest,
     /// Отданные fs чтения, ещё не отвеченные. Одна таблица на топик, а не по
     /// таблице на назначение (см. [`veldsdk::Correlator`]): назначение
     /// различает `ReadPurpose`.
@@ -102,6 +106,7 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
         origins: HashMap::new(),
         downloads: HashMap::new(),
         pending_list: veldsdk::Correlator::new(),
+        pending_roots: veldsdk::Latest::new(),
         pending_reads: veldsdk::Correlator::new(),
         pending_sidecar_writes: veldsdk::Correlator::new(),
         pending_delete: veldsdk::Correlator::new(),
@@ -127,6 +132,12 @@ impl State {
         self.origins.get(name).map(|o| o.identifier.as_str())
     }
 
+    /// Снимок, к которому относится запись. Знает об этом только сидкар: имя на
+    /// диске о снимке не говорит ничего.
+    pub fn product_of(&self, name: &str) -> Option<&str> {
+        self.origins.get(name).map(|o| o.product.as_str())
+    }
+
     /// Ожидаемый полный размер из сидкара; 0 — Content-Length ещё не видели.
     pub fn total_bytes(&self, name: &str) -> u64 {
         self.origins.get(name).and_then(|o| o.total_bytes).unwrap_or(0)
@@ -134,7 +145,7 @@ impl State {
 }
 
 // -- Input handlers --
-pub use catalog::{on_list, on_list_result, on_write_result};
+pub use catalog::{on_list, on_list_result, on_product_roots_result, on_write_result};
 
 /// fs/on_read_result — топик один, назначений два: каталог дочитывает сидкары,
 /// open отдаёт файл заказчику. Развилка здесь, а не в схеме, потому что
@@ -148,4 +159,4 @@ pub fn on_read_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
 }
 pub use download::{on_download, on_pause, on_delete, on_delete_result,
                    on_signed, on_fs_download_progress, on_fs_download_result};
-pub use open::on_open;
+pub use open::{on_open, on_reveal};

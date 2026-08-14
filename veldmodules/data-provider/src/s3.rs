@@ -95,23 +95,53 @@ pub fn is_single_object(identifier: &str) -> bool {
     )
 }
 
-/// Корень продукта, внутри которого лежит ключ: самый мелкий (первый слева)
-/// сегмент с контейнерным суффиксом каталога — .SAFE у Sentinel-1/2, .SEN3 у
-/// Sentinel-3. Без такого сегмента продуктом считается сам ключ: одиночные
-/// объекты (архивы, климатика) и продукты-папки без суффикса (Landsat, RTC)
-/// и есть свои корни, а угадывать глубже по одному ключу не из чего.
-pub fn product_root(identifier: &str) -> &str {
+/// Корень продукта, внутри которого лежит ключ. `None` — ключ лежит в пути к
+/// снимкам, а не в снимке: ни контейнерного суффикса, ни даты над ним нет.
+///
+/// Граница продукта проводится одним правилом на два случая, потому что случай
+/// один: где кончается путь и начинается снимок.
+///  * контейнерный суффикс каталога — .SAFE у Sentinel-1/2, .SEN3 у
+///    Sentinel-3: самый мелкий (первый слева) такой сегмент и есть корень;
+///  * без суффикса — первый сегмент сразу под тройкой даты съёмки
+///    (`…/ГГГГ/ММ/ДД/<снимок>/…`): так лежат Landsat и RTC.
+///
+/// Отсутствие ответа именно `None`, а не «сам ключ»: «сам себе корень» и
+/// «здесь снимка нет» — разные вещи, и слитые в одно они делают папку года
+/// снимком. Кому нужен запасной вариант, тот называет его у себя.
+pub fn product_root(identifier: &str) -> Option<&str> {
     let trimmed = identifier.trim_end_matches('/');
     let mut offset = 0;
+    // Сегменты идут слева направо, и вместе с ними — путь до конца каждого:
+    // корень возвращается срезом, а не сборкой строки.
     for segment in trimmed.split('/') {
         let end = offset + segment.len();
         let suffix = segment.rsplit_once('.').map(|(_, suffix)| suffix.to_ascii_lowercase());
         if matches!(suffix.as_deref(), Some("safe" | "sen3")) {
-            return &trimmed[..end];
+            return Some(&trimmed[..end]);
+        }
+        // Над этим сегментом стоит дата — значит он и есть снимок.
+        if under_date(&trimmed[..offset.saturating_sub(1)]) {
+            return Some(&trimmed[..end]);
         }
         offset = end + 1;
     }
-    trimmed
+    None
+}
+
+/// Путь кончается тройкой «год/месяц/день» — тем местом, куда хранилище кладёт
+/// сами снимки. Ниже неё папок пути уже нет, поэтому всё, что лежит прямо
+/// здесь, — продукт.
+fn under_date(path: &str) -> bool {
+    let mut tail = path.rsplit('/');
+    match (tail.next(), tail.next(), tail.next()) {
+        (Some(day), Some(month), Some(year)) => {
+            year.len() == 4
+                && month.len() == 2
+                && day.len() == 2
+                && [year, month, day].iter().all(|part| part.bytes().all(|b| b.is_ascii_digit()))
+        }
+        _ => false,
+    }
 }
 
 /// GET объекта целиком или диапазоном — Range к подписи не относится и
@@ -303,23 +333,26 @@ mod tests {
             product_root(
                 "eodata/Sentinel-2/MSI/L1C/2026/08/12/S2B_MSIL1C_X.SAFE/GRANULE/L1C_T24LVP/IMG_DATA/T24LVP_TCI.jp2"
             ),
-            "eodata/Sentinel-2/MSI/L1C/2026/08/12/S2B_MSIL1C_X.SAFE"
+            Some("eodata/Sentinel-2/MSI/L1C/2026/08/12/S2B_MSIL1C_X.SAFE")
         );
         // Сам продукт (папкой, со слэшем листинга) — он и есть корень.
         assert_eq!(
             product_root("eodata/Sentinel-1/SAR/IW_GRDH_1S-COG/2026/08/12/S1C_IW_GRDH_1SDV_15A3_COG.SAFE/"),
-            "eodata/Sentinel-1/SAR/IW_GRDH_1S-COG/2026/08/12/S1C_IW_GRDH_1SDV_15A3_COG.SAFE"
+            Some("eodata/Sentinel-1/SAR/IW_GRDH_1S-COG/2026/08/12/S1C_IW_GRDH_1SDV_15A3_COG.SAFE")
         );
-        // Без контейнерного суффикса подниматься не к чему: одиночный объект
-        // и папка без суффикса — сами себе продукты.
-        assert_eq!(
-            product_root("eodata/CLMS/Vegetation/ndvi_1999_v3.0.1.nc"),
-            "eodata/CLMS/Vegetation/ndvi_1999_v3.0.1.nc"
-        );
+        // Без суффикса корень находится по дате — так лежат Landsat и RTC, и
+        // файл внутри такого продукта поднимается до него же.
         assert_eq!(
             product_root("eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC/"),
-            "eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC"
+            Some("eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC")
         );
+        assert_eq!(
+            product_root("eodata/Landsat-9/OLI-2/L2SP/2026/08/11/LC09_L2SP_02_T1/LC09_B1.TIF"),
+            Some("eodata/Landsat-9/OLI-2/L2SP/2026/08/11/LC09_L2SP_02_T1")
+        );
+        // Путь к снимкам — ещё не снимок: ни суффикса, ни даты над ним.
+        assert_eq!(product_root("eodata/Sentinel-2/MSI/L2A/2026/08"), None);
+        assert_eq!(product_root("eodata/CLMS/Vegetation/ndvi_1999_v3.0.1.nc"), None);
     }
 
     #[test]
@@ -336,5 +369,16 @@ mod tests {
         ));
         assert!(!is_single_object("eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC"));
         assert!(!is_single_object("eodata/Landsat-5/TM/GTC_1P/1985/02/02/LS05_TM_GTC_1P_4A43"));
+    }
+
+    /// Дата — это ровно три разряда нужной длины и только из цифр: «08» месяцем
+    /// быть может, а «MSI» или «2026-08» — нет.
+    #[test]
+    fn date_triple_is_matched_by_shape() {
+        assert!(under_date("eodata/Sentinel-2/MSI/L2A/2026/08/12"));
+        assert!(!under_date("eodata/Sentinel-2/MSI/L2A/2026/08"));
+        assert!(!under_date("eodata/Sentinel-2/MSI/L2A/26/08/12"));
+        assert!(!under_date("eodata/Sentinel-2/MSI/L2A/2026/8/12"));
+        assert!(!under_date("eodata/Sentinel-2/MSI/L2A/2026/AU/12"));
     }
 }

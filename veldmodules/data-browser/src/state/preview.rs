@@ -36,10 +36,6 @@ pub struct PreviewState {
 }
 
 impl PreviewState {
-    pub fn is_loading(&self) -> bool {
-        self.request.is_pending() || self.view_state.as_ref().is_some_and(|state| state.busy)
-    }
-
     /// Ошибка показа, чья бы она ни была: открытия или конвейера тайлов.
     pub fn failure(&self) -> Option<&str> {
         if let Some(error) = &self.error {

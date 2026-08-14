@@ -11,7 +11,8 @@
 
 use crate::proto::ui_service::{
     Border, Background, Color, Padding, ProgressBarStyle, Scrollbar, Shadow,
-    TextInputStyle, WidgetStyle, Container, Element, Length, container, space,
+    SliderStyle, TextInputStyle, WidgetStyle, Container, Element, Length, container, icon, space,
+    text,
 };
 
 // --- Глифы ---
@@ -19,6 +20,11 @@ use crate::proto::ui_service::{
 // Словарь иконок (шрифт Icons) — один на приложение: вкладка, меню и таблица
 // подписывают одну сущность одним знаком, и сменившийся глиф не должен
 // разводить их между собой.
+//
+// Шрифт — Nerd Fonts Symbols, и большинство знаков здесь из блока Font Awesome
+// (U+F000–F2FF). Те, которых в ней нет вовсе — спутник, перечёркнутый глаз,
+// слои, — взяты из Material Design Icons: то же семейство, другой блок, оттого
+// и коды в пять знаков.
 pub mod glyph {
     pub const PLUS: &str = "\u{f067}";
     pub const CLOSE: &str = "\u{f00d}";
@@ -32,9 +38,18 @@ pub mod glyph {
     pub const PAUSE: &str = "\u{f04c}";
     pub const PLAY: &str = "\u{f04b}";
     pub const EYE: &str = "\u{f06e}";
+    pub const EYE_OFF: &str = "\u{f0209}";
+    pub const TRASH: &str = "\u{f1f8}";
+    pub const LAYERS: &str = "\u{f0328}";
+    /// Разделение экрана: две колонки рядом.
+    pub const SPLIT: &str = "\u{f0db}";
     pub const MORE: &str = "\u{f141}";
     pub const CARET: &str = "\u{f0d7}";
+    /// Снимок — логическая единица, а не файл и не папка: его собирает декодер
+    /// (см. `RowKind::Product`).
+    pub const SATELLITE: &str = "\u{f0471}";
     pub const UP: &str = "\u{f062}";
+    pub const DOWN: &str = "\u{f063}";
     pub const LEFT: &str = "\u{f053}";
     pub const RIGHT: &str = "\u{f054}";
     pub const TICK: &str = "\u{f00c}";
@@ -105,6 +120,9 @@ pub const GUTTER: f32 = 16.0;
 /// Высота однострочной полосы хрома: строка состояния, подпись под областью.
 /// Одна на всех — полосы одного роста читаются как один язык.
 pub const BAR_HEIGHT: f32 = 30.0;
+/// Высота заголовка экрана: название списка и подпись под ним. Тоже одна на
+/// всех — заголовки разной высоты читаются как разные экраны.
+pub const HEADING_HEIGHT: f32 = 52.0;
 
 // --- Размеры текста ---
 
@@ -169,7 +187,7 @@ pub fn chrome_icon<M>(content: impl Into<Element<M>>) -> Container<M> {
     clickable(
         content,
         face(Color::TRANSPARENT, INK_DIM, Border::with_radius(RADIUS_SMALL)),
-        face(Color::rgb8(0xE7, 0xDF, 0xCB), INK, Border::with_radius(RADIUS_SMALL)),
+        face(TRACK, INK, Border::with_radius(RADIUS_SMALL)),
     )
     .padding(4.0)
 }
@@ -180,6 +198,64 @@ pub fn surface_button<M>(content: impl Into<Element<M>>, raised: bool) -> Contai
     let border = outline(if raised { LINE_STRONG } else { LINE }, RADIUS);
     let background = if raised { HOVER } else { SURFACE };
     clickable(content, face(background, INK_MUTED, border), face(HOVER, INK, border))
+}
+
+/// Полоса хрома: строка состояния, подпись под областью. Роль, а не сборка на
+/// месте: полос таких две, и написанные порознь они разъезжаются зазором и
+/// отступом — что и случилось, пока их было две копии.
+pub fn chrome_bar<M>(content: impl Into<Element<M>>) -> Container<M> {
+    container(content)
+        .background(CHROME)
+        .width(Length::Fill)
+        .height(Length::Fixed(BAR_HEIGHT))
+        .padding(Padding { top: 0.0, bottom: 0.0, left: GUTTER, right: GUTTER })
+}
+
+/// Распорка, отжимающая соседей к краям. Пишется одной ролью: `Fill` внутри
+/// `Shrink` схлопывается в ноль (см. README про нехватку места), и обёртка,
+/// которая этого не даёт, нужна каждому такому месту.
+pub fn spacer<M>() -> Container<M> {
+    container(space::<M>(Length::Fill, Length::Fixed(0.0))).width(Length::Fill)
+}
+
+/// Место, где показывать нечего, и короткая фраза почему. Одна роль на все
+/// пустые состояния: они говорят об одном и том же и обязаны выглядеть
+/// одинаково — иначе пустой список и пустая половина читаются как разные беды.
+pub fn empty<M>(what: &str) -> Container<M> {
+    container(text::<M>(what.to_string()).size(TEXT_BODY).color(INK_DIM))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x()
+        .center_y()
+        .padding(Padding::new(20.0))
+}
+
+/// Значок строки списка. Размер здесь и назначается: строка одна и та же в
+/// таблице и в списке слоёв, и разные размеры читались бы как разные вещи.
+pub fn row_glyph<M>(glyph: &str, color: Color) -> Element<M> {
+    icon::<M>(glyph).size(13.0).color(color).into()
+}
+
+/// Квадратная кнопка со значком в строке списка: главное действие, «на шар»,
+/// меню. Роль, а не сборка на месте, — её собирают и таблица, и список слоёв, а
+/// разойдясь, две одинаковые с виду кнопки читаются как две разные вещи.
+///
+/// Размер здесь и назначается: он свойство роли, а не того, кто её ставит.
+pub fn row_button_icon<M>(glyph: &str, raised: bool) -> Container<M> {
+    surface_button(icon::<M>(glyph).size(11.0).color(INK_SOFT), raised)
+        .width(Length::Fixed(ROW_BUTTON))
+        .height(Length::Fixed(ROW_BUTTON))
+}
+
+/// Кнопка с подписью в полосе хрома: под областью глобуса, в заголовке списка
+/// слоёв. Тоже роль: полосы одного роста читаются как один язык, и кнопки в
+/// них — тоже.
+pub fn bar_button<M>(label: &str) -> Container<M> {
+    surface_button(
+        text::<M>(label.to_string()).size(TEXT_SMALL).single_line(),
+        false,
+    )
+    .padding(Padding { top: 3.0, bottom: 3.0, left: 8.0, right: 8.0 })
 }
 
 /// Выбранная страница пагинации — единственная кнопка с акцентной заливкой.
@@ -194,10 +270,15 @@ pub fn page_button<M>(content: impl Into<Element<M>>, current: bool) -> Containe
 
 /// Строка списка. Своего фона у неё нет — она лежит на странице; видно её
 /// только под курсором и по черте снизу.
-pub fn row_button<M>(content: impl Into<Element<M>>) -> Container<M> {
+///
+/// `picked` — та, чей контур сейчас выделен на шаре. Заливка акцентная, та же,
+/// что у выбранной страницы: «выбрано» в интерфейсе одно, и говориться о нём
+/// должно одинаково.
+pub fn row_button<M>(content: impl Into<Element<M>>, picked: bool) -> Container<M> {
+    let background = if picked { ACCENT_WASH } else { Color::TRANSPARENT };
     clickable(
         content,
-        face(Color::TRANSPARENT, INK_SOFT, Border::default()),
+        face(background, INK_SOFT, Border::default()),
         face(ROW_HOVER, INK_SOFT, Border::default()),
     )
     .padding(Padding { top: 0.0, bottom: 0.0, left: GUTTER, right: GUTTER })
@@ -272,6 +353,22 @@ pub fn progress(color: Color) -> ProgressBarStyle {
         track: Some(Background::Color(TRACK)),
         bar: Some(Background::Color(color)),
         border: Border::with_radius(3.0),
+    }
+}
+
+/// Ползунок: дорожка того же вида, что у полосы прогресса, — они стоят в одном
+/// списке друг под другом, — и круглая ручка на ней. Отличается он не видом
+/// дорожки, а тем, что за ручку тянут.
+pub fn slider() -> SliderStyle {
+    SliderStyle {
+        filled: Some(Background::Color(ACCENT)),
+        rest: Some(Background::Color(TRACK)),
+        rail_width: 5.0,
+        rail_border: Border::with_radius(3.0),
+        handle: Some(Background::Color(SURFACE)),
+        handle_radius: 6.0,
+        handle_border_width: 1.5,
+        handle_border_color: ACCENT,
     }
 }
 

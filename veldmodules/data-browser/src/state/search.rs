@@ -80,13 +80,20 @@ pub enum Period {
     Week,
     Month,
     Year,
+    /// Оба края названы датами. Отдельным вариантом, а не парой полей рядом с
+    /// пресетом: «за неделю» и «с 1 по 5 августа» — это два разных способа
+    /// сказать одно и то же, и держать их одновременно значит завести вопрос
+    /// «какой из них главный».
+    Custom,
 }
 
 impl Period {
     /// Начало окна в unix-секундах; 0 — не ограничивать.
     pub fn since(self, now: i64) -> i64 {
         let days = match self {
-            Period::Any => return 0,
+            // Свой интервал считается не отсюда, а из набранных дат
+            // (см. `SearchState::window`).
+            Period::Any | Period::Custom => return 0,
             Period::Week => 7,
             Period::Month => 30,
             Period::Year => 365,
@@ -96,7 +103,8 @@ impl Period {
 }
 
 impl Choice for Period {
-    const ALL: &'static [Self] = &[Period::Any, Period::Week, Period::Month, Period::Year];
+    const ALL: &'static [Self] =
+        &[Period::Any, Period::Week, Period::Month, Period::Year, Period::Custom];
 
     fn key(self) -> &'static str {
         match self {
@@ -104,6 +112,7 @@ impl Choice for Period {
             Period::Week => "week",
             Period::Month => "month",
             Period::Year => "year",
+            Period::Custom => "custom",
         }
     }
 
@@ -113,6 +122,7 @@ impl Choice for Period {
             Period::Week => "За неделю",
             Period::Month => "За месяц",
             Period::Year => "За год",
+            Period::Custom => "Свой интервал",
         }
     }
 
@@ -122,6 +132,7 @@ impl Choice for Period {
             Period::Week => "неделя",
             Period::Month => "месяц",
             Period::Year => "год",
+            Period::Custom => "свой интервал",
         }
     }
 }
@@ -187,6 +198,11 @@ pub struct SearchState {
     pub query: String,
     pub mission: Mission,
     pub period: Period,
+    /// Края своего интервала — как их набрали, а не как разобрали. Текстом,
+    /// потому что набранное наполовину («2026-08-») числом ещё не является, а
+    /// стирать из поля недобранное значило бы отнимать у него ввод.
+    pub from: String,
+    pub to: String,
     /// Потолок облачности. Держится и когда его не спрашивают (миссия сменилась
     /// на радарную), но в запрос тогда не уходит: см. `handlers::search::run`.
     pub cloud: Cloud,
@@ -198,4 +214,27 @@ pub struct SearchState {
     pub request: veldsdk::Latest,
     /// Как показывать найденное — отбор, порядок, страница.
     pub listing: super::listing::ListingState,
+}
+
+impl SearchState {
+    /// Окно съёмки для запроса: пара unix-секунд, 0 — край не задан.
+    ///
+    /// Одним местом на оба края: у пресета верхнего края нет вовсе («за
+    /// неделю» значит «по сегодня»), у своего интервала оба выводятся из
+    /// набранного, — и решать, какой из двух способов сейчас в силе, должен
+    /// кто-то один.
+    ///
+    /// Верхний край — конец названного дня, а не его полночь: «по 13 августа»
+    /// без этого не включало бы сам тринадцатое, и снимок, ради которого дату
+    /// и набрали, в выдачу бы не попал.
+    pub fn window(&self, now: i64) -> (i64, i64) {
+        use crate::module::components::format::parse_date;
+        match self.period {
+            Period::Custom => (
+                parse_date(&self.from).unwrap_or(0),
+                parse_date(&self.to).map(|day| day + 24 * 60 * 60 - 1).unwrap_or(0),
+            ),
+            period => (period.since(now), 0),
+        }
+    }
 }

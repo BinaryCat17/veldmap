@@ -50,9 +50,35 @@ pub trait UiMessage: Sized {
     /// Имя метода и значение. Имя должно быть устойчивым — по нему сообщение
     /// возвращается обратно.
     fn encode(&self) -> (String, String);
+    /// Кого это сообщение адресует: вкладку, строку списка — то, чего нельзя
+    /// вывести из имени метода, когда одинаковых виджетов на экране много.
+    ///
+    /// Отдельно от `encode`, потому что нагрузку у поля ввода, области и
+    /// ползунка подменяет рендерер, а адресата — никто (см. `Handler.key`).
+    /// Пусто — сообщение адресата не несёт, и это законно: у «открыть новую
+    /// вкладку» его и нет.
+    fn key(&self) -> String {
+        String::new()
+    }
     /// Обратный разбор. `None` — такого сообщения в наборе нет или нагрузка
     /// не того вида.
     fn decode(event: &proto::UiEventResponse) -> Option<Self>;
+}
+
+/// Обработчик из сообщения: имя метода, нагрузка и адресат — всё, что виджет
+/// отдаёт обратно. Собирается здесь и только здесь, чтобы ни один построитель
+/// не забыл про адресата.
+fn handler<M: UiMessage>(message: &M) -> proto::Handler {
+    let (method, value) = message.encode();
+    proto::Handler { method, value, key: message.key() }
+}
+
+/// То же для виджета, чью нагрузку изготавливает рендерер: из сообщения-образца
+/// берутся только имя метода и адресат, а объявленное значение выбрасывается —
+/// его всё равно подменят.
+fn substituted<M: UiMessage>(sample: &M) -> proto::Handler {
+    let (method, _) = sample.encode();
+    proto::Handler { method, value: String::new(), key: sample.key() }
 }
 
 /// Чтение нагрузки события. Вид её у каждого метода свой и заранее известен
@@ -364,8 +390,7 @@ impl<M> TextInput<M> {
     where
         M: UiMessage,
     {
-        let (method, _) = message(String::new()).encode();
-        self.widget.on_input = Some(proto::Handler { method, value: String::new() });
+        self.widget.on_input = Some(substituted(&message(String::new())));
         self
     }
     /// Что модуль получит по Enter.
@@ -373,8 +398,7 @@ impl<M> TextInput<M> {
     where
         M: UiMessage,
     {
-        let (method, value) = message.encode();
-        self.widget.on_submit = Some(proto::Handler { method, value });
+        self.widget.on_submit = Some(handler(&message));
         self
     }
     /// Только ширина: высоту поле ввода берёт из размера шрифта и отступов.
@@ -483,8 +507,7 @@ impl<M> Container<M> {
     where
         M: UiMessage,
     {
-        let (method, value) = message.encode();
-        self.interaction().on_press = Some(proto::Handler { method, value });
+        self.interaction().on_press = Some(handler(&message));
         self
     }
 
@@ -731,8 +754,7 @@ impl<M> Popover<M> {
     where
         M: UiMessage,
     {
-        let (method, value) = message.encode();
-        self.widget.on_dismiss = Some(proto::Handler { method, value });
+        self.widget.on_dismiss = Some(handler(&message));
         self
     }
 }
@@ -816,13 +838,17 @@ impl<M> Viewport<M> {
 
     /// Что модуль получит, когда области достанется новый размер. Как и у поля
     /// ввода, принимается способ собрать сообщение, а не готовое: нагрузку
-    /// подставит рендерер, отсюда едет только имя метода.
+    /// подставит рендерер.
+    ///
+    /// Адресат сообщения при этом сохраняется и уезжает именем области
+    /// (`UiEventResponse.key`): у сообщения, которое несёт ещё и вкладку, он
+    /// назван её `key()`, а объявленное значение выбрасывается — его всё равно
+    /// подменит рендерер (см. [`substituted`]).
     pub fn on_resized(mut self, message: impl FnOnce(proto::ViewportSize) -> M) -> Self
     where
         M: UiMessage,
     {
-        let (method, _) = message(proto::ViewportSize::default()).encode();
-        self.widget.on_resized = Some(proto::Handler { method, value: String::new() });
+        self.widget.on_resized = Some(substituted(&message(proto::ViewportSize::default())));
         self
     }
 
@@ -831,10 +857,99 @@ impl<M> Viewport<M> {
     where
         M: UiMessage,
     {
-        let (method, _) = message(proto::PointerEvent::default()).encode();
-        self.widget.on_pointer = Some(proto::Handler { method, value: String::new() });
+        self.widget.on_pointer = Some(substituted(&message(proto::PointerEvent::default())));
         self
     }
+}
+
+pub struct Slider<M> {
+    widget: proto::Slider,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Slider<M> {
+    /// Ползунок с обязательным обработчиком: без него он неотличим от полосы
+    /// прогресса, но при этом ловит указатель.
+    ///
+    /// Сообщение принимается способом его собрать, а не готовым, — как у поля
+    /// ввода: число подставит рендерер. Адресат сообщения при этом уезжает
+    /// именем ползунка (`UiEventResponse.key`), и ползунок в списке тем себя и
+    /// называет: разметка знает, чья это строка, а рендерер — какое число.
+    pub fn new(
+        range: std::ops::RangeInclusive<f32>,
+        value: f32,
+        on_change: impl FnOnce(f32) -> M,
+    ) -> Self
+    where
+        M: UiMessage,
+    {
+        let change = substituted(&on_change(value));
+        Self {
+            widget: proto::Slider {
+                range_start: *range.start(),
+                range_end: *range.end(),
+                value,
+                step: 0.0,
+                on_change: Some(change),
+                on_release: None,
+                width: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
+                height: 0.0,
+                style: None,
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub fn step(mut self, step: f32) -> Self {
+        self.widget.step = step;
+        self
+    }
+
+    /// Что придёт, когда ручку отпустят. В отличие от `on_change`, сообщение
+    /// готовое: нагрузку рендерер здесь не подставляет — говорить ему нечего,
+    /// кроме «отпустили».
+    pub fn on_release(mut self, message: M) -> Self
+    where
+        M: UiMessage,
+    {
+        self.widget.on_release = Some(handler(&message));
+        self
+    }
+
+    /// Ширина — как у всех, а вот высота своя и в точках: у ползунка это не
+    /// место в раскладке, а рост дорожки с ручкой, и `Length::Fill` для неё
+    /// означал бы ручку во всю колонку.
+    pub fn width(mut self, w: Length) -> Self {
+        self.widget.width = Some(w.to_proto());
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.widget.height = height;
+        self
+    }
+
+    pub fn style(mut self, style: super::style::SliderStyle) -> Self {
+        self.widget.style = Some(style.to_proto());
+        self
+    }
+}
+
+impl<M> From<Slider<M>> for Element<M> {
+    fn from(s: Slider<M>) -> Self {
+        proto::Widget {
+            r#type: Some(proto::widget::Type::Slider(s.widget)),
+            ..Default::default()
+        }.into()
+    }
+}
+
+pub fn slider<M: UiMessage>(
+    range: std::ops::RangeInclusive<f32>,
+    value: f32,
+    on_change: impl FnOnce(f32) -> M,
+) -> Slider<M> {
+    Slider::new(range, value, on_change)
 }
 
 impl<M> Default for Viewport<M> {

@@ -143,7 +143,7 @@ fn key_margins(rgba: &mut [u8], w: u32, h: u32) {
 
     let mut seen = vec![false; w * h];
     let mut queue: Vec<usize> = Vec::new();
-    let mut push = |rgba: &[u8], seen: &mut [bool], queue: &mut Vec<usize>, px: usize| {
+    let push = |rgba: &[u8], seen: &mut [bool], queue: &mut Vec<usize>, px: usize| {
         if !seen[px] && zero(rgba, px) {
             seen[px] = true;
             queue.push(px);

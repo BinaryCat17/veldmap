@@ -12,7 +12,8 @@ use crate::proto::ui_service::{
 };
 use crate::module::components::{arrange::Arranged, menu};
 use crate::module::state::listing::{Choice, ListingState, Menu};
-use crate::module::{theme, Msg};
+use crate::module::state::ViewId;
+use crate::module::{theme, Msg, ViewMsg};
 
 
 /// Полоса отбора: поле фильтра и чипы.
@@ -20,17 +21,37 @@ use crate::module::{theme, Msg};
 /// `groupable` — есть ли что складывать по папкам. Рычаг, который ничего не
 /// меняет, хуже отсутствующего: он обещает выбор и молчит в ответ. Знает это
 /// вид — он один и знает, откуда собраны его строки (см. `list_screen`).
-pub fn toolbar(listing: &ListingState, counts: &[usize], groupable: bool) -> Element<Msg> {
+pub fn toolbar(
+    view: ViewId,
+    listing: &ListingState,
+    counts: &[usize],
+    groupable: bool,
+) -> Element<Msg> {
     let open = &listing.menu;
     let mut controls: Vec<Element<Msg>> = vec![
-        search_field("Фильтр по имени", &listing.query, Msg::Query, None),
-        chip("Состояние:", listing.filter, Menu::Filter, open, counts, Msg::Filter),
+        search_field("Фильтр по имени", &listing.query, move |query| {
+            Msg::In(view, ViewMsg::Query(query))
+        }, None),
+        chip(view, "Состояние:", listing.filter, Menu::Filter, open, counts, move |choice| {
+            Msg::In(view, ViewMsg::Filter(choice))
+        }),
     ];
     if groupable {
-        controls.push(chip("Группировка:", listing.grouping, Menu::Grouping, open, &[], Msg::Group));
+        controls.push(chip(view, "Группировка:", listing.grouping, Menu::Grouping, open, &[], move |choice| {
+            Msg::In(view, ViewMsg::Group(choice))
+        }));
     }
-    controls.push(chip("Сортировка:", listing.sorting, Menu::Sorting, open, &[], Msg::Sort));
+    controls.push(chip(view, "Сортировка:", listing.sorting, Menu::Sorting, open, &[], move |choice| {
+        Msg::In(view, ViewMsg::Sort(choice))
+    }));
 
+    bar(controls)
+}
+
+/// Полоса рычагов над таблицей: ряд полей и чипов во всю ширину. Роль, а не
+/// сборка на месте — таких полос две (отбор списка и запрос к каталогу), и
+/// написанные порознь они разъезжаются зазором и отступом снизу.
+pub fn bar(controls: Vec<Element<Msg>>) -> Element<Msg> {
     row(controls)
         .spacing(7.0)
         .width(Length::Fill)
@@ -46,7 +67,7 @@ pub fn toolbar(listing: &ListingState, counts: &[usize], groupable: bool) -> Ele
 pub fn search_field(
     placeholder: &str,
     value: &str,
-    on_input: fn(String) -> Msg,
+    on_input: impl Fn(String) -> Msg + 'static,
     on_submit: Option<Msg>,
 ) -> Element<Msg> {
     let mut input = text_input::<Msg>(placeholder, value)
@@ -74,6 +95,11 @@ pub fn search_field(
     .height(Length::Fixed(theme::CONTROL_HEIGHT))
     .align_y(Alignment::Center)
     .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 })
+    // Поле — единственное тянущееся в своей полосе, и в узкой половине экрана
+    // ему достаётся то, что осталось от чипов. Осталось мало — подсказка длиннее
+    // места, а не поместившийся текст рисуется поверх соседа, а не прячется
+    // (см. `Wrapping` в ui-service/types.proto).
+    .clip()
     .into()
 }
 
@@ -83,12 +109,13 @@ pub fn search_field(
 /// `opened` — меню, раскрытое в этом виде: их много, а раскрыто одно, и знать
 /// чипу нужно только это.
 pub fn chip<C: Choice>(
+    view: ViewId,
     caption: &str,
     current: C,
     menu: Menu,
     opened: &Menu,
     counts: &[usize],
-    make: fn(C) -> Msg,
+    make: impl Fn(C) -> Msg,
 ) -> Element<Msg> {
     let open = *opened == menu;
     let anchor = theme::surface_button(
@@ -107,7 +134,7 @@ pub fn chip<C: Choice>(
     )
     .height(Length::Fixed(theme::CONTROL_HEIGHT))
     .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 })
-    .on_press(Msg::OpenMenu(menu));
+    .on_press(Msg::In(view, ViewMsg::OpenMenu(menu)));
 
     let items = C::ALL
         .iter()
@@ -125,13 +152,13 @@ pub fn chip<C: Choice>(
         .open(open)
         .align_x(Alignment::End)
         .gap(3.0)
-        .on_dismiss(Msg::OpenMenu(Menu::Closed))
+        .on_dismiss(Msg::In(view, ViewMsg::OpenMenu(Menu::Closed)))
         .into()
 }
 
 /// Путь текущей папки: «вверх» и сегменты, по которым можно вернуться.
 /// Показывается там, где путь есть, — то есть в сетевом каталоге.
-pub fn path(current: &str) -> Element<Msg> {
+pub fn path(view: ViewId, current: &str) -> Element<Msg> {
     // Корень назван как папка, а не пустым местом: он такой же шаг пути, и
     // вернуться в него — обычный переход, а не особый случай.
     let mut crumbs: Vec<Element<Msg>> = vec![
@@ -140,7 +167,7 @@ pub fn path(current: &str) -> Element<Msg> {
                 .size(theme::TEXT_SMALL)
                 .color(if current.is_empty() { theme::INK } else { theme::ACCENT }),
         )
-        .on_press(Msg::Enter(String::new()))
+        .on_press(Msg::In(view, ViewMsg::Enter(String::new())))
         .key("root")
         .into(),
     ];
@@ -158,7 +185,7 @@ pub fn path(current: &str) -> Element<Msg> {
                     .size(theme::TEXT_SMALL)
                     .color(if last { theme::INK } else { theme::ACCENT }),
             )
-            .on_press(Msg::Enter(prefix.clone()))
+            .on_press(Msg::In(view, ViewMsg::Enter(prefix.clone())))
             .key(prefix.clone()),
         );
     }
@@ -167,7 +194,7 @@ pub fn path(current: &str) -> Element<Msg> {
         theme::surface_button(icon::<Msg>(theme::glyph::UP).size(11.0).color(theme::INK_MUTED), false)
             .width(Length::Fixed(theme::CONTROL_HEIGHT))
             .height(Length::Fixed(theme::CONTROL_HEIGHT))
-            .on_press(Msg::Up),
+            .on_press(Msg::In(view, ViewMsg::Up)),
         container(row(crumbs).spacing(4.0).align_items(Alignment::Center))
             .style(theme::control_box())
             .width(Length::Fill)
@@ -190,7 +217,7 @@ const STEP_WIDTH: f32 = 26.0;
 /// Подвал со страницами. Длинный каталог режется на страницы, и прокрутка
 /// остаётся внутри страницы — поэтому место, на котором стоял пользователь,
 /// не теряется при переходе.
-pub fn pager(arranged: &Arranged<'_>) -> Element<Msg> {
+pub fn pager(view: ViewId, arranged: &Arranged<'_>) -> Element<Msg> {
     let step = |glyph: &str, to: usize, enabled: bool| {
         let step = theme::surface_button(
             icon::<Msg>(glyph).size(9.0).color(if enabled { theme::INK_SOFT } else { theme::LINE_STRONG }),
@@ -198,7 +225,7 @@ pub fn pager(arranged: &Arranged<'_>) -> Element<Msg> {
         )
         .width(Length::Fixed(STEP_WIDTH))
         .height(Length::Fixed(STEP_HEIGHT));
-        if enabled { step.on_press(Msg::Page(to)) } else { step }
+        if enabled { step.on_press(Msg::In(view, ViewMsg::Page(to))) } else { step }
     };
 
     let pages = (0..arranged.pages).map(|index| {
@@ -210,7 +237,7 @@ pub fn pager(arranged: &Arranged<'_>) -> Element<Msg> {
             index == arranged.page,
         )
         .height(Length::Fixed(STEP_HEIGHT))
-        .on_press(Msg::Page(index))
+        .on_press(Msg::In(view, ViewMsg::Page(index)))
         .into()
     });
 
@@ -228,4 +255,46 @@ pub fn pager(arranged: &Arranged<'_>) -> Element<Msg> {
     .padding(Padding { top: 7.0, bottom: 7.0, left: theme::GUTTER, right: theme::GUTTER });
 
     container(bar).width(Length::Fill).background(theme::SHELF).into()
+}
+
+/// Поле даты в полосе фильтров: подпись края и набранное рядом.
+///
+/// Ширина фиксированная, а не тянущаяся: дата — восемь знаков, и растягивать
+/// под неё половину полосы значило бы отнять место у поля запроса, которое как
+/// раз тянется. Отсюда же `clip()` — набранное сверх места уедет за край и
+/// нарисуется поверх соседа (см. `Wrapping` в ui-service/types.proto).
+pub fn date_field(
+    caption: &str,
+    value: &str,
+    on_input: impl Fn(String) -> Msg + 'static,
+    on_submit: Msg,
+) -> Element<Msg> {
+    let input = text_input::<Msg>("ГГГГ-ММ-ДД", value)
+        .style(theme::field())
+        .font_family(veld_ui_service_wrap::style::FONT_MONO)
+        .size(theme::TEXT_LABEL)
+        .padding(Padding::ZERO)
+        .width(Length::Fill)
+        .on_input(on_input)
+        .on_submit(on_submit);
+
+    container(
+        row![
+            text::<Msg>(caption.to_string())
+                .size(theme::TEXT_LABEL)
+                .color(theme::INK_DIM)
+                .single_line(),
+            input,
+        ]
+        .spacing(8.0)
+        .width(Length::Fill)
+        .align_items(Alignment::Center),
+    )
+    .style(theme::control_box())
+    .width(Length::Fixed(150.0))
+    .height(Length::Fixed(theme::CONTROL_HEIGHT))
+    .align_y(Alignment::Center)
+    .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 })
+    .clip()
+    .into()
 }

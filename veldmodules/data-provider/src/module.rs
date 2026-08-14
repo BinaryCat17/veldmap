@@ -59,6 +59,7 @@ pub use cdse::{
     on_open,
     on_imagery,
     on_locate,
+    on_product_roots,
 
     // subs
     on_http_result,

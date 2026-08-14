@@ -76,6 +76,12 @@ pub struct State {
     pending_describe: veldsdk::Correlator<String>,
     pending_query: veldsdk::Correlator<QueryCtx>,
     pending_produce: veldsdk::Correlator<ProduceCtx>,
+    /// Отпечатки, по которым проход уже идёт. Ключом отпечаток, а не вид:
+    /// проход читает источник, а источник у двух вкладок с одним файлом один
+    /// и тот же. Второй проход по нему — не вторая работа, а та же самая
+    /// заново, и стоит она полного чтения файла, пока единственный тайлер
+    /// занят и им, и шаром.
+    producing: HashMap<String, String>,
 }
 
 pub fn hook_init(config: Config) -> anyhow::Result<State> {
@@ -86,6 +92,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         pending_describe: veldsdk::Correlator::new(),
         pending_query: veldsdk::Correlator::new(),
         pending_produce: veldsdk::Correlator::new(),
+        producing: HashMap::new(),
     })
 }
 
@@ -344,23 +351,46 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             view.inflight.remove(&addr);
         }
     }
+    // Ручку источника и подпись берём здесь же: дальше `state` занят учётом, и
+    // держать на нём ссылку в вид одновременно нельзя.
+    let (handle, label) = match view.shown.as_ref() {
+        Some(shown) => (shown.resource.handle(), view.label.clone()),
+        None => return,
+    };
+
     if produce_list.is_empty() {
         report(state, &ctx.view);
         return;
     }
 
-    let Some(shown) = &view.shown else { return };
+    // По этому источнику проход уже идёт — у соседней вкладки с тем же файлом.
+    // Ждём его молча: сложенное им ляжет в кэш, а `on_produce_done` пересчитает
+    // нужное всем, кто на этот источник смотрит. Ожидания снимаем, иначе
+    // пересчёт сочтёт эти ячейки уже запрошенными и не переспросит их никогда.
+    if state.producing.contains_key(&ctx.fingerprint) {
+        if let Some(view) = state.views.get_mut(&ctx.view) {
+            for addr in &produce_list {
+                view.inflight.remove(addr);
+            }
+        }
+        report(state, &ctx.view);
+        return;
+    }
+
     let correlation = state.pending_produce.begin(ProduceCtx {
         view: ctx.view.clone(),
         fingerprint: ctx.fingerprint.clone(),
         cells: produce_list.clone(),
     });
-    view.produce = Some((correlation.clone(), level));
+    state.producing.insert(ctx.fingerprint.clone(), correlation.clone());
+    if let Some(view) = state.views.get_mut(&ctx.view) {
+        view.produce = Some((correlation.clone(), level));
+    }
     crate::calls::image_tiler::on_produce(&ProduceRequest {
-        resource: Some(shown.resource.handle()),
+        resource: Some(handle),
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
-        label: view.label.clone(),
+        label,
     }, &correlation);
 
     report(state, &ctx.view);
@@ -382,11 +412,23 @@ pub fn on_produce_progress(state: &mut State, msg: ProduceProgress) {
 pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.take(&correlation) else { return };
-    let Some(view) = state.views.get_mut(&ctx.view) else { return };
 
-    if view.produce.as_ref().is_some_and(|(active, _)| *active == correlation) {
-        view.produce = None;
+    // Сторож снимается раньше всего и безусловно: он стоял на источнике, а не
+    // на виде, и заказчика прохода могли закрыть, пока проход шёл. Уйди мы
+    // отсюда, не сняв его, — соседние вкладки с тем же файлом ждали бы конца,
+    // которого уже не будет.
+    state.producing.remove(&ctx.fingerprint);
+
+    if let Some(view) = state.views.get_mut(&ctx.view) {
+        if view.produce.as_ref().is_some_and(|(active, _)| *active == correlation) {
+            view.produce = None;
+        }
     }
+    let Some(view) = state.views.get_mut(&ctx.view) else {
+        // Вида нет — будить остаётся соседей (см. ниже).
+        wake_watchers(state, &ctx.fingerprint);
+        return;
+    };
     if view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint) {
         for addr in &ctx.cells {
             view.inflight.remove(addr);
@@ -401,9 +443,25 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
         }
     }
 
-    // Пока проход шёл, запросы откладывались — пересчитать нужное сейчас.
-    want_tiles(state, &ctx.view);
-    report(state, &ctx.view);
+    // Пока проход шёл, запросы откладывались — пересчитать нужное сейчас, и не
+    // только заказчику: соседняя вкладка с тем же файлом всё это время ждала
+    // молча, и разбудить её больше некому.
+    wake_watchers(state, &ctx.fingerprint);
+}
+
+/// Пересчитывает нужное всем видам, смотрящим на этот источник. Зовётся концом
+/// прохода: до него они ждали чужого производства и своих запросов не слали.
+fn wake_watchers(state: &mut State, fingerprint: &str) {
+    let watching: Vec<String> = state
+        .views
+        .iter()
+        .filter(|(_, view)| view.meta().is_some_and(|meta| meta.fingerprint == fingerprint))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in watching {
+        want_tiles(state, &key);
+        report(state, &key);
+    }
 }
 
 // ── Кадровый тик ───────────────────────────────────────────────

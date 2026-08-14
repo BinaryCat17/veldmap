@@ -37,7 +37,7 @@ dependencies:
   # ни сидкаров — приходит уже выведенное состояние записей.
   data-library:
     subs: [on_state, on_open_result]
-    calls: [on_list, on_download, on_pause, on_delete, on_open]
+    calls: [on_list, on_download, on_pause, on_delete, on_open, on_reveal]
   # Канва просмотра снимка. Ресурс открывает библиотека или провайдер, а
   # владение уходит канве вместе с on_show: тайлы, камеру и кадр она ведёт
   # сама. Ей же делегируется место вкладки (on_canvas — тот же обряд, что у

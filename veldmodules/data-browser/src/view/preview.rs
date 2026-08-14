@@ -14,14 +14,14 @@ use crate::proto::ui_service::{
     container, mono, text, Alignment, Element, FontWeight, Length, Padding,
 };
 use crate::module::components::format;
-use crate::module::state::{PreviewState, State};
-use crate::module::{theme, Msg};
+use crate::module::state::{PreviewState, State, ViewId};
+use crate::module::{theme, Msg, ViewMsg};
 
 /// Ширина панели свойств. Фиксирована: колонка значений не должна ездить от
 /// длины имени файла.
 const PANEL_WIDTH: f32 = 290.0;
 
-pub fn view(state: &State, preview: &PreviewState) -> Element<Msg> {
+pub fn view(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     // Отказ вытесняет канву: показывать поверх мёртвого кадра нечего, а
     // причина отказа — единственное, что тут можно сообщить.
     let body: Element<Msg> = match preview.failure() {
@@ -32,12 +32,12 @@ pub fn view(state: &State, preview: &PreviewState) -> Element<Msg> {
             .center_y()
             .padding(Padding::new(20.0))
             .into(),
-        None => canvas(preview),
+        None => canvas(view, preview),
     };
 
     row![
         column![
-            toolbar(state, preview),
+            toolbar(state, view, preview),
             theme::hairline(theme::LINE_SOFT),
             container(body).background(theme::CHROME).width(Length::Fill).height(Length::Fill),
         ]
@@ -53,12 +53,12 @@ pub fn view(state: &State, preview: &PreviewState) -> Element<Msg> {
 /// Место под кадр канвы. Текстуру область получает от нас же — мы выделили её
 /// в ответ на прошлый on_resized; на первом кадре её ещё нет, и место стоит
 /// пустым, пока событие не приедет.
-fn canvas(preview: &PreviewState) -> Element<Msg> {
+fn canvas(view: ViewId, preview: &PreviewState) -> Element<Msg> {
     let mut area = viewport::<Msg>()
         .width(Length::Fill)
         .height(Length::Fill)
-        .on_resized(Msg::PreviewResized)
-        .on_pointer(Msg::PreviewPointer);
+        .on_resized(move |size| Msg::In(view, ViewMsg::PreviewResized(size)))
+        .on_pointer(move |pointer| Msg::In(view, ViewMsg::PreviewPointer(pointer)));
     if let Some(surface) = &preview.surface {
         area = area.texture(surface.handle());
     }
@@ -66,10 +66,10 @@ fn canvas(preview: &PreviewState) -> Element<Msg> {
 }
 
 /// Имя снимка, ход показа и масштаб.
-fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
+fn toolbar(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     let name = mono::<Msg>(format::ellipsize(
         &preview.label,
-        format::mono_fit(state.logical_width() - PANEL_WIDTH - 230.0, theme::TEXT_LABEL),
+        format::mono_fit(state.pane_width() - PANEL_WIDTH - 230.0, theme::TEXT_LABEL),
     ))
     .size(theme::TEXT_LABEL)
     .color(theme::INK);
@@ -85,7 +85,7 @@ fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
         theme::surface_button(text::<Msg>(label.to_string()).size(theme::TEXT_LABEL).single_line(), false)
             .width(Length::Fixed(27.0))
             .height(Length::Fixed(27.0))
-            .on_press(Msg::PreviewZoom(direction))
+            .on_press(Msg::In(view, ViewMsg::PreviewZoom(direction)))
     };
 
     // Подпись масштаба — она же кнопка «вписать»: отдельной кнопке тут места
@@ -103,7 +103,7 @@ fn toolbar(state: &State, preview: &PreviewState) -> Element<Msg> {
     )
     .height(Length::Fixed(27.0))
     .padding(Padding { top: 0.0, bottom: 0.0, left: 11.0, right: 11.0 })
-    .on_press(Msg::PreviewFit);
+    .on_press(Msg::In(view, ViewMsg::PreviewFit));
 
     row![
         container(name).width(Length::Fill).clip(),
