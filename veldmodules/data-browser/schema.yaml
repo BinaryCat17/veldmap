@@ -37,7 +37,7 @@ dependencies:
   # ни сидкаров — приходит уже выведенное состояние записей.
   data-library:
     subs: [on_state, on_open_result]
-    calls: [on_list, on_download, on_pause, on_delete, on_open, on_reveal]
+    calls: [on_list, on_download, on_pause, on_delete, on_open, on_reveal, on_snapshot]
   # Канва просмотра снимка. Ресурс открывает библиотека или провайдер, а
   # владение уходит канве вместе с on_show: тайлы, камеру и кадр она ведёт
   # сама. Ей же делегируется место вкладки (on_canvas — тот же обряд, что у
@@ -46,6 +46,12 @@ dependencies:
   image-view:
     subs: [on_view_state]
     calls: [on_canvas, on_show, on_close, on_camera]
+  # Раскладка окна между запусками: как экран сложили, таким он и открывается
+  # (см. handlers::persist). Пишет и читает её сам модуль — раскладка его, и
+  # никто больше про неё не знает.
+  fs:
+    subs: [on_read_result, on_write_result]
+    calls: [on_read, on_write]
   # Трёхмерный вид. Почти всё исходящее: место под рендер (on_set_surface, тем
   # же обрядом, что и поверхность окна), движение камеры (on_camera), то, что
   # очертить на поверхности (on_outlines), и то, что на неё наложить

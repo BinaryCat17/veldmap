@@ -1,18 +1,14 @@
-//! Поиск по каталогу: запрос, приём найденного и его контуры на глобусе.
+//! Поиск по каталогу: запрос и приём найденного.
 //!
-//! Здесь же проходит граница данных и представления. Провайдер отдаёт снимок с
-//! его геометрией и ничего не знает о том, что её кто-то рисует; глобус
-//! принимает ломаные и ничего не знает о снимках. Свести одно с другим может
-//! только тот, у кого на экране и список, и шар, — то есть мы.
+//! Контуров здесь нет: рисует шар не то, что нашлось, а то, что отметили, — и
+//! сводит это в набор `handlers::outline`. Выдача с ним связана одним
+//! правилом: ушедший из неё продукт уносит с собой и отметку, и наложение —
+//! отмечать и показывать нечего то, чего в списке больше нет.
 
 use crate::module::footprint;
-use crate::module::state::globe::Shown;
-use crate::module::state::search::{Cloud, Mission, Period, SearchState};
+use crate::module::state::search::{Cloud, Mission, Period};
 use crate::module::state::{State, ViewId, ViewKind};
-use crate::proto::data_provider::{DataProduct, SearchRequest, SearchResponse};
-use crate::proto::globe::{
-    camera_command::Command, CameraCommand, Focus, GeoPoint, Outline, Outlines,
-};
+use crate::proto::data_provider::{SearchRequest, SearchResponse};
 
 /// Набранное в поле запроса. Сам запрос отсюда не уходит: искать на каждую
 /// букву значит слать в сеть десяток запросов на одно слово.
@@ -104,154 +100,55 @@ pub fn on_search_result(
         search.error = None;
         search.results = response.products;
     }
+    // Раскрытое принадлежало прошлой выдаче: продукты в ней другие, и файлы
+    // под их строками — тоже. Свернуть надо и сами строки: раскрытая с пустым
+    // содержимым выглядит как снимок без файлов.
+    search.children.clear();
+    search.listing.expanded.clear();
 
-    show_on_globe(state, view);
+    survivors(state, view);
 }
 
-/// Отправляет глобусу контуры найденного.
+/// Что пережило новую выдачу.
 ///
-/// Целиком, а не добавкой: набор у глобуса заменяется полностью (см. `Outlines`
-/// в его types.proto), и пустой список — это «ничего не нашлось», то есть тоже
-/// осмысленный ответ, а не повод промолчать.
+/// Правило одно на отметку и на наложение: ушедший из выдачи продукт уносит с
+/// собой и контур, и снимок с шара — быть им там больше не с чего. Действует
+/// оно только на своё: показанному из каталога чужая выдача не указ.
 ///
-/// Открыта ли вкладка глобуса, здесь не проверяется, и знать этого не нужно:
-/// контуры — свойство найденного, а не экрана. Глобус их запомнит и покажет,
-/// когда ему дадут место.
-fn show_on_globe(state: &mut State, view: ViewId) {
-    // Выбранное переживает новый поиск, только если само в нём осталось: контур
-    // ушёл с шара — значит, выбрано больше ничего. `shown` до успеха не
-    // трогаем: ранний выход не должен разводить его с нарисованным.
-    let selected = state
-        .shown
-        .as_ref()
-        .filter(|shown| shown.view == view)
-        .and_then(|shown| shown.selected.clone());
-
-    let Some(ViewKind::Search(search)) = state.get_mut(view) else { return };
-    let selected = selected
-        .filter(|id| search.results.iter().any(|product| &product.identifier == id));
-
-    crate::calls::globe::on_outlines(&Outlines {
-        outlines: outlines_of(search, selected.as_deref()),
-    });
-    state.shown = Some(Shown { view, selected });
-
-    // Наложение — тем же правилом, что выделение: его продукт ушёл из выдачи —
-    // снимку больше не с чего быть на шаре. Правило действует на наложения из
-    // этого же вида: показанному из каталога чужая выдача не указ.
-    //
-    // Но только когда выдача есть. Отказ каталога — это отсутствие ответа, а не
-    // пустой ответ: продукт от сетевой ошибки никуда не делся, и снимать из-за
-    // неё то, что человек положил на шар руками, значит терять его работу.
-    let alive: Option<std::collections::HashSet<String>> = {
+/// И только когда выдача есть. Отказ каталога — это отсутствие ответа, а не
+/// пустой ответ: продукт от сетевой ошибки никуда не делся, и снимать из-за неё
+/// то, что человек положил на шар руками, значит терять его работу.
+fn survivors(state: &mut State, view: ViewId) {
+    let alive: std::collections::HashSet<String> = {
         let Some(ViewKind::Search(search)) = state.get(view) else { return };
-        match search.error.is_some() {
-            true => None,
-            false => Some(search.results.iter().map(|p| p.identifier.clone()).collect()),
+        if search.error.is_some() {
+            return;
         }
+        search.results.iter().map(|product| product.identifier.clone()).collect()
     };
-    if let Some(alive) = alive {
-        super::overlay::keep_only(state, view, |identifier| alive.contains(identifier));
+
+    if let Some(listing) = state.listing_mut(view) {
+        listing.selected.retain(|key| alive.contains(key));
     }
+    super::overlay::keep_only(state, view, |identifier| alive.contains(identifier));
+    super::outline::refresh(state);
 }
 
-/// Контуры результатов; у выбранного — признак выделения.
-fn outlines_of(search: &SearchState, selected: Option<&str>) -> Vec<Outline> {
-    search
-        .results
-        .iter()
-        .flat_map(|product| {
-            let picked = selected == Some(product.identifier.as_str());
-            product.footprint.iter().map(move |ring| Outline {
-                points: ring
-                    .points
-                    .iter()
-                    .map(|point| GeoPoint { lat: point.lat, lon: point.lon })
-                    .collect(),
-                selected: picked,
-            })
-        })
-        .collect()
-}
-
-/// Вкладка-источник закрывается. Контуры остаются на шаре — они свойство
-/// найденного, а не вкладки, — но выбирать среди них больше нечего: выделение
-/// гаснет, и щелчки по шару перестают что-либо значить (`pick` не находит вида
-/// и выходит ни с чем). Иначе подсветка горела бы вечно: снять её мог только
-/// выбор в этом же виде.
-///
-/// `Shown` при этом остаётся: он единственный носитель факта «шар очерчен», и
-/// без него снять контуры было бы нечем — заново их не собрать, выдача ушла с
-/// вкладкой. Наложение из выдачи этого вида уходит вместе с ним: продукта, из
-/// которого оно взялось, больше нет ни в одном списке (см.
-/// overlay::source_closed).
-pub fn on_source_closed(state: &mut State, id: ViewId, search: &SearchState) {
+/// Вкладка-источник закрывается: её отметки уходят вместе с ней — очерчивал
+/// снимок этот список, и другого носителя у отметки нет. Наложение из её выдачи
+/// уходит по тому же правилу (см. overlay::source_closed).
+pub fn on_source_closed(state: &mut State, id: ViewId) {
     super::overlay::source_closed(state, id);
-    if state.shown.as_ref().is_none_or(|shown| shown.view != id) {
-        return;
-    }
-    state.shown = Some(Shown { view: id, selected: None });
-    crate::calls::globe::on_outlines(&Outlines { outlines: outlines_of(search, None) });
+    super::outline::refresh(state);
 }
 
-/// Снять контуры с шара. Единственный способ убрать их совсем: заводит их
-/// показ выдачи, а сменяет — только следующий показ, поэтому без этого они
-/// остались бы до конца запуска.
-pub fn clear_outlines(state: &mut State) {
-    if state.shown.take().is_none() {
-        return;
-    }
-    crate::calls::globe::on_outlines(&Outlines { outlines: Vec::new() });
-}
-
-/// Погасить выделение контура, не трогая сами контуры и выбор по щелчку.
-/// Нужно показу по ключу (см. overlay::on_locate_result): на шар лёг другой
-/// снимок, и подсвеченный контур прежнего рядом с ним — ложь о том, на что
-/// смотрят.
-pub fn deselect(state: &mut State) {
-    let Some(shown) = &state.shown else { return };
-    if shown.selected.is_none() {
-        return;
-    }
-    let view = shown.view;
-    state.shown = Some(Shown { view, selected: None });
-    show_on_globe(state, view);
-}
-
-/// Выбрать снимок, накрывающий точку. `None` — щелчок пришёлся мимо Земли.
-///
-/// Из накрывших берём самый мелкий: одну съёмку каталог отдаёт несколькими
-/// продуктами с почти одинаковым контуром, а полоса радара накрывает собой
-/// целую плитку, — и «то, что помельче» единственное отвечает на вопрос «куда
-/// я ткнул».
-pub fn pick(state: &mut State, at: Option<(f64, f64)>) {
-    let Some(view) = state.shown.as_ref().map(|shown| shown.view) else { return };
-
-    let selected = at.and_then(|(lat, lon)| {
-        let ViewKind::Search(search) = state.get(view)? else { return None };
-        search
-            .results
-            .iter()
-            .filter(|product| footprint::covers(&product.footprint, lat, lon))
-            .min_by(|left, right| extent(left).total_cmp(&extent(right)))
-            .map(|product| product.identifier.clone())
-    });
-
-    // Ничего не изменилось — не тревожим глобус: набор поедет тот же самый.
-    if state.shown.as_ref().is_some_and(|shown| shown.selected == selected) {
-        return;
-    }
-    state.shown = Some(Shown { view, selected });
-    show_on_globe(state, view);
-}
-
-/// Показать снимок из выдачи названного поиска: выбрать его, навести на него
-/// камеру, наложить его растры и открыть вкладку с шаром. `false` — этот вид не
-/// поиск или продукта в его выдаче нет; тогда его восстанавливает по ключу
-/// провайдер (см. overlay::on_show_pressed).
+/// Показать снимок из выдачи названного поиска: навести на него камеру,
+/// наложить его растры и открыть вкладку с шаром. `false` — этот вид не поиск
+/// или продукта в его выдаче нет; тогда его восстанавливает по ключу провайдер
+/// (см. overlay::on_show_pressed).
 ///
 /// Именно названного, а не активного: строку могли нажать в той половине
-/// экрана, что не под рукой, и выделять контур надо в её выдаче.
+/// экрана, что не под рукой, и продукт искать надо в её выдаче.
 pub fn show(state: &mut State, view: ViewId, identifier: &str) -> bool {
     let Some(search) = state.search_mut(view) else { return false };
     let Some(product) = search
@@ -263,27 +160,10 @@ pub fn show(state: &mut State, view: ViewId, identifier: &str) -> bool {
         return false;
     };
 
-    // Наводка — при живом контуре: продукт без геометрии (вспомогательные
-    // данные) камере не указ, но наложение его растров всё равно пробуем —
-    // честный ответ «нет растров» придёт от провайдера.
-    if let Some(frame) = footprint::frame(&product.footprint) {
-        crate::calls::globe::on_camera(&CameraCommand {
-            command: Some(Command::Focus(Focus {
-                at: Some(GeoPoint { lat: frame.lat, lon: frame.lon }),
-                radius_deg: frame.radius_deg,
-            })),
-        });
-    }
-
-    state.shown = Some(Shown { view, selected: Some(identifier.to_string()) });
-    show_on_globe(state, view);
+    // Наложение растров пробуем и без геометрии: честный ответ «нет растров»
+    // придёт от провайдера, а наводка при пустом контуре просто не случится
+    // (см. `overlay::look_at`).
+    super::overlay::look_at(state, footprint::frame(&product.footprint));
     super::overlay::show(state, &product, Some(view));
-    super::nav::on_new_globe(state);
     true
-}
-
-/// Насколько снимок велик — угловой радиус его контура. Без геометрии он
-/// бесконечен: такой не выиграет ни у одного настоящего.
-fn extent(product: &DataProduct) -> f64 {
-    footprint::frame(&product.footprint).map_or(f64::INFINITY, |frame| frame.radius_deg)
 }

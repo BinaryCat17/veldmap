@@ -272,8 +272,17 @@ pub fn parse_listing(body: &[u8], requested: &str) -> anyhow::Result<Listing> {
                 match e.local_name().as_ref() {
                     b"CommonPrefixes" => in_common_prefixes = false,
                     b"Contents" => {
-                        if let Some(entry) = object.take() {
-                            push(&mut entries, entry, requested);
+                        // Ключ со слэшем на конце — не объект, а пустышка,
+                        // которой хранилище обозначает папку. Папками в
+                        // листинге отвечают общие префиксы, и та же папка
+                        // приезжает ими же, а в обходе вглубь папок нет вовсе:
+                        // оставленная пустышка стала бы файлом нулевого
+                        // размера, который потом «скачивают».
+                        match object.take() {
+                            Some(entry) if !entry.identifier.ends_with('/') => {
+                                push(&mut entries, entry, requested)
+                            }
+                            _ => {}
                         }
                     }
                     _ => {}
@@ -369,6 +378,26 @@ mod tests {
         ));
         assert!(!is_single_object("eodata/Sentinel-1-RTC/2024/01/05/S1A_IW_GRDH_RTC"));
         assert!(!is_single_object("eodata/Landsat-5/TM/GTC_1P/1985/02/02/LS05_TM_GTC_1P_4A43"));
+    }
+
+    /// Пустышка-«папка» файлом не становится: хранилище кладёт рядом с ключами
+    /// объект нулевого размера со слэшем на конце, и в обходе вглубь он —
+    /// единственное, что притворяется файлом. Сама папка при этом остаётся в
+    /// листинге общим префиксом.
+    #[test]
+    fn folder_placeholder_is_not_a_file() {
+        let body = br#"<?xml version="1.0" encoding="UTF-8"?>
+        <ListBucketResult>
+          <Contents><Key>Landsat-5/1988/P.TIFF/</Key><Size>0</Size></Contents>
+          <Contents><Key>Landsat-5/1988/P.TIFF/B1.TIF</Key><Size>10</Size></Contents>
+          <CommonPrefixes><Prefix>Landsat-5/1988/P.TIFF/</Prefix></CommonPrefixes>
+        </ListBucketResult>"#;
+        let listing = parse_listing(body, "eodata/Landsat-5/1988/").expect("листинг разобран");
+        let keys: Vec<&str> = listing.entries.iter().map(|e| e.identifier.as_str()).collect();
+        assert_eq!(keys, vec![
+            "eodata/Landsat-5/1988/P.TIFF/B1.TIF",
+            "eodata/Landsat-5/1988/P.TIFF/",
+        ], "папка осталась одна — общим префиксом");
     }
 
     /// Дата — это ровно три разряда нужной длины и только из цифр: «08» месяцем

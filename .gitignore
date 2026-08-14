@@ -24,6 +24,8 @@ project_context.txt
 generated
 .venv
 runtime/data
+# Запомненное приложением между запусками — раскладка окна (см. data-browser)
+runtime/state
 .qwen
 .claude
 __pycache__

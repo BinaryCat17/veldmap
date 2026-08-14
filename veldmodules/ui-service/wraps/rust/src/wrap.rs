@@ -17,9 +17,9 @@ pub use style::{
     Scrollbar, Shadow, SliderStyle, TextInputStyle, WidgetStyle,
 };
 pub use widgets::{
-    Column, Container, Element, Image, Keyed, Payload, Popover, ProgressBar, Row,
+    Column, Container, Divider, Element, Image, Keyed, Payload, Popover, ProgressBar, Row,
     Scrollable, Slider, Space, Text, TextInput, Tooltip, UiMessage, Viewport,
-    column, container, icon, image, mono, popover, progress_bar, row, scrollable,
+    column, container, divider, icon, image, mono, popover, progress_bar, row, scrollable,
     slider, space, text, text_input, tooltip, viewport,
 };
 

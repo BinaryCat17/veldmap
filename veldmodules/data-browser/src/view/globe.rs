@@ -16,6 +16,15 @@ use crate::module::{theme, Msg, ViewMsg};
 /// продукта длиной под семьдесят знаков и без того не показать целиком.
 const PICKED_CHARS: usize = 46;
 
+/// Снимок, о котором говорит полоса: чем его подписать, чем адресовать и каким
+/// способом смотреть. Три поля, а не тройка: имя и ключ у снимка похожи с виду,
+/// и перепутать их местами в тройке ничто не мешает.
+struct Subject<'a> {
+    label: &'a str,
+    key: &'a str,
+    folder: bool,
+}
+
 pub fn view(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
     // Текстуру область получает от нас же: мы её выделили в ответ на
     // предыдущий on_resized. На первом кадре её ещё нет — место занимается
@@ -44,40 +53,61 @@ pub fn view(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
 /// Названный снимок вытесняет размер места: пока не выбрано и не наложено
 /// ничего, размер — то единственное, что можно сказать о безымянной области,
 /// а как только снимок назван, он и есть ответ на вопрос «на что я смотрю».
-/// Рядом с именем — обратный ход: с шара к строке продукта в каталоге, а у
-/// наложений «снять» — разом все. По одному их снимают в «На просмотре»; здесь
-/// кнопка на случай, когда той вкладки не открыто.
+/// Рядом с именем — то, что с ним делают, глядя на шар: посмотреть его самого
+/// и найти его в каталоге. У наложений «снять» — разом все; по одному их
+/// снимают в «На просмотре», здесь кнопка на случай, когда той вкладки не
+/// открыто.
 fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
-    // Что назвать: выбранный контур, а без него — верхний слой на шаре. Обычно
-    // это один и тот же продукт; расходятся они, когда щёлкнули по соседнему
-    // контуру, и тогда именем отвечает выбор — он свежее.
+    // Что назвать: выбранный щелчком контур, а без него — верхний слой на шаре.
+    // Обычно это один и тот же снимок; расходятся они, когда щёлкнули по
+    // соседнему контуру, и тогда именем отвечает выбор — он свежее.
     //
     // Верхний из тех, что видно: слоёв бывает несколько, назвать одной строкой
     // можно только один, а собирающийся или скрытый назвал бы то, чего на шаре
     // нет.
-    let subject: Option<(&str, &str)> = state
+    let subject: Option<Subject<'_>> = state
         .picked()
-        .map(|product| (product.name.as_str(), product.identifier.as_str()))
+        .map(|outlined| Subject {
+            label: &outlined.label,
+            key: &outlined.key,
+            folder: outlined.folder,
+        })
         .or_else(|| {
             state
                 .overlays
                 .iter()
                 .rev()
                 .find(|overlay| overlay.on_globe() && !overlay.hidden)
-                .map(|overlay| (overlay.label.as_str(), overlay.identifier.as_str()))
+                .map(|overlay| Subject {
+                    label: &overlay.label,
+                    key: &overlay.identifier,
+                    folder: overlay.folder,
+                })
         });
 
     let mut trailing: Vec<Element<Msg>> = Vec::new();
     match subject {
-        Some((name, identifier)) => {
+        Some(subject) => {
             trailing.push(
-                mono::<Msg>(format::ellipsize(name, PICKED_CHARS))
+                mono::<Msg>(format::ellipsize(subject.label, PICKED_CHARS))
                     .size(theme::TEXT_SMALL)
                     .color(theme::INK_SOFT)
                     .single_line()
                     .into(),
             );
-            trailing.push(theme::bar_button("В каталоге").on_press(Msg::In(view, ViewMsg::Enter(components::folder_of(identifier).to_string()))).into());
+            trailing.push(
+                theme::bar_button("Смотреть")
+                    .on_press(Msg::In(
+                        view,
+                        components::preview_of(&state.library, subject.key, subject.folder),
+                    ))
+                    .into(),
+            );
+            trailing.push(
+                theme::bar_button("В каталоге")
+                    .on_press(Msg::In(view, ViewMsg::InCatalog(subject.key.to_string())))
+                    .into(),
+            );
         }
         None => {
             let label = match &globe.surface {
@@ -91,7 +121,7 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
     }
     // Контуры считаются наравне с растрами: очерченный шар — тоже «что-то на
     // нём лежит», и снимать это надо тем же рычагом.
-    if !state.overlays.is_empty() || state.shown.is_some() {
+    if !state.overlays.is_empty() || !state.outlined.is_empty() {
         trailing.push(theme::bar_button("Снять с шара").on_press(Msg::GlobeClear).into());
     }
 

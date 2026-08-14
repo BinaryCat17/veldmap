@@ -138,6 +138,12 @@ impl State {
         self.origins.get(name).map(|o| o.product.as_str())
     }
 
+    /// Сколько файлов в снимке этой записи; 0 — снимок целиком не обходили,
+    /// и о его полноте сказать нечего.
+    pub fn siblings_of(&self, name: &str) -> u32 {
+        self.origins.get(name).map(|o| o.siblings).unwrap_or(0)
+    }
+
     /// Ожидаемый полный размер из сидкара; 0 — Content-Length ещё не видели.
     pub fn total_bytes(&self, name: &str) -> u64 {
         self.origins.get(name).and_then(|o| o.total_bytes).unwrap_or(0)
@@ -145,7 +151,7 @@ impl State {
 }
 
 // -- Input handlers --
-pub use catalog::{on_list, on_list_result, on_product_roots_result, on_write_result};
+pub use catalog::{on_list, on_list_result, on_product_roots_result, on_snapshot, on_write_result};
 
 /// fs/on_read_result — топик один, назначений два: каталог дочитывает сидкары,
 /// open отдаёт файл заказчику. Развилка здесь, а не в схеме, потому что

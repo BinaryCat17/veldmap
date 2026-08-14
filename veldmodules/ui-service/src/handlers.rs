@@ -3,6 +3,7 @@ use crate::module::state::{PluginUiState, State};
 use veldsdk::proto::app as app_proto;
 use crate::module::renderer::GpuRenderer;
 use crate::module::converter;
+use crate::module::converter::UiMessage;
 use iced_core::{Point, Event, Size, Theme};
 use iced_runtime::UserInterface;
 use iced_graphics::Viewport;
@@ -267,6 +268,15 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
     // Идёт последним: запоминается то состояние, до которого довёл весь
     // обработанный в этом кадре ввод.
     let mut events = std::mem::take(&mut plugin.pending_events);
+    // Кончился ли в этом кадре перенос. Считается до раздачи событий: сбросить
+    // несомое должен кадровый цикл, а не виджеты, — отпускание видят и взявший,
+    // и принявший, а порядок между ними не определён (см. drag.rs).
+    let released = events.iter().any(|event| {
+        matches!(
+            event,
+            Event::Mouse(iced_core::mouse::Event::ButtonReleased(iced_core::mouse::Button::Left))
+        )
+    });
     events.push(Event::Window(iced_core::window::Event::RedrawRequested(std::time::Instant::now())));
     veldsdk::log::trace!(target: "render", "Processing {} events", events.len());
 
@@ -317,6 +327,16 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
     // движения может и не быть вовсе.
     plugin.cursor_position = at;
 
+    // Отпустили — значит несомое доставлено (или уронено мимо зон): подсветка
+    // гаснет уже в этом кадре, до отрисовки.
+    if released {
+        crate::module::drag::drop_carried();
+    }
+
+    // Наводка — после ввода и до отрисовки: колесо этого кадра уже учтено, а
+    // нарисуется область уже там, куда её навели.
+    aim_scrollables(plugin, &mut ui, renderer);
+
     veldsdk::log::trace!(target: "render", "Drawing UI");
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor_at(at));
 
@@ -358,4 +378,86 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
 
     veldsdk::log::trace!(target: "render", "END");
     Ok(())
+}
+
+/// Наводит области прокрутки туда, куда просит разметка.
+///
+/// Один раз на просьбу: разметка пересобирается на каждое событие, и наводка,
+/// применяемая каждый кадр, держала бы прокрутку намертво — колесо крутилось
+/// бы, а список стоял. Помнится поэтому номер просьбы, а не смещение: к одной
+/// и той же строке приводят дважды подряд, и по смещению вторую просьбу от
+/// первой не отличить.
+///
+/// Забытая наводка (`scroll_to` пропал) снимается с учёта: клиент увёл строку с
+/// глаз сам. Область, ушедшая из разметки, — тоже: переключили вкладку, и,
+/// вернувшись на неё, к строке надо привести заново — состояние прокрутки за
+/// это время пересборки не пережило.
+fn aim_scrollables(plugin: &mut PluginUiState, ui: &mut UserInterface<'_, UiMessage, Theme, GpuRenderer>, renderer: &GpuRenderer) {
+    let mut asked: Vec<(String, Option<ScrollTo>)> = Vec::new();
+    collect_aims(plugin.layout.root.as_ref(), &mut asked);
+    plugin.aimed.retain(|name, _| asked.iter().any(|(shown, _)| shown == name));
+
+    for (name, aim) in asked {
+        let Some(aim) = aim else {
+            plugin.aimed.remove(&name);
+            continue;
+        };
+        if plugin.aimed.get(&name) == Some(&aim.request) {
+            continue;
+        }
+        plugin.aimed.insert(name.clone(), aim.request);
+        veldsdk::log::debug!(target: "render", "наводка '{}' на {:.0}", name, aim.offset);
+        let mut operation = iced_core::widget::operation::scrollable::scroll_to(
+            iced_core::widget::Id::from(name.clone()),
+            iced_core::widget::operation::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(aim.offset),
+            },
+        );
+        ui.operate(renderer, &mut operation);
+    }
+}
+
+/// Все именованные области прокрутки разметки и то, куда их просят навести.
+///
+/// Match исчерпывающий намеренно: обход знает форму дерева отдельно от
+/// `converter::convert_widget`, и завести носителя детей, забыв про него здесь,
+/// значило бы молча потерять наводку у всего, что внутри него. С исчерпывающим
+/// match'ем об этом скажет компилятор.
+fn collect_aims(widget: Option<&Widget>, into: &mut Vec<(String, Option<ScrollTo>)>) {
+    let Some(widget) = widget else { return };
+    let Some(kind) = &widget.r#type else { return };
+    match kind {
+        widget::Type::Scrollable(scroll) => {
+            if !scroll.name.is_empty() {
+                into.push((scroll.name.clone(), scroll.scroll_to.clone()));
+            }
+            collect_aims(scroll.content.as_deref(), into);
+        }
+        widget::Type::Column(column) => {
+            for child in &column.children {
+                collect_aims(Some(child), into);
+            }
+        }
+        widget::Type::Row(row) => {
+            for child in &row.children {
+                collect_aims(Some(child), into);
+            }
+        }
+        widget::Type::Container(container) => collect_aims(container.child.as_deref(), into),
+        widget::Type::Tooltip(tooltip) => collect_aims(tooltip.content.as_deref(), into),
+        widget::Type::Popover(popover) => {
+            collect_aims(popover.anchor.as_deref(), into);
+            collect_aims(popover.panel.as_deref(), into);
+        }
+        // Детей не носят — идти внутрь некуда.
+        widget::Type::Text(_)
+        | widget::Type::TextInput(_)
+        | widget::Type::Image(_)
+        | widget::Type::Space(_)
+        | widget::Type::ProgressBar(_)
+        | widget::Type::Slider(_)
+        | widget::Type::Divider(_)
+        | widget::Type::Viewport(_) => {}
+    }
 }

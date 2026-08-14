@@ -18,13 +18,14 @@
 //! переоткрывает его.
 
 use crate::module::footprint;
-use crate::module::state::{overlay::Assembly, overlay::OverlayState, Shift, State, ViewId};
+use crate::module::state::{
+    overlay::Assembly, overlay::OverlayState, Locate, Located, Shift, State, ViewId,
+};
 use crate::proto::data_provider::{
     DataProduct, ImageryRequest, ImageryResponse, LocateRequest, LocateResponse,
 };
 use crate::proto::globe::{
-    camera_command::Command, CameraCommand, Focus, GeoPoint, Overlay, OverlayRaster, OverlayRole,
-    Overlays, UtmFrame,
+    GeoPoint, Overlay, OverlayRaster, OverlayRole, Overlays, UtmFrame,
 };
 use veldsdk::proto::core::ResourceOpened;
 
@@ -45,26 +46,56 @@ fn role_for_globe(role: crate::proto::data_provider::ImageryRole) -> OverlayRole
 /// «На глобус» из строки списка — любой: у найденного продукт с контуром уже
 /// под рукой, у строки каталога или загрузок есть только ключ, и продукт по
 /// нему восстанавливает провайдер (см. его on_locate).
+///
+/// Ключ приходит уже без завершающего слэша листинга: приводит его к виду
+/// продукта сама строка (см. `Row::snapshot_key`), и второе такое правило
+/// разошлось бы с первым.
+///
+/// Показ на шаре — это и очерчивание: «где он» и «вот он» — одно намерение с
+/// двумя степенями подробности, и разводить их двумя нажатиями незачем. Отметка
+/// поэтому ставится здесь же, а не ждёт, пока до коробочки дойдут руки.
 pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     // Меню строки закрываем сами: показ уводит с этого экрана, а открытым оно
     // осталось бы до возвращения.
     state.close_menus();
-    // Ключ папки приходит со слэшем листинга, продукт каталога — без; продукт
-    // один и тот же.
-    let identifier = identifier.trim_end_matches('/').to_string();
-    // Сперва выдача: там у продукта есть контур, и щелчок по строке обязан его
-    // выделить — даже если снимок на шаре уже лежит.
+    // Сперва выдача: там у продукта есть всё, что нужно, и ходить за ним в
+    // каталог второй раз незачем.
     if super::search::show(state, view, &identifier) {
+        super::outline::mark(state, view, &identifier);
         return;
     }
     // Уже на шаре, но не из выдачи — значит просят посмотреть на него, а не
     // положить туда ещё раз. Спрашивать ради этого каталог нечего: куда
     // смотреть, посчитано в момент показа.
     if focus(state, &identifier) {
+        super::outline::mark(state, view, &identifier);
         return;
     }
-    let correlation = state.locates.begin();
+    // Продукт придётся восстанавливать у провайдера — и один ход отвечает
+    // обоим: и наложению, и контуру. Ответ помечается ожидаемым до отметки,
+    // иначе сборка контуров послала бы за тем же продуктом второй запрос.
+    state.located.insert(identifier.clone(), Located::Asking);
+    super::outline::mark(state, view, &identifier);
+    let correlation = state.locates.begin(Locate::Overlay(identifier.clone()));
     crate::calls::data_provider::on_locate(&LocateRequest { identifier }, &correlation);
+}
+
+/// Обряд «теперь смотрят на этот снимок»: навести на него камеру, погасить
+/// прежнюю подсветку и перевести взгляд на шар.
+///
+/// Одной функцией на все три показа — из выдачи, из уже лежащего слоя и по
+/// восстановленному ключу: вопрос у них один, и три ответа на него разошлись
+/// бы молча — снаружи это выглядело бы как «из каталога камера наводится, а из
+/// „На просмотре“ нет».
+///
+/// `frame` пуст — у продукта нет геометрии (вспомогательные данные): наводить
+/// не на что, а всё остальное всё равно делается.
+pub fn look_at(state: &mut State, frame: Option<footprint::Frame>) {
+    super::globe::focus_on(frame);
+    // Подсветка прежнего выбора гаснет: на шар лёг другой снимок, и полоса
+    // глобуса должна назвать его, а не прошлый выбор.
+    super::outline::deselect(state);
+    super::nav::on_new_globe(state);
 }
 
 /// Навести шар на слой и показать вкладку с ним. `false` — такого слоя нет.
@@ -80,46 +111,21 @@ pub fn focus(state: &mut State, key: &str) -> bool {
     let Some(overlay) = state.overlays.iter().find(|o| o.identifier == key) else {
         return false;
     };
-    if let Some(frame) = &overlay.focus {
-        crate::calls::globe::on_camera(&CameraCommand {
-            command: Some(Command::Focus(Focus {
-                at: Some(GeoPoint { lat: frame.lat, lon: frame.lon }),
-                radius_deg: frame.radius_deg,
-            })),
-        });
-    }
-    // Подсветка прежнего выбора гаснет — по той же причине, что и при показе
-    // по ключу: полоса глобуса называет то, на что смотрят, а смотрят теперь
-    // на этот слой.
-    super::search::deselect(state);
-    super::nav::on_new_globe(state);
+    let frame = overlay.focus.clone();
+    look_at(state, frame);
     true
 }
 
-/// Продукт восстановлен по ключу — показываем, как показывали бы из поиска,
-/// только без выделения контура: выдачи, в которой его выделять, нет.
-pub fn on_locate_result(state: &mut State, response: LocateResponse) {
-    if state.locates.settle(&veldsdk::correlation()) != veldsdk::Reply::Current {
-        return;
-    }
+/// Продукт восстановлен по ключу — показываем, как показывали бы из поиска.
+pub fn on_located(state: &mut State, response: LocateResponse) {
     let Some(product) = response.product else {
         veldsdk::log::warn!(target: "handlers", "показать на шаре не вышло: {}", response.error);
+        state.notice = Some(format!("Показать на шаре не вышло: {}", response.error));
         return;
     };
 
-    if let Some(frame) = footprint::frame(&product.footprint) {
-        crate::calls::globe::on_camera(&CameraCommand {
-            command: Some(Command::Focus(Focus {
-                at: Some(GeoPoint { lat: frame.lat, lon: frame.lon }),
-                radius_deg: frame.radius_deg,
-            })),
-        });
-    }
-    // Подсветка прежнего выбранного контура гаснет: на шар лёг другой снимок,
-    // и полоса глобуса должна назвать его, а не прошлый выбор.
-    super::search::deselect(state);
+    look_at(state, footprint::frame(&product.footprint));
     show(state, &product, None);
-    super::nav::on_new_globe(state);
 }
 
 /// Положить продукт на шар. Уже лежащий не кладётся заново: наводка камеры
@@ -138,6 +144,7 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
     state.overlays.push(OverlayState::new(
         product.identifier.clone(),
         product.name.clone(),
+        product.folder,
         source,
         quad_of(product),
         footprint::frame(&product.footprint),
@@ -213,9 +220,9 @@ fn abandon(state: &mut State, overlay: OverlayState) {
 }
 
 /// Наложение переживает новый поиск в своём виде, только если его продукт
-/// остался в выдаче, — как выделение (см. search::show_on_globe). Чужая
-/// выдача наложений не трогает: продукт из каталога или загрузок в ней и не
-/// бывал.
+/// остался в выдаче, — тем же правилом, что и отметка (см.
+/// `search::survivors`). Чужая выдача наложений не трогает: продукт из
+/// каталога или загрузок в ней и не бывал.
 pub fn keep_only(state: &mut State, view: ViewId, alive: impl Fn(&str) -> bool) {
     retain(state, |overlay| {
         overlay.source != Some(view) || alive(&overlay.identifier)
@@ -267,6 +274,16 @@ pub fn set_hidden(state: &mut State, key: &str, hidden: bool) {
     send_set(state);
 }
 
+/// Меню слоя: раскрыть или закрыть раскрытое. Всё прочее раскрытое при этом
+/// гаснет — раскрытым бывает только одно (см. `State::close_menus`).
+pub fn menu(state: &mut State, key: Option<String>) {
+    let same = state.layer_menu == key;
+    state.close_menus();
+    if !same {
+        state.layer_menu = key;
+    }
+}
+
 /// Скрыть или показать все сразу — кнопка «Скрыть все» в списке.
 pub fn hide_all(state: &mut State, hidden: bool) {
     let mut changed = false;
@@ -298,8 +315,12 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     // кнопке: пустая строка, которая никогда ничего не покажет, хуже её
     // отсутствия. Именно `remove`, а не выкидывание из списка: слой мог уже
     // лежать на шаре, и тогда его нужно ещё и снять оттуда.
+    //
+    // Причина уходит и на экран: нажали «на глобус», а на шаре не появилось
+    // ничего — и без строки состояния это выглядит как несработавшая кнопка.
     let give_up = |state: &mut State, why: String| {
         veldsdk::log::warn!(target: "handlers", "'{}': {}", label, why);
+        state.notice = Some(format!("«{}»: {}", crate::module::components::format::ellipsize(&label, 40), why));
         remove(state, &key);
     };
 

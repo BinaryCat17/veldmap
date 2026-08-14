@@ -532,6 +532,9 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
         callback(Err(unsupported_image()));
     }
     fn start_layer(&mut self, bounds: iced_core::Rectangle) {
+        // Границы приходят в пространстве вызывающего: слой, открытый внутри
+        // переноса, назван относительно него (см. [`transformation`]).
+        let bounds = bounds * self.transformation();
         self.scissor_stack.push(bounds);
         self.apply_scissor();
     }
@@ -553,14 +556,74 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
 }
 
 impl GpuRenderer {
+    /// Рисует то, что не поместилось, в отведённых ему границах.
+    ///
+    /// Подписи iced в слой не заворачивает: он передаёт границы отдельным
+    /// доводом (`clip_bounds`) и ждёт, что рендерер их применит. Контейнер с
+    /// `clip()` тоже своего слоя не заводит — он лишь сужает эти границы для
+    /// детей (см. `container::draw` в iced_widget). Значит, единственное место,
+    /// где обрезка вообще может случиться, — здесь; без неё длинное имя
+    /// рисуется поверх соседней колонки, а подсказка поля — за краем половины.
+    ///
+    /// Ножницы ставятся только тому тексту, которому они нужны: попавший в
+    /// границы целиком рисуется как рисовался, и лишней смены состояния кадр не
+    /// получает. Пересечение с текущими ножницами — затем, что обрезка
+    /// вложенного не может быть шире обрезки объемлющего.
+    fn clipped(
+        &mut self,
+        ink: iced_core::Rectangle,
+        clip: iced_core::Rectangle,
+        draw: impl FnOnce(&mut Self),
+    ) {
+        // Границы и чернила меряны в одном пространстве — том, в котором
+        // рисует вызывающий, — поэтому сравниваются до перевода в кадр.
+        if ink.is_within(&clip) {
+            draw(self);
+            return;
+        }
+
+        let clip = clip * self.transformation();
+        let bounds = match self.scissor_stack.last() {
+            Some(current) => current.intersection(&clip),
+            None => Some(clip),
+        };
+        let Some(bounds) = bounds else {
+            // Пересечения нет вовсе: всё, что могло бы быть нарисовано, лежит
+            // за границами.
+            return;
+        };
+
+        self.scissor_stack.push(bounds);
+        self.apply_scissor();
+        draw(self);
+        self.scissor_stack.pop();
+        self.apply_scissor();
+    }
+
+    /// Текущий перенос: им сдвинуто всё, что рисуется, — и ножницы обязаны
+    /// сдвинуться вместе с рисуемым, иначе прокрученный список обрежется по
+    /// месту, где содержимое стояло до прокрутки.
+    fn transformation(&self) -> Transformation {
+        self.transformation_stack.last().copied().unwrap_or(Transformation::IDENTITY)
+    }
+
     fn apply_scissor(&mut self) {
         if let Some(rect) = self.scissor_stack.last() {
-            let x = (rect.x * self.current_sf).max(0.0) as u32;
-            let y = (rect.y * self.current_sf).max(0.0) as u32;
-            let w = (rect.width * self.current_sf) as u32;
-            let h = (rect.height * self.current_sf) as u32;
-            self.draw_commands
-                .push(DrawCmd::Scissor { x, y, width: w, height: h });
+            // Считается по краям, а не по началу с размером: у прямоугольника,
+            // уехавшего за левый край кадра, начало подтягивается к нулю, и
+            // ширина, оставленная прежней, увела бы правый край вправо на
+            // столько же — то есть обрезка отпустила бы ровно то, что должна
+            // была срезать.
+            let x = (rect.x * self.current_sf).max(0.0);
+            let y = (rect.y * self.current_sf).max(0.0);
+            let right = ((rect.x + rect.width) * self.current_sf).max(x);
+            let bottom = ((rect.y + rect.height) * self.current_sf).max(y);
+            self.draw_commands.push(DrawCmd::Scissor {
+                x: x as u32,
+                y: y as u32,
+                width: (right - x) as u32,
+                height: (bottom - y) as u32,
+            });
         } else {
             self.draw_commands.push(DrawCmd::Scissor {
                 x: 0,
@@ -900,7 +963,7 @@ impl iced_core::text::Renderer for GpuRenderer {
         p: &Self::Paragraph,
         pos: Point,
         color: Color,
-        _clip: iced_core::Rectangle,
+        clip: iced_core::Rectangle,
     ) {
         if let Some(buffer) = &p.buffer {
             // `pos` — уже выровненный левый верхний угол текста: выравнивание
@@ -913,8 +976,14 @@ impl iced_core::text::Renderer for GpuRenderer {
             // текст меряется по чернилам — иначе строка уезжает вправо на эту
             // разницу.
             let adjusted_pos = Point::new(pos.x - p.min_x, pos.y);
+            // Место, которое текст займёт, — тем же измерением, которым он
+            // отвечает на `min_bounds`: по нему его раскладывал iced, по нему
+            // же и видно, нужна ли обрезка вообще.
+            let ink = iced_core::Rectangle::new(pos, iced_core::text::Paragraph::min_bounds(p));
             self.prepare_glyphs(buffer);
-            self.draw_buffer(buffer, adjusted_pos, color);
+            self.clipped(ink, clip, |renderer| {
+                renderer.draw_buffer(buffer, adjusted_pos, color);
+            });
         }
     }
 

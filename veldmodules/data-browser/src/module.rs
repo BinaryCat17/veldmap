@@ -41,42 +41,66 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         return;
     };
 
+    // Извещение о том, что не вышло, живёт до следующего действия — и гаснет
+    // здесь, до разбора: обработчик этого же нажатия вправе поставить своё, и
+    // гашение после него стёрло бы свежее (см. `State::notice`).
+    state.notice = None;
+
+    // Раскладку запоминаем после разбора, но не на каждом кадре перетаскивания:
+    // граница шлёт сдвиг десятками сообщений в секунду, а записать надо то
+    // место, где её отпустили (см. `Msg::Divided`).
+    let dragging = matches!(message, Msg::Divide(..));
+
     match message {
         Msg::TabSelect(id) => handlers::nav::on_tab_select(state, id),
         Msg::TabClose(id) => handlers::nav::on_tab_close(state, id),
-        Msg::TabMenu(half) => handlers::nav::on_tab_menu(state, half),
+        Msg::TabMenu(pane) => handlers::nav::on_tab_menu(state, pane),
         Msg::TabOptions(id) => handlers::nav::on_tab_options(state, id),
-        Msg::NewTab(half, kind) => handlers::nav::on_new_tab(state, half, kind),
-        Msg::TabMove(id) => handlers::nav::on_tab_move(state, id),
-        Msg::TabSplit(id, placement) => handlers::nav::on_tab_split(state, id, placement),
-        Msg::TabUnsplit => handlers::nav::on_tab_unsplit(state),
+        Msg::NewTab(pane, kind) => handlers::nav::on_new_tab(state, pane, kind),
+        Msg::TabMove(id, side) => handlers::nav::on_tab_move(state, id, side),
+        Msg::TabCollapse => handlers::nav::on_tab_collapse(state),
+        Msg::Divide(split, delta) => state.divide(split, delta),
+        // Границу отпустили: делать нечего — это тот самый момент, ради
+        // которого сообщение и заведено, а запоминает раскладку общий ход ниже.
+        Msg::Divided => {}
+        Msg::TabDrop(pane, drop) => handlers::nav::on_tab_drop(state, pane, drop),
         Msg::Download(identifier, product) => {
             handlers::library::on_download_pressed(state, identifier, product)
         }
         Msg::Delete(name) => handlers::library::on_delete_pressed(state, name),
         Msg::DeleteSnapshot(product) => handlers::library::on_delete_snapshot(state, product),
+        Msg::DownloadSnapshot(product) => handlers::library::on_download_snapshot(state, product),
+        Msg::PauseSnapshot(product) => handlers::library::on_pause_snapshot(state, product),
         Msg::Reveal(name) => handlers::library::on_reveal_pressed(state, name),
         // «Снять с шара» — про всё, что на нём лежит: и растры, и контуры.
         // Порознь их не снять ничем, а разделять их пользователю не по чему —
         // он видит один шар.
         Msg::GlobeClear => {
             handlers::overlay::clear_all(state);
-            handlers::search::clear_outlines(state);
+            handlers::outline::clear(state);
         }
         Msg::OverlayOpacity(key, value) => handlers::overlay::set_opacity(state, &key, value),
         Msg::OverlayHidden(key, hidden) => handlers::overlay::set_hidden(state, &key, hidden),
         Msg::OverlayRemove(key) => handlers::overlay::remove(state, &key),
         Msg::OverlayShift(key, shift) => handlers::overlay::shift(state, &key, shift),
         Msg::OverlayHideAll(hidden) => handlers::overlay::hide_all(state, hidden),
+        Msg::OverlayMenu(key) => handlers::overlay::menu(state, key),
+        Msg::OutlineRemove(key) => handlers::outline::drop_one(state, &key),
+        Msg::OutlineFocus(key) => handlers::outline::focus(state, &key),
         Msg::In(view, message) => on_view_message(state, view, message),
+    }
+
+    if !dragging {
+        handlers::persist::save_if_changed(state);
     }
 }
 
 /// Сообщение из тела вкладки. Вид назвал себя сам (см. `Msg::In`), поэтому
 /// адресат здесь известен точно — и обработчику не приходится гадать, какая из
-/// половин экрана была под рукой.
+/// панелей была под рукой.
 fn on_view_message(state: &mut State, view: crate::module::state::ViewId, message: ViewMsg) {
     match message {
+        ViewMsg::Fill(kind) => handlers::nav::fill(state, view, kind),
         ViewMsg::OpenMenu(menu) => handlers::listing::on_menu(state, view, menu),
         ViewMsg::Filter(filter) => handlers::listing::on_filter(state, view, filter),
         ViewMsg::Group(grouping) => handlers::listing::on_group(state, view, grouping),
@@ -84,6 +108,9 @@ fn on_view_message(state: &mut State, view: crate::module::state::ViewId, messag
         ViewMsg::Query(query) => handlers::listing::on_query(state, view, query),
         ViewMsg::Page(page) => handlers::listing::on_page(state, view, page),
         ViewMsg::Expand(key) => handlers::listing::on_expand(state, view, key),
+        ViewMsg::Check(key) => handlers::outline::toggle(state, view, key),
+        ViewMsg::CheckShown(on) => handlers::outline::mark_shown(state, view, on),
+        ViewMsg::CheckClear => handlers::outline::unmark_all(state, view),
         ViewMsg::SearchQuery(query) => handlers::search::on_query(state, view, query),
         ViewMsg::SearchMission(mission) => handlers::search::on_mission(state, view, mission),
         ViewMsg::SearchPeriod(period) => handlers::search::on_period(state, view, period),
@@ -93,6 +120,7 @@ fn on_view_message(state: &mut State, view: crate::module::state::ViewId, messag
         ViewMsg::RunSearch => handlers::search::run(state, view),
         ViewMsg::Enter(path) => handlers::browse::on_enter(state, view, path),
         ViewMsg::Up => handlers::browse::on_up(state, view),
+        ViewMsg::InCatalog(key) => handlers::nav::in_catalog(state, view, key),
         ViewMsg::Preview(name) => handlers::preview::on_view_local_pressed(state, view, name),
         ViewMsg::PreviewProduct(identifier) => {
             handlers::preview::on_view_product_pressed(state, view, identifier)
@@ -113,6 +141,9 @@ fn on_view_message(state: &mut State, view: crate::module::state::ViewId, messag
 // -- Sub handlers --
 pub use handlers::library::on_state;
 pub use handlers::preview::on_view_state;
+// Раскладка окна между запусками: файл читается один раз на старте, пишется по
+// каждому действию с вкладками (см. handlers::persist).
+pub use handlers::persist::{on_read_result, on_write_result};
 
 /// Ресурс открыт. Топиков два — библиотека отдаёт скачанный файл, провайдер
 /// открывает ещё не скачанный, — но сообщение одно, так что и обработчик
@@ -124,7 +155,26 @@ pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
     veldsdk::resource::discard("on_open_result", opened);
 }
 pub use handlers::globe::on_probed;
-pub use handlers::overlay::on_locate_result;
+
+/// Продукт каталога по ключу хранилища. Ждут его двое — показ снимка на шаре и
+/// контур отмеченного, — и по содержимому их не различить: продукт в обоих
+/// случаях один и тот же. Чей это ответ, говорит таблица маршрутов.
+pub fn on_locate_result(
+    state: &mut State,
+    response: crate::proto::data_provider::LocateResponse,
+) {
+    let Some(asked) = state.locates.take(&veldsdk::correlation()) else { return };
+    match asked {
+        state::Locate::Outline(key) => handlers::outline::located(state, key, response),
+        // Один ход к каталогу отвечает обоим: показать снимок — это и очертить
+        // его (см. `overlay::on_show_pressed`), и второй такой же запрос ради
+        // той же геометрии был бы лишним.
+        state::Locate::Overlay(key) => {
+            handlers::outline::located(state, key, response.clone());
+            handlers::overlay::on_located(state, response);
+        }
+    }
+}
 
 /// Растры продукта. Ждут их двое — вкладка превью и собираемое наложение, —
 /// и чей это ответ, говорит таблица маршрутов, а не содержимое (то же, что у

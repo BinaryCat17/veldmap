@@ -3,30 +3,108 @@ pub use types::*;
 
 use veldsdk::Correlator;
 
+/// Кому едет ответ на data-provider/on_list_path. Топик один, а спрашивают его
+/// трое, и «чей это id» должно иметь ровно один ответ — перебором по видам на
+/// него не ответить.
+pub enum Listing {
+    /// Содержимое папки, которую показывает вкладка.
+    Path(ViewId),
+    /// Содержимое раскрытой строки: вкладка и ключ её папки.
+    Children(ViewId, String),
+    /// Все файлы снимка — под закачку целиком. Вкладки здесь нет: качают в
+    /// библиотеку, а она одна на окно. Счётчики едут с запросом, а не лежат в
+    /// состоянии: снимков могут качать несколько сразу, и общий счётчик
+    /// оборвал бы второй на середине первого.
+    ///
+    /// `files` — сколько файлов снимка прошло мимо нас, `queued` — сколько из
+    /// них поставлено в закачку. Первое считается ради библиотеки: обойти
+    /// снимок в хранилище может только этот обход, и его итог — единственный
+    /// ответ на «сколько файлов должно быть».
+    Snapshot { product: String, files: u32, queued: usize },
+}
+
+/// Кому едет ответ на data-provider/on_locate_result. Ждут его двое, и по
+/// содержимому их не различить: продукт в обоих случаях один и тот же.
+pub enum Locate {
+    /// Положить снимок на шар — нажали значок глобуса в строке. Ключ тот же,
+    /// что у контура: показать снимок — это и очертить его, и один ход к
+    /// каталогу отвечает обоим (см. `handlers::overlay::on_show_pressed`).
+    Overlay(String),
+    /// Геометрия отмеченного снимка: очертить его. Ключ — тот, которым он
+    /// отмечен в списке; он же ключ кэша (см. `State::located`).
+    Outline(String),
+}
+
+/// Что известно про продукт по ключу строки.
+///
+/// Одной таблицей на все три состояния, а не «кэш ответов» плюс «спрошенное»:
+/// это одно знание в трёх положениях, и два множества под него держались бы
+/// договором «ключ не бывает в обоих» — договором, который однажды нарушат.
+pub enum Located {
+    /// Спрошено, ответа ещё нет. Второй раз спрашивать незачем: сборка контуров
+    /// идёт на каждую отметку, и без этого один ключ уехал бы в каталог десяток
+    /// раз.
+    Asking,
+    /// Каталог его не знает. Тоже ответ, и запомнить его надо: иначе
+    /// ненайденное спрашивалось бы вечно.
+    Missing,
+    /// Спросить не вышло — сеть или отказ службы. Про сам снимок это не
+    /// говорит ничего, поэтому метка временная: её снимает следующая отметка
+    /// той же строки, и «щёлкни ещё раз» и есть повтор. Само по себе не
+    /// повторяется — иначе ответ на сорвавшийся запрос звал бы следующий, и
+    /// так до конца запуска.
+    Failed,
+    Found(crate::proto::data_provider::DataProduct),
+}
+
+/// Насколько узкой человек вправе сделать панель, в точках разметки. Уже этого
+/// в ней не видно ни полосы вкладок, ни того, что в них.
+const MIN_PANE: f32 = 180.0;
+
 pub struct State {
     /// Открытые виды в порядке вкладок. Порядок — свойство разметки, а не
-    /// набора: закрытие соседа не должно менять, где стоит остальное. Половина,
-    /// в которой вкладка лежит, — её собственное поле (см. `View::half`).
+    /// набора: закрытие соседа не должно менять, где стоит остальное. Панель,
+    /// в которой вкладка лежит, — её собственное поле (см. `View::pane`), а
+    /// порядок внутри панели — порядок этого же списка.
     views: Vec<View>,
-    /// Активный вид каждой половины. `None` — в половине пусто; это законное
-    /// состояние, а не ошибка: пустая половина предлагает, что в неё положить.
-    active: [Option<ViewId>; 2],
-    /// Половина, чья активная вкладка получает события виджетов. Событие
-    /// приходит от виджета, а не от половины, и назвать себя умеют не все —
-    /// поэтому у экрана есть одна половина, которая «сейчас под рукой».
-    focus: Half,
-    /// Разделён ли экран и где стоит вторая половина. `None` — не разделён, и
-    /// вторая половина не показывается, даже если в ней что-то осталось.
-    split: Option<Placement>,
+    /// Как сложен экран: дерево панелей с их долями и активными вкладками
+    /// (см. state::layout).
+    layout: Layout,
+    /// Панель, чья активная вкладка получает события виджетов. Событие приходит
+    /// от виджета, а не от панели, и назвать себя умеют не все — поэтому у
+    /// экрана есть одна панель, которая «сейчас под рукой».
+    focus: PaneId,
     next_id: u64,
+    /// С чего начинать, когда вспоминать нечего, — из конфига. Сохранённая
+    /// раскладка старше: конфиг говорит, с чего начать первый запуск, а не что
+    /// показывать вместо того, на чём человек остановился.
+    pub start: crate::module::NewTab,
+    /// Отпечаток последней записанной раскладки. По нему видно, изменилось ли
+    /// что-то с тех пор: раскладку пишут на каждое действие с вкладками, а
+    /// большинство действий её не трогает (см. handlers::persist).
+    pub last_saved: u64,
     /// Кэш состояния библиотеки — один на модуль: он приходит рассылкой и
     /// нужен всем видам сразу (см. state::library).
     pub library: library::LibraryState,
-    /// Отказ библиотеки — единственное, что относится к модулю целиком, а не
-    /// к какому-то одному виду. Ход своей работы каждый вид показывает у себя:
-    /// строка состояния одна, а видов много, и «12 items» из фоновой вкладки
-    /// под заголовком активной — неправда.
+    /// Отказ библиотеки. Ставит и гасит его она сама: она рассылает состояние
+    /// на каждое изменение, и «нет ответа» в этой рассылке значит «жалобы
+    /// больше нет». Ход своей работы каждый вид показывает у себя: строка
+    /// состояния одна, а видов много, и «12 items» из фоновой вкладки под
+    /// заголовком активной — неправда.
     pub error: Option<String>,
+    /// Что не вышло по нажатию: снимок без растров, снимок, обрезанный
+    /// потолком, продукт, не найденный в каталоге.
+    ///
+    /// Отдельно от отказа библиотеки, а не в том же поле: библиотека рассылает
+    /// состояние на каждый поставленный в очередь файл и гасит им своё
+    /// сообщение — а поставила эти файлы как раз та работа, о которой
+    /// извещение. В общем поле оно стиралось бы раньше, чем его успевали
+    /// прочесть, причём не случайно, а всегда.
+    ///
+    /// Живёт до следующего действия: его и гасит (см. `module::on_ui_event`).
+    /// Своего «закрыть» у него нет — извещение о том, что только что не
+    /// вышло, переживать следующее нажатие не должно.
+    pub notice: Option<String>,
     /// Render-таргет нашего окна: аллоцируется в ответ на app/window_resized
     /// и делегируется рендереру (см. handlers::window).
     pub window_surface: Option<veldsdk::surface::Delegated>,
@@ -38,12 +116,16 @@ pub struct State {
     /// колонку (см. components::table).
     pub scale: f32,
     /// Чей «плюс» раскрыт. Не в `ListingState`: полоса вкладок принадлежит
-    /// половине, а списков в ней много. Взаимоисключение со всеми прочими меню
+    /// панели, а списков в ней много. Взаимоисключение со всеми прочими меню
     /// держит [`State::close_menus`] — раскрытым бывает только одно.
-    pub tab_menu: Option<Half>,
+    pub tab_menu: Option<PaneId>,
     /// У какой вкладки раскрыто её собственное меню: разделить, перенести,
     /// закрыть.
     pub tab_options: Option<ViewId>,
+    /// У какого слоя «На просмотре» раскрыто меню. Здесь, а не в состоянии
+    /// вида: слои лежат в состоянии модуля, и меню слоя — про слой, а не про
+    /// вкладку, которая его показывает.
+    pub layer_menu: Option<String>,
     /// Скорость закачки, байт в секунду: выводится из двух соседних состояний
     /// библиотеки (см. handlers::library). Своего поля у библиотеки под это
     /// нет — она рассылает то, что есть сейчас, а не то, как быстро оно росло.
@@ -51,9 +133,19 @@ pub struct State {
     /// Прошлый замер: когда и сколько было скачано.
     pub measured: Option<(i64, u64)>,
     /// Что сейчас очерчено на шаре. Не в состоянии вкладки глобуса: контуры —
-    /// свойство найденного, а не экрана, и уезжают они к рисующему независимо
-    /// от того, открыта ли вкладка (см. handlers::search::show_on_globe).
-    pub shown: Option<globe::Shown>,
+    /// свойство отмеченного в списках, а не экрана, и уезжают они к рисующему
+    /// независимо от того, открыта ли вкладка (см. handlers::outline).
+    ///
+    /// Сводится сюда из пакетного выделения всех списков сразу — потому и не в
+    /// состоянии вида: шар один, а списков, отмечающих на нём снимки, сколько
+    /// угодно.
+    pub outlined: Vec<globe::Outlined>,
+    /// Ключ контура, выбранного щелчком по шару. `None` — не выбран ни один.
+    pub pick: Option<String>,
+    /// Продукт каталога по ключу строки: что спрошено и что отвечено
+    /// (см. [`Located`]). У строк поиска продукт под рукой, и сюда они не
+    /// попадают.
+    pub located: std::collections::HashMap<String, Located>,
     /// Наложения снимков на шар — то, что собирается или уже показано
     /// (см. handlers::overlay). Порядок — порядок слоёв снизу вверх, тот же,
     /// которым его понимает глобус; список «На просмотре» переворачивает его
@@ -84,37 +176,62 @@ pub struct State {
     /// Отдельной таблицей, а не общей с наложениями: ответ один и тот же, а
     /// ждущих двое, и «чей это id» должно иметь ровно один ответ.
     pub preview_imagery: Correlator<ViewId>,
-    /// data-provider/on_list_path_result.
-    pub listings: Correlator<ViewId>,
+    /// data-provider/on_list_path_result. Контекст — кому этот листинг
+    /// (см. [`Listing`]).
+    pub listings: Correlator<Listing>,
     /// data-provider/on_search_result.
     pub searches: Correlator<ViewId>,
     /// globe/on_probe — «что под указателем». Не таблица, а последний вопрос:
     /// ответ на предыдущий уже не нужен, указатель с тех пор уехал.
     pub probe: veldsdk::Latest,
-    /// data-provider/on_locate_result — продукт по ключу для «показать на
-    /// шаре» из каталога и загрузок. Последний вопрос, как probe: показывают
-    /// один продукт, и второй щелчок отменяет первый.
-    pub locates: veldsdk::Latest,
+    /// data-provider/on_locate_result — продукт по ключу хранилища. Контекст —
+    /// зачем его спросили (см. [`Locate`]): положить на шар или очертить.
+    pub locates: Correlator<Locate>,
+    /// fs/on_write раскладки: корреляция → регион, отданный службе. Освобождает
+    /// его ответ — до него регион наш (см. handlers::persist).
+    pub layout_writes: Correlator<u64>,
+    /// Чтение сохранённой раскладки. Не таблица, а последний вопрос: спрашивают
+    /// её один раз, на старте, и ответ на позапрошлый вопрос значил бы, что
+    /// экран собирают дважды.
+    pub layout_read: veldsdk::Latest,
 }
 
 impl State {
     pub fn new(config: crate::module::handlers::Config) -> anyhow::Result<Self> {
-        let mut state = Self {
+        // Стартовая вкладка — из конфига; умолчание и поведение при неизвестном
+        // значении — Search (этот вид существует всегда).
+        let start = match config.initial_view.as_deref() {
+            None | Some("search") => crate::module::NewTab::Search,
+            Some("browse") => crate::module::NewTab::Browse,
+            Some("downloaded") => crate::module::NewTab::Downloaded,
+            Some(other) => {
+                veldsdk::log::warn!(target: "system", "unknown initial_view '{}', falling back to Search", other);
+                crate::module::NewTab::Search
+            }
+        };
+
+        let layout = Layout::new();
+        Ok(Self {
             views: Vec::new(),
-            active: [None, None],
-            focus: Half::First,
-            split: None,
+            focus: layout.first(),
+            layout,
             next_id: 1,
+            start,
+            last_saved: 0,
             library: library::LibraryState::default(),
             error: None,
+            notice: None,
             window_surface: None,
             window: (0, 0),
             scale: 1.0,
             tab_menu: None,
             tab_options: None,
+            layer_menu: None,
             speed: 0.0,
             measured: None,
-            shown: None,
+            outlined: Vec::new(),
+            pick: None,
+            located: Default::default(),
             overlays: Vec::new(),
             previews: Correlator::new(),
             opens: Correlator::new(),
@@ -123,44 +240,54 @@ impl State {
             listings: Correlator::new(),
             searches: Correlator::new(),
             probe: veldsdk::Latest::default(),
-            locates: veldsdk::Latest::default(),
-        };
+            locates: Correlator::new(),
+            layout_writes: Correlator::new(),
+            layout_read: veldsdk::Latest::default(),
+        })
+    }
 
-        // Стартовая вкладка — из конфига; умолчание и поведение при неизвестном
-        // значении — Search (этот вид существует всегда).
-        let kind = match config.initial_view.as_deref() {
-            None | Some("search") => ViewKind::Search(search::SearchState::default()),
-            Some("browse") => ViewKind::Browse(browse::BrowseState::default()),
-            Some("downloaded") => ViewKind::Downloaded(listing::ListingState::default()),
-            Some(other) => {
-                veldsdk::log::warn!(target: "system", "unknown initial_view '{}', falling back to Search", other);
-                ViewKind::Search(search::SearchState::default())
-            }
-        };
-        state.open(kind);
-        Ok(state)
+    /// Заводит панель с названной стороны и сразу задаёт ей долю — так экран
+    /// собирают из сохранённого (см. handlers::persist). Живой путь к делению
+    /// экрана другой: делит его перенос вкладки (см. [`Self::move_aside`]).
+    pub fn split_pane(&mut self, pane: PaneId, side: Side, fraction: f32) -> Option<PaneId> {
+        let fresh = self.layout.split(pane, side)?;
+        if let Some(split) = self.layout.split_of(fresh) {
+            self.layout.set_fraction(split, fraction);
+        }
+        Some(fresh)
     }
 
     // -- Вкладки --
 
-    /// Открывает вид в названной половине и делает его в ней активным, а саму
-    /// половину — той, что под рукой. Открытие — это всегда новая вкладка:
+    /// Открывает вид в названной панели и делает его в ней активным, а саму
+    /// панель — той, что под рукой. Открытие — это всегда новая вкладка:
     /// «переиспользовать похожую» решает вызывающий, у него для этого есть
     /// [`Self::find`].
-    pub fn open_in(&mut self, half: Half, kind: ViewKind) -> ViewId {
+    pub fn open_in(&mut self, pane: PaneId, kind: ViewKind) -> ViewId {
         let id = ViewId(self.next_id);
         self.next_id += 1;
-        self.views.push(View { id, kind, half });
-        self.active[half.index()] = Some(id);
-        self.focus = half;
+        let at = self.after_last(pane);
+        self.views.insert(at, View { id, kind, pane });
+        self.layout.set_active(pane, Some(id));
+        self.focus = pane;
         id
     }
 
-    /// То же в половине, которая сейчас под рукой, — так открывается всё, что
-    /// заводят не глядя на разделение экрана: превью из строки, глобус по
+    /// То же в панели, которая сейчас под рукой, — так открывается всё, что
+    /// заводят не глядя на то, как сложен экран: превью из строки, глобус по
     /// показу снимка.
     pub fn open(&mut self, kind: ViewKind) -> ViewId {
         self.open_in(self.focus, kind)
+    }
+
+    /// Место в списке сразу за последней вкладкой этой панели: туда встаёт и
+    /// открытое, и перенесённое — конец полосы и есть то место, куда человек
+    /// смотрит после такого действия. У панели без вкладок это конец списка.
+    fn after_last(&self, pane: PaneId) -> usize {
+        self.views
+            .iter()
+            .rposition(|view| view.pane == pane)
+            .map_or(self.views.len(), |at| at + 1)
     }
 
     /// Убирает вид из набора и отдаёт его вызывающему: закрытие превью гасит
@@ -169,97 +296,164 @@ impl State {
     pub fn close(&mut self, id: ViewId) -> Option<View> {
         let at = self.views.iter().position(|view| view.id == id)?;
         let view = self.views.remove(at);
-        if self.active[view.half.index()] == Some(id) {
-            self.active[view.half.index()] = self.neighbour(view.half, at);
+        if self.layout.active(view.pane) == Some(id) {
+            self.layout.set_active(view.pane, self.neighbour(view.pane, at));
         }
+        self.forget_if_empty(view.pane);
         Some(view)
     }
 
-    /// Кто занимает место закрытой вкладки: следующая в той же половине, иначе
-    /// предыдущая. Пустая половина оставляет `None` — и предлагает, что в неё
-    /// положить.
+    /// Убирает опустевшую панель: место отдаётся соседней, к ней же переходит
+    /// взгляд. Последняя панель остаётся пустой — отдавать её место некому, а
+    /// «все вкладки закрыты» надо где-то показать.
+    fn forget_if_empty(&mut self, pane: PaneId) {
+        if self.views_in(pane).next().is_some() {
+            return;
+        }
+        if let Some(took) = self.layout.remove(pane)
+            && self.focus == pane
+        {
+            self.focus = took;
+        }
+    }
+
+    /// Кто занимает место закрытой вкладки: следующая в той же панели, иначе
+    /// предыдущая.
     ///
     /// Считается по общему списку, а не по отфильтрованному: индексы в нём и
-    /// есть порядок вкладок, а соседство — это соседство внутри своей половины.
-    fn neighbour(&self, half: Half, at: usize) -> Option<ViewId> {
-        let right = self.views.iter().skip(at).find(|view| view.half == half);
-        let left = self.views.iter().take(at).rev().find(|view| view.half == half);
+    /// есть порядок вкладок, а соседство — это соседство внутри своей панели.
+    fn neighbour(&self, pane: PaneId, at: usize) -> Option<ViewId> {
+        let right = self.views.iter().skip(at).find(|view| view.pane == pane);
+        let left = self.views.iter().take(at).rev().find(|view| view.pane == pane);
         right.or(left).map(|view| view.id)
     }
 
-    /// Делает вид активным в его половине, а её — той, что под рукой.
+    /// Делает вид активным в его панели, а её — той, что под рукой.
     pub fn focus(&mut self, id: ViewId) {
         let Some(view) = self.views.iter().find(|view| view.id == id) else { return };
-        let half = view.half;
-        self.active[half.index()] = Some(id);
-        self.focus = half;
+        let pane = view.pane;
+        self.layout.set_active(pane, Some(id));
+        self.focus = pane;
     }
 
-    /// Половина, чьи виджеты сейчас отвечают за события без адресата.
-    pub fn focused(&self) -> Half {
+    /// Панель, чьи виджеты сейчас отвечают за события без адресата.
+    pub fn focused(&self) -> PaneId {
         self.focus
     }
 
-    /// Разделён ли экран и где стоит вторая половина.
-    pub fn split(&self) -> Option<Placement> {
-        self.split
+    /// Дерево панелей — то, по чему собирается экран.
+    pub fn layout(&self) -> &Layout {
+        &self.layout
     }
 
-    /// Разделить экран: с названной стороны открывается пустая половина, а
-    /// вкладка, из меню которой позвали, остаётся там, где стояла. Уезжала бы
-    /// она — с экрана уходило бы то, на что смотрели, а делят его ровно затем,
-    /// чтобы это не уходило; заодно переезд стоил бы ей прокрутки и каретки:
-    /// состояние виджетов рендерер держит по месту в дереве разметки.
-    pub fn split_off(&mut self, id: ViewId, placement: Placement) {
-        self.split = Some(placement);
-        self.focus(id);
-    }
-
-    /// Свести половины обратно в одну: всё уезжает в первую, порядок вкладок
-    /// сохраняется — он свойство списка, а не половины.
-    pub fn unsplit(&mut self) {
-        self.split = None;
+    /// Свести всё в одну панель: вкладки собираются в ту, что под рукой, — на
+    /// неё и смотрели, — а порядок их сохраняется, он свойство списка.
+    pub fn collapse(&mut self) {
+        let kept = self.layout.collapse(self.focus);
         for view in &mut self.views {
-            view.half = Half::First;
+            view.pane = kept;
         }
-        // Активной остаётся та, что была под рукой: на неё и смотрели. Если под
-        // рукой была пустая половина — первая же из оставшихся: вкладки есть, и
-        // «все вкладки закрыты» вместо них было бы неправдой.
-        self.active[0] = self.active[self.focus.index()]
-            .or(self.active[0])
-            .or(self.active[1])
-            .or_else(|| self.views.first().map(|view| view.id));
-        self.active[1] = None;
-        self.focus = Half::First;
+        // Активной остаётся та, что была под рукой. Если под рукой была пустая
+        // панель — первая же из оставшихся: вкладки есть, и «все вкладки
+        // закрыты» вместо них было бы неправдой.
+        let active = self.layout.active(kept).or_else(|| self.views.first().map(|view| view.id));
+        self.layout.set_active(kept, active);
+        self.focus = kept;
     }
 
-    /// Перенести вкладку в другую половину — и туда же перевести взгляд.
-    pub fn move_to(&mut self, id: ViewId, half: Half) {
+    /// Перенести вкладку в названную панель — и туда же перевести взгляд.
+    pub fn move_to(&mut self, id: ViewId, pane: PaneId) {
         let Some(at) = self.views.iter().position(|view| view.id == id) else { return };
-        let from = self.views[at].half;
-        if from == half {
+        let from = self.views[at].pane;
+        if from == pane || !self.layout.contains(pane) {
             return;
         }
-        self.views[at].half = half;
-        if self.active[from.index()] == Some(id) {
-            self.active[from.index()] = self.neighbour(from, at);
+
+        let mut view = self.views.remove(at);
+        // Кто останется показанным в прежней панели — считается до вставки:
+        // вставка сдвигает индексы, по которым ищется сосед.
+        let left_behind = self.neighbour(from, at);
+        view.pane = pane;
+        let to = self.after_last(pane);
+        self.views.insert(to, view);
+
+        if self.layout.active(from) == Some(id) {
+            self.layout.set_active(from, left_behind);
         }
-        self.active[half.index()] = Some(id);
-        self.focus = half;
+        self.layout.set_active(pane, Some(id));
+        self.focus = pane;
+        self.forget_if_empty(from);
+    }
+
+    /// Перенести вкладку туда, где человек видит названную сторону: в соседнюю
+    /// панель, а если её там нет — в заведённую с этой стороны.
+    ///
+    /// Деление экрана поэтому не отдельное действие, а следствие переноса:
+    /// делят его не сами по себе, а затем, чтобы что-то показать рядом, — и
+    /// пустая панель, которую надо ещё чем-то наполнить, была бы лишним шагом
+    /// ровно там, где человек уже сказал, чем.
+    pub fn move_aside(&mut self, id: ViewId, side: Side) {
+        if !self.can_move(id, side) {
+            return;
+        }
+        let Some(from) = self.pane_of(id) else { return };
+        let target = match self.layout.neighbour(from, side) {
+            Some(pane) => pane,
+            None => match self.layout.split(from, side) {
+                Some(pane) => pane,
+                None => return,
+            },
+        };
+        self.move_to(id, target);
+    }
+
+    /// Положить вкладку рядом с названной панелью, поделив её место, — так
+    /// кончается бросок на край (см. `handlers::nav::on_tab_drop`).
+    ///
+    /// От [`Self::move_aside`] отличается тем, что делит место названной
+    /// панели, а не той, в которой вкладка лежала: у броска эти две разные, и
+    /// спрашивают его о первой.
+    pub fn drop_beside(&mut self, id: ViewId, pane: PaneId, side: Side) {
+        // Единственная вкладка своей же панели, брошенная на её край, не
+        // двигает ничего: заведённая панель тут же осталась бы одна вместо
+        // прежней, а экран — прежним.
+        if self.pane_of(id) == Some(pane) && self.views_in(pane).count() < 2 {
+            return;
+        }
+        let Some(fresh) = self.split_pane(pane, side, 0.5) else { return };
+        self.move_to(id, fresh);
+    }
+
+    /// Изменит ли такой перенос экран. Меню спрашивает об этом заранее: пункт,
+    /// который ничего не сделает, обещает выбор и молчит в ответ.
+    pub fn can_move(&self, id: ViewId, side: Side) -> bool {
+        let Some(from) = self.pane_of(id) else { return false };
+        match self.layout.neighbour(from, side) {
+            // В соседнюю переносить есть смысл всегда: она другая.
+            Some(_) => true,
+            // Единственная вкладка панели уедет вместе с самой панелью: та
+            // опустеет и уйдёт из дерева, а экран останется прежним.
+            None => self.views_in(from).count() > 1,
+        }
     }
 
     pub fn views(&self) -> &[View] {
         &self.views
     }
 
-    /// Вкладки одной половины, в порядке их списка.
-    pub fn views_in(&self, half: Half) -> impl Iterator<Item = &View> {
-        self.views.iter().filter(move |view| view.half == half)
+    /// Вкладки одной панели, в порядке их списка.
+    pub fn views_in(&self, pane: PaneId) -> impl Iterator<Item = &View> {
+        self.views.iter().filter(move |view| view.pane == pane)
     }
 
-    /// Активная вкладка названной половины — то, что в ней показано.
-    pub fn active_in(&self, half: Half) -> Option<ViewId> {
-        self.active[half.index()]
+    /// Активная вкладка названной панели — то, что в ней показано.
+    pub fn active_in(&self, pane: PaneId) -> Option<ViewId> {
+        self.layout.active(pane)
+    }
+
+    /// Панель, в которой лежит вкладка. `None` — её уже закрыли.
+    pub fn pane_of(&self, id: ViewId) -> Option<PaneId> {
+        self.views.iter().find(|view| view.id == id).map(|view| view.pane)
     }
 
     pub fn get(&self, id: ViewId) -> Option<&ViewKind> {
@@ -278,25 +472,51 @@ impl State {
 
     // -- Доступ к состоянию названного вида --
     //
-    // Именно названного, а не активного: половин на экране две, и «активный
-    // вид» на вопрос «чей это щелчок» больше не отвечает. Кто именно — говорит
-    // само сообщение (см. `Msg::In`).
+    // Именно названного, а не активного: панелей на экране сколько угодно, и
+    // «активный вид» на вопрос «чей это щелчок» не отвечает. Кто именно —
+    // говорит само сообщение (см. `Msg::In`).
 
     /// Ширина окна в точках разметки.
     pub fn logical_width(&self) -> f32 {
         self.window.0 as f32 / self.scale.max(1.0)
     }
 
-    /// Ширина половины — то, чем меряется место под колонки списка. Считать
-    /// его по окну нельзя: половина вдвое уже, а колонки от этого не худеют, и
-    /// тянущееся имя схлопнулось бы в ноль (см. `table::fit`).
+    /// Высота, доставшаяся дереву панелей: окно без строки состояния под ним.
+    /// Ею меряется перетаскивание горизонтальной границы — доли считаются от
+    /// места дерева, а не от окна.
+    fn layout_height(&self) -> f32 {
+        let chrome = crate::module::theme::BAR_HEIGHT + crate::module::theme::HAIRLINE;
+        (self.window.1 as f32 / self.scale.max(1.0) - chrome).max(0.0)
+    }
+
+    /// Границу деления потянули: сдвиг в точках разметки становится сдвигом
+    /// доли. Считается он от места, доставшегося самому делению, — деления
+    /// бывают вложенными, и доля вложенного меряется не окном.
     ///
-    /// Делит только разделение вбок: снизу половина остаётся во всю ширину.
-    pub fn pane_width(&self) -> f32 {
-        match self.split {
-            Some(Placement::Right | Placement::Left) => self.logical_width() / 2.0,
-            Some(Placement::Below) | None => self.logical_width(),
+    /// Сами границы в этой арифметике не учитываются: каждая из них тоньше
+    /// точности, с которой её тянут мышью.
+    pub fn divide(&mut self, split: SplitId, delta: f32) {
+        let Some(axis) = self.layout.axis_of(split) else { return };
+        let (wide, tall) = self.layout.split_share(split);
+        let room = match axis {
+            Axis::Row => self.logical_width() * wide,
+            Axis::Column => self.layout_height() * tall,
+        };
+        if room <= 0.0 {
+            return;
         }
+        self.layout.nudge(split, delta / room, MIN_PANE / room);
+    }
+
+    /// Ширина панели, в которой лежит вид, — то, чем меряется место под колонки
+    /// списка. Считать его по окну нельзя: панель у́же, а колонки от этого не
+    /// худеют, и тянущееся имя схлопнулось бы в ноль (см. `table::fit`).
+    ///
+    /// Доля берётся у дерева: делений может быть несколько, и вложенные доли
+    /// перемножаются (см. `Layout::share`).
+    pub fn pane_width(&self, id: ViewId) -> f32 {
+        let share = self.pane_of(id).map_or(1.0, |pane| self.layout.share(pane).0);
+        self.logical_width() * share
     }
 
     /// Настройки показа списка: их правят сообщения, одинаковые для всех
@@ -305,19 +525,51 @@ impl State {
         self.get_mut(id)?.listing_mut()
     }
 
-    /// Закрывает всё раскрытое: меню половин, меню вкладки и меню каждого
+    /// Закрывает всё раскрытое: меню панелей, меню вкладки и меню каждого
     /// списка. Одним движением, потому что раскрытым бывает только одно, — а
     /// держать это правило присвоениями по обработчикам значит однажды забыть
-    /// одно. По всем спискам, а не по активному: раскрытое в другой половине
+    /// одно. По всем спискам, а не по активному: раскрытое в другой панели
     /// осталось бы висеть.
     pub fn close_menus(&mut self) {
         self.tab_menu = None;
         self.tab_options = None;
+        self.layer_menu = None;
         for view in &mut self.views {
             if let Some(listing) = view.kind.listing_mut() {
                 listing.menu = listing::Menu::Closed;
             }
         }
+    }
+
+    /// Снять пакетное выделение во всех списках сразу. `true` — было что
+    /// снимать.
+    ///
+    /// По всем, а не по активному: контуры на шаре собраны из всех списков, и
+    /// снять их значит снять отметки везде (см. handlers::outline::clear).
+    /// Снять отметку с одного снимка — во всех списках сразу. `true` — было
+    /// что снимать.
+    ///
+    /// Во всех, потому что контур у снимка один: отмеченный и в каталоге, и в
+    /// выдаче, он снялся бы в одном списке и тут же вернулся из другого.
+    pub fn clear_mark(&mut self, key: &str) -> bool {
+        let mut cleared = false;
+        for view in &mut self.views {
+            if let Some(listing) = view.kind.listing_mut() {
+                cleared |= listing.selected.remove(key);
+            }
+        }
+        cleared
+    }
+
+    pub fn clear_selection(&mut self) -> bool {
+        let mut cleared = false;
+        for view in &mut self.views {
+            if let Some(listing) = view.kind.listing_mut() {
+                cleared |= !listing.selected.is_empty();
+                listing.selected.clear();
+            }
+        }
+        cleared
     }
 
     pub fn browse_mut(&mut self, id: ViewId) -> Option<&mut browse::BrowseState> {
@@ -352,29 +604,40 @@ impl State {
         }
     }
 
-    /// Выбранный на шаре снимок. `None` — не выбран ни один или закрыли вид, из
-    /// которого он взялся: контуры на шаре его переживают, а сам он — нет.
-    pub fn picked(&self) -> Option<&crate::proto::data_provider::DataProduct> {
-        let shown = self.shown.as_ref()?;
-        let selected = shown.selected.as_ref()?;
-        let ViewKind::Search(search) = self.get(shown.view)? else { return None };
-        search.results.iter().find(|product| &product.identifier == selected)
+    /// Выбранный щелчком по шару снимок. `None` — не выбран ни один: щёлкнули
+    /// мимо контуров либо сняли отметку в списке, и контура больше нет.
+    pub fn picked(&self) -> Option<&globe::Outlined> {
+        let key = self.pick.as_deref()?;
+        self.outlined.iter().find(|outlined| outlined.key == key)
     }
 
     /// Он же одним ключом — то, чем его узнаю́т списки: строку с этим ключом
     /// они отмечают у себя. Пусто — не выбрано ничего.
     pub fn picked_key(&self) -> &str {
-        self.picked().map(|product| product.identifier.as_str()).unwrap_or_default()
+        self.picked().map(|outlined| outlined.key.as_str()).unwrap_or_default()
+    }
+
+    /// Сколько отмеченного в этом списке действительно очерчено на шаре.
+    ///
+    /// Отмечают строку, а рисуется контур: у снимка без геометрии его нет
+    /// вовсе, а пока продукт спрашивают у каталога — ещё нет. «Отмечено» на
+    /// вопрос «что на шаре» поэтому не отвечает, и заголовок списка считает по
+    /// нарисованному (см. `list_screen`).
+    pub fn outlined_in(&self, listing: &listing::ListingState) -> usize {
+        self.outlined.iter().filter(|outlined| listing.selected.contains(&outlined.key)).count()
     }
 }
 
 pub mod search;
 pub mod browse;
 pub mod globe;
+pub mod layout;
 pub mod library;
 pub mod listing;
 pub mod overlay;
 pub mod preview;
+
+pub use layout::{Axis, Layout, Node, PaneId, Side, SplitId};
 
 pub use browse::BrowseState;
 pub use globe::GlobeState;

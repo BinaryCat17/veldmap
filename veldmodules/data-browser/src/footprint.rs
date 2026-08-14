@@ -13,6 +13,7 @@
 use crate::proto::data_provider::Ring;
 
 /// Круг, в который вписан контур.
+#[derive(Clone, Copy)]
 pub struct Frame {
     pub lat: f64,
     pub lon: f64,

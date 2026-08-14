@@ -18,11 +18,15 @@ use crate::module::{theme, Msg, ViewMsg};
 /// Колонка таблицы. Перечислением, а не списком ширин: колонок столько же,
 /// сколько ячеек в строке, и связывать одно с другим позицией в массиве значит
 /// однажды сдвинуть ячейку на соседнюю колонку.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Column {
-    /// Треугольник раскрытия у строки-снимка. Своя колонка, а не значок внутри
-    /// имени: раскрытие — действие, и нажимать его надо мимо самой строки,
-    /// иначе оно спорит с её главным действием.
+    /// Отметка снимка: отмеченные очерчены на шаре (см. handlers::outline).
+    /// Своя колонка по той же причине, что у раскрытия, — это отдельное
+    /// действие, и нажимать его надо мимо главного действия строки.
+    Check,
+    /// Треугольник раскрытия. Своя колонка, а не значок внутри имени:
+    /// раскрытие — действие, и нажимать его надо мимо самой строки, иначе оно
+    /// спорит с её главным действием.
     Twist,
     Icon,
     Name,
@@ -37,7 +41,8 @@ pub enum Column {
 /// Все колонки в порядке показа. Один список на всю таблицу: сетка у шапки,
 /// заголовка группы и строки обязана совпадать, а три её копии рано или поздно
 /// разъедутся.
-const COLUMNS: [Column; 9] = [
+const COLUMNS: [Column; 10] = [
+    Column::Check,
     Column::Twist,
     Column::Icon,
     Column::Name,
@@ -51,16 +56,24 @@ const COLUMNS: [Column; 9] = [
 
 /// В каком порядке колонки уступают место, когда его мало. Первой уходит та,
 /// без которой список читается легче всего: полоса загрузки дублирует
-/// состояние, дата и размер — справка, а не действие.
+/// состояние, дата и размер — справка, а не действие. Значок уходит последним:
+/// род строки виден и по её имени, но пока место есть, значок читается быстрее.
 ///
-/// Имени, значка и кнопок в этом списке нет: имя единственное тянущееся, и
-/// сжатие доводит его до нулевой ширины (см. `Wrapping` в types.proto), а
-/// строка без имени и без действий — не строка.
-const DROP_ORDER: [Column; 5] =
-    [Column::Progress, Column::Date, Column::Size, Column::Status, Column::Format];
+/// Имени и кнопок в этом списке нет: имя единственное тянущееся, и сжатие
+/// доводит его до нулевой ширины (см. `Wrapping` в types.proto), а строка без
+/// имени и без действий — не строка.
+const DROP_ORDER: [Column; 6] =
+    [Column::Progress, Column::Date, Column::Size, Column::Status, Column::Format, Column::Icon];
 
-/// Треугольник раскрытия — узкая колонка перед значком.
-const TWIST: f32 = 22.0;
+/// Отметка и треугольник раскрытия — узкие колонки перед значком. Полей у них
+/// нет вовсе (см. [`padding_of`]), поэтому ширина здесь — это ровно то место,
+/// которое достаётся кнопке.
+///
+/// Мерены они по знаку, а не на глаз: у строки, которой нечего отметить и
+/// нечего раскрыть, обе стоят пустыми, и всё лишнее в них читается как отступ
+/// — будто файл вложен туда, где вложенности нет.
+const CHECK: f32 = 20.0;
+const TWIST: f32 = 14.0;
 const ICON: f32 = 34.0;
 /// Под тип продукта, а не под расширение файла: у радара он длинный
 /// (`IW_GRDH_1SDV`), и по трём буквам «png» такую колонку не смеришь.
@@ -70,7 +83,7 @@ const SIZE: f32 = 84.0;
 const STATUS: f32 = 104.0;
 const PROGRESS: f32 = 132.0;
 /// Сколько кнопок помещается в колонку действий. Больше всего их у снимка,
-/// лежащего папкой: зайти внутрь, посмотреть, положить на шар и меню.
+/// лежащего папкой: скачать целиком, посмотреть, положить на шар и меню.
 const ACTION_BUTTONS: f32 = 4.0;
 
 /// Ширина колонки действий. Считается по числу кнопок, а не подбирается на
@@ -82,6 +95,7 @@ const ACTIONS: f32 =
 /// остаток.
 fn width_of(column: Column) -> f32 {
     match column {
+        Column::Check => CHECK,
         Column::Twist => TWIST,
         Column::Icon => ICON,
         Column::Name => 0.0,
@@ -94,20 +108,28 @@ fn width_of(column: Column) -> f32 {
     }
 }
 
-/// Сколько знаков имени помещается — то, ради чего вообще считаются ширины.
-/// Ниже этого колонка имени не сжимается: вместо неё уходит соседняя.
+/// Ширина, ради которой колонки уступают место: пока имени достаётся меньше,
+/// уходит следующая соседняя. Обещанием она не является — уступать бывает уже
+/// нечему, и тогда имя получает то, что осталось (см. [`fit`]).
 const NAME_MIN: f32 = 150.0;
 
-/// Зазор между кнопками строки.
+/// Зазор между кнопками строки. Наружу затем, что такой же ряд кнопок стоит в
+/// списке слоёв, и вторая запись этого зазора разошлась бы с первой.
 pub const BUTTON_GAP: f32 = 6.0;
-
-/// Сколько места занимает колонка действий целиком — три кнопки со своими
-/// зазорами и полями ячейки. Наружу затем, что такой же ряд кнопок стоит в
-/// списке слоёв, и вторая запись этой арифметики разошлась бы с первой.
-pub const ACTIONS_WIDTH: f32 = ACTIONS;
 
 /// Отступ содержимого ячейки от её границ — по обе стороны.
 const CELL_PADDING: f32 = 8.0;
+
+/// Какие необязательные колонки нужны этому списку. Знает это тот, кто собрал
+/// строки: раскрывать и отмечать бывает нечего, и пустой столбец тогда сдвигал
+/// бы весь список ради того, чего в нём не бывает.
+#[derive(Clone, Copy, Default)]
+pub struct Optional {
+    /// Есть что раскрыть.
+    pub twisty: bool,
+    /// Есть что отметить — то есть в списке стоят снимки.
+    pub checkable: bool,
+}
 
 /// Какие колонки показывать в отведённой ширине и сколько достанется имени.
 ///
@@ -115,11 +137,17 @@ const CELL_PADDING: f32 = 8.0;
 /// худеют — в узком месте их сумма перекрывает всё место, и тянущееся имя
 /// схлопывается в ноль. Поэтому лишние не сжимаются, а уходят: список без
 /// даты читается, список без имени — нет.
-pub fn fit(width: f32, twisty: bool) -> (Vec<Column>, f32) {
+///
+/// Возвращаемая ширина имени — та, что достанется ему на самом деле, даже если
+/// это меньше [`NAME_MIN`]: по ней считается многоточие (`format::mono_fit`), и
+/// названное с запасом имя не влезло бы в свою ячейку — вместо многоточия его
+/// обрывала бы обрезка, на середине знака.
+pub fn fit(width: f32, optional: Optional) -> (Vec<Column>, f32) {
     let mut columns: Vec<Column> = COLUMNS.to_vec();
-    // Раскрывать нечего — и колонки под это нет: пустой столбец сдвигал бы
-    // весь список ради того, чего в нём не бывает.
-    if !twisty {
+    if !optional.checkable {
+        columns.retain(|column| *column != Column::Check);
+    }
+    if !optional.twisty {
         columns.retain(|column| *column != Column::Twist);
     }
     // Отступы экрана и собственные поля колонки имени тратятся всегда.
@@ -134,7 +162,7 @@ pub fn fit(width: f32, twisty: bool) -> (Vec<Column>, f32) {
         }
         columns.retain(|column| *column != dropped);
     }
-    let name = (width - taken(&columns)).max(NAME_MIN);
+    let name = (width - taken(&columns)).max(0.0);
     (columns, name)
 }
 
@@ -165,24 +193,34 @@ fn grid(
     indent: f32,
 ) -> RowBuilder<Msg> {
     // Ступень группировки расширяет первую показанную колонку, какой бы она ни
-    // была: колонка раскрытия есть не всегда, и привязка ступени к ней роняла
-    // бы отступ группы там, где раскрывать нечего.
+    // была: колонки отметки и раскрытия есть не всегда, и привязка ступени к
+    // ним роняла бы отступ группы там, где отмечать и раскрывать нечего.
     let first = columns.first().copied();
     row(columns.iter().map(|column| {
         let step = if Some(*column) == first { indent } else { 0.0 };
+        let pad = padding_of(*column);
         let (width, left) = match column {
-            Column::Name => (Length::Fill, CELL_PADDING),
-            other => (Length::Fixed(width_of(*other) + step), CELL_PADDING + step),
+            Column::Name => (Length::Fill, pad),
+            other => (Length::Fixed(width_of(*other) + step), pad + step),
         };
         container(cells(*column))
             .width(width)
             .height(Length::Fill)
             .align_y(Alignment::Center)
-            .padding(Padding { top: 0.0, bottom: 0.0, left, right: CELL_PADDING })
-            .clip()
+            .padding(Padding { top: 0.0, bottom: 0.0, left, right: pad })
             .into()
     }))
     .width(Length::Fill)
+}
+
+/// Поля ячейки по бокам. У колонок-кнопок их нет: кнопка занимает ячейку
+/// целиком, и восемь точек полей с каждой стороны оставили бы от двадцати
+/// четыре — значок в такой ячейке рисуется огрызком, а нажать по нему негде.
+fn padding_of(column: Column) -> f32 {
+    match column {
+        Column::Check | Column::Twist => 0.0,
+        _ => CELL_PADDING,
+    }
 }
 
 /// Отступ сетки от краёв экрана. У строки его ставит сама кнопка строки
@@ -211,10 +249,14 @@ pub struct Context<'a> {
     /// Папка, которую сейчас показывают; пусто — вид её не знает (скачанное,
     /// поиск). По ней видно, куда вести «показать в каталоге» бессмысленно.
     pub here: &'a str,
-    /// Ключ снимка, чей контур выделен на шаре; пусто — не выделен ни один.
-    /// Живёт он в состоянии приложения (`State::shown`), а не вида: выделяют на
+    /// Ключ снимка, чей контур выбран на шаре; пусто — не выбран ни один.
+    /// Живёт он в состоянии приложения (`State::pick`), а не вида: выбирают на
     /// шаре, а видно это должно быть в списке, из которого снимок родом.
     pub picked: &'a str,
+    /// Строка, к которой привёл переход, — она подсвечена наравне с выбранной
+    /// на шаре: обе отвечают на один и тот же вопрос «что здесь главное
+    /// сейчас», и говорить о них по-разному было бы не о чем.
+    pub target: &'a str,
     /// Точка отсчёта для подписей времени. Одна на всю таблицу: строки одного
     /// кадра должны мериться от одного «сейчас», иначе соседние даты
     /// перескакивают через полночь по-разному.
@@ -222,7 +264,11 @@ pub struct Context<'a> {
 }
 
 /// Шапка. Стоит вне прокрутки, поэтому не уезжает вместе со строками.
-pub fn header(columns: &[Column]) -> Element<Msg> {
+///
+/// `all` — отмечено ли всё, что видно под ней (см. `Arranged::all_marked`): в
+/// колонке отметки стоит та же коробочка, что и в строках, и действует она на
+/// тот же набор, о котором говорит.
+pub fn header(view: ViewId, columns: &[Column], all: bool) -> Element<Msg> {
     let label = |name: &str| {
         text::<Msg>(name.to_string())
             .size(theme::TEXT_HEADER)
@@ -233,6 +279,16 @@ pub fn header(columns: &[Column]) -> Element<Msg> {
     };
     let head = grid(
         |column| match column {
+            // «Показанное», а не «всё»: коробочка берёт страницу со всем
+            // раскрытым на ней, и подпись обязана сказать это — иначе она
+            // обещает очертить всю выдачу, а очертит двадцать строк.
+            Column::Check => hinted(
+                theme::row_check(all).on_press(Msg::In(view, ViewMsg::CheckShown(!all))),
+                match all {
+                    true => "Убрать контуры показанного",
+                    false => "Очертить показанное на шаре",
+                },
+            ),
             Column::Name => label("ИМЯ"),
             Column::Format => label("ФОРМАТ"),
             Column::Date => label("ДАТА"),
@@ -262,8 +318,37 @@ pub fn body(view: ViewId, lines: &[Line<'_>], context: Context<'_>) -> Element<M
     column(lines.iter().map(|line| match line {
         Line::Group { title, meta, depth } => group_line(title, meta, *depth, context),
         Line::Entry { row, depth } => entry_line(view, row, *depth, context),
+        Line::Waiting { depth } => waiting_line(*depth, context),
     }))
     .width(Length::Fill)
+    .into()
+}
+
+/// Раскрытая папка, чей листинг ещё идёт. Той же сеткой, что и строка, — она
+/// стоит на её месте и уступит его первой же приехавшей записи; нажимать в ней
+/// нечего.
+fn waiting_line(depth: usize, context: Context<'_>) -> Element<Msg> {
+    let indent = indent(depth);
+    let cells = grid(
+        |column| match column {
+            Column::Name => text::<Msg>("загружается…".to_string())
+                .size(theme::TEXT_SMALL)
+                .color(theme::INK_FAINT)
+                .single_line()
+                .into(),
+            _ => theme::nothing(),
+        },
+        context.columns,
+        indent,
+    )
+    .height(Length::Fixed(theme::ROW_HEIGHT));
+
+    column![
+        gutters(cells),
+        theme::hairline(theme::LINE_ROW),
+    ]
+    .width(Length::Fill)
+    .key(format!("waiting:{}", depth))
     .into()
 }
 
@@ -309,6 +394,7 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     let indent = indent(depth);
     let cells = grid(
         |column| match column {
+            Column::Check => check(view, row_data, context),
             Column::Twist => twist(view, row_data, context),
             // Цветом сказано, чем запись является, а не чем она лежит: снимок
             // одним объектом и снимок каталогом — один и тот же снимок.
@@ -383,12 +469,20 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     )
     .height(Length::Fixed(theme::ROW_HEIGHT));
 
-    // Вся строка — кнопка: нажатие на неё делает то же, что её главная кнопка.
-    // Отдельная кнопка при этом остаётся: по ней видно, что именно случится.
-    let picked = !context.picked.is_empty() && row_data.identifier == context.picked;
-    let line = match primary(view, row_data) {
-        Some((_, _, message)) => theme::row_button(cells, picked).on_press(message),
-        None => theme::row_button(cells, picked),
+    // Вся строка — кнопка: нажатие на неё делает то же, что её главная кнопка,
+    // а у той, чьё главное дело — раскрыться, оно и делает. Отдельная кнопка
+    // при этом остаётся там, где она есть: по ней видно, что именно случится.
+    let key = row_data.key();
+    let marked = (!context.picked.is_empty() && row_data.snapshot_key() == context.picked)
+        || row_data.named(context.target);
+    let press = primary(view, row_data).map(|action| action.message).or_else(|| {
+        row_data
+            .expandable()
+            .then(|| Msg::In(view, ViewMsg::Expand(key.to_string())))
+    });
+    let line = match press {
+        Some(message) => theme::row_button(cells, marked).on_press(message),
+        None => theme::row_button(cells, marked),
     };
 
     column![
@@ -464,14 +558,36 @@ fn progress_cell(status: &RowStatus) -> Element<Msg> {
     .into()
 }
 
-/// Главная кнопка строки: глиф, подпись для подсказки и что она делает.
-/// `None` — делать со строкой нечего (например, ключ провайдера неизвестен).
-fn primary(view: ViewId, row: &Row) -> Option<(&'static str, &'static str, Msg)> {
-    // Строка, собранная из записей, сама записью не является: качать и
+/// Главное действие строки: что случится по нажатию на неё.
+struct Primary {
+    glyph: &'static str,
+    /// Подпись подсказки — она же говорит, что именно случится.
+    hint: &'static str,
+    message: Msg,
+    /// Действие уводит внутрь — в другую папку или в другой список. Отдельным
+    /// значком такое не стоит: нажатие на строку делает ровно то же, и стрелка
+    /// рядом с ней повторяла бы её (см. `quick`).
+    transition: bool,
+}
+
+impl Primary {
+    fn new(glyph: &'static str, hint: &'static str, message: Msg) -> Self {
+        Self { glyph, hint, message, transition: false }
+    }
+
+    fn transition(glyph: &'static str, hint: &'static str, message: Msg) -> Self {
+        Self { glyph, hint, message, transition: true }
+    }
+}
+
+/// Главная кнопка строки. `None` — делать со строкой нечего (например, ключ
+/// провайдера неизвестен).
+fn primary(view: ViewId, row: &Row) -> Option<Primary> {
+    // Строка, сложенная из записей, сама записью не является: качать и
     // открывать нужно её файлы, а её ключ — путь снимка в хранилище, и послать
     // его в закачку значит попросить скачать папку одним объектом. Её
     // собственное действие — раскрыться (см. `twist`).
-    if !row.children.is_empty() {
+    if row.folded {
         return None;
     }
     // Действие без ключа некому адресовать — лучше не предлагать его вовсе,
@@ -481,14 +597,26 @@ fn primary(view: ViewId, row: &Row) -> Option<(&'static str, &'static str, Msg)>
     let local = || (!row.name.is_empty()).then(|| row.name.clone());
 
     Some(match &row.status {
-        RowStatus::Downloading { .. } => (theme::glyph::PAUSE, "Пауза", Msg::Download(remote()?, row.product.clone())),
-        RowStatus::Paused { .. } => (theme::glyph::PLAY, "Продолжить", Msg::Download(remote()?, row.product.clone())),
-        _ if row.kind.is_folder() => {
-            (theme::glyph::ENTER, "Перейти", Msg::In(view, ViewMsg::Enter(remote()?)))
+        RowStatus::Downloading { .. } => {
+            Primary::new(theme::glyph::PAUSE, "Пауза", Msg::Download(remote()?, row.product.clone()))
         }
-        RowStatus::Remote => (theme::glyph::DOWNLOAD, "Скачать", Msg::Download(remote()?, row.product.clone())),
+        RowStatus::Paused { .. } => Primary::new(
+            theme::glyph::PLAY,
+            "Продолжить",
+            Msg::Download(remote()?, row.product.clone()),
+        ),
+        _ if row.kind.is_folder() => Primary::transition(
+            theme::glyph::ENTER,
+            "Перейти",
+            Msg::In(view, ViewMsg::Enter(remote()?)),
+        ),
+        RowStatus::Remote => Primary::new(
+            theme::glyph::DOWNLOAD,
+            "Скачать",
+            Msg::Download(remote()?, row.product.clone()),
+        ),
         RowStatus::Complete => {
-            (theme::glyph::EYE, "Открыть", Msg::In(view, ViewMsg::Preview(local()?)))
+            Primary::new(theme::glyph::EYE, "Открыть", Msg::In(view, ViewMsg::Preview(local()?)))
         }
         // Про папку, часть которой скачана, главная кнопка сказать не может:
         // «скачать остальное» библиотека не умеет, а «открыть» тут нечего.
@@ -501,7 +629,7 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
     let mut buttons: Vec<Element<Msg>> = quick(view, entry)
         .into_iter()
         .map(|(glyph, hint, message)| {
-            hinted(theme::row_button_icon(glyph, false).on_press(message), hint)
+            hinted(theme::row_button_icon(glyph, false).on_press(message), &hint)
         })
         .collect();
 
@@ -533,50 +661,103 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
 /// Быстрые значки строки по порядку: сначала то, ради чего строку открывают,
 /// потом показ на шаре.
 ///
+/// Перехода вглубь среди них нет: внутрь ведёт нажатие на саму строку, и
+/// стрелка рядом с ней говорила бы то же самое второй раз. Показать содержимое,
+/// не уходя со списка, — дело треугольника (см. `twist`).
+///
 /// Значок глобуса — только у снимка: класть на шар папку пути или файл внутри
 /// снимка нечего, а кнопка, которой нечего сделать, врёт о том, что строка
 /// умеет. Остальным этот пункт по-прежнему доступен из меню (см. `menu_items`).
-fn quick(view: ViewId, row: &Row) -> Vec<(&'static str, &'static str, Msg)> {
+fn quick(view: ViewId, row: &Row) -> Vec<(&'static str, String, Msg)> {
     let mut quick = Vec::new();
-    if let Some(action) = primary(view, row) {
-        quick.push(action);
+    let key = row.snapshot_key().to_string();
+    if let Some(action) = primary(view, row).filter(|action| !action.transition) {
+        quick.push((action.glyph, action.hint.to_string(), action.message));
     }
-    // У снимка-папки главного действия нет (внутрь ведёт треугольник), поэтому
-    // просмотр стоит значком: иначе смотреть снимок можно было бы только через
-    // меню, а это его основное занятие.
-    if row.kind.is_product() && row.kind.is_folder() && !row.identifier.is_empty() {
+    // Снимок, лежащий папкой, скачивается целиком: его файлы разложены по
+    // ярусам, и качать их по одному, обойдя каталог руками, — работа, которую
+    // приложение умеет сделать само (см. handlers::library::on_download_snapshot).
+    // Доведённому это предлагать незачем: он уже весь на диске.
+    if row.kind.is_product()
+        && row.kind.is_folder()
+        && !key.is_empty()
+        && !matches!(row.status, RowStatus::Complete)
+    {
+        // Вес — в подсказке: одно нажатие ставит в очередь весь снимок, а это
+        // гигабайты, и узнавать об этом по счётчику закачек поздно. Каталог
+        // размера папки не знает (в S3 за префиксом его нет), и тогда сказано
+        // просто, что качается снимок целиком.
+        let hint = match row.size > 0 {
+            true => format!("Скачать снимок целиком — {}", format::bytes(row.size)),
+            false => "Скачать снимок целиком".to_string(),
+        };
+        quick.push((theme::glyph::DOWNLOAD, hint, Msg::DownloadSnapshot(key.clone())));
+    }
+    // Главное действие снимка-папки — переход внутрь, а значком оно не стоит
+    // (см. выше), поэтому просмотр остаётся единственным значком показа: иначе
+    // смотреть снимок можно было бы только через меню, а это его основное
+    // занятие.
+    if row.kind.is_product() && row.kind.is_folder() && !key.is_empty() {
         quick.push((
             theme::glyph::EYE,
-            "Смотреть снимок",
-            Msg::In(view, ViewMsg::PreviewProduct(row.identifier.clone())),
+            "Смотреть снимок".to_string(),
+            Msg::In(view, ViewMsg::PreviewProduct(key.clone())),
         ));
     }
-    if row.kind.is_product() && !row.identifier.is_empty() {
+    if row.is_snapshot() && !key.is_empty() {
         quick.push((
             theme::glyph::GLOBE,
-            "На глобус",
-            Msg::In(view, ViewMsg::GlobeShow(row.identifier.clone())),
+            "На глобус".to_string(),
+            Msg::In(view, ViewMsg::GlobeShow(key)),
         ));
     }
     quick
 }
 
-/// Треугольник раскрытия. У строки без файлов — пусто: место за ней остаётся,
-/// поэтому соседи не съезжают, когда в списке есть и то, и другое.
+/// Треугольник раскрытия. У строки, которой нечего показать, — пусто: место за
+/// ней остаётся, поэтому соседи не съезжают, когда в списке есть и то, и другое.
+///
+/// Содержимое папки к этому моменту может быть ещё не спрошено — раскрытие его
+/// и спросит (см. handlers::browse::request_children), поэтому треугольник
+/// стоит у всякой папки, а не только у наполненной.
 fn twist(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
-    if row.children.is_empty() {
+    if !row.expandable() {
         return theme::nothing();
     }
     let open = context.listing.expanded.contains(row.key());
     theme::chrome_icon(
-        icon::<Msg>(if open { theme::glyph::CARET } else { theme::glyph::RIGHT })
-            .size(9.0)
+        icon::<Msg>(if open { theme::glyph::CARET } else { theme::glyph::CARET_RIGHT })
+            .size(10.0)
             .color(theme::INK_DIM),
     )
+    // Поля у́же обычных — по той же причине, что у коробочки отметки.
+    .padding(1.0)
     .width(Length::Fill)
     .height(Length::Fixed(theme::ROW_BUTTON))
     .on_press(Msg::In(view, ViewMsg::Expand(row.key().to_string())))
     .into()
+}
+
+/// Коробочка отметки. Отмеченные снимки очерчены на шаре, и другого способа
+/// очертить их нет (см. handlers::outline) — поэтому она стоит только у
+/// снимка: у папки пути и у файла внутри снимка контура не бывает.
+///
+/// С подсказкой, и это не украшение: коробочка — единственный рычаг, чьё
+/// действие происходит не здесь, а на другой вкладке. Без подписи она
+/// предлагает «отметить» неизвестно для чего.
+fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
+    let key = row.snapshot_key();
+    if !row.is_snapshot() || key.is_empty() {
+        return theme::nothing();
+    }
+    let marked = context.listing.selected.contains(key);
+    hinted(
+        theme::row_check(marked).on_press(Msg::In(view, ViewMsg::Check(key.to_string()))),
+        match marked {
+            true => "Убрать контур с шара",
+            false => "Очертить на шаре",
+        },
+    )
 }
 
 /// Кнопка с подсказкой: подсказка одинакова у всех значков строки, и написанная
@@ -599,27 +780,19 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     // продукт с контуром уже под рукой, у строки каталога или скачанного его
     // восстанавливает провайдер по ключу (см. handlers::overlay). У снимка
     // этот пункт стоит значком в самой строке и здесь не повторяется.
-    if !row.identifier.is_empty() && !row.kind.is_product() {
+    if !row.identifier.is_empty() && !row.is_snapshot() {
         items.push(Item::new(
             "Показать на шаре",
-            Msg::In(view, ViewMsg::GlobeShow(row.identifier.clone())),
+            Msg::In(view, ViewMsg::GlobeShow(row.snapshot_key().to_string())),
         ));
     }
     // Показывать папку, которая и так открыта, незачем: пункт вёл бы туда,
     // где пользователь уже стоит.
-    if !row.folder().is_empty() && !here.trim_end_matches('/').ends_with(row.folder()) {
+    if !row.folder().is_empty() && !crate::module::components::row::bare(here).ends_with(row.folder())
+    {
         items.push(Item::new(
             "Показать в каталоге",
-            Msg::In(view, ViewMsg::Enter(format!("{}/", row.folder()))),
-        ));
-    }
-    // Снимок, лежащий папкой, тоже смотрят — только растр внутри выбирает
-    // провайдер: сам путь каталога `GET` не открывает (см.
-    // `handlers::preview::on_view_product_pressed`).
-    if row.kind.is_product() && row.kind.is_folder() && !row.identifier.is_empty() {
-        items.push(Item::new(
-            "Смотреть снимок",
-            Msg::In(view, ViewMsg::PreviewProduct(row.identifier.clone())),
+            Msg::In(view, ViewMsg::InCatalog(row.snapshot_key().to_string())),
         ));
     }
     if !row.kind.is_folder() && !row.identifier.is_empty() && matches!(row.status, RowStatus::Remote) {
@@ -630,13 +803,10 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     }
     // Перекачка сносит имеющийся файл до старта — иначе рядом с ним лёг бы
     // второй, недокачанный (см. data-library::download). Отсюда и пометка.
-    // Строке, собранной из записей, качать нечего: её ключ — путь снимка в
-    // хранилище, и послать его в закачку значит попросить скачать папку одним
-    // объектом. Качают её файлы — по одному, из раскрытой строки.
-    if !row.identifier.is_empty()
-        && row.children.is_empty()
-        && matches!(row.status, RowStatus::Complete)
-    {
+    // Сложенной строке качать нечего: её ключ — путь снимка в хранилище, и
+    // послать его в закачку значит попросить скачать папку одним объектом.
+    // Снимок целиком качает свой значок (см. `quick`).
+    if !row.identifier.is_empty() && !row.folded && matches!(row.status, RowStatus::Complete) {
         items.push(
             Item::new("Скачать заново", Msg::Download(row.identifier.clone(), row.product.clone()))
                 .danger(),
@@ -660,15 +830,75 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
         };
         items.push(Item::new(label, Msg::Delete(row.name.clone())).danger());
     }
-    // У строки, собранной из записей, своего имени нет — она и не запись, а
-    // снимок. Выбрасывается он целиком: раскрывать его, чтобы удалить файлы по
-    // одному, значит просить пользователя сделать за нас то, что мы же и
-    // свернули.
-    if !row.children.is_empty() && !row.product.is_empty() {
+    // Пауза на снимок целиком — по той же причине, по какой он целиком
+    // качается: файлов у него под три десятка, и жать паузу на каждом значит
+    // просить пользователя сделать за нас то, что мы же и сложили. Предлагается
+    // только пока есть что останавливать.
+    if row.folded
+        && !row.product.is_empty()
+        && row.children.iter().any(|file| matches!(file.status, RowStatus::Downloading { .. }))
+    {
+        items.push(Item::new("Приостановить снимок", Msg::PauseSnapshot(row.product.clone())));
+    }
+    // У сложенной строки своего имени нет — она и не запись, а снимок.
+    // Выбрасывается он целиком: раскрывать его, чтобы удалить файлы по одному,
+    // значит просить пользователя сделать за нас то, что мы же и сложили.
+    if row.folded && !row.product.is_empty() {
         items.push(
             Item::new("Удалить снимок с диска", Msg::DeleteSnapshot(row.product.clone())).danger(),
         );
     }
 
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Колонки отметки и раскрытия появляются только там, где им есть что
+    /// показать: пустой столбец сдвигал бы весь список ради того, чего в нём
+    /// не бывает.
+    #[test]
+    fn optional_columns_appear_only_where_they_are_needed() {
+        let wide = 1400.0;
+        let (bare, _) = fit(wide, Optional::default());
+        assert!(!bare.contains(&Column::Check) && !bare.contains(&Column::Twist));
+
+        let (full, _) = fit(wide, Optional { twisty: true, checkable: true });
+        assert_eq!(full.first(), Some(&Column::Check));
+        assert_eq!(full.get(1), Some(&Column::Twist));
+    }
+
+    /// В узком месте колонки уступают место по одной, а имя не сжимается ниже
+    /// своего минимума: список без даты читается, список без имени — нет.
+    #[test]
+    fn narrow_panes_drop_columns_instead_of_squeezing_the_name() {
+        let optional = Optional { twisty: true, checkable: true };
+        let (columns, name) = fit(420.0, optional);
+        assert!(name >= NAME_MIN, "имени досталось {}", name);
+        assert!(columns.contains(&Column::Name) && columns.contains(&Column::Actions));
+        assert!(!columns.contains(&Column::Progress), "справочное уходит первым");
+    }
+
+    /// Уступать бывает нечему: в половине узкого окна одни лишь кнопки строки
+    /// занимают половину места. Тогда имя получает остаток — и говорит об этом
+    /// честно, потому что по названной ширине считается его многоточие.
+    #[test]
+    fn a_pane_too_narrow_for_the_minimum_reports_what_is_left() {
+        let optional = Optional { twisty: false, checkable: true };
+        let (columns, name) = fit(272.0, optional);
+
+        assert!(name < NAME_MIN, "проверяется именно нехватка, а досталось {}", name);
+        assert!(!columns.contains(&Column::Icon), "значок уступает последним");
+        // Ровно то, что достанется тянущейся колонке: всё место минус
+        // фиксированные колонки, отступы экрана и собственные поля ячейки.
+        let fixed: f32 = columns.iter().map(|column| width_of(*column)).sum();
+        assert_eq!(name, 272.0 - fixed - theme::GUTTER * 2.0 - CELL_PADDING * 2.0);
+
+        // Совсем без места имени не остаётся ничего — но и отрицательным оно
+        // не бывает: на такой ширине по нему всё равно считают знаки.
+        let (_, none) = fit(100.0, optional);
+        assert_eq!(none, 0.0);
+    }
 }

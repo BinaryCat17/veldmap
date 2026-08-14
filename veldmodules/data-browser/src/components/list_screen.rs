@@ -6,12 +6,13 @@
 
 use veld_ui_service_wrap::{column, row};
 use crate::proto::ui_service::{
-    container, scrollable, text, Alignment, Element, FontWeight, Length, Padding, ScrollDirection,
+    container, scrollable, text, Alignment, Element, FontWeight, Length, Padding,
+    ScrollDirection, ScrollTo,
 };
 use crate::module::components::{arrange, controls, format, table, Row};
 use crate::module::state::ViewId;
 use crate::module::state::listing::ListingState;
-use crate::module::{theme, Msg};
+use crate::module::{theme, Msg, ViewMsg};
 
 /// Чем экран подписан и что показывает.
 pub struct Screen<'a> {
@@ -30,9 +31,14 @@ pub struct Screen<'a> {
     /// у каждого своё, и спрашивают они об этом по-разному.
     pub controls: Option<Element<Msg>>,
     pub rows: Vec<Row>,
-    /// Ключ снимка, выделенного на шаре; пусто — либо не выделен, либо этот вид
-    /// к нему отношения не имеет (см. `table::Context::picked`).
+    /// Ключ снимка, выбранного щелчком по шару; пусто — не выбран ни один.
+    /// Один на все списки: выбирают на шаре, а видно это должно быть везде, где
+    /// этот снимок стоит строкой (см. `table::Context::picked`).
     pub picked: &'a str,
+    /// Сколько отмеченного здесь очерчено на шаре. Считает его состояние
+    /// модуля (`State::outlined_in`), а не сам список: отметка — намерение, а
+    /// контур — то, что из него вышло, и совпадают они не всегда.
+    pub outlined: usize,
 }
 
 /// `width` — ширина окна в логических точках: по ней считается, сколько знаков
@@ -70,6 +76,28 @@ pub fn heading(title: &str, subtitle: String, trailing: Vec<Element<Msg>>) -> El
     .into()
 }
 
+/// Куда прокрутить список, чтобы строка перехода оказалась на виду. `None` —
+/// вести не к чему либо строки на этой странице нет.
+///
+/// Считается в строках, а не в пикселях от рендерера: шаг строки — наш
+/// (`theme::ROW_PITCH`), и мерить его умеем только мы. Пара строк оставляется
+/// сверху: строка, прижатая к верхнему краю, читается как начало списка, а не
+/// как место, к которому привели.
+///
+/// Номер просьбы едет вместе со смещением: по одному смещению рендереру не
+/// отличить «просят снова» от «просят то же самое» (см. `ListingState::aim`).
+fn aim(arranged: &arrange::Arranged<'_>, listing: &ListingState) -> Option<ScrollTo> {
+    let target = listing.target.as_deref()?;
+    let at = arranged.lines.iter().position(|line| match line {
+        arrange::Line::Entry { row, .. } => row.named(target),
+        arrange::Line::Group { .. } | arrange::Line::Waiting { .. } => false,
+    })?;
+    Some(ScrollTo {
+        offset: at.saturating_sub(2) as f32 * theme::ROW_PITCH,
+        request: listing.aim,
+    })
+}
+
 pub fn view(
     view: ViewId,
     screen: Screen<'_>,
@@ -79,11 +107,47 @@ pub fn view(
     let arranged = arrange::arrange(&screen.rows, listing);
     // Что поместится в отведённую ширину, решает сама таблица: половина
     // экрана вдвое уже окна, а колонки от этого не худеют (см. table::fit).
-    // Колонка раскрытия нужна, только если есть что раскрывать.
-    let twisty = screen.rows.iter().any(|row| !row.children.is_empty());
-    let (columns, name_width) = table::fit(width, twisty);
+    //
+    // Необязательные колонки нужны, только если есть что раскрывать и что
+    // отмечать, — и считаются они по нарисованному, а не по верхнему ярусу:
+    // снимки в каталоге лежат под папкой дня, то есть появляются только в
+    // раскрытой строке. Считай мы по верхнему ярусу — колонка отметки ушла бы
+    // целиком, и очертить лениво раскрытый снимок стало бы нечем, хотя он на
+    // экране (см. `Arranged::marks`).
+    let optional = table::Optional {
+        twisty: arranged.shown().any(Row::expandable),
+        checkable: arranged.marks().next().is_some(),
+    };
+    let (columns, name_width) = table::fit(width, optional);
 
-    let heading = heading(screen.title, screen.subtitle, Vec::new());
+    // Сколько снимков этого списка очерчено на шаре — и чем это снять. Без
+    // такой подписи коробочки говорят только «отмечено», а отмечено-то ради
+    // контура (см. handlers::outline).
+    //
+    // Считается по нарисованному, а не по отмеченному: у снимка без геометрии
+    // контура не бывает вовсе, а пока продукт спрашивают у каталога — ещё нет,
+    // и «1 на шаре» над пустым шаром было бы неправдой.
+    let mut trailing: Vec<Element<Msg>> = Vec::new();
+    if !listing.selected.is_empty() {
+        let marked = listing.selected.len();
+        let counts = match screen.outlined == marked {
+            true => format!("{} на шаре", marked),
+            false => format!("{} на шаре из {}", screen.outlined, marked),
+        };
+        trailing.push(
+            text::<Msg>(counts)
+                .size(theme::TEXT_LABEL)
+                .color(theme::ACCENT_TEXT)
+                .single_line()
+                .into(),
+        );
+        trailing.push(
+            theme::bar_button("Снять отметки")
+                .on_press(Msg::In(view, ViewMsg::CheckClear))
+                .into(),
+        );
+    }
+    let heading = heading(screen.title, screen.subtitle, trailing);
 
     // Пустой список и список, из которого всё убрал отбор, — разные вещи:
     // «ничего не скачано» под выбранным фильтром было бы неправдой.
@@ -93,6 +157,7 @@ pub fn view(
         "Под отбор ничего не подошло"
     };
 
+    let target = listing.target.as_deref().unwrap_or_default();
     let body: Element<Msg> = if arranged.lines.is_empty() {
         theme::empty(nothing).into()
     } else {
@@ -105,11 +170,16 @@ pub fn view(
                 name_width,
                 here: screen.path.unwrap_or_default(),
                 picked: screen.picked,
+                target,
                 now: format::now(),
             },
         ))
             .direction(ScrollDirection::ScrollVertical)
             .scrollbar(theme::scrollbar())
+            // Имя — своё у каждой вкладки: наводка адресуется им, а списков на
+            // экране бывает два.
+            .name(format!("rows:{}", view))
+            .scroll_to(aim(&arranged, listing))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -126,8 +196,8 @@ pub fn view(
     // Наличие пути ровно это и означает: вид с путём показывает содержимое
     // одной папки, все его строки лежат в ней, и заголовок над ними был бы
     // ровно один. Второго признака под это заводить не нужно — этот уже есть.
-    screen_rows.push(controls::toolbar(view, listing, &arranged.counts, screen.path.is_none()));
-    screen_rows.push(table::header(&columns));
+    screen_rows.push(controls::toolbar(view, listing, &arranged.counts, screen.path.is_none(), width));
+    screen_rows.push(table::header(view, &columns, arranged.all_marked(listing)));
     screen_rows.push(body);
     if arranged.pages > 1 {
         screen_rows.push(theme::hairline(theme::LINE_SOFT));

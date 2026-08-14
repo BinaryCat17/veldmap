@@ -13,6 +13,11 @@ interface:
       type: module/ItemRequest
     on_delete:
       type: module/ItemRequest
+    # Состав снимка: сколько в нём файлов. Своими силами не узнать — обойти
+    # снимок в хранилище умеет только провайдер; приходит от того, кто снимок
+    # качает, и ложится в сидкары его файлов.
+    on_snapshot:
+      type: module/SnapshotFiles
     on_open:
       type: module/OpenRequest
     # Показать запись в файловом менеджере. Тем же ItemRequest, потому что

@@ -188,8 +188,10 @@ pub fn on_product_roots(_state: &mut State, request: ProductRootsRequest) {
 
 pub fn on_locate(state: &mut State, request: LocateRequest) {
     if request.identifier.is_empty() {
+        // Отвечено, и повторять нечего: пустой ключ пустым и останется.
         crate::emit::on_locate_result(&LocateResponse {
             error: "пустой identifier: искать в каталоге нечего".to_string(),
+            answered: true,
             ..Default::default()
         }, &veldsdk::correlation());
         return;
@@ -221,7 +223,13 @@ pub fn on_list_path(
     state: &mut State,
     request: ListPathRequest
 ) {
-    let listing = s3::listing(&state.identity, &request.path, &request.token);
+    // Разделитель — это и есть вся разница между уровнем и поддеревом: с ним
+    // хранилище отвечает папками как общими префиксами, без него разворачивает
+    // все ключи под путём.
+    let listing = match request.recursive {
+        true => s3::listing_deep(&state.identity, &request.path, &request.token),
+        false => s3::listing(&state.identity, &request.path, &request.token),
+    };
     let internal_id = state.pending_http.begin(Pending {
         correlation_id: veldsdk::correlation(),
         what: Asked::List(request.path),
@@ -359,16 +367,22 @@ pub fn on_http_result(
             };
 
             let response = match found.map(|products| products.into_iter().next()) {
-                Ok(Some(product)) => LocateResponse { product: Some(product), error: String::new() },
+                Ok(Some(product)) => LocateResponse {
+                    product: Some(product),
+                    error: String::new(),
+                    answered: true,
+                },
                 // Пустой ответ — тоже ответ: ключ не из каталога (климатика,
                 // вспомогательные данные) либо продукт из него уже ушёл.
                 Ok(None) => LocateResponse {
                     product: None,
                     error: format!("в каталоге нет продукта с именем '{}'", name),
+                    answered: true,
                 },
+                // А это не ответ вовсе — спросить не вышло.
                 Err(error) => {
                     log::warn!(target: "handlers", "Продукт '{}' не нашёлся: {}", name, error);
-                    LocateResponse { product: None, error }
+                    LocateResponse { product: None, error, answered: false }
                 }
             };
             crate::emit::on_locate_result(&response, &pending.correlation_id);

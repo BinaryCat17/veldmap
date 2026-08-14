@@ -4,7 +4,9 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::module::{ReadPurpose, SidecarWrite, State};
 use crate::module::storage::{self, LocalFile, OriginSidecar};
-use crate::proto::data_library::{LibraryEntry, LibraryRequest, LibraryState, LibraryStatus};
+use crate::proto::data_library::{
+    LibraryEntry, LibraryRequest, LibraryState, LibraryStatus, SnapshotFiles,
+};
 use crate::proto::data_provider::{ProductRoots, ProductRootsRequest};
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsReadRequest, FsWriteRequest, FsWriteResult};
@@ -128,20 +130,51 @@ pub fn on_product_roots_result(state: &mut State, response: ProductRoots) {
     let correlation_id = veldsdk::correlation();
     if state.pending_roots.settle(&correlation_id) != veldsdk::Reply::Current { return }
 
-    let found: Vec<(String, String, Option<u64>, String)> = state
+    let found: Vec<(String, OriginSidecar)> = state
         .origins
         .iter()
         .filter(|(_, origin)| origin.product.is_empty())
         .filter_map(|(name, origin)| {
             let root = response.roots.get(&origin.identifier)?;
-            Some((name.clone(), origin.identifier.clone(), origin.total_bytes, root.clone()))
+            Some((name.clone(), OriginSidecar { product: root.clone(), ..origin.clone() }))
         })
         .collect();
     if found.is_empty() {
         return;
     }
-    for (name, identifier, total_bytes, product) in found {
-        write_sidecar(state, &name, &identifier, &product, total_bytes);
+    for (name, sidecar) in found {
+        write_sidecar(state, &name, sidecar);
+    }
+    publish(state);
+}
+
+/// «В снимке столько файлов» — единственное, что о снимке нельзя вывести из
+/// диска: сколько его файлов доведено, видно по записям, а сколько их должно
+/// быть, знает только тот, кто обошёл снимок в хранилище.
+///
+/// Ложится в сидкары его файлов — тем же приёмом, что и корень снимка
+/// (см. [`on_product_roots_result`]): сидкар и так единственное, что переживает
+/// рестарт, а спрашивать одно и то же на каждый листинг незачем. Переписываются
+/// только те, кто этого числа ещё не знает или знает другое: снимок обходят и
+/// повторно, а лишняя запись на диск — это лишняя запись на диск.
+pub fn on_snapshot(state: &mut State, request: SnapshotFiles) {
+    if request.product.is_empty() || request.files == 0 {
+        return;
+    }
+    let stale: Vec<(String, OriginSidecar)> = state
+        .origins
+        .iter()
+        .filter(|(_, origin)| origin.product == request.product)
+        .filter(|(_, origin)| origin.siblings != request.files)
+        .map(|(name, origin)| {
+            (name.clone(), OriginSidecar { siblings: request.files, ..origin.clone() })
+        })
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    for (name, sidecar) in stale {
+        write_sidecar(state, &name, sidecar);
     }
     publish(state);
 }
@@ -165,19 +198,11 @@ pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened)
 
 /// Пишет сидкар. Он ложится на диск ДО старта закачки, поэтому переживает
 /// сбой, случившийся до появления первых байт.
-pub fn write_sidecar(
-    state: &mut State,
-    name: &str,
-    identifier: &str,
-    product: &str,
-    total_bytes: Option<u64>,
-) {
-    let sidecar = OriginSidecar {
-        provider: storage::PROVIDER_NAME.to_string(),
-        identifier: identifier.to_string(),
-        total_bytes,
-        product: product.to_string(),
-    };
+///
+/// Сидкар приходит целиком, а не полями: он пишется поверх прежнего, и правка
+/// одного факта — это `OriginSidecar { поле: новое, ..прежний }`. Собранный по
+/// полям на месте затирал бы всё, о чём вызывающий не подумал.
+pub fn write_sidecar(state: &mut State, name: &str, sidecar: OriginSidecar) {
     state.origins.insert(name.to_string(), sidecar.clone());
 
     let Ok(json) = serde_json::to_vec(&sidecar) else { return };
@@ -292,6 +317,7 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
             total,
             status: status as i32,
             product: state.product_of(name).unwrap_or_default().to_string(),
+            siblings: state.siblings_of(name),
         }
     }).collect()
 }

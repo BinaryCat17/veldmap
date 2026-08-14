@@ -45,6 +45,13 @@ pub mod glyph {
     pub const SPLIT: &str = "\u{f0db}";
     pub const MORE: &str = "\u{f141}";
     pub const CARET: &str = "\u{f0d7}";
+    /// Тот же треугольник в закрытом положении. Пара к CARET, а не общая
+    /// стрелка: раскрытие и переход вглубь — разные действия, и знаки у них
+    /// разные (переход показан стрелкой ENTER).
+    pub const CARET_RIGHT: &str = "\u{f0da}";
+    /// Коробочка пакетного выделения: пустая и с галочкой.
+    pub const BOX: &str = "\u{f096}";
+    pub const BOX_TICKED: &str = "\u{f046}";
     /// Снимок — логическая единица, а не файл и не папка: его собирает декодер
     /// (см. `RowKind::Product`).
     pub const SATELLITE: &str = "\u{f0471}";
@@ -91,6 +98,10 @@ pub const INK_FAINT: Color = Color::rgb8(0x94, 0x8B, 0x78);
 pub const ACCENT: Color = Color::rgb8(0x4A, 0x7A, 0x3F);
 /// Подпись состояния «готово»: тот же зелёный, но читаемый как текст.
 pub const ACCENT_TEXT: Color = Color::rgb8(0x3D, 0x65, 0x34);
+/// Чем закрашивается место, куда упадёт принесённая вкладка. Прозрачным, а не
+/// плотным: под ним видно то, поверх чего она ляжет, — иначе обещание закрывало
+/// бы собой то, о чём оно.
+pub const DROP_HINT: Color = ACCENT.with_alpha(0.22);
 /// Заливка выбранного: активная страница пагинации, выбранный пункт меню.
 const ACCENT_WASH: Color = Color::rgb8(0xDC, 0xE7, 0xD2);
 const ACCENT_LINE: Color = Color::rgb8(0xC3, 0xD6, 0xB4);
@@ -111,6 +122,13 @@ const RADIUS: f32 = 7.0;
 const RADIUS_SMALL: f32 = 6.0;
 /// Высота строки списка. От неё считается, сколько строк влезает на страницу.
 pub const ROW_HEIGHT: f32 = 30.0;
+/// Толщина волосяной линии — ею разделено всё, что лежит полосами
+/// (см. [`hairline`]).
+pub const HAIRLINE: f32 = 1.0;
+/// Шаг строки списка на экране: сама строка и черта под ней. По нему считает
+/// прокрутку тот, кто ведёт к строке, — и без общего имени он разошёлся бы с
+/// разметкой молча.
+pub const ROW_PITCH: f32 = ROW_HEIGHT + HAIRLINE;
 /// Высота управляющего элемента в тулбаре: поле фильтра и чипы.
 pub const CONTROL_HEIGHT: f32 = 31.0;
 /// Сторона квадратной кнопки в строке списка.
@@ -244,6 +262,25 @@ pub fn row_glyph<M>(glyph: &str, color: Color) -> Element<M> {
 pub fn row_button_icon<M>(glyph: &str, raised: bool) -> Container<M> {
     surface_button(icon::<M>(glyph).size(11.0).color(INK_SOFT), raised)
         .width(Length::Fixed(ROW_BUTTON))
+        .height(Length::Fixed(ROW_BUTTON))
+}
+
+/// Коробочка пакетного выделения: в строке списка и в его шапке. Роль, а не
+/// сборка на месте — стоит она в двух местах, и разъехавшись, читалась бы как
+/// две разные вещи.
+///
+/// Занимает свою колонку целиком: та узкая (см. `table::CHECK`), и полей у неё
+/// нет — иначе от коробочки остались бы несколько точек, по которым не попасть.
+pub fn row_check<M>(marked: bool) -> Container<M> {
+    let (glyph, color) = match marked {
+        true => (glyph::BOX_TICKED, ACCENT),
+        false => (glyph::BOX, INK_FAINT),
+    };
+    chrome_icon(icon::<M>(glyph).size(12.0).color(color))
+        // Поля у́же обычных: колонка узкая, и четыре точки с каждой стороны
+        // срезали бы сам знак.
+        .padding(2.0)
+        .width(Length::Fill)
         .height(Length::Fixed(ROW_BUTTON))
 }
 
@@ -385,18 +422,37 @@ pub fn nothing<M>() -> Element<M> {
 /// Отдельным виджетом, а не рамкой: рамка в этом протоколе одна на все четыре
 /// стороны, а нужна только одна.
 pub fn hairline<M>(color: Color) -> Element<M> {
-    container(space::<M>(Length::Fill, Length::Fixed(1.0)))
+    container(space::<M>(Length::Fill, Length::Fixed(HAIRLINE)))
         .background(color)
         .width(Length::Fill)
-        .height(Length::Fixed(1.0))
+        .height(Length::Fixed(HAIRLINE))
         .into()
+}
+
+/// Граница между панелями: та же волосяная линия, но за неё берутся мышью.
+///
+/// Полоса захвата шире линии: попасть курсором в один пиксель нельзя, а
+/// граница — единственное, чем панели меряют место. Подсвечивается она под
+/// курсором — курсор в этом протоколе не меняется, и сказать «здесь можно
+/// тянуть» больше нечем.
+pub fn divider<M: veld_ui_service_wrap::UiMessage>(
+    axis: crate::proto::ui_service::DividerAxis,
+    on_drag: impl FnOnce(f32) -> M,
+    on_release: M,
+) -> veld_ui_service_wrap::Divider<M> {
+    const GRIP: f32 = 7.0;
+    veld_ui_service_wrap::divider(axis, on_drag)
+        .on_release(on_release)
+        .thickness(GRIP)
+        .line(HAIRLINE)
+        .color(LINE, ACCENT)
 }
 
 /// Та же линия поперёк — разделитель внутри строки.
 pub fn vline<M>(color: Color) -> Element<M> {
-    container(space::<M>(Length::Fixed(1.0), Length::Fill))
+    container(space::<M>(Length::Fixed(HAIRLINE), Length::Fill))
         .background(color)
-        .width(Length::Fixed(1.0))
+        .width(Length::Fixed(HAIRLINE))
         .height(Length::Fill)
         .into()
 }

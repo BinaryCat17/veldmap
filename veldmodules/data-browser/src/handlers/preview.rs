@@ -70,8 +70,9 @@ pub fn on_view_remote_pressed(state: &mut State, from: ViewId, identifier: Strin
 pub fn on_view_product_pressed(state: &mut State, from: ViewId, identifier: String) {
     if identifier.is_empty() { return; }
 
-    let half = super::nav::half_of(state, from);
-    let view = super::nav::open_preview(state, half, identifier.clone(), None);
+    state.close_menus();
+    let pane = super::nav::pane_of(state, from);
+    let view = super::nav::open_preview(state, pane, identifier.clone(), None);
     let correlation_id = state.preview_mut(view).expect("вид только что открыт").begin();
     state.preview_imagery.insert(correlation_id.clone(), view);
     crate::calls::data_provider::on_imagery(
@@ -117,11 +118,47 @@ pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool 
     true
 }
 
+/// Открыть просмотр заново — так возвращается вкладка из сохранённой раскладки
+/// (см. handlers::persist).
+///
+/// Ход тот же, что по нажатию, и различаются они ровно двумя вещами: панель
+/// названа прямо (у восстанавливаемой вкладки нет строки, из которой её
+/// позвали) и снимок берётся тем, чем он был подписан. Скачанный открывает
+/// библиотека, прочее — провайдер: это и есть весь смысл `entry`.
+pub fn reopen(
+    state: &mut State,
+    pane: crate::module::state::PaneId,
+    label: String,
+    entry: Option<String>,
+) {
+    if label.is_empty() {
+        return;
+    }
+    let view = super::nav::open_preview(state, pane, label.clone(), entry.clone());
+    let correlation_id = state.preview_mut(view).expect("вид только что открыт").begin();
+    state.previews.insert(correlation_id.clone(), view);
+
+    match entry {
+        Some(name) => crate::calls::data_library::on_open(
+            &crate::proto::data_library::OpenRequest { name },
+            &correlation_id,
+        ),
+        None => crate::calls::data_provider::on_open(
+            &crate::proto::data_provider::OpenRequest { identifier: label },
+            &correlation_id,
+        ),
+    }
+}
+
 /// Общее начало обоих путей: новая вкладка и корреляция, по которой её найдёт
 /// ответ открывателя.
 fn begin_open(state: &mut State, from: ViewId, label: String, entry: Option<String>) -> String {
-    let half = super::nav::half_of(state, from);
-    let view = super::nav::open_preview(state, half, label, entry);
+    // Меню строки закрываем сами — по той же причине, что и показ на шаре:
+    // просмотр уводит с этого экрана, а открытым оно осталось бы до
+    // возвращения.
+    state.close_menus();
+    let pane = super::nav::pane_of(state, from);
+    let view = super::nav::open_preview(state, pane, label, entry);
     let correlation_id = state.preview_mut(view)
         .expect("вид только что открыт")
         .begin();

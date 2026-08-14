@@ -12,7 +12,8 @@ pub mod format;
 pub mod list_screen;
 pub mod menu;
 pub mod row;
+pub mod rows;
 pub mod table;
 
 pub use list_screen::Screen;
-pub use row::{downloaded_rows, folder_of, Row, RowKind, RowStatus};
+pub use row::{folder_of, folder_path, preview_of, Row, RowKind, RowStatus};

@@ -32,6 +32,25 @@ impl LibraryState {
         self.entries.iter().filter(|entry| entry.identifier.starts_with(prefix)).count()
     }
 
+    /// Полнота снимка: сколько его файлов доведено и сколько их в снимке
+    /// всего. Второе число ноль — снимок ни разу не обходили, и назвать его
+    /// целым не из чего: доведено «всё, что качали», а качали не обязательно
+    /// весь снимок.
+    ///
+    /// Наибольшим из записей, а не первым попавшимся: число приходит извне и
+    /// расходится по сидкарам файлов записями на диск, поэтому в момент между
+    /// ними часть записей его ещё не знает (0), а знающая — знает верно.
+    pub fn snapshot(&self, product: &str) -> (usize, u32) {
+        if product.is_empty() { return (0, 0); }
+        self.entries
+            .iter()
+            .filter(|entry| entry.product == product)
+            .fold((0, 0), |(done, files), entry| {
+                let complete = status_of(entry) == LibraryStatus::LibComplete;
+                (done + complete as usize, files.max(entry.siblings))
+            })
+    }
+
     /// Сколько байт лежит на диске — считая недокачанное, оно тоже занимает
     /// место.
     pub fn stored(&self) -> u64 {

@@ -17,7 +17,9 @@
 
 use crate::module::state::globe::Drag;
 use crate::module::state::{State, ViewId};
-use crate::proto::globe::{camera_command::Command, CameraCommand, Orbit, Probe, Probed, Zoom};
+use crate::proto::globe::{
+    camera_command::Command, CameraCommand, Focus, GeoPoint, Orbit, Probe, Probed, Zoom,
+};
 use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
 use veldsdk::graphics::TextureFormat;
 
@@ -146,7 +148,21 @@ pub fn on_probed(state: &mut State, probed: Probed) {
         Some(at) => veldsdk::log::debug!(target: "handlers", "щелчок по шару: {:.4}, {:.4}", at.lat, at.lon),
         None => veldsdk::log::debug!(target: "handlers", "щелчок мимо Земли"),
     }
-    super::search::pick(state, probed.at.map(|at| (at.lat, at.lon)));
+    super::outline::pick(state, probed.at.map(|at| (at.lat, at.lon)));
+}
+
+/// Навести камеру на круг, в который вписан снимок. `None` — наводить не на
+/// что: у продукта нет геометрии (вспомогательные данные).
+///
+/// Здесь, а не у того, кто показывает: команда камеры — разговор с глобусом, и
+/// мест, откуда на снимок наводят, четыре — выдача, слой, ключ и контур. Четыре
+/// копии одного `Focus` разошлись бы молча.
+pub fn focus_on(frame: Option<crate::module::footprint::Frame>) {
+    let Some(frame) = frame else { return };
+    send(Command::Focus(Focus {
+        at: Some(GeoPoint { lat: frame.lat, lon: frame.lon }),
+        radius_deg: frame.radius_deg,
+    }));
 }
 
 fn send(command: Command) {

@@ -4,9 +4,12 @@
 //! недокачанное: всё это делает data-library. Модуль только переводит нажатие
 //! в запрос к ней, а состояние получает рассылкой.
 
-use crate::proto::data_library::{DownloadRequest, ItemRequest, LibraryState as LibraryStateMsg};
+use crate::proto::data_library::{
+    DownloadRequest, ItemRequest, LibraryState as LibraryStateMsg, SnapshotFiles,
+};
+use crate::proto::data_provider::{ListPathRequest, ListPathResponse};
 
-use crate::module::state::State;
+use crate::module::state::{Listing, State};
 use crate::module::state::library::status_of;
 use crate::proto::data_library::LibraryStatus;
 
@@ -43,6 +46,131 @@ pub fn on_reveal_pressed(_state: &mut State, name: String) {
     if name.is_empty() { return; }
 
     crate::calls::data_library::on_reveal(&ItemRequest { name });
+}
+
+/// Скачать снимок целиком. Библиотека качает по файлу — снимка она не знает
+/// вовсе, — поэтому сперва спрашиваем провайдера, из чего снимок состоит.
+///
+/// Рекурсивным листингом, а не обходом по ярусам: файлы .SAFE разложены в
+/// четыре-пять уровней, и обход стоил бы запроса на каждый.
+pub fn on_download_snapshot(state: &mut State, product: String) {
+    if product.is_empty() { return; }
+
+    let path = crate::module::components::folder_path(&product);
+    let correlation_id = state.listings.begin(Listing::Snapshot { product, files: 0, queued: 0 });
+    crate::calls::data_provider::on_list_path(
+        &ListPathRequest { path, token: String::new(), recursive: true },
+        &correlation_id,
+    );
+}
+
+/// Снимок и то, что о нём насчитано страницами: обход идёт по одной, а оба
+/// числа — итоговые.
+pub struct Counted {
+    pub product: String,
+    /// Сколько файлов снимка уже перечислено.
+    pub files: u32,
+    /// Сколько из них поставлено в закачку.
+    pub queued: usize,
+}
+
+/// Файлы снимка приехали — ставим в закачку то, чего на диске ещё нет, под тем
+/// снимком, из которого их позвали.
+///
+/// Папок в рекурсивном листинге не бывает (см. `ListPathRequest.recursive`),
+/// поэтому отсеивать по роду нечего: всё, что пришло, — файлы.
+pub fn on_snapshot_files(
+    state: &mut State,
+    counted: Counted,
+    correlation_id: String,
+    response: ListPathResponse,
+) {
+    let Counted { product, mut files, mut queued } = counted;
+    if !response.error.is_empty() {
+        state.notice = Some(format!("Снимок «{}» не перечислился: {}", product, response.error));
+        return;
+    }
+
+    files += response.entries.len() as u32;
+    for entry in response.entries {
+        // Уже доведённое не трогаем. Перекачка сносит готовый файл до старта
+        // (см. data-library::download), поэтому «докачать снимок» на снимке,
+        // где половина уже на диске, стирало бы ровно то, что в нём есть, — и
+        // качало бы гигабайты заново. Перекачивают по одному файлу, из его
+        // меню, где это и помечено как необратимое.
+        let done = state
+            .library
+            .by_identifier(&entry.key)
+            .is_some_and(|record| status_of(record) == LibraryStatus::LibComplete);
+        if done {
+            continue;
+        }
+        crate::calls::data_library::on_download(&DownloadRequest {
+            identifier: entry.key,
+            product: product.clone(),
+        });
+        queued += 1;
+    }
+
+    // Страница не последняя — дочитываем той же корреляцией. Потолок тот же,
+    // что у обхода папки: снимок конечен, но раскладка, в которой он не
+    // кончается, не должна превращаться в бесконечную закачку. Молча
+    // обрывать её нельзя — недокачанный снимок с виду ничем не отличается от
+    // целого.
+    let short = product.rsplit('/').next().unwrap_or(&product).to_string();
+    if response.next_token.is_empty() {
+        veldsdk::log::info!(target: "handlers", "снимок '{}': {} файлов, в закачке {}", product, files, queued);
+        // Обход дошёл до конца — значит, состав снимка известен целиком, и это
+        // единственный момент, когда его можно назвать. Библиотека без этого
+        // числа считает полным всякий снимок, у которого доведено всё, что
+        // качали, — три файла из двадцати шести читались бы как «на диске».
+        crate::calls::data_library::on_snapshot(&SnapshotFiles { product, files });
+        state.notice = Some(match (files, queued) {
+            // Обход кончился, не встретив ни файла. «Уже на диске» тут — ложь:
+            // на диске ничего нет, и качать хранилищу тоже нечего.
+            (0, _) => format!("В снимке «{}» нет файлов", short),
+            (_, 0) => format!("Снимок «{}» уже на диске", short),
+            (_, n) => format!("Снимок «{}»: в закачке {} файлов", short, n),
+        });
+        return;
+    }
+    if queued >= super::browse::MAX_ITEMS {
+        // Состав снимка здесь не называем: обход оборван, и перечисленное —
+        // не весь снимок. Сказать библиотеке насчитанное значило бы объявить
+        // полным ровно тот снимок, который мы не дочитали.
+        state.notice =
+            Some(format!("Снимок «{}»: поставлено {} файлов, остальные пропущены", short, queued));
+        return;
+    }
+
+    let path = crate::module::components::folder_path(&product);
+    state.listings.insert(correlation_id.clone(), Listing::Snapshot { product, files, queued });
+    crate::calls::data_provider::on_list_path(
+        &ListPathRequest { path, token: response.next_token, recursive: true },
+        &correlation_id,
+    );
+}
+
+/// Приостановить закачку снимка целиком.
+///
+/// Разворачивается он так же, как при удалении: библиотека снимков не знает, а
+/// файлов у одного бывает под три десятка, и жать паузу на каждом — работа,
+/// которую приложение обязано сделать само. Приостанавливается только идущее:
+/// пауза на доведённом файле означала бы «начать и остановить».
+pub fn on_pause_snapshot(state: &mut State, product: String) {
+    if product.is_empty() { return; }
+
+    let names: Vec<String> = state
+        .library
+        .entries
+        .iter()
+        .filter(|entry| entry.product == product)
+        .filter(|entry| status_of(entry) == LibraryStatus::LibDownloading)
+        .map(|entry| entry.name.clone())
+        .collect();
+    for name in names {
+        crate::calls::data_library::on_pause(&ItemRequest { name });
+    }
 }
 
 /// Выбросить снимок целиком. Библиотека про снимки не знает — она ведёт учёт

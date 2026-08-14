@@ -86,8 +86,7 @@ fn line(item: Item) -> Element<Msg> {
     let content = row![
         container(mark).width(Length::Fixed(12.0)),
         container(text::<Msg>(item.label).size(theme::TEXT_BODY).single_line())
-            .width(Length::Fill)
-            .clip(),
+            .width(Length::Fill),
         count,
     ]
     .spacing(8.0)

@@ -18,6 +18,9 @@ pub struct OverlayState {
     /// Продукт наложения; он же ключ наложения у глобуса.
     pub identifier: String,
     pub label: String,
+    /// Лежит ли продукт в хранилище каталогом: по нему выбирается, каким
+    /// способом его смотреть (см. `handlers::preview`).
+    pub folder: bool,
     /// Вид поиска, из выдачи которого продукт взят: его жизнью наложение и
     /// живёт — уходит с продуктом из выдачи и с закрытием вкладки. `None` —
     /// продукт восстановлен по ключу (каталог, загрузки) и от выдач не
@@ -58,6 +61,7 @@ impl OverlayState {
     pub fn new(
         identifier: String,
         label: String,
+        folder: bool,
         source: Option<ViewId>,
         quad: Option<[(f64, f64); 4]>,
         focus: Option<crate::module::footprint::Frame>,
@@ -65,6 +69,7 @@ impl OverlayState {
         Self {
             identifier,
             label,
+            folder,
             source,
             quad,
             focus,

@@ -1,12 +1,12 @@
 //! View рендеринг для data-browser.
 //!
-//! Здесь каркас окна: половина (или две) со своей полосой вкладок и телом
+//! Здесь каркас окна: дерево панелей, у каждой своя полоса вкладок и тело
 //! активной в ней вкладки, а под ними — общая строка состояния. Содержимое
 //! вкладки собирают модули рядом.
 //!
-//! Строка состояния одна на окно, а не на половину: она говорит о том, что
+//! Строка состояния одна на окно, а не на панель: она говорит о том, что
 //! делает приложение целиком — идут ли закачки и сколько занято на диске, — и
-//! к тому, на что смотрят в этой половине, отношения не имеет.
+//! к тому, на что смотрят в этой панели, отношения не имеет.
 
 pub mod browse;
 pub mod downloaded;
@@ -17,12 +17,12 @@ pub mod shown;
 
 use veld_ui_service_wrap::{column, row, Keyed};
 use crate::proto::ui_service::{
-    container, icon, popover, progress_bar, space, text, Alignment, Color, Element,
+    container, icon, popover, progress_bar, space, text, Alignment, Color, DividerAxis, Element,
     FontWeight, Length, Padding, ScrollDirection, scrollable,
 };
 use crate::module::components::{format, menu};
-use crate::module::state::{Half, Placement, State, ViewId, ViewKind};
-use crate::module::{theme, Msg, NewTab};
+use crate::module::state::{Axis, Node, PaneId, Side, State, ViewId, ViewKind};
+use crate::module::{theme, Msg, NewTab, ViewMsg};
 
 
 /// Высота полосы вкладок. Фиксирована, а не выведена из содержимого: это хром
@@ -35,32 +35,11 @@ const TAB_STRIP_HEIGHT: f32 = 38.0;
 pub const BAR_SPACING: f32 = 10.0;
 
 pub fn build_root(state: &State) -> Element<Msg> {
-    // Половины равны: делить экран пополам и есть то, о чём просили, а тянуть
-    // границу мышью нечем — своего виджета под неё в разметке нет.
-    //
-    // Неразделённый экран собирается той же парой, что и разделённый вправо,
-    // только вторая половина нулевой ширины. Форма дерева от этого не зависит
-    // от разделения, а состояние виджетов (прокрутка, каретка, наведение)
-    // рендерер сопоставляет по месту в дереве: собери первую половину то
-    // корнем, то ребёнком строки — и список, который читали, прыгнет в начало
-    // ровно в тот момент, когда экран делят, чтобы не терять его из виду.
-    let screen: Element<Msg> = match state.split() {
-        None => beside(pane(state, Half::First), None),
-        Some(Placement::Right) => beside(pane(state, Half::First), Some(pane(state, Half::Second))),
-        Some(Placement::Left) => beside(pane(state, Half::Second), Some(pane(state, Half::First))),
-        Some(Placement::Below) => column![
-            container(pane(state, Half::First)).width(Length::Fill).height(Length::FillPortion(1)),
-            theme::hairline(theme::LINE),
-            container(pane(state, Half::Second)).width(Length::Fill).height(Length::FillPortion(1)),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into(),
-    };
-
     container(
         column![
-            container(screen).width(Length::Fill).height(Length::Fill),
+            container(node(state, state.layout().root()))
+                .width(Length::Fill)
+                .height(Length::Fill),
             theme::hairline(theme::LINE),
             status_bar(state),
         ]
@@ -73,68 +52,109 @@ pub fn build_root(state: &State) -> Element<Msg> {
     .into()
 }
 
-/// Две половины бок о бок. `None` справа — неразделённый экран: место второй
-/// половины остаётся в дереве, но нулевой ширины, чтобы форма не зависела от
-/// разделения (см. `build_root`). Разделитель едет вместе с правой половиной,
-/// а не отдельным ребёнком, — тогда он исчезает с ней заодно.
-fn beside(left: Element<Msg>, right: Option<Element<Msg>>) -> Element<Msg> {
-    // Ширину строке-обёртке задаём явно: `Shrink` по умолчанию свёл бы
-    // `Fill`-половину внутри себя в ноль.
-    let (width, right) = match right {
-        Some(right) => (
-            Length::FillPortion(1),
-            row![theme::vline(theme::LINE), container(right).width(Length::Fill).height(Length::Fill)]
-                .width(Length::Fill)
-                .height(Length::Fill),
-        ),
-        None => (Length::Fixed(0.0), row![].width(Length::Fill).height(Length::Fill)),
+/// Узел дерева: панель либо деление надвое (см. state::layout).
+///
+/// Состояние виджетов — прокрутку списка, каретку поля — рендерер сопоставляет
+/// по месту в дереве разметки, а деление это место меняет: панель, бывшая
+/// корнем, становится ребёнком строки. Прокрутка её списка поэтому переезда не
+/// переживает, и это цена произвольных делений: форму дерева разметки задаёт
+/// форма раскладки, и совпадать они обязаны.
+fn node(state: &State, node: &Node) -> Element<Msg> {
+    let split = match node {
+        Node::Leaf(leaf) => return pane(state, leaf.id),
+        Node::Split(split) => split,
     };
-    row![
-        container(left).width(Length::FillPortion(1)).height(Length::Fill),
-        container(right).width(width).height(Length::Fill).clip(),
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+
+    let (head, tail) = portions(split.fraction);
+    let first = container(self::node(state, &split.first));
+    let second = container(self::node(state, &split.second));
+    // Граница — не линия между детьми, а виджет: её тянут мышью, и ею дети
+    // меряют своё место (см. `Msg::Divide`).
+    let id = split.id;
+    let border = |axis| theme::divider(axis, move |delta| Msg::Divide(id, delta), Msg::Divided);
+    match split.axis {
+        Axis::Row => row![
+            first.width(Length::FillPortion(head)).height(Length::Fill),
+            border(DividerAxis::DividerVertical),
+            second.width(Length::FillPortion(tail)).height(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+        Axis::Column => column![
+            first.width(Length::Fill).height(Length::FillPortion(head)),
+            border(DividerAxis::DividerHorizontal),
+            second.width(Length::Fill).height(Length::FillPortion(tail)),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into(),
+    }
 }
 
-/// Одна половина: своя полоса вкладок и тело её активной вкладки.
-fn pane(state: &State, half: Half) -> Element<Msg> {
-    let body: Element<Msg> = match state.active_in(half).and_then(|id| state.get(id).map(|kind| (id, kind))) {
+/// Доля первого ребёнка — долями места: другого способа сказать «эта часть
+/// вдвое шире» у разметки нет. Тысячные, потому что доли целые, а тысячная
+/// экрана мельче, чем различает глаз.
+///
+/// Ни одна часть не доходит до нуля: панель нулевого размера остаётся в дереве
+/// со всеми своими вкладками, но становится недоступной — вернуть ей место
+/// было бы уже нечем.
+fn portions(fraction: f32) -> (u16, u16) {
+    let head = ((fraction * 1000.0).round() as i32).clamp(1, 999) as u16;
+    (head, 1000 - head)
+}
+
+/// Одна панель: своя полоса вкладок и тело её активной вкладки.
+fn pane(state: &State, pane: PaneId) -> Element<Msg> {
+    let shown = state.active_in(pane).and_then(|id| state.get(id).map(|kind| (id, kind)));
+    let body: Element<Msg> = match shown {
+        Some((id, ViewKind::Empty)) => empty_tab(id),
         Some((id, ViewKind::Browse(view))) => browse::view(state, id, view),
         Some((id, ViewKind::Search(view))) => search::view(state, id, view),
         Some((id, ViewKind::Downloaded(listing))) => downloaded::view(state, id, listing),
         Some((id, ViewKind::Preview(view))) => preview::view(state, id, view),
         Some((id, ViewKind::Globe(view))) => globe::view(state, id, view),
         Some((id, ViewKind::Shown)) => shown::view(state, id),
-        None => empty_pane(state, half),
+        None => nothing_open(pane),
     };
 
+    // Тело панели — место приёма: в середину вкладку кладут, в край — делят им
+    // место (см. `Msg::TabDrop`). Полоса вкладок принимает тоже, но краёв у неё
+    // нет: делить полосу не по чему.
     column![
-        tab_strip(state, half),
+        tab_strip(state, pane),
         theme::hairline(theme::LINE),
-        container(body).width(Length::Fill).height(Length::Fill),
+        container(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .on_drop(move |drop| Msg::TabDrop(pane, drop), true, theme::DROP_HINT),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
     .into()
 }
 
-/// Пустая половина. Не ошибка и не «всё закрыто»: половина ждёт, что в неё
-/// положат, и спрашивает об этом прямо — списком того, что бывает, а не пустым
-/// местом с крестиком где-то в углу.
-fn empty_pane(state: &State, half: Half) -> Element<Msg> {
-    let split = state.split().is_some();
-    let title = match split {
-        true => "Что показать в этой половине",
-        false => "Все вкладки закрыты",
-    };
-    let hint = match split {
-        true => "Половина пустая. Выберите вкладку — она встанет рядом.",
-        false => "Выберите, с чего начать.",
-    };
+/// Пустая вкладка: место, где ещё не решили, что смотреть. Спрашивает об этом
+/// прямо — списком того, что бывает, а не пустым местом с крестиком в углу.
+fn empty_tab(id: ViewId) -> Element<Msg> {
+    chooser("Пустая вкладка", "Выберите, что здесь показать.", |kind| {
+        Msg::In(id, ViewMsg::Fill(kind))
+    })
+}
 
-    let choices = NewTab::ALL.iter().map(|kind| {
+/// Панель, в которой не осталось ни одной вкладки. Так бывает у последней —
+/// прочие опустевшие уходят из дерева (см. `State::close`).
+fn nothing_open(pane: PaneId) -> Element<Msg> {
+    chooser("Все вкладки закрыты", "Выберите, с чего начать.", move |kind| {
+        Msg::NewTab(pane, kind)
+    })
+}
+
+/// Выбор рода вкладки. Что с ним делать — наполнить пустую вкладку или завести
+/// новую в опустевшей панели, — решает вызывающий: спрашивают они об одном и
+/// том же, а отвечают разным.
+fn chooser(title: &str, hint: &str, message: impl Fn(NewTab) -> Msg) -> Element<Msg> {
+    let choices = NewTab::KINDS.iter().map(|kind| {
         theme::surface_button(
             row![
                 icon::<Msg>(tab_glyph(*kind)).size(12.0).color(theme::ACCENT),
@@ -147,7 +167,7 @@ fn empty_pane(state: &State, half: Half) -> Element<Msg> {
         .width(Length::Fill)
         .padding(Padding { top: 9.0, bottom: 9.0, left: 12.0, right: 12.0 })
         .align_x(Alignment::Start)
-        .on_press(Msg::NewTab(half, *kind))
+        .on_press(message(*kind))
         .into()
     });
 
@@ -172,15 +192,15 @@ fn empty_pane(state: &State, half: Half) -> Element<Msg> {
     .into()
 }
 
-/// Полоса вкладок одной половины. Вкладка адресуется своим `ViewId`, а не
+/// Полоса вкладок одной панели. Вкладка адресуется своим `ViewId`, а не
 /// позицией: позиция меняется, когда закрывают соседа.
 ///
 /// Вкладки не сжимаются, а уезжают под горизонтальную прокрутку: сжатие
 /// доводит подпись до нулевой ширины, а такой текст занимает высоту, а не
 /// ширину (см. `Wrapping` в types.proto).
-fn tab_strip(state: &State, half: Half) -> Element<Msg> {
-    let active = state.active_in(half);
-    let tabs = state.views_in(half).map(|view| {
+fn tab_strip(state: &State, pane: PaneId) -> Element<Msg> {
+    let active = state.active_in(pane);
+    let tabs = state.views_in(pane).map(|view| {
         let current = Some(view.id) == active;
         let label = row![
             icon::<Msg>(glyph(&view.kind))
@@ -193,20 +213,31 @@ fn tab_strip(state: &State, half: Half) -> Element<Msg> {
 
         // Крестик и «ещё» — отдельные кнопки внутри вкладки: нажатие на них до
         // самой вкладки не доходит, поэтому не выбирает её заодно.
+        //
+        // Кнопки меню нет, пока предлагать нечего: единственной вкладке на весь
+        // экран переезжать некуда, а «закрыть» у неё и так под рукой крестиком —
+        // меню из одного этого пункта обещало бы выбор, которого нет.
         let options = state.tab_options == Some(view.id);
+        let arrangements = arrangements(state, view.id);
+        let more: Element<Msg> = match arrangements.is_empty() {
+            true => theme::nothing(),
+            false => popover(
+                theme::chrome_icon(
+                    icon::<Msg>(theme::glyph::SPLIT).size(9.0).color(theme::INK_FAINT),
+                )
+                .on_press(Msg::TabOptions(if options { None } else { Some(view.id) })),
+                menu::panel(tab_options(arrangements, view.id)),
+            )
+            .open(options)
+            .gap(4.0)
+            .on_dismiss(Msg::TabOptions(None))
+            .into(),
+        };
+
         let tab = theme::tab(
             row![
                 label,
-                popover(
-                    theme::chrome_icon(
-                        icon::<Msg>(theme::glyph::SPLIT).size(9.0).color(theme::INK_FAINT),
-                    )
-                    .on_press(Msg::TabOptions(if options { None } else { Some(view.id) })),
-                    menu::panel(tab_options(state, view.id)),
-                )
-                .open(options)
-                .gap(4.0)
-                .on_dismiss(Msg::TabOptions(None)),
+                more,
                 theme::chrome_icon(icon::<Msg>(theme::glyph::CLOSE).size(9.0).color(theme::INK_FAINT))
                     .on_press(Msg::TabClose(view.id)),
             ]
@@ -215,7 +246,10 @@ fn tab_strip(state: &State, half: Half) -> Element<Msg> {
             current,
         )
         .height(Length::Fill)
-        .on_press(Msg::TabSelect(view.id));
+        .on_press(Msg::TabSelect(view.id))
+        // Вкладку берут мышью и несут: чем она себя называет, тем и вернётся
+        // в событии броска.
+        .draggable(view.id.to_string());
 
         // Подчёркивание активной: рамка в этом протоколе одна на все стороны,
         // а нужна только нижняя.
@@ -235,17 +269,17 @@ fn tab_strip(state: &State, half: Half) -> Element<Msg> {
         .padding(Padding { top: 5.0, right: 7.0, bottom: 0.0, left: 7.0 })
         .align_items(Alignment::End);
 
-    let open = state.tab_menu == Some(half);
+    let open = state.tab_menu == Some(pane);
     let opener = popover(
         theme::chrome_icon(icon::<Msg>(theme::glyph::PLUS).size(11.0).color(theme::INK_DIM))
             .width(Length::Fixed(TAB_STRIP_HEIGHT))
             .height(Length::Fill)
-            .on_press(Msg::TabMenu(if open { None } else { Some(half) })),
+            .on_press(Msg::TabMenu(if open { None } else { Some(pane) })),
         menu::panel(
             NewTab::ALL
                 .iter()
                 .map(|kind| {
-                    menu::Item::new(kind.title(), Msg::NewTab(half, *kind)).glyph(tab_glyph(*kind))
+                    menu::Item::new(kind.title(), Msg::NewTab(pane, *kind)).glyph(tab_glyph(*kind))
                 })
                 .collect(),
         ),
@@ -267,39 +301,51 @@ fn tab_strip(state: &State, half: Half) -> Element<Msg> {
         .width(Length::Fill)
         .height(Length::Fill),
     )
+    .on_drop(move |drop| Msg::TabDrop(pane, drop), false, theme::DROP_HINT)
     .background(theme::CHROME)
     .width(Length::Fill)
     .height(Length::Fixed(TAB_STRIP_HEIGHT))
     .into()
 }
 
-/// Меню самой вкладки: куда её деть. Разделение предлагается, пока экран не
-/// разделён; разделённому предлагается перенос и обратное сведение — второго
-/// разделения не бывает, а пункт, который ничего не сделает, обещает выбор и
-/// молчит в ответ.
-fn tab_options(state: &State, id: ViewId) -> Vec<menu::Item> {
+/// Что вкладка может сделать с раскладкой: куда переехать и можно ли свести
+/// панели обратно.
+///
+/// Направления предлагаются те, что изменят экран: перенести туда, где сосед
+/// уже есть, — значит положить вкладку к нему; туда, где соседа нет, — значит
+/// поделить экран этим переносом. Пункт, который ничего не сделает, обещает
+/// выбор и молчит в ответ, поэтому его здесь нет вовсе (см. `State::can_move`).
+fn arrangements(state: &State, id: ViewId) -> Vec<menu::Item> {
     let mut items = Vec::new();
-    match state.split() {
-        None => {
-            for placement in Placement::ALL {
-                items.push(
-                    menu::Item::new(placement.title(), Msg::TabSplit(id, placement))
-                        .glyph(theme::glyph::SPLIT),
-                );
-            }
-        }
-        Some(_) => {
+    for side in Side::ALL {
+        if state.can_move(id, side) {
             items.push(
-                menu::Item::new("Перенести в другую половину", Msg::TabMove(id))
-                    .glyph(theme::glyph::ENTER),
-            );
-            items.push(
-                menu::Item::new("Свести половины", Msg::TabUnsplit).glyph(theme::glyph::CLOSE),
+                menu::Item::new(side.title(), Msg::TabMove(id, side)).glyph(side_glyph(side)),
             );
         }
     }
+    if state.layout().count() > 1 {
+        items.push(menu::Item::new("Свести панели", Msg::TabCollapse).glyph(theme::glyph::SPLIT));
+    }
+    items
+}
+
+/// Меню самой вкладки: куда её деть. Закрытие последним пунктом — оно про
+/// вкладку целиком, а не про её место.
+fn tab_options(mut items: Vec<menu::Item>, id: ViewId) -> Vec<menu::Item> {
     items.push(menu::Item::new("Закрыть вкладку", Msg::TabClose(id)).glyph(theme::glyph::CLOSE));
     items
+}
+
+/// Знак направления переноса — та же стрелка, которой направление показано
+/// везде ещё.
+fn side_glyph(side: Side) -> &'static str {
+    match side {
+        Side::Left => theme::glyph::LEFT,
+        Side::Right => theme::glyph::RIGHT,
+        Side::Above => theme::glyph::UP,
+        Side::Below => theme::glyph::DOWN,
+    }
 }
 
 /// Глиф вкладки, которую предлагают открыть, — тот же, которым она подписана
@@ -311,6 +357,7 @@ fn tab_glyph(kind: NewTab) -> &'static str {
         NewTab::Downloaded => theme::glyph::DOWNLOAD,
         NewTab::Globe => theme::glyph::GLOBE,
         NewTab::Shown => theme::glyph::LAYERS,
+        NewTab::Empty => theme::glyph::PLUS,
     }
 }
 
@@ -353,8 +400,10 @@ fn status_bar(state: &State) -> Element<Msg> {
 
     parts.push(label(format!("на диске {}", format::bytes(state.library.stored())), theme::INK_DIM).into());
     parts.push(theme::spacer().into());
-    if let Some(error) = &state.error {
-        parts.push(label(error.clone(), theme::DANGER).into());
+    // Извещение о только что не вышедшем старше отказа библиотеки: оно про то,
+    // что человек сделал секунду назад, а места под обоих в полосе нет.
+    if let Some(said) = state.notice.as_ref().or(state.error.as_ref()) {
+        parts.push(label(said.clone(), theme::DANGER).into());
     }
 
     theme::chrome_bar(

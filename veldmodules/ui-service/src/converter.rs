@@ -38,6 +38,10 @@ impl proto::UiEventResponse {
     pub fn sized(method: String, key: String, size: proto::ViewportSize) -> Self {
         Self { method, key, payload: Some(proto::ui_event_response::Payload::Size(size)) }
     }
+
+    pub fn dropped(method: String, key: String, drop: proto::DropEvent) -> Self {
+        Self { method, key, payload: Some(proto::ui_event_response::Payload::Drop(drop)) }
+    }
 }
 
 /// Все дети одного рода — условие, при котором колонку можно диффить по
@@ -241,7 +245,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .height(height)
                 .max_width(convert_length_val(&c.max_width))
                 .max_height(convert_length_val(&c.max_height))
-                .clip(c.clip);
+                // Всегда: коробка ограничивает содержимое собой (см. `Container`
+                // в types.proto). У iced это не слой, а суженные границы для
+                // детей, и до рисунка они доезжают одним доводом — `clip_bounds`
+                // у текста (см. `fill_paragraph` в renderer.rs).
+                .clip(true);
 
             if let Some(ax) = convert_alignment(c.align_x()) { cont = cont.align_x(ax); }
             if let Some(ay) = convert_alignment(c.align_y()) { cont = cont.align_y(ay); }
@@ -252,7 +260,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                     let style = convert_widget_style(style);
                     cont = cont.style(move |_theme: &Theme| style);
                 }
-                return cont.into();
+                return carried(c, cont.into());
             };
 
             // Нажимаемая — та же коробка внутри кнопки iced: отступ,
@@ -283,7 +291,7 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             // Перевод в стиль iced идёт внутри замыкания, а не рядом: цвет
             // текста в стиле может быть не задан, и тогда его берёт тема, — а
             // тему видно только здесь.
-            btn.style(move |theme: &Theme, status| {
+            let styled = btn.style(move |theme: &Theme, status| {
                 let style = match status {
                     iced_widget::button::Status::Active => &rest,
                     iced_widget::button::Status::Hovered => &hovered,
@@ -291,8 +299,8 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                     iced_widget::button::Status::Disabled => &disabled,
                 };
                 convert_button_style(style, theme.palette().text)
-            })
-            .into()
+            });
+            carried(c, styled.into())
         }
         Some(proto::widget::Type::Scrollable(s)) => {
             let content = if let Some(child) = &s.content { convert_widget(child) } else { Space::new().into() };
@@ -315,6 +323,13 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 .direction(direction)
                 .width(convert_length(&s.width))
                 .height(convert_length(&s.height));
+
+            // Имя — то, чем область адресует наводка (см. `aim_scrollables`).
+            // Безымянной его не давать: пустой Id совпал бы у всех областей
+            // сразу, и одна наводка увела бы их все.
+            if !s.name.is_empty() {
+                scroll = scroll.id(s.name.clone());
+            }
 
             if let Some(look) = &s.scrollbar {
                 let rail = convert_rail(look);
@@ -495,6 +510,28 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             }
             area.into()
         }
+        Some(proto::widget::Type::Divider(d)) => {
+            let mut divider = crate::module::divider::Divider::new(
+                d.axis(),
+                d.thickness,
+                d.line,
+                convert_color(&d.color),
+                convert_color(&d.active),
+            );
+            // Без обработчика полоса остаётся линией: тянуть её некому, и
+            // отклик под курсором обещал бы то, чего не будет.
+            if let Some(h) = &d.on_drag
+                && !h.method.is_empty()
+            {
+                divider = divider.on_drag(h.method.clone()).key(h.key.clone());
+            }
+            if let Some(h) = &d.on_release
+                && !h.method.is_empty()
+            {
+                divider = divider.on_release(UiMessage::declared(h));
+            }
+            divider.into()
+        }
         Some(proto::widget::Type::Space(s)) => {
             Space::new().width(convert_length(&s.width)).height(convert_length(&s.height)).into()
         }
@@ -502,6 +539,37 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         // сюда попадает только `type: None` — сообщение без содержимого.
         _ => column([]).into(),
     }
+}
+
+/// Коробка, которую можно взять или в которую можно бросить (см. `Drag` и
+/// `Drop` в types.proto). Не объявлено ни того, ни другого — та же коробка.
+///
+/// Обёрткой поверх готового элемента, а не полями внутри него: и взятое, и
+/// место приёма ведут себя одинаково, чем бы коробка ни была — простой или
+/// нажимаемой, — а стоит это одного узла в дереве.
+fn carried(
+    c: &proto::Container,
+    element: Element<'static, UiMessage, Theme, GpuRenderer>,
+) -> Element<'static, UiMessage, Theme, GpuRenderer> {
+    let element = match &c.drag {
+        Some(drag) if !drag.payload.is_empty() => {
+            crate::module::drag::Draggable::new(element, drag.payload.clone()).into()
+        }
+        _ => element,
+    };
+
+    let Some(drop) = &c.drop else { return element };
+    let Some(handler) = drop.on_drop.as_ref().filter(|h| !h.method.is_empty()) else {
+        return element;
+    };
+    crate::module::drag::DropZone::new(
+        element,
+        handler.method.clone(),
+        handler.key.clone(),
+        drop.edges,
+        convert_color(&drop.highlight),
+    )
+    .into()
 }
 
 fn convert_length(len: &Option<proto::Length>) -> Length {

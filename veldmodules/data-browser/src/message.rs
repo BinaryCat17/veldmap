@@ -9,21 +9,21 @@
 //! приватная проводка модуля: ui-service возвращает их эхом, смысла их не зная
 //! и не проверяя.
 //!
-//! **Адресат — отдельно от нагрузки.** Половин на экране две, и «активный вид»
-//! на вопрос «чей это щелчок» не отвечает: щёлкнуть могли в той половине, что
-//! не под рукой. Поэтому всё, что рождается в теле вкладки, едет обёрнутым в
+//! **Адресат — отдельно от нагрузки.** Панелей на экране сколько угодно, и
+//! «активный вид» на вопрос «чей это щелчок» не отвечает: щёлкнуть могли в той
+//! панели, что не под рукой. Поэтому всё, что рождается в теле вкладки, едет обёрнутым в
 //! [`Msg::In`], а вкладка называет себя полем `Handler.key` — тем самым, которое
 //! не подменяет рендерер. Сложить её в нагрузку было бы нельзя: у поля ввода,
 //! области и ползунка нагрузку изготавливает он.
 
 use crate::module::state::listing::{Choice, Filter, Grouping, Menu, Sorting};
 use crate::module::state::search::{Cloud, Mission, Period};
-use crate::module::state::{Half, Placement, Shift, ViewId};
-use crate::proto::ui_service::{PointerEvent, UiEventResponse, ViewportSize};
+use crate::module::state::{PaneId, Shift, Side, SplitId, ViewId};
+use crate::proto::ui_service::{DropEvent, PointerEvent, UiEventResponse, ViewportSize};
 use veld_ui_service_wrap::{Payload, UiMessage};
 
 /// Что можно открыть новой вкладкой. Один вариант вместо пяти сообщений:
-/// различаются они только тем, какой вид завести, а половина, куда его класть,
+/// различаются они только тем, какой вид завести, а панель, куда его класть, —
 /// у всех одна и та же забота.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NewTab {
@@ -32,10 +32,25 @@ pub enum NewTab {
     Downloaded,
     Globe,
     Shown,
+    /// Вкладка, которая ещё ничего не показывает (см. `ViewKind::Empty`).
+    Empty,
 }
 
 impl NewTab {
-    pub const ALL: [NewTab; 5] =
+    /// Что предлагает «плюс». Пустая вкладка последней: она не про то, что
+    /// смотреть, а про место, где это решат потом.
+    pub const ALL: [NewTab; 6] = [
+        NewTab::Browse,
+        NewTab::Search,
+        NewTab::Downloaded,
+        NewTab::Globe,
+        NewTab::Shown,
+        NewTab::Empty,
+    ];
+
+    /// Чем наполняют пустую вкладку — та же пятёрка без неё самой: пустое
+    /// пустым не наполняют.
+    pub const KINDS: [NewTab; 5] =
         [NewTab::Browse, NewTab::Search, NewTab::Downloaded, NewTab::Globe, NewTab::Shown];
 
     pub fn key(self) -> &'static str {
@@ -45,6 +60,7 @@ impl NewTab {
             NewTab::Downloaded => "downloaded",
             NewTab::Globe => "globe",
             NewTab::Shown => "shown",
+            NewTab::Empty => "empty",
         }
     }
 
@@ -59,6 +75,7 @@ impl NewTab {
             NewTab::Downloaded => "Скачанное",
             NewTab::Globe => "Глобус",
             NewTab::Shown => "На просмотре",
+            NewTab::Empty => "Пустая вкладка",
         }
     }
 }
@@ -70,23 +87,34 @@ pub enum Msg {
     // когда закрывают соседа.
     TabSelect(ViewId),
     TabClose(ViewId),
-    /// Меню «плюса» названной половины; `None` — закрыть раскрытое.
-    TabMenu(Option<Half>),
-    /// Меню самой вкладки: разделить, перенести, закрыть. `None` — закрыть.
+    /// Меню «плюса» названной панели; `None` — закрыть раскрытое.
+    TabMenu(Option<PaneId>),
+    /// Меню самой вкладки: перенести, закрыть. `None` — закрыть.
     TabOptions(Option<ViewId>),
-    /// Завести вкладку в названной половине.
-    NewTab(Half, NewTab),
-    /// Перенести вкладку в другую половину.
-    TabMove(ViewId),
-    /// Разделить экран, отправив вкладку во вторую половину.
-    TabSplit(ViewId, Placement),
-    /// Свести половины обратно в одну.
-    TabUnsplit,
+    /// Завести вкладку в названной панели.
+    NewTab(PaneId, NewTab),
+    /// Перенести вкладку туда, где человек видит эту сторону: в соседнюю
+    /// панель либо в заведённую с этой стороны (см. `State::move_aside`).
+    TabMove(ViewId, Side),
+    /// Свести все панели в одну.
+    TabCollapse,
+    /// Границу деления потянули: сдвиг в точках разметки. Что это в долях,
+    /// знает только тот, кто их задавал (см. `State::divide`).
+    Divide(SplitId, f32),
+    /// Границу отпустили. Отдельным сообщением, а не концом потока сдвигов:
+    /// «перетаскивание кончилось» — момент, а не отсутствие событий, и ждать
+    /// его молчанием значило бы не дождаться вовсе.
+    Divided,
+    /// В панель бросили вкладку. Что принесли и в какой край панели попали,
+    /// изготавливает рендерер: где какая зона, знает только он (см. `Drop` в
+    /// ui-service/types.proto). Нагрузка едет как есть — разбирает её
+    /// обработчик, ровно как у указателя над областью.
+    TabDrop(PaneId, DropEvent),
 
     // -- Записи --
     //
     // Действуют не на вид, а на библиотеку, поэтому вкладки-источника не несут:
-    // скачанное одно на всё окно, из какой половины его ни попроси.
+    // скачанное одно на всё окно, из какой панели его ни попроси.
     /// Скачать, докачать или приостановить — по ключу провайдера. Второе поле —
     /// снимок, к которому файл относится (пусто — сам по себе): библиотека
     /// пишет его в свой снимок, а вывести это из ключа не может.
@@ -100,13 +128,20 @@ pub enum Msg {
     /// разворачивает его в записи тот, кто его и собрал (см.
     /// `handlers::library::on_delete_snapshot`).
     DeleteSnapshot(String),
+    /// Скачать снимок целиком — по ключу продукта. Список файлов приезжает
+    /// рекурсивным листингом от провайдера: раскладку .SAFE знает только он, а
+    /// закачка идёт по одному файлу (см. `handlers::library::on_download_snapshot`).
+    DownloadSnapshot(String),
+    /// Приостановить закачку снимка целиком. Ключом снимок — по той же
+    /// причине, что и у выброса: разворачивает его в файлы тот, кто его собрал.
+    PauseSnapshot(String),
     /// Показать запись в файловом менеджере. Путь считает библиотека — раскладка
     /// хранения её, — а показывает платформа.
     Reveal(String),
 
     // -- Шар --
-    /// Снять с шара все наложения — кнопка в полосе вкладки глобуса. Контуры
-    /// выдачи остаются: снимаются снимки, а не найденное.
+    /// Снять с шара всё: и наложения, и контуры. Порознь их не снять ничем, а
+    /// разделять их пользователю не по чему — он видит один шар.
     GlobeClear,
 
     // -- На просмотре --
@@ -126,6 +161,17 @@ pub enum Msg {
     OverlayShift(String, Shift),
     /// Скрыть или показать все слои разом.
     OverlayHideAll(bool),
+    /// Меню слоя: порядок и переходы к снимку. `None` — закрыть раскрытое.
+    OverlayMenu(Option<String>),
+
+    // -- Контуры --
+    //
+    // Контур адресуется тем же ключом снимка, что и слой, и тем же полем: на
+    // шаре они про один и тот же снимок, просто с разной подробностью.
+    /// Убрать контур: снять отметку во всех списках сразу.
+    OutlineRemove(String),
+    /// Навести шар на контур и выбрать его.
+    OutlineFocus(String),
 
     /// Сообщение, рождённое в теле названной вкладки.
     In(ViewId, ViewMsg),
@@ -135,6 +181,11 @@ pub enum Msg {
 /// вариантов с `ViewId` первым полем: адресат у них общий и приписывается один
 /// раз — в [`Msg::In`].
 pub enum ViewMsg {
+    /// Чем наполнить пустую вкладку. Ей, а не панели: вкладка становится
+    /// выбранным видом на месте, не заводя рядом вторую и не оставляя после
+    /// себя пустую (см. `handlers::nav::fill`).
+    Fill(NewTab),
+
     // -- Показ списка --
     /// Раскрыть меню или закрыть открытое (`Menu::Closed`).
     OpenMenu(Menu),
@@ -144,8 +195,18 @@ pub enum ViewMsg {
     /// Набранное в поле фильтра — его подставляет рендерер, а не разметка.
     Query(String),
     Page(usize),
-    /// Раскрыть строку-снимок в её файлы или свернуть обратно.
+    /// Раскрыть строку в её содержимое или свернуть обратно.
     Expand(String),
+    /// Отметить снимок или снять отметку: отмеченные очерчены на шаре.
+    Check(String),
+    /// Отметить или снять отметку разом со всего, что показано, — коробочка в
+    /// шапке. Действует ровно на то, о чём говорит: на снимки этой страницы.
+    CheckShown(bool),
+    /// Снять все отметки списка, включая сделанные в другой папке, — кнопка в
+    /// заголовке. Отдельное сообщение, а не `CheckShown(false)`: отметка
+    /// переживает переход по папкам, и «снять видимое» оставило бы контуры,
+    /// убрать которые стало бы нечем.
+    CheckClear,
 
     // -- Поиск по каталогу --
     //
@@ -169,6 +230,14 @@ pub enum ViewMsg {
     /// Перейти в папку по ключу провайдера; пустой ключ — перечитать текущую.
     Enter(String),
     Up,
+    /// Показать названную запись в каталоге: открыть папку, в которой она
+    /// лежит, встать на её страницу и подсветить её.
+    ///
+    /// Отдельно от [`ViewMsg::Enter`], потому что вопрос другой: тот называет
+    /// папку и ведёт в неё, этот называет запись и ведёт к ней. Каталог при
+    /// этом переиспользуется — новую вкладку заводит только тот, кому её
+    /// попросили завести (см. `handlers::nav::catalog`).
+    InCatalog(String),
 
     // -- Просмотр снимка --
     //
@@ -219,11 +288,15 @@ mod method {
     pub const TAB_OPTIONS: &str = "tab_options";
     pub const NEW_TAB: &str = "new_tab";
     pub const TAB_MOVE: &str = "tab_move";
-    pub const TAB_SPLIT: &str = "tab_split";
-    pub const TAB_UNSPLIT: &str = "tab_unsplit";
+    pub const TAB_COLLAPSE: &str = "tab_collapse";
+    pub const DIVIDE: &str = "divide";
+    pub const DIVIDED: &str = "divided";
+    pub const TAB_DROP: &str = "tab_drop";
     pub const DOWNLOAD: &str = "download";
     pub const DELETE: &str = "delete";
     pub const DELETE_SNAPSHOT: &str = "delete_snapshot";
+    pub const DOWNLOAD_SNAPSHOT: &str = "download_snapshot";
+    pub const PAUSE_SNAPSHOT: &str = "pause_snapshot";
     pub const REVEAL: &str = "reveal";
     pub const GLOBE_CLEAR: &str = "globe_clear";
     pub const OVERLAY_OPACITY: &str = "overlay_opacity";
@@ -231,7 +304,11 @@ mod method {
     pub const OVERLAY_REMOVE: &str = "overlay_remove";
     pub const OVERLAY_SHIFT: &str = "overlay_shift";
     pub const OVERLAY_HIDE_ALL: &str = "overlay_hide_all";
+    pub const OVERLAY_MENU: &str = "overlay_menu";
+    pub const OUTLINE_REMOVE: &str = "outline_remove";
+    pub const OUTLINE_FOCUS: &str = "outline_focus";
 
+    pub const FILL: &str = "fill";
     pub const OPEN_MENU: &str = "open_menu";
     pub const FILTER: &str = "filter";
     pub const GROUP: &str = "group";
@@ -239,6 +316,9 @@ mod method {
     pub const QUERY: &str = "query";
     pub const PAGE: &str = "page";
     pub const EXPAND: &str = "expand";
+    pub const CHECK: &str = "check";
+    pub const CHECK_SHOWN: &str = "check_shown";
+    pub const CHECK_CLEAR: &str = "check_clear";
     pub const SEARCH_QUERY: &str = "search_query";
     pub const SEARCH_MISSION: &str = "search_mission";
     pub const SEARCH_PERIOD: &str = "search_period";
@@ -248,6 +328,7 @@ mod method {
     pub const RUN_SEARCH: &str = "run_search";
     pub const ENTER: &str = "enter";
     pub const UP: &str = "up";
+    pub const IN_CATALOG: &str = "in_catalog";
     pub const PREVIEW: &str = "preview";
     pub const PREVIEW_REMOTE: &str = "preview_remote";
     pub const PREVIEW_PRODUCT: &str = "preview_product";
@@ -263,6 +344,7 @@ mod method {
 impl ViewMsg {
     fn encode(&self) -> (&'static str, String) {
         match self {
+            ViewMsg::Fill(kind) => (method::FILL, kind.key().to_string()),
             ViewMsg::OpenMenu(menu) => (method::OPEN_MENU, menu.key()),
             ViewMsg::Filter(filter) => (method::FILTER, filter.key().to_string()),
             ViewMsg::Group(grouping) => (method::GROUP, grouping.key().to_string()),
@@ -270,6 +352,9 @@ impl ViewMsg {
             ViewMsg::Query(query) => (method::QUERY, query.clone()),
             ViewMsg::Page(page) => (method::PAGE, page.to_string()),
             ViewMsg::Expand(key) => (method::EXPAND, key.clone()),
+            ViewMsg::Check(key) => (method::CHECK, key.clone()),
+            ViewMsg::CheckShown(on) => (method::CHECK_SHOWN, on.to_string()),
+            ViewMsg::CheckClear => (method::CHECK_CLEAR, String::new()),
             ViewMsg::SearchQuery(query) => (method::SEARCH_QUERY, query.clone()),
             ViewMsg::SearchMission(mission) => (method::SEARCH_MISSION, mission.key().to_string()),
             ViewMsg::SearchPeriod(period) => (method::SEARCH_PERIOD, period.key().to_string()),
@@ -279,6 +364,7 @@ impl ViewMsg {
             ViewMsg::RunSearch => (method::RUN_SEARCH, String::new()),
             ViewMsg::Enter(path) => (method::ENTER, path.clone()),
             ViewMsg::Up => (method::UP, String::new()),
+            ViewMsg::InCatalog(key) => (method::IN_CATALOG, key.clone()),
             ViewMsg::Preview(name) => (method::PREVIEW, name.clone()),
             ViewMsg::PreviewRemote(identifier) => (method::PREVIEW_REMOTE, identifier.clone()),
             ViewMsg::PreviewProduct(identifier) => (method::PREVIEW_PRODUCT, identifier.clone()),
@@ -300,6 +386,7 @@ impl ViewMsg {
         // `None` — второй проверки на вид нагрузки не нужно.
         let value = event.value();
         Some(match event.method.as_str() {
+            method::FILL => ViewMsg::Fill(NewTab::from_key(value)?),
             method::OPEN_MENU => ViewMsg::OpenMenu(Menu::from_key(value)),
             method::FILTER => ViewMsg::Filter(Filter::from_key(value)?),
             method::GROUP => ViewMsg::Group(Grouping::from_key(value)?),
@@ -307,6 +394,9 @@ impl ViewMsg {
             method::QUERY => ViewMsg::Query(value.to_string()),
             method::PAGE => ViewMsg::Page(value.parse().ok()?),
             method::EXPAND => ViewMsg::Expand(value.to_string()),
+            method::CHECK => ViewMsg::Check(value.to_string()),
+            method::CHECK_SHOWN => ViewMsg::CheckShown(value == "true"),
+            method::CHECK_CLEAR => ViewMsg::CheckClear,
             method::SEARCH_QUERY => ViewMsg::SearchQuery(value.to_string()),
             method::SEARCH_MISSION => ViewMsg::SearchMission(Mission::from_key(value)?),
             method::SEARCH_PERIOD => ViewMsg::SearchPeriod(Period::from_key(value)?),
@@ -316,6 +406,7 @@ impl ViewMsg {
             method::RUN_SEARCH => ViewMsg::RunSearch,
             method::ENTER => ViewMsg::Enter(value.to_string()),
             method::UP => ViewMsg::Up,
+            method::IN_CATALOG => ViewMsg::InCatalog(value.to_string()),
             method::PREVIEW => ViewMsg::Preview(value.to_string()),
             method::PREVIEW_REMOTE => ViewMsg::PreviewRemote(value.to_string()),
             method::PREVIEW_PRODUCT => ViewMsg::PreviewProduct(value.to_string()),
@@ -339,12 +430,19 @@ impl UiMessage for Msg {
             Msg::TabMenu(_) => (method::TAB_MENU, String::new()),
             Msg::TabOptions(_) => (method::TAB_OPTIONS, String::new()),
             Msg::NewTab(_, kind) => (method::NEW_TAB, kind.key().to_string()),
-            Msg::TabMove(_) => (method::TAB_MOVE, String::new()),
-            Msg::TabSplit(_, placement) => (method::TAB_SPLIT, placement.key().to_string()),
-            Msg::TabUnsplit => (method::TAB_UNSPLIT, String::new()),
+            // Ключ занят вкладкой, поэтому сторона едет нагрузкой.
+            Msg::TabMove(_, side) => (method::TAB_MOVE, side.key().to_string()),
+            Msg::TabCollapse => (method::TAB_COLLAPSE, String::new()),
+            // Сдвиг подставит рендерер, деление уедет ключом — сказать нечего.
+            Msg::Divide(..) => (method::DIVIDE, String::new()),
+            Msg::Divided => (method::DIVIDED, String::new()),
+            // Принесённое подставит рендерер, панель уедет ключом.
+            Msg::TabDrop(..) => (method::TAB_DROP, String::new()),
             Msg::Download(identifier, _) => (method::DOWNLOAD, identifier.clone()),
             Msg::Delete(name) => (method::DELETE, name.clone()),
             Msg::DeleteSnapshot(product) => (method::DELETE_SNAPSHOT, product.clone()),
+            Msg::DownloadSnapshot(product) => (method::DOWNLOAD_SNAPSHOT, product.clone()),
+            Msg::PauseSnapshot(product) => (method::PAUSE_SNAPSHOT, product.clone()),
             Msg::Reveal(name) => (method::REVEAL, name.clone()),
             Msg::GlobeClear => (method::GLOBE_CLEAR, String::new()),
             // Число подставит рендерер, слой уедет ключом — сказать нечего.
@@ -354,30 +452,38 @@ impl UiMessage for Msg {
             // Ключ занят слоем, поэтому направление едет нагрузкой.
             Msg::OverlayShift(_, shift) => (method::OVERLAY_SHIFT, shift.key().to_string()),
             Msg::OverlayHideAll(hidden) => (method::OVERLAY_HIDE_ALL, hidden.to_string()),
+            // Слой едет ключом — как у остальных сообщений про слой; сказать
+            // нагрузкой нечего.
+            Msg::OverlayMenu(_) => (method::OVERLAY_MENU, String::new()),
+            Msg::OutlineRemove(_) => (method::OUTLINE_REMOVE, String::new()),
+            Msg::OutlineFocus(_) => (method::OUTLINE_FOCUS, String::new()),
             Msg::In(_, view) => view.encode(),
         };
         (method.to_string(), value)
     }
 
-    /// Кого адресует сообщение: вкладку, половину экрана или слой на шаре.
+    /// Кого адресует сообщение: вкладку, панель или слой на шаре.
     ///
     /// Одинаковых виджетов на экране столько же, сколько вкладок и снимков, и
     /// различить их по имени метода нельзя — а нагрузка у половины из них
     /// занята рендерером (см. `Handler.key` в ui-service/types.proto).
     fn key(&self) -> String {
         match self {
-            Msg::TabSelect(id)
-            | Msg::TabClose(id)
-            | Msg::TabMove(id)
-            | Msg::TabSplit(id, _)
-            | Msg::In(id, _) => id.to_string(),
+            Msg::TabSelect(id) | Msg::TabClose(id) | Msg::TabMove(id, _) | Msg::In(id, _) => {
+                id.to_string()
+            }
             Msg::TabOptions(id) => id.map(|id| id.to_string()).unwrap_or_default(),
-            Msg::TabMenu(half) => half.map(|half| half.key().to_string()).unwrap_or_default(),
-            Msg::NewTab(half, _) => half.key().to_string(),
+            Msg::Divide(split, _) => split.to_string(),
+            Msg::TabDrop(pane, _) => pane.to_string(),
+            Msg::TabMenu(pane) => pane.map(|pane| pane.to_string()).unwrap_or_default(),
+            Msg::NewTab(pane, _) => pane.to_string(),
             Msg::OverlayOpacity(key, _)
             | Msg::OverlayHidden(key, _)
             | Msg::OverlayRemove(key)
-            | Msg::OverlayShift(key, _) => key.clone(),
+            | Msg::OverlayShift(key, _)
+            | Msg::OutlineRemove(key)
+            | Msg::OutlineFocus(key) => key.clone(),
+            Msg::OverlayMenu(key) => key.clone().unwrap_or_default(),
             // Снимок едет ключом: нагрузку занял сам файл, а вопрос «к чему его
             // отнести» — это тот же вопрос «с кем», на который ключ и отвечает.
             Msg::Download(_, product) => product.clone(),
@@ -399,15 +505,19 @@ impl UiMessage for Msg {
             // должно быть одно.
             method::TAB_SELECT => Msg::TabSelect(event.key.parse().ok()?),
             method::TAB_CLOSE => Msg::TabClose(event.key.parse().ok()?),
-            method::TAB_MENU => Msg::TabMenu(Half::from_key(&event.key)),
+            method::TAB_MENU => Msg::TabMenu(event.key.parse().ok()),
             method::TAB_OPTIONS => Msg::TabOptions(event.key.parse().ok()),
-            method::NEW_TAB => Msg::NewTab(Half::from_key(&event.key)?, NewTab::from_key(value)?),
-            method::TAB_MOVE => Msg::TabMove(event.key.parse().ok()?),
-            method::TAB_SPLIT => Msg::TabSplit(event.key.parse().ok()?, Placement::from_key(value)?),
-            method::TAB_UNSPLIT => Msg::TabUnsplit,
+            method::NEW_TAB => Msg::NewTab(event.key.parse().ok()?, NewTab::from_key(value)?),
+            method::TAB_MOVE => Msg::TabMove(event.key.parse().ok()?, Side::from_key(value)?),
+            method::TAB_COLLAPSE => Msg::TabCollapse,
+            method::DIVIDE => Msg::Divide(event.key.parse().ok()?, value.parse().ok()?),
+            method::DIVIDED => Msg::Divided,
+            method::TAB_DROP => Msg::TabDrop(event.key.parse().ok()?, event.drop()?.clone()),
             method::DOWNLOAD => Msg::Download(value.to_string(), event.key.clone()),
             method::DELETE => Msg::Delete(value.to_string()),
             method::DELETE_SNAPSHOT => Msg::DeleteSnapshot(value.to_string()),
+            method::DOWNLOAD_SNAPSHOT => Msg::DownloadSnapshot(value.to_string()),
+            method::PAUSE_SNAPSHOT => Msg::PauseSnapshot(value.to_string()),
             method::REVEAL => Msg::Reveal(value.to_string()),
             method::GLOBE_CLEAR => Msg::GlobeClear,
             method::OVERLAY_OPACITY => Msg::OverlayOpacity(event.key.clone(), value.parse().ok()?),
@@ -415,6 +525,12 @@ impl UiMessage for Msg {
             method::OVERLAY_REMOVE => Msg::OverlayRemove(event.key.clone()),
             method::OVERLAY_SHIFT => Msg::OverlayShift(event.key.clone(), Shift::from_key(value)?),
             method::OVERLAY_HIDE_ALL => Msg::OverlayHideAll(value == "true"),
+            method::OUTLINE_REMOVE => Msg::OutlineRemove(event.key.clone()),
+            method::OUTLINE_FOCUS => Msg::OutlineFocus(event.key.clone()),
+            // Пустой ключ — «закрыть»: имени у слоя пустым не бывает.
+            method::OVERLAY_MENU => {
+                Msg::OverlayMenu(Some(event.key.clone()).filter(|key| !key.is_empty()))
+            }
             _ => return None,
         })
     }
@@ -437,6 +553,10 @@ mod tests {
         "7".parse().expect("ViewId из строки")
     }
 
+    fn pane() -> PaneId {
+        "3".parse().expect("PaneId из строки")
+    }
+
     /// Каждый вариант обязан пережить полный круг: encode → шина → decode →
     /// encode без изменений. Ровно тот класс расхождений двух match'ей, ради
     /// которого заведены константы `method`.
@@ -445,16 +565,17 @@ mod tests {
         let mut messages = vec![
             Msg::TabSelect(id()),
             Msg::TabClose(id()),
-            Msg::TabMenu(Some(Half::First)),
-            Msg::TabMenu(Some(Half::Second)),
+            Msg::TabMenu(Some(pane())),
             Msg::TabMenu(None),
             Msg::TabOptions(Some(id())),
             Msg::TabOptions(None),
-            Msg::TabMove(id()),
-            Msg::TabUnsplit,
+            Msg::TabCollapse,
+            Msg::Divided,
             Msg::Download("продукт".into(), "снимок".into()),
             Msg::Delete("запись".into()),
             Msg::DeleteSnapshot("снимок".into()),
+            Msg::DownloadSnapshot("снимок".into()),
+            Msg::PauseSnapshot("снимок".into()),
             Msg::Reveal("запись".into()),
             Msg::GlobeClear,
             Msg::OverlayHidden("продукт".into(), true),
@@ -463,10 +584,19 @@ mod tests {
             Msg::OverlayShift("продукт".into(), Shift::Up),
             Msg::OverlayShift("продукт".into(), Shift::Down),
             Msg::OverlayHideAll(true),
+            Msg::OverlayMenu(Some("продукт".into())),
+            Msg::OverlayMenu(None),
+            Msg::OutlineRemove("продукт".into()),
+            Msg::OutlineFocus("продукт".into()),
             Msg::In(id(), ViewMsg::OpenMenu(Menu::Closed)),
             Msg::In(id(), ViewMsg::Query("s2a".into())),
             Msg::In(id(), ViewMsg::Page(3)),
             Msg::In(id(), ViewMsg::Expand("снимок".into())),
+            Msg::In(id(), ViewMsg::Check("снимок".into())),
+            Msg::In(id(), ViewMsg::CheckShown(true)),
+            Msg::In(id(), ViewMsg::CheckShown(false)),
+            Msg::In(id(), ViewMsg::CheckClear),
+            Msg::In(id(), ViewMsg::InCatalog("eodata/Sentinel-2/S2B.SAFE".into())),
             Msg::In(id(), ViewMsg::SearchQuery("msil2a".into())),
             Msg::In(id(), ViewMsg::SearchFrom("2026-08-01".into())),
             Msg::In(id(), ViewMsg::SearchTo("2026-08-13".into())),
@@ -480,10 +610,9 @@ mod tests {
             Msg::In(id(), ViewMsg::PreviewZoom(1.0)),
             Msg::In(id(), ViewMsg::GlobeShow("продукт".into())),
         ];
-        for half in Half::BOTH {
-            messages.extend(NewTab::ALL.iter().map(|kind| Msg::NewTab(half, *kind)));
-        }
-        messages.extend(Placement::ALL.iter().map(|placement| Msg::TabSplit(id(), *placement)));
+        messages.extend(NewTab::ALL.iter().map(|kind| Msg::NewTab(pane(), *kind)));
+        messages.extend(NewTab::KINDS.iter().map(|kind| Msg::In(id(), ViewMsg::Fill(*kind))));
+        messages.extend(Side::ALL.iter().map(|side| Msg::TabMove(id(), *side)));
         messages.extend(Filter::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::Filter(*choice))));
         messages.extend(Grouping::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::Group(*choice))));
         messages.extend(Sorting::ALL.iter().map(|choice| Msg::In(id(), ViewMsg::Sort(*choice))));
@@ -553,6 +682,24 @@ mod tests {
             Some(Msg::OverlayOpacity(key, value)) => {
                 assert_eq!(key, "eodata/Sentinel-2/S2B.SAFE");
                 assert!((value - 0.62).abs() < 1e-6, "{}", value);
+            }
+            other => panic!("разобралось не тем: {:?}", other.map(|m| m.encode())),
+        }
+    }
+
+    /// Граница называет своё деление тем же полем, что ползунок — свой слой:
+    /// нагрузку у обоих занял рендерер, и сказать «чей сдвиг» больше нечем.
+    #[test]
+    fn divider_names_its_split_apart_from_its_delta() {
+        let event = UiEventResponse {
+            method: method::DIVIDE.to_string(),
+            key: "4".to_string(),
+            payload: Some(Wire::Value("-12.5".to_string())),
+        };
+        match Msg::decode(&event) {
+            Some(Msg::Divide(split, delta)) => {
+                assert_eq!(split.to_string(), "4");
+                assert!((delta + 12.5).abs() < 1e-6, "{}", delta);
             }
             other => panic!("разобралось не тем: {:?}", other.map(|m| m.encode())),
         }

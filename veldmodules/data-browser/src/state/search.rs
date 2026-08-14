@@ -207,6 +207,9 @@ pub struct SearchState {
     /// на радарную), но в запрос тогда не уходит: см. `handlers::search::run`.
     pub cloud: Cloud,
     pub results: Vec<DataProduct>,
+    /// Содержимое раскрытых снимков: продукт, лежащий папкой, раскрывается в
+    /// свои файлы прямо в выдаче — тем же листингом, что и в каталоге.
+    pub children: super::browse::Children,
     /// Последняя ошибка search от data-provider (пусто, если запрос успешен)
     pub error: Option<String>,
     /// Ожидание ответа на data-provider/on_search: актуален только последний —

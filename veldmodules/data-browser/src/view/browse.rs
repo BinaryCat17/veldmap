@@ -1,51 +1,16 @@
 //! view/browse.rs — сетевой каталог.
 //!
-//! Своего здесь только источник строк и подпись: показывает их общий экран
-//! списка (см. components::list_screen).
+//! Своего здесь только подпись: строки собирает `components::rows` (их
+//! спрашивает не одна разметка), а показывает общий экран списка
+//! (см. components::list_screen).
 
 use crate::proto::ui_service::Element;
-use crate::module::components::{format, list_screen, Row, RowKind, RowStatus, Screen};
+use crate::module::components::{format, list_screen, rows, Row, RowKind, Screen};
 use crate::module::state::{BrowseState, State, ViewId};
 use crate::module::Msg;
 
 pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
-    let rows: Vec<Row> = browse
-        .items
-        .iter()
-        .map(|item| {
-            // Снимком запись делает провайдер: раскладку бакета знает только
-            // он (см. `ListEntry.product`). Папкой она при этом остаться может
-            // — .SAFE и есть папка, — и заход внутрь у неё никто не отнимает.
-            let itself = item.product == item.identifier.trim_end_matches('/');
-            let kind = match (itself, item.is_folder) {
-                (true, folder) => RowKind::Product { folder },
-                (false, true) => RowKind::Folder,
-                (false, false) => RowKind::File,
-            };
-            if item.is_folder {
-                // Папка каталога: сколько её содержимого уже на диске, знает
-                // библиотека — у самого каталога такого ответа нет.
-                let done = state.library.count_under(&item.identifier);
-                let status = if done > 0 { RowStatus::Partial { done } } else { RowStatus::Remote };
-                Row {
-                    product: item.product.clone(),
-                    ..Row::container_row(item.identifier.clone(), item.name.clone(), status, kind)
-                }
-            } else {
-                Row {
-                    product: item.product.clone(),
-                    ..Row::remote(
-                        &state.library,
-                        item.identifier.clone(),
-                        item.name.clone(),
-                        item.size,
-                        item.modified,
-                        kind,
-                    )
-                }
-            }
-        })
-        .collect();
+    let rows: Vec<Row> = rows::browse(state, browse);
 
     let subtitle = match &browse.error {
         Some(error) => error.clone(),
@@ -79,6 +44,7 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
         Screen {
             title: "Сетевой каталог",
             picked: state.picked_key(),
+            outlined: state.outlined_in(&browse.listing),
             subtitle,
             path: Some(&browse.current_path),
             empty: if browse.request.is_pending() { "Загружается…" } else { "Папка пуста" },
@@ -86,6 +52,6 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
             rows,
         },
         &browse.listing,
-        state.pane_width(),
+        state.pane_width(view),
     )
 }

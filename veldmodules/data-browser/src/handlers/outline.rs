@@ -1,0 +1,321 @@
+//! Контуры на шаре: что отмечено в списках, то и очерчено.
+//!
+//! Здесь проходит граница данных и представления. Провайдер отдаёт снимок с
+//! его геометрией и ничего не знает о том, что её кто-то рисует; глобус
+//! принимает ломаные и ничего не знает о снимках. Свести одно с другим может
+//! только тот, у кого на экране и список, и шар, — то есть мы.
+//!
+//! Источник у контуров ровно один — пакетное выделение: шар очерчивает то, что
+//! отметили, а не то, что нашлось. Отмечают в любом списке — в выдаче поиска, в
+//! сетевом каталоге, в скачанном, — и набор сводится из всех сразу: шар один, а
+//! списков сколько угодно, и «контуры этой вкладки» на вопрос «что на шаре» не
+//! отвечает.
+//!
+//! Геометрия при этом под рукой не у всех: у найденного продукт с контуром уже
+//! есть, а у строки каталога или файла на диске — один ключ, и продукт по нему
+//! восстанавливает провайдер (`on_locate`). Ответы кэшируются: ключ строки не
+//! меняется, а ход к каталогу сетевой.
+
+use std::collections::HashSet;
+
+use crate::module::components::{arrange, rows};
+use crate::module::footprint;
+use crate::module::state::globe::Outlined;
+use crate::module::state::{Locate, Located, State, ViewId, ViewKind};
+use crate::proto::data_provider::{DataProduct, LocateRequest, LocateResponse};
+use crate::proto::globe::{GeoPoint, Outline, Outlines};
+
+/// Отметить снимок в списке или снять отметку.
+pub fn toggle(state: &mut State, view: ViewId, key: String) {
+    retry(state, &key);
+    let Some(listing) = state.listing_mut(view) else { return };
+    listing.select(key);
+    refresh(state);
+}
+
+/// Отметить, если ещё не отмечен. В отличие от [`toggle`] — не переключатель:
+/// зовёт это показ снимка на шаре, а его просят у отмеченного и у
+/// неотмеченного одинаково, и снять отметку вторым нажатием было бы ответом не
+/// на тот вопрос.
+///
+/// Вид без списка (полоса шара, «На просмотре») отмечать нечем — там и нечего:
+/// снимок туда попал уже отмеченным.
+pub fn mark(state: &mut State, view: ViewId, key: &str) {
+    retry(state, key);
+    let Some(listing) = state.listing_mut(view) else { return };
+    if !listing.selected.insert(key.to_string()) {
+        return;
+    }
+    refresh(state);
+}
+
+/// Отметить заново — это и переспросить: сорвавшийся ход к каталогу метку не
+/// переживает (см. [`Located::Failed`]). Ответ каталога — «нет такого» — метку
+/// переживает: он не устаревает.
+fn retry(state: &mut State, key: &str) {
+    if matches!(state.located.get(key), Some(Located::Failed)) {
+        state.located.remove(key);
+    }
+}
+
+/// Отметить или снять отметку разом со всего, что показано, — коробочка в
+/// шапке.
+///
+/// Набор берётся тот же, о котором она и говорит (`Arranged::marks`): страница
+/// со всем раскрытым на ней. Второго определения «что видно» здесь нет
+/// намеренно — разойдясь с первым, коробочка обещала бы одно, а делала другое.
+pub fn mark_shown(state: &mut State, view: ViewId, on: bool) {
+    let rows = rows::of(state, view);
+    let Some(listing) = state.get(view).and_then(ViewKind::listing) else { return };
+    let keys: Vec<String> =
+        arrange::arrange(&rows, listing).marks().map(str::to_string).collect();
+
+    if on {
+        for key in &keys {
+            retry(state, key);
+        }
+    }
+    let Some(listing) = state.listing_mut(view) else { return };
+    for key in keys {
+        match on {
+            true => listing.selected.insert(key),
+            false => listing.selected.remove(&key),
+        };
+    }
+    refresh(state);
+}
+
+/// Снять все отметки этого списка — кнопка в заголовке.
+///
+/// Все, а не показанные: отметка переживает переход в другую папку — шар
+/// держит её, пока не снимут, — и «снять видимое» оставило бы контуры, убрать
+/// которые стало бы нечем.
+pub fn unmark_all(state: &mut State, view: ViewId) {
+    let Some(listing) = state.listing_mut(view) else { return };
+    if listing.selected.is_empty() {
+        return;
+    }
+    listing.selected.clear();
+    refresh(state);
+}
+
+/// Убрать один контур — из списка «На просмотре», где он стоит своей строкой.
+///
+/// Отметка снимается во всех списках сразу: контур один, а отмечен снимок мог
+/// быть и в каталоге, и в выдаче, и оставшаяся отметка вернула бы его тут же.
+pub fn drop_one(state: &mut State, key: &str) {
+    if !state.clear_mark(key) {
+        return;
+    }
+    refresh(state);
+}
+
+/// Навести шар на контур и выбрать его: полоса под шаром назовёт именно его.
+///
+/// Выбирает, а не гасит выбор, — в отличие от показа снимка растром
+/// (`overlay::look_at`): туда идут за самим снимком, а сюда — за местом, и
+/// названо должно быть то, к чему привели.
+pub fn focus(state: &mut State, key: &str) {
+    let Some(outlined) = state.outlined.iter().find(|outlined| outlined.key == key) else {
+        return;
+    };
+    super::globe::focus_on(footprint::frame(&outlined.rings));
+    if state.pick.as_deref() != Some(key) {
+        state.pick = Some(key.to_string());
+        send(state);
+    }
+    super::nav::on_new_globe(state);
+}
+
+/// Снять контуры с шара — то есть снять отметки во всех списках: контур живёт
+/// отметкой, и убрать его иначе нечем.
+pub fn clear(state: &mut State) {
+    if !state.clear_selection() {
+        return;
+    }
+    state.pick = None;
+    state.outlined.clear();
+    send(state);
+}
+
+/// Погасить выбор контура, не трогая сами контуры. Нужно показу снимка на шаре
+/// (см. overlay): на шар лёг другой снимок, и подсвеченный контур прежнего
+/// рядом с ним — ложь о том, на что смотрят.
+pub fn deselect(state: &mut State) {
+    if state.pick.take().is_none() {
+        return;
+    }
+    send(state);
+}
+
+/// Выбрать снимок, накрывающий точку. `None` — щелчок пришёлся мимо Земли.
+///
+/// Из накрывших берём самый мелкий: одну съёмку каталог отдаёт несколькими
+/// продуктами с почти одинаковым контуром, а полоса радара накрывает собой
+/// целую плитку, — и «то, что помельче» единственное отвечает на вопрос «куда
+/// я ткнул».
+pub fn pick(state: &mut State, at: Option<(f64, f64)>) {
+    let chosen = at.and_then(|(lat, lon)| {
+        state
+            .outlined
+            .iter()
+            .filter(|outlined| footprint::covers(&outlined.rings, lat, lon))
+            .min_by(|left, right| extent(left).total_cmp(&extent(right)))
+            .map(|outlined| outlined.key.clone())
+    });
+    // Ничего не изменилось — не тревожим глобус: набор поедет тот же самый.
+    if state.pick == chosen {
+        return;
+    }
+    state.pick = chosen;
+    send(state);
+}
+
+/// Продукт по ключу приехал — или не приехал.
+///
+/// Три ответа, и запоминаются они по-разному: продукт живёт до конца запуска,
+/// «такого нет» тоже (оно не устареет), а «не спросилось» — только до
+/// следующей отметки той же строки. Свалив последнее в «такого нет», мы
+/// хоронили бы снимок из-за одной сетевой заминки.
+pub fn located(state: &mut State, key: String, response: LocateResponse) {
+    let answer = match (response.product, response.answered) {
+        (Some(product), _) => Located::Found(product),
+        (None, true) => Located::Missing,
+        (None, false) => {
+            veldsdk::log::warn!(target: "handlers", "контур '{}': {}", key, response.error);
+            state.notice = Some(format!("Контур не спросился: {}", response.error));
+            Located::Failed
+        }
+    };
+    state.located.insert(key, answer);
+    refresh(state);
+}
+
+/// Пересобрать набор контуров из отмеченного во всех списках и отправить его
+/// глобусу.
+///
+/// Зовётся всякий раз, когда меняется отмеченное или то, из чего берётся
+/// геометрия: набор у глобуса заменяется целиком (см. `Outlines` в его
+/// types.proto), и другого способа сказать ему про контуры нет.
+pub fn refresh(state: &mut State) {
+    let mut wanted: Vec<Outlined> = Vec::new();
+    let mut ask: Vec<String> = Vec::new();
+    {
+        // Один и тот же снимок отмечают и в каталоге, и в выдаче: контур у него
+        // один, и рисовать его дважды значит рисовать его вдвое ярче.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for view in state.views() {
+            let Some(listing) = view.kind.listing() else { continue };
+            for key in &listing.selected {
+                if !seen.insert(key.as_str()) {
+                    continue;
+                }
+                match product(state, key) {
+                    Known::Have(found) if !found.footprint.is_empty() => wanted.push(Outlined {
+                        key: key.clone(),
+                        label: found.name.clone(),
+                        folder: found.folder,
+                        rings: found.footprint.clone(),
+                    }),
+                    Known::Ask => ask.push(key.clone()),
+                    // Геометрии у снимка нет вовсе — очерчивать нечего.
+                    Known::Have(_) | Known::Nothing => {}
+                }
+            }
+        }
+    }
+    // Порядок множества случаен, а набор уезжает целиком: без этого один и тот
+    // же набор выглядел бы новым на каждую пересборку.
+    wanted.sort_by(|left, right| left.key.cmp(&right.key));
+
+    for key in ask {
+        // Отметка «спрашиваем» ставится здесь же: со следующей пересборки этот
+        // ключ уже известен, и второй раз в каталог не поедет (см. [`Located`]).
+        state.located.insert(key.clone(), Located::Asking);
+        let correlation = state.locates.begin(Locate::Outline(key.clone()));
+        crate::calls::data_provider::on_locate(&LocateRequest { identifier: key }, &correlation);
+    }
+
+    // Набор уезжает целиком и стоит глобусу пересборки геометрии, поэтому
+    // неизменившийся не шлётся. «Неизменившийся» — это и тот же состав, и тот
+    // же выбор: выделен на шаре один контур, и о нём глобусу говорит тот же
+    // набор.
+    let kept = state.outlined.len() == wanted.len()
+        && state.outlined.iter().zip(&wanted).all(|(was, now)| was.key == now.key);
+    let picked = state.pick.clone();
+    state.outlined = wanted;
+    // Выбранный щелчком контур мог уйти вместе с отметкой — подсвечивать нечего.
+    if state.pick.as_deref().is_some_and(|key| !state.outlined.iter().any(|o| o.key == key)) {
+        state.pick = None;
+    }
+    if kept && state.pick == picked {
+        return;
+    }
+    send(state);
+}
+
+/// Что известно про геометрию отмеченного снимка.
+enum Known<'a> {
+    Have(&'a DataProduct),
+    /// Продукта под рукой нет — надо спросить провайдера.
+    Ask,
+    /// Рисовать нечего и спрашивать нечего: ответ либо ещё в пути, либо был и
+    /// оказался пуст, либо не вышло спросить. Различать их здесь не по чему —
+    /// набор контуров от этого не меняется.
+    Nothing,
+}
+
+/// Продукт, из которого берётся контур: в выдаче поиска он под рукой, у
+/// прочих списков — только в ответах провайдера.
+///
+/// Ищется по ключу во всех выдачах сразу, а не в той вкладке, где ключ
+/// отмечен: один и тот же снимок отмечают и в каталоге, и в выдаче, а продукт
+/// с геометрией лежит только во второй. Спрашивай мы по вкладке — вторая
+/// отметка гасила бы уже нарисованный контур и слала бы в каталог запрос за
+/// тем, что лежит в соседнем виде.
+fn product<'a>(state: &'a State, key: &str) -> Known<'a> {
+    let found = state.views().iter().find_map(|view| match &view.kind {
+        ViewKind::Search(search) => {
+            search.results.iter().find(|product| product.identifier == key)
+        }
+        _ => None,
+    });
+    if let Some(found) = found {
+        return Known::Have(found);
+    }
+    match state.located.get(key) {
+        Some(Located::Found(found)) => Known::Have(found),
+        Some(Located::Asking | Located::Missing | Located::Failed) => Known::Nothing,
+        None => Known::Ask,
+    }
+}
+
+/// Отправить глобусу весь набор. Единственный способ сказать ему про контуры —
+/// отсюда и одна точка вызова на каждое изменение.
+fn send(state: &State) {
+    let picked = state.pick.as_deref();
+    let outlines = state
+        .outlined
+        .iter()
+        .flat_map(|outlined| {
+            let selected = picked == Some(outlined.key.as_str());
+            outlined.rings.iter().map(move |ring| Outline {
+                points: ring
+                    .points
+                    .iter()
+                    .map(|point| GeoPoint { lat: point.lat, lon: point.lon })
+                    .collect(),
+                selected,
+            })
+        })
+        .collect();
+
+    crate::calls::globe::on_outlines(&Outlines { outlines });
+}
+
+/// Насколько снимок велик — угловой радиус его контура. Без геометрии он
+/// бесконечен: такой не выиграет ни у одного настоящего.
+fn extent(outlined: &Outlined) -> f64 {
+    footprint::frame(&outlined.rings).map_or(f64::INFINITY, |frame| frame.radius_deg)
+}
+

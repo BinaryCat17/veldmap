@@ -69,7 +69,7 @@ fn canvas(view: ViewId, preview: &PreviewState) -> Element<Msg> {
 fn toolbar(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     let name = mono::<Msg>(format::ellipsize(
         &preview.label,
-        format::mono_fit(state.pane_width() - PANEL_WIDTH - 230.0, theme::TEXT_LABEL),
+        format::mono_fit(state.pane_width(view) - PANEL_WIDTH - 230.0, theme::TEXT_LABEL),
     ))
     .size(theme::TEXT_LABEL)
     .color(theme::INK);
@@ -106,7 +106,7 @@ fn toolbar(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> 
     .on_press(Msg::In(view, ViewMsg::PreviewFit));
 
     row![
-        container(name).width(Length::Fill).clip(),
+        container(name).width(Length::Fill),
         status,
         step("−", -1.0),
         current,

@@ -4,13 +4,13 @@
 //! того, как их показать.
 
 use crate::proto::ui_service::Element;
-use crate::module::components::{downloaded_rows, format, list_screen, Screen};
+use crate::module::components::{format, list_screen, rows, Screen};
 use crate::module::state::listing::ListingState;
 use crate::module::state::{State, ViewId};
 use crate::module::Msg;
 
 pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg> {
-    let rows = downloaded_rows(&state.library);
+    let rows = rows::of(state, view);
     let on_disk: u64 = rows.iter().map(|row| row.stored()).sum();
 
     // Снимки и одиночные файлы считаются порознь: строка «21 файл» над списком
@@ -32,6 +32,7 @@ pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg>
         Screen {
             title: "Скачанное",
             picked: state.picked_key(),
+            outlined: state.outlined_in(listing),
             subtitle: match said.is_empty() {
                 true => format::bytes(on_disk),
                 false => format!("{} · {}", said.join(", "), format::bytes(on_disk)),
@@ -42,6 +43,6 @@ pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg>
             rows,
         },
         listing,
-        state.pane_width(),
+        state.pane_width(view),
     )
 }

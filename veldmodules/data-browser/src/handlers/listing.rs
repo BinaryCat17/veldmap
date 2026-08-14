@@ -38,17 +38,26 @@ pub fn on_query(state: &mut State, view: ViewId, query: String) {
     }
 }
 
-/// Раскрыть строку-снимок в её файлы или свернуть обратно.
+/// Раскрыть строку в её содержимое или свернуть обратно.
+///
+/// Содержимое папки каталога подгружается лениво, и спрашивается оно ровно
+/// здесь: показать его без раскрытия некому, а листать сотню папок наперёд
+/// значит сходить в сеть сто раз ради одной строки.
 pub fn on_expand(state: &mut State, view: ViewId, key: String) {
-    if let Some(listing) = state.listing_mut(view) {
-        listing.expand(key);
+    let Some(listing) = state.listing_mut(view) else { return };
+    if !listing.expand(key.clone()) {
+        return;
     }
+    super::browse::request_children(state, view, key);
 }
 
 pub fn on_page(state: &mut State, view: ViewId, page: usize) {
     if let Some(listing) = state.listing_mut(view) {
         listing.page = page;
         listing.menu = Menu::Closed;
+        // Ушли со страницы, к которой привёл переход, — вести больше не к
+        // чему, и подсветка на другой странице говорила бы неправду.
+        listing.target = None;
     }
 }
 

@@ -46,9 +46,18 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
 
     // Сидкар — сразу, до подписи: даже если приложение упадёт на первом байте,
     // на диске уже будет известно, откуда файл, и запись о намерении не
-    // пропадёт. total_bytes пишем, если он уже известен из прошлой попытки.
-    let known_total = state.origins.get(&name).and_then(|o| o.total_bytes);
-    write_sidecar(state, &name, &req.identifier, &product, known_total);
+    // пропадёт. Из прежнего сидкара переносим то, что о записи известно, но
+    // добыто не этим запросом: ожидаемый размер с прошлой попытки и состав
+    // снимка, если его успели обойти.
+    let (total_bytes, siblings) = state.origins.get(&name)
+        .map_or((None, 0), |origin| (origin.total_bytes, origin.siblings));
+    write_sidecar(state, &name, storage::OriginSidecar {
+        provider: storage::PROVIDER_NAME.to_string(),
+        identifier: req.identifier.clone(),
+        total_bytes,
+        product: product.clone(),
+        siblings,
+    });
 
     // Перекачка доведённого файла сносит его до старта. Качальщик пишет в
     // `.part` и переименовывает его только в конце, поэтому иначе рядом с
@@ -170,13 +179,17 @@ pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
     // начнётся новая закачка — сидкар это единственное, что переживает
     // перезапуск.
     if event.total_bytes > 0 {
-        let (identifier, name) = (dl.identifier.clone(), dl.name.clone());
-        if state.total_bytes(&name) != event.total_bytes {
-            // Снимок берётся из уже записанного сидкара: он приехал с запросом
-            // закачки, а здесь его взять неоткуда — и переписать пустым значило
-            // бы потерять то, к чему файл относится.
-            let product = state.product_of(&name).unwrap_or_default().to_string();
-            write_sidecar(state, &name, &identifier, &product, Some(event.total_bytes));
+        let name = dl.name.clone();
+        // Правим одно поле поверх записанного сидкара: всё остальное приехало
+        // с запросом закачки, а здесь этих фактов взять неоткуда — переписать
+        // их пустыми значило бы потерять и происхождение, и снимок.
+        let known = state.origins.get(&name).cloned()
+            .filter(|origin| origin.total_bytes != Some(event.total_bytes));
+        if let Some(known) = known {
+            write_sidecar(state, &name, storage::OriginSidecar {
+                total_bytes: Some(event.total_bytes),
+                ..known
+            });
         }
     }
     catalog::publish(state);

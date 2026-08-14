@@ -66,15 +66,61 @@ impl RowKind {
     }
 }
 
+/// Голый ключ хранилища: без завершающего слэша, которым листинг помечает
+/// папку.
+///
+/// Слэш — признак строки листинга, а не часть пути: один и тот же продукт
+/// приходит из каталога со слэшем, а из выдачи поиска без него. Правило
+/// написано здесь одно на всех — от него зависят и папка записи, и путь
+/// листинга, и ключ снимка, и сравнение строки с ключом перехода, а пять его
+/// копий однажды сочли бы один снимок за два.
+pub fn bare(key: &str) -> &str {
+    key.trim_end_matches('/')
+}
+
 /// Папка, в которой лежит ключ провайдера. Выводится из самого ключа — своего
 /// поля под это нет ни у каталога, ни у библиотеки, — и написана здесь одна на
 /// всех: её спрашивают и строка списка, и полоса под глобусом, а две копии
 /// правила «где кончается путь» однажды ответят по-разному.
 pub fn folder_of(identifier: &str) -> &str {
-    let path = identifier.trim_end_matches('/');
+    let path = bare(identifier);
     match path.rfind('/') {
         Some(cut) => &path[..cut],
         None => "",
+    }
+}
+
+/// Путь, которым листают содержимое этой записи: ключ папки — всегда со
+/// слэшем. Без него листинг по префиксу показал бы саму папку вместо того, что
+/// в ней лежит.
+pub fn folder_path(identifier: &str) -> String {
+    format!("{}/", bare(identifier))
+}
+
+/// Чем смотреть снимок, о котором известен один ключ.
+///
+/// Правило одно на всех, кто предлагает «смотреть» не из строки списка: полоса
+/// под шаром и список слоёв. Строка решает это сама — род и запись библиотеки
+/// записаны прямо в ней.
+///
+/// Порядок вопросов — от дешёвого к дорогому. Скачанное смотрят с диска: файл
+/// под рукой, и ходить за ним по сети значит ждать того, что уже есть. Снимок,
+/// лежащий каталогом, открывается через провайдера — растр внутри выбирает он,
+/// потому что `GET` по пути каталога отвечает 404. Остальное открывается прямо.
+pub fn preview_of(
+    library: &LibraryState,
+    identifier: &str,
+    folder: bool,
+) -> crate::module::ViewMsg {
+    use crate::module::ViewMsg;
+    if let Some(entry) = library.by_identifier(identifier)
+        && status_of(entry) == LibraryStatus::LibComplete
+    {
+        return ViewMsg::Preview(entry.name.clone());
+    }
+    match folder {
+        true => ViewMsg::PreviewProduct(identifier.to_string()),
+        false => ViewMsg::PreviewRemote(identifier.to_string()),
     }
 }
 
@@ -101,10 +147,25 @@ pub struct Row {
     /// которого его позвали, а вывести это из ключа она не может — раскладку
     /// бакета знает провайдер (см. `ListEntry.product`).
     pub product: String,
-    /// Файлы, из которых состоит снимок. Непусто только у строки-снимка,
-    /// собранной из нескольких записей: раскрытая строка показывает их
-    /// подстроками, закрытая — молчит о них.
+    /// Содержимое строки: файлы снимка или записи раскрытой папки.
+    ///
+    /// У сложенной строки они есть всегда — она из них и сложена, и по ним
+    /// считается всё, что о ней известно (см. [`Row::stored`]); у папки
+    /// каталога наполняются только раскрытые, потому что до раскрытия их и не
+    /// спрашивали. Показывать содержимое или молчать о нём — дело не этого
+    /// поля, а раскладки (см. `arrange::expand`).
     pub children: Vec<Row>,
+    /// Строка сложена из записей библиотеки, а не является записью. Качать и
+    /// открывать нужно её файлы: её ключ — путь снимка в хранилище, и послать
+    /// его в закачку значит попросить скачать папку одним объектом.
+    ///
+    /// Отдельным полем, а не «есть дети»: детей заводит и раскрытая папка
+    /// каталога, а она как раз обычная запись, и заход внутрь у неё никто не
+    /// отнимает.
+    pub folded: bool,
+    /// Содержимое раскрытой папки ещё едет. Пустота под ней читается как
+    /// «здесь ничего нет», и это неправда до конца листинга.
+    pub loading: bool,
     pub status: RowStatus,
 }
 
@@ -117,6 +178,35 @@ impl Row {
         if self.identifier.is_empty() { &self.name } else { &self.identifier }
     }
 
+    /// Ключ снимка, каким его знает провайдер (см. [`bare`]). Им снимок
+    /// отмечают на шаре, кладут на него и открывают. Пуст у записи, которой
+    /// провайдер не знает вовсе, — такую ни очертить, ни показать.
+    pub fn snapshot_key(&self) -> &str {
+        bare(&self.identifier)
+    }
+
+    /// Та ли это строка, о которой говорит ключ перехода. Сравнивается голыми
+    /// ключами по той же причине, по какой они и голые: слэш есть в каталоге и
+    /// нет в выдаче, а строка одна и та же.
+    pub fn named(&self, key: &str) -> bool {
+        !key.is_empty() && bare(self.key()) == bare(key)
+    }
+
+    /// Снимок ли это — то, у чего есть контур, растры и своя единица показа.
+    /// Род отвечает на это почти всегда; исключение — скачанный файл, который
+    /// сам себе снимок: записью библиотеки он остаётся файлом
+    /// (см. `downloaded_rows`).
+    pub fn is_snapshot(&self) -> bool {
+        self.kind.is_product()
+            || (!self.product.is_empty() && self.product == self.snapshot_key())
+    }
+
+    /// Есть ли что раскрыть под этой строкой: файлы снимка или содержимое
+    /// папки. У папки каталога оно ещё не приехало — раскрытие его и спросит.
+    pub fn expandable(&self) -> bool {
+        self.folded || self.kind.is_folder()
+    }
+
     /// Путь папки, в которой лежит запись: по нему строки группируются, он же
     /// показывается в меню строки.
     pub fn folder(&self) -> &str {
@@ -126,10 +216,10 @@ impl Row {
     /// Сколько байт этой записи уже на диске: у недокачанной — скачанное, у
     /// готовой — весь размер.
     pub fn stored(&self) -> u64 {
-        // У строки с детьми своих байтов нет: она сумма своих файлов, и
+        // У сложенной строки своих байтов нет: она сумма своих файлов, и
         // спрашивать её собственный статус значило бы считать снимок пустым
         // ровно тогда, когда часть его уже лежит на диске.
-        if !self.children.is_empty() {
+        if self.folded {
             return self.children.iter().map(Row::stored).sum();
         }
         match &self.status {
@@ -160,8 +250,9 @@ impl Row {
     }
 
     /// Строка того, что содержит другое: папки пути или снимка, разложенного
-    /// каталогом. Размера и времени у такой записи нет — за общим префиксом
-    /// ключей в S3 не стоит ни того, ни другого.
+    /// каталогом. Размера и времени за ней не стоит — в S3 папка это общий
+    /// префикс ключей, и ни того, ни другого за ним нет; у снимка их знает
+    /// каталог, и приписывает их вызывающий (см. `components::rows::from_key`).
     pub fn container_row(identifier: String, title: String, status: RowStatus, kind: RowKind) -> Row {
         Row {
             identifier,
@@ -173,6 +264,8 @@ impl Row {
             product_type: String::new(),
             product: String::new(),
             children: Vec::new(),
+            folded: false,
+            loading: false,
             status,
         }
     }
@@ -200,6 +293,8 @@ impl Row {
             // сидкаре — файл вывалился бы из своего снимка молча.
             product: entry.product.clone(),
             children: Vec::new(),
+            folded: false,
+            loading: false,
             status,
         }
     }
@@ -237,6 +332,8 @@ impl Row {
                 product_type: String::new(),
                 product: String::new(),
                 children: Vec::new(),
+                folded: false,
+                loading: false,
                 status: RowStatus::Remote,
             },
         }
@@ -276,15 +373,22 @@ pub fn downloaded_rows(library: &LibraryState) -> Vec<Row> {
             // носила бы тот же ключ строки, и список сопоставлял бы состояние
             // виджетов между ней и её же ребёнком.
             true => files.remove(0),
-            false => snapshot(key, files),
+            // Состав снимка спрашиваем у библиотеки, а не складываем здесь:
+            // правило «сколько файлов в снимке» одно на всех, и второй его
+            // носитель разошёлся бы с первым (см. `LibraryState::snapshot`).
+            false => {
+                let (_, siblings) = library.snapshot(&key);
+                snapshot(key, siblings, files)
+            }
         })
         .chain(alone)
         .collect()
 }
 
 /// Строка снимка поверх его файлов: то, что о снимке можно сказать, сложено из
-/// того, что известно о каждом файле.
-fn snapshot(product: String, files: Vec<Row>) -> Row {
+/// того, что известно о каждом файле, — кроме одного. Сколько файлов в снимке
+/// всего (`siblings`), из записей не выводится: их столько, сколько качали.
+fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
     let done = files.iter().filter(|file| matches!(file.status, RowStatus::Complete)).count();
     let downloading = files.iter().any(|file| matches!(file.status, RowStatus::Downloading { .. }));
     let size = files.iter().map(Row::stored).sum();
@@ -296,7 +400,13 @@ fn snapshot(product: String, files: Vec<Row>) -> Row {
         // Пока хоть один файл едет, снимок едет весь: сумма байтов по частям
         // была бы правдой о файлах, а не о нём.
         (true, ..) => RowStatus::Downloading { done: size, total: 0 },
-        (false, done, total) if done == total => RowStatus::Complete,
+        // «На диске» — только когда известно, из скольки файлов снимок состоит,
+        // и все они здесь и доведены. Без этого числа доведённым выглядел бы
+        // всякий снимок, у которого доведено скачанное, — три файла из
+        // двадцати шести читались бы как целый снимок.
+        (false, done, total) if siblings > 0 && done == total && total as u32 == siblings => {
+            RowStatus::Complete
+        }
         // Не доведён ни один — снимок оборван, а не «частично скачан»: зелёная
         // строка с нулём на диске обещает то, чего нет, и проходит отбор «на
         // диске» вместе с целыми.
@@ -314,6 +424,8 @@ fn snapshot(product: String, files: Vec<Row>) -> Row {
         product_type: String::new(),
         product,
         children: files,
+        folded: true,
+        loading: false,
         status,
     }
 }
@@ -332,20 +444,30 @@ mod tests {
             total: done,
             status: status as i32,
             modified: 0,
+            siblings: 0,
         }
+    }
+
+    /// Те же записи, но снимок к этому времени обойдён: в нём столько файлов,
+    /// сколько сказано. Число носит каждая запись — оно и приходит к ним по
+    /// одной, в сидкары (см. data-library::catalog::on_snapshot).
+    fn walked(files: u32, mut entries: Vec<LibraryEntry>) -> Vec<LibraryEntry> {
+        for entry in &mut entries {
+            entry.siblings = files;
+        }
+        entries
     }
 
     /// Файлы одного снимка сходятся в одну строку, а то, что снимку не
     /// принадлежит, остаётся само по себе — это и есть весь смысл свёртки.
     #[test]
     fn files_of_one_snapshot_fold_into_one_row() {
-        let rows = downloaded_rows(&LibraryState {
-            entries: vec![
-                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
-                entry("dem.tif", "", LibraryStatus::LibComplete, 7),
-                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 20),
-            ],
-        });
+        let mut entries = walked(2, vec![
+            entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
+            entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 20),
+        ]);
+        entries.push(entry("dem.tif", "", LibraryStatus::LibComplete, 7));
+        let rows = downloaded_rows(&LibraryState { entries });
 
         assert_eq!(rows.len(), 2, "снимок и одиночный файл");
         let snapshot = &rows[0];
@@ -384,6 +506,25 @@ mod tests {
         assert!(matches!(rows[0].status, RowStatus::Partial { done: 1 }));
     }
 
+    /// Целым снимок называется только по обходу: доведённые файлы говорят,
+    /// сколько скачали, а не сколько в снимке есть.
+    #[test]
+    fn snapshot_is_whole_only_when_its_size_is_known() {
+        let files = vec![
+            entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
+            entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 20),
+        ];
+        // Снимок не обходили: два доведённых файла — это два файла на диске.
+        let rows = downloaded_rows(&LibraryState { entries: files.clone() });
+        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2 }));
+        // Обошли и насчитали три — двух мало.
+        let rows = downloaded_rows(&LibraryState { entries: walked(3, files.clone()) });
+        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2 }));
+        // Насчитали два — снимок на диске целиком.
+        let rows = downloaded_rows(&LibraryState { entries: walked(2, files) });
+        assert!(matches!(rows[0].status, RowStatus::Complete));
+    }
+
     /// Снимок, у которого не доведён ни один файл, оборван — а не «частично
     /// скачан»: зелёная строка с нулём на диске обещала бы то, чего нет.
     #[test]
@@ -401,6 +542,10 @@ mod tests {
 
     /// Снимок из одного файла — это и есть тот файл: обёртка над ним носила бы
     /// тот же ключ строки, что и её единственный ребёнок.
+    ///
+    /// Записью библиотеки он при этом остаётся файлом, а снимком его делает
+    /// совпадение ключей: род об этом сказать не может, а контур и шар у него
+    /// есть наравне с прочими снимками.
     #[test]
     fn single_file_snapshot_is_not_wrapped() {
         let mut only = entry("S1A_X.zip", "eodata/S1A_X.zip", LibraryStatus::LibComplete, 9);
@@ -409,5 +554,69 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].children.is_empty(), "обёртки нет");
         assert_eq!(rows[0].name, "S1A_X.zip", "запись библиотеки осталась записью");
+        assert!(rows[0].is_snapshot(), "снимком его делает совпадение ключей");
+        assert!(!rows[0].expandable(), "раскрывать в нём нечего");
+    }
+
+    /// Сложенная строка раскрывается, но сама записью не является: её файлы
+    /// качают и открывают по одному, а её собственный ключ — путь снимка.
+    #[test]
+    fn a_folded_snapshot_expands_but_is_not_a_record() {
+        let rows = downloaded_rows(&LibraryState {
+            entries: vec![
+                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10),
+                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 20),
+            ],
+        });
+        assert!(rows[0].folded);
+        assert!(rows[0].expandable());
+        assert!(rows[0].name.is_empty(), "своего имени в библиотеке у неё нет");
+        // Файлы под ней — обычные записи, и раскрывать в них нечего.
+        assert!(!rows[0].children[0].folded);
+        assert!(!rows[0].children[0].expandable());
+    }
+
+    /// Слэш папки в ключе перехода в счёт не идёт: в каталоге он есть, а в
+    /// выдаче поиска нет — строка при этом одна и та же.
+    #[test]
+    fn a_row_answers_to_its_key_with_or_without_the_folder_slash() {
+        let row = Row::container_row(
+            "eodata/S2B_X.SAFE/".to_string(),
+            "S2B_X.SAFE".to_string(),
+            RowStatus::Remote,
+            RowKind::Product { folder: true },
+        );
+        assert!(row.named("eodata/S2B_X.SAFE"));
+        assert!(row.named("eodata/S2B_X.SAFE/"));
+        assert!(!row.named("eodata/S2B_Y.SAFE"));
+        assert!(!row.named(""), "пустой ключ не называет никого");
+    }
+
+    /// Смотреть скачанное надо с диска: файл под рукой, и ходить за ним по
+    /// сети значит ждать того, что уже есть.
+    #[test]
+    fn preview_prefers_the_downloaded_file() {
+        use crate::module::ViewMsg;
+        let key = "eodata/S1A_X.SAFE/quick-look.png";
+
+        let done = LibraryState {
+            entries: vec![entry("quick-look.png", "S1A_X.SAFE", LibraryStatus::LibComplete, 4)],
+        };
+        assert!(
+            matches!(preview_of(&done, key, false), ViewMsg::Preview(name) if name == "quick-look.png")
+        );
+
+        // Недокачанного на диске ещё нет — смотреть его надо из хранилища.
+        let started = LibraryState {
+            entries: vec![entry("quick-look.png", "S1A_X.SAFE", LibraryStatus::LibPaused, 4)],
+        };
+        assert!(matches!(preview_of(&started, key, false), ViewMsg::PreviewRemote(_)));
+
+        // Снимок, лежащий каталогом, открывает провайдер: GET по пути каталога
+        // отвечает 404, и растр внутри выбирает он.
+        assert!(matches!(
+            preview_of(&started, "eodata/S1A_X.SAFE", true),
+            ViewMsg::PreviewProduct(_)
+        ));
     }
 }

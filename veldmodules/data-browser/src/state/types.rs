@@ -3,63 +3,12 @@
 //! Своё состояние держит сам вариант `ViewKind`, а не модуль: два открытых
 //! Browse — это две независимые папки, а не один экран с общей переменной.
 
-use super::browse::BrowseState;
+use super::browse::{BrowseState, Children};
 use super::globe::GlobeState;
+use super::layout::PaneId;
 use super::listing::ListingState;
 use super::preview::PreviewState;
 use super::search::SearchState;
-
-/// Половина экрана. Их две и всегда две: «разделить надвое» — законченный
-/// жест, и его хватает, чтобы держать рядом список и то, чем он управляет.
-/// Произвольное дерево панелей потребовало бы способа его собирать и
-/// разбирать, то есть целого языка вместо одной кнопки.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Half {
-    First,
-    Second,
-}
-
-impl Half {
-    pub const BOTH: [Half; 2] = [Half::First, Half::Second];
-
-    pub fn other(self) -> Half {
-        match self {
-            Half::First => Half::Second,
-            Half::Second => Half::First,
-        }
-    }
-
-    pub(super) fn index(self) -> usize {
-        match self {
-            Half::First => 0,
-            Half::Second => 1,
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Half::First => "first",
-            Half::Second => "second",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Half> {
-        match key {
-            "first" => Some(Half::First),
-            "second" => Some(Half::Second),
-            _ => None,
-        }
-    }
-}
-
-/// Где встаёт вторая половина. Первая всегда там, где была, — иначе
-/// разделение экрана двигало бы то, на что человек смотрит.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Placement {
-    Right,
-    Left,
-    Below,
-}
 
 /// Куда двигать слой в наборе. Перечислением, а не «вверх: да/нет»: у сдвига
 /// два равноправных направления, и одно из них не является отрицанием другого
@@ -83,30 +32,6 @@ impl Shift {
             "up" => Some(Shift::Up),
             "down" => Some(Shift::Down),
             _ => None,
-        }
-    }
-}
-
-impl Placement {
-    pub const ALL: [Placement; 3] = [Placement::Right, Placement::Left, Placement::Below];
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Placement::Right => "right",
-            Placement::Left => "left",
-            Placement::Below => "below",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Placement> {
-        Placement::ALL.into_iter().find(|placement| placement.key() == key)
-    }
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Placement::Right => "Открыть справа",
-            Placement::Left => "Открыть слева",
-            Placement::Below => "Открыть снизу",
         }
     }
 }
@@ -135,6 +60,13 @@ impl std::str::FromStr for ViewId {
 }
 
 pub enum ViewKind {
+    /// Заведена, но ещё ничего не показывает: спрашивает, чем её наполнить.
+    /// Своего состояния у неё нет — весь её вид и есть этот вопрос.
+    ///
+    /// Вкладкой, а не пустой панелью: панель без вкладок в дереве не живёт
+    /// (см. `state::layout`), а место, где человек ещё не решил, что смотреть,
+    /// нужно — с него начинается всякое «открыть рядом».
+    Empty,
     Search(SearchState),
     Browse(BrowseState),
     /// Строки берутся из `LibraryState` — он один на модуль и приходит
@@ -159,6 +91,7 @@ impl ViewKind {
     pub fn opened_as(&self) -> Option<crate::module::NewTab> {
         use crate::module::NewTab;
         Some(match self {
+            ViewKind::Empty => NewTab::Empty,
             ViewKind::Search(_) => NewTab::Search,
             ViewKind::Browse(_) => NewTab::Browse,
             ViewKind::Downloaded(_) => NewTab::Downloaded,
@@ -176,7 +109,32 @@ impl ViewKind {
             ViewKind::Search(search) => Some(&mut search.listing),
             ViewKind::Browse(browse) => Some(&mut browse.listing),
             ViewKind::Downloaded(listing) => Some(listing),
-            ViewKind::Preview(_) | ViewKind::Globe(_) | ViewKind::Shown => None,
+            ViewKind::Empty | ViewKind::Preview(_) | ViewKind::Globe(_) | ViewKind::Shown => None,
+        }
+    }
+
+    /// Они же на чтение — их спрашивает сборка контуров: что в этом списке
+    /// отмечено (см. handlers::outline).
+    pub fn listing(&self) -> Option<&ListingState> {
+        match self {
+            ViewKind::Search(search) => Some(&search.listing),
+            ViewKind::Browse(browse) => Some(&browse.listing),
+            ViewKind::Downloaded(listing) => Some(listing),
+            ViewKind::Empty | ViewKind::Preview(_) | ViewKind::Globe(_) | ViewKind::Shown => None,
+        }
+    }
+
+    /// Содержимое раскрытых папок. Есть там, где строки приходят из каталога
+    /// провайдера: у скачанного файлы снимка уже под рукой, листать нечего.
+    pub fn children_mut(&mut self) -> Option<&mut Children> {
+        match self {
+            ViewKind::Search(search) => Some(&mut search.children),
+            ViewKind::Browse(browse) => Some(&mut browse.children),
+            ViewKind::Empty
+            | ViewKind::Downloaded(_)
+            | ViewKind::Preview(_)
+            | ViewKind::Globe(_)
+            | ViewKind::Shown => None,
         }
     }
 }
@@ -184,10 +142,11 @@ impl ViewKind {
 pub struct View {
     pub id: ViewId,
     pub kind: ViewKind,
-    /// В какой половине экрана лежит эта вкладка. Поле у вида, а не два списка
-    /// в состоянии: id уникален на всё окно, и поиск по нему обязан иметь один
-    /// ответ — а два списка отвечали бы на него перебором обоих.
-    pub half: Half,
+    /// В какой панели лежит эта вкладка. Поле у вида, а не список вкладок у
+    /// панели: id уникален на всё окно, и поиск по нему обязан иметь один
+    /// ответ — а список у каждой панели отвечал бы на него перебором всех, да
+    /// ещё и допускал бы вкладку сразу в двух местах.
+    pub pane: PaneId,
 }
 
 /// Сколько знаков заголовка помещается на вкладке. Имена продуктов Copernicus
@@ -199,6 +158,9 @@ impl ViewKind {
     /// Заголовок вкладки — последний сегмент пути, обрезанный до `TITLE_LIMIT`.
     pub fn title(&self) -> String {
         match self {
+            // Подпись у пустой вкладки та же, которой её предлагает «плюс»:
+            // это одна и та же вещь до и после нажатия.
+            ViewKind::Empty => crate::module::NewTab::Empty.title().to_string(),
             ViewKind::Search(_) => "Поиск снимков".to_string(),
             ViewKind::Browse(browse) => match last_segment(&browse.current_path) {
                 "" => "Каталог".to_string(),

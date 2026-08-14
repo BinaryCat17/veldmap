@@ -2,7 +2,7 @@
 //! Стили и геометрия — в style.rs.
 
 use crate::proto;
-use super::style::{Alignment, Background, Length, Padding};
+use super::style::{Alignment, Background, Color, Length, Padding};
 
 pub struct Element<M> {
     pub widget: proto::Widget,
@@ -91,6 +91,8 @@ pub trait Payload {
     fn value(&self) -> &str;
     fn pointer(&self) -> Option<&proto::PointerEvent>;
     fn size(&self) -> Option<&proto::ViewportSize>;
+    /// Что и куда бросили. Пусто — нагрузка другого вида.
+    fn drop(&self) -> Option<&proto::DropEvent>;
 }
 
 impl Payload for proto::UiEventResponse {
@@ -111,6 +113,13 @@ impl Payload for proto::UiEventResponse {
     fn size(&self) -> Option<&proto::ViewportSize> {
         match &self.payload {
             Some(proto::ui_event_response::Payload::Size(size)) => Some(size),
+            _ => None,
+        }
+    }
+
+    fn drop(&self) -> Option<&proto::DropEvent> {
+        match &self.payload {
+            Some(proto::ui_event_response::Payload::Drop(drop)) => Some(drop),
             _ => None,
         }
     }
@@ -473,11 +482,6 @@ impl<M> Container<M> {
         self.widget.style = Some(style.to_proto());
         self
     }
-    /// Обрезать содержимое по своим границам — см. `Container.clip`.
-    pub fn clip(mut self) -> Self {
-        self.widget.clip = true;
-        self
-    }
     pub fn align_x(mut self, align: Alignment) -> Self {
         self.widget.align_x = align as i32;
         self
@@ -508,6 +512,36 @@ impl<M> Container<M> {
         M: UiMessage,
     {
         self.interaction().on_press = Some(handler(&message));
+        self
+    }
+
+    /// Коробку можно взять мышью и перенести. Нагрузка — то, чем владелец
+    /// разметки её называет: она вернётся ему в событии броска.
+    pub fn draggable(mut self, payload: impl Into<String>) -> Self {
+        self.widget.drag = Some(proto::Drag { payload: payload.into() });
+        self
+    }
+
+    /// В коробку можно бросить перенесённое.
+    ///
+    /// Сообщение принимается способом его собрать, а не готовым, — как у поля
+    /// ввода: что принесли и в какой край попали, знает только рендерер. Адресат
+    /// при этом уезжает именем зоны (`UiEventResponse.key`), и зон в разметке
+    /// потому может быть сколько угодно.
+    pub fn on_drop(
+        mut self,
+        message: impl FnOnce(proto::DropEvent) -> M,
+        edges: bool,
+        highlight: Color,
+    ) -> Self
+    where
+        M: UiMessage,
+    {
+        self.widget.drop = Some(proto::Drop {
+            on_drop: Some(substituted(&message(proto::DropEvent::default()))),
+            edges,
+            highlight: Some(highlight.to_proto()),
+        });
         self
     }
 
@@ -561,6 +595,8 @@ impl<M> Scrollable<M> {
                 height: Some(proto::Length { value: Some(proto::length::Value::Fill(true)) }),
                 direction: proto::ScrollDirection::ScrollVertical as i32,
                 scrollbar: None,
+                name: String::new(),
+                scroll_to: None,
             },
             _marker: std::marker::PhantomData,
         }
@@ -574,6 +610,21 @@ impl<M> Scrollable<M> {
     /// Вид и ширина полосы прокрутки.
     pub fn scrollbar(mut self, bar: super::style::Scrollbar) -> Self {
         self.widget.scrollbar = Some(bar.to_proto());
+        self
+    }
+
+    /// Имя области — им её адресует наводка. Списков на экране несколько, и
+    /// без имени наводка увела бы их все разом.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.widget.name = name.into();
+        self
+    }
+
+    /// Куда встать по вертикали и по чьей просьбе. `None` — не наводить.
+    /// Применяется один раз на просьбу (см. `Scrollable.scroll_to` в
+    /// types.proto).
+    pub fn scroll_to(mut self, aim: Option<proto::ScrollTo>) -> Self {
+        self.widget.scroll_to = aim;
         self
     }
 }
@@ -660,6 +711,82 @@ impl<M> From<Space<M>> for Element<M> {
 
 pub fn space<M>(width: Length, height: Length) -> Space<M> {
     Space::new(width, height)
+}
+
+pub struct Divider<M> {
+    widget: proto::Divider,
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> Divider<M> {
+    /// Граница с обязательным обработчиком: без него это просто линия, а её
+    /// рисует контейнер (см. `hairline` у клиентов).
+    ///
+    /// Сообщение принимается способом его собрать, а не готовым, — как у
+    /// ползунка: сдвиг подставит рендерер. Адресат при этом уезжает именем
+    /// границы (`UiEventResponse.key`), и границ в раскладке потому может быть
+    /// сколько угодно.
+    pub fn new(axis: proto::DividerAxis, on_drag: impl FnOnce(f32) -> M) -> Self
+    where
+        M: UiMessage,
+    {
+        Self {
+            widget: proto::Divider {
+                axis: axis as i32,
+                thickness: 1.0,
+                line: 1.0,
+                color: None,
+                active: None,
+                on_drag: Some(substituted(&on_drag(0.0))),
+                on_release: None,
+            },
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Ширина полосы, за которую берутся, и толщина видимой линии.
+    pub fn thickness(mut self, thickness: f32) -> Self {
+        self.widget.thickness = thickness;
+        self
+    }
+
+    pub fn line(mut self, line: f32) -> Self {
+        self.widget.line = line;
+        self
+    }
+
+    /// Границу отпустили — конец перетаскивания одним событием.
+    pub fn on_release(mut self, message: M) -> Self
+    where
+        M: UiMessage,
+    {
+        self.widget.on_release = Some(handler(&message));
+        self
+    }
+
+    /// Цвет линии в покое и когда за границу можно взяться.
+    pub fn color(mut self, color: Color, active: Color) -> Self {
+        self.widget.color = Some(color.to_proto());
+        self.widget.active = Some(active.to_proto());
+        self
+    }
+}
+
+impl<M> From<Divider<M>> for Element<M> {
+    fn from(d: Divider<M>) -> Self {
+        proto::Widget {
+            r#type: Some(proto::widget::Type::Divider(d.widget)),
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
+pub fn divider<M: UiMessage>(
+    axis: proto::DividerAxis,
+    on_drag: impl FnOnce(f32) -> M,
+) -> Divider<M> {
+    Divider::new(axis, on_drag)
 }
 
 pub struct Tooltip<M> {

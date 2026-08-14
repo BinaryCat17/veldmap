@@ -54,6 +54,12 @@ pub struct PluginUiState {
     /// Темп разбора кадров, раз в несколько секунд в trace.log.
     pub frames: crate::module::frames::FrameMeter,
 
+    /// По какой просьбе уже наведены области прокрутки: имя области → номер
+    /// применённой просьбы. Нужно затем, что наводка одноразовая: разметка
+    /// пересобирается на каждое событие, и наводка, применяемая каждый кадр,
+    /// держала бы прокрутку намертво (см. `Scrollable.scroll_to`).
+    pub aimed: HashMap<String, u64>,
+
     /// Пойманное iced'ом за этот кадр; рассылается сразу после рендера
     /// (см. handlers::render_plugin_if_needed).
     pub pending_messages: Vec<UiMessage>,
@@ -124,6 +130,7 @@ impl PluginUiState {
             target_view: None,
             monitor_fps: 60,
             frames: crate::module::frames::FrameMeter::new(),
+            aimed: HashMap::new(),
             pending_messages: Vec::new(),
             surface_handle: None,
             surface_format: 0,
