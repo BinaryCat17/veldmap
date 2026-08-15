@@ -70,6 +70,17 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
     // Верхний из тех, что видно: слоёв бывает несколько, назвать одной строкой
     // можно только один, а собирающийся или скрытый назвал бы то, чего на шаре
     // нет.
+    // Выбранный ищется и среди слоёв: контура у снимка может не быть вовсе —
+    // геометрию каталог знает не про всё, а отметку с него могли снять, — и
+    // тогда назвать его больше нечем. Молчаливый откат к верхнему слою здесь
+    // хуже всего: полоса называет не тот снимок, к которому только что привели,
+    // и её кнопки уводят тоже не к нему.
+    let picked = state.picked_key();
+    let layer_named = |key: &str| {
+        state.overlays.iter().find(move |overlay| overlay.identifier == key).map(|overlay| {
+            Subject { label: &overlay.label, key: &overlay.identifier, folder: overlay.folder }
+        })
+    };
     let subject: Option<Subject<'_>> = state
         .picked()
         .map(|outlined| Subject {
@@ -77,6 +88,7 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
             key: &outlined.key,
             folder: outlined.folder,
         })
+        .or_else(|| layer_named(picked))
         .or_else(|| {
             state
                 .overlays

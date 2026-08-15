@@ -202,9 +202,20 @@ fn on_path(state: &mut State, view: ViewId, correlation_id: String, response: Li
     browse.error = None;
     browse.items.extend(response.entries.into_iter().map(item));
 
-    let more = !response.next_token.is_empty() && browse.items.len() < MAX_ITEMS;
+    // Потолок обхода. Молча обрывать нельзя — тем же правилом, что и у
+    // раскрытой строки (см. [`on_children`]): папка с тысячей записей и папка,
+    // которой оборвали хвост, с виду одинаковы, а «здесь всё» и «здесь начало»
+    // — разные ответы.
+    let cut = !response.next_token.is_empty() && browse.items.len() >= MAX_ITEMS;
+    let more = !response.next_token.is_empty() && !cut;
     if !more {
         browse.request.settle(&correlation_id);
+        if cut {
+            let shown = browse.items.len();
+            let path = browse.current_path.clone();
+            veldsdk::log::warn!(target: "handlers", "листинг '{}' оборван на {}", path, shown);
+            state.notice = Some(format!("Показаны первые {} записей папки", shown));
+        }
         // Строка перехода могла приехать только что — теперь видно, на какой
         // она странице.
         aim(state, view);

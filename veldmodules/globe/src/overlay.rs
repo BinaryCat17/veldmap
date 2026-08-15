@@ -217,6 +217,13 @@ pub struct Raster {
     /// Что уже спрошено, что производится и чего больше не просить — общий
     /// учёт потребителя тайлов (см. `veldmap_image_tiler_wrap::tiles`).
     pub fetch: Fetch,
+    /// Ход идущего прохода производителя: прочитано байт источника из скольки.
+    /// Нулевой знаменатель — прохода нет.
+    ///
+    /// Хранится, потому что ступень бывает в один тайл, а чтобы его отдать,
+    /// последовательный источник читается целиком: по ячейкам всё это время
+    /// сделано ровно ноль, и сказать о работе больше нечем.
+    pub pass: (u64, u64),
 }
 
 impl Raster {
@@ -227,6 +234,16 @@ impl Raster {
             meta: None,
             describe: veldsdk::Latest::default(),
             fetch: Fetch::default(),
+            pass: (0, 0),
+        }
+    }
+
+    /// Доля прочитанного идущим проходом, 0..1. Ноль — прохода нет либо он
+    /// только начался.
+    pub fn read(&self) -> f64 {
+        match self.pass {
+            (_, 0) => 0.0,
+            (read, total) => (read as f64 / total as f64).clamp(0.0, 1.0),
         }
     }
 }
@@ -250,6 +267,33 @@ pub struct Overlay {
     /// хранилище на попечение вытеснения — показ обратно тогда мгновенный, а
     /// платить за них памятью приходится только пока их не вытеснили.
     pub hidden: bool,
+    /// Почему слой не ляжет: ни один растр не описался. Пусто — всё в порядке.
+    /// Причина уезжает приславшему ходом добычи: убрать наложение — его дело,
+    /// набор принадлежит ему (см. `OverlayProgress.error`).
+    pub error: String,
+    /// Ход добычи, каким его посчитал последний кадр (см. [`Progress`]).
+    ///
+    /// Хранится, а не выводится на месте: вывести его можно только при живом
+    /// взгляде — ступень считается матрицей кадра, — а рассказать о слое надо и
+    /// тогда, когда вкладку с шаром закрыли. Молча замерший счёт у получателя
+    /// выглядит зависшей загрузкой.
+    pub progress: Progress,
+}
+
+/// Ход добычи одного слоя.
+///
+/// `share` — доля пути слоя, и считается она ступенями пирамиды, а не ячейками
+/// кадра: ступеней столько, сколько их есть, и каждая закрывается один раз, а
+/// видимых ячеек столько, сколько сейчас попало в кадр. Полоса, выведенная из
+/// второго, ездит взад-вперёд на каждом движении камеры, ничего при этом не
+/// сообщая.
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct Progress {
+    /// Ячеек текущего заказа доведено и сколько их в нём. Заказ, а не кадр:
+    /// см. `tiles::Fetch::ordered`.
+    pub ready: u32,
+    pub total: u32,
+    pub share: f32,
 }
 
 /// Что рисовать у наложения прямо сейчас: какой растр и каким уровнем.
@@ -266,6 +310,15 @@ pub struct Choice {
 pub struct Wanted {
     pub choice: Choice,
     pub cells: Vec<Addr>,
+    /// Куда идут и откуда: уровень, на котором картинка станет резкой, и
+    /// вершина пирамиды, с которой начинают. Ступень (`choice.level`)
+    /// спускается от второй к первому, и «сколько слою осталось» — это она.
+    ///
+    /// Ими меряется ход добычи, а не числом видимых ячеек: видимое есть
+    /// функция камеры и меняется на каждом кадре жеста, а ступеней у слоя
+    /// столько, сколько их есть, и каждая закрывается один раз.
+    pub target: u32,
+    pub top: u32,
 }
 
 /// Взгляд, которым меряется желаемое: чем проецировать, откуда смотрят и какой
@@ -362,10 +415,11 @@ impl Overlay {
         store: &Store,
     ) -> Wanted {
         let (target, cells) = self.target_level(meta, look, cap_tiles);
+        let top = meta.levels - 1;
         let fetch = self.raster(role).map(|raster| &raster.fetch);
         let (level, cells) = tiles::rung(
             target,
-            meta.levels - 1,
+            top,
             |level| match level == target {
                 // Целевой уже посчитан потолком выше — считать его второй раз
                 // значит второй раз проецировать все его ячейки.
@@ -373,11 +427,16 @@ impl Overlay {
                 false => self.visible(meta, level, look),
             },
             |addr| {
-                store.contains(&meta.fingerprint, addr)
-                    || fetch.is_some_and(|fetch| fetch.hopeless(addr))
+                fetch.is_some_and(|fetch| tiles::settled(store, fetch, &meta.fingerprint, addr))
+                    || store.contains(&meta.fingerprint, addr)
             },
         );
-        Wanted { choice: Choice { role, fingerprint: meta.fingerprint.clone(), level }, cells }
+        Wanted {
+            choice: Choice { role, fingerprint: meta.fingerprint.clone(), level },
+            cells,
+            target,
+            top,
+        }
     }
 
     /// Уровень, к которому идут, и его видимые ячейки: ближайший, чей пиксель
@@ -582,6 +641,8 @@ mod tests {
             sources: Vec::new(),
             opacity: 1.0,
             hidden: false,
+            error: String::new(),
+            progress: Progress::default(),
         }
     }
 

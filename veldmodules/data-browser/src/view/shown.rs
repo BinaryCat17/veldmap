@@ -156,6 +156,18 @@ fn header(total: usize, contours: usize, shown: usize, ready: usize) -> Element<
 fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize) -> Element<Msg> {
     let key = overlay.identifier.clone();
     let dim = overlay.hidden || !overlay.on_globe();
+    // Скрытый слой гасится фоном, а не только чернилами: приглушённые чернила
+    // здесь уже заняты — ими сказано «на шаре его ещё нет», и скрытый от
+    // собирающегося отличался бы одним словом справа. Подсветка старше:
+    // выделенный слой назван полосой под шаром и обведён на нём лентой, и
+    // строка обязана сказать то же самое.
+    let tint = if state.picked_key() == key {
+        theme::RowTint::Picked
+    } else if overlay.hidden {
+        theme::RowTint::Dim
+    } else {
+        theme::RowTint::Plain
+    };
 
     let name = row![
         theme::row_glyph::<Msg>(
@@ -212,18 +224,24 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize)
         table::hinted(
             theme::row_button_icon(
                 if overlay.hidden { theme::glyph::EYE_OFF } else { theme::glyph::EYE },
-                false,
+                // Скрытие — включённый режим строки, и кнопка, которая его
+                // держит, стои́т нажатой: иначе о нём говорит один
+                // перечёркнутый глаз в одиннадцать точек.
+                match overlay.hidden {
+                    true => theme::IconTone::Raised,
+                    false => theme::IconTone::Rest,
+                },
             )
             .on_press(Msg::OverlayHidden(key.clone(), !overlay.hidden)),
             if overlay.hidden { "Показать на шаре" } else { "Скрыть" },
         ),
         table::hinted(
-            theme::row_button_icon(theme::glyph::GLOBE, false)
-                .on_press(Msg::In(view, ViewMsg::GlobeShow(key.clone()))),
-            "Навести шар",
+            theme::row_button_icon(theme::glyph::GLOBE, theme::IconTone::Rest)
+                .on_press(Msg::OutlineFocus(key.clone())),
+            "Навести и выделить",
         ),
         table::hinted(
-            theme::row_button_icon(theme::glyph::TRASH, false)
+            theme::row_button_icon(theme::glyph::TRASH, theme::IconTone::Rest)
                 .on_press(Msg::OverlayRemove(key.clone())),
             "Убрать",
         ),
@@ -252,7 +270,7 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize)
     });
 
     column![
-        container(line).width(Length::Fill).height(Length::Fixed(ROW_HEIGHT)),
+        theme::layer_row(line, tint).width(Length::Fill).height(Length::Fixed(ROW_HEIGHT)),
         theme::hairline(theme::LINE_ROW),
     ]
     .width(Length::Fill)
@@ -285,8 +303,6 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
     .width(Length::Fill);
 
     let items = vec![
-        menu::Item::new("Навести шар", Msg::OutlineFocus(key.clone()))
-            .glyph(theme::glyph::GLOBE),
         menu::Item::new(
             "Смотреть снимок",
             Msg::In(view, preview_of(&state.library, &key, outlined.folder)),
@@ -295,17 +311,32 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
         menu::Item::new("Показать в каталоге", Msg::In(view, ViewMsg::InCatalog(key.clone())))
             .glyph(theme::glyph::FOLDER),
     ];
-    let anchor = theme::row_button_icon(theme::glyph::MORE, open)
-        .on_press(Msg::OverlayMenu(if open { None } else { Some(key.clone()) }));
+    let anchor = theme::row_button_icon(
+        theme::glyph::MORE,
+        match open {
+            true => theme::IconTone::Raised,
+            false => theme::IconTone::Rest,
+        },
+    )
+    .on_press(Msg::OverlayMenu(if open { None } else { Some(key.clone()) }));
 
+    // Значки те же и в том же порядке, что у строки слоя: слои и контуры лежат
+    // в одном списке друг под другом, и одинаково подписанное действие обязано
+    // быть одним и тем же. Разводит их первый значок — то, чего у соседней
+    // строки нет: слой кладут растром, а слою прятать.
     let buttons = row![
         table::hinted(
-            theme::row_button_icon(theme::glyph::LAYERS, false)
+            theme::row_button_icon(theme::glyph::LAYERS, theme::IconTone::Rest)
                 .on_press(Msg::In(view, ViewMsg::GlobeShow(key.clone()))),
             "Положить растром",
         ),
         table::hinted(
-            theme::row_button_icon(theme::glyph::TRASH, false)
+            theme::row_button_icon(theme::glyph::GLOBE, theme::IconTone::Rest)
+                .on_press(Msg::OutlineFocus(key.clone())),
+            "Навести и выделить",
+        ),
+        table::hinted(
+            theme::row_button_icon(theme::glyph::TRASH, theme::IconTone::Rest)
                 .on_press(Msg::OutlineRemove(key.clone())),
             "Убрать контур",
         ),
@@ -327,8 +358,12 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
     .height(Length::Fill)
     .padding(Padding { top: 0.0, bottom: 0.0, left: theme::GUTTER, right: theme::GUTTER });
 
+    let tint = match state.picked_key() == key {
+        true => theme::RowTint::Picked,
+        false => theme::RowTint::Plain,
+    };
     column![
-        container(line).width(Length::Fill).height(Length::Fixed(theme::ROW_HEIGHT)),
+        theme::layer_row(line, tint).width(Length::Fill).height(Length::Fixed(theme::ROW_HEIGHT)),
         theme::hairline(theme::LINE_ROW),
     ]
     .width(Length::Fill)
@@ -350,8 +385,14 @@ fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> 
     let key = overlay.identifier.clone();
     let open = state.layer_menu(&key);
 
-    let anchor = theme::row_button_icon(theme::glyph::MORE, open)
-        .on_press(Msg::OverlayMenu(if open { None } else { Some(key.clone()) }));
+    let anchor = theme::row_button_icon(
+        theme::glyph::MORE,
+        match open {
+            true => theme::IconTone::Raised,
+            false => theme::IconTone::Rest,
+        },
+    )
+    .on_press(Msg::OverlayMenu(if open { None } else { Some(key.clone()) }));
     popover(anchor, open, || {
         menu::panel(vec![
             menu::Item::new(Shift::Up.title(), Msg::OverlayShift(key.clone(), Shift::Up))

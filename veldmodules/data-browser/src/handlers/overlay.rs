@@ -67,6 +67,7 @@ pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     // каталог второй раз незачем.
     if super::search::show(state, view, &identifier) {
         super::outline::mark(state, view, &identifier);
+        super::outline::focus(state, &identifier);
         return;
     }
     // Уже на шаре, но не из выдачи — значит просят посмотреть на него, а не
@@ -85,52 +86,56 @@ pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     crate::calls::data_provider::on_locate(&LocateRequest { identifier }, &correlation);
 }
 
-/// Обряд «теперь смотрят на этот снимок»: навести на него камеру, погасить
-/// прежнюю подсветку и перевести взгляд на шар.
+/// Вернуть слой на шар, навести на него камеру и выделить. `false` — такого
+/// слоя нет.
 ///
-/// Одной функцией на все три показа — из выдачи, из уже лежащего слоя и по
-/// восстановленному ключу: вопрос у них один, и три ответа на него разошлись
-/// бы молча — снаружи это выглядело бы как «из каталога камера наводится, а из
-/// „На просмотре“ нет».
-///
-/// `frame` пуст — у продукта нет геометрии (вспомогательные данные): наводить
-/// не на что, а всё остальное всё равно делается.
-pub fn look_at(state: &mut State, frame: Option<footprint::Frame>) {
-    super::globe::focus_on(frame);
-    // Подсветка прежнего выбора гаснет: на шар лёг другой снимок, и полоса
-    // глобуса должна назвать его, а не прошлый выбор.
-    super::outline::deselect(state);
-    super::nav::on_new_globe(state);
-}
-
-/// Навести шар на слой и показать вкладку с ним. `false` — такого слоя нет.
-///
-/// Скрытый при этом возвращается на шар: «на глобус» просят у того, чего не
-/// видно, и молча навести камеру на пустое место — это ответить не на тот
-/// вопрос.
+/// Скрытый при этом возвращается на шар: значок глобуса в строке списка просят
+/// у того, чего не видно, и молча навести камеру на пустое место — это ответить
+/// не на тот вопрос. В списке слоёв кнопка другая (`Msg::OutlineFocus`): там
+/// показом заведует соседний глаз, и трогать его за спиной нечему.
 pub fn focus(state: &mut State, key: &str) -> bool {
     if !state.overlays.iter().any(|overlay| overlay.identifier == key) {
         return false;
     }
     set_hidden(state, key, false);
-    let Some(overlay) = state.overlays.iter().find(|o| o.identifier == key) else {
-        return false;
-    };
-    let frame = overlay.focus.clone();
-    look_at(state, frame);
+    super::outline::focus(state, key);
     true
 }
 
 /// Продукт восстановлен по ключу — показываем, как показывали бы из поиска.
-pub fn on_located(state: &mut State, response: LocateResponse) {
+///
+/// Ключ продукта может оказаться не тем, которым его позвали: спросили файл
+/// внутри снимка, а каталог отвечает корнем продукта (см. `on_locate` у
+/// провайдера). Наложение ложится под ключом продукта — иначе глобус получил
+/// бы два ключа на один снимок, — а отметку переносим туда же: оставшись на
+/// ключе строки, она развела бы один снимок на слой и «только контур» в списке
+/// «На просмотре».
+pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
+    // Пока ход к каталогу шёл, показа могли и расхотеть: отметку сняли, вкладку
+    // закрыли, «снять с шара» нажали. Убить запрос в полёте нечем — он ответит
+    // всё равно, — поэтому спрашиваем здесь, всё ли ещё его ждут. Иначе
+    // приложение через несколько секунд после отмены само прыгает на вкладку
+    // глобуса, уводит камеру и кладёт снимок, которого не просили.
+    if !state.marked(key) {
+        veldsdk::log::info!(target: "handlers", "показ '{}' расхотели, пока шёл ответ", key);
+        return;
+    }
     let Some(product) = response.product else {
         veldsdk::log::warn!(target: "handlers", "показать на шаре не вышло: {}", response.error);
         state.notice = Some(format!("Показать на шаре не вышло: {}", response.error));
         return;
     };
 
-    look_at(state, footprint::frame(&product.footprint));
+    if key != product.identifier {
+        state.clear_mark(key);
+        state.located.remove(key);
+    }
+    // Продукт кладётся в кэш под своим ключом — тем, которым он теперь и
+    // адресуется: без этого сборка контуров сочла бы его неспрошенным и
+    // послала бы в каталог второй запрос за тем же самым.
+    state.located.insert(product.identifier.clone(), Located::Found(product.clone()));
     show(state, &product, None);
+    super::outline::focus(state, &product.identifier);
 }
 
 /// Положить продукт на шар. Уже лежащий не кладётся заново: наводка камеры
@@ -241,12 +246,34 @@ pub fn source_closed(state: &mut State, view: ViewId) {
 }
 
 /// Оставить те, что прошли условие, и переслать набор.
+///
+/// О снятом говорится вслух: убирает его не человек, а правило («наложение
+/// живёт жизнью своей выдачи»), и снаружи молчаливое исчезновение снимка с
+/// шара выглядит как то, что он выгрузился сам собой.
 fn retain(state: &mut State, keep: impl Fn(&OverlayState) -> bool) {
     let (kept, gone): (Vec<_>, Vec<_>) =
         std::mem::take(&mut state.overlays).into_iter().partition(&keep);
     state.overlays = kept;
+    let said = match gone.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "«{}» снят с шара: его больше нет в выдаче",
+            crate::module::components::format::ellipsize(&one.label, 40)
+        )),
+        many => Some(format!(
+            "{} {} снято с шара: их больше нет в выдаче",
+            many.len(),
+            crate::module::components::format::plural(
+                many.len(),
+                ["снимок", "снимка", "снимков"]
+            )
+        )),
+    };
     for overlay in gone {
         abandon(state, overlay);
+    }
+    if let Some(said) = said {
+        state.notice = Some(said);
     }
     send_set(state);
 }
@@ -286,6 +313,22 @@ pub fn hide_all(state: &mut State, hidden: bool) {
 
 // ── Сборка ─────────────────────────────────────────────────────
 
+/// Отказаться от наложения — значит убрать его, тем же путём, что и по кнопке:
+/// пустая строка, которая никогда ничего не покажет, хуже её отсутствия. Именно
+/// `remove`, а не выкидывание из списка: слой мог уже лежать на шаре, и тогда
+/// его нужно ещё и снять оттуда.
+///
+/// Причина уходит и на экран: нажали «на глобус», а на шаре не появилось
+/// ничего — и без извещения это выглядит как несработавшая кнопка. Одной
+/// функцией на все отказы сборки, потому что снаружи они неразличимы: слой
+/// пропал, и человек вправе узнать почему.
+fn give_up(state: &mut State, key: &str, label: &str, why: String) {
+    veldsdk::log::warn!(target: "handlers", "'{}': {}", label, why);
+    state.notice =
+        Some(format!("«{}»: {}", crate::module::components::format::ellipsize(label, 40), why));
+    remove(state, key);
+}
+
 /// Ответ провайдера: роли растров и рамка. Открываем каждый растр ресурсом.
 pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     let Some(key) = state.imageries.take(&veldsdk::correlation()) else { return };
@@ -299,29 +342,21 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
         return;
     }
 
-    // Отказаться от наложения — значит убрать его, тем же путём, что и по
-    // кнопке: пустая строка, которая никогда ничего не покажет, хуже её
-    // отсутствия. Именно `remove`, а не выкидывание из списка: слой мог уже
-    // лежать на шаре, и тогда его нужно ещё и снять оттуда.
-    //
-    // Причина уходит и на экран: нажали «на глобус», а на шаре не появилось
-    // ничего — и без строки состояния это выглядит как несработавшая кнопка.
-    let give_up = |state: &mut State, why: String| {
-        veldsdk::log::warn!(target: "handlers", "'{}': {}", label, why);
-        state.notice = Some(format!("«{}»: {}", crate::module::components::format::ellipsize(&label, 40), why));
-        remove(state, &key);
-    };
-
     if !response.error.is_empty() {
-        return give_up(state, format!("растры не спросились: {}", response.error));
+        return give_up(state, &key, &label, format!("растры не спросились: {}", response.error));
     }
     if response.rasters.is_empty() {
-        return give_up(state, "нет растров для наложения".to_string());
+        return give_up(state, &key, &label, "нет растров для наложения".to_string());
     }
     // Привязки нет ни рамкой, ни квадом — снимку негде лежать; честнее не
     // открывать ресурсы, чем дать глобусу отказаться от готового.
     if response.utm.is_none() && overlay.quad.is_none() {
-        return give_up(state, "без привязки: контур не четырёхугольник и рамки нет".to_string());
+        return give_up(
+            state,
+            &key,
+            &label,
+            "без привязки: контур не четырёхугольник и рамки нет".to_string(),
+        );
     }
 
     let utm = response.utm.map(|utm| UtmFrame {
@@ -406,9 +441,10 @@ fn finish(state: &mut State, key: &str) {
         }
     }
     if rasters.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "'{}': ни один растр не открылся", label);
-        state.overlays.retain(|overlay| overlay.identifier != key);
-        return;
+        // Тем же путём и с тем же словом, что и прочие отказы сборки (см.
+        // `give_up`): пустая строка, которая никогда ничего не покажет, хуже
+        // её отсутствия, а нажали-то на значок — и на шаре не появилось ничего.
+        return give_up(state, &key, &label, "ни один растр не открылся".to_string());
     }
 
     overlay.utm = assembly.utm;
@@ -458,8 +494,26 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
         overlay.progress = said.map_or(Progress::default(), |progress| Progress {
             ready: progress.ready,
             total: progress.total,
+            share: progress.share,
             working: progress.working,
         });
+    }
+
+    // Слой, которому нечем лечь, убираем тем же путём и с тем же словом, что и
+    // отказы сборки: набор наложений наш, и снять с него неложащийся слой может
+    // только тот, кто его туда положил. Заметить это может только глобус — у
+    // него растры и привязка, — а «пустая строка, которая никогда ничего не
+    // покажет, хуже её отсутствия» одинаково верно с обеих сторон.
+    let doomed: Vec<(String, String)> = msg
+        .overlays
+        .iter()
+        .filter(|progress| !progress.error.is_empty())
+        .map(|progress| (progress.key.clone(), progress.error.clone()))
+        .collect();
+    for (key, why) in doomed {
+        let Some(overlay) = state.overlays.iter().find(|o| o.identifier == key) else { continue };
+        let label = overlay.label.clone();
+        give_up(state, &key, &label, why);
     }
 }
 

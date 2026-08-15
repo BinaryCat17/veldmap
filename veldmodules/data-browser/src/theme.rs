@@ -79,6 +79,11 @@ const SURFACE: Color = Color::rgb8(0xFF, 0xFD, 0xF8);
 const HOVER: Color = Color::rgb8(0xF1, 0xEA, 0xDA);
 /// Наведение на строку списка: слабее кнопочного, строк много.
 const ROW_HOVER: Color = Color::rgb8(0xF7, 0xF2, 0xE5);
+/// Погашенная строка: скрытый слой, снимок одним контуром. Не [`SHELF`] — тем
+/// в этом же списке нарисованы шапка и черта между группами, и залитая им
+/// строка читалась бы заголовком раздела. Этот гасит, а тот группирует.
+const ROW_DIM: Color = Color::rgb8(0xF4, 0xF1, 0xEA);
+const ROW_DIM_HOVER: Color = Color::rgb8(0xEE, 0xEA, 0xE1);
 
 pub const LINE: Color = Color::rgb8(0xDC, 0xD3, 0xBF);
 /// Разделитель внутри содержимого — тише рамки.
@@ -102,8 +107,15 @@ pub const ACCENT_TEXT: Color = Color::rgb8(0x3D, 0x65, 0x34);
 /// плотным: под ним видно то, поверх чего она ляжет, — иначе обещание закрывало
 /// бы собой то, о чём оно.
 pub const DROP_HINT: Color = ACCENT.with_alpha(0.22);
-/// Заливка выбранного: активная страница пагинации, выбранный пункт меню.
+/// Заливка выбранного: активная страница пагинации, выбранный пункт меню,
+/// подсвеченная строка.
 const ACCENT_WASH: Color = Color::rgb8(0xDC, 0xE7, 0xD2);
+const ACCENT_WASH_HOVER: Color = Color::rgb8(0xD2, 0xE0, 0xC6);
+/// Заливка отмеченного — та же зелень вполсилы. Слабее выбранного намеренно:
+/// выбрано на экране одно, а отмечено бывает полсписка, и равная заливка
+/// стёрла бы разницу между «это главное сейчас» и «этих я набрал».
+const ACCENT_TINT: Color = Color::rgb8(0xEE, 0xF3, 0xE7);
+const ACCENT_TINT_HOVER: Color = Color::rgb8(0xE5, 0xED, 0xDA);
 const ACCENT_LINE: Color = Color::rgb8(0xC3, 0xD6, 0xB4);
 
 pub const WARN: Color = Color::rgb8(0xC4, 0x79, 0x1F);
@@ -254,13 +266,48 @@ pub fn row_glyph<M>(glyph: &str, color: Color) -> Element<M> {
     icon::<M>(glyph).size(13.0).color(color).into()
 }
 
+/// Каким лицом стоит квадратная кнопка-значок строки.
+///
+/// Три, а не флаг: «держится нажатой» и «горит» — разные вещи. Первое про сам
+/// рычаг (раскрытое меню, включённый режим), второе про мир: то, о чём кнопка,
+/// уже сделано и это видно на шаре. Сложив их в один булев, мы получили бы
+/// значок, который у лежащего на шаре снимка выглядит как раскрытое меню.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IconTone {
+    Rest,
+    /// Держится нажатой: раскрытое меню, включённый режим.
+    Raised,
+    /// Горит: снимок лежит на шаре и виден.
+    Lit,
+    /// Горит вполсилы: на шаре он есть, а увидеть его сейчас нельзя —
+    /// собирается или скрыт. Та же зелень, что у [`IconTone::Lit`], слабее
+    /// залитая: состояние одного рода, и говорить о нём другим цветом значило
+    /// бы завести второй словарь.
+    Half,
+}
+
 /// Квадратная кнопка со значком в строке списка: главное действие, «на шар»,
 /// меню. Роль, а не сборка на месте, — её собирают и таблица, и список слоёв, а
 /// разойдясь, две одинаковые с виду кнопки читаются как две разные вещи.
 ///
 /// Размер здесь и назначается: он свойство роли, а не того, кто её ставит.
-pub fn row_button_icon<M>(glyph: &str, raised: bool) -> Container<M> {
-    surface_button(icon::<M>(glyph).size(11.0).color(INK_SOFT), raised)
+pub fn row_button_icon<M>(glyph: &str, tone: IconTone) -> Container<M> {
+    let lit = |fill: Color, ink: Color| {
+        let border = outline(ACCENT_LINE, RADIUS);
+        (face(fill, ink, border), face(ACCENT_WASH, ACCENT_TEXT, border))
+    };
+    let (rest, hovered) = match tone {
+        IconTone::Rest | IconTone::Raised => {
+            let raised = tone == IconTone::Raised;
+            let border = outline(if raised { LINE_STRONG } else { LINE }, RADIUS);
+            let background = if raised { HOVER } else { SURFACE };
+            (face(background, INK_SOFT, border), face(HOVER, INK, border))
+        }
+        IconTone::Lit => lit(ACCENT_WASH, ACCENT_TEXT),
+        IconTone::Half => lit(ACCENT_TINT, ACCENT_TEXT),
+    };
+    let ink = rest.text_color.unwrap_or(INK_SOFT);
+    clickable(icon::<M>(glyph).size(11.0).color(ink), rest, hovered)
         .width(Length::Fixed(ROW_BUTTON))
         .height(Length::Fixed(ROW_BUTTON))
 }
@@ -305,20 +352,60 @@ pub fn page_button<M>(content: impl Into<Element<M>>, current: bool) -> Containe
     clickable(content, face(ACCENT_WASH, INK, border), face(ACCENT_WASH, INK, border)).padding(step)
 }
 
-/// Строка списка. Своего фона у неё нет — она лежит на странице; видно её
-/// только под курсором и по черте снизу.
+/// Чем строка выделена среди соседей.
 ///
-/// `picked` — та, чей контур сейчас выделен на шаре. Заливка акцентная, та же,
-/// что у выбранной страницы: «выбрано» в интерфейсе одно, и говориться о нём
-/// должно одинаково.
-pub fn row_button<M>(content: impl Into<Element<M>>, picked: bool) -> Container<M> {
-    let background = if picked { ACCENT_WASH } else { Color::TRANSPARENT };
+/// Перечислением, а не набором флагов, и вот почему: состояние коробки рендерер
+/// выбирает целиком, а не подмешивает к покою (см. `Interaction` в
+/// ui-service/types.proto), поэтому «отмечена и под курсором» протоколом не
+/// выражается — свести их в один цвет обязан тот, кто цвет и называет. Раз
+/// сводить всё равно здесь, то здесь же названо и старшинство: подсветка одна
+/// на весь экран и старше отметки, которых в списке бывает полсотни.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum RowTint {
+    #[default]
+    Plain,
+    /// На шаре её нет или её оттуда не видно: скрытый слой, снимок одним
+    /// контуром. Не «выключена» — с ней всё то же самое делают, просто сейчас
+    /// её не видно.
+    Dim,
+    /// Отмечена коробочкой: её снимок очерчен на шаре.
+    Marked,
+    /// Главное сейчас: выбранный на шаре снимок или строка, к которой привёл
+    /// переход (см. `state::Highlight`).
+    Picked,
+}
+
+/// Пара «покой — под курсором» для заливки строки.
+///
+/// Наведение считается от покоя, а не берётся общим: общий ROW_HOVER светлее
+/// акцентной заливки, и подсвеченная строка под курсором теряла бы подсветку —
+/// снаружи это выглядит как «выделение слетает от наведения».
+fn row_faces(tint: RowTint) -> (Color, Color) {
+    match tint {
+        RowTint::Plain => (Color::TRANSPARENT, ROW_HOVER),
+        RowTint::Dim => (ROW_DIM, ROW_DIM_HOVER),
+        RowTint::Marked => (ACCENT_TINT, ACCENT_TINT_HOVER),
+        RowTint::Picked => (ACCENT_WASH, ACCENT_WASH_HOVER),
+    }
+}
+
+/// Строка списка. Своего фона у обычной нет — она лежит на странице; видно её
+/// только под курсором и по черте снизу.
+pub fn row_button<M>(content: impl Into<Element<M>>, tint: RowTint) -> Container<M> {
+    let (rest, hovered) = row_faces(tint);
     clickable(
         content,
-        face(background, INK_SOFT, Border::default()),
-        face(ROW_HOVER, INK_SOFT, Border::default()),
+        face(rest, INK_SOFT, Border::default()),
+        face(hovered, INK_SOFT, Border::default()),
     )
     .padding(Padding { top: 0.0, bottom: 0.0, left: GUTTER, right: GUTTER })
+}
+
+/// Строка списка слоёв — та же заливка, но не кнопка: внутри строки лежит
+/// ползунок прозрачности, и нажимаемая обёртка вокруг него отобрала бы у него
+/// протаскивание.
+pub fn layer_row<M>(content: impl Into<Element<M>>, tint: RowTint) -> Container<M> {
+    container(content).background(row_faces(tint).0)
 }
 
 /// Пункт выпадающего меню. `danger` — удаление: единственное, что подписано

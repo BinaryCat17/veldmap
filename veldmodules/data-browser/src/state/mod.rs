@@ -397,7 +397,16 @@ impl State {
     pub fn move_to(&mut self, id: ViewId, pane: PaneId) {
         let Some(at) = self.views.iter().position(|view| view.id == id) else { return };
         let from = self.views[at].pane;
-        if from == pane || !self.layout.contains(pane) {
+        if !self.layout.contains(pane) {
+            return;
+        }
+        // Переносить внутри своей же панели нечего, но показать — есть что:
+        // зовут это и «плюс», которому ответили уже открытым синглтоном, и
+        // бросок вкладки в свою полосу. Молчаливый выход отсюда значил бы, что
+        // на просьбу «покажи мне поиск здесь» экран не меняется вовсе.
+        if from == pane {
+            self.layout.set_active(pane, Some(id));
+            self.focus = pane;
             return;
         }
 
@@ -609,6 +618,15 @@ impl State {
             }
         }
         cleared
+    }
+
+    /// Отмечен ли снимок хоть в одном списке. Спрашивают об этом те, чей ответ
+    /// приехал позже, чем человек передумал: запрос к каталогу живёт секунды, а
+    /// отметку снимают одним нажатием, и убить его нечем.
+    pub fn marked(&self, key: &str) -> bool {
+        self.views().iter().any(|view| {
+            view.kind.listing().is_some_and(|listing| listing.selected.contains(key))
+        })
     }
 
     /// Снять пакетное выделение во всех списках сразу. `true` — было что

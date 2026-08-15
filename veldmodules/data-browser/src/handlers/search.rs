@@ -5,7 +5,6 @@
 //! правилом: ушедший из неё продукт уносит с собой и отметку, и наложение —
 //! отмечать и показывать нечего то, чего в списке больше нет.
 
-use crate::module::footprint;
 use crate::module::state::search::{Cloud, Mission, Period};
 use crate::module::state::{State, ViewId, ViewKind};
 use crate::proto::data_provider::{SearchRequest, SearchResponse};
@@ -57,7 +56,13 @@ pub fn on_cloud(state: &mut State, view: ViewId, cloud: Cloud) {
 }
 
 /// Спросить каталог.
+///
+/// Страница сбрасывается здесь, а не только у чипов отбора: выдача меняется
+/// целиком, и «страница 3» относилась бы к прошлой. Иначе Enter в поле имени
+/// или в поле даты открывает новый ответ на старой странице — а это чужая
+/// страница чужого списка (см. `ListingState::page`).
 pub fn run(state: &mut State, view: ViewId) {
+    state.refine(view);
     let now = crate::module::components::format::now();
     let Some(search) = state.search_mut(view) else { return };
     let (from, to) = search.window(now);
@@ -142,13 +147,16 @@ pub fn on_source_closed(state: &mut State, id: ViewId) {
     super::outline::refresh(state);
 }
 
-/// Показать снимок из выдачи названного поиска: навести на него камеру,
-/// наложить его растры и открыть вкладку с шаром. `false` — этот вид не поиск
-/// или продукта в его выдаче нет; тогда его восстанавливает по ключу провайдер
-/// (см. overlay::on_show_pressed).
+/// Наложить растры снимка из выдачи названного поиска. `false` — этот вид не
+/// поиск или продукта в его выдаче нет; тогда его восстанавливает по ключу
+/// провайдер (см. overlay::on_show_pressed).
 ///
 /// Именно названного, а не активного: строку могли нажать в той половине
 /// экрана, что не под рукой, и продукт искать надо в её выдаче.
+///
+/// Наводка камеры и выбор снимка живут не здесь: они одни на все четыре места,
+/// откуда снимок кладут на шар, и делает их `outline::focus` (см.
+/// `overlay::on_show_pressed`).
 pub fn show(state: &mut State, view: ViewId, identifier: &str) -> bool {
     let Some(search) = state.search_mut(view) else { return false };
     let Some(product) = search
@@ -161,9 +169,7 @@ pub fn show(state: &mut State, view: ViewId, identifier: &str) -> bool {
     };
 
     // Наложение растров пробуем и без геометрии: честный ответ «нет растров»
-    // придёт от провайдера, а наводка при пустом контуре просто не случится
-    // (см. `overlay::look_at`).
-    super::overlay::look_at(state, footprint::frame(&product.footprint));
+    // придёт от провайдера, а наводка при пустом контуре просто не случится.
     super::overlay::show(state, &product, Some(view));
     true
 }

@@ -16,4 +16,4 @@ pub mod rows;
 pub mod table;
 
 pub use list_screen::Screen;
-pub use row::{folder_of, folder_path, preview_of, Row, RowKind, RowStatus};
+pub use row::{folder_of, folder_path, preview_of, OnGlobe, Row, RowKind, RowStatus};

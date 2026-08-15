@@ -8,7 +8,9 @@
 //! каталог отвечает записями листинга, поиск — продуктами, скачанное —
 //! записями библиотеки. Всё остальное про строку живёт в `row`.
 
-use crate::module::components::row::{bare, downloaded_rows, folder_path, Row, RowKind, RowStatus};
+use crate::module::components::row::{
+    bare, downloaded_rows, folder_path, OnGlobe, Row, RowKind, RowStatus,
+};
 use crate::module::state::browse::{BrowseItem, Children};
 use crate::module::state::listing::ListingState;
 use crate::module::state::{BrowseState, SearchState, State, ViewId, ViewKind};
@@ -22,13 +24,12 @@ pub fn of(state: &State, view: ViewId) -> Vec<Row> {
         ViewKind::Search(opened) => search(state, opened),
         ViewKind::Downloaded(_) => {
             // Скачанное собрано из записей библиотеки, а не из ключей каталога,
-            // — общей сборки строк (`from_key`) у него нет, и ход укладки на шар
-            // проставляется здесь. Вглубь идти незачем: внутри снимка лежат его
-            // файлы, а на шар едет он сам.
+            // — общей сборки строк (`from_key`) у него нет, и признак шара
+            // проставляется здесь. Вглубь при этом идём тем же обходом, что и
+            // общая сборка: одинаковая с виду подстрока не должна гореть в
+            // каталоге и молчать здесь.
             let mut rows = downloaded_rows(&state.library);
-            for row in &mut rows {
-                row.globe = onto_globe(state, row.snapshot_key());
-            }
+            mark_globe(state, &mut rows);
             rows
         }
         // Таблицы у них нет вовсе; перечислены поимённо, чтобы новый вид со
@@ -39,16 +40,30 @@ pub fn of(state: &State, view: ViewId) -> Vec<Row> {
     }
 }
 
-/// Ход укладки снимка этой строки на шар; `None` — он туда не едет.
+/// Проставить признак шара строкам «Скачанного» и всему, что под ними.
+fn mark_globe(state: &State, rows: &mut [Row]) {
+    for row in rows {
+        row.globe = onto_globe(state, row.snapshot_key());
+        mark_globe(state, &mut row.children);
+    }
+}
+
+/// Чем снимок этой строки лежит на шаре (см. [`OnGlobe`]).
 ///
 /// Спрашивается по ключу снимка, а не по ключу строки: строка каталога знает
 /// папку со слэшем на конце, а наложение помнит продукт без него.
-fn onto_globe(state: &State, key: &str) -> Option<f32> {
-    state
-        .overlays
-        .iter()
-        .find(|overlay| overlay.identifier == key)
-        .and_then(|overlay| overlay.progress.share())
+///
+/// Единственное место, где строка встречается с набором наложений: и значок, и
+/// полоса хода спрашивают об одном и том же, а два ответа на это однажды
+/// разошлись бы.
+fn onto_globe(state: &State, key: &str) -> OnGlobe {
+    let Some(overlay) = state.overlays.iter().find(|overlay| overlay.identifier == key) else {
+        return OnGlobe::Off;
+    };
+    match overlay.on_globe() {
+        false => OnGlobe::Assembling,
+        true => OnGlobe::Laid { hidden: overlay.hidden, share: overlay.progress.share() },
+    }
 }
 
 /// Сетевой каталог: записи текущей папки и содержимое раскрытых.

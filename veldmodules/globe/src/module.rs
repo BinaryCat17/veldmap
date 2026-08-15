@@ -96,6 +96,14 @@ pub struct State {
 
     /// Наложения в порядке прихода — он же порядок отрисовки.
     overlays: Vec<Overlay>,
+    /// Наложения, которых мы не приняли, и почему: без привязки, без единого
+    /// открывшегося растра. Своими наложениями они не стали и лежать им негде,
+    /// но сказать о них надо — приславший считает их лежащими на шаре, и
+    /// молчание оставило бы у него вечно «готовится…».
+    ///
+    /// Живут до следующего набора: приславший на такое извещение слой убирает,
+    /// а набор от этого приезжает заново.
+    refused: Vec<(String, String)>,
     /// Текстуры тайлов наложений, общие всем наложениям, с бюджетом.
     tiles: Store,
     /// Собранные варп-патчи и то, из чего они собраны: поколение хранилища,
@@ -135,6 +143,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         outlines: Vec::new(),
         generation: 0,
         overlays: Vec::new(),
+        refused: Vec::new(),
         tiles: Store::new(config.vram_budget_mb * 1024 * 1024),
         batch: gpu::OverlayBatch::new(),
         built: None,
@@ -160,6 +169,11 @@ pub fn on_set_surface(state: &mut State, req: SurfaceDelegated) {
     let Some(surface) = req.surface else {
         veldsdk::log::info!(target: "handlers", "место отозвано");
         state.target = None;
+        // Без места добыча стои́т: видимого прямоугольника не существует, и
+        // `want_tiles` выходит первой же строкой. Сказать об этом надо — иначе
+        // у показывающего список остаётся последний присланный счёт, и
+        // остановившаяся работа выглядит идущей и зависшей.
+        report_progress(state, &[]);
         return;
     };
     if req.width == 0 || req.height == 0 {
@@ -259,6 +273,9 @@ pub fn on_outlines(state: &mut State, outlines: crate::proto::globe::Outlines) {
 /// ресурсами остаётся как есть — его тайлы и ожидания продолжают жить.
 pub fn on_overlay(state: &mut State, msg: crate::proto::globe::Overlays) {
     let keep: HashSet<String> = msg.overlays.iter().map(|o| o.key.clone()).collect();
+    // Прошлые отказы кончились вместе с прошлым набором: этот прислали уже
+    // зная о них.
+    state.refused.clear();
 
     // Снятые — прочь: производство убить, тайлы забыть, ресурсы освободить.
     let removed: Vec<Overlay> = {
@@ -331,8 +348,21 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             // прозрачности и «скрыть» шлют тот же набор, и переоткрывать под
             // них ресурсы значило бы платить за движение ползунка декодом.
             let overlay = &mut state.overlays[index];
+            let was = overlay.hidden;
             overlay.opacity = opacity;
             overlay.hidden = hidden;
+            // Скрытый тайлов не просит — и идущий проход тоже его: производство
+            // у источника одно, и держать его невидимым слоем значит не давать
+            // добывать тем, кого видно. Показ обратно спросит заново, а то, что
+            // уже добыто, никуда не делось.
+            if hidden && !was {
+                let cancels: Vec<String> =
+                    overlay.rasters.iter_mut().filter_map(|raster| raster.fetch.reset()).collect();
+                for correlation in cancels {
+                    crate::cancel::image_tiler::on_produce(&correlation);
+                }
+                state.epoch += 1;
+            }
             return;
         }
         let old = state.overlays.remove(index);
@@ -358,9 +388,8 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             (incoming.quad[3].lat, incoming.quad[3].lon),
         ])
     } else {
-        veldsdk::log::warn!(target: "handlers", "{}: наложение без привязки — снимку негде лежать", label);
         release_rasters(incoming.rasters);
-        return;
+        return refuse(state, incoming.key, &label, "снимку негде лежать: привязки нет");
     };
 
     let mut rasters = Vec::new();
@@ -387,8 +416,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         rasters.push(raster);
     }
     if rasters.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "{}: у наложения нет растров", label);
-        return;
+        return refuse(state, incoming.key, &label, "ни один растр не открылся");
     }
 
     veldsdk::log::info!(target: "handlers", "{}: наложение из {} растров", label, rasters.len());
@@ -400,7 +428,16 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         sources: incoming_ids,
         opacity,
         hidden,
+        error: String::new(),
+        progress: overlay::Progress::default(),
     });
+}
+
+/// Наложение не принято. Своим оно не стало, поэтому и причина живёт отдельно
+/// от набора — до следующего набора (см. `State::refused`).
+fn refuse(state: &mut State, key: String, label: &str, why: &str) {
+    veldsdk::log::warn!(target: "handlers", "{}: {}", label, why);
+    state.refused.push((key, why.to_string()));
 }
 
 /// Конец наложения: производство убить, тайлы забыть (если отпечаток не живёт
@@ -454,16 +491,25 @@ pub fn on_described(state: &mut State, msg: Described) {
 
     describe_settled(state, &key, role, msg);
 
-    // Описания кончились, а привязка так и осталась догадкой — сказать об этом
-    // надо здесь и один раз: снимок вот-вот ляжет по контуру каталога, и
-    // повёрнутый снимок на шаре ничем другим не объясняется.
-    if let Some(overlay) = state.overlays.iter().find(|o| o.key == key)
-        && matches!(overlay.frame, overlay::Frame::Quad(_))
+    // Описания кончились — время сказать о том, что видно только сейчас.
+    if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == key)
         && !overlay.rasters.iter().any(|raster| raster.describe.is_pending())
     {
-        veldsdk::log::warn!(target: "handlers",
-            "{}: привязки в растрах нет — снимок ложится по контуру каталога, порядок его вершин обходу растра не обязан совпадать",
-            overlay.label);
+        // Привязка так и осталась догадкой: снимок вот-вот ляжет по контуру
+        // каталога, и повёрнутый снимок на шаре ничем другим не объясняется.
+        if matches!(overlay.frame, overlay::Frame::Quad(_)) {
+            veldsdk::log::warn!(target: "handlers",
+                "{}: привязки в растрах нет — снимок ложится по контуру каталога, порядок его вершин обходу растра не обязан совпадать",
+                overlay.label);
+        }
+        // А вот описаться не вышло ни одному — тогда слою нечем лечь вовсе, и
+        // ждать больше нечего: молчание оставило бы у приславшего вечное
+        // «готовится…».
+        if !overlay.rasters.iter().any(|raster| raster.meta.is_some()) {
+            veldsdk::log::warn!(target: "handlers",
+                "{}: ни один растр не описался — накладывать нечего", overlay.label);
+            overlay.error = "ни один растр не описался".to_string();
+        }
     }
 
     state.epoch += 1;
@@ -559,33 +605,59 @@ pub fn on_produced(state: &mut State, msg: ProducedTile) {
 pub fn on_query_done(state: &mut State, msg: QueryDone) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.take(&correlation) else { return };
-    let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
-    let label = overlay.label.clone();
-    let Some(raster) = overlay.raster_mut(ctx.role) else { return };
-
-    // Наложение успели заменить, пока ответ шёл: ожидания того запроса — не
-    // об этом растре.
-    if raster.meta.as_ref().is_none_or(|meta| meta.fingerprint != ctx.fingerprint) {
-        return;
-    }
-
-    if !msg.error.is_empty() {
-        raster.fetch.forget_asked(&ctx.cells);
-        veldsdk::log::warn!(target: "handlers", "{}: кэш тайлов: {}", label, msg.error);
-        return;
-    }
-
     // Желанность здесь не пересчитывается: то, что спрошено, спрошено под тот
     // же кадр, а устаревший уровень убьёт следующий `want_tiles`.
     let level = ctx.cells.first().map_or(0, |(level, ..)| *level);
-    let produce_list = raster.fetch.missed(
-        &ctx.cells,
-        msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
-        |_| true,
-    );
-    if produce_list.is_empty() {
+
+    let Some((label, produce_list, resource)) = ({
+        let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
+        let label = overlay.label.clone();
+        // Слой скрыли, пока кэш искал: заводить под него проход — занять
+        // единственное производство тем, чего не видно.
+        let hidden = overlay.hidden;
+        let Some(raster) = overlay.raster_mut(ctx.role) else { return };
+        if hidden {
+            raster.fetch.forget_asked(&ctx.cells);
+            return;
+        }
+
+        // Наложение успели заменить, пока ответ шёл: ожидания того запроса — не
+        // об этом растре.
+        if raster.meta.as_ref().is_none_or(|meta| meta.fingerprint != ctx.fingerprint) {
+            return;
+        }
+        if !msg.error.is_empty() {
+            raster.fetch.forget_asked(&ctx.cells);
+            veldsdk::log::warn!(target: "handlers", "{}: кэш тайлов: {}", label, msg.error);
+            // Эпоху двигаем и здесь: без неё `build_patches` выйдет по
+            // сравнению, ход добычи больше не пересчитается, и последнее
+            // присланное «идёт работа» останется действующим до конца запуска.
+            // Спрашивать заново при этом нечего — отказ кэша не про сеть, а про
+            // сам запрос, и повтор дал бы тот же ответ по кругу.
+            state.epoch += 1;
+            return;
+        }
+
+        let produce_list = raster.fetch.missed(
+            &ctx.cells,
+            msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
+            |_| true,
+        );
+        match produce_list.is_empty() {
+            true => None,
+            false => Some((label, produce_list, raster.resource.handle())),
+        }
+    }) else {
+        // Кэш закрыл заказ целиком — производить нечего, а ступень тем самым
+        // пройдена. Спросить следующую надо здесь: иначе цикл «ступень доехала
+        // → просим следующую» замыкается только через конец прохода
+        // производителя, которого не было, и добыча встаёт до ближайшего
+        // движения камеры. Снаружи это выглядит как «полоса стоит на месте, а
+        // потом снимок мгновенно становится резким».
+        state.epoch += 1;
+        want_tiles(state);
         return;
-    }
+    };
 
     let correlation = state.pending_produce.begin(ProduceCtx {
         key: ctx.key.clone(),
@@ -593,20 +665,37 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         fingerprint: ctx.fingerprint.clone(),
         cells: produce_list.clone(),
     });
-    raster.fetch.producing_now(correlation.clone(), level);
+    if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key)
+        && let Some(raster) = overlay.raster_mut(ctx.role)
+    {
+        raster.fetch.producing_now(correlation.clone(), level);
+    }
     crate::calls::image_tiler::on_produce(&ProduceRequest {
-        resource: Some(raster.resource.handle()),
+        resource: Some(resource),
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
     }, &correlation);
 }
 
-pub fn on_produce_progress(_state: &mut State, msg: ProduceProgress) {
-    // Ход прохода виден в логе: своей строки состояния у глобуса нет, а
-    // parent-fallback уже показывает грубое вместо пустоты.
+/// Ход прохода производителя. Единственное, что о работе можно сказать, пока
+/// последовательный источник читается насквозь: ячеек за это время не
+/// прибавляется ни одной, а читать бывает минуту.
+pub fn on_produce_progress(state: &mut State, msg: ProduceProgress) {
     veldsdk::log::debug!(target: "handlers", "производство: {} из {} МиБ, тайлов {}/{}",
         msg.read_bytes >> 20, msg.total_bytes >> 20, msg.done_tiles, msg.want_tiles);
+
+    let correlation = veldsdk::correlation();
+    let Some(ctx) = state.pending_produce.peek(&correlation) else { return };
+    let (key, role) = (ctx.key.clone(), ctx.role);
+    if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == key)
+        && let Some(raster) = overlay.raster_mut(role)
+    {
+        raster.pass = (msg.read_bytes, msg.total_bytes);
+    }
+    // Эпоху двигаем: без неё кадровый тик выйдет по сравнению, и ход добычи не
+    // пересчитается — а он только что и изменился.
+    state.epoch += 1;
 }
 
 /// Единственный конец производства, каким бы он ни был, — за убитое отвечает
@@ -622,6 +711,7 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     // растр, и снять с учёта надо только сам проход.
     let ours = raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
     let failed = ours && !msg.error.is_empty();
+    raster.pass = (0, 0);
     raster.fetch.produced(&correlation, if ours { &ctx.cells } else { &[] }, failed);
     if failed {
         // Не переспрашивать то, что уже не произвелось: каждый кадр долбил бы
@@ -824,34 +914,86 @@ fn build_patches(state: &mut State) {
     }
 }
 
-/// Разослать ход добычи.
+/// Пересчитать ход добычи по тому, что слою нужно прямо сейчас, и разослать
+/// набор целиком.
 ///
-/// Набор целиком и по одной строке на наложение, включая скрытые: у скрытого
-/// добыча стои́т, и сказать о нём «ничего не едет» — такой же ответ, как всякий
-/// другой. Считается он на каждом кадре, а уезжает только изменившийся — топик
-/// объявлен снимком, и отсекает повтор его стаб (см. schema.yaml).
-fn report_progress(state: &State, wanted: &[(String, f32, overlay::Wanted)]) {
+/// Меряется он двумя величинами, и обе выведены из заказа, а не из кадра. Доля
+/// пути — это ступени пирамиды: от вершины, с которой начинают, до уровня, на
+/// котором картинка станет резкой; каждая закрывается один раз, и панорама их
+/// не двигает. Счёт ячеек — это последний оформленный заказ
+/// (`tiles::Fetch::ordered`), а не то, что попало в кадр на этом кадре.
+/// Посчитанное по видимому ездит взад-вперёд на каждом движении камеры и не
+/// сообщает ничего.
+///
+/// Пустой `wanted` — считать не по чему (места под кадр нет, слой скрыт или
+/// растр ещё описывают): тогда о слое рассказывается то, что посчитал последний
+/// живой кадр, а работа объявляется стоящей.
+///
+/// Уезжает только изменившийся набор — топик объявлен снимком, и повтор
+/// отсекает его стаб (см. schema.yaml).
+fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)]) {
+    for overlay in &mut state.overlays {
+        // Последняя запись, а не сумма: превью и подробный — две разные
+        // пирамиды с разными отпечатками, и сложенные в один счёт они меняют
+        // знаменатель ровно в тот миг, когда экранный пиксель переходит через
+        // родное разрешение превью. Резкость доводит последняя, о ней и речь.
+        let Some((.., mine)) = wanted.iter().filter(|(key, ..)| key == &overlay.key).next_back()
+        else {
+            continue;
+        };
+        let Some(raster) = overlay.rasters.iter().find(|raster| raster.role == mine.choice.role)
+        else {
+            continue;
+        };
+        let (ready, total) = raster.fetch.ordered();
+        // Доля внутри ступени — по большему из двух. Пустой заказ значит
+        // «спрашивать было нечего»: ступень закрыта, и считать её недобранной
+        // было бы неправдой. А байты нужны там, где ячейка одна: чтобы отдать
+        // её, последовательный источник читается целиком, и по ячейкам всё это
+        // время сделано ровно ноль.
+        let within = match total {
+            0 => 1.0,
+            total => (f64::from(ready) / f64::from(total)).max(raster.read()),
+        };
+        let steps = f64::from(mine.top - mine.target + 1);
+        let done = f64::from(mine.top - mine.choice.level);
+        overlay.progress = overlay::Progress {
+            ready,
+            total,
+            share: ((done + within) / steps).clamp(0.0, 1.0) as f32,
+        };
+    }
+
     let overlays: Vec<OverlayProgress> = state
         .overlays
         .iter()
         .map(|overlay| {
-            let mine = wanted.iter().filter(|(key, ..)| key == &overlay.key);
-            let (mut ready, mut total) = (0, 0);
-            for (.., wanted) in mine {
-                total += wanted.cells.len() as u32;
-                ready += wanted
-                    .cells
-                    .iter()
-                    .filter(|addr| state.tiles.contains(&wanted.choice.fingerprint, **addr))
-                    .count() as u32;
-            }
+            // Работа идёт, пока путь не пройден, — а не пока что-то в полёте:
+            // между «последний тайл ступени приехал» и «оформлен заказ
+            // следующей» в полёте нет ничего, и признак, выведенный из одного
+            // полёта, мигал бы на каждой ступени, дёргая за собой полосу и
+            // высоту строки. Слой, которому не дают считать (скрыт, места под
+            // кадр нет), работой не занят по определению.
+            let live = wanted.iter().any(|(key, ..)| key == &overlay.key);
             OverlayProgress {
                 key: overlay.key.clone(),
-                ready,
-                total,
-                working: overlay.busy(),
+                ready: overlay.progress.ready,
+                total: overlay.progress.total,
+                working: live && (overlay.busy() || overlay.progress.share < 1.0),
+                share: overlay.progress.share,
+                error: overlay.error.clone(),
             }
         })
+        // Отвергнутые — теми же строками: наложения у нас нет, а сказать о нём
+        // надо, иначе приславший будет считать его лежащим на шаре вечно.
+        .chain(state.refused.iter().map(|(key, why)| OverlayProgress {
+            key: key.clone(),
+            ready: 0,
+            total: 0,
+            working: false,
+            share: 0.0,
+            error: why.clone(),
+        }))
         .collect();
 
     crate::emit::on_overlay_progress(&OverlaysProgress { overlays });

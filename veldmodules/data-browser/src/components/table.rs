@@ -10,7 +10,7 @@ use crate::proto::ui_service::{
     container, icon, mono, popover, progress_bar, text, tooltip,
     Alignment, Color, Container, Element, FontWeight, Length, Padding, TooltipPosition,
 };
-use crate::module::components::{arrange::Line, format, Row, RowKind, RowStatus};
+use crate::module::components::{arrange::Line, format, OnGlobe, Row, RowKind, RowStatus};
 use crate::module::state::listing::{ListingState, Menu};
 use crate::module::state::ViewId;
 use crate::module::{theme, Msg, ViewMsg};
@@ -481,39 +481,68 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     // видно должно быть здесь же. Высота у неё занятая, а не добавленная: шаг
     // строки считается в одном месте (`theme::ROW_PITCH`), им же список
     // прокручивают к нужной строке, и подрасти он не может.
-    let height = theme::ROW_HEIGHT - row_data.globe.map_or(0.0, |_| ONTO_GLOBE);
+    //
+    // Место под полосу занято, пока снимок на шаре, — а не пока по нему идёт
+    // работа. Иначе строка подпрыгивает на три точки ровно в тот миг, когда
+    // добыча кончилась, то есть на каждом слое и на глазах.
+    let onto_globe = row_data.globe.share();
+    let height = theme::ROW_HEIGHT - if row_data.globe.any() { ONTO_GLOBE } else { 0.0 };
     let cells = cells.height(Length::Fixed(height));
 
     // Вся строка — кнопка: нажатие на неё делает то же, что её главная кнопка,
     // а у той, чьё главное дело — раскрыться, оно и делает. Отдельная кнопка
     // при этом остаётся там, где она есть: по ней видно, что именно случится.
     let key = row_data.key();
-    let marked = (!context.picked.is_empty() && row_data.snapshot_key() == context.picked)
-        || row_data.named(context.target);
     let press = primary(view, row_data).map(|action| action.message).or_else(|| {
         row_data
             .expandable()
             .then(|| Msg::In(view, ViewMsg::Expand(key.to_string())))
     });
     let line = match press {
-        Some(message) => theme::row_button(cells, marked).on_press(message),
-        None => theme::row_button(cells, marked),
+        Some(message) => theme::row_button(cells, tint(row_data, context)).on_press(message),
+        None => theme::row_button(cells, tint(row_data, context)),
     };
 
     let mut lines: Vec<Element<Msg>> =
         vec![line.width(Length::Fill).height(Length::Fixed(height)).into()];
-    if let Some(share) = row_data.globe {
-        lines.push(
+    match (row_data.globe.any(), onto_globe) {
+        (true, Some(share)) => lines.push(
             progress_bar::<Msg>(0.0..=1.0, share)
                 .style(theme::progress(theme::ACCENT))
                 .width(Length::Fill)
                 .height(Length::Fixed(ONTO_GLOBE))
                 .into(),
-        );
+        ),
+        // Добыча кончилась, а место остаётся за ней: пустым, чтобы строка не
+        // дрогнула. Что снимок на шаре, говорит зажжённый значок.
+        (true, None) => lines.push(
+            veld_ui_service_wrap::space::<Msg>(Length::Fill, Length::Fixed(ONTO_GLOBE)).into(),
+        ),
+        (false, _) => {}
     }
     lines.push(theme::hairline(theme::LINE_ROW));
 
     column(lines).width(Length::Fill).key(row_data.key().to_string()).into()
+}
+
+/// Чем строка выделена среди соседей. Старшинство названо в самой роли
+/// (см. [`theme::RowTint`]): подсветка одна на весь экран и старше отметки,
+/// которых в списке бывает полсотни.
+///
+/// Отметка читается здесь той же меркой, что и в коробочке (`check`): у неё
+/// один источник — `ListingState::selected`, — а два выражения на этот вопрос
+/// однажды разошлись бы, и залитая строка стояла бы с пустой коробочкой.
+fn tint(row: &Row, context: Context<'_>) -> theme::RowTint {
+    let picked = (!context.picked.is_empty() && row.snapshot_key() == context.picked)
+        || row.named(context.target);
+    if picked {
+        return theme::RowTint::Picked;
+    }
+    let marked = row.is_snapshot() && context.listing.selected.contains(row.snapshot_key());
+    match marked {
+        true => theme::RowTint::Marked,
+        false => theme::RowTint::Plain,
+    }
 }
 
 /// Насколько отодвинут ярус группировки. Считается по глубине здесь и только
@@ -650,8 +679,8 @@ fn primary(view: ViewId, row: &Row) -> Option<Primary> {
 fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
     let mut buttons: Vec<Element<Msg>> = quick(view, entry)
         .into_iter()
-        .map(|(glyph, hint, message)| {
-            hinted(theme::row_button_icon(glyph, false).on_press(message), &hint)
+        .map(|Quick { glyph, hint, message, tone }| {
+            hinted(theme::row_button_icon(glyph, tone).on_press(message), &hint)
         })
         .collect();
 
@@ -659,7 +688,11 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
     if !items.is_empty() {
         let menu = Menu::Row(entry.key().to_string());
         let open = context.menu == Some(&menu);
-        let anchor = theme::row_button_icon(theme::glyph::MORE, open)
+        let raised = match open {
+            true => theme::IconTone::Raised,
+            false => theme::IconTone::Rest,
+        };
+        let anchor = theme::row_button_icon(theme::glyph::MORE, raised)
             .on_press(Msg::In(view, ViewMsg::OpenMenu(Some(menu))));
 
         buttons.push(
@@ -679,6 +712,27 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
         .into()
 }
 
+/// Быстрый значок строки: чем нарисован, что скажет подсказка, что пошлёт и
+/// каким лицом стоит.
+struct Quick {
+    glyph: &'static str,
+    hint: String,
+    message: Msg,
+    /// Горит ли он. Умолчание — покой: состояние есть только у значка шара,
+    /// остальные о мире ничего не рассказывают.
+    tone: theme::IconTone,
+}
+
+impl Quick {
+    fn new(glyph: &'static str, hint: String, message: Msg) -> Self {
+        Self { glyph, hint, message, tone: theme::IconTone::Rest }
+    }
+
+    fn tone(self, tone: theme::IconTone) -> Self {
+        Self { tone, ..self }
+    }
+}
+
 /// Быстрые значки строки по порядку: сначала то, ради чего строку открывают,
 /// потом показ на шаре.
 ///
@@ -689,11 +743,11 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
 /// Значок глобуса — только у снимка: класть на шар папку пути или файл внутри
 /// снимка нечего, а кнопка, которой нечего сделать, врёт о том, что строка
 /// умеет. Остальным этот пункт по-прежнему доступен из меню (см. `menu_items`).
-fn quick(view: ViewId, row: &Row) -> Vec<(&'static str, String, Msg)> {
+fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
     let mut quick = Vec::new();
     let key = row.snapshot_key().to_string();
     if let Some(action) = primary(view, row).filter(|action| !action.transition) {
-        quick.push((action.glyph, action.hint.to_string(), action.message));
+        quick.push(Quick::new(action.glyph, action.hint.to_string(), action.message));
     }
     // Снимок, лежащий папкой, скачивается целиком: его файлы разложены по
     // ярусам, и качать их по одному, обойдя каталог руками, — работа, которую
@@ -712,25 +766,38 @@ fn quick(view: ViewId, row: &Row) -> Vec<(&'static str, String, Msg)> {
             true => format!("Скачать снимок целиком — {}", format::bytes(row.size)),
             false => "Скачать снимок целиком".to_string(),
         };
-        quick.push((theme::glyph::DOWNLOAD, hint, Msg::DownloadSnapshot(key.clone())));
+        quick.push(Quick::new(theme::glyph::DOWNLOAD, hint, Msg::DownloadSnapshot(key.clone())));
     }
     // Главное действие снимка-папки — переход внутрь, а значком оно не стоит
     // (см. выше), поэтому просмотр остаётся единственным значком показа: иначе
     // смотреть снимок можно было бы только через меню, а это его основное
     // занятие.
     if row.kind.is_product() && row.kind.is_folder() && !key.is_empty() {
-        quick.push((
+        quick.push(Quick::new(
             theme::glyph::EYE,
             "Смотреть снимок".to_string(),
             Msg::In(view, ViewMsg::PreviewProduct(key.clone())),
         ));
     }
     if row.is_snapshot() && !key.is_empty() {
-        quick.push((
-            theme::glyph::GLOBE,
-            "На глобус".to_string(),
-            Msg::In(view, ViewMsg::GlobeShow(key)),
-        ));
+        // Значок горит, когда снимок лежит на шаре растром, — и это
+        // единственное, по чему в списке видно, что именно там лежит. Подпись
+        // при этом называет то, что случится по нажатию, а не то, что есть:
+        // у лежащего это переход к нему, а не второе наложение.
+        let (tone, hint) = match row.globe {
+            OnGlobe::Off => (theme::IconTone::Rest, "На глобус"),
+            OnGlobe::Assembling => (theme::IconTone::Half, "Кладётся на глобус…"),
+            OnGlobe::Laid { hidden: true, .. } => {
+                (theme::IconTone::Half, "На шаре, скрыт — показать и навести")
+            }
+            OnGlobe::Laid { hidden: false, .. } => {
+                (theme::IconTone::Lit, "На шаре — навести и выделить")
+            }
+        };
+        quick.push(
+            Quick::new(theme::glyph::GLOBE, hint.to_string(), Msg::In(view, ViewMsg::GlobeShow(key)))
+                .tone(tone),
+        );
     }
     quick
 }

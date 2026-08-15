@@ -5,10 +5,19 @@
 //! снимки вовсе; провайдеру тем более — он отдаёт геометрию и на этом всё.
 //! Сводить одно с другим может только тот, у кого на экране и список, и шар.
 //!
-//! Считается на градусах, а не на эллипсоиде: контур приходит в EPSG:4326 и так
-//! же понимается рисующим (см. globe/outlines.rs) — рёбра там прямые в широте с
-//! долготой. «Внутри» здесь поэтому значит ровно то, что видно на экране, а
-//! честный счёт по эллипсоиду разошёлся бы с картинкой.
+//! Считается на шаре, а не на паре углов и не на эллипсоиде. На шаре — потому
+//! что рёбра контура рисующий ведёт дугами (`geodesy::between` в
+//! globe/outlines.rs), и «внутри» здесь обязано значить то же, что видно на
+//! экране. Не на эллипсоиде — потому что сжатие даёт доли процента, а числа эти
+//! нужны, чтобы отойти от снимка на расстояние, с которого он виден целиком, и
+//! чтобы понять, ткнули в него или мимо.
+//!
+//! Пары углов не хватает, и это не придирка: у широты с долготой есть полюс и
+//! есть шов. Полярная гранула Sentinel-1 обходит макушку кольцом, у которого
+//! все вершины лежат южнее любой точки внутри него, — счёт пересечений вдоль
+//! широты отвечает на такую «снаружи», а среднее сырых долгот кладёт её центр
+//! на противоположную сторону Земли. Единичных векторов ни того, ни другого не
+//! знают.
 
 use crate::proto::data_provider::Ring;
 
@@ -26,30 +35,17 @@ pub struct Frame {
 pub fn frame(rings: &[Ring]) -> Option<Frame> {
     let first = rings.iter().flat_map(|ring| &ring.points).next()?;
 
-    let (mut south, mut north) = (first.lat, first.lat);
-    let (mut west, mut east) = (0.0_f64, 0.0_f64);
-    // Долготы разворачиваем относительно первой точки: контур у 180-го меридиана
-    // каталог отдаёт разрезанным, и куски по обе стороны шва иначе усреднились
-    // бы в точку на противоположной стороне Земли.
-    let unwrapped: Vec<(f64, f64)> = rings
-        .iter()
-        .flat_map(|ring| &ring.points)
-        .map(|point| (point.lat, wrap(point.lon - first.lon)))
-        .collect();
-    for &(lat, lon) in &unwrapped {
-        south = south.min(lat);
-        north = north.max(lat);
-        west = west.min(lon);
-        east = east.max(lon);
-    }
+    // Вершины разошлись по всей сфере и погасили друг друга — середины у такого
+    // набора нет. Берём первую вершину: радиус выйдет большим, и снимок в кадр
+    // всё равно поместится.
+    let (lat, lon) = middle(rings).unwrap_or((first.lat, first.lon));
 
-    let lat = (south + north) * 0.5;
-    let lon = first.lon + (west + east) * 0.5;
     // Радиус — по самой дальней вершине, а не по половине рамки: у контура,
     // вытянутого по диагонали, рамка вдвое уже того, что в него не влезло.
-    let radius_deg = unwrapped
+    let radius_deg = rings
         .iter()
-        .map(|&(vertex_lat, vertex_lon)| arc(lat, (west + east) * 0.5, vertex_lat, vertex_lon))
+        .flat_map(|ring| &ring.points)
+        .map(|point| arc(lat, lon, point.lat, point.lon))
         .fold(0.0, f64::max);
 
     Some(Frame { lat, lon: wrap(lon), radius_deg })
@@ -64,29 +60,87 @@ pub fn covers(rings: &[Ring], lat: f64, lon: f64) -> bool {
     rings.iter().any(|ring| inside(ring, lat, lon))
 }
 
-/// Чётность пересечений: луч из точки на восток пересекает границу нечётное
-/// число раз — точка внутри.
+/// Лежит ли точка внутри кольца.
+///
+/// Считается азимутами: смотрим из точки на каждую вершину по очереди и
+/// складываем повороты взгляда. Кольцо, обошедшее точку, вернёт взгляд на
+/// место, провернув его ровно на полный оборот; кольцо в стороне — качнёт
+/// туда-сюда и вернёт в ноль.
+///
+/// Так, а не чётностью пересечений вдоль широты: у той есть полюс. Кольцо,
+/// обходящее макушку, лежит целиком южнее точки внутри себя, ни одно его ребро
+/// широту этой точки не пересекает, и ответ выходит «снаружи» — а это ровно
+/// полярная гранула, попасть по которой хочется не меньше, чем по любой другой.
+/// У азимутов особой точки нет: полюс для них такое же место, как всякое другое.
+///
+/// Одного оборота при этом мало, и это не придирка к формуле: на шаре у
+/// замкнутой линии нет наружной стороны — она делит шар надвое, и кольцо вокруг
+/// северной макушки обходит кругом и её, и всё остальное вместе с южной. Стороны
+/// различает знак, а какая из двух — снимок, говорит его собственная середина:
+/// снимков крупнее половины Земли не бывает.
 fn inside(ring: &Ring, lat: f64, lon: f64) -> bool {
-    let mut inside = false;
     let points = &ring.points;
+    if points.len() < 3 {
+        return false;
+    }
+    let turned = turn(ring, lat, lon);
+    if turned.abs() <= 180.0 {
+        return false;
+    }
+    // Середина кольца — заведомо его сторона. Выродилась (вершины разошлись по
+    // всей сфере и погасили друг друга) — сторону назвать нечем, и остаётся сам
+    // оборот.
+    let Some((centre_lat, centre_lon)) = middle(std::slice::from_ref(ring)) else {
+        return true;
+    };
+    turned.signum() == turn(ring, centre_lat, centre_lon).signum()
+}
+
+/// На сколько провернётся взгляд из точки, если обойти кольцо по вершинам.
+fn turn(ring: &Ring, lat: f64, lon: f64) -> f64 {
+    let points = &ring.points;
+    let mut turned = 0.0;
     for (index, from) in points.iter().enumerate() {
         let to = &points[(index + 1) % points.len()];
-        // Всё считается от самой точки: так луч идёт вдоль нулевой широты, а
-        // разворот долгот приходится на противоположный от неё меридиан — там,
-        // где контура заведомо нет (он разрезан по 180-му, а точка внутри него).
-        let (from_lon, from_lat) = (wrap(from.lon - lon), from.lat - lat);
-        let (to_lon, to_lat) = (wrap(to.lon - lon), to.lat - lat);
+        turned += wrap(bearing(lat, lon, to.lat, to.lon) - bearing(lat, lon, from.lat, from.lon));
+    }
+    turned
+}
 
-        // Ребро должно пересекать широту точки — строго, чтобы вершина ровно на
-        // ней не сосчиталась дважды.
-        if (from_lat > 0.0) != (to_lat > 0.0) {
-            let crossing = from_lon + (to_lon - from_lon) * (-from_lat) / (to_lat - from_lat);
-            if crossing > 0.0 {
-                inside = !inside;
-            }
+/// Середина набора колец — направление суммы единичных векторов их вершин. Ни
+/// шва, ни полюса для неё не существует: складываются точки, а не углы.
+/// `None` — вершин нет вовсе либо они погасили друг друга.
+fn middle(rings: &[Ring]) -> Option<(f64, f64)> {
+    let mut sum = [0.0_f64; 3];
+    for point in rings.iter().flat_map(|ring| &ring.points) {
+        let unit = unit(point.lat, point.lon);
+        for axis in 0..3 {
+            sum[axis] += unit[axis];
         }
     }
-    inside
+    let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
+    (length > 1e-9).then(|| angles([sum[0] / length, sum[1] / length, sum[2] / length]))
+}
+
+/// Азимут взгляда из первой точки на вторую, градусы. Ноль — на север.
+fn bearing(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> f64 {
+    let (from, to) = (from_lat.to_radians(), to_lat.to_radians());
+    let delta = (to_lon - from_lon).to_radians();
+    let east = delta.sin() * to.cos();
+    let north = from.cos() * to.sin() - from.sin() * to.cos() * delta.cos();
+    east.atan2(north).to_degrees()
+}
+
+/// Единичный вектор по паре углов — точка на шаре.
+fn unit(lat_deg: f64, lon_deg: f64) -> [f64; 3] {
+    let (sin_lat, cos_lat) = lat_deg.to_radians().sin_cos();
+    let (sin_lon, cos_lon) = lon_deg.to_radians().sin_cos();
+    [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat]
+}
+
+/// Пара углов по единичному вектору — обратное к [`unit`].
+fn angles(unit: [f64; 3]) -> (f64, f64) {
+    (unit[2].clamp(-1.0, 1.0).asin().to_degrees(), unit[1].atan2(unit[0]).to_degrees())
 }
 
 /// Дуга между двумя точками, градусы. По шару: на размере снимка сжатие
@@ -143,7 +197,10 @@ mod tests {
     fn frame_stays_on_the_seam() {
         let rings = [ring(&[(10.0, 175.0), (10.0, -175.0), (20.0, -175.0), (20.0, 175.0)])];
         let frame = frame(&rings).expect("у контура есть геометрия");
-        assert!((frame.lat - 15.0).abs() < 1e-9);
+        // Середина шаровая, а не средняя по рамке, поэтому от 15° она отходит
+        // на десятые доли: у широт 10 и 20 разная длина параллели, и сумма
+        // точек это учитывает, а полусумма углов — нет.
+        assert!((frame.lat - 15.0).abs() < 0.2, "{}", frame.lat);
         assert!(frame.lon.abs() > 179.0, "центр на шве, а не на нулевом меридиане: {}", frame.lon);
         assert!(frame.radius_deg > 5.0 && frame.radius_deg < 12.0, "{}", frame.radius_deg);
     }
@@ -152,5 +209,33 @@ mod tests {
     fn frame_of_nothing_is_none() {
         assert!(frame(&[]).is_none());
         assert!(frame(&[ring(&[])]).is_none());
+    }
+
+    /// Кольцо вокруг макушки: обычное дело у радара в Арктике. Все его вершины
+    /// лежат южнее точки внутри него, поэтому счёт пересечений вдоль широты
+    /// отвечал бы «снаружи» — щелчок по такому снимку не выбирал бы его.
+    #[test]
+    fn covers_a_ring_around_the_pole() {
+        let around: Vec<(f64, f64)> =
+            (0..12).map(|step| (80.0, -180.0 + f64::from(step) * 30.0)).collect();
+        let rings = [ring(&around)];
+
+        assert!(covers(&rings, 89.0, 0.0), "точка у самого полюса");
+        assert!(covers(&rings, 89.0, 150.0), "она же с другой долготы");
+        assert!(covers(&rings, 85.0, -60.0));
+        assert!(!covers(&rings, 70.0, 0.0), "точка южнее кольца");
+        assert!(!covers(&rings, -85.0, 0.0), "и у противоположного полюса");
+    }
+
+    /// Середина такого кольца — сам полюс, а не точка на экваторе, куда
+    /// усреднились бы сырые долготы. От неё же считается радиус: наводка,
+    /// промахнувшаяся мимо цели на десять градусов, показывает пустой лёд.
+    #[test]
+    fn frame_of_a_polar_ring_sits_on_the_pole() {
+        let around: Vec<(f64, f64)> =
+            (0..12).map(|step| (80.0, -180.0 + f64::from(step) * 30.0)).collect();
+        let frame = frame(&[ring(&around)]).expect("у контура есть геометрия");
+        assert!(frame.lat > 89.9, "середина уехала с полюса: {}", frame.lat);
+        assert!((frame.radius_deg - 10.0).abs() < 1e-6, "{}", frame.radius_deg);
     }
 }

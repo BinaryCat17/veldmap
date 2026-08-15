@@ -110,16 +110,32 @@ pub fn drop_one(state: &mut State, key: &str) {
     refresh(state);
 }
 
-/// Навести шар на контур и выбрать его: полоса под шаром назовёт именно его.
+/// Навести шар на снимок и выбрать его: обвести лентой, назвать полосой под
+/// шаром и перевести взгляд туда.
 ///
-/// Выбирает, а не гасит выбор, — в отличие от показа снимка растром
-/// (`overlay::look_at`): туда идут за самим снимком, а сюда — за местом, и
+/// Один обработчик на контур и на слой: вопрос у них один — «покажи мне, где
+/// это», — и два ответа на него разошлись бы тем, что у слоя выбор не
+/// зажигался бы. Именно выбирает, а не гасит выбор: сюда идут за местом, и
 /// названо должно быть то, к чему привели.
+///
+/// Куда смотреть, спрашивается у того, у кого это точнее: у контура —
+/// нарисованная геометрия, у слоя — рамка, посчитанная в момент показа. Ход к
+/// каталогу за наводкой не делается: это сетевой запрос за тем, что уже
+/// известно.
 pub fn focus(state: &mut State, key: &str) {
-    let Some(outlined) = state.outlined.iter().find(|outlined| outlined.key == key) else {
-        return;
-    };
-    super::globe::focus_on(footprint::frame(&outlined.rings));
+    let frame = state
+        .outlined
+        .iter()
+        .find(|outlined| outlined.key == key)
+        .and_then(|outlined| footprint::frame(&outlined.rings))
+        .or_else(|| {
+            state
+                .overlays
+                .iter()
+                .find(|overlay| overlay.identifier == key)
+                .and_then(|overlay| overlay.focus.clone())
+        });
+    super::globe::focus_on(frame);
     select(state, Some(key.to_string()));
     super::nav::on_new_globe(state);
 }
@@ -246,10 +262,13 @@ pub fn refresh(state: &mut State) {
     }
 
     state.outlined = wanted;
-    // Выбранный щелчком контур мог уйти вместе с отметкой — ленте не на чем
-    // держаться.
+    // Выбранный контур мог уйти вместе с отметкой — ленте не на чем держаться.
+    // Лежащий растром при этом выбранным остаётся: он и без ленты назван
+    // полосой под шаром, а гасить выбор снимка, который на шаре виден, значило
+    // бы отвечать «ни на что не смотрим», глядя прямо на него.
     let gone = !state.picked_key().is_empty()
-        && !state.outlined.iter().any(|outlined| outlined.key == state.picked_key());
+        && !state.outlined.iter().any(|outlined| outlined.key == state.picked_key())
+        && !state.overlays.iter().any(|overlay| overlay.identifier == state.picked_key());
     if gone {
         state.deselect();
     }
@@ -368,6 +387,39 @@ mod tests {
 
         browse::reveal(&mut state, view, elsewhere);
         assert_eq!(state.picked_key(), "", "лента на шаре пережила переход к другой строке");
+    }
+
+    /// Слой без контура остаётся выбранным. Контур у снимка бывает не всегда —
+    /// геометрию каталог знает не про всё, а отметку с него могли снять, — но
+    /// на шаре он при этом лежит, и полоса под шаром называет его. Гасить такой
+    /// выбор на первой же пересборке значило бы отвечать «ни на что не смотрим»,
+    /// глядя прямо на снимок.
+    #[test]
+    fn a_layer_without_a_contour_keeps_its_selection() {
+        use crate::module::state::overlay::OverlayState;
+
+        let mut state = state();
+        let key = "eodata/store/A.SAFE".to_string();
+        state.overlays.push(OverlayState::new(
+            key.clone(),
+            "A.SAFE".to_string(),
+            false,
+            None,
+            None,
+            None,
+        ));
+
+        focus(&mut state, &key);
+        assert_eq!(state.picked_key(), key, "наводка на слой его не выбрала");
+
+        refresh(&mut state);
+        assert_eq!(state.picked_key(), key, "выбор слоя погас на пересборке контуров");
+
+        // А снимок, которого на шаре нет вовсе, выбранным не остаётся: ленте
+        // не на чем держаться, и назвать его нечем.
+        state.overlays.clear();
+        refresh(&mut state);
+        assert_eq!(state.picked_key(), "", "выбор пережил уход снимка с шара");
     }
 
     /// Переход к тому же снимку, что обведён на шаре, ленту не гасит: это одна

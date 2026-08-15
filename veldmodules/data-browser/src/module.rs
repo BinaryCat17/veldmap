@@ -38,7 +38,14 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
     // Извещение о том, что не вышло, живёт до следующего действия — и гаснет
     // здесь, до разбора: обработчик этого же нажатия вправе поставить своё, и
     // гашение после него стёрло бы свежее (см. `State::notice`).
-    state.notice = None;
+    //
+    // Действия, а не всякого сообщения: указатель над областью и её новый
+    // размер приезжают на голое движение мыши, а показ на шаре переводит взгляд
+    // как раз на шар — курсор оказывается над той самой областью, и извещение о
+    // неудавшемся показе стиралось бы раньше, чем его успевали прочесть.
+    if !idle(&message) {
+        state.notice = None;
+    }
 
     // Раскладку запоминаем после разбора, но не на каждом кадре перетаскивания:
     // граница шлёт сдвиг десятками сообщений в секунду, а записать надо то
@@ -87,6 +94,22 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
     if !dragging {
         handlers::persist::save_if_changed(state);
     }
+}
+
+/// Сообщение, которое человек не отправлял, — оно приезжает от того, что
+/// курсор подвинулся или окно поделили. Таким нечего гасить извещения: они
+/// говорят о том, что не вышло по нажатию, и стереть их вправе только
+/// следующее нажатие.
+fn idle(message: &Msg) -> bool {
+    matches!(
+        message,
+        Msg::Divide(..)
+            | Msg::Divided
+            | Msg::In(_, ViewMsg::GlobePointer(_))
+            | Msg::In(_, ViewMsg::GlobeResized(_))
+            | Msg::In(_, ViewMsg::PreviewPointer(_))
+            | Msg::In(_, ViewMsg::PreviewResized(_))
+    )
 }
 
 /// Сообщение из тела вкладки. Вид назвал себя сам (см. `Msg::In`), поэтому
@@ -167,8 +190,8 @@ pub fn on_locate_result(
         // его (см. `overlay::on_show_pressed`), и второй такой же запрос ради
         // той же геометрии был бы лишним.
         state::Locate::Overlay(key) => {
-            handlers::outline::located(state, key, response.clone());
-            handlers::overlay::on_located(state, response);
+            handlers::outline::located(state, key.clone(), response.clone());
+            handlers::overlay::on_located(state, &key, response);
         }
     }
 }
