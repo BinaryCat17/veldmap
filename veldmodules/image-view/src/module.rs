@@ -558,9 +558,11 @@ fn accept_tile(
     }
 }
 
-/// Рассылка состояния — на каждом смысловом изменении и только при изменении.
-fn report(state: &mut State, key: &str) {
-    let Some(view) = state.views.get_mut(key) else { return };
+/// Рассылка состояния показа. Зовётся на всяком смысловом изменении, а уезжает
+/// только изменившееся: топик объявлен снимком, и повтор отсекает его стаб
+/// (см. schema.yaml).
+fn report(state: &State, key: &str) {
+    let Some(view) = state.views.get(key) else { return };
     let meta = view.shown.as_ref().and_then(|shown| shown.meta.as_ref());
     let current = ViewState {
         view: key.to_string(),
@@ -572,10 +574,7 @@ fn report(state: &mut State, key: &str) {
         busy: view.busy(),
         error: view.error.clone().unwrap_or_default(),
     };
-    if view.reported.as_ref() != Some(&current) {
-        crate::emit::on_view_state(&current);
-        view.reported = Some(current);
-    }
+    crate::emit::on_view_state(&current);
 }
 
 fn discard_tile(texture: Option<veldsdk::proto::core::ResourceHandle>) {

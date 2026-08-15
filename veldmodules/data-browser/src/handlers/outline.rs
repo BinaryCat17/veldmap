@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use crate::module::components::{arrange, rows};
 use crate::module::footprint;
 use crate::module::state::globe::Outlined;
-use crate::module::state::{Locate, Located, State, ViewId, ViewKind};
+use crate::module::state::{Highlight, Locate, Located, State, ViewId, ViewKind};
 use crate::proto::data_provider::{DataProduct, LocateRequest, LocateResponse};
 use crate::proto::globe::{GeoPoint, Outline, Outlines};
 
@@ -127,16 +127,15 @@ pub fn focus(state: &mut State, key: &str) {
 /// Выбрать контур — или снять выбор. Единственное место, где выбор меняется по
 /// воле человека, и потому же здесь гаснет подсветка перехода: подсвечена на
 /// экране одна строка, и выбор на шаре — свежий ответ на тот же вопрос
-/// (см. `State::clear_targets`).
+/// (см. [`Highlight`]).
 ///
 /// Глобусу при этом уезжает весь набор контуров: о выборе ему говорит он же —
-/// а неизменившийся выбор не уезжает вовсе, набор поехал бы тот же самый.
+/// а неизменившийся набор до шины не доходит.
 fn select(state: &mut State, key: Option<String>) {
-    if state.pick == key {
+    if state.picked_key() == key.as_deref().unwrap_or_default() {
         return;
     }
-    state.pick = key;
-    state.clear_targets(None);
+    state.highlight = key.map(|key| Highlight { key, view: None, on_globe: true });
     send(state);
 }
 
@@ -146,7 +145,7 @@ pub fn clear(state: &mut State) {
     if !state.clear_selection() {
         return;
     }
-    state.pick = None;
+    state.deselect();
     state.outlined.clear();
     send(state);
 }
@@ -155,7 +154,7 @@ pub fn clear(state: &mut State) {
 /// (см. overlay): на шар лёг другой снимок, и подсвеченный контур прежнего
 /// рядом с ним — ложь о том, на что смотрят.
 pub fn deselect(state: &mut State) {
-    if state.pick.take().is_none() {
+    if !state.deselect() {
         return;
     }
     send(state);
@@ -204,7 +203,9 @@ pub fn located(state: &mut State, key: String, response: LocateResponse) {
 ///
 /// Зовётся всякий раз, когда меняется отмеченное или то, из чего берётся
 /// геометрия: набор у глобуса заменяется целиком (см. `Outlines` в его
-/// types.proto), и другого способа сказать ему про контуры нет.
+/// types.proto), и другого способа сказать ему про контуры нет. Спрашивать
+/// перед отправкой «а изменился ли он» не нужно — топик объявлен снимком, и
+/// неизменившийся набор до шины не доходит.
 pub fn refresh(state: &mut State) {
     let mut wanted: Vec<Outlined> = Vec::new();
     let mut ask: Vec<String> = Vec::new();
@@ -244,20 +245,13 @@ pub fn refresh(state: &mut State) {
         crate::calls::data_provider::on_locate(&LocateRequest { identifier: key }, &correlation);
     }
 
-    // Набор уезжает целиком и стоит глобусу пересборки геометрии, поэтому
-    // неизменившийся не шлётся. «Неизменившийся» — это и тот же состав, и тот
-    // же выбор: выделен на шаре один контур, и о нём глобусу говорит тот же
-    // набор.
-    let kept = state.outlined.len() == wanted.len()
-        && state.outlined.iter().zip(&wanted).all(|(was, now)| was.key == now.key);
-    let picked = state.pick.clone();
     state.outlined = wanted;
-    // Выбранный щелчком контур мог уйти вместе с отметкой — подсвечивать нечего.
-    if state.pick.as_deref().is_some_and(|key| !state.outlined.iter().any(|o| o.key == key)) {
-        state.pick = None;
-    }
-    if kept && state.pick == picked {
-        return;
+    // Выбранный щелчком контур мог уйти вместе с отметкой — ленте не на чем
+    // держаться.
+    let gone = !state.picked_key().is_empty()
+        && !state.outlined.iter().any(|outlined| outlined.key == state.picked_key());
+    if gone {
+        state.deselect();
     }
     send(state);
 }
@@ -301,12 +295,12 @@ fn product<'a>(state: &'a State, key: &str) -> Known<'a> {
 /// Отправить глобусу весь набор. Единственный способ сказать ему про контуры —
 /// отсюда и одна точка вызова на каждое изменение.
 fn send(state: &State) {
-    let picked = state.pick.as_deref();
+    let picked = state.picked_key();
     let outlines = state
         .outlined
         .iter()
         .flat_map(|outlined| {
-            let selected = picked == Some(outlined.key.as_str());
+            let selected = picked == outlined.key;
             outlined.rings.iter().map(move |ring| Outline {
                 points: ring
                     .points
@@ -354,9 +348,9 @@ mod tests {
     }
 
     /// Подсвечена на экране одна строка, и владелец у подсветки один: щелчок по
-    /// шару гасит подсветку перехода, а переход к другой строке — выбор на шаре.
-    /// Без этого правила подсвеченными остаются обе — та, к которой привели, и
-    /// та, которую выбрали после.
+    /// шару гасит подсветку перехода, а переход к другой строке — ленту на
+    /// шаре. Без этого правила подсвеченными остаются обе — та, к которой
+    /// привели, и та, которую выбрали после.
     #[test]
     fn the_highlight_has_one_owner() {
         let mut state = state();
@@ -366,20 +360,33 @@ mod tests {
         let elsewhere = "eodata/store/B.SAFE".to_string();
 
         browse::reveal(&mut state, view, elsewhere.clone());
-        assert_eq!(
-            state.listing_mut(view).expect("список").target.as_deref(),
-            Some(elsewhere.as_str()),
-        );
+        assert_eq!(state.target_in(view), elsewhere);
 
         pick(&mut state, Some((15.0, 15.0)));
-        assert_eq!(state.pick.as_deref(), Some("eodata/store/A.SAFE"));
-        assert!(
-            state.listing_mut(view).expect("список").target.is_none(),
-            "подсветка перехода пережила выбор на шаре",
-        );
+        assert_eq!(state.picked_key(), "eodata/store/A.SAFE");
+        assert_eq!(state.target_in(view), "", "подсветка перехода пережила выбор на шаре");
 
         browse::reveal(&mut state, view, elsewhere);
-        assert!(state.pick.is_none(), "выбор на шаре пережил переход к другой строке");
+        assert_eq!(state.picked_key(), "", "лента на шаре пережила переход к другой строке");
+    }
+
+    /// Переход к тому же снимку, что обведён на шаре, ленту не гасит: это одна
+    /// и та же подсветка, и гасить её значило бы отвечать не на тот вопрос.
+    /// Так и приводят к нему — полосой под самим шаром.
+    #[test]
+    fn walking_to_the_picked_row_keeps_its_ribbon() {
+        let mut state = state();
+        let pane = state.focused();
+        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
+        let key = "eodata/store/A.SAFE".to_string();
+        state.outlined = vec![square(&key)];
+
+        pick(&mut state, Some((15.0, 15.0)));
+        assert_eq!(state.picked_key(), key);
+
+        browse::reveal(&mut state, view, key.clone());
+        assert_eq!(state.picked_key(), key, "лента погасла под собственным переходом");
+        assert_eq!(state.target_in(view), key);
     }
 }
 

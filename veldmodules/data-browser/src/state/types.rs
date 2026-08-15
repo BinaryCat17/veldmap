@@ -3,6 +3,7 @@
 //! Своё состояние держит сам вариант `ViewKind`, а не модуль: два открытых
 //! Browse — это две независимые папки, а не один экран с общей переменной.
 
+use super::listing::{choice, Choice};
 use super::browse::{BrowseState, Children};
 use super::globe::GlobeState;
 use super::layout::PaneId;
@@ -10,29 +11,13 @@ use super::listing::ListingState;
 use super::preview::PreviewState;
 use super::search::SearchState;
 
-/// Куда двигать слой в наборе. Перечислением, а не «вверх: да/нет»: у сдвига
-/// два равноправных направления, и одно из них не является отрицанием другого
-/// — оно просто другое.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Shift {
-    Up,
-    Down,
-}
-
-impl Shift {
-    pub fn key(self) -> &'static str {
-        match self {
-            Shift::Up => "up",
-            Shift::Down => "down",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        match key {
-            "up" => Some(Shift::Up),
-            "down" => Some(Shift::Down),
-            _ => None,
-        }
+choice! {
+    /// Куда двигать слой в наборе. Перечислением, а не «вверх: да/нет»: у сдвига
+    /// два равноправных направления, и одно из них не является отрицанием
+    /// другого — оно просто другое.
+    Shift {
+        Up   = "up",   "Выше";
+        Down = "down", "Ниже";
     }
 }
 

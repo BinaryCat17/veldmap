@@ -6,36 +6,34 @@
 //! правила показа у него одни.
 
 use crate::module::state::listing::{Filter, Grouping, Menu, Sorting};
-use crate::module::state::{State, ViewId};
+use crate::module::state::{Open, State, ViewId};
 
 pub fn on_filter(state: &mut State, view: ViewId, filter: Filter) {
     if let Some(listing) = state.listing_mut(view) {
         listing.filter = filter;
-        listing.refine();
     }
+    state.refine(view);
 }
 
 pub fn on_group(state: &mut State, view: ViewId, grouping: Grouping) {
     if let Some(listing) = state.listing_mut(view) {
         listing.grouping = grouping;
-        listing.refine();
     }
+    state.refine(view);
 }
 
 pub fn on_sort(state: &mut State, view: ViewId, sorting: Sorting) {
     if let Some(listing) = state.listing_mut(view) {
         listing.sorting = sorting;
-        listing.refine();
     }
+    state.refine(view);
 }
 
 pub fn on_query(state: &mut State, view: ViewId, query: String) {
     if let Some(listing) = state.listing_mut(view) {
         listing.query = query;
-        // Страница сбрасывается, меню закрывается: набранное меняет состав
-        // списка, и прежняя страница относилась к другому списку.
-        listing.refine();
     }
+    state.refine(view);
 }
 
 /// Раскрыть строку в её содержимое или свернуть обратно.
@@ -52,27 +50,20 @@ pub fn on_expand(state: &mut State, view: ViewId, key: String) {
 }
 
 pub fn on_page(state: &mut State, view: ViewId, page: usize) {
+    state.close_menus();
     if let Some(listing) = state.listing_mut(view) {
         listing.page = page;
-        listing.menu = Menu::Closed;
-        // Ушли со страницы, к которой привёл переход, — вести больше не к
-        // чему, и подсветка на другой странице говорила бы неправду.
-        listing.target = None;
     }
+    // Ушли со страницы, к которой привёл переход, — вести больше не к чему,
+    // и подсветка на другой странице говорила бы неправду.
+    state.drop_target_in(view);
 }
 
-/// Раскрыть меню, закрыть открытое (`Menu::Closed`) или переключить то же
-/// самое — повторное нажатие на чип.
-pub fn on_menu(state: &mut State, view: ViewId, menu: Menu) {
-    // Было ли это меню раскрыто, спрашивается ДО общего закрытия: оно гасит и
-    // его тоже, и после него «то же самое» уже неотличимо от «другое» —
-    // повторное нажатие на чип открывало бы его заново вместо того, чтобы
-    // закрыть.
-    let same = state.listing_mut(view).is_some_and(|listing| listing.menu == menu);
-    // Всё раскрытое закрывается разом (см. State::close_menus): два раскрытых
-    // меню сразу — состояние, которого не бывает.
-    state.close_menus();
-    if !same && let Some(listing) = state.listing_mut(view) {
-        listing.menu = menu;
+/// Раскрыть меню, закрыть раскрытое (`None`) или переключить то же самое —
+/// повторное нажатие на чип.
+pub fn on_menu(state: &mut State, view: ViewId, menu: Option<Menu>) {
+    match menu {
+        Some(menu) => state.toggle_open(Open::Listing(view, menu)),
+        None => state.close_menus(),
     }
 }

@@ -32,8 +32,6 @@ pub struct View {
     pub read_bytes: u64,
     pub total_bytes: u64,
     pub error: Option<String>,
-    /// Последнее разосланное состояние — дедуп on_view_state.
-    pub reported: Option<crate::proto::image_view::ViewState>,
 }
 
 /// Показанный ресурс. Метаданные приходят вторым тактом (on_described),
@@ -73,7 +71,6 @@ impl View {
             read_bytes: 0,
             total_bytes: 0,
             error: None,
-            reported: None,
         }
     }
 

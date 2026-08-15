@@ -288,6 +288,53 @@ def flow_entries(svc_name: str, schema: dict) -> tuple[list[dict], list[str]]:
     return entries, errors
 
 
+def is_killable(schema: dict) -> bool:
+    """Может ли инстанс сервиса быть убит и поднят заново, потеряв состояние.
+    Убивают операцию, а уносит она весь инстанс, поэтому признак — наличие
+    хотя бы одного отменяемого входа."""
+    inputs = (schema.get("interface") or {}).get("inputs") or {}
+    return any((entry or {}).get("cancellable") for entry in inputs.values())
+
+
+def snapshot_errors(schema: dict, native: bool) -> list[str]:
+    """Правила `snapshot: true` внутри одной схемы.
+
+    Помечен им топик, который везёт состояние целиком: стаб помнит отпечаток
+    последнего отправленного тела и повтор не шлёт (см. veldsdk::snapshot).
+    Отсюда три места, где такая пометка означала бы не то, что написано.
+    """
+    errors = []
+    iface = schema.get("interface") or {}
+    requests, replies = correlated_topics(schema)
+    for kind, correlated in (("inputs", set(requests)), ("outputs", set(replies))):
+        for name, entry in (iface.get(kind) or {}).items():
+            if not (entry or {}).get("snapshot"):
+                continue
+            where = f"interface.{kind}.{name}"
+            if native:
+                errors.append(f"{where}: `snapshot: true` понимает только кодоген "
+                              f"wasm-модуля — у платформенного сервиса рассылок "
+                              f"состояния нет")
+            if (entry or {}).get("targeted"):
+                errors.append(f"{where}: `snapshot: true` несовместим с `targeted` — "
+                              f"отпечаток у топика один, а адресатов много, и "
+                              f"второму уехало бы «не изменилось»")
+            if name in correlated:
+                errors.append(f"{where}: `snapshot: true` несовместим с парой "
+                              f"`replies_to` — ответ принадлежит своему запросу, и "
+                              f"совпавший с прошлым ответом всё равно обязан уехать")
+    # Инстанс уносит своё состояние молча, а отправитель об этом не узнаёт и
+    # повтора не сделает. Поэтому снимок не сводится с отменяемым: здесь —
+    # своим входом, ниже (в перекрёстной проверке) — чужим выходом.
+    if is_killable(schema):
+        for name, entry in (iface.get("inputs") or {}).items():
+            if (entry or {}).get("snapshot"):
+                errors.append(f"interface.inputs.{name}: `snapshot: true` у отменяемого "
+                              f"сервиса — воскресший инстанс потеряет присланное, а "
+                              f"отправитель повтора не сделает")
+    return errors
+
+
 # ── Нормализация: схема → модель сервиса ─────────────────────────────────────
 # Общий для обоих конвейеров (wasm-модули и нативные сервисы хоста) шаг:
 # флаги топиков вычисляются из схемы один раз, а тонкие бэкенды рендеринга
@@ -320,6 +367,10 @@ def topic_entries(svc_name: str, schema: dict, kind: str, rust_path_of,
             "const":      n.upper(),
             "rust_path":  rust_path_of(kind, n, d),
             "targeted":   bool(d.get("targeted", False)),
+            # Топик везёт состояние целиком, а не команду: у стаба тогда есть
+            # отпечаток последнего отправленного, и неизменившееся не уходит
+            # вовсе (см. veldsdk::snapshot).
+            "snapshot":   bool(d.get("snapshot", False)),
             "correlated": correlated,
             "pairs_with": ", ".join(f"`{svc_name}/{t}`" for t in peers),
         })
@@ -446,6 +497,9 @@ def validate_service_schema(schema: dict, universe: dict,
     # его без ответа, которым он закрывается, нельзя (см. flow_entries).
     errors.extend(flow_entries(name, schema)[1])
 
+    # Где `snapshot: true` означал бы не то, что написано (см. snapshot_errors).
+    errors.extend(snapshot_errors(schema, native=schema_dir is None))
+
     # Перекрёстная проверка зависимостей — только диалект wasm-модуля.
     if schema_dir is not None:
         modules_root = os.path.dirname(schema_dir)
@@ -483,6 +537,17 @@ def validate_service_schema(schema: dict, universe: dict,
 
             cross_check("subs", list(dep_data.get("subs") or []), dep_outputs, "output")
             cross_check("calls", list(dep_data.get("calls") or []), dep_inputs, "input")
+
+            # Вторая половина правила про снимок и отменяемость: отправитель
+            # помнит отправленное, поэтому потерять присланное подписчику
+            # нельзя — а убитый инстанс теряет всё своё.
+            if is_killable(schema):
+                for topic in dep_data.get("subs") or []:
+                    if ((dep_outputs.get(topic) or {}).get("snapshot")):
+                        err(f"dependencies.{dep}.subs.{topic}",
+                            f"'{dep}/{topic}' рассылает снимок, а мы отменяемы — "
+                            f"воскресший инстанс потеряет присланное, а отправитель "
+                            f"повтора не сделает")
 
     return [f"schema '{name}': {e}" for e in errors], resolved
 

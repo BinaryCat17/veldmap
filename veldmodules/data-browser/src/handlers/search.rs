@@ -26,7 +26,7 @@ pub fn on_mission(state: &mut State, view: ViewId, mission: Mission) {
     if !mission.clouded() {
         search.cloud = Cloud::default();
     }
-    search.listing.refine();
+    state.refine(view);
     run(state, view);
 }
 
@@ -45,14 +45,14 @@ pub fn on_to(state: &mut State, view: ViewId, value: String) {
 pub fn on_period(state: &mut State, view: ViewId, period: Period) {
     let Some(search) = state.search_mut(view) else { return };
     search.period = period;
-    search.listing.refine();
+    state.refine(view);
     run(state, view);
 }
 
 pub fn on_cloud(state: &mut State, view: ViewId, cloud: Cloud) {
     let Some(search) = state.search_mut(view) else { return };
     search.cloud = cloud;
-    search.listing.refine();
+    state.refine(view);
     run(state, view);
 }
 

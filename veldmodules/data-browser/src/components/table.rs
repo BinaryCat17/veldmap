@@ -245,6 +245,10 @@ fn gutters<M>(content: impl Into<Element<M>>) -> Container<M> {
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     pub listing: &'a ListingState,
+    /// Раскрытое меню этого списка; `None` — раскрыто что-то другое или
+    /// ничего. Живёт оно в состоянии экрана (`State::open`), а не вида:
+    /// раскрытым бывает одно на весь экран.
+    pub menu: Option<&'a Menu>,
     /// Колонки, которые помещаются в отведённую ширину, — их и рисуем
     /// (см. [`fit`]). Набор один на всю таблицу: шапка, заголовок группы и
     /// строка обязаны совпасть по сетке.
@@ -654,16 +658,15 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
     let items = menu_items(view, entry, context.here);
     if !items.is_empty() {
         let menu = Menu::Row(entry.key().to_string());
-        let open = context.listing.menu == menu;
+        let open = context.menu == Some(&menu);
         let anchor = theme::row_button_icon(theme::glyph::MORE, open)
-            .on_press(Msg::In(view, ViewMsg::OpenMenu(menu)));
+            .on_press(Msg::In(view, ViewMsg::OpenMenu(Some(menu))));
 
         buttons.push(
-            popover(anchor, super::menu::panel(items))
-                .open(open)
+            popover(anchor, open, || super::menu::panel(items))
                 .align_x(Alignment::End)
                 .gap(4.0)
-                .on_dismiss(Msg::In(view, ViewMsg::OpenMenu(Menu::Closed)))
+                .on_dismiss(Msg::In(view, ViewMsg::OpenMenu(None)))
                 .into(),
         );
     }

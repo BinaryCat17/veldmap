@@ -11,7 +11,7 @@ use crate::proto::ui_service::{
 };
 use crate::module::components::{arrange, controls, format, table, Row};
 use crate::module::state::ViewId;
-use crate::module::state::listing::ListingState;
+use crate::module::state::listing::{ListingState, Menu};
 use crate::module::{theme, Msg, ViewMsg};
 
 /// Чем экран подписан и что показывает.
@@ -39,6 +39,11 @@ pub struct Screen<'a> {
     /// модуля (`State::outlined_in`), а не сам список: отметка — намерение, а
     /// контур — то, что из него вышло, и совпадают они не всегда.
     pub outlined: usize,
+    /// Раскрытое меню этого списка (см. `table::Context::menu`).
+    pub menu: Option<&'a Menu>,
+    /// Строка, к которой привёл переход в эту вкладку; пусто — переход был не
+    /// сюда (см. `state::Highlight`).
+    pub target: &'a str,
 }
 
 /// `width` — ширина окна в логических точках: по ней считается, сколько знаков
@@ -86,8 +91,10 @@ pub fn heading(title: &str, subtitle: String, trailing: Vec<Element<Msg>>) -> El
 ///
 /// Номер просьбы едет вместе со смещением: по одному смещению рендереру не
 /// отличить «просят снова» от «просят то же самое» (см. `ListingState::aim`).
-fn aim(arranged: &arrange::Arranged<'_>, listing: &ListingState) -> Option<ScrollTo> {
-    let target = listing.target.as_deref()?;
+fn aim(arranged: &arrange::Arranged<'_>, listing: &ListingState, target: &str) -> Option<ScrollTo> {
+    if target.is_empty() {
+        return None;
+    }
     let at = arranged.lines.iter().position(|line| match line {
         arrange::Line::Entry { row, .. } => row.named(target),
         arrange::Line::Group { .. } | arrange::Line::Waiting { .. } => false,
@@ -157,7 +164,6 @@ pub fn view(
         "Под отбор ничего не подошло"
     };
 
-    let target = listing.target.as_deref().unwrap_or_default();
     let body: Element<Msg> = if arranged.lines.is_empty() {
         theme::empty(nothing).into()
     } else {
@@ -166,11 +172,12 @@ pub fn view(
             &arranged.lines,
             table::Context {
                 listing,
+                menu: screen.menu,
                 columns: &columns,
                 name_width,
                 here: screen.path.unwrap_or_default(),
                 picked: screen.picked,
-                target,
+                target: screen.target,
                 now: format::now(),
             },
         ))
@@ -179,7 +186,7 @@ pub fn view(
             // Имя — своё у каждой вкладки: наводка адресуется им, а списков на
             // экране бывает два.
             .name(format!("rows:{}", view))
-            .scroll_to(aim(&arranged, listing))
+            .scroll_to(aim(&arranged, listing, screen.target))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -196,7 +203,8 @@ pub fn view(
     // Наличие пути ровно это и означает: вид с путём показывает содержимое
     // одной папки, все его строки лежат в ней, и заголовок над ними был бы
     // ровно один. Второго признака под это заводить не нужно — этот уже есть.
-    screen_rows.push(controls::toolbar(view, listing, &arranged.counts, screen.path.is_none(), width));
+    screen_rows.push(controls::toolbar(
+        view, listing, screen.menu, &arranged.counts, screen.path.is_none(), width));
     screen_rows.push(table::header(view, &columns, arranged.all_marked(listing)));
     screen_rows.push(body);
     if arranged.pages > 1 {

@@ -112,8 +112,6 @@ pub struct State {
     epoch: u64,
     /// При чём выборы проверялись в прошлый раз.
     checked: Option<(Camera, u64, u64)>,
-    /// Последний разосланный ход добычи — дедуп on_overlay_progress.
-    progress: Vec<crate::proto::globe::OverlayProgress>,
     pending_describe: veldsdk::Correlator<(String, Role)>,
     pending_query: veldsdk::Correlator<QueryCtx>,
     pending_produce: veldsdk::Correlator<ProduceCtx>,
@@ -143,7 +141,6 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         patches: 0,
         epoch: 0,
         checked: None,
-        progress: Vec::new(),
         pending_describe: veldsdk::Correlator::new(),
         pending_query: veldsdk::Correlator::new(),
         pending_produce: veldsdk::Correlator::new(),
@@ -827,13 +824,13 @@ fn build_patches(state: &mut State) {
     }
 }
 
-/// Разослать ход добычи — если он с прошлого раза изменился.
+/// Разослать ход добычи.
 ///
 /// Набор целиком и по одной строке на наложение, включая скрытые: у скрытого
 /// добыча стои́т, и сказать о нём «ничего не едет» — такой же ответ, как всякий
-/// другой. Пересылка только на изменение: сообщение уезжает в разметку, а
-/// пересобирать её на каждый кадр не за чем.
-fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)]) {
+/// другой. Считается он на каждом кадре, а уезжает только изменившийся — топик
+/// объявлен снимком, и отсекает повтор его стаб (см. schema.yaml).
+fn report_progress(state: &State, wanted: &[(String, f32, overlay::Wanted)]) {
     let overlays: Vec<OverlayProgress> = state
         .overlays
         .iter()
@@ -857,10 +854,6 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
         })
         .collect();
 
-    if state.progress == overlays {
-        return;
-    }
-    state.progress = overlays.clone();
     crate::emit::on_overlay_progress(&OverlaysProgress { overlays });
 }
 

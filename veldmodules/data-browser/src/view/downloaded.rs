@@ -41,6 +41,8 @@ pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg>
             empty: "Ничего не скачано",
             controls: None,
             rows,
+            menu: state.menu_in(view),
+            target: state.target_in(view),
         },
         listing,
         state.pane_width(view),

@@ -4,6 +4,7 @@ pub mod graphics;
 pub mod correlator;
 pub mod latest;
 pub mod resource;
+pub mod snapshot;
 pub mod surface;
 pub mod time;
 

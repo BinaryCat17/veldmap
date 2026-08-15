@@ -12,6 +12,8 @@
 //! перенос, бросок, доля границы, сохранение — сводится к нескольким
 //! действиям над ним и потому лежит здесь целиком.
 
+use super::listing::choice;
+
 use super::types::ViewId;
 
 /// Идентификатор панели. Уникален в пределах сессии и не переиспользуется — по
@@ -99,19 +101,22 @@ impl Axis {
     }
 }
 
-/// Сторона, с которой встаёт панель. Ею же называют направление переноса
-/// («перенести вправо») и край, за который взялись броском.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Side {
-    Left,
-    Right,
-    Above,
-    Below,
+choice! {
+    /// Сторона, с которой встаёт панель. Ею же называют направление переноса
+    /// («перенести вправо») и край, за который взялись броском.
+    ///
+    /// Порядок здесь — порядок пунктов в меню переноса; подпись живёт рядом с
+    /// самой стороной, потому что сторона и то, как её называют человеку, —
+    /// одна вещь, и разъехаться им нельзя.
+    Side {
+        Right = "right", "Перенести вправо";
+        Left  = "left",  "Перенести влево";
+        Above = "above", "Перенести вверх";
+        Below = "below", "Перенести вниз";
+    }
 }
 
 impl Side {
-    pub const ALL: [Side; 4] = [Side::Right, Side::Left, Side::Above, Side::Below];
-
     pub fn axis(self) -> Axis {
         match self {
             Side::Left | Side::Right => Axis::Row,
@@ -134,29 +139,6 @@ impl Side {
         }
     }
 
-    pub fn key(self) -> &'static str {
-        match self {
-            Side::Left => "left",
-            Side::Right => "right",
-            Side::Above => "above",
-            Side::Below => "below",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Side> {
-        Side::ALL.into_iter().find(|side| side.key() == key)
-    }
-
-    /// Подпись переноса. Здесь, а не в меню: сторона и то, как её называют
-    /// человеку, — одна вещь, и разъехаться им нельзя.
-    pub fn title(self) -> &'static str {
-        match self {
-            Side::Left => "Перенести влево",
-            Side::Right => "Перенести вправо",
-            Side::Above => "Перенести вверх",
-            Side::Below => "Перенести вниз",
-        }
-    }
 }
 
 /// Узел дерева: панель либо деление надвое.

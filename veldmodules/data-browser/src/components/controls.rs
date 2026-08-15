@@ -51,11 +51,12 @@ pub struct Control {
 pub fn toolbar(
     view: ViewId,
     listing: &ListingState,
+    opened: Option<&Menu>,
     counts: &[usize],
     groupable: bool,
     width: f32,
 ) -> Element<Msg> {
-    let open = &listing.menu;
+    let open = opened;
     let field = search_field("Фильтр по имени", &listing.query, move |query| {
         Msg::In(view, ViewMsg::Query(query))
     }, None);
@@ -207,11 +208,11 @@ pub fn chip<C: Choice>(
     caption: &str,
     current: C,
     menu: Menu,
-    opened: &Menu,
+    opened: Option<&Menu>,
     counts: &[usize],
     make: impl Fn(C) -> Msg,
 ) -> Control {
-    let open = *opened == menu;
+    let open = opened == Some(&menu);
     let anchor = theme::surface_button(
         row![
             text::<Msg>(caption.to_string()).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line(),
@@ -228,7 +229,7 @@ pub fn chip<C: Choice>(
     )
     .height(Length::Fixed(theme::CONTROL_HEIGHT))
     .padding(Padding { top: 0.0, bottom: 0.0, left: PAD, right: PAD })
-    .on_press(Msg::In(view, ViewMsg::OpenMenu(menu)));
+    .on_press(Msg::In(view, ViewMsg::OpenMenu(Some(menu))));
 
     // Ширина — по тому, что на чипе стои́т сейчас, а не по самой длинной из
     // подписей меню: выбранное значение и есть его содержимое. Полоса от смены
@@ -239,23 +240,27 @@ pub fn chip<C: Choice>(
         + format::text_width(caption, theme::TEXT_LABEL)
         + format::text_width(current.label(), theme::TEXT_LABEL);
 
-    let items = C::ALL
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let item = menu::Item::new(value.title(), make(*value)).selected(*value == current);
-            match counts.get(index) {
-                Some(count) => item.count(*count),
-                None => item,
-            }
-        })
-        .collect();
+    // Пункты собираются вместе с панелью, то есть только у раскрытого чипа:
+    // их столько же, сколько значений у перечисления, и на закрытом они не
+    // видны ни секунды.
+    let items = || {
+        C::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let item = menu::Item::new(value.title(), make(*value)).selected(*value == current);
+                match counts.get(index) {
+                    Some(count) => item.count(*count),
+                    None => item,
+                }
+            })
+            .collect()
+    };
 
-    let element = popover(anchor, menu::panel(items))
-        .open(open)
+    let element = popover(anchor, open, || menu::panel(items()))
         .align_x(Alignment::End)
         .gap(3.0)
-        .on_dismiss(Msg::In(view, ViewMsg::OpenMenu(Menu::Closed)));
+        .on_dismiss(Msg::In(view, ViewMsg::OpenMenu(None)));
 
     Control { element: element.into(), width }
 }

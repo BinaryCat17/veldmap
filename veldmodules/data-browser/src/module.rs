@@ -18,17 +18,11 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
 }
 
 // -- Event hook (Elm-цикл: вызывается сгенерированным раннером после каждого
-// сообщения). Пересобирает view и шлёт в ui-service; неизменный layout не
-// уходит по сети — дедуп по хэшу внутри render(). --
-static LAST_UI_HASH: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
-
+// сообщения). Пересобирает view и шлёт в ui-service; неизменившийся layout по
+// шине не едет — топик объявлен снимком (см. его schema.yaml). --
 pub fn hook_event(state: &State) {
     let root = view::build_root(state);
-    veld_ui_service_wrap::render::render(
-        root,
-        &mut LAST_UI_HASH.lock().unwrap(),
-        crate::calls::ui_service::on_set_view,
-    );
+    veld_ui_service_wrap::render::render(root, crate::calls::ui_service::on_set_view);
 }
 
 // -- UI-события (ui-service/on_ui_event, адресовано нам через target) --

@@ -35,11 +35,41 @@ pub const SERVICE_NAME: &str = "{{ service_name }}";
 /// у остальных её негде указать, а у этих — нельзя забыть.
 pub mod emit {
     {% if emits %}use veldsdk::prost::Message;{% endif %}
+    {%- set snapshots = emits | selectattr("snapshot") | list %}
+    {%- if snapshots %}
+
+    /// Отпечатки последних разосланных снимков — по одному на топик
+    /// (см. veldsdk::snapshot).
+    mod sent {
+        {%- for output in snapshots %}
+        pub static {{ output.const }}: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        {%- endfor %}
+    }
+
+    /// Забыть разосланное: следующая рассылка снимка уйдёт, даже совпади она
+    /// с прошлой. Тем и отвечают на просьбу прислать состояние заново.
+    pub mod resend {
+        {%- for output in snapshots %}
+        pub fn {{ output.name }}() {
+            veldsdk::snapshot::forget(&super::sent::{{ output.const }});
+        }
+        {%- endfor %}
+    }
+    {%- endif %}
     {% for output in emits %}
-    /// `{{ service_name }}/{{ output.name }}`{% if output.correlated %} — ответ на {{ output.pairs_with }}: `correlation_id` берётся из запроса{% endif %}{% if output.targeted %} (адресовано: доставляется только `target`){% endif %}
+    /// `{{ service_name }}/{{ output.name }}`{% if output.correlated %} — ответ на {{ output.pairs_with }}: `correlation_id` берётся из запроса{% endif %}{% if output.targeted %} (адресовано: доставляется только `target`){% endif %}{% if output.snapshot %} — снимок состояния: неизменившийся не уходит{% endif %}
     pub fn {{ output.name }}(msg: &{{ output.rust_path }}{% if output.correlated %}, correlation_id: &str{% endif %}{% if output.targeted %}, target: &str{% endif %}) {
+        {%- if output.snapshot %}
+        let body = msg.encode_to_vec();
+        if !veldsdk::snapshot::changed(&sent::{{ output.const }}, &body) {
+            return;
+        }
+        veldsdk::abi::publish("{{ service_name }}/{{ output.name }}", body, "", "");
+        {%- else %}
         veldsdk::abi::publish("{{ service_name }}/{{ output.name }}", msg.encode_to_vec(),
             {% if output.correlated %}correlation_id{% else %}""{% endif %}, {% if output.targeted %}target{% else %}""{% endif %});
+        {%- endif %}
     }
     {% endfor %}
 }
@@ -95,11 +125,40 @@ pub mod calls {
     {% for dep in dep_calls %}
     pub mod {{ dep.snake }} {
         use veldsdk::prost::Message;
+        {%- set snapshots = dep.methods | selectattr("snapshot") | list %}
+        {%- if snapshots %}
+
+        /// Отпечатки последних отправленных снимков (см. veldsdk::snapshot).
+        mod sent {
+            {%- for method in snapshots %}
+            pub static {{ method.const }}: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            {%- endfor %}
+        }
+
+        /// Забыть отправленное: следующий снимок уйдёт, даже совпади он с
+        /// прошлым.
+        pub mod resend {
+            {%- for method in snapshots %}
+            pub fn {{ method.name }}() {
+                veldsdk::snapshot::forget(&super::sent::{{ method.const }});
+            }
+            {%- endfor %}
+        }
+        {%- endif %}
         {% for method in dep.methods %}
-        /// `{{ dep.service }}/{{ method.name }}`{% if method.correlated %} — запрос; ответ придёт в {{ method.pairs_with }} с этим же `correlation_id`{% endif %}
+        /// `{{ dep.service }}/{{ method.name }}`{% if method.correlated %} — запрос; ответ придёт в {{ method.pairs_with }} с этим же `correlation_id`{% endif %}{% if method.snapshot %} — снимок состояния: неизменившийся не уходит{% endif %}
         pub fn {{ method.name }}(msg: &{{ method.rust_path }}{% if method.correlated %}, correlation_id: &str{% endif %}) {
+            {%- if method.snapshot %}
+            let body = msg.encode_to_vec();
+            if !veldsdk::snapshot::changed(&sent::{{ method.const }}, &body) {
+                return;
+            }
+            veldsdk::abi::publish("{{ dep.service }}/{{ method.name }}", body, "", "");
+            {%- else %}
             veldsdk::abi::publish("{{ dep.service }}/{{ method.name }}", msg.encode_to_vec(),
                 {% if method.correlated %}correlation_id{% else %}""{% endif %}, "");
+            {%- endif %}
         }
         {% endfor %}
     }

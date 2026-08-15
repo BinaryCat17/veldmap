@@ -1,15 +1,15 @@
 use crate::proto::data_provider::DataProduct;
 
-use super::listing::Choice;
+use super::listing::choice;
 
-/// Миссия, по которой сужается запрос.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mission {
-    #[default]
-    Any,
-    Sentinel1,
-    Sentinel2,
-    Sentinel3,
+choice! {
+    /// Миссия, по которой сужается запрос.
+    Mission {
+        Any       = "any",        "Все", "все";
+        Sentinel1 = "sentinel-1", "Sentinel-1";
+        Sentinel2 = "sentinel-2", "Sentinel-2";
+        Sentinel3 = "sentinel-3", "Sentinel-3";
+    }
 }
 
 impl Mission {
@@ -35,56 +35,24 @@ impl Mission {
     }
 }
 
-impl Choice for Mission {
-    const ALL: &'static [Self] =
-        &[Mission::Any, Mission::Sentinel1, Mission::Sentinel2, Mission::Sentinel3];
-
-    fn key(self) -> &'static str {
-        match self {
-            Mission::Any => "any",
-            Mission::Sentinel1 => "sentinel-1",
-            Mission::Sentinel2 => "sentinel-2",
-            Mission::Sentinel3 => "sentinel-3",
-        }
+choice! {
+    /// Окно съёмки: насколько глубоко в прошлое смотреть.
+    ///
+    /// Само по себе окно выдачу почти не меняет: каталог отдаёт самое свежее
+    /// первым, и пятьдесят самых свежих сняты минуты назад — они попадают в
+    /// любое окно. Смысл у него появляется вместе с сужением по месту: у одной
+    /// плитки пролёты за неделю и за год — это разные списки.
+    Period {
+        Any   = "any",   "За всё время", "всё время";
+        Week  = "week",  "За неделю",    "неделя";
+        Month = "month", "За месяц",     "месяц";
+        Year  = "year",  "За год",       "год";
+        /// Оба края названы датами. Отдельным вариантом, а не парой полей рядом
+        /// с пресетом: «за неделю» и «с 1 по 5 августа» — это два разных
+        /// способа сказать одно и то же, и держать их одновременно значит
+        /// завести вопрос «какой из них главный».
+        Custom = "custom", "Свой интервал", "свой интервал";
     }
-
-    fn title(self) -> &'static str {
-        match self {
-            Mission::Any => "Все",
-            Mission::Sentinel1 => "Sentinel-1",
-            Mission::Sentinel2 => "Sentinel-2",
-            Mission::Sentinel3 => "Sentinel-3",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Mission::Any => "все",
-            Mission::Sentinel1 => "Sentinel-1",
-            Mission::Sentinel2 => "Sentinel-2",
-            Mission::Sentinel3 => "Sentinel-3",
-        }
-    }
-}
-
-/// Окно съёмки: насколько глубоко в прошлое смотреть.
-///
-/// Само по себе окно выдачу почти не меняет: каталог отдаёт самое свежее
-/// первым, и пятьдесят самых свежих сняты минуты назад — они попадают в любое
-/// окно. Смысл у него появляется вместе с сужением по месту: у одной плитки
-/// пролёты за неделю и за год — это разные списки.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Period {
-    #[default]
-    Any,
-    Week,
-    Month,
-    Year,
-    /// Оба края названы датами. Отдельным вариантом, а не парой полей рядом с
-    /// пресетом: «за неделю» и «с 1 по 5 августа» — это два разных способа
-    /// сказать одно и то же, и держать их одновременно значит завести вопрос
-    /// «какой из них главный».
-    Custom,
 }
 
 impl Period {
@@ -102,50 +70,15 @@ impl Period {
     }
 }
 
-impl Choice for Period {
-    const ALL: &'static [Self] =
-        &[Period::Any, Period::Week, Period::Month, Period::Year, Period::Custom];
-
-    fn key(self) -> &'static str {
-        match self {
-            Period::Any => "any",
-            Period::Week => "week",
-            Period::Month => "month",
-            Period::Year => "year",
-            Period::Custom => "custom",
-        }
+choice! {
+    /// Потолок облачности. Спрашивается только у оптических миссий — см.
+    /// [`Mission::clouded`].
+    Cloud {
+        Any    = "any", "Любая",  "любая";
+        Upto10 = "10",  "До 10%", "до 10%";
+        Upto30 = "30",  "До 30%", "до 30%";
+        Upto60 = "60",  "До 60%", "до 60%";
     }
-
-    fn title(self) -> &'static str {
-        match self {
-            Period::Any => "За всё время",
-            Period::Week => "За неделю",
-            Period::Month => "За месяц",
-            Period::Year => "За год",
-            Period::Custom => "Свой интервал",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Period::Any => "всё время",
-            Period::Week => "неделя",
-            Period::Month => "месяц",
-            Period::Year => "год",
-            Period::Custom => "свой интервал",
-        }
-    }
-}
-
-/// Потолок облачности. Спрашивается только у оптических миссий — см.
-/// [`Mission::clouded`].
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Cloud {
-    #[default]
-    Any,
-    Upto10,
-    Upto30,
-    Upto60,
 }
 
 impl Cloud {
@@ -156,37 +89,6 @@ impl Cloud {
             Cloud::Upto10 => Some(10.0),
             Cloud::Upto30 => Some(30.0),
             Cloud::Upto60 => Some(60.0),
-        }
-    }
-}
-
-impl Choice for Cloud {
-    const ALL: &'static [Self] = &[Cloud::Any, Cloud::Upto10, Cloud::Upto30, Cloud::Upto60];
-
-    fn key(self) -> &'static str {
-        match self {
-            Cloud::Any => "any",
-            Cloud::Upto10 => "10",
-            Cloud::Upto30 => "30",
-            Cloud::Upto60 => "60",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Cloud::Any => "Любая",
-            Cloud::Upto10 => "До 10%",
-            Cloud::Upto30 => "До 30%",
-            Cloud::Upto60 => "До 60%",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Cloud::Any => "любая",
-            Cloud::Upto10 => "до 10%",
-            Cloud::Upto30 => "до 30%",
-            Cloud::Upto60 => "до 60%",
         }
     }
 }

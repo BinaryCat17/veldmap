@@ -21,7 +21,8 @@ use crate::proto::ui_service::{
     FontWeight, Length, Padding, ScrollDirection, scrollable,
 };
 use crate::module::components::{format, menu};
-use crate::module::state::{Axis, Node, PaneId, Side, State, ViewId, ViewKind};
+use crate::module::state::listing::Choice;
+use crate::module::state::{Axis, Node, Open, PaneId, Side, State, ViewId, ViewKind};
 use crate::module::{theme, Msg, NewTab, ViewMsg};
 
 
@@ -217,7 +218,7 @@ fn tab_strip(state: &State, pane: PaneId) -> Element<Msg> {
         // Кнопки меню нет, пока предлагать нечего: единственной вкладке на весь
         // экран переезжать некуда, а «закрыть» у неё и так под рукой крестиком —
         // меню из одного этого пункта обещало бы выбор, которого нет.
-        let options = state.tab_options == Some(view.id);
+        let options = state.open == Open::TabOptions(view.id);
         let arrangements = arrangements(state, view.id);
         let more: Element<Msg> = match arrangements.is_empty() {
             true => theme::nothing(),
@@ -226,9 +227,9 @@ fn tab_strip(state: &State, pane: PaneId) -> Element<Msg> {
                     icon::<Msg>(theme::glyph::SPLIT).size(9.0).color(theme::INK_FAINT),
                 )
                 .on_press(Msg::TabOptions(if options { None } else { Some(view.id) })),
-                menu::panel(tab_options(arrangements, view.id)),
+                options,
+                || menu::panel(tab_options(arrangements, view.id)),
             )
-            .open(options)
             .gap(4.0)
             .on_dismiss(Msg::TabOptions(None))
             .into(),
@@ -269,22 +270,25 @@ fn tab_strip(state: &State, pane: PaneId) -> Element<Msg> {
         .padding(Padding { top: 5.0, right: 7.0, bottom: 0.0, left: 7.0 })
         .align_items(Alignment::End);
 
-    let open = state.tab_menu == Some(pane);
+    let open = state.open == Open::TabMenu(pane);
     let opener = popover(
         theme::chrome_icon(icon::<Msg>(theme::glyph::PLUS).size(11.0).color(theme::INK_DIM))
             .width(Length::Fixed(TAB_STRIP_HEIGHT))
             .height(Length::Fill)
             .on_press(Msg::TabMenu(if open { None } else { Some(pane) })),
-        menu::panel(
-            NewTab::ALL
-                .iter()
-                .map(|kind| {
-                    menu::Item::new(kind.title(), Msg::NewTab(pane, *kind)).glyph(tab_glyph(*kind))
-                })
-                .collect(),
-        ),
+        open,
+        || {
+            menu::panel(
+                NewTab::ALL
+                    .iter()
+                    .map(|kind| {
+                        menu::Item::new(kind.title(), Msg::NewTab(pane, *kind))
+                            .glyph(tab_glyph(*kind))
+                    })
+                    .collect(),
+            )
+        },
     )
-    .open(open)
     .gap(2.0)
     .on_dismiss(Msg::TabMenu(None));
 
@@ -317,7 +321,7 @@ fn tab_strip(state: &State, pane: PaneId) -> Element<Msg> {
 /// выбор и молчит в ответ, поэтому его здесь нет вовсе (см. `State::can_move`).
 fn arrangements(state: &State, id: ViewId) -> Vec<menu::Item> {
     let mut items = Vec::new();
-    for side in Side::ALL {
+    for &side in Side::ALL {
         if state.can_move(id, side) {
             items.push(
                 menu::Item::new(side.title(), Msg::TabMove(id, side)).glyph(side_glyph(side)),

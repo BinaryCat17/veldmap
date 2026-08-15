@@ -850,21 +850,24 @@ pub struct Popover<M> {
 }
 
 impl<M> Popover<M> {
-    pub fn new(anchor: impl Into<Element<M>>, panel: impl Into<Element<M>>) -> Self {
+    /// Открытость приходит вместе с панелью, а не отдельным доводом, и панель
+    /// приходит замыканием: закрытая не строится вовсе. Иначе меню каждой
+    /// строки списка собиралось бы, ехало по шине и разворачивалось в виджеты
+    /// на каждом кадре — при том, что на экране его нет.
+    ///
+    /// Состояние меню при этом принадлежит клиенту: сервис его не помнит и сам
+    /// не переключает.
+    pub fn new(anchor: impl Into<Element<M>>, open: bool,
+               panel: impl FnOnce() -> Element<M>) -> Self {
         Self {
             widget: proto::Popover {
                 anchor: Some(Box::new(anchor.into().widget)),
-                panel: Some(Box::new(panel.into().widget)),
+                panel: open.then(|| Box::new(panel().widget)),
+                open,
                 ..Default::default()
             },
             _marker: std::marker::PhantomData,
         }
-    }
-    /// Открыта ли панель. Состояние меню принадлежит клиенту — сервис его не
-    /// помнит и сам не переключает.
-    pub fn open(mut self, open: bool) -> Self {
-        self.widget.open = open;
-        self
     }
     /// Каким краем панель равняется на якорь.
     pub fn align_x(mut self, align: Alignment) -> Self {
@@ -895,8 +898,9 @@ impl<M> From<Popover<M>> for Element<M> {
     }
 }
 
-pub fn popover<M>(anchor: impl Into<Element<M>>, panel: impl Into<Element<M>>) -> Popover<M> {
-    Popover::new(anchor, panel)
+pub fn popover<M>(anchor: impl Into<Element<M>>, open: bool,
+                  panel: impl FnOnce() -> Element<M>) -> Popover<M> {
+    Popover::new(anchor, open, panel)
 }
 
 pub struct Image<M> {

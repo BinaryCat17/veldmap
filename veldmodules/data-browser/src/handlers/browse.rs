@@ -2,7 +2,7 @@
 
 use crate::module::components::{arrange, folder_of, folder_path, rows};
 use crate::module::state::browse::BrowseItem;
-use crate::module::state::{Listing, State, ViewId, ViewKind};
+use crate::module::state::{Highlight, Listing, State, ViewId, ViewKind};
 use crate::proto::data_provider::{ListEntry, ListPathRequest, ListPathResponse};
 
 /// Сколько записей забирать из одной папки. Хранилище отдаёт листинг
@@ -33,9 +33,11 @@ pub fn request_path(state: &mut State, view: ViewId, path: String) {
         browse.children.clear();
         browse.listing.expanded.clear();
         browse.listing.page = 0;
-        browse.listing.target = None;
         browse.request.begin()
     };
+    // Ушли из папки, к строке которой привёл переход, — подсвечивать больше
+    // нечего.
+    state.drop_target_in(view);
     state.listings.insert(correlation_id.clone(), Listing::Path(view));
 
     crate::calls::data_provider::on_list_path(&ListPathRequest {
@@ -111,21 +113,20 @@ pub fn reveal(state: &mut State, view: ViewId, key: String) {
     if !here {
         request_path(state, view, folder);
     }
-    // Привели к другому снимку, чем выбран на шаре, — выбор гаснет: подсвечена
+    // Привели к другому снимку, чем обведён на шаре, — лента гаснет: подсвечена
     // на экране одна строка, и переход — свежий ответ на тот же вопрос, что и
-    // щелчок по шару (см. `State::clear_targets`). К тому же самому приводит
+    // щелчок по шару (см. `state::Highlight`). К тому же самому снимку приводит
     // как раз полоса под шаром, и там гасить нечего.
-    let elsewhere = state.pick.as_deref().is_some_and(|picked| picked != key);
+    let same = state.picked_key() == key;
+    if !same {
+        super::outline::deselect(state);
+    }
     if let Some(listing) = state.listing_mut(view) {
-        listing.target = Some(key);
         // Просьба новая, даже если строка та же: без этого повторный переход к
         // ней ничего бы не сдвинул (см. `ListingState::aim`).
         listing.aim = listing.aim.wrapping_add(1);
     }
-    state.clear_targets(Some(view));
-    if elsewhere {
-        super::outline::deselect(state);
-    }
+    state.highlight = Some(Highlight { key, view: Some(view), on_globe: same });
     // Папку ещё листают — считать страницу не по чему; посчитает её конец
     // листинга (см. [`aim`]).
     if here {
@@ -141,7 +142,10 @@ pub fn reveal(state: &mut State, view: ViewId, key: String) {
 fn aim(state: &mut State, view: ViewId) {
     let rows = rows::of(state, view);
     let Some(listing) = state.get(view).and_then(ViewKind::listing) else { return };
-    let Some(key) = listing.target.clone() else { return };
+    let key = state.target_in(view).to_string();
+    if key.is_empty() {
+        return;
+    }
     let page = arrange::page_of(&rows, listing, &key);
     // Строка в папке есть, а на странице её нет — значит её убрал отбор,
     // набранный в этой вкладке. Промолчать тут нельзя: снаружи «привели, но

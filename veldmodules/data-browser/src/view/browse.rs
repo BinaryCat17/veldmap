@@ -50,6 +50,8 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
             empty: if browse.request.is_pending() { "Загружается…" } else { "Папка пуста" },
             controls: None,
             rows,
+            menu: state.menu_in(view),
+            target: state.target_in(view),
         },
         &browse.listing,
         state.pane_width(view),

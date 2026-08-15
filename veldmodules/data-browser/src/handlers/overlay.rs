@@ -13,14 +13,18 @@
 //! погасить одно нечем, и заводить для этого второй способ значило бы держать
 //! набор в двух местах сразу.
 //!
+//! Спрашивать перед отправкой «а изменился ли набор» при этом не нужно: топик
+//! объявлен снимком, и совпавший с прошлым до шины не доходит. Правило поэтому
+//! и звучит без оговорок — отправляют всегда.
+//!
 //! Уже отправленные растры пересылаются теми же дескрипторами: владения за
 //! ними нет, это имена, по которым глобус узнаёт прежнее наложение и не
 //! переоткрывает его.
 
 use crate::module::footprint;
 use crate::module::state::{
-    overlay::Assembly, overlay::OverlayState, overlay::Progress, Locate, Located, Shift, State,
-    ViewId,
+    overlay::Assembly, overlay::OverlayState, overlay::Progress, Locate, Located, Open, Shift,
+    State, ViewId,
 };
 use crate::proto::data_provider::{
     DataProduct, ImageryRequest, ImageryResponse, LocateRequest, LocateResponse,
@@ -236,15 +240,11 @@ pub fn source_closed(state: &mut State, view: ViewId) {
     retain(state, |overlay| overlay.source != Some(view));
 }
 
-/// Оставить те, что прошли условие, и переслать набор — если что-то ушло.
-/// Пересылка при пустом отсеве была бы лишним сообщением на каждый поиск.
+/// Оставить те, что прошли условие, и переслать набор.
 fn retain(state: &mut State, keep: impl Fn(&OverlayState) -> bool) {
     let (kept, gone): (Vec<_>, Vec<_>) =
         std::mem::take(&mut state.overlays).into_iter().partition(&keep);
     state.overlays = kept;
-    if gone.is_empty() {
-        return;
-    }
     for overlay in gone {
         abandon(state, overlay);
     }
@@ -257,44 +257,31 @@ fn retain(state: &mut State, keep: impl Fn(&OverlayState) -> bool) {
 /// дескрипторы, поэтому движение ползунка ничего не переоткрывает.
 pub fn set_opacity(state: &mut State, key: &str, opacity: f32) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
-    let opacity = opacity.clamp(0.0, 1.0);
-    if overlay.opacity == opacity {
-        return;
-    }
-    overlay.opacity = opacity;
+    overlay.opacity = opacity.clamp(0.0, 1.0);
     send_set(state);
 }
 
 /// Скрыть или показать слой.
 pub fn set_hidden(state: &mut State, key: &str, hidden: bool) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
-    if overlay.hidden == hidden {
-        return;
-    }
     overlay.hidden = hidden;
     send_set(state);
 }
 
-/// Меню слоя: раскрыть или закрыть раскрытое. Всё прочее раскрытое при этом
-/// гаснет — раскрытым бывает только одно (см. `State::close_menus`).
+/// Меню слоя: раскрыть или закрыть раскрытое.
 pub fn menu(state: &mut State, key: Option<String>) {
-    let same = state.layer_menu == key;
-    state.close_menus();
-    if !same {
-        state.layer_menu = key;
+    match key {
+        Some(key) => state.toggle_open(Open::Layer(key)),
+        None => state.close_menus(),
     }
 }
 
 /// Скрыть или показать все сразу — кнопка «Скрыть все» в списке.
 pub fn hide_all(state: &mut State, hidden: bool) {
-    let mut changed = false;
     for overlay in &mut state.overlays {
-        changed |= overlay.hidden != hidden;
         overlay.hidden = hidden;
     }
-    if changed {
-        send_set(state);
-    }
+    send_set(state);
 }
 
 // ── Сборка ─────────────────────────────────────────────────────

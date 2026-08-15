@@ -19,23 +19,86 @@ pub trait Choice: Copy + PartialEq + Sized + 'static {
     fn key(self) -> &'static str;
     /// Подпись в меню — полная.
     fn title(self) -> &'static str;
-    /// Подпись на самом чипе — короче: рядом уже написано, чего она касается.
-    fn label(self) -> &'static str;
+    /// Подпись на самом чипе. По умолчанию та же, что в меню: короче она
+    /// бывает не у всякого набора, а разная там, где рядом уже написано, чего
+    /// она касается.
+    fn label(self) -> &'static str {
+        self.title()
+    }
 
     fn from_key(key: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|choice| choice.key() == key)
     }
 }
 
-/// Отбор по состоянию записи.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Filter {
-    #[default]
-    All,
-    Downloading,
-    Interrupted,
-    OnDisk,
-    Remote,
+/// Объявляет набор вместе с его ключом провода и подписями.
+///
+/// Одним местом на четыре списка: сами варианты, порядок в меню, ключ, которым
+/// вариант ездит в разметку и обратно, и то, как он назван человеку. Написанные
+/// порознь четырьмя `match`, они расходятся молча — забытая ветка `key` даёт не
+/// ошибку компиляции, а нажатие, которое не разобралось.
+///
+/// Первый вариант — умолчание набора. Подпись на чипе необязательна: не
+/// написана — та же, что в меню.
+macro_rules! choice {
+    (
+        $(#[$outer:meta])*
+        $name:ident {
+            $(#[$head_doc:meta])* $head:ident = $head_key:literal, $head_title:literal
+                $(, $head_label:literal)? ;
+            $( $(#[$doc:meta])* $variant:ident = $key:literal, $title:literal
+                $(, $label:literal)? ; )*
+        }
+    ) => {
+        $(#[$outer])*
+        #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+        pub enum $name {
+            #[default]
+            $(#[$head_doc])*
+            $head,
+            $( $(#[$doc])* $variant, )*
+        }
+
+        impl $crate::module::state::listing::Choice for $name {
+            const ALL: &'static [Self] = &[$name::$head, $( $name::$variant ),*];
+
+            fn key(self) -> &'static str {
+                match self {
+                    $name::$head => $head_key,
+                    $( $name::$variant => $key, )*
+                }
+            }
+
+            fn title(self) -> &'static str {
+                match self {
+                    $name::$head => $head_title,
+                    $( $name::$variant => $title, )*
+                }
+            }
+
+            fn label(self) -> &'static str {
+                match self {
+                    $name::$head => choice!(@label $head_title $(, $head_label)?),
+                    $( $name::$variant => choice!(@label $title $(, $label)?), )*
+                }
+            }
+        }
+    };
+    (@label $title:literal) => { $title };
+    (@label $title:literal, $label:literal) => { $label };
+}
+
+pub(crate) use choice;
+
+choice! {
+    /// Отбор по состоянию записи.
+    Filter {
+        All         = "all",         "Все",         "все";
+        Downloading = "downloading", "Скачиваются", "скачиваются";
+        Interrupted = "interrupted", "Прервано",    "прервано";
+        OnDisk      = "on-disk",     "На диске",    "на диске";
+        Remote      = "remote",      "В хранилище", "в хранилище";
+    }
 }
 
 impl Filter {
@@ -50,122 +113,30 @@ impl Filter {
     }
 }
 
-impl Choice for Filter {
-    const ALL: &'static [Self] = &[Filter::All, Filter::Downloading, Filter::Interrupted, Filter::OnDisk, Filter::Remote];
-
-    fn key(self) -> &'static str {
-        match self {
-            Filter::All => "all",
-            Filter::Downloading => "downloading",
-            Filter::Interrupted => "interrupted",
-            Filter::OnDisk => "on-disk",
-            Filter::Remote => "remote",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Filter::All => "Все",
-            Filter::Downloading => "Скачиваются",
-            Filter::Interrupted => "Прервано",
-            Filter::OnDisk => "На диске",
-            Filter::Remote => "В хранилище",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Filter::All => "все",
-            Filter::Downloading => "скачиваются",
-            Filter::Interrupted => "прервано",
-            Filter::OnDisk => "на диске",
-            Filter::Remote => "в хранилище",
-        }
+choice! {
+    /// Во что складывать строки одной папки.
+    Grouping {
+        None = "none", "Без группировки", "нет";
+        /// Заголовок на папку целиком — одна ступень.
+        Folder = "folder", "По папкам", "по папкам";
+        /// Заголовок на каждый сегмент пути — сколько их, столько и ступеней.
+        Tree = "tree", "Полное дерево", "дерево";
     }
 }
 
-/// Во что складывать строки одной папки.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Grouping {
-    #[default]
-    None,
-    /// Заголовок на папку целиком — одна ступень.
-    Folder,
-    /// Заголовок на каждый сегмент пути — сколько их, столько и ступеней.
-    Tree,
-}
-
-impl Choice for Grouping {
-    const ALL: &'static [Self] = &[Grouping::None, Grouping::Folder, Grouping::Tree];
-
-    fn key(self) -> &'static str {
-        match self {
-            Grouping::None => "none",
-            Grouping::Folder => "folder",
-            Grouping::Tree => "tree",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Grouping::None => "Без группировки",
-            Grouping::Folder => "По папкам",
-            Grouping::Tree => "Полное дерево",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Grouping::None => "нет",
-            Grouping::Folder => "по папкам",
-            Grouping::Tree => "дерево",
-        }
+choice! {
+    /// Порядок строк.
+    Sorting {
+        Newest = "newest", "Сначала новые", "новые";
+        Name   = "name",   "По имени",      "имя";
+        Size   = "size",   "По размеру",    "размер";
     }
 }
 
-/// Порядок строк.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-pub enum Sorting {
-    #[default]
-    Newest,
-    Name,
-    Size,
-}
-
-impl Choice for Sorting {
-    const ALL: &'static [Self] = &[Sorting::Newest, Sorting::Name, Sorting::Size];
-
-    fn key(self) -> &'static str {
-        match self {
-            Sorting::Newest => "newest",
-            Sorting::Name => "name",
-            Sorting::Size => "size",
-        }
-    }
-
-    fn title(self) -> &'static str {
-        match self {
-            Sorting::Newest => "Сначала новые",
-            Sorting::Name => "По имени",
-            Sorting::Size => "По размеру",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Sorting::Newest => "новые",
-            Sorting::Name => "имя",
-            Sorting::Size => "размер",
-        }
-    }
-}
-
-/// Какое меню сейчас раскрыто. Одно поле, а не флаг на каждое: два раскрытых
-/// меню сразу — состояние, которого не бывает, и выражать его нечем.
-#[derive(Clone, PartialEq, Eq, Default)]
+/// Какое из меню списка. Что раскрыто хоть что-то, говорит не этот тип, а
+/// `State::open`: «ничего не раскрыто» — свойство экрана, а не списка.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Menu {
-    #[default]
-    Closed,
     Filter,
     Grouping,
     Sorting,
@@ -184,7 +155,6 @@ impl Menu {
     /// адресуется, второго имени у строки нет.
     pub fn key(&self) -> String {
         match self {
-            Menu::Closed => "closed".to_string(),
             Menu::Filter => "filter".to_string(),
             Menu::Grouping => "grouping".to_string(),
             Menu::Sorting => "sorting".to_string(),
@@ -195,21 +165,18 @@ impl Menu {
         }
     }
 
-    pub fn from_key(key: &str) -> Menu {
-        match key {
+    /// `None` — закрыть раскрытое: пустым именем едет и «закрой», и
+    /// неизвестное имя, а показывать по нему нечего.
+    pub fn from_key(key: &str) -> Option<Menu> {
+        Some(match key {
             "filter" => Menu::Filter,
             "grouping" => Menu::Grouping,
             "sorting" => Menu::Sorting,
             "mission" => Menu::Mission,
             "period" => Menu::Period,
             "cloud" => Menu::Cloud,
-            // Неизвестное имя — закрытое меню: показывать нечего, а падать тут
-            // не за что.
-            other => match other.strip_prefix("row:") {
-                Some(row) => Menu::Row(row.to_string()),
-                None => Menu::Closed,
-            },
-        }
+            other => Menu::Row(other.strip_prefix("row:")?.to_string()),
+        })
     }
 }
 
@@ -225,7 +192,6 @@ pub struct ListingState {
     /// Страница, считая с нуля. Любая правка отбора возвращает на первую:
     /// «страница 3» списка из одной строки — не состояние, а недоразумение.
     pub page: usize,
-    pub menu: Menu,
     /// Строки, раскрытые в своё содержимое. Множество имён, а не флаг у
     /// строки: строки пересобираются на каждый кадр из библиотеки и из
     /// листинга, а «я это раскрыл» — свойство экрана и переживает пересборку.
@@ -234,9 +200,6 @@ pub struct ListingState {
     /// Множество ключей по той же причине, что и `expanded`, — и своё у каждой
     /// вкладки: очерчивают из списка, а списков много (см. handlers::outline).
     pub selected: std::collections::HashSet<String>,
-    /// Строка, к которой привёл переход: подсвечена, и её страница открыта.
-    /// `None` — пришли сюда сами, и выделять нечего.
-    pub target: Option<String>,
     /// Номер просьбы навести прокрутку — растёт на каждый переход к строке.
     ///
     /// Считать «навести» по самой строке нельзя: к одной и той же приводят
@@ -247,13 +210,6 @@ pub struct ListingState {
 }
 
 impl ListingState {
-    /// Смена отбора: меню закрывается, страница сбрасывается. Общий хвост у
-    /// всех трёх списков — вызывается после присвоения самого значения.
-    pub fn refine(&mut self) {
-        self.page = 0;
-        self.menu = Menu::Closed;
-    }
-
     /// Раскрыть строку в её содержимое или свернуть обратно. `true` — теперь
     /// раскрыта: содержимое папки подгружается лениво, и спрашивать его надо
     /// только при раскрытии (см. handlers::browse::request_children).

@@ -30,8 +30,10 @@ pub fn view(state: &State, view: ViewId, search: &SearchState) -> Element<Msg> {
                 true => "Спрашиваем каталог…",
                 false => "Ничего не нашлось — попробуйте другую миссию или часть имени",
             },
-            controls: Some(bar(view, search, state.pane_width(view))),
+            controls: Some(bar(view, search, state.menu_in(view), state.pane_width(view))),
             rows,
+            menu: state.menu_in(view),
+            target: state.target_in(view),
         },
         &search.listing,
         state.pane_width(view),
@@ -64,7 +66,7 @@ fn subtitle(search: &SearchState, found: usize) -> String {
 /// Облачность спрашивается не всегда: у радара её нет, и условие по ней вернуло
 /// бы пусто (см. [`Mission::clouded`]). Рычаг, который может только обнулить
 /// выдачу, лучше не показывать вовсе.
-fn bar(view: ViewId, search: &SearchState, width: f32) -> Element<Msg> {
+fn bar(view: ViewId, search: &SearchState, opened: Option<&Menu>, width: f32) -> Element<Msg> {
     // Ввод сам по себе ничего не запускает: запрос идёт по сети, поле ждёт
     // Enter (`on_submit`).
     let field = controls::search_field(
@@ -74,7 +76,6 @@ fn bar(view: ViewId, search: &SearchState, width: f32) -> Element<Msg> {
         Some(Msg::In(view, ViewMsg::RunSearch)),
     );
 
-    let opened = &search.listing.menu;
     let mut controls = vec![
         controls::chip(view, "Миссия:", search.mission, Menu::Mission, opened, &[], move |choice| {
             Msg::In(view, ViewMsg::SearchMission(choice))

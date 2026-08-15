@@ -288,7 +288,7 @@ def outputs(gen):
         "inputs":  {"on_read": {"type": "fs/FsReadRequest"}},
         "outputs": {
             "on_read_result": {"type": "fs/FsReadResult", "replies_to": "on_read"},
-            "on_state":       {"type": "fs/FsReadResult"},
+            "on_state":       {"type": "fs/FsReadResult", "snapshot": True},
             "on_ui_event":    {"type": "fs/FsReadResult", "targeted": True},
         }}}
     entries = gen.topic_entries("svc", schema, "outputs", lambda kind, n, d: "X")
@@ -300,6 +300,8 @@ def outputs(gen):
     ("on_state",       "correlated", False),
     ("on_ui_event",    "targeted",   True),
     ("on_state",       "targeted",   False),
+    ("on_state",       "snapshot",   True),
+    ("on_ui_event",    "snapshot",   False),
 ])
 def test_topic_flags(outputs, topic, flag, expected):
     assert outputs[topic][flag] is expected
@@ -314,3 +316,121 @@ def test_only_requested_topics_are_emitted(gen):
     entries = gen.topic_entries("svc", schema, "outputs",
                                 lambda kind, n, d: "X", only={"on_a"})
     assert [e["name"] for e in entries] == ["on_a"]
+
+
+# ── Снимок состояния ─────────────────────────────────────────────────────────
+#
+# `snapshot: true` меняет не документацию, а поведение стаба: он помнит
+# отпечаток отправленного и повтор не шлёт. Ошибка здесь молчалива вдвойне —
+# событие не доставляется, и в логе об этом нет ни строки. Правила ниже
+# закрывают три случая, где пометка означала бы не то, что написано, и один,
+# где она безопасна ровно до первого убийства инстанса.
+
+def snapshot_schema(kind, topic_extra=None, cancellable=False, name="svc"):
+    """Схема с одним снимком заданного направления и, по просьбе, отменяемым
+    входом рядом."""
+    entry = {"type": "fs/FsReadResult", "snapshot": True, **(topic_extra or {})}
+    iface = {"inputs": {}, "outputs": {}}
+    iface[kind]["on_state"] = entry
+    if cancellable:
+        iface["inputs"]["on_work"] = {"type": "fs/FsReadRequest", "cancellable": True}
+        iface["outputs"]["on_done"] = {"type": "fs/FsReadResult", "replies_to": "on_work"}
+    return {"name": name, "interface": iface}
+
+
+def test_a_plain_snapshot_output_is_accepted(gen):
+    assert gen.snapshot_errors(snapshot_schema("outputs"), native=False) == []
+
+
+def test_snapshot_is_rejected_in_a_platform_service(gen):
+    # Стаб со снимком печатает только шаблон wasm-модуля; у платформенного
+    # сервиса пометка молча не сделала бы ничего.
+    errors = gen.snapshot_errors(snapshot_schema("outputs"), native=True)
+    assert any("платформенного сервиса" in e for e in errors), errors
+
+
+def test_snapshot_is_rejected_with_targeted(gen):
+    # Отпечаток у топика один, а адресатов много: второму уехало бы
+    # «не изменилось» вместо состояния, которого он ещё не видел.
+    schema = snapshot_schema("outputs", {"targeted": True})
+    errors = gen.snapshot_errors(schema, native=False)
+    assert any("targeted" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("kind, extra", [
+    pytest.param("outputs", {"replies_to": "on_work"}, id="ответ на запрос"),
+    pytest.param("inputs",  {},                        id="запрос с ответом"),
+])
+def test_snapshot_is_rejected_on_a_correlated_topic(gen, kind, extra):
+    # Ответ принадлежит своему запросу: совпав с прошлым ответом дословно, он
+    # всё равно обязан уехать — иначе заказчик не дождётся своего.
+    schema = {"name": "svc", "interface": {
+        "inputs":  {"on_work": {"type": "fs/FsReadRequest",
+                                **({"snapshot": True} if kind == "inputs" else {})}},
+        "outputs": {"on_done": {"type": "fs/FsReadResult", "replies_to": "on_work",
+                                **({"snapshot": True} if kind == "outputs" else {})}}}}
+    errors = gen.snapshot_errors(schema, native=False)
+    assert any("replies_to" in e for e in errors), errors
+
+
+def test_snapshot_input_is_rejected_in_a_cancellable_service(gen):
+    # Убитый инстанс поднимается с чистой памятью и теряет присланное, а
+    # отправитель помнит отправленное и повтора не сделает.
+    errors = gen.snapshot_errors(snapshot_schema("inputs", cancellable=True), native=False)
+    assert any("отменяемого" in e for e in errors), errors
+
+
+def test_snapshot_output_of_a_cancellable_service_is_fine(gen):
+    # Терять нечего тому, кто рассылает: свежий инстанс начинает с «ещё не
+    # слали» и первую рассылку делает непременно.
+    assert gen.snapshot_errors(snapshot_schema("outputs", cancellable=True),
+                               native=False) == []
+
+
+@pytest.mark.parametrize("cancellable, ok", [
+    pytest.param(False, True,  id="подписчик не убиваем"),
+    pytest.param(True,  False, id="подписчик отменяем"),
+])
+def test_subscribing_to_a_snapshot_requires_surviving(gen, universe, tmp_path,
+                                                      cancellable, ok):
+    # Вторая половина того же правила, и проверить её можно только
+    # перекрёстно: снимок объявлен у производителя, а теряет состояние
+    # подписчик.
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    (producer / "schema.yaml").write_text(
+        "name: producer\n"
+        "interface:\n"
+        "  outputs:\n"
+        "    on_state:\n"
+        "      type: fs/FsReadResult\n"
+        "      snapshot: true\n")
+
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    schema = snapshot_schema("outputs", cancellable=cancellable, name="consumer")
+    schema["interface"]["outputs"].pop("on_state")
+    schema["dependencies"] = {"producer": {"subs": ["on_state"]}}
+
+    errors, _ = gen.validate_module_schema(schema, str(consumer), PROTO_DIR, universe)
+    assert (errors == []) is ok, errors
+    if not ok:
+        assert any("рассылает снимок" in e for e in errors), errors
+
+
+def test_project_schemas_declare_their_snapshots(gen, real_schemas):
+    # Регрессия на живых схемах: рассылка состояния целиком — не команда, и
+    # ограничитель у неё должен быть от кодогена, а не от руки.
+    declared = {f"{name}/{topic}"
+                for name, _path, schema, _kind in real_schemas
+                for direction in ("inputs", "outputs")
+                for topic, entry in ((schema.get("interface") or {}).get(direction) or {}).items()
+                if (entry or {}).get("snapshot")}
+    assert declared == {
+        "data-library/on_state",
+        "globe/on_outlines",
+        "globe/on_overlay",
+        "globe/on_overlay_progress",
+        "image-view/on_view_state",
+        "ui-service/on_set_view",
+    }

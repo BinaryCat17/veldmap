@@ -1,6 +1,6 @@
 //! Вкладки: открыть вид, показать открытый, перенести, закрыть.
 
-use crate::module::state::{
+use crate::module::state::{Open, 
     BrowseState, PaneId, PreviewState, SearchState, Side, State, ViewId, ViewKind,
 };
 use crate::module::NewTab;
@@ -152,17 +152,14 @@ pub fn in_catalog(state: &mut State, from: ViewId, key: String) {
     super::browse::reveal(state, view, key);
 }
 
-/// Меню «плюса» одной из панелей. Раскрытое меню списка при этом закрывается —
-/// открытым бывает только одно (см. State::close_menus).
+/// Меню «плюса» одной из панелей; `None` — закрыть раскрытое.
 pub fn on_tab_menu(state: &mut State, pane: Option<PaneId>) {
-    state.close_menus();
-    state.tab_menu = pane;
+    state.open = pane.map_or(Open::Nothing, Open::TabMenu);
 }
 
 /// Меню самой вкладки: перенести, закрыть.
 pub fn on_tab_options(state: &mut State, id: Option<ViewId>) {
-    state.close_menus();
-    state.tab_options = id;
+    state.open = id.map_or(Open::Nothing, Open::TabOptions);
 }
 
 /// Перенести вкладку туда, где человек видит эту сторону.

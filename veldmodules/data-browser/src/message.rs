@@ -16,68 +16,35 @@
 //! не подменяет рендерер. Сложить её в нагрузку было бы нельзя: у поля ввода,
 //! области и ползунка нагрузку изготавливает он.
 
-use crate::module::state::listing::{Choice, Filter, Grouping, Menu, Sorting};
+use crate::module::state::listing::{choice, Choice, Filter, Grouping, Menu, Sorting};
 use crate::module::state::search::{Cloud, Mission, Period};
 use crate::module::state::{PaneId, Shift, Side, SplitId, ViewId};
 use crate::proto::ui_service::{DropEvent, PointerEvent, UiEventResponse, ViewportSize};
 use veld_ui_service_wrap::{Payload, UiMessage};
 
-/// Что можно открыть новой вкладкой. Один вариант вместо пяти сообщений:
-/// различаются они только тем, какой вид завести, а панель, куда его класть, —
-/// у всех одна и та же забота.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum NewTab {
-    Browse,
-    Search,
-    Downloaded,
-    Globe,
-    Shown,
-    /// Вкладка, которая ещё ничего не показывает (см. `ViewKind::Empty`).
-    Empty,
+choice! {
+    /// Что можно открыть новой вкладкой. Один вариант вместо пяти сообщений:
+    /// различаются они только тем, какой вид завести, а панель, куда его
+    /// класть, — у всех одна и та же забота.
+    ///
+    /// Порядок — порядок пунктов «плюса». Пустая вкладка последней: она не про
+    /// то, что смотреть, а про место, где это решат потом.
+    NewTab {
+        Browse     = "browse",     "Сетевой каталог";
+        Search     = "search",     "Поиск снимков";
+        Downloaded = "downloaded", "Скачанное";
+        Globe      = "globe",      "Глобус";
+        Shown      = "shown",      "На просмотре";
+        /// Вкладка, которая ещё ничего не показывает (см. `ViewKind::Empty`).
+        Empty      = "empty",      "Пустая вкладка";
+    }
 }
 
 impl NewTab {
-    /// Что предлагает «плюс». Пустая вкладка последней: она не про то, что
-    /// смотреть, а про место, где это решат потом.
-    pub const ALL: [NewTab; 6] = [
-        NewTab::Browse,
-        NewTab::Search,
-        NewTab::Downloaded,
-        NewTab::Globe,
-        NewTab::Shown,
-        NewTab::Empty,
-    ];
-
     /// Чем наполняют пустую вкладку — та же пятёрка без неё самой: пустое
     /// пустым не наполняют.
     pub const KINDS: [NewTab; 5] =
         [NewTab::Browse, NewTab::Search, NewTab::Downloaded, NewTab::Globe, NewTab::Shown];
-
-    pub fn key(self) -> &'static str {
-        match self {
-            NewTab::Browse => "browse",
-            NewTab::Search => "search",
-            NewTab::Downloaded => "downloaded",
-            NewTab::Globe => "globe",
-            NewTab::Shown => "shown",
-            NewTab::Empty => "empty",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<NewTab> {
-        NewTab::ALL.into_iter().find(|kind| kind.key() == key)
-    }
-
-    pub fn title(self) -> &'static str {
-        match self {
-            NewTab::Browse => "Сетевой каталог",
-            NewTab::Search => "Поиск снимков",
-            NewTab::Downloaded => "Скачанное",
-            NewTab::Globe => "Глобус",
-            NewTab::Shown => "На просмотре",
-            NewTab::Empty => "Пустая вкладка",
-        }
-    }
 }
 
 pub enum Msg {
@@ -187,8 +154,8 @@ pub enum ViewMsg {
     Fill(NewTab),
 
     // -- Показ списка --
-    /// Раскрыть меню или закрыть открытое (`Menu::Closed`).
-    OpenMenu(Menu),
+    /// Раскрыть меню или закрыть раскрытое (`None`).
+    OpenMenu(Option<Menu>),
     Filter(Filter),
     Group(Grouping),
     Sort(Sorting),
@@ -345,7 +312,9 @@ impl ViewMsg {
     fn encode(&self) -> (&'static str, String) {
         match self {
             ViewMsg::Fill(kind) => (method::FILL, kind.key().to_string()),
-            ViewMsg::OpenMenu(menu) => (method::OPEN_MENU, menu.key()),
+            ViewMsg::OpenMenu(menu) => {
+                (method::OPEN_MENU, menu.as_ref().map(Menu::key).unwrap_or_default())
+            }
             ViewMsg::Filter(filter) => (method::FILTER, filter.key().to_string()),
             ViewMsg::Group(grouping) => (method::GROUP, grouping.key().to_string()),
             ViewMsg::Sort(sorting) => (method::SORT, sorting.key().to_string()),
@@ -588,7 +557,9 @@ mod tests {
             Msg::OverlayMenu(None),
             Msg::OutlineRemove("продукт".into()),
             Msg::OutlineFocus("продукт".into()),
-            Msg::In(id(), ViewMsg::OpenMenu(Menu::Closed)),
+            Msg::In(id(), ViewMsg::OpenMenu(None)),
+            Msg::In(id(), ViewMsg::OpenMenu(Some(Menu::Filter))),
+            Msg::In(id(), ViewMsg::OpenMenu(Some(Menu::Row("снимок".into())))),
             Msg::In(id(), ViewMsg::Query("s2a".into())),
             Msg::In(id(), ViewMsg::Page(3)),
             Msg::In(id(), ViewMsg::Expand("снимок".into())),

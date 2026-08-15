@@ -21,6 +21,7 @@ use crate::proto::ui_service::{
     container, mono, scrollable, text, Alignment, Element, Length, Padding, ScrollDirection,
 };
 use crate::module::components::{format, list_screen, menu, preview_of, table};
+use crate::module::state::listing::Choice;
 use crate::module::state::{globe::Outlined, overlay::OverlayState, Shift, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
 
@@ -266,7 +267,7 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize)
 /// контур и меню с переходами к самому снимку.
 fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) -> Element<Msg> {
     let key = outlined.key.clone();
-    let open = state.layer_menu.as_deref() == Some(key.as_str());
+    let open = state.layer_menu(&key);
 
     let name = row![
         theme::row_glyph::<Msg>(theme::glyph::SATELLITE, theme::INK_FAINT),
@@ -308,8 +309,7 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
                 .on_press(Msg::OutlineRemove(key.clone())),
             "Убрать контур",
         ),
-        popover(anchor, menu::panel(items))
-            .open(open)
+        popover(anchor, open, || menu::panel(items))
             .align_x(Alignment::End)
             .gap(4.0)
             .on_dismiss(Msg::OverlayMenu(None)),
@@ -348,30 +348,29 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
 /// экране это `Shift::Up` в наборе: переворот один и живёт он здесь.
 fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> {
     let key = overlay.identifier.clone();
-    let open = state.layer_menu.as_deref() == Some(key.as_str());
-
-    let items = vec![
-        menu::Item::new("Выше", Msg::OverlayShift(key.clone(), Shift::Up))
-            .glyph(theme::glyph::UP),
-        menu::Item::new("Ниже", Msg::OverlayShift(key.clone(), Shift::Down))
-            .glyph(theme::glyph::DOWN),
-        menu::Item::new(
-            "Смотреть снимок",
-            Msg::In(view, preview_of(&state.library, &key, overlay.folder)),
-        )
-        .glyph(theme::glyph::EYE),
-        menu::Item::new("Показать в каталоге", Msg::In(view, ViewMsg::InCatalog(key.clone())))
-            .glyph(theme::glyph::FOLDER),
-    ];
+    let open = state.layer_menu(&key);
 
     let anchor = theme::row_button_icon(theme::glyph::MORE, open)
-        .on_press(Msg::OverlayMenu(if open { None } else { Some(key) }));
-    popover(anchor, menu::panel(items))
-        .open(open)
-        .align_x(Alignment::End)
-        .gap(4.0)
-        .on_dismiss(Msg::OverlayMenu(None))
-        .into()
+        .on_press(Msg::OverlayMenu(if open { None } else { Some(key.clone()) }));
+    popover(anchor, open, || {
+        menu::panel(vec![
+            menu::Item::new(Shift::Up.title(), Msg::OverlayShift(key.clone(), Shift::Up))
+                .glyph(theme::glyph::UP),
+            menu::Item::new(Shift::Down.title(), Msg::OverlayShift(key.clone(), Shift::Down))
+                .glyph(theme::glyph::DOWN),
+            menu::Item::new(
+                "Смотреть снимок",
+                Msg::In(view, preview_of(&state.library, &key, overlay.folder)),
+            )
+            .glyph(theme::glyph::EYE),
+            menu::Item::new("Показать в каталоге", Msg::In(view, ViewMsg::InCatalog(key.clone())))
+                .glyph(theme::glyph::FOLDER),
+        ])
+    })
+    .align_x(Alignment::End)
+    .gap(4.0)
+    .on_dismiss(Msg::OverlayMenu(None))
+    .into()
 }
 
 /// Что со слоем прямо сейчас. Пусто у доехавшего видимого слоя: сказать о нём
