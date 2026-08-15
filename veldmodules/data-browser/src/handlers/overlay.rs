@@ -19,7 +19,8 @@
 
 use crate::module::footprint;
 use crate::module::state::{
-    overlay::Assembly, overlay::OverlayState, Locate, Located, Shift, State, ViewId,
+    overlay::Assembly, overlay::OverlayState, overlay::Progress, Locate, Located, Shift, State,
+    ViewId,
 };
 use crate::proto::data_provider::{
     DataProduct, ImageryRequest, ImageryResponse, LocateRequest, LocateResponse,
@@ -457,6 +458,22 @@ fn send_set(state: &State) {
         .collect();
 
     crate::calls::globe::on_overlay(&Overlays { overlays });
+}
+
+/// Ход добычи тайлов от глобуса: набор целиком, тем же правилом, что и сам
+/// набор наложений, — о чьём ключе не сказано, у того ничего и не добывают.
+///
+/// Ничего, кроме записи в состояние: числа приезжают готовыми, а показывает их
+/// список слоёв и строка того списка, из которого снимок родом.
+pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::OverlaysProgress) {
+    for overlay in &mut state.overlays {
+        let said = msg.overlays.iter().find(|progress| progress.key == overlay.identifier);
+        overlay.progress = said.map_or(Progress::default(), |progress| Progress {
+            ready: progress.ready,
+            total: progress.total,
+            working: progress.working,
+        });
+    }
 }
 
 /// Четырёхугольник футпринта: первое кольцо ровно из четырёх вершин (замыкающий

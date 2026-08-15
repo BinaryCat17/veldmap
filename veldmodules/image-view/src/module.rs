@@ -12,17 +12,18 @@
 //! складывает туда все уровни. Устаревает produce только сменой уровня или
 //! показа — тогда он убивается, это и есть отмена-приоритизация.
 //!
-//! module.rs — состояние и обработчики; камера — camera.rs, тайлы в
-//! видеопамяти — tiles.rs, кадр — view.rs и gpu.rs.
+//! module.rs — состояние и обработчики; камера — camera.rs, кадр — view.rs и
+//! gpu.rs. Тайлы в видеопамяти и учёт спрошенного — общие с глобусом
+//! (`veldmap_image_tiler_wrap::tiles`).
 
 pub mod camera;
 pub mod gpu;
-pub mod tiles;
 pub mod view;
 
 use std::collections::HashMap;
 
 use veldmap_image_tiler_wrap::pyramid;
+use veldmap_image_tiler_wrap::tiles::{Addr, Store};
 use veldsdk::proto::app as app_proto;
 
 use crate::proto::image_tiler::{
@@ -36,7 +37,6 @@ use crate::proto::tile_cache::{QueryDone, QueryRequest, TileResult as CachedTile
 
 use camera::Camera;
 use gpu::Device;
-use tiles::{Addr, TileStore};
 use view::{Meta, Shown, Stamp, View};
 
 #[derive(serde::Deserialize, Clone)]
@@ -72,7 +72,7 @@ pub struct State {
     /// повода что-то собирать.
     device: Option<Device>,
     views: HashMap<String, View>,
-    tiles: TileStore,
+    tiles: Store,
     pending_describe: veldsdk::Correlator<String>,
     pending_query: veldsdk::Correlator<QueryCtx>,
     pending_produce: veldsdk::Correlator<ProduceCtx>,
@@ -88,7 +88,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
     Ok(State {
         device: None,
         views: HashMap::new(),
-        tiles: TileStore::new(config.vram_budget_mb * 1024 * 1024),
+        tiles: Store::new(config.vram_budget_mb * 1024 * 1024),
         pending_describe: veldsdk::Correlator::new(),
         pending_query: veldsdk::Correlator::new(),
         pending_produce: veldsdk::Correlator::new(),
@@ -124,7 +124,7 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
                 // Bind group'ы тайлов собраны под layout прежнего устройства —
                 // с новым они несовместимы. Хранилище опустошается: тайлы
                 // лежат на диске и вернутся за миллисекунды.
-                state.tiles = TileStore::new_like(&state.tiles);
+                state.tiles = Store::new_like(&state.tiles);
                 state.device = Some(device);
             }
             Err(error) => {
@@ -171,11 +171,9 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
 
     // Прежний показ кончается здесь: производство убивается, ожидания
     // обнуляются. Хвосты в полёте опознаются по отпечатку и выбрасываются.
-    if let Some((correlation, _)) = view.produce.take() {
+    if let Some(correlation) = view.fetch.reset() {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
-    view.inflight.clear();
-    view.failed.clear();
     view.error = None;
     view.read_bytes = 0;
     view.total_bytes = resource.size;
@@ -209,7 +207,7 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
 /// вытеснения: та же вкладка, открытая заново, начнёт с них.
 pub fn on_close(state: &mut State, msg: CloseView) {
     let Some(mut view) = state.views.remove(&msg.view) else { return };
-    if let Some((correlation, _)) = view.produce.take() {
+    if let Some(correlation) = view.fetch.reset() {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
     veldsdk::log::debug!(target: "handlers", "{}: вид закрыт", view.label);
@@ -324,9 +322,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     }
 
     if !msg.error.is_empty() {
-        for addr in &ctx.cells {
-            view.inflight.remove(addr);
-        }
+        view.fetch.forget_asked(&ctx.cells);
         view.error = Some(msg.error);
         report(state, &ctx.view);
         return;
@@ -335,22 +331,14 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     // Промахи, которые всё ещё видимы, — на производство; уехавшие с экрана
     // выбрасываются из ожиданий и переспросятся, когда вернутся в кадр.
     let level = ctx.cells.first().map_or(0, |(level, ..)| *level);
-    let missed: Vec<Addr> = msg.misses.iter().map(|addr| (level, addr.x, addr.y)).collect();
-    let desired: std::collections::HashSet<Addr> = view::desired_cells(view)
+    let desired: std::collections::HashSet<Addr> = view::desired_cells(view, &state.tiles)
         .map(|(_, cells)| cells.into_iter().collect())
         .unwrap_or_default();
-
-    let mut produce_list: Vec<Addr> = Vec::new();
-    for addr in missed {
-        if !ctx.cells.contains(&addr) {
-            continue;
-        }
-        if desired.contains(&addr) && !view.failed.contains(&addr) && view.produce.is_none() {
-            produce_list.push(addr);
-        } else {
-            view.inflight.remove(&addr);
-        }
-    }
+    let produce_list = view.fetch.missed(
+        &ctx.cells,
+        msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
+        |addr| desired.contains(&addr),
+    );
     // Ручку источника и подпись берём здесь же: дальше `state` занят учётом, и
     // держать на нём ссылку в вид одновременно нельзя.
     let (handle, label) = match view.shown.as_ref() {
@@ -369,9 +357,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     // пересчёт сочтёт эти ячейки уже запрошенными и не переспросит их никогда.
     if state.producing.contains_key(&ctx.fingerprint) {
         if let Some(view) = state.views.get_mut(&ctx.view) {
-            for addr in &produce_list {
-                view.inflight.remove(addr);
-            }
+            view.fetch.forget_asked(&produce_list);
         }
         report(state, &ctx.view);
         return;
@@ -384,7 +370,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     });
     state.producing.insert(ctx.fingerprint.clone(), correlation.clone());
     if let Some(view) = state.views.get_mut(&ctx.view) {
-        view.produce = Some((correlation.clone(), level));
+        view.fetch.producing_now(correlation.clone(), level);
     }
     crate::calls::image_tiler::on_produce(&ProduceRequest {
         resource: Some(handle),
@@ -419,28 +405,23 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     // которого уже не будет.
     state.producing.remove(&ctx.fingerprint);
 
-    if let Some(view) = state.views.get_mut(&ctx.view) {
-        if view.produce.as_ref().is_some_and(|(active, _)| *active == correlation) {
-            view.produce = None;
-        }
-    }
     let Some(view) = state.views.get_mut(&ctx.view) else {
         // Вида нет — будить остаётся соседей (см. ниже).
         wake_watchers(state, &ctx.fingerprint);
         return;
     };
-    if view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint) {
-        for addr in &ctx.cells {
-            view.inflight.remove(addr);
-        }
-        if !msg.error.is_empty() {
-            // Не переспрашивать то, что уже не произвелось: каждый сдвиг
-            // камеры долбил бы производителя тем же отказом.
-            view.failed.extend(ctx.cells.iter().copied());
-            view.error = Some(msg.error);
-            veldsdk::log::warn!(target: "handlers", "{}: производство: {}",
-                view.label, view.error.as_deref().unwrap_or_default());
-        }
+    // Показ мог смениться, пока проход шёл: тогда его ячейки уже не про этот
+    // вид, и ни ожидания, ни отказ к нему не относятся — снять с учёта надо
+    // только сам проход.
+    let ours = view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
+    let failed = ours && !msg.error.is_empty();
+    view.fetch.produced(&correlation, if ours { &ctx.cells } else { &[] }, failed);
+    if failed {
+        // Не переспрашивать то, что уже не произвелось: каждый сдвиг камеры
+        // долбил бы производителя тем же отказом.
+        view.error = Some(msg.error);
+        veldsdk::log::warn!(target: "handlers", "{}: производство: {}",
+            view.label, view.error.as_deref().unwrap_or_default());
     }
 
     // Пока проход шёл, запросы откладывались — пересчитать нужное сейчас, и не
@@ -517,59 +498,28 @@ fn fit_if_first(state: &mut State, key: &str) {
 /// смотрят.
 fn want_tiles(state: &mut State, key: &str) {
     let Some(view) = state.views.get(key) else { return };
-    let Some((level, cells)) = view::desired_cells(view) else { return };
-
-    let stale = view
-        .produce
-        .as_ref()
-        .filter(|(_, produce_level)| *produce_level != level)
-        .map(|(correlation, _)| correlation.clone());
-
-    let needed: Vec<Addr> = {
-        let meta = view.meta().expect("desired_cells требует меты");
-        cells
-            .into_iter()
-            .filter(|addr| {
-                !state.tiles.contains(&meta.fingerprint, *addr)
-                    && !view.inflight.contains(addr)
-                    && !view.failed.contains(addr)
-            })
-            .collect()
-    };
+    let Some((level, cells)) = view::desired_cells(view, &state.tiles) else { return };
+    let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) else { return };
+    let label = view.label.clone();
 
     let view = state.views.get_mut(key).expect("вид только что был");
-    if let Some(correlation) = stale {
+    if let Some(correlation) = view.fetch.stale(level) {
         crate::cancel::image_tiler::on_produce(&correlation);
-        view.produce = None;
     }
-    if view.produce.is_some() || needed.is_empty() {
-        return;
-    }
+    let Some(ask) = view.fetch.want(&state.tiles, &fingerprint, level, cells) else { return };
 
-    let Some(meta) = view.meta() else { return };
-    let fingerprint = meta.fingerprint.clone();
-    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
-    for &(_, x, y) in &needed {
-        x0 = x0.min(x);
-        y0 = y0.min(y);
-        x1 = x1.max(x + 1);
-        y1 = y1.max(y + 1);
-    }
-    view.inflight.extend(needed.iter().copied());
-
-    let label = view.label.clone();
     let correlation = state.pending_query.begin(QueryCtx {
         view: key.to_string(),
         fingerprint: fingerprint.clone(),
-        cells: needed,
+        cells: ask.cells,
     });
     crate::calls::tile_cache::on_query(&QueryRequest {
         fingerprint,
-        level,
-        x0,
-        y0,
-        x1,
-        y1,
+        level: ask.level,
+        x0: ask.x0,
+        y0: ask.y0,
+        x1: ask.x1,
+        y1: ask.y1,
         label,
     }, &correlation);
 }
@@ -593,15 +543,18 @@ fn accept_tile(
         return veldsdk::resource::release(texture);
     }
 
-    if let Err(error) = state.tiles.insert(device, fingerprint, addr, texture, width, height) {
+    let insert = state.tiles.insert(fingerprint, addr, texture, width, height, |view| {
+        device.tile_bind_group(view)
+    });
+    if let Err(error) = insert {
         veldsdk::log::warn!(target: "handlers", "тайл {}:{}:{} не принят: {}",
             addr.0, addr.1, addr.2, error);
     }
 
-    if let Some(view) = state.views.get_mut(view_key) {
-        if view.meta().is_some_and(|meta| meta.fingerprint == fingerprint) {
-            view.inflight.remove(&addr);
-        }
+    if let Some(view) = state.views.get_mut(view_key)
+        && view.meta().is_some_and(|meta| meta.fingerprint == fingerprint)
+    {
+        view.fetch.arrived(addr);
     }
 }
 

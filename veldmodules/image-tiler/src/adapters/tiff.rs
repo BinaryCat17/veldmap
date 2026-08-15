@@ -24,7 +24,7 @@ use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::{self, TILE};
 use super::super::resample::resample;
 use super::radiometry::{percentile_stretch, Mapping, Samples};
-use super::{Info, Kind};
+use super::{Info, Kind, Tie};
 
 /// Потолок области источника, читаемой ради одного тайла (в пикселях).
 /// При обычных для COG копиях-половинах область — до 1024², а больше 4096²
@@ -73,6 +73,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     let (width, height) = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
     ensure_chunky(&mut decoder)?;
     let tiled = decoder.get_tag_unsigned::<u32>(Tag::TileWidth).is_ok();
+    let ties = ties(&mut decoder, width, height);
 
     let mut overviews = Vec::new();
     let mut index = 0;
@@ -95,7 +96,62 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         overviews.push(Overview { image: index, width: w, height: h });
     }
 
-    Ok(Info { width, height, kind: Kind::Tiff(Layout { tiled, overviews }) })
+    Ok(Info { width, height, kind: Kind::Tiff(Layout { tiled, overviews }), ties })
+}
+
+/// Сетка геопривязки GeoTIFF — опорные точки в градусах. Пусто, если файл
+/// привязан к проекции, а не к градусам: перевести её мог бы только тот, кто
+/// знает саму проекцию, а тайлер знает про растр и не знает про Землю.
+///
+/// Два вида привязки, и оба сводятся к одному: решётка точек (ModelTiepoint по
+/// шесть чисел — пиксель, потом место) — как есть; одна точка с шагом пикселя
+/// (ModelPixelScale) — четырьмя углами, потому что такой растр лежит в градусах
+/// ровным прямоугольником и промежуточные точки в нём линейны.
+///
+/// Декодер после возврата стоит на том же образе: наводки здесь нет.
+fn ties<R: Read + Seek>(decoder: &mut Decoder<R>, width: u32, height: u32) -> Vec<Tie> {
+    let keys = decoder.get_tag_u16_vec(Tag::GeoKeyDirectoryTag).unwrap_or_default();
+    let points = decoder.get_tag_f64_vec(Tag::ModelTiepointTag).unwrap_or_default();
+    let scale = decoder.get_tag_f64_vec(Tag::ModelPixelScaleTag).unwrap_or_default();
+    geo_ties(&keys, &points, &scale, width, height)
+}
+
+/// Разбор геотегов — отдельно от чтения, потому что проверяется он ими же:
+/// файла с решёткой в тестах нет, а правила «градусы или проекция», «шесть
+/// чисел на узел» и «шаг по Y идёт на юг» есть.
+fn geo_ties(keys: &[u16], points: &[f64], scale: &[f64], width: u32, height: u32) -> Vec<Tie> {
+    // GTModelTypeGeoKey (1024): 2 — градусы. Ключи лежат четвёрками после
+    // заголовка из четырёх же чисел; значение простого ключа (место 0) —
+    // четвёртое в четвёрке.
+    let geographic = keys
+        .get(4..)
+        .unwrap_or_default()
+        .chunks_exact(4)
+        .any(|key| key[0] == 1024 && key[1] == 0 && key[3] == 2);
+    if !geographic {
+        return Vec::new();
+    }
+
+    let point = |px: f64, py: f64, lon: f64, lat: f64| Tie { px, py, lat, lon };
+    // Узел — шесть чисел: пиксель (i, j, k) и место (x, y, z).
+    if points.len() > 6 {
+        return points.chunks_exact(6).map(|tie| point(tie[0], tie[1], tie[3], tie[4])).collect();
+    }
+
+    // Одна точка с шагом пикселя: растр лежит в градусах ровным
+    // прямоугольником, и хватает его углов.
+    let (Some(tie), true) = (points.get(..6), scale.len() >= 2) else {
+        return Vec::new();
+    };
+    // Шаг по Y положителен, а строки растра идут на юг — отсюда минус.
+    let (x, y) = (tie[3] - tie[0] * scale[0], tie[4] + tie[1] * scale[1]);
+    let (right, bottom) = (f64::from(width), f64::from(height));
+    vec![
+        point(0.0, 0.0, x, y),
+        point(right, 0.0, x + right * scale[0], y),
+        point(0.0, bottom, x, y - bottom * scale[1]),
+        point(right, bottom, x + right * scale[0], y - bottom * scale[1]),
+    ]
 }
 
 // ── Прямой доступ ──────────────────────────────────────────────
@@ -402,5 +458,55 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
         // Вся выборка — «нет данных»: растягивать нечего, а прозрачным файл
         // сделает само ключевание.
         None => Ok(Mapping::identity(nodata)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Заголовок каталога геоключей: версия, ревизия и число ключей.
+    fn geokeys(model: u16) -> Vec<u16> {
+        vec![1, 1, 0, 1, 1024, 0, 1, model]
+    }
+
+    /// Решётка узлов проходит как есть: пиксель берётся из первых двух чисел
+    /// шестёрки, место — из четвёртого и пятого. Порядок узлов — файла: им и
+    /// сказано, каким пикселем куда лёг растр.
+    #[test]
+    fn tiepoint_lattice_keeps_pixel_and_place() {
+        // Два узла верхнего ребра гранулы Sentinel-1: слева восток, справа
+        // запад — снимок нисходящего витка лежит поперёк меридианов.
+        let points = vec![
+            0.0, 0.0, 0.0, 2.707, 73.395, 0.0, //
+            529.0, 0.0, 0.0, 2.096, 73.470, 0.0,
+        ];
+        let ties = geo_ties(&geokeys(2), &points, &[], 10572, 9993);
+        assert_eq!(ties.len(), 2);
+        assert_eq!((ties[0].px, ties[0].py), (0.0, 0.0));
+        assert_eq!((ties[0].lat, ties[0].lon), (73.395, 2.707));
+        assert_eq!((ties[1].px, ties[1].py), (529.0, 0.0));
+    }
+
+    /// Одна точка с шагом пикселя — четырьмя углами, и строки идут на юг:
+    /// нижний край южнее верхнего, а не наоборот.
+    #[test]
+    fn pixel_scale_becomes_four_corners_facing_south() {
+        let points = vec![0.0, 0.0, 0.0, 10.0, 50.0, 0.0];
+        let ties = geo_ties(&geokeys(2), &points, &[0.5, 0.25, 0.0], 100, 200);
+        assert_eq!(ties.len(), 4);
+        assert_eq!((ties[0].lon, ties[0].lat), (10.0, 50.0));
+        assert_eq!((ties[1].lon, ties[1].lat), (60.0, 50.0), "правый край восточнее");
+        assert_eq!((ties[2].lon, ties[2].lat), (10.0, 0.0), "нижний край южнее");
+    }
+
+    /// Привязка к проекции — не наше дело: перевести её в градусы может только
+    /// тот, кто знает саму проекцию, а тайлер про Землю не знает ничего.
+    #[test]
+    fn projected_files_yield_nothing() {
+        let points = vec![0.0, 0.0, 0.0, 600_000.0, 7_800_000.0, 0.0];
+        assert!(geo_ties(&geokeys(1), &points, &[10.0, 10.0, 0.0], 10, 10).is_empty());
+        // Как и файл вовсе без геотегов.
+        assert!(geo_ties(&[], &points, &[10.0, 10.0, 0.0], 10, 10).is_empty());
     }
 }

@@ -374,14 +374,22 @@ fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> 
         .into()
 }
 
-/// Что со слоем прямо сейчас. Пусто у обычного видимого слоя: сказать о нём
+/// Что со слоем прямо сейчас. Пусто у доехавшего видимого слоя: сказать о нём
 /// нечего, кроме того, что и так видно на шаре.
+///
+/// Три состояния и три источника: собирается — наше (растры ещё открываются),
+/// скрыт — тоже наше, а сколько тайлов осталось, знает только глобус и
+/// рассказывает сам (см. `state::overlay::Progress`). Ждать снимок приходится
+/// десятками секунд, и без этой подписи он выглядит зависшим.
 fn state_label(overlay: &OverlayState) -> Element<Msg> {
     let (label, color) = match (overlay.on_globe(), overlay.hidden) {
-        (false, _) => ("готовится…", theme::INK_FAINT),
-        (true, true) => ("скрыт", theme::INK_FAINT),
-        (true, false) => return theme::nothing(),
+        (false, _) => ("готовится…".to_string(), theme::INK_FAINT),
+        (true, true) => ("скрыт".to_string(), theme::INK_FAINT),
+        (true, false) => match overlay.progress.said() {
+            Some(said) => (said, theme::ACCENT_TEXT),
+            None => return theme::nothing(),
+        },
     };
-    text::<Msg>(label.to_string()).size(theme::TEXT_SMALL).color(color).single_line().into()
+    text::<Msg>(label).size(theme::TEXT_SMALL).color(color).single_line().into()
 }
 

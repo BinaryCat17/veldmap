@@ -11,7 +11,7 @@ pub fn describe<R: BufRead + Seek>(reader: R) -> Result<Info, String> {
     let decoder = png::Decoder::new(reader);
     let reader = decoder.read_info().map_err(|e| format!("png: {}", e))?;
     let info = reader.info();
-    Ok(Info { width: info.width, height: info.height, kind: Kind::Png })
+    Ok(Info::plain(info.width, info.height, Kind::Png))
 }
 
 pub fn produce_pass<R: BufRead + Seek>(reader: R, info: &Info, emit: Emit) -> Result<(), String> {

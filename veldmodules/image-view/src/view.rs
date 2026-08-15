@@ -7,14 +7,12 @@
 //! уровня z, см. resample::halve у тайлера). Одна ячейка — один квад, поэтому
 //! перекрытий нет и буфер глубины не нужен.
 
-use std::collections::HashSet;
-
 use veldmap_image_tiler_wrap::pyramid::{self, TILE};
+use veldmap_image_tiler_wrap::tiles::{self, Addr, Fetch, Store};
 use veldsdk::graphics::GrowingBuffer;
 
 use super::camera::Camera;
 use super::gpu::{self, Quad, Target};
-use super::tiles::{Addr, TileStore};
 
 pub struct View {
     pub label: String,
@@ -26,15 +24,9 @@ pub struct View {
     pub vertices: GrowingBuffer,
     /// Из чего собран последний записанный кадр; совпало — кадр пропускается.
     pub drawn: Option<Stamp>,
-    /// Тайлы, за которыми уже послано — в кэш или производителю. Второй раз
-    /// не просим: ответ либо едет, либо придёт терминалом с промахами.
-    pub inflight: HashSet<Addr>,
-    /// Тайлы, которые произвести не удалось. Не переспрашиваются до нового
-    /// показа — иначе каждый сдвиг камеры долбил бы производителя тем же
-    /// отказом.
-    pub failed: HashSet<Addr>,
-    /// Активное производство: корреляция (ею операция и убивается) и уровень.
-    pub produce: Option<(String, u32)>,
+    /// Что уже спрошено, что производится и чего больше не просить — общий
+    /// учёт потребителя тайлов (см. `veldmap_image_tiler_wrap::tiles`).
+    pub fetch: Fetch,
     /// Актуальность описания: показ могли сменить, пока ответ шёл.
     pub describe: veldsdk::Latest,
     pub read_bytes: u64,
@@ -76,9 +68,7 @@ impl View {
             camera: None,
             vertices: gpu::vertex_buffer(),
             drawn: None,
-            inflight: HashSet::new(),
-            failed: HashSet::new(),
-            produce: None,
+            fetch: Fetch::default(),
             describe: veldsdk::Latest::default(),
             read_bytes: 0,
             total_bytes: 0,
@@ -93,36 +83,41 @@ impl View {
 
     /// Показ идёт: описание в пути или производство не кончилось.
     pub fn busy(&self) -> bool {
-        self.describe.is_pending() || self.produce.is_some()
+        self.describe.is_pending() || self.fetch.producing()
     }
 }
 
-/// Видимые ячейки: уровень под текущий масштаб и адреса тайлов, накрывающих
-/// видимый прямоугольник. `None` — рисовать пока не из чего (нет места,
-/// снимка или камеры).
-pub fn desired_cells(view: &View) -> Option<(u32, Vec<Addr>)> {
+/// Видимые ячейки: ступень добычи под текущий масштаб и адреса тайлов,
+/// накрывающих видимый прямоугольник. `None` — рисовать пока не из чего (нет
+/// места, снимка или камеры).
+///
+/// Ступень, а не уровень под масштаб: пирамида набирается сверху вниз, и на
+/// прыжке к глубокому уровню канва стояла бы пустой, пока едут его тайлы
+/// (см. `tiles::rung`). Отвечает эта функция обоим — и запросу тайлов, и сборке
+/// кадра: рисовать не то, что просили, значит либо просить невидимое, либо не
+/// показывать добытое.
+pub fn desired_cells(view: &View, store: &Store) -> Option<(u32, Vec<Addr>)> {
     let (target, camera, meta) = parts(view)?;
-    let level = camera.level(meta.levels);
+    let sharpest = camera.level(meta.levels);
     let rect = camera.visible((meta.width, meta.height), (target.width, target.height));
     if rect.0 >= rect.2 || rect.1 >= rect.3 {
-        return Some((level, Vec::new()));
+        return Some((sharpest, Vec::new()));
     }
 
-    let (xs, ys) = cell_range(rect, level, meta);
-    let mut cells = Vec::new();
-    for y in ys {
-        for x in xs.clone() {
-            cells.push((level, x, y));
-        }
-    }
-    Some((level, cells))
+    let cells_at = |level| {
+        let (xs, ys) = cell_range(rect, level, meta);
+        ys.flat_map(|y| xs.clone().map(move |x| (level, x, y))).collect()
+    };
+    Some(tiles::rung(sharpest, meta.levels - 1, cells_at, |addr| {
+        store.contains(&meta.fingerprint, addr) || view.fetch.hopeless(addr)
+    }))
 }
 
 /// Квады кадра: по одному на видимую ячейку, у которой нашёлся хоть какой-то
 /// тайл. Обращения продлевают тайлам жизнь в бюджете хранилища.
-pub fn quads(view: &View, store: &mut TileStore) -> Vec<Quad> {
+pub fn quads(view: &View, store: &mut Store) -> Vec<Quad> {
     let Some((target, camera, meta)) = parts(view) else { return Vec::new() };
-    let Some((level, cells)) = desired_cells(view) else { return Vec::new() };
+    let Some((level, cells)) = desired_cells(view, store) else { return Vec::new() };
 
     let mut quads = Vec::with_capacity(cells.len());
     for (_, x, y) in cells {

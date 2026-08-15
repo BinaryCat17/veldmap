@@ -60,5 +60,5 @@ dependencies:
   # ровно один ответ — на вопрос, куда пришёлся щелчок: перевести точку кадра
   # в место на Земле может только тот, у кого камера.
   globe:
-    subs: [on_probed]
+    subs: [on_probed, on_overlay_progress]
     calls: [on_set_surface, on_camera, on_outlines, on_overlay, on_probe]

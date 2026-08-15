@@ -17,6 +17,10 @@ struct Camera {
     view_proj: mat4x4<f32>,
     eye: vec3<f32>,
     _pad: f32,
+    /// Размер кадра в пикселях — им лента выбранного контура меряет свою
+    /// ширину (см. vs_ribbon).
+    viewport: vec2<f32>,
+    _pad2: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -86,11 +90,93 @@ fn fs_outline(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(OUTLINE, line_alpha(in));
 }
 
-// Выбранный снимок: тот же контур акцентом. Цветом, а не толщиной, — линия в
-// пайплайне всегда в пиксель шириной, и это единственное, чем один контур
-// отличают от полусотни соседних.
+// Остальные, когда выбран один: тот же контур вполсилы. Лента выбранного и так
+// заметна, но приглушённые соседи не спорят с ней за взгляд.
 @fragment
-fn fs_picked(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_outline_dim(in: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(OUTLINE, line_alpha(in) * 0.35);
+}
+
+// --- Лента выбранного контура ---
+// Линия в пайплайне всегда в пиксель шириной, а выбранный снимок должен быть
+// виден среди полусотни соседних. Поэтому он обводится не линией, а полосой из
+// треугольников: вершина контура приезжает сюда дважды — левым краем полосы и
+// правым, — и разводит их в стороны этот шейдер.
+//
+// Разводит на экране, а не в мире: мировая ширина зависела бы от приближения —
+// на отлёте полоса расплылась бы в пятно, вблизи истончилась бы в ту же линию.
+// Экранная же остаётся собой на любом масштабе.
+
+/// Ширина ленты в пикселях кадра.
+const RIBBON_PX: f32 = 5.0;
+/// Насколько сильно позволено растянуть стык на изломе. Ус стыка тем длиннее,
+/// чем острее угол, и на развороте почти назад он уходит в бесконечность;
+/// потолок обрезает его, оставляя стык слегка срезанным.
+const MITER_LIMIT: f32 = 3.0;
+
+fn to_screen(clip: vec4<f32>) -> vec2<f32> {
+    return clip.xy / clip.w * camera.viewport * 0.5;
+}
+
+fn along(tail: vec2<f32>, head: vec2<f32>) -> vec2<f32> {
+    let delta = head - tail;
+    let len = length(delta);
+    // Совпавшие точки направления не задают: соседи вершины сходятся, когда
+    // контур пришёл с повторённой вершиной.
+    if len < 1e-5 {
+        return vec2<f32>(1.0, 0.0);
+    }
+    return delta / len;
+}
+
+@vertex
+fn vs_ribbon(
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) prev: vec3<f32>,
+    @location(3) next: vec3<f32>,
+    @location(4) side: f32,
+) -> VsOut {
+    var out: VsOut;
+    out.world = position;
+    out.normal = normal;
+
+    let clip = camera.view_proj * vec4<f32>(position, 1.0);
+    let clip_prev = camera.view_proj * vec4<f32>(prev, 1.0);
+    let clip_next = camera.view_proj * vec4<f32>(next, 1.0);
+    out.clip = clip;
+    // Вершина или её сосед за камерой: делить на такое w нельзя, а звено всё
+    // равно не видно — оставляем полосу схлопнутой в линию.
+    if clip.w <= 0.0 || clip_prev.w <= 0.0 || clip_next.w <= 0.0 {
+        return out;
+    }
+
+    let here = to_screen(clip);
+    let back = along(to_screen(clip_prev), here);
+    let ahead = along(here, to_screen(clip_next));
+    // Нормаль стыка — биссектриса нормалей соседних звеньев, удлинённая
+    // ровно настолько, чтобы полоса осталась своей ширины и на изломе.
+    let n_back = vec2<f32>(-back.y, back.x);
+    let n_ahead = vec2<f32>(-ahead.y, ahead.x);
+    var miter = n_back + n_ahead;
+    let len = length(miter);
+    if len < 1e-5 {
+        miter = n_ahead;
+    } else {
+        miter = miter / len;
+    }
+    let stretch = min(1.0 / max(dot(miter, n_ahead), 1.0 / MITER_LIMIT), MITER_LIMIT);
+
+    let offset = miter * side * RIBBON_PX * 0.5 * stretch;
+    // Обратно в отсечение: экранные пиксели — это доли кадра, умноженные на w.
+    out.clip = vec4<f32>(clip.xy + offset / (camera.viewport * 0.5) * clip.w, clip.z, clip.w);
+    return out;
+}
+
+// Выбранный снимок: акцент в полную силу. Гаснет у края силуэта тем же
+// правилом, что и линии, — иначе на самом краю полоса сгустилась бы в заливку.
+@fragment
+fn fs_ribbon(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(ACCENT, line_alpha(in));
 }
 

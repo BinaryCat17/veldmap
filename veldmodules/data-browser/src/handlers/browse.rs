@@ -111,11 +111,20 @@ pub fn reveal(state: &mut State, view: ViewId, key: String) {
     if !here {
         request_path(state, view, folder);
     }
+    // Привели к другому снимку, чем выбран на шаре, — выбор гаснет: подсвечена
+    // на экране одна строка, и переход — свежий ответ на тот же вопрос, что и
+    // щелчок по шару (см. `State::clear_targets`). К тому же самому приводит
+    // как раз полоса под шаром, и там гасить нечего.
+    let elsewhere = state.pick.as_deref().is_some_and(|picked| picked != key);
     if let Some(listing) = state.listing_mut(view) {
         listing.target = Some(key);
         // Просьба новая, даже если строка та же: без этого повторный переход к
         // ней ничего бы не сдвинул (см. `ListingState::aim`).
         listing.aim = listing.aim.wrapping_add(1);
+    }
+    state.clear_targets(Some(view));
+    if elsewhere {
+        super::outline::deselect(state);
     }
     // Папку ещё листают — считать страницу не по чему; посчитает её конец
     // листинга (см. [`aim`]).

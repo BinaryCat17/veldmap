@@ -12,9 +12,14 @@ use crate::module::{theme, Msg, ViewMsg};
 
 
 /// Сколько знаков имени выбранного снимка помещается в подпись. Числом, а не
-/// шириной: полоса тянется вместе с окном, и мерить в ней нечего — а имя
-/// продукта длиной под семьдесят знаков и без того не показать целиком.
-const PICKED_CHARS: usize = 46;
+/// шириной: укорачивает имя многоточие в середине (см. `format::ellipsize`), а
+/// не разметка, — способа сказать тексту «сожмись» в этом протоколе нет.
+///
+/// Столько, сколько остаётся от полосы после трёх кнопок в панели шириной в
+/// пол-экрана: имя продукта длиной под семьдесят знаков целиком не показать
+/// всё равно, а вылезшее за край утащило бы за собой кнопки — то единственное,
+/// ради чего в эту полосу и смотрят.
+const PICKED_CHARS: usize = 34;
 
 /// Снимок, о котором говорит полоса: чем его подписать, чем адресовать и каким
 /// способом смотреть. Три поля, а не тройка: имя и ключ у снимка похожи с виду,
@@ -85,15 +90,22 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
                 })
         });
 
+    let named = subject.is_some();
     let mut trailing: Vec<Element<Msg>> = Vec::new();
     match subject {
         Some(subject) => {
+            // Имя занимает всё, что осталось от полосы: место кнопкам разметка
+            // отводит первым, и никакое имя их за край не вытолкнет.
             trailing.push(
-                mono::<Msg>(format::ellipsize(subject.label, PICKED_CHARS))
-                    .size(theme::TEXT_SMALL)
-                    .color(theme::INK_SOFT)
-                    .single_line()
-                    .into(),
+                container(
+                    mono::<Msg>(format::ellipsize(subject.label, PICKED_CHARS))
+                        .size(theme::TEXT_SMALL)
+                        .color(theme::INK_SOFT)
+                        .single_line(),
+                )
+                .width(Length::Fill)
+                .align_x(Alignment::End)
+                .into(),
             );
             trailing.push(
                 theme::bar_button("Смотреть")
@@ -125,19 +137,30 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
         trailing.push(theme::bar_button("Снять с шара").on_press(Msg::GlobeClear).into());
     }
 
-    let mut line = row![
-        text::<Msg>("Тащите — вращает, колесо — приближает, щелчок — выбирает".to_string())
-            .size(theme::TEXT_LABEL)
-            .color(theme::INK_DIM)
-            .single_line(),
-        theme::spacer(),
-    ];
-    for element in trailing {
-        line = line.push(element);
+    // Подсказка уступает место названному снимку — как и размер области выше:
+    // что делают со снимком, важнее того, чем вращают шар. Уступает целиком, а
+    // не ужимается: в полосе узкой панели вместе они не помещаются, и
+    // выдавливает подсказка как раз кнопки — то единственное, ради чего в эту
+    // полосу и смотрят.
+    let mut parts: Vec<Element<Msg>> = Vec::new();
+    if !named {
+        parts.push(
+            text::<Msg>("Тащите — вращает, колесо — приближает, щелчок — выбирает".to_string())
+                .size(theme::TEXT_LABEL)
+                .color(theme::INK_DIM)
+                .single_line()
+                .into(),
+        );
+        // Распорка нужна только здесь: при названном снимке остаток полосы
+        // занимает его имя, и второй тянущийся элемент отобрал бы у него
+        // половину места.
+        parts.push(theme::spacer().into());
     }
+    parts.extend(trailing);
 
     theme::chrome_bar(
-        line.spacing(crate::module::view::BAR_SPACING)
+        row(parts)
+            .spacing(crate::module::view::BAR_SPACING)
             .width(Length::Fill)
             .height(Length::Fill)
             .align_items(Alignment::Center),

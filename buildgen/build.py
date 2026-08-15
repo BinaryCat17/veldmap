@@ -437,9 +437,8 @@ def build_all(debug: bool = False, windows: bool = False, dist_dir: str | None =
     return started
 
 
-def _has_unit_tests(module: dict) -> bool:
-    """Есть ли в исходниках модуля юнит-тесты (`#[cfg(test)]`)."""
-    src = os.path.join(module["dir"], "src")
+def _has_unit_tests(src: str) -> bool:
+    """Есть ли в этих исходниках юнит-тесты (`#[cfg(test)]`)."""
     for root, _dirs, files in os.walk(src):
         for name in files:
             if not name.endswith(".rs"):
@@ -466,16 +465,26 @@ def test_rust_units():
     print("\n[4/4] Rust unit tests...")
     started = time.monotonic()
 
-    run(["cargo", "test", "--release", "-q", "-p", "veldsdk", "-p", "veldmap-host-core"],
+    run(["cargo", "test", "--release", "-q",
+         "-p", "veldsdk", "-p", "veldmap-host-core", "-p", "veldmap-host-network"],
         cwd=os.path.join(PROJECT_ROOT, "veldcore"))
 
-    tested = ["veldsdk", "veldmap-host-core"]
+    tested = ["veldsdk", "veldmap-host-core", "veldmap-host-network"]
     for module in discover_modules():
-        if module["language"] != "rust" or not _has_unit_tests(module):
+        if module["language"] != "rust":
             continue
-        run(["cargo", "test", "--release", "-q", "-p", module["package"]],
-            cwd=os.path.join(module["dir"], "generated"))
-        tested.append(module["name"])
+        if _has_unit_tests(os.path.join(module["dir"], "src")):
+            run(["cargo", "test", "--release", "-q", "-p", module["package"]],
+                cwd=os.path.join(module["dir"], "generated"))
+            tested.append(module["name"])
+        # Wrap-крейт — отдельный пакет в своём воркспейсе, и тестами модуля он
+        # не покрывается: рукописные хелперы для потребителей живут только в
+        # нём (см. veldmodules/*/wraps/rust/src).
+        wrap = os.path.join(module["dir"], "wraps", "rust", "src")
+        if os.path.isdir(wrap) and _has_unit_tests(wrap):
+            run(["cargo", "test", "--release", "-q"],
+                cwd=os.path.join(module["dir"], "generated", "wraps", "rust"))
+            tested.append(f"{module['name']}-wrap")
 
     print(f"  {', '.join(tested)} — {elapsed(started)}")
 

@@ -20,9 +20,15 @@ use veldmap_host_util::{blocking, opened, opened_handle, Caller, RangeSource};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Размер блока кэша. Крупнее окна читателя: у HTTP заметная цена запроса,
-/// и последовательный проход по файлу выгоднее делать реже и большими кусками.
-const BLOCK: u64 = 4 * 1024 * 1024;
+/// Размер блока кэша — наименьший кусок, которым ходят в сеть. Вдвое крупнее
+/// окна читателя (256 КиБ), и не больше: за 64 килобайтами заголовка не должны
+/// ехать мегабайты. У eodata запрос стоит около полусекунды, а мегабайт — около
+/// секунды, поэтому случайному чтению дешевле сходить ещё раз, чем взять
+/// вчетверо больше нужного.
+const BLOCK: u64 = 512 * 1024;
+/// Потолок упреждающего чтения: последовательный проход разгоняется до него,
+/// чтобы не платить задержкой запроса за каждый блок (см. [`Readahead`]).
+const READAHEAD: u64 = 8 * 1024 * 1024;
 
 /// Потолок кэша на один ресурс. Проход по гигабайтному снимку не должен
 /// превращаться в его копию в памяти — что не влезло, перечитается.
@@ -86,7 +92,7 @@ impl Drop for HttpRange {
 }
 
 /// Блоки хранятся под Arc: читатель ходит окнами по 256 КБ (ResourceReader),
-/// и копировать ради каждого окна весь четырёхмегабайтный блок незачем.
+/// и копировать ради каждого окна весь блок незачем.
 #[derive(Default)]
 struct Cache {
     blocks: HashMap<u64, Arc<[u8]>>,
@@ -94,6 +100,38 @@ struct Cache {
     /// (а это основной сценарий) самый старый блок и есть самый ненужный.
     order: std::collections::VecDeque<u64>,
     bytes: u64,
+    readahead: Readahead,
+}
+
+/// Разгон последовательного чтения: сколько блоков брать одним запросом.
+///
+/// Мелкий блок хорош случайному чтению и плох проходу по файлу — на каждый
+/// блок пришлась бы задержка запроса. Поэтому блок остаётся мелким, а проход
+/// узнаётся по тому, что промах пришёлся ровно туда, где кончился прошлый
+/// запрос: тогда кусок удваивается, и уже через несколько промахов запросы
+/// идут мегабайтами. Скачок в сторону сбрасывает разгон — там снова дешевле
+/// взять один блок, чем тянуть упреждением то, чего никто не спросит.
+#[derive(Default)]
+struct Readahead {
+    /// Блок сразу за концом прошлого запроса — на нём проход и опознаётся.
+    next: u64,
+    /// Сколько блоков взял прошлый запрос.
+    run: u64,
+}
+
+impl Readahead {
+    /// Сколько блоков брать, начиная с промаха на `index`. `total` — всего
+    /// блоков у ресурса: за конец файла упреждать нечего.
+    fn plan(&mut self, index: u64, total: u64) -> u64 {
+        let run = match index == self.next {
+            true => (self.run * 2).min(READAHEAD / BLOCK),
+            false => 1,
+        };
+        let run = run.clamp(1, total.saturating_sub(index).max(1));
+        self.next = index + run;
+        self.run = run;
+        run
+    }
 }
 
 impl Cache {
@@ -152,14 +190,20 @@ impl HttpRange {
         })
     }
 
-    /// Блок из кэша или из сети.
+    /// Блок из кэша или из сети. Промах тянет не один блок, а столько, сколько
+    /// назначил разгон, — и одним запросом: цена запроса не зависит от того,
+    /// сколько в нём байт (см. [`Readahead`]).
     fn block(&self, index: u64) -> anyhow::Result<Arc<[u8]>> {
-        if let Some(data) = self.cache.lock().unwrap().blocks.get(&index) {
-            return Ok(data.clone());
-        }
+        let run = {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(data) = cache.blocks.get(&index) {
+                return Ok(data.clone());
+            }
+            cache.readahead.plan(index, self.len.div_ceil(BLOCK))
+        };
 
         let from = index * BLOCK;
-        let to = (from + BLOCK).min(self.len);
+        let to = (from + run * BLOCK).min(self.len);
         let expected = to - from;
         let response = self.runtime.block_on(
             super::http::get(&self.url, &self.headers, Some((from, to))).send(),
@@ -176,16 +220,27 @@ impl HttpRange {
             anyhow::bail!("чтение диапазона {}..{}: HTTP {}", from, to, status);
         }
 
-        let data: Arc<[u8]> = Arc::from(self.runtime.block_on(response.bytes())?.as_ref());
+        let data = self.runtime.block_on(response.bytes())?;
         // Короткий ответ — это обрыв, а не конец файла: длину мы знаем из
         // Content-Range и запросили ровно столько, сколько есть.
         if data.len() as u64 != expected {
             anyhow::bail!("чтение диапазона {}..{}: получено {} байт вместо {}",
                           from, to, data.len(), expected);
         }
-
         self.fetched.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        Ok(self.cache.lock().unwrap().insert(index, data))
+
+        // Пришедшее раскладывается по блокам целиком: упреждающая часть за это
+        // и заплачена, а выбросить её значило бы перечитать её же следующим
+        // окном читателя.
+        let mut cache = self.cache.lock().unwrap();
+        let mut wanted = None;
+        for (step, chunk) in data.chunks(BLOCK as usize).enumerate() {
+            let stored = cache.insert(index + step as u64, Arc::from(chunk));
+            if step == 0 {
+                wanted = Some(stored);
+            }
+        }
+        wanted.ok_or_else(|| anyhow::anyhow!("чтение диапазона {}..{}: пустой ответ", from, to))
     }
 }
 
@@ -208,5 +263,41 @@ impl RangeSource for HttpRange {
             position += take as u64;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Проход разгоняется, скачок в сторону — нет. Цена ошибки несимметрична:
+    /// не разогнаться на проходе значит платить задержкой за каждые полмегабайта,
+    /// а разогнаться на случайном чтении — тянуть мегабайты ради заголовка.
+    #[test]
+    fn sequential_reads_speed_up_random_ones_do_not() {
+        let total = 1024;
+        let mut readahead = Readahead::default();
+
+        // Первый промах — один блок: о проходе ещё ничего не известно.
+        assert_eq!(readahead.plan(0, total), 1);
+        // Дальше подряд — удвоение до потолка.
+        let cap = READAHEAD / BLOCK;
+        assert_eq!(readahead.plan(1, total), 2);
+        assert_eq!(readahead.plan(3, total), 4);
+        assert_eq!(readahead.plan(7, total), 8);
+        assert_eq!(readahead.plan(15, total), cap);
+        assert_eq!(readahead.plan(15 + cap, total), cap, "выше потолка не растёт");
+
+        // Скачок в сторону сбрасывает разгон.
+        assert_eq!(readahead.plan(500, total), 1);
+    }
+
+    /// За концом файла упреждать нечего: запрошенный диапазон обрежется по
+    /// длине, а короткий ответ здесь читается как обрыв связи.
+    #[test]
+    fn readahead_stops_at_the_last_block() {
+        let mut readahead = Readahead::default();
+        assert_eq!(readahead.plan(8, 10), 1);
+        assert_eq!(readahead.plan(9, 10), 1, "остался один блок");
     }
 }

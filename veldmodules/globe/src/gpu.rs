@@ -28,13 +28,35 @@ const DEPTH_FORMAT: TextureFormat = TextureFormat::TexDepth32Float;
 
 /// То, что уезжает в шейдер каждый кадр. Раскладка обязана совпадать со
 /// `struct Camera` в globe.wgsl: матрица по столбцам, за ней позиция глаза,
-/// выровненная на 16 байт.
+/// выровненная на 16 байт, и размер кадра в пикселях.
+///
+/// Размер кадра нужен ленте выбранного контура: её ширина экранная, и перевести
+/// пиксели в доли отсечения можно только зная, сколько их в кадре
+/// (см. `vs_ribbon`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CameraUniform {
     view_proj: Mat4,
     eye: World,
     _pad: f32,
+    viewport: [f32; 2],
+    _pad2: [f32; 2],
+}
+
+/// Вершина ленты выбранного контура: точка поверхности с нормалью, её соседи по
+/// обходу и сторона, в которую эту копию вершины отводит шейдер.
+///
+/// Соседи здесь потому, что направление ленты считается на экране, а не в мире:
+/// в мире оно у одного и того же звена разное на разном приближении.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct RibbonVertex {
+    pub position: World,
+    pub normal: World,
+    pub prev: World,
+    pub next: World,
+    /// −1 — левый край ленты, +1 — правый.
+    pub side: f32,
 }
 
 /// С чего начинаются буферы контуров. Экран найденного — это десятки снимков по
@@ -101,7 +123,10 @@ pub struct Device {
     body: PipelineId,
     grid: PipelineId,
     outline: PipelineId,
-    picked: PipelineId,
+    /// Он же вполсилы — им рисуются невыбранные, пока выбран один.
+    dimmed: PipelineId,
+    /// Лента выбранного: своя вершина, своя вершинная функция.
+    ribbon: PipelineId,
     /// Наложения: варп-сетки с текстурой тайла-носителя.
     overlay: PipelineId,
     overlay_layout: BindGroupLayoutId,
@@ -114,9 +139,11 @@ pub struct Device {
     /// поиск, а Земля строится один раз.
     outline_vertices: GrowingBuffer,
     outline_indices: GrowingBuffer,
-    /// Куски индексного буфера под обычные контуры и под выделенные.
-    outline_plain: std::ops::Range<u32>,
-    outline_picked: std::ops::Range<u32>,
+    outline_lines: std::ops::Range<u32>,
+    /// Лента выбранного — своя пара: вершина у неё другая.
+    ribbon_vertices: GrowingBuffer,
+    ribbon_indices: GrowingBuffer,
+    ribbon_range: std::ops::Range<u32>,
 }
 
 impl Device {
@@ -149,15 +176,48 @@ impl Device {
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
         // Контуры устроены ровно как сетка и отличаются от неё только цветом.
-        // Выделенный — от остальных тем же и ровно настолько же.
+        // Выбранный — от остальных тем же, а остальные от самих себя —
+        // силой: пока выбран один, соседние приглушены (см. globe.wgsl).
         let outline = pipeline(
             "Globe Outline", &shader, "fs_outline", &camera_layout, format,
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
-        let picked = pipeline(
-            "Globe Picked", &shader, "fs_picked", &camera_layout, format,
+        let dimmed = pipeline(
+            "Globe Outline Dim", &shader, "fs_outline_dim", &camera_layout, format,
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
+        // Лента: треугольники вместо линий и своя вершина, а глубина как у
+        // линий — она лежит на той же высоте и о ней же говорит.
+        let ribbon = gfx::create_render_pipeline(CreateRenderPipeline {
+            shader_id: shader.id(),
+            label: "Globe Ribbon".into(),
+            vertex_entry: "vs_ribbon".into(),
+            fragment_entry: "fs_ribbon".into(),
+            target_format: format,
+            vertex_layouts: vec![VertexBufferLayout {
+                array_stride: std::mem::size_of::<RibbonVertex>() as u64,
+                step_mode: StepMode::StepVertex as i32,
+                // Как поля RibbonVertex, смещения выводятся.
+                attributes: gfx::packed_attributes(&[
+                    VertexFormat::VtxFloat32x3,
+                    VertexFormat::VtxFloat32x3,
+                    VertexFormat::VtxFloat32x3,
+                    VertexFormat::VtxFloat32x3,
+                    VertexFormat::VtxFloat32,
+                ]),
+            }],
+            bind_group_layout_ids: vec![camera_layout.id()],
+            primitive_topology: PrimitiveTopology::TopologyTriangleList as i32,
+            // Лента отводится в стороны на экране, и какая её сторона окажется
+            // лицевой — зависит от того, с какой стороны на неё смотрят.
+            cull_mode: CullMode::None as i32,
+            depth_stencil: Some(DepthStencilState {
+                format: DEPTH_FORMAT as i32,
+                depth_write_enabled: false,
+                depth_compare: CompareFunction::CmpLessEqual as i32,
+            }),
+            ..Default::default()
+        })?;
 
         // Наложения: своя вершина (точка + UV) и привязка тайла, глубина как у
         // сетки — лежат на поверхности, спор за неё решает порядок отрисовки.
@@ -206,7 +266,8 @@ impl Device {
             body,
             grid,
             outline,
-            picked,
+            dimmed,
+            ribbon,
             overlay,
             overlay_layout,
             overlay_sampler,
@@ -219,8 +280,14 @@ impl Device {
             outline_indices: GrowingBuffer::new(
                 buffer_usage::INDEX, "индексы контуров", INITIAL_OUTLINE_BUFFER,
             ),
-            outline_plain: 0..0,
-            outline_picked: 0..0,
+            outline_lines: 0..0,
+            ribbon_vertices: GrowingBuffer::new(
+                buffer_usage::VERTEX, "вершины ленты", INITIAL_OUTLINE_BUFFER,
+            ),
+            ribbon_indices: GrowingBuffer::new(
+                buffer_usage::INDEX, "индексы ленты", INITIAL_OUTLINE_BUFFER,
+            ),
+            ribbon_range: 0..0,
         })
     }
 
@@ -229,8 +296,10 @@ impl Device {
     pub fn set_outlines(&mut self, outlines: &Outlines) -> anyhow::Result<()> {
         self.outline_vertices.write(&outlines.vertices)?;
         self.outline_indices.write(&outlines.indices)?;
-        self.outline_plain = outlines.plain.clone();
-        self.outline_picked = outlines.picked.clone();
+        self.outline_lines = 0..outlines.indices.len() as u32;
+        self.ribbon_vertices.write(&outlines.ribbon)?;
+        self.ribbon_indices.write(&outlines.ribbon_indices)?;
+        self.ribbon_range = 0..outlines.ribbon_indices.len() as u32;
         Ok(())
     }
 
@@ -292,6 +361,8 @@ pub fn render(
         view_proj: camera.view_projection(target.aspect()),
         eye: camera.eye(),
         _pad: 0.0,
+        viewport: [target.width.max(1) as f32, target.height.max(1) as f32],
+        _pad2: [0.0, 0.0],
     };
     resource_write(device.camera.id(), 0, gfx::bytes_of(std::slice::from_ref(&uniform)))?;
 
@@ -329,24 +400,35 @@ pub fn render(
 
     // Контуры последними: они поверх сетки. Глубину линии не пишут, поэтому
     // между собой они разбираются только очередью записи, и решает её порядок
-    // здесь.
-    if let (Some(vertices), Some(indices)) =
-        (device.outline_vertices.id(), device.outline_indices.id())
+    // здесь: лента выбранного пишется после линий и потому видна поверх
+    // накрывших его соседей.
+    if !device.outline_lines.is_empty()
+        && let (Some(vertices), Some(indices)) =
+            (device.outline_vertices.id(), device.outline_indices.id())
     {
         recorder.set_vertex_buffer(0, vertices, 0, device.outline_vertices.filled());
         recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, device.outline_indices.filled());
 
-        for (pipeline, range) in [
-            (&device.outline, &device.outline_plain),
-            (&device.picked, &device.outline_picked),
-        ] {
-            if range.is_empty() {
-                continue;
-            }
-            recorder.set_pipeline(pipeline);
-            recorder.set_bind_group(0, &device.camera_bind_group);
-            recorder.draw_indexed(range.clone(), 0, 0..1);
-        }
+        // Пока выбран один контур, остальные рисуются вполсилы: лента и так
+        // заметна, но приглушённые соседи не спорят с ней за взгляд.
+        let plain = match device.ribbon_range.is_empty() {
+            true => &device.outline,
+            false => &device.dimmed,
+        };
+        recorder.set_pipeline(plain);
+        recorder.set_bind_group(0, &device.camera_bind_group);
+        recorder.draw_indexed(device.outline_lines.clone(), 0, 0..1);
+    }
+
+    if !device.ribbon_range.is_empty()
+        && let (Some(vertices), Some(indices)) =
+            (device.ribbon_vertices.id(), device.ribbon_indices.id())
+    {
+        recorder.set_vertex_buffer(0, vertices, 0, device.ribbon_vertices.filled());
+        recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, device.ribbon_indices.filled());
+        recorder.set_pipeline(&device.ribbon);
+        recorder.set_bind_group(0, &device.camera_bind_group);
+        recorder.draw_indexed(device.ribbon_range.clone(), 0, 0..1);
     }
 
     recorder.submit_with_depth(&target.view, &target.depth_view)

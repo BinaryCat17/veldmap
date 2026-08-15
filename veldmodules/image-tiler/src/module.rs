@@ -25,7 +25,7 @@ use veldsdk::graphics::{texture_usage, TextureFormat};
 use veldsdk::proto::core::ResourceHandle;
 
 use crate::proto::image_tiler::{
-    Described, DescribeRequest, ProduceDone, ProduceProgress, ProduceRequest, TileResult,
+    Described, DescribeRequest, GeoTie, ProduceDone, ProduceProgress, ProduceRequest, TileResult,
 };
 use crate::proto::tile_cache::StoreTile;
 
@@ -68,6 +68,11 @@ fn describe(req: &DescribeRequest) -> Result<Described, String> {
         tile: pyramid::TILE,
         levels: pyramid::level_count(info.width, info.height),
         random_access: info.random_access(),
+        ties: info
+            .ties
+            .iter()
+            .map(|tie| GeoTie { px: tie.px, py: tie.py, lat: tie.lat, lon: tie.lon })
+            .collect(),
         error: String::new(),
     })
 }

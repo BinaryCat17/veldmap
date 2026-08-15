@@ -236,9 +236,12 @@ impl Layout {
         self.next += 2;
 
         let at = self.root.find_mut(pane).expect("панель на месте — проверено выше");
-        // Место листа занимает деление, а сам лист становится его ребёнком.
-        let stub = Node::Leaf(Pane { id, active: None });
-        let old = std::mem::replace(at, stub);
+        // Место листа занимает деление, а сам лист становится его ребёнком,
+        // поэтому вынимается он целиком. Заглушка — та же панель без вкладки, и
+        // живёт она ровно до присваивания ниже (та же уловка, что в
+        // [`Self::remove`]): второй лист с новым номером на это мгновение сделал
+        // бы номер в дереве неуникальным.
+        let old = std::mem::replace(at, Node::Leaf(Pane { id: pane, active: None }));
         let fresh = Node::Leaf(Pane { id, active: None });
         let (first, second) = if side.head() { (fresh, old) } else { (old, fresh) };
         *at = Node::Split(Box::new(Split {

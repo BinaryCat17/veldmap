@@ -155,6 +155,9 @@ pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
     veldsdk::resource::discard("on_open_result", opened);
 }
 pub use handlers::globe::on_probed;
+// Ход добычи тайлов наложений: глобус рассказывает, сколько снимку ещё ехать, —
+// показывают это списки, у которых есть его строка.
+pub use handlers::overlay::on_overlay_progress;
 
 /// Продукт каталога по ключу хранилища. Ждут его двое — показ снимка на шаре и
 /// контур отмеченного, — и по содержимому их не различить: продукт в обоих

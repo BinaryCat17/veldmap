@@ -120,11 +120,24 @@ pub fn focus(state: &mut State, key: &str) {
         return;
     };
     super::globe::focus_on(footprint::frame(&outlined.rings));
-    if state.pick.as_deref() != Some(key) {
-        state.pick = Some(key.to_string());
-        send(state);
-    }
+    select(state, Some(key.to_string()));
     super::nav::on_new_globe(state);
+}
+
+/// Выбрать контур — или снять выбор. Единственное место, где выбор меняется по
+/// воле человека, и потому же здесь гаснет подсветка перехода: подсвечена на
+/// экране одна строка, и выбор на шаре — свежий ответ на тот же вопрос
+/// (см. `State::clear_targets`).
+///
+/// Глобусу при этом уезжает весь набор контуров: о выборе ему говорит он же —
+/// а неизменившийся выбор не уезжает вовсе, набор поехал бы тот же самый.
+fn select(state: &mut State, key: Option<String>) {
+    if state.pick == key {
+        return;
+    }
+    state.pick = key;
+    state.clear_targets(None);
+    send(state);
 }
 
 /// Снять контуры с шара — то есть снять отметки во всех списках: контур живёт
@@ -163,12 +176,7 @@ pub fn pick(state: &mut State, at: Option<(f64, f64)>) {
             .min_by(|left, right| extent(left).total_cmp(&extent(right)))
             .map(|outlined| outlined.key.clone())
     });
-    // Ничего не изменилось — не тревожим глобус: набор поедет тот же самый.
-    if state.pick == chosen {
-        return;
-    }
-    state.pick = chosen;
-    send(state);
+    select(state, chosen);
 }
 
 /// Продукт по ключу приехал — или не приехал.
@@ -317,5 +325,61 @@ fn send(state: &State) {
 /// бесконечен: такой не выиграет ни у одного настоящего.
 fn extent(outlined: &Outlined) -> f64 {
     footprint::frame(&outlined.rings).map_or(f64::INFINITY, |frame| frame.radius_deg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::handlers::browse;
+    use crate::module::state::BrowseState;
+    use crate::proto::data_provider::{GeoPoint as ProductPoint, Ring};
+
+    fn state() -> State {
+        State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние")
+    }
+
+    /// Снимок с квадратным контуром 10..20 по обеим осям.
+    fn square(key: &str) -> Outlined {
+        Outlined {
+            key: key.to_string(),
+            label: key.to_string(),
+            folder: false,
+            rings: vec![Ring {
+                points: [(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)]
+                    .into_iter()
+                    .map(|(lat, lon)| ProductPoint { lat, lon })
+                    .collect(),
+            }],
+        }
+    }
+
+    /// Подсвечена на экране одна строка, и владелец у подсветки один: щелчок по
+    /// шару гасит подсветку перехода, а переход к другой строке — выбор на шаре.
+    /// Без этого правила подсвеченными остаются обе — та, к которой привели, и
+    /// та, которую выбрали после.
+    #[test]
+    fn the_highlight_has_one_owner() {
+        let mut state = state();
+        let pane = state.focused();
+        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
+        state.outlined = vec![square("eodata/store/A.SAFE")];
+        let elsewhere = "eodata/store/B.SAFE".to_string();
+
+        browse::reveal(&mut state, view, elsewhere.clone());
+        assert_eq!(
+            state.listing_mut(view).expect("список").target.as_deref(),
+            Some(elsewhere.as_str()),
+        );
+
+        pick(&mut state, Some((15.0, 15.0)));
+        assert_eq!(state.pick.as_deref(), Some("eodata/store/A.SAFE"));
+        assert!(
+            state.listing_mut(view).expect("список").target.is_none(),
+            "подсветка перехода пережила выбор на шаре",
+        );
+
+        browse::reveal(&mut state, view, elsewhere);
+        assert!(state.pick.is_none(), "выбор на шаре пережил переход к другой строке");
+    }
 }
 

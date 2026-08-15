@@ -40,7 +40,7 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     let mut head = vec![0u8; HEAD.min(len as usize)];
     reader.read_exact(&mut head).map_err(|e| format!("jp2: чтение заголовка: {}", e))?;
     let (width, height) = header_dims(&head)?;
-    Ok(Info { width, height, kind: Kind::Jp2 })
+    Ok(Info::plain(width, height, Kind::Jp2))
 }
 
 pub fn produce(

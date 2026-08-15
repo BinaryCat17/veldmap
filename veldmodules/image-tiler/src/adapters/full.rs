@@ -13,7 +13,7 @@ pub fn describe<R: BufRead + Seek>(reader: R, format: ImageFormat) -> Result<Inf
         .into_decoder()
         .map_err(|e| format!("{:?}: {}", format, e))?;
     let (width, height) = image::ImageDecoder::dimensions(&decoder);
-    Ok(Info { width, height, kind: Kind::Full(format) })
+    Ok(Info::plain(width, height, Kind::Full(format)))
 }
 
 pub fn produce<R: BufRead + Seek>(

@@ -172,6 +172,11 @@ const INDENT: f32 = 12.0;
 /// Высота шапки — своя: в ней подписи, а не строки данных.
 const HEADER_HEIGHT: f32 = 22.0;
 
+/// Полоса хода укладки на шар под строкой снимка. Тонкая: она отвечает на один
+/// вопрос — «идёт ли», — а сколько именно осталось, сказано словами в «На
+/// просмотре».
+const ONTO_GLOBE: f32 = 3.0;
+
 /// Расширения, у которых есть превью, — по ним же выбрана иконка строки.
 const IMAGE_FORMATS: [&str; 7] = ["png", "jpg", "jpeg", "tif", "tiff", "jp2", "webp"];
 
@@ -466,8 +471,14 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
         },
         context.columns,
         indent,
-    )
-    .height(Length::Fixed(theme::ROW_HEIGHT));
+    );
+
+    // Снимок едет на шар — под строкой полоса хода: нажали значок здесь, и
+    // видно должно быть здесь же. Высота у неё занятая, а не добавленная: шаг
+    // строки считается в одном месте (`theme::ROW_PITCH`), им же список
+    // прокручивают к нужной строке, и подрасти он не может.
+    let height = theme::ROW_HEIGHT - row_data.globe.map_or(0.0, |_| ONTO_GLOBE);
+    let cells = cells.height(Length::Fixed(height));
 
     // Вся строка — кнопка: нажатие на неё делает то же, что её главная кнопка,
     // а у той, чьё главное дело — раскрыться, оно и делает. Отдельная кнопка
@@ -485,13 +496,20 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
         None => theme::row_button(cells, marked),
     };
 
-    column![
-        line.width(Length::Fill).height(Length::Fixed(theme::ROW_HEIGHT)),
-        theme::hairline(theme::LINE_ROW),
-    ]
-    .width(Length::Fill)
-    .key(row_data.key().to_string())
-    .into()
+    let mut lines: Vec<Element<Msg>> =
+        vec![line.width(Length::Fill).height(Length::Fixed(height)).into()];
+    if let Some(share) = row_data.globe {
+        lines.push(
+            progress_bar::<Msg>(0.0..=1.0, share)
+                .style(theme::progress(theme::ACCENT))
+                .width(Length::Fill)
+                .height(Length::Fixed(ONTO_GLOBE))
+                .into(),
+        );
+    }
+    lines.push(theme::hairline(theme::LINE_ROW));
+
+    column(lines).width(Length::Fill).key(row_data.key().to_string()).into()
 }
 
 /// Насколько отодвинут ярус группировки. Считается по глубине здесь и только

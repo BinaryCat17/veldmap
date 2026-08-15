@@ -166,6 +166,11 @@ pub struct Row {
     /// Содержимое раскрытой папки ещё едет. Пустота под ней читается как
     /// «здесь ничего нет», и это неправда до конца листинга.
     pub loading: bool,
+    /// Доля добытого, пока снимок этой строки едет на шар; `None` — не едет.
+    /// Считает её глобус — тайлы его, — а строке достаётся готовое число
+    /// (см. `state::overlay::Progress`). Стоит оно здесь, а не в разметке,
+    /// потому что спрашивают его по ключу снимка, а ключ есть у строки.
+    pub globe: Option<f32>,
     pub status: RowStatus,
 }
 
@@ -266,6 +271,7 @@ impl Row {
             children: Vec::new(),
             folded: false,
             loading: false,
+            globe: None,
             status,
         }
     }
@@ -295,6 +301,7 @@ impl Row {
             children: Vec::new(),
             folded: false,
             loading: false,
+            globe: None,
             status,
         }
     }
@@ -334,6 +341,7 @@ impl Row {
                 children: Vec::new(),
                 folded: false,
                 loading: false,
+                globe: None,
                 status: RowStatus::Remote,
             },
         }
@@ -426,6 +434,7 @@ fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
         children: files,
         folded: true,
         loading: false,
+        globe: None,
         status,
     }
 }

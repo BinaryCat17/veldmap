@@ -16,11 +16,7 @@ pub fn describe<R: Read>(reader: R) -> Result<Info, String> {
     let mut decoder = jpeg_decoder::Decoder::new(reader);
     decoder.read_info().map_err(|e| format!("jpeg: {}", e))?;
     let info = decoder.info().ok_or_else(|| "jpeg: нет заголовка".to_string())?;
-    Ok(Info {
-        width: u32::from(info.width),
-        height: u32::from(info.height),
-        kind: Kind::Jpeg,
-    })
+    Ok(Info::plain(u32::from(info.width), u32::from(info.height), Kind::Jpeg))
 }
 
 pub fn produce<R: Read>(reader: R, info: &Info, level: u32, emit: Emit) -> Result<(), String> {

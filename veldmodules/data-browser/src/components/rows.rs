@@ -20,13 +20,35 @@ pub fn of(state: &State, view: ViewId) -> Vec<Row> {
     match kind {
         ViewKind::Browse(opened) => browse(state, opened),
         ViewKind::Search(opened) => search(state, opened),
-        ViewKind::Downloaded(_) => downloaded_rows(&state.library),
+        ViewKind::Downloaded(_) => {
+            // Скачанное собрано из записей библиотеки, а не из ключей каталога,
+            // — общей сборки строк (`from_key`) у него нет, и ход укладки на шар
+            // проставляется здесь. Вглубь идти незачем: внутри снимка лежат его
+            // файлы, а на шар едет он сам.
+            let mut rows = downloaded_rows(&state.library);
+            for row in &mut rows {
+                row.globe = onto_globe(state, row.snapshot_key());
+            }
+            rows
+        }
         // Таблицы у них нет вовсе; перечислены поимённо, чтобы новый вид со
         // списком не остался молча без строк.
         ViewKind::Empty | ViewKind::Preview(_) | ViewKind::Globe(_) | ViewKind::Shown => {
             Vec::new()
         }
     }
+}
+
+/// Ход укладки снимка этой строки на шар; `None` — он туда не едет.
+///
+/// Спрашивается по ключу снимка, а не по ключу строки: строка каталога знает
+/// папку со слэшем на конце, а наложение помнит продукт без него.
+fn onto_globe(state: &State, key: &str) -> Option<f32> {
+    state
+        .overlays
+        .iter()
+        .find(|overlay| overlay.identifier == key)
+        .and_then(|overlay| overlay.progress.share())
 }
 
 /// Сетевой каталог: записи текущей папки и содержимое раскрытых.
@@ -114,6 +136,10 @@ fn from_key(
     kind: RowKind,
     product: String,
 ) -> Row {
+    // Ход укладки на шар — здесь, потому что здесь собираются строки и каталога,
+    // и выдачи поиска: снимок в них один и тот же, и два ответа на этот вопрос
+    // однажды разошлись бы.
+    let globe = onto_globe(state, bare(&identifier));
     if kind.is_folder() {
         // Два разных вопроса о папке, и второй задаётся только снимку. Сколько
         // её содержимого на диске, видно по ключам записей — это и всё, что
@@ -132,9 +158,9 @@ fn from_key(
             (false, done) => RowStatus::Partial { done },
         };
         let row = Row::container_row(identifier, title, status, kind);
-        return Row { size, date, product, ..row };
+        return Row { size, date, product, globe, ..row };
     }
-    Row { product, ..Row::remote(&state.library, identifier, title, size, date, kind) }
+    Row { product, globe, ..Row::remote(&state.library, identifier, title, size, date, kind) }
 }
 
 /// Содержимое раскрытой папки — подстроками под ней, и так вглубь: раскрытая
