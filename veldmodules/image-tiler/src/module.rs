@@ -21,13 +21,24 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use veldsdk::graphics::{texture_usage, TextureFormat};
-use veldsdk::proto::core::ResourceHandle;
+use veldsdk::graphics::{self as gfx, TextureFormat};
 
 use crate::proto::image_tiler::{
     Described, DescribeRequest, GeoTie, ProduceDone, ProduceProgress, ProduceRequest, TileResult,
 };
 use crate::proto::tile_cache::StoreTile;
+
+/// Формат текстуры тайла. sRGB, потому что в тайле лежит готовое к показу
+/// содержимое: сэмплер потребителя отдаст линейные значения, и фильтрация
+/// дробных масштабов пройдёт в линейном пространстве.
+///
+/// Своя константа у каждого из двух поставщиков тайлов — общего крейта у них
+/// нет и быть не может (`image-tiler` зависит от `tile-cache`, обратная
+/// зависимость замкнула бы граф сборки), а факт этот объявлен там же, где и
+/// сам тайл: в комментарии к `TileResult` обоих контрактов. Расходиться им
+/// нельзя: тайлы из кэша и от производителя ложатся в один кадр, и разный
+/// формат дал бы там разную яркость.
+const TILE_FORMAT: TextureFormat = TextureFormat::TexRgba8UnormSrgb;
 
 /// Шаг прогресса по прочитанному: чаще — шум, реже — «висит».
 const PROGRESS_STEP: u64 = 8 * 1024 * 1024;
@@ -67,7 +78,8 @@ fn describe(req: &DescribeRequest) -> Result<Described, String> {
         height: info.height,
         tile: pyramid::TILE,
         levels: pyramid::level_count(info.width, info.height),
-        random_access: info.random_access(),
+        reach: info.reach() as i32,
+        finest: info.finest,
         ties: info
             .ties
             .iter()
@@ -180,7 +192,7 @@ impl Sink<'_> {
         });
 
         if level == self.want_level && self.wants.remove(&(tx, ty)) {
-            let texture = tile_texture(w, h, rgba, &self.owner)?;
+            let texture = gfx::upload_texture("тайл", w, h, TILE_FORMAT, rgba, &self.owner)?;
             crate::emit::on_produced(
                 &TileResult { level, x: tx, y: ty, texture: Some(texture), width: w, height: h },
                 self.correlation,
@@ -212,26 +224,4 @@ impl Sink<'_> {
             self.correlation,
         );
     }
-}
-
-/// Текстура тайла с передачей владения заказчику. sRGB-формат: сэмплер
-/// потребителя отдаст линейные значения, и фильтрация дробных масштабов
-/// пройдёт в линейном пространстве.
-fn tile_texture(width: u32, height: u32, rgba: &[u8], owner: &str) -> Result<ResourceHandle, String> {
-    let id = veldsdk::abi::resource_alloc_texture(
-        width,
-        height,
-        TextureFormat::TexRgba8UnormSrgb as i32,
-        texture_usage::TEXTURE_BINDING | texture_usage::COPY_DST,
-    )
-    .ok_or_else(|| format!("не выделилась текстура {}×{}", width, height))?;
-    // Во владельца сразу: сорвись заливка, текстуру освободит Drop, а голый
-    // id остался бы висеть на хосте до конца процесса.
-    let texture = veldsdk::OwnedResource::from_raw_id(id);
-    veldsdk::abi::resource_upload_image(texture.id(), rgba)
-        .map_err(|e| format!("тайл не залит в текстуру: {}", e))?;
-    veldsdk::resource::hand_off(
-        ResourceHandle { id: texture.into_handle().id, size: rgba.len() as u64 },
-        owner,
-    )
 }

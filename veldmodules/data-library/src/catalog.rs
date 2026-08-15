@@ -25,7 +25,19 @@ pub fn on_list(state: &mut State, _req: LibraryRequest) {
 }
 
 /// Перечитать каталог; результатом станет рассылка состояния.
+///
+/// Обход рекурсивный и по всему каталогу, а поводов перечитать бывает столько
+/// же, сколько файлов в снимке: сюда зовёт каждая доведённая закачка и каждое
+/// удаление. Второй обход поверх идущего ответил бы то же самое и стоил бы
+/// столько же, поэтому пока один в полёте, повод копится флагом и
+/// превращается ровно в один обход, когда идущий вернётся. Отложить,
+/// а не отбросить: снимок диска, снятый до изменения, ответом на него не
+/// является.
 pub fn rescan(state: &mut State) {
+    if !state.pending_list.is_empty() {
+        state.list_again = true;
+        return;
+    }
     let correlation_id = state.pending_list.begin(());
     // Вглубь: снимок лежит папкой, и его файлы — записи каталога наравне с
     // теми, что лежат в корне. Каталоги сами по себе записями не являются, и
@@ -40,7 +52,16 @@ pub fn rescan(state: &mut State) {
 /// которых ещё нет в памяти.
 pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     if state.pending_list.take(&veldsdk::correlation()).is_none() { return }
+    ingest(state, response);
+    // Поводы, набежавшие пока обход шёл, стали ровно одним обходом. Отсюда, а
+    // не из ingest: там ветки выхода, и в каждой отложенный повод пришлось бы
+    // вспоминать заново.
+    if std::mem::take(&mut state.list_again) {
+        rescan(state);
+    }
+}
 
+fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     if !response.error.is_empty() {
         publish_error(&response.error);
         return;

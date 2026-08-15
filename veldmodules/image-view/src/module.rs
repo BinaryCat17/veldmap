@@ -5,12 +5,15 @@
 //! Тайлы спрашиваются у tile-cache, промахи заказываются у image-tiler; его
 //! read-грант на ресурс выдаётся здесь, при показе.
 //!
-//! Пока производство идёт, новые запросы канвы откладываются: у формата без
-//! произвольного доступа каждый produce — полный проход по файлу, и пускать
-//! второй параллельно первому значит читать гигабайты дважды. Проход кончился
-//! — want_tiles() пересчитает нужное, и почти всё найдётся в кэше: проход
-//! складывает туда все уровни. Устаревает produce только сменой уровня или
-//! показа — тогда он убивается, это и есть отмена-приоритизация.
+//! Проход по источнику один: у формата без произвольного доступа каждый
+//! produce — полный проход по файлу, и пускать второй параллельно первому
+//! значит читать гигабайты дважды. Пока он идёт, промахи по этому источнику в
+//! производство не уходят — ни свои, ни соседней вкладки с тем же файлом;
+//! кончился — нужное пересчитывается всем, кто на него смотрит, и почти всё
+//! находится в кэше: проход складывает туда все уровни. Убивается проход двумя
+//! способами и обоими своим заказчиком: он уходит со снимка (`release_pass`)
+//! либо ему нужен уровень грубее, чем производит его же проход
+//! (`Passes::stale`).
 //!
 //! module.rs — состояние и обработчики; камера — camera.rs, кадр — view.rs и
 //! gpu.rs. Тайлы в видеопамяти и учёт спрошенного — общие с глобусом
@@ -20,10 +23,9 @@ pub mod camera;
 pub mod gpu;
 pub mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use veldmap_image_tiler_wrap::pyramid;
-use veldmap_image_tiler_wrap::tiles::{Addr, Store};
+use veldmap_image_tiler_wrap::tiles::{self, Addr, Missed, Passes, Store};
 use veldsdk::proto::app as app_proto;
 
 use crate::proto::image_tiler::{
@@ -33,11 +35,13 @@ use crate::proto::image_tiler::{
 use crate::proto::image_view::{
     camera_command::Command, CameraCommand, Canvas, CloseView, ShowRequest, ViewState,
 };
-use crate::proto::tile_cache::{QueryDone, QueryRequest, TileResult as CachedTile};
+use crate::proto::tile_cache::{
+    QueryDone, QueryRequest, TileAddr as QueryAddr, TileResult as CachedTile,
+};
 
 use camera::Camera;
 use gpu::Device;
-use view::{Meta, Shown, Stamp, View};
+use view::{Shown, Stamp, View};
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {
@@ -48,7 +52,7 @@ pub struct Config {
 }
 
 fn default_vram_budget_mb() -> u64 {
-    256
+    tiles::DEFAULT_VRAM_BUDGET_MB
 }
 
 /// Чей это ответ кэша и о чём спрашивали. Отпечаток свой, а не из вида:
@@ -76,12 +80,11 @@ pub struct State {
     pending_describe: veldsdk::Correlator<String>,
     pending_query: veldsdk::Correlator<QueryCtx>,
     pending_produce: veldsdk::Correlator<ProduceCtx>,
-    /// Отпечатки, по которым проход уже идёт. Ключом отпечаток, а не вид:
-    /// проход читает источник, а источник у двух вкладок с одним файлом один
-    /// и тот же. Второй проход по нему — не вторая работа, а та же самая
-    /// заново, и стоит она полного чтения файла, пока единственный тайлер
-    /// занят и им, и шаром.
-    producing: HashMap<String, String>,
+    /// Идущие проходы производителя, по одному на источник. Не у вида: проход
+    /// читает файл, а файл у двух вкладок с одним снимком один и тот же.
+    /// Заказчик здесь — имя вкладки: снять проход с учёта вправе только та, что
+    /// его завела.
+    passes: Passes<String>,
 }
 
 pub fn hook_init(config: Config) -> anyhow::Result<State> {
@@ -92,7 +95,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         pending_describe: veldsdk::Correlator::new(),
         pending_query: veldsdk::Correlator::new(),
         pending_produce: veldsdk::Correlator::new(),
-        producing: HashMap::new(),
+        passes: Passes::default(),
     })
 }
 
@@ -164,16 +167,21 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
         return;
     }
 
+    // Прежний показ кончается здесь, и его проход уходит вместе с ним: читает
+    // тот ресурс, который сейчас освободится. Хвосты в полёте опознаются по
+    // отпечатку и выбрасываются.
+    let previous =
+        state.views.get(&msg.view).and_then(|view| view.meta()).map(|meta| meta.fingerprint.clone());
+    if let Some(fingerprint) = previous {
+        release_pass(state, &fingerprint, &msg.view);
+    }
+
     let view = state.views.entry(msg.view.clone()).or_insert_with(|| View::new(msg.view.clone()));
     if !msg.label.is_empty() {
         view.label = msg.label.clone();
     }
 
-    // Прежний показ кончается здесь: производство убивается, ожидания
-    // обнуляются. Хвосты в полёте опознаются по отпечатку и выбрасываются.
-    if let Some(correlation) = view.fetch.reset() {
-        crate::cancel::image_tiler::on_produce(&correlation);
-    }
+    view.fetch.reset();
     view.error = None;
     view.read_bytes = 0;
     view.total_bytes = resource.size;
@@ -207,8 +215,9 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
 /// вытеснения: та же вкладка, открытая заново, начнёт с них.
 pub fn on_close(state: &mut State, msg: CloseView) {
     let Some(mut view) = state.views.remove(&msg.view) else { return };
-    if let Some(correlation) = view.fetch.reset() {
-        crate::cancel::image_tiler::on_produce(&correlation);
+    view.fetch.reset();
+    if let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) {
+        release_pass(state, &fingerprint, &msg.view);
     }
     veldsdk::log::debug!(target: "handlers", "{}: вид закрыт", view.label);
 }
@@ -252,37 +261,23 @@ pub fn on_described(state: &mut State, msg: Described) {
         return;
     }
 
-    if !msg.error.is_empty() {
-        view.error = Some(msg.error);
-        report(state, &key);
-        return;
-    }
-    if msg.width == 0 || msg.height == 0 || msg.levels == 0 {
-        view.error = Some("источник описан пустым".to_string());
-        report(state, &key);
-        return;
-    }
-    // Арифметика ячеек считается общим pyramid.rs — он и производитель обязаны
-    // быть собраны под одну сторону тайла.
-    if msg.tile != pyramid::TILE {
-        view.error = Some(format!(
-            "сторона тайла {} у производителя против {} у канвы", msg.tile, pyramid::TILE
-        ));
-        report(state, &key);
-        return;
-    }
+    // Годность описания решает общее правило: тайлер один, пирамида одна, и
+    // разойтись с наложением в том, какой ответ считать пригодным, нечем.
+    // Своё здесь одно — что делать с непригодным: у канвы есть место на
+    // экране, и причина уезжает туда.
+    let meta = match tiles::describe(&msg) {
+        Ok(meta) => meta,
+        Err(error) => {
+            view.error = Some(error);
+            report(state, &key);
+            return;
+        }
+    };
 
-    veldsdk::log::info!(target: "handlers",
-        "{}: {}×{}, уровней {}, {}", view.label, msg.width, msg.height, msg.levels,
-        if msg.random_access { "произвольный доступ" } else { "последовательный проход" });
+    veldsdk::log::info!(target: "handlers", "{}: {}", view.label, meta.note());
 
     if let Some(shown) = &mut view.shown {
-        shown.meta = Some(Meta {
-            fingerprint: msg.fingerprint,
-            width: msg.width,
-            height: msg.height,
-            levels: msg.levels,
-        });
+        shown.meta = Some(meta);
     }
 
     fit_if_first(state, &key);
@@ -294,7 +289,7 @@ pub fn on_described(state: &mut State, msg: Described) {
 pub fn on_tile(state: &mut State, msg: CachedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.peek(&correlation) else {
-        return discard_tile(msg.texture);
+        return tiles::discard(msg.texture);
     };
     let (view_key, fingerprint) = (ctx.view.clone(), ctx.fingerprint.clone());
     accept_tile(state, &view_key, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -304,7 +299,7 @@ pub fn on_tile(state: &mut State, msg: CachedTile) {
 pub fn on_produced(state: &mut State, msg: ProducedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.peek(&correlation) else {
-        return discard_tile(msg.texture);
+        return tiles::discard(msg.texture);
     };
     let (view_key, fingerprint) = (ctx.view.clone(), ctx.fingerprint.clone());
     accept_tile(state, &view_key, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -314,6 +309,7 @@ pub fn on_produced(state: &mut State, msg: ProducedTile) {
 pub fn on_query_done(state: &mut State, msg: QueryDone) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.take(&correlation) else { return };
+    let cap = cap_tiles(state);
     let Some(view) = state.views.get_mut(&ctx.view) else { return };
 
     // Показ сменили, пока ответ шёл: ожидания этого запроса уже не наши.
@@ -331,10 +327,12 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     // Промахи, которые всё ещё видимы, — на производство; уехавшие с экрана
     // выбрасываются из ожиданий и переспросятся, когда вернутся в кадр.
     let level = ctx.cells.first().map_or(0, |(level, ..)| *level);
-    let desired: std::collections::HashSet<Addr> = view::desired_cells(view, &state.tiles)
-        .map(|(_, cells)| cells.into_iter().collect())
+    let desired: HashSet<Addr> = view::wanted(view, &state.tiles, cap)
+        .map(|want| want.cells.into_iter().collect())
         .unwrap_or_default();
-    let produce_list = view.fetch.missed(
+    let missed = view.fetch.missed(
+        &state.passes,
+        &ctx.fingerprint,
         &ctx.cells,
         msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
         |addr| desired.contains(&addr),
@@ -346,32 +344,29 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         None => return,
     };
 
-    if produce_list.is_empty() {
-        report(state, &ctx.view);
-        return;
-    }
-
-    // По этому источнику проход уже идёт — у соседней вкладки с тем же файлом.
-    // Ждём его молча: сложенное им ляжет в кэш, а `on_produce_done` пересчитает
-    // нужное всем, кто на этот источник смотрит. Ожидания снимаем, иначе
-    // пересчёт сочтёт эти ячейки уже запрошенными и не переспросит их никогда.
-    if state.producing.contains_key(&ctx.fingerprint) {
-        if let Some(view) = state.views.get_mut(&ctx.view) {
-            view.fetch.forget_asked(&produce_list);
+    let produce_list = match missed {
+        Missed::Produce(cells) => cells,
+        // Ждём чужой проход молча: его конец пересчитает нужное всем, кто на
+        // этот источник смотрит.
+        Missed::Waiting => {
+            report(state, &ctx.view);
+            return;
         }
-        report(state, &ctx.view);
-        return;
-    }
+        // Кэш закрыл заказ целиком — ступень пройдена, и спросить следующую
+        // надо здесь (см. `Missed::Closed`).
+        Missed::Closed => {
+            want_tiles(state, &ctx.view);
+            report(state, &ctx.view);
+            return;
+        }
+    };
 
     let correlation = state.pending_produce.begin(ProduceCtx {
         view: ctx.view.clone(),
         fingerprint: ctx.fingerprint.clone(),
         cells: produce_list.clone(),
     });
-    state.producing.insert(ctx.fingerprint.clone(), correlation.clone());
-    if let Some(view) = state.views.get_mut(&ctx.view) {
-        view.fetch.producing_now(correlation.clone(), level);
-    }
+    state.passes.begin(&ctx.fingerprint, ctx.view.clone(), correlation.clone(), level);
     crate::calls::image_tiler::on_produce(&ProduceRequest {
         resource: Some(handle),
         level,
@@ -403,45 +398,50 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     // на виде, и заказчика прохода могли закрыть, пока проход шёл. Уйди мы
     // отсюда, не сняв его, — соседние вкладки с тем же файлом ждали бы конца,
     // которого уже не будет.
-    state.producing.remove(&ctx.fingerprint);
+    state.passes.finish(&correlation);
 
-    let Some(view) = state.views.get_mut(&ctx.view) else {
-        // Вида нет — будить остаётся соседей (см. ниже).
-        wake_watchers(state, &ctx.fingerprint);
-        return;
-    };
-    // Показ мог смениться, пока проход шёл: тогда его ячейки уже не про этот
-    // вид, и ни ожидания, ни отказ к нему не относятся — снять с учёта надо
-    // только сам проход.
-    let ours = view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
-    let failed = ours && !msg.error.is_empty();
-    view.fetch.produced(&correlation, if ours { &ctx.cells } else { &[] }, failed);
-    if failed {
-        // Не переспрашивать то, что уже не произвелось: каждый сдвиг камеры
-        // долбил бы производителя тем же отказом.
-        view.error = Some(msg.error);
-        veldsdk::log::warn!(target: "handlers", "{}: производство: {}",
-            view.label, view.error.as_deref().unwrap_or_default());
+    if let Some(view) = state.views.get_mut(&ctx.view) {
+        // Показ мог смениться, пока проход шёл: тогда его ячейки уже не про
+        // этот вид, и ни ожидания, ни отказ к нему не относятся.
+        let ours = view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
+        let failed = ours && !msg.error.is_empty();
+        view.fetch.produced(if ours { &ctx.cells } else { &[] }, failed);
+        if failed {
+            // Не переспрашивать то, что уже не произвелось: каждый сдвиг камеры
+            // долбил бы производителя тем же отказом.
+            veldsdk::log::warn!(target: "handlers", "{}: производство: {}", view.label, msg.error);
+            view.error = Some(msg.error);
+        }
     }
 
     // Пока проход шёл, запросы откладывались — пересчитать нужное сейчас, и не
     // только заказчику: соседняя вкладка с тем же файлом всё это время ждала
     // молча, и разбудить её больше некому.
-    wake_watchers(state, &ctx.fingerprint);
+    for key in watchers(state, &ctx.fingerprint) {
+        want_tiles(state, &key);
+        report(state, &key);
+    }
 }
 
-/// Пересчитывает нужное всем видам, смотрящим на этот источник. Зовётся концом
-/// прохода: до него они ждали чужого производства и своих запросов не слали.
-fn wake_watchers(state: &mut State, fingerprint: &str) {
-    let watching: Vec<String> = state
+/// Вкладки, смотрящие на этот источник.
+fn watchers(state: &State, fingerprint: &str) -> Vec<String> {
+    state
         .views
         .iter()
         .filter(|(_, view)| view.meta().is_some_and(|meta| meta.fingerprint == fingerprint))
         .map(|(key, _)| key.clone())
-        .collect();
-    for key in watching {
-        want_tiles(state, &key);
-        report(state, &key);
+        .collect()
+}
+
+/// Вкладка уходит со снимка — или закрывается совсем: её проход уносится с ней.
+///
+/// Уносится безусловно, даже когда на тот же файл смотрит соседняя вкладка:
+/// читает проход не «файл», а тот самый ресурс, который сейчас освободится
+/// вместе с показом (см. `tiles::Passes`). Сосед заведёт свой по концу этого —
+/// со своим ресурсом, который жив.
+fn release_pass(state: &mut State, fingerprint: &str, view: &str) {
+    if let Some(correlation) = state.passes.abandon(fingerprint, &view.to_string()) {
+        crate::cancel::image_tiler::on_produce(&correlation);
     }
 }
 
@@ -451,6 +451,7 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
     if !matches!(event.event, Some(app_proto::ui_event::Event::Frame(_))) {
         return;
     }
+    let cap = cap_tiles(state);
     let State { views, tiles, device: Some(device), .. } = state else { return };
 
     for view in views.values_mut() {
@@ -465,7 +466,7 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
             continue;
         }
 
-        let quads = view::quads(view, tiles);
+        let quads = view::quads(view, tiles, cap);
         let target = view.target.as_ref().expect("место проверено выше");
         match gpu::render(device, target, &mut view.vertices, &quads) {
             Ok(()) => view.drawn = Some(stamp),
@@ -492,40 +493,62 @@ fn fit_if_first(state: &mut State, key: &str) {
     view.camera = Some(Camera::fit(meta.width, meta.height, target.width, target.height));
 }
 
-/// Пересчёт нужного: видимые ячейки без имеющихся, ожидаемых и провальных —
-/// в запрос кэшу. Пока идёт производство, новых запросов нет (см. заголовок);
-/// производство другого уровня при этом убивается — оно уже не про то, на что
-/// смотрят.
+/// Пересчёт нужного: видимые ячейки без имеющихся, ожидаемых и провальных — в
+/// запрос кэшу. Свой проход, который производит уровень подробнее нужного, тут
+/// же и убивается: он уже не про то, на что смотрят.
 fn want_tiles(state: &mut State, key: &str) {
+    let cap = cap_tiles(state);
     let Some(view) = state.views.get(key) else { return };
-    let Some((level, cells)) = view::desired_cells(view, &state.tiles) else { return };
+    let Some(want) = view::wanted(view, &state.tiles, cap) else { return };
     let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) else { return };
     let label = view.label.clone();
 
-    let view = state.views.get_mut(key).expect("вид только что был");
-    if let Some(correlation) = view.fetch.stale(level) {
+    if let Some(correlation) = state.passes.stale(&fingerprint, &key.to_string(), want.level) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
-    let Some(ask) = view.fetch.want(&state.tiles, &fingerprint, level, cells) else { return };
+    let view = state.views.get_mut(key).expect("вид только что был");
+    let Some(cells) = view.fetch.ask(&state.tiles, &fingerprint, want.cells) else { return };
+
+    // Ход добычи видно только здесь: какая ступень понадобилась, сколько её
+    // ячеек не хватает и далеко ли ещё до резкости (та же строка, что у
+    // наложений на шаре).
+    veldsdk::log::debug!(target: "handlers", "{}: ступень {} ({} из {}), ячеек {}",
+        label, want.level, want.climbed + 1, want.steps, cells.len());
 
     let correlation = state.pending_query.begin(QueryCtx {
         view: key.to_string(),
         fingerprint: fingerprint.clone(),
-        cells: ask.cells,
+        cells: cells.clone(),
     });
     crate::calls::tile_cache::on_query(&QueryRequest {
         fingerprint,
-        level: ask.level,
-        x0: ask.x0,
-        y0: ask.y0,
-        x1: ask.x1,
-        y1: ask.y1,
+        level: want.level,
+        tiles: cells.iter().map(|&(_, x, y)| QueryAddr { x, y }).collect(),
         label,
     }, &correlation);
 }
 
-/// Тайл приехал — в хранилище и вон из ожиданий. Чей бы он ни был, текстура
-/// уже наша: не принять её значит потерять видеопамять.
+/// Потолок аппетита одной пирамиды. Правило общее с глобусом и живёт у бюджета
+/// (`Store::cap_tiles`); здесь только ответ на «сколько пирамид сейчас
+/// рисуется».
+///
+/// Пирамид, а не вкладок: две вкладки с одним снимком — это один набор тайлов и
+/// одна доля бюджета.
+fn cap_tiles(state: &State) -> u64 {
+    state.tiles.cap_tiles(
+        state
+            .views
+            .values()
+            .filter(|view| view.target.is_some() && view.camera.is_some())
+            .filter_map(|view| view.meta().map(|meta| meta.fingerprint.as_str())),
+    )
+}
+
+/// Тайл приехал — в хранилище и вон из ожиданий.
+///
+/// С ожиданий ячейка снимается в любом случае: ответ про неё пришёл, а не
+/// легший тайл — это промах, и переспросится он следующим пересчётом. Оставь
+/// мы его в ожиданиях — не переспросился бы никогда.
 fn accept_tile(
     state: &mut State,
     view_key: &str,
@@ -535,26 +558,25 @@ fn accept_tile(
     width: u32,
     height: u32,
 ) {
-    let Some(texture) = texture else { return };
-    let Some(device) = &state.device else {
-        return veldsdk::resource::release(texture);
+    let landed = match &state.device {
+        Some(device) => state.tiles.land(fingerprint, addr, texture, width, height, |view| {
+            device.tile_bind_group(view)
+        }),
+        // Устройства нет — рисовать нечем и класть некуда; ячейка при этом ни в
+        // чём не виновата и спросится заново, когда место под канву появится.
+        None => {
+            tiles::discard(texture);
+            true
+        }
     };
-    if width == 0 || height == 0 {
-        return veldsdk::resource::release(texture);
-    }
-
-    let insert = state.tiles.insert(fingerprint, addr, texture, width, height, |view| {
-        device.tile_bind_group(view)
-    });
-    if let Err(error) = insert {
-        veldsdk::log::warn!(target: "handlers", "тайл {}:{}:{} не принят: {}",
-            addr.0, addr.1, addr.2, error);
-    }
 
     if let Some(view) = state.views.get_mut(view_key)
         && view.meta().is_some_and(|meta| meta.fingerprint == fingerprint)
     {
-        view.fetch.arrived(addr);
+        match landed {
+            true => view.fetch.arrived(addr),
+            false => view.fetch.rejected(addr),
+        }
     }
 }
 
@@ -564,6 +586,11 @@ fn accept_tile(
 fn report(state: &State, key: &str) {
     let Some(view) = state.views.get(key) else { return };
     let meta = view.shown.as_ref().and_then(|shown| shown.meta.as_ref());
+    // Желаемое считается заново, а не берётся с прошлого раза: «работа идёт»
+    // держится в том числе на непройденном пути к цели, а путь этот меряется
+    // тем, что нужно сейчас. Считать дёшево — у канвы видимое это
+    // прямоугольник камеры, без проекций.
+    let want = view::wanted(view, &state.tiles, cap_tiles(state));
     let current = ViewState {
         view: key.to_string(),
         source_width: meta.map_or(0, |meta| meta.width),
@@ -571,14 +598,8 @@ fn report(state: &State, key: &str) {
         scale: view.camera.map_or(0.0, |camera| camera.scale),
         read_bytes: view.read_bytes,
         total_bytes: view.total_bytes,
-        busy: view.busy(),
+        busy: view.busy(&state.passes, want.as_ref()),
         error: view.error.clone().unwrap_or_default(),
     };
     crate::emit::on_view_state(&current);
-}
-
-fn discard_tile(texture: Option<veldsdk::proto::core::ResourceHandle>) {
-    if let Some(handle) = texture {
-        veldsdk::resource::release(handle);
-    }
 }

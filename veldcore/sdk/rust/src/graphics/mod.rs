@@ -125,6 +125,42 @@ pub fn upload<T: Copy>(what: &str, data: &[T], usage: u32) -> anyhow::Result<cra
     Ok(region)
 }
 
+/// Готовая картинка → текстура во владении названного сервиса: выделение,
+/// заливка и передача владения одной операцией. Пара к [`upload`], только для
+/// изображения и с отдачей владения.
+///
+/// Здесь потому, что два правила обряда молчаливы и оба стоят ресурса:
+/// `COPY_DST` — без него заливка откажет; владелец до заливки — иначе
+/// сорвавшаяся заливка оставит голый id висеть на хосте до конца процесса.
+///
+/// А вот **формат — довод, а не умолчание**: чем ляжет картинка, решает тот,
+/// кто её отдаёт, и SDK за него не выбирает. Сэмплится готовое содержимое как
+/// sRGB, а место под чужой рендер — как UNORM, и правило это не платформы, а
+/// того протокола, по которому картинка едет.
+pub fn upload_texture(
+    what: &str,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    pixels: &[u8],
+    owner: &str,
+) -> Result<crate::ResourceHandle, String> {
+    let id = crate::abi::resource_alloc_texture(
+        width,
+        height,
+        format as i32,
+        texture_usage::TEXTURE_BINDING | texture_usage::COPY_DST,
+    )
+    .ok_or_else(|| format!("не выделилась текстура {} {}×{}", what, width, height))?;
+    let texture = crate::OwnedResource::from_raw_id(id);
+    crate::abi::resource_upload_image(texture.id(), pixels)
+        .map_err(|e| format!("{} не залит в текстуру: {}", what, e))?;
+    crate::resource::hand_off(
+        crate::ResourceHandle { id: texture.into_handle().id, size: pixels.len() as u64 },
+        owner,
+    )
+}
+
 // ── Создание ресурсов ──────────────────────────────────────────
 
 fn create(command: resource_request::Command) -> anyhow::Result<u64> {

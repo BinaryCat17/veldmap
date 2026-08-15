@@ -162,10 +162,8 @@ pub fn preview_of(
     folder: bool,
 ) -> crate::module::ViewMsg {
     use crate::module::ViewMsg;
-    if let Some(entry) = library.by_identifier(identifier)
-        && status_of(entry) == LibraryStatus::LibComplete
-    {
-        return ViewMsg::Preview(entry.name.clone());
+    if let Some(name) = library.local_name(identifier) {
+        return ViewMsg::Preview(name.to_string());
     }
     match folder {
         true => ViewMsg::PreviewProduct(identifier.to_string()),

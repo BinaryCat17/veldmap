@@ -45,8 +45,14 @@ pub struct State {
     /// события — включая окно ожидания подписи, когда задачи ещё нет.
     pub downloads: HashMap<String, Download>,
 
-    /// Ожидание fs/on_list — гасит устаревший ответ.
+    /// Ожидание fs/on_list — гасит устаревший ответ. Запрос здесь всегда
+    /// один: обходов диска ровно столько, сколько нужно, чтобы состояние было
+    /// верным, а не сколько было поводов перечитать (см. `catalog::rescan`).
     pub pending_list: veldsdk::Correlator<()>,
+    /// Повод перечитать, пришедший, пока обход шёл. Один флаг, а не счётчик:
+    /// сколько бы их ни набежало, догоняет их всех один обход — он видит диск
+    /// целиком.
+    pub list_again: bool,
     /// Вопрос провайдеру «к каким снимкам относятся эти ключи». Актуален только
     /// последний: сидкары дочитываются по одному, и каждый прочитанный делает
     /// вопрос полнее — отвечать по устаревшему списку незачем.
@@ -106,6 +112,7 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
         origins: HashMap::new(),
         downloads: HashMap::new(),
         pending_list: veldsdk::Correlator::new(),
+        list_again: false,
         pending_roots: veldsdk::Latest::new(),
         pending_reads: veldsdk::Correlator::new(),
         pending_sidecar_writes: veldsdk::Correlator::new(),

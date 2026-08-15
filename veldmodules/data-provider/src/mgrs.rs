@@ -37,12 +37,20 @@ const BANDS: &[u8] = b"CDEFGHJKLMNPQRSTUVWX";
 const ROWS: &[u8] = b"ABCDEFGHJKLMNPQRSTUV";
 
 /// Код тайла из имени продукта: сегмент `_TxxABC_` с зоной и тремя буквами.
+///
+/// Имя приходит из хранилища, поэтому длина проверяется до всякого среза и
+/// в одном условии с ними: на `T` начинается не только код гранулы, но и,
+/// например, тир Landsat (`..._T1`), а срез мимо длины — паника, а не отказ.
+/// Режется байтами: пятизначный код латиницей, и граница символа у среза по
+/// байтам не спрашивается.
 pub fn tile_of(product_name: &str) -> Option<&str> {
     product_name.split('_').find_map(|part| {
         let tile = part.strip_prefix('T')?;
-        let zone_ok = tile.len() == 5 && tile[..2].bytes().all(|b| b.is_ascii_digit());
-        let letters_ok = tile[2..].bytes().all(|b| b.is_ascii_uppercase());
-        (zone_ok && letters_ok).then_some(tile)
+        let bytes = tile.as_bytes();
+        let ok = bytes.len() == 5
+            && bytes[..2].iter().all(u8::is_ascii_digit)
+            && bytes[2..].iter().all(u8::is_ascii_uppercase);
+        ok.then_some(tile)
     })
 }
 
@@ -110,6 +118,20 @@ mod tests {
             Some("40WFC")
         );
         assert_eq!(tile_of("S1C_IW_GRDH_1SDV_20260810T031955_011C6E_EDC8.SAFE"), None);
+    }
+
+    /// Имя приходит из хранилища, и на `T` там начинается не только гранула.
+    /// Короткий сегмент — отказ, а не срез мимо длины: тир Landsat (`_T1`)
+    /// стоит в имени каждого его продукта.
+    #[test]
+    fn short_and_odd_segments_are_refused_not_sliced() {
+        assert_eq!(tile_of("LC09_L2SP_02_T1"), None);
+        assert_eq!(tile_of("A_T_B"), None);
+        assert_eq!(tile_of("T"), None);
+        // Пять знаков, но не пять байт: срез по байтам границы символа не
+        // спрашивает, а код гранулы латиницей.
+        assert_eq!(tile_of("T40WФC"), None);
+        assert_eq!(tile_of("T40wfc"), None);
     }
 
     /// Опорная гранула T40WFC: числа сверены с её MTD_TL.xml

@@ -30,9 +30,13 @@ const BLOCK: u64 = 512 * 1024;
 /// чтобы не платить задержкой запроса за каждый блок (см. [`Readahead`]).
 const READAHEAD: u64 = 8 * 1024 * 1024;
 
-/// Потолок кэша на один ресурс. Проход по гигабайтному снимку не должен
-/// превращаться в его копию в памяти — что не влезло, перечитается.
-const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
+/// Потолок блочных кэшей — общий на процесс, а не на ресурс. Открытых
+/// ресурсов столько, сколько попросил сценарий: у наложения это по растру на
+/// слой, включая скрытые, — и потолок «на каждого» умножался бы на их число,
+/// оставаясь при этом невидимым (ни один бюджет его не считает, потому что
+/// байты лежат в куче хоста). Проход по гигабайтному снимку по-прежнему не
+/// превращается в его копию в памяти: что не влезло, перечитается.
+const POOL_LIMIT: u64 = 256 * 1024 * 1024;
 
 /// Задачи здесь нет намеренно, в отличие от download и http: открытие — это
 /// один пробный запрос, ограниченный таймаутами клиента (см. http::client),
@@ -41,10 +45,11 @@ const CACHE_LIMIT: u64 = 64 * 1024 * 1024;
 /// кто ресурс потом читает (например, декодирования в image-loader).
 pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
     let Caller { instance, correlation, .. } = caller;
+    let blocks = state.blocks.clone();
 
     // Пробный запрос уходит в сеть, поэтому не в async-обработчике.
     blocking(&state.ctx, move |ctx| {
-        let result = match HttpRange::open(&req.url, req.headers) {
+        let result = match HttpRange::open(&req.url, req.headers, blocks) {
             Ok(source) => {
                 let len = source.len();
                 let id = ctx.memory.alloc_range(Arc::new(source), instance);
@@ -71,7 +76,11 @@ struct HttpRange {
     /// Хендл рантайма: read_at вызывается хостом с blocking-пула, где
     /// асинхронный запрос надо кому-то отдать.
     runtime: tokio::runtime::Handle,
-    cache: Mutex<Cache>,
+    /// Общий на все ресурсы пул блоков и ключ владения в нём.
+    blocks: Arc<Blocks>,
+    owner: u64,
+    /// Разгон — наоборот, свой: это состояние потока чтения, а не хранилище.
+    readahead: Mutex<Readahead>,
     /// Сколько байт реально ушло по проводу. Смысл оконного чтения в том,
     /// чтобы это была доля файла, а не он весь, — но доля зависит от формата
     /// (тайловый TIFF с пирамидой читается кусками, PNG приходится прочесть
@@ -80,10 +89,11 @@ struct HttpRange {
     fetched: std::sync::atomic::AtomicU64,
 }
 
-/// Ресурс закрыт (гость освободил его через veld_resource_free) — подводим
-/// итог по трафику.
+/// Ресурс закрыт (гость освободил его через veld_resource_free) — блоки прочь,
+/// итог по трафику в лог.
 impl Drop for HttpRange {
     fn drop(&mut self) {
+        self.blocks.release(self.owner);
         let fetched = self.fetched.load(std::sync::atomic::Ordering::Relaxed);
         let share = if self.len > 0 { fetched * 100 / self.len } else { 0 };
         log::info!(target: "network", "Closed remote resource: fetched {} of {} bytes ({}%): {}",
@@ -91,16 +101,79 @@ impl Drop for HttpRange {
     }
 }
 
+/// Блочные кэши всех открытых удалённых ресурсов: одна карта, один счётчик,
+/// один порядок вытеснения.
+///
+/// Порядок общий не ради стройности, а потому что вытеснять своё — неверно:
+/// под давлением активный читатель выбрасывал бы блоки, которые сейчас же и
+/// перечитает, пока простаивающий сосед держит свои нетронутыми. Старейший
+/// блок пула и есть самый ненужный, чей бы он ни был.
+///
 /// Блоки хранятся под Arc: читатель ходит окнами по 256 КБ (ResourceReader),
 /// и копировать ради каждого окна весь блок незачем.
 #[derive(Default)]
-struct Cache {
-    blocks: HashMap<u64, Arc<[u8]>>,
+pub struct Blocks {
+    pool: Mutex<Pool>,
+    /// Раздатчик ключей владения. Адрес блока — пара «чей, какой», и ключ
+    /// нельзя переиспользовать: закрытый ресурс и открытый следом за ним —
+    /// разные файлы с разными смещениями.
+    next_owner: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+struct Pool {
+    blocks: HashMap<(u64, u64), Arc<[u8]>>,
     /// Порядок появления — им же и вытесняем: у последовательного прохода
     /// (а это основной сценарий) самый старый блок и есть самый ненужный.
-    order: std::collections::VecDeque<u64>,
+    /// Ключи закрытых ресурсов остаются здесь до своей очереди и снимаются
+    /// вхолостую: пройти всю очередь при закрытии дороже, чем пропустить.
+    order: std::collections::VecDeque<(u64, u64)>,
     bytes: u64,
-    readahead: Readahead,
+}
+
+impl Blocks {
+    fn claim(&self) -> u64 {
+        self.next_owner.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
+
+    fn get(&self, owner: u64, index: u64) -> Option<Arc<[u8]>> {
+        self.pool.lock().unwrap().blocks.get(&(owner, index)).cloned()
+    }
+
+    /// Кладёт блок, вытесняя старые. Если блок уже есть (два читателя
+    /// запросили его одновременно), возвращается лежащий: учёт байт должен
+    /// совпадать с содержимым, иначе потолок поплывёт.
+    fn insert(&self, owner: u64, index: u64, data: Arc<[u8]>) -> Arc<[u8]> {
+        let mut pool = self.pool.lock().unwrap();
+        if let Some(present) = pool.blocks.get(&(owner, index)) {
+            return present.clone();
+        }
+        while pool.bytes + data.len() as u64 > POOL_LIMIT {
+            let Some(oldest) = pool.order.pop_front() else { break };
+            if let Some(dropped) = pool.blocks.remove(&oldest) {
+                pool.bytes -= dropped.len() as u64;
+            }
+        }
+        pool.bytes += data.len() as u64;
+        pool.order.push_back((owner, index));
+        pool.blocks.insert((owner, index), data.clone());
+        data
+    }
+
+    /// Ресурс закрыт: его блоки не переживут его — читать их больше некому,
+    /// а место они держат общее.
+    fn release(&self, owner: u64) {
+        let mut pool = self.pool.lock().unwrap();
+        let mut freed = 0;
+        pool.blocks.retain(|&(who, _), data| {
+            let mine = who == owner;
+            if mine {
+                freed += data.len() as u64;
+            }
+            !mine
+        });
+        pool.bytes -= freed;
+    }
 }
 
 /// Разгон последовательного чтения: сколько блоков брать одним запросом.
@@ -134,31 +207,10 @@ impl Readahead {
     }
 }
 
-impl Cache {
-    /// Кладёт блок, вытесняя старые. Если блок уже есть (два читателя
-    /// запросили его одновременно), возвращается лежащий: учёт байт должен
-    /// совпадать с содержимым, иначе потолок кэша поплывёт.
-    fn insert(&mut self, index: u64, data: Arc<[u8]>) -> Arc<[u8]> {
-        if let Some(present) = self.blocks.get(&index) {
-            return present.clone();
-        }
-        while self.bytes + data.len() as u64 > CACHE_LIMIT {
-            let Some(oldest) = self.order.pop_front() else { break };
-            if let Some(dropped) = self.blocks.remove(&oldest) {
-                self.bytes -= dropped.len() as u64;
-            }
-        }
-        self.bytes += data.len() as u64;
-        self.order.push_back(index);
-        self.blocks.insert(index, data.clone());
-        data
-    }
-}
-
 impl HttpRange {
     /// Пробный запрос первого байта: заодно проверяет, что сервер понимает
     /// Range, и узнаёт полный размер из Content-Range.
-    fn open(url: &str, headers: HashMap<String, String>) -> anyhow::Result<Self> {
+    fn open(url: &str, headers: HashMap<String, String>, blocks: Arc<Blocks>) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Handle::current();
         let response = runtime.block_on(super::http::get(url, &headers, Some((0, 1))).send())?;
 
@@ -185,7 +237,9 @@ impl HttpRange {
             headers,
             len,
             runtime,
-            cache: Mutex::new(Cache::default()),
+            owner: blocks.claim(),
+            blocks,
+            readahead: Mutex::new(Readahead::default()),
             fetched: std::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -194,13 +248,10 @@ impl HttpRange {
     /// назначил разгон, — и одним запросом: цена запроса не зависит от того,
     /// сколько в нём байт (см. [`Readahead`]).
     fn block(&self, index: u64) -> anyhow::Result<Arc<[u8]>> {
-        let run = {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(data) = cache.blocks.get(&index) {
-                return Ok(data.clone());
-            }
-            cache.readahead.plan(index, self.len.div_ceil(BLOCK))
-        };
+        if let Some(data) = self.blocks.get(self.owner, index) {
+            return Ok(data);
+        }
+        let run = self.readahead.lock().unwrap().plan(index, self.len.div_ceil(BLOCK));
 
         let from = index * BLOCK;
         let to = (from + run * BLOCK).min(self.len);
@@ -232,10 +283,9 @@ impl HttpRange {
         // Пришедшее раскладывается по блокам целиком: упреждающая часть за это
         // и заплачена, а выбросить её значило бы перечитать её же следующим
         // окном читателя.
-        let mut cache = self.cache.lock().unwrap();
         let mut wanted = None;
         for (step, chunk) in data.chunks(BLOCK as usize).enumerate() {
-            let stored = cache.insert(index + step as u64, Arc::from(chunk));
+            let stored = self.blocks.insert(self.owner, index + step as u64, Arc::from(chunk));
             if step == 0 {
                 wanted = Some(stored);
             }
@@ -299,5 +349,76 @@ mod tests {
         let mut readahead = Readahead::default();
         assert_eq!(readahead.plan(8, 10), 1);
         assert_eq!(readahead.plan(9, 10), 1, "остался один блок");
+    }
+
+    fn block() -> Arc<[u8]> {
+        Arc::from(vec![0u8; BLOCK as usize])
+    }
+
+    /// Потолок общий: сколько бы ресурсов ни было открыто, вместе они держат
+    /// не больше, чем один. Ради этого пул и заведён — прежний потолок «на
+    /// ресурс» умножался на их число.
+    #[test]
+    fn pool_is_capped_across_resources_not_per_resource() {
+        let pool = Blocks::default();
+        let per_resource = POOL_LIMIT / BLOCK / 4;
+
+        let owners: Vec<u64> = (0..8).map(|_| pool.claim()).collect();
+        for &owner in &owners {
+            for index in 0..per_resource {
+                pool.insert(owner, index, block());
+            }
+        }
+
+        assert!(pool.pool.lock().unwrap().bytes <= POOL_LIMIT, "восемь читателей вместе не выше потолка");
+    }
+
+    /// Вытесняется старейшее в пуле, а не старейшее своё: иначе активный
+    /// читатель выбрасывал бы то, что сейчас же и перечитает, пока сосед
+    /// держит нетронутое.
+    #[test]
+    fn oldest_in_the_pool_goes_first_whoever_owns_it() {
+        let pool = Blocks::default();
+        let (old, fresh) = (pool.claim(), pool.claim());
+        let fits = POOL_LIMIT / BLOCK;
+
+        pool.insert(old, 0, block());
+        for index in 0..fits {
+            pool.insert(fresh, index, block());
+        }
+
+        assert!(pool.get(old, 0).is_none(), "первым вышел старейший, хоть он и чужой");
+        assert!(pool.get(fresh, fits - 1).is_some(), "только что положенное на месте");
+    }
+
+    /// Закрытый ресурс уносит свои блоки и своё место: читать их больше
+    /// некому, а место они держат общее.
+    #[test]
+    fn closing_a_resource_returns_its_bytes() {
+        let pool = Blocks::default();
+        let (leaving, staying) = (pool.claim(), pool.claim());
+        pool.insert(leaving, 0, block());
+        pool.insert(leaving, 1, block());
+        pool.insert(staying, 0, block());
+
+        pool.release(leaving);
+
+        assert_eq!(pool.pool.lock().unwrap().bytes, BLOCK, "осталось место одного блока");
+        assert!(pool.get(leaving, 0).is_none());
+        assert!(pool.get(staying, 0).is_some(), "чужие блоки не тронуты");
+    }
+
+    /// Ключ владения не переиспользуется: закрытый ресурс и открытый следом —
+    /// разные файлы, и блок с тем же номером у них разный.
+    #[test]
+    fn owner_keys_are_not_reused() {
+        let pool = Blocks::default();
+        let first = pool.claim();
+        pool.insert(first, 0, block());
+        pool.release(first);
+
+        let second = pool.claim();
+        assert_ne!(first, second);
+        assert!(pool.get(second, 0).is_none(), "новый ресурс начинает с пустого");
     }
 }

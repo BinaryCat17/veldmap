@@ -369,13 +369,25 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     });
     let mut opens = Vec::new();
     for raster in response.rasters {
+        // Чем открывать, решается по растру, а не по снимку: у продукта
+        // скачана бывает часть, и лежащий рядом квиклук не делает локальным
+        // измерительный растр. Правило общее с просмотром строки — оно в
+        // `LibraryState::local_name`.
+        let local = state.library.local_name(&raster.identifier).map(str::to_string);
         // Роль переводится сразу, на границе: дальше по нашему коду ездит уже
         // та, которую поймёт глобус.
         let correlation = state.opens.begin((key.clone(), role_for_globe(raster.role())));
         opens.push(correlation.clone());
-        crate::calls::data_provider::on_open(&crate::proto::data_provider::OpenRequest {
-            identifier: raster.identifier,
-        }, &correlation);
+        match local {
+            Some(name) => crate::calls::data_library::on_open(
+                &crate::proto::data_library::OpenRequest { name },
+                &correlation,
+            ),
+            None => crate::calls::data_provider::on_open(
+                &crate::proto::data_provider::OpenRequest { identifier: raster.identifier },
+                &correlation,
+            ),
+        }
     }
 
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };

@@ -1,4 +1,4 @@
-//! Обслуживание запроса: тайлы прямоугольника — из файлов кэша в текстуры.
+//! Обслуживание запроса: названные тайлы — из файлов кэша в текстуры.
 //!
 //! Открытие файла — событие fs, чтение открытого — синхронный ABI-вызов,
 //! поэтому запрос живёт в два такта: on_query рассылает чтения, ответы
@@ -6,17 +6,35 @@
 //! терминальным QueryDone со списком промахов. Промах — не ошибка: за ним
 //! заказчик идёт к производителю (image-tiler).
 
-use veldsdk::graphics::{texture_usage, TextureFormat};
-use veldsdk::proto::core::{ResourceHandle, ResourceOpened};
+use veldsdk::graphics::TextureFormat;
+use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
 
 use crate::module::{layout, store, State};
 use crate::proto::tile_cache::{QueryDone, QueryRequest, TileAddr, TileResult};
 
+/// Формат текстуры тайла. sRGB, потому что в тайле лежит готовое к показу
+/// содержимое: сэмплер потребителя отдаст линейные значения, и фильтрация
+/// дробных масштабов пройдёт в линейном пространстве.
+///
+/// Своя константа у каждого из двух поставщиков тайлов — общего крейта у них
+/// нет и быть не может (`image-tiler` зависит от `tile-cache`, обратная
+/// зависимость замкнула бы граф сборки), а факт этот объявлен там же, где и
+/// сам тайл: в комментарии к `TileResult` обоих контрактов. Расходиться им
+/// нельзя: тайлы из кэша и от производителя ложатся в один кадр, и разный
+/// формат дал бы там разную яркость.
+const TILE_FORMAT: TextureFormat = TextureFormat::TexRgba8UnormSrgb;
+
 /// Потолок числа тайлов в одном запросе. Экран — это десятки тайлов;
-/// тысячи означают ошибку в расчёте видимого прямоугольника у заказчика,
-/// и честнее отказать, чем молча открыть тысячи файлов.
-const MAX_QUERY_TILES: u64 = 1024;
+/// тысячи означают ошибку в расчёте видимого у заказчика, и честнее отказать,
+/// чем молча открыть тысячи файлов.
+///
+/// Заказчик своё желаемое режет по бюджету видеопамяти
+/// (`tiles::Store::cap_tiles` — при умолчании в 256 МиБ это 128 ячеек), и пока
+/// его доля бюджета меньше этого числа тайлов, потолок не срабатывает вовсе.
+/// Больше 2 ГиБ на одну пирамиду — и он начнёт отказывать законным запросам, а
+/// выхода из такого отказа у заказчика нет: он пришлёт тот же список.
+const MAX_QUERY_TILES: usize = 1024;
 
 /// Запрос в обслуживании.
 pub struct Query {
@@ -50,12 +68,10 @@ pub fn on_query(state: &mut State, req: QueryRequest) {
     if !layout::valid_key(&req.fingerprint) {
         return fail(format!("негодный ключ кэша: '{}'", req.fingerprint));
     }
-    let (w, h) = (req.x1.saturating_sub(req.x0), req.y1.saturating_sub(req.y0));
-    let count = u64::from(w) * u64::from(h);
-    if count > MAX_QUERY_TILES {
-        return fail(format!("{} тайлов за раз — больше потолка {}", count, MAX_QUERY_TILES));
+    if req.tiles.len() > MAX_QUERY_TILES {
+        return fail(format!("{} тайлов за раз — больше потолка {}", req.tiles.len(), MAX_QUERY_TILES));
     }
-    if count == 0 {
+    if req.tiles.is_empty() {
         crate::emit::on_query_done(&QueryDone { misses: Vec::new(), error: String::new() }, &correlation);
         return;
     }
@@ -68,18 +84,18 @@ pub fn on_query(state: &mut State, req: QueryRequest) {
     state.queries.insert(correlation.clone(), Query {
         owner,
         level: req.level,
-        remaining: count as u32,
+        remaining: req.tiles.len() as u32,
         misses: Vec::new(),
         label,
     });
 
-    for y in req.y0..req.y1 {
-        for x in req.x0..req.x1 {
-            let read = state.pending_reads.begin(TileRead { query: correlation.clone(), x, y });
-            crate::calls::fs::on_read(&FsReadRequest {
-                path: layout::tile_path(&req.fingerprint, req.level, x, y),
-            }, &read);
-        }
+    for tile in &req.tiles {
+        let read = state
+            .pending_reads
+            .begin(TileRead { query: correlation.clone(), x: tile.x, y: tile.y });
+        crate::calls::fs::on_read(&FsReadRequest {
+            path: layout::tile_path(&req.fingerprint, req.level, tile.x, tile.y),
+        }, &read);
     }
 }
 
@@ -125,7 +141,8 @@ fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Re
     drop(file);
 
     let (width, height, rgba) = decode(&bytes)?;
-    let texture = texture(width, height, &rgba, owner)?;
+    let texture =
+        veldsdk::graphics::upload_texture("тайл", width, height, TILE_FORMAT, &rgba, owner)?;
     Ok(TileResult { level, x, y, texture: Some(texture), width, height })
 }
 
@@ -150,25 +167,4 @@ fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         }
         other => Err(format!("qoi: {} каналов", other)),
     }
-}
-
-/// Текстура тайла — тот же обряд, что у производителя: sRGB-формат, заливка,
-/// владение заказчику (см. image-tiler::tile_texture; свой экземпляр, потому
-/// что модули делят код только через крейты, а пятнадцать строк обряда не
-/// стоят собственного крейта).
-fn texture(width: u32, height: u32, rgba: &[u8], owner: &str) -> Result<ResourceHandle, String> {
-    let id = veldsdk::abi::resource_alloc_texture(
-        width,
-        height,
-        TextureFormat::TexRgba8UnormSrgb as i32,
-        texture_usage::TEXTURE_BINDING | texture_usage::COPY_DST,
-    )
-    .ok_or_else(|| format!("не выделилась текстура {}×{}", width, height))?;
-    let texture = veldsdk::OwnedResource::from_raw_id(id);
-    veldsdk::abi::resource_upload_image(texture.id(), rgba)
-        .map_err(|e| format!("тайл не залит в текстуру: {}", e))?;
-    veldsdk::resource::hand_off(
-        ResourceHandle { id: texture.into_handle().id, size: rgba.len() as u64 },
-        owner,
-    )
 }

@@ -11,9 +11,6 @@ use veldsdk::proto::fs::{FsWriteRequest, FsWriteResult};
 use crate::module::{evict, layout, State};
 use crate::proto::tile_cache::StoreTile;
 
-/// Потолок тела тайла; сторона ограничена общим `layout::MAX_TILE_SIDE`.
-const MAX_TILE_BYTES: usize = 64 * 1024 * 1024;
-
 /// CPU-регион, уехавший в fs/on_write и ещё не подтверждённый.
 pub struct PendingWrite {
     /// Освобождается по ответу.
@@ -29,7 +26,7 @@ pub fn on_store(state: &mut State, tile: StoreTile) {
     }
     if tile.width == 0 || tile.height == 0
         || tile.width > layout::MAX_TILE_SIDE || tile.height > layout::MAX_TILE_SIDE
-        || tile.qoi.is_empty() || tile.qoi.len() > MAX_TILE_BYTES
+        || tile.qoi.is_empty() || tile.qoi.len() > layout::MAX_TILE_BYTES
     {
         veldsdk::log::warn!(target: "handlers",
             "store {}:{}:{}:{} отвергнут: {}×{}, {} байт",

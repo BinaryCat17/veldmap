@@ -19,10 +19,13 @@ use veldmap_host_util::{HostContext, Tasks};
 pub struct State {
     ctx: Arc<HostContext>,
     tasks: Tasks,
+    /// Блоки всех открытых удалённых ресурсов под одним потолком. Живут здесь,
+    /// а не в каждом ресурсе, потому что потолок у них общий (см. range.rs).
+    blocks: Arc<range::Blocks>,
 }
 
 pub fn hook_init(ctx: Arc<HostContext>) -> State {
-    State { tasks: Tasks::new(&ctx), ctx }
+    State { tasks: Tasks::new(&ctx), ctx, blocks: Arc::default() }
 }
 
 // -- Input handlers --

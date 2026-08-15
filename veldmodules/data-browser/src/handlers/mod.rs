@@ -12,6 +12,15 @@ pub mod overlay;
 pub mod preview;
 pub mod window;
 
+use veldsdk::graphics::TextureFormat;
+
+/// Формат места под чужой рендер — и у канвы просмотра, и у шара. UNORM с
+/// sRGB-числами: разметка сэмплит эту текстуру как обычную картинку и
+/// линеаризует сама, а закодируй её GPU второй раз — вкладка приехала бы
+/// темнее соседней. Один на оба места, потому что правило одно: разъехавшись,
+/// они дали бы ровно эту разницу, и видна она была бы только их сравнением.
+pub const SURFACE_FORMAT: TextureFormat = TextureFormat::TexRgba8Unorm;
+
 #[derive(serde::Deserialize)]
 pub struct Config {
     /// Вид в стартовой вкладке: "search" (умолчание), "browse", "downloaded".

@@ -191,7 +191,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     linker.func_wrap("env", "veld_resource_alloc_cpu", |caller: Caller<'_, HostState>, size: u64| -> u64 {
         let memory = caller.data().memory.clone();
         let owner_id = caller.data().instance_id;
-        memory.alloc_cpu(vec![0u8; size as usize], owner_id)
+        memory.alloc_cpu(size, owner_id)
     })?;
 
     // veld_resource_alloc_texture(width, height, format, usage) → region_id

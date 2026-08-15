@@ -21,13 +21,7 @@ use crate::proto::image_view::{
     camera_command::Command, CameraCommand, Canvas, Fit, Pan, ShowRequest, ViewState, ZoomAt,
 };
 use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
-use veldsdk::graphics::TextureFormat;
 use veldsdk::proto::core::ResourceOpened;
-
-/// Формат места под кадр. UNORM с sRGB-числами — тот же выбор и по той же
-/// причине, что у места глобуса: разметка сэмплит эту текстуру как обычную
-/// картинку и линеаризует сама.
-const SURFACE_FORMAT: TextureFormat = TextureFormat::TexRgba8Unorm;
 
 /// Во сколько раз шаг колеса меняет масштаб. Щелчок приезжает долями с
 /// инерцией, так что итоговое приближение — плавная степень этого числа.
@@ -243,7 +237,7 @@ pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
         size.width,
         size.height,
         scale,
-        SURFACE_FORMAT as i32,
+        super::SURFACE_FORMAT as i32,
         "image-view",
         // Рисует канва, показывает разметка: право чтения — её рендереру.
         &["ui-service"],

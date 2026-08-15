@@ -96,7 +96,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         overviews.push(Overview { image: index, width: w, height: h });
     }
 
-    Ok(Info { width, height, kind: Kind::Tiff(Layout { tiled, overviews }), ties })
+    Ok(Info { width, height, kind: Kind::Tiff(Layout { tiled, overviews }), finest: 0, ties })
 }
 
 /// Сетка геопривязки GeoTIFF — опорные точки в градусах. Пусто, если файл

@@ -20,8 +20,9 @@
 //! перекрытий внутри наложения нет.
 
 use veldmap_image_tiler_wrap::pyramid;
-use veldmap_image_tiler_wrap::tiles::{self, Addr, Fetch, Store};
+use veldmap_image_tiler_wrap::tiles::{self, Addr, Fetch, Meta, Passes, Store};
 use veldsdk::graphics::BindGroupId;
+
 
 use super::camera;
 use super::geodesy::{self, Geodetic, World};
@@ -200,14 +201,6 @@ fn ground_span(from: (f64, f64), to: (f64, f64)) -> f64 {
     geodesy::separation(from, to).to_radians() * geodesy::SEMI_MAJOR_M
 }
 
-/// Описанный растр — то же, что у канвы.
-pub struct Meta {
-    pub fingerprint: String,
-    pub width: u32,
-    pub height: u32,
-    pub levels: u32,
-}
-
 /// Один растр наложения и все его ожидания.
 pub struct Raster {
     pub role: Role,
@@ -309,16 +302,15 @@ pub struct Choice {
 /// смысла — уровень выбирается как раз по тому, сколько его ячеек видно.
 pub struct Wanted {
     pub choice: Choice,
-    pub cells: Vec<Addr>,
-    /// Куда идут и откуда: уровень, на котором картинка станет резкой, и
-    /// вершина пирамиды, с которой начинают. Ступень (`choice.level`)
-    /// спускается от второй к первому, и «сколько слою осталось» — это она.
+    /// Ступень к цели и её ячейки — ответ общей лестницы, целиком.
     ///
-    /// Ими меряется ход добычи, а не числом видимых ячеек: видимое есть
-    /// функция камеры и меняется на каждом кадре жеста, а ступеней у слоя
-    /// столько, сколько их есть, и каждая закрывается один раз.
-    pub target: u32,
-    pub top: u32,
+    /// Целиком, а не полями по одному: ход добычи слоя меряется ступенями
+    /// (`climbed` из `steps`), и знаменатель у них не число уровней, а длина
+    /// лестницы — у источника, которому ступень стоит целого прохода, их две
+    /// на всю пирамиду. Разложив их здесь по своим полям, мы завели бы вторую
+    /// копию того же счёта, расходящуюся с той, по которой считается «работа
+    /// идёт» (`tiles::working`).
+    pub want: tiles::Want,
 }
 
 /// Взгляд, которым меряется желаемое: чем проецировать, откуда смотрят и какой
@@ -339,13 +331,24 @@ impl Overlay {
         self.rasters.iter().find(|raster| raster.role == role)
     }
 
-    /// Наложению ещё есть чего ждать: описание в пути или по растру идёт проход
-    /// производителя. «Добыто всё, что просили» этого не заменяет: за добытой
-    /// ступенью идёт следующая, и работа на ней не кончилась.
-    pub fn busy(&self) -> bool {
-        self.rasters
-            .iter()
-            .any(|raster| raster.describe.is_pending() || raster.fetch.waiting())
+    /// Наложению ещё есть чего ждать. Описание в пути — своё; всё остальное
+    /// считает общее правило (`tiles::working`) — то же, по которому отвечает
+    /// на этот вопрос канва.
+    ///
+    /// `wanted` — то, что слою нужно прямо сейчас, по растру. Пустое значит
+    /// «считать не по чему» (слой скрыт, места под кадр нет, растр ещё
+    /// описывают): тогда о непройденном пути сказать нечего.
+    pub fn busy<K: PartialEq>(&self, passes: &Passes<K>, wanted: Option<&Wanted>) -> bool {
+        self.rasters.iter().any(|raster| {
+            if raster.describe.is_pending() {
+                return true;
+            }
+            let Some(meta) = raster.meta.as_ref() else { return false };
+            let mine = wanted
+                .filter(|wanted| wanted.choice.role == raster.role)
+                .map(|wanted| &wanted.want);
+            tiles::working(&raster.fetch, passes, &meta.fingerprint, mine)
+        })
     }
 
     /// Привязка ещё может смениться, и потому наложение пока ни рисуют, ни
@@ -375,87 +378,65 @@ impl Overlay {
             return Vec::new();
         }
         let mut wanted = Vec::new();
-        let described =
-            |role: Role| self.raster(role).and_then(|raster| raster.meta.as_ref());
+        let described = |role: Role| {
+            let raster = self.raster(role)?;
+            Some((raster, raster.meta.as_ref()?))
+        };
 
-        if let Some(meta) = described(Role::Preview) {
-            wanted.push(self.at_level(Role::Preview, meta, look, cap_tiles, store));
+        if let Some((raster, meta)) = described(Role::Preview) {
+            wanted.push(self.at_level(raster, meta, look, cap_tiles, store));
             if look.mpp >= self.frame.ground_m_per_px(meta.width) {
                 // Родного разрешения превью хватает — подробный не нужен.
                 return wanted;
             }
         }
-        if let Some(meta) = described(Role::Detailed) {
-            wanted.push(self.at_level(Role::Detailed, meta, look, cap_tiles, store));
+        if let Some((raster, meta)) = described(Role::Detailed) {
+            wanted.push(self.at_level(raster, meta, look, cap_tiles, store));
         }
         wanted
     }
 
     /// Ступень добычи под взгляд и видимые ячейки этой ступени.
     ///
-    /// Целевой уровень — ближайший, чей пиксель не крупнее экранного; дальше он
-    /// грубеет, пока видимого не станет меньше потолка. Потолок считается по
-    /// видимому, а не по уровню целиком, и в этом вся разница: гранула
-    /// 10000×10000 целым нулевым уровнем не помещается ни в какой бюджет, и мерь
-    /// мы им — снимок не показал бы подробностей ни на каком приближении. Видно
-    /// же от силы десяток ячеек, сколько ни приближай.
-    ///
-    /// Спрашивается при этом не сразу целевой, а самый грубый уровень, которого
-    /// ещё не хватает: вершина пирамиды — это один тайл из самой мелкой копии
-    /// файла, он приезжает за секунду и накрывает снимок целиком, а целевой из
-    /// десятка тайлов по мегабайту едет полминуты, и всё это время на шаре была
-    /// бы пустота. Каждая ступень к тому же становится предком для следующей
-    /// (parent-fallback в [`patches`]), так что дыр между ними не бывает.
+    /// Считает это общее правило (`tiles::want`) — то же, по которому выбирает
+    /// уровень канва просмотра: и цель под экранный пиксель с потолком
+    /// аппетита, и ступень к ней. Наложение приносит туда одно своё —
+    /// `sharpest` (какой уровень отвечает пикселю кадра при этой привязке) и
+    /// ответ на «что из уровня видно».
     fn at_level(
         &self,
-        role: Role,
+        raster: &Raster,
         meta: &Meta,
         look: &Look,
         cap_tiles: u64,
         store: &Store,
     ) -> Wanted {
-        let (target, cells) = self.target_level(meta, look, cap_tiles);
-        let top = meta.levels - 1;
-        let fetch = self.raster(role).map(|raster| &raster.fetch);
-        let (level, cells) = tiles::rung(
-            target,
-            top,
-            |level| match level == target {
-                // Целевой уже посчитан потолком выше — считать его второй раз
-                // значит второй раз проецировать все его ячейки.
-                true => cells.clone(),
-                false => self.visible(meta, level, look),
-            },
-            |addr| {
-                fetch.is_some_and(|fetch| tiles::settled(store, fetch, &meta.fingerprint, addr))
-                    || store.contains(&meta.fingerprint, addr)
-            },
+        let want = tiles::want(
+            self.sharpest(meta, look),
+            meta.levels,
+            meta.finest,
+            cap_tiles,
+            meta.reach,
+            store,
+            &raster.fetch,
+            &meta.fingerprint,
+            |level| self.visible(meta, level, look),
         );
         Wanted {
-            choice: Choice { role, fingerprint: meta.fingerprint.clone(), level },
-            cells,
-            target,
-            top,
+            choice: Choice { role: raster.role, fingerprint: meta.fingerprint.clone(), level: want.level },
+            want,
         }
     }
 
-    /// Уровень, к которому идут, и его видимые ячейки: ближайший, чей пиксель
-    /// не крупнее экранного, загрублённый до потолка аппетита.
-    fn target_level(&self, meta: &Meta, look: &Look, cap_tiles: u64) -> (u32, Vec<Addr>) {
+    /// Уровень, чей пиксель не крупнее экранного, — единственное, что о выборе
+    /// уровня знает наложение и не знает канва: у растра на шаре масштаб
+    /// задаётся привязкой, а не камерой над картинкой.
+    fn sharpest(&self, meta: &Meta, look: &Look) -> u32 {
         let mpp_raster = self.frame.ground_m_per_px(meta.width);
-        let mut level = if look.mpp <= mpp_raster {
-            0
-        } else {
-            (look.mpp / mpp_raster).log2().floor() as u32
+        match look.mpp <= mpp_raster {
+            true => 0,
+            false => (look.mpp / mpp_raster).log2().floor() as u32,
         }
-        .min(meta.levels - 1);
-
-        let mut cells = self.visible(meta, level, look);
-        while cells.len() as u64 > cap_tiles && level + 1 < meta.levels {
-            level += 1;
-            cells = self.visible(meta, level, look);
-        }
-        (level, cells)
     }
 
     /// Ячейки уровня, попавшие в кадр.
@@ -543,19 +524,16 @@ pub fn patches(
     };
     let level = wanted.choice.level;
 
-    for &(_, x, y) in &wanted.cells {
-        // Ближайший имеющийся предок, начиная с точного тайла.
-        for d in 0..=(meta.levels - 1 - level) {
-            let addr = (level + d, x >> d, y >> d);
-            let Some(stored) = store.touch(&meta.fingerprint, addr) else { continue };
-            let cell = pyramid::cell_image_rect(x, y, level, meta.width, meta.height);
-            let uv = pyramid::cell_uv(cell, addr, stored.width, stored.height);
-            let bind = stored.bind.clone();
-            let from = vertices.len() as u32;
-            patch(&overlay.frame, meta, cell, uv, overlay.opacity, vertices);
-            draws.push((bind, from..vertices.len() as u32));
-            break;
-        }
+    for &cell in &wanted.want.cells {
+        let Some((addr, stored)) = store.carrier(&meta.fingerprint, cell, meta.levels) else {
+            continue;
+        };
+        let (bind, tex) = (stored.bind.clone(), (stored.width, stored.height));
+        let rect = pyramid::cell_image_rect(cell.1, cell.2, level, meta.width, meta.height);
+        let uv = pyramid::cell_uv(rect, addr, tex.0, tex.1);
+        let from = vertices.len() as u32;
+        patch(&overlay.frame, meta, rect, uv, overlay.opacity, vertices);
+        draws.push((bind, from..vertices.len() as u32));
     }
 }
 
@@ -615,6 +593,8 @@ mod tests {
             width,
             height,
             levels: pyramid::level_count(width, height),
+            reach: crate::proto::image_tiler::Reach::Exact,
+            finest: 0,
         }
     }
 
@@ -683,27 +663,30 @@ mod tests {
         assert_eq!(near[1].choice.role, Role::Detailed);
     }
 
-    /// Целевой уровень — по экранному пикселю: 40 м/px против 10 м/px родных
-    /// дают второй, вплотную — нулевой.
+    /// Уровень под экранный пиксель: 40 м/px против 10 м/px родных дают
+    /// второй, вплотную — нулевой.
     #[test]
-    fn target_level_follows_the_screen_pixel() {
+    fn sharpest_level_follows_the_screen_pixel() {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
         let detailed = meta(10980, 10980);
-        let level = |mpp| overlay.target_level(&detailed, &look_at(&overlay, mpp), u64::MAX).0;
+        let level = |mpp| overlay.sharpest(&detailed, &look_at(&overlay, mpp));
         assert_eq!(level(40.0), 2);
         assert_eq!(level(5.0), 0);
     }
 
-    /// Потолок аппетита загрубляет уровень — но меряется он видимым, а не
-    /// уровнем целиком: снимок виден весь, и 22×22 ячейки нулевого уровня в
-    /// потолок из ста не влезают, 11×11 первого — тоже, 6×6 второго — да.
+    /// Потолок аппетита загрубляет цель — но меряется он видимым, а не уровнем
+    /// целиком: снимок виден весь, и 22×22 ячейки нулевого уровня в потолок из
+    /// ста не влезают, 11×11 первого — тоже, 6×6 второго — да. (Само правило
+    /// живёт в `tiles::want`; здесь проверяется, что наложение приносит туда
+    /// именно видимое.)
     #[test]
-    fn tile_cap_coarsens_level() {
+    fn tile_cap_coarsens_target() {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let (level, cells) =
-            overlay.target_level(&meta(10980, 10980), &look_at(&overlay, 5.0), 100);
-        assert_eq!(level, 2);
-        assert_eq!(cells.len(), 36, "видно все ячейки уровня");
+        let look = look_at(&overlay, 5.0);
+        assert_eq!(overlay.visible(&meta(10980, 10980), 2, &look).len(), 36, "видно все ячейки");
+        // Цель видна через длину лестницы: от вершины (пятый уровень) до неё
+        // включительно — четыре ступени, то есть цель вторая.
+        assert_eq!(overlay.wanted(&look, 100, &store())[0].want.steps, 4);
     }
 
     /// Пустое хранилище — и просят вершину пирамиды, а не целевой уровень:
@@ -714,7 +697,7 @@ mod tests {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
         let wanted = overlay.wanted(&look_at(&overlay, 5.0), u64::MAX, &store());
         assert_eq!(wanted[0].choice.level, meta(10980, 10980).levels - 1);
-        assert_eq!(wanted[0].cells.len(), 1, "вершина — один тайл");
+        assert_eq!(wanted[0].want.cells.len(), 1, "вершина — один тайл");
     }
 
     /// Из кадра выпавшее не просят: камера, отведённая на другую сторону
@@ -726,7 +709,7 @@ mod tests {
         let mut camera = crate::module::camera::Camera::default();
         camera.focus(-lat, lon + 180.0, 1.0);
         let look = Look { view_proj: camera.view_projection(1.0), eye: camera.eye(), mpp: 5.0 };
-        assert!(overlay.wanted(&look, u64::MAX, &store())[0].cells.is_empty());
+        assert!(overlay.wanted(&look, u64::MAX, &store())[0].want.cells.is_empty());
     }
 
     /// Без описанных растров выбирать не из чего.

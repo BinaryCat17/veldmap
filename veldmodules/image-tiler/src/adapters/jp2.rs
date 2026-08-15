@@ -40,7 +40,27 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     let mut head = vec![0u8; HEAD.min(len as usize)];
     reader.read_exact(&mut head).map_err(|e| format!("jp2: чтение заголовка: {}", e))?;
     let (width, height) = header_dims(&head)?;
-    Ok(Info::plain(width, height, Kind::Jp2))
+    let mut info = Info::plain(width, height, Kind::Jp2);
+    info.finest = finest(len, width, height);
+    Ok(info)
+}
+
+/// Самый подробный уровень, который влезает в бюджет декода. Считается по тем
+/// же [`estimate`] и [`DECODE_BUDGET`], которыми [`produce`] потом и отказывает,
+/// — затем и считается заранее: заказчику не за чем просить то, что заведомо
+/// получит отказ (см. `Described.finest`).
+///
+/// Уровней у пирамиды конечное число, и если не влезает ни один — отдаётся
+/// последний: вершина помещается в тайл, и не влезть она может только вместе с
+/// самим файлом, который в память всё равно поднимать.
+fn finest(len: u64, width: u32, height: u32) -> u32 {
+    let top = pyramid::level_count(width, height).saturating_sub(1);
+    (0..=top)
+        .find(|level| {
+            let (w, h) = (pyramid::level_size(width, *level), pyramid::level_size(height, *level));
+            estimate(len, w, h) <= DECODE_BUDGET
+        })
+        .unwrap_or(top)
 }
 
 pub fn produce(

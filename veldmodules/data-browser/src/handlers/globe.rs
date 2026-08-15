@@ -21,17 +21,6 @@ use crate::proto::globe::{
     camera_command::Command, CameraCommand, Focus, GeoPoint, Orbit, Probe, Probed, Zoom,
 };
 use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
-use veldsdk::graphics::TextureFormat;
-
-/// Формат места под шар. Не тот, что у окна: у окна он продиктован свопчейном
-/// (BGRA), а здесь выбираем мы.
-///
-/// UNORM, а не sRGB: показывает эту текстуру разметка тем же путём, что и любую
-/// другую картинку, а картинки у неё лежат в UNORM и хранят sRGB-числа —
-/// сэмплируя их, она линеаризует прочитанное сама (см. shaders.wgsl в
-/// ui-service). sRGB-текстура на этом пути линеаризуется дважды и приезжает на
-/// экран заметно темнее, чем нарисована.
-const SURFACE_FORMAT: TextureFormat = TextureFormat::TexRgba8Unorm;
 
 /// Насколько указателю позволено уехать, чтобы нажатие всё ещё считалось
 /// щелчком. Пиксели области: рука дрожит на пиксель-другой, а протаскивание за
@@ -55,7 +44,7 @@ pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
         size.width,
         size.height,
         scale,
-        SURFACE_FORMAT as i32,
+        super::SURFACE_FORMAT as i32,
         "globe",
         // Показывает её разметка, а рисует её глобус: право чтения нужно
         // именно рендереру разметки, чтобы построить по ней bind group.

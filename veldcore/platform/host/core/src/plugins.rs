@@ -45,9 +45,14 @@ impl PluginSpec {
             config: self.config.clone(),
             call_context: None,
             wasi: WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build_p1(),
-            resource_limiter: StoreLimitsBuilder::new().memory_size(1024 * 1024 * 1024).build(),
+            resource_limiter: StoreLimitsBuilder::new()
+                .memory_size(crate::INSTANCE_MEMORY_LIMIT as usize)
+                .build(),
         };
         let mut store = Store::new(&self.engine, state);
+        // Потолок памяти инстанса действует, только пока Store знает, где его
+        // искать: собранный, но не выданный движку StoreLimits — мёртвое поле.
+        store.limiter(|state| &mut state.resource_limiter);
 
         // Приговор и его исполнитель. Движок сам вызвать модуль не прервёт —
         // проверка живёт здесь и срабатывает на каждом тике эпохи; пока

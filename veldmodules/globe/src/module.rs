@@ -23,8 +23,7 @@ use std::collections::HashSet;
 use camera::Camera;
 use gpu::{Device, Target};
 use overlay::{Overlay, Raster, Role};
-use veldmap_image_tiler_wrap::pyramid;
-use veldmap_image_tiler_wrap::tiles::{Addr, Store};
+use veldmap_image_tiler_wrap::tiles::{self, Addr, Missed, Passes, Store};
 use veldsdk::proto::app as app_proto;
 use veldsdk::proto::core::SurfaceDelegated;
 
@@ -33,7 +32,9 @@ use crate::proto::image_tiler::{
     TileResult as ProducedTile,
 };
 use crate::proto::globe::{OverlayProgress, OverlaysProgress};
-use crate::proto::tile_cache::{QueryDone, QueryRequest, TileResult as CachedTile};
+use crate::proto::tile_cache::{
+    QueryDone, QueryRequest, TileAddr as QueryAddr, TileResult as CachedTile,
+};
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {
@@ -44,11 +45,8 @@ pub struct Config {
 }
 
 fn default_vram_budget_mb() -> u64 {
-    256
+    tiles::DEFAULT_VRAM_BUDGET_MB
 }
-
-/// Байт в текстуре одного тайла — потолками аппетита меряется в них.
-const TILE_BYTES: u64 = (pyramid::TILE as u64) * (pyramid::TILE as u64) * 4;
 
 /// Чей это ответ кэша и о чём спрашивали. Отпечаток свой, а не из растра:
 /// наложение могли заменить, пока ответ шёл, и класть его тайлы под новый
@@ -106,6 +104,11 @@ pub struct State {
     refused: Vec<(String, String)>,
     /// Текстуры тайлов наложений, общие всем наложениям, с бюджетом.
     tiles: Store,
+    /// Идущие проходы производителя, по одному на источник. Не у растра:
+    /// проход принадлежит файлу, а растров с одним файлом бывает несколько.
+    /// Заказчик здесь — слой и роль растра: снять проход с учёта вправе только
+    /// тот, кто его завёл.
+    passes: Passes<(String, Role)>,
     /// Собранные варп-патчи и то, из чего они собраны: поколение хранилища,
     /// выборы растров и прозрачность слоёв (она запечена в вершинах). Разошлось
     /// с нынешним — пересборка (см. build_patches).
@@ -145,6 +148,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         overlays: Vec::new(),
         refused: Vec::new(),
         tiles: Store::new(config.vram_budget_mb * 1024 * 1024),
+        passes: Passes::default(),
         batch: gpu::OverlayBatch::new(),
         built: None,
         patches: 0,
@@ -305,16 +309,27 @@ pub fn on_overlay(state: &mut State, msg: crate::proto::globe::Overlays) {
     want_tiles(state);
 }
 
-/// Потолок аппетита одного уровня: половина бюджета на всех видимых сразу, а
-/// не каждому по половине. Иначе шесть слоёв, каждый со своей половиной,
-/// вымывали бы из памяти друг друга по кругу, и не дорисовался бы ни один.
+/// Потолок аппетита одного уровня. Правило общее с канвой и живёт у бюджета
+/// (`Store::cap_tiles`); здесь только ответ на «сколько пирамид сейчас
+/// рисуется».
 ///
-/// Считается в одном месте, потому что спрашивают его двое — тот, кто просит
-/// тайлы, и тот, кто собирает патчи, — и разойтись им нельзя: заказанный
-/// уровень обязан быть тем же, который рисуют.
+/// Пирамид, а не слоёв: у слоя их до двух — превью и подробный, — и лежат в
+/// бюджете обе. Считаются описанные, а не выбранные нынешним кадром: выбор
+/// зависит от потолка, и вывести потолок из него значило бы замкнуть их друг
+/// на друга. Ошибка тогда в безопасную сторону — потолок ниже, а не выше.
+///
+/// Спрашивают его двое — тот, кто просит тайлы, и тот, кто собирает патчи, — и
+/// разойтись им нельзя: заказанный уровень обязан быть тем же, который рисуют.
 fn cap_tiles(state: &State) -> u64 {
-    let visible = state.overlays.iter().filter(|overlay| !overlay.hidden).count().max(1) as u64;
-    (state.tiles.capacity_tiles(TILE_BYTES) / (2 * visible)).max(1)
+    state.tiles.cap_tiles(
+        state
+            .overlays
+            .iter()
+            .filter(|overlay| !overlay.hidden)
+            .flat_map(|overlay| overlay.rasters.iter())
+            .filter_map(|raster| raster.meta.as_ref())
+            .map(|meta| meta.fingerprint.as_str()),
+    )
 }
 
 /// Как показывать слой: прозрачность и скрытость. Не сказанная прозрачность —
@@ -356,10 +371,17 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             // добывать тем, кого видно. Показ обратно спросит заново, а то, что
             // уже добыто, никуда не делось.
             if hidden && !was {
-                let cancels: Vec<String> =
-                    overlay.rasters.iter_mut().filter_map(|raster| raster.fetch.reset()).collect();
-                for correlation in cancels {
-                    crate::cancel::image_tiler::on_produce(&correlation);
+                let sources: Vec<(Role, String)> = overlay
+                    .rasters
+                    .iter_mut()
+                    .filter_map(|raster| {
+                        raster.fetch.reset();
+                        raster.meta.as_ref().map(|meta| (raster.role, meta.fingerprint.clone()))
+                    })
+                    .collect();
+                let key = incoming.key.clone();
+                for (role, fingerprint) in sources {
+                    release_pass(state, &key, role, &fingerprint);
                 }
                 state.epoch += 1;
             }
@@ -443,21 +465,40 @@ fn refuse(state: &mut State, key: String, label: &str, why: &str) {
 /// Конец наложения: производство убить, тайлы забыть (если отпечаток не живёт
 /// в другом наложении), ресурсы освободить их Drop'ом.
 fn drop_overlay(state: &mut State, mut overlay: Overlay) {
-    for raster in &mut overlay.rasters {
-        if let Some(correlation) = raster.fetch.reset() {
-            crate::cancel::image_tiler::on_produce(&correlation);
+    let key = std::mem::take(&mut overlay.key);
+    let sources: Vec<(Role, String)> = overlay
+        .rasters
+        .iter_mut()
+        .filter_map(|raster| {
+            raster.fetch.reset();
+            raster.meta.as_ref().map(|meta| (raster.role, meta.fingerprint.clone()))
+        })
+        .collect();
+
+    for (role, fingerprint) in sources {
+        release_pass(state, &key, role, &fingerprint);
+        // Тайлы забываются по другому счёту, чем убивается проход: держит их и
+        // скрытый слой — показ обратно тогда мгновенный, — а вот работать на
+        // скрытого не за чем.
+        let held = state.overlays.iter().any(|other| {
+            other.rasters.iter().any(|raster| {
+                raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == fingerprint)
+            })
+        });
+        if !held {
+            state.tiles.forget(&fingerprint);
         }
-        if let Some(meta) = &raster.meta {
-            let shared = state.overlays.iter().any(|other| {
-                other
-                    .rasters
-                    .iter()
-                    .any(|r| r.meta.as_ref().is_some_and(|m| m.fingerprint == meta.fingerprint))
-            });
-            if !shared {
-                state.tiles.forget(&meta.fingerprint);
-            }
-        }
+    }
+}
+
+/// Растр уходит — вместе со слоем либо под скрытие: его проход уносится с ним.
+///
+/// Уносится безусловно, даже когда на тот же файл смотрит соседний слой: читает
+/// проход не «файл», а тот самый ресурс, который сейчас освободится вместе с
+/// растром (см. `tiles::Passes`). Сосед заведёт свой по концу этого.
+fn release_pass(state: &mut State, key: &str, role: Role, fingerprint: &str) {
+    if let Some(correlation) = state.passes.abandon(fingerprint, &(key.to_string(), role)) {
+        crate::cancel::image_tiler::on_produce(&correlation);
     }
 }
 
@@ -520,23 +561,20 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == key) else { return };
     let label = overlay.label.clone();
 
-    if !msg.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "{}: описание растра: {}", label, msg.error);
-        return;
-    }
-    if msg.width == 0 || msg.height == 0 || msg.levels == 0 {
-        veldsdk::log::warn!(target: "handlers", "{}: растр описан пустым", label);
-        return;
-    }
-    if msg.tile != pyramid::TILE {
-        veldsdk::log::warn!(target: "handlers",
-            "{}: сторона тайла {} у производителя против {} у глобуса", label, msg.tile, pyramid::TILE);
-        return;
-    }
+    // Годность описания решает общее правило: тайлер один, пирамида одна, и
+    // разойтись с канвой в том, какой ответ считать пригодным, нечем. Своё
+    // здесь одно — что делать с непригодным: растров у наложения два, и
+    // отказавший один оставляет слой жить вторым, поэтому наружу уходит не
+    // ошибка слоя, а строка в лог.
+    let meta = match tiles::describe(&msg) {
+        Ok(meta) => meta,
+        Err(error) => {
+            veldsdk::log::warn!(target: "handlers", "{}: описание растра: {}", label, error);
+            return;
+        }
+    };
 
-    veldsdk::log::info!(target: "handlers",
-        "{}: {}×{}, уровней {}, {}", label, msg.width, msg.height, msg.levels,
-        if msg.random_access { "произвольный доступ" } else { "последовательный проход" });
+    veldsdk::log::info!(target: "handlers", "{}: {}", label, meta.note());
 
     // Узлы сетки — в доли растра: растров у наложения два и они разного
     // размера, а лежат оба одинаково, и привязка у наложения одна.
@@ -552,12 +590,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
         .collect();
 
     let Some(raster) = overlay.raster_mut(role) else { return };
-    raster.meta = Some(overlay::Meta {
-        fingerprint: msg.fingerprint,
-        width: msg.width,
-        height: msg.height,
-        levels: msg.levels,
-    });
+    raster.meta = Some(meta);
 
     // Привязка из самого растра главнее всего, что сказал о снимке каталог: там
     // сказано, где он, а здесь — каким пикселем куда. Приехавшая первой и
@@ -583,7 +616,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
 pub fn on_tile(state: &mut State, msg: CachedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.peek(&correlation) else {
-        return discard_tile(msg.texture);
+        return tiles::discard(msg.texture);
     };
     let (key, role, fingerprint) = (ctx.key.clone(), ctx.role, ctx.fingerprint.clone());
     accept_tile(state, &key, role, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -593,7 +626,7 @@ pub fn on_tile(state: &mut State, msg: CachedTile) {
 pub fn on_produced(state: &mut State, msg: ProducedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.peek(&correlation) else {
-        return discard_tile(msg.texture);
+        return tiles::discard(msg.texture);
     };
     let (key, role, fingerprint) = (ctx.key.clone(), ctx.role, ctx.fingerprint.clone());
     accept_tile(state, &key, role, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -638,22 +671,22 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             return;
         }
 
-        let produce_list = raster.fetch.missed(
+        let missed = raster.fetch.missed(
+            &state.passes,
+            &ctx.fingerprint,
             &ctx.cells,
             msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
             |_| true,
         );
-        match produce_list.is_empty() {
-            true => None,
-            false => Some((label, produce_list, raster.resource.handle())),
+        match missed {
+            Missed::Produce(cells) => Some((label, cells, raster.resource.handle())),
+            // Ждём чужой проход молча: его конец пересчитает нужное всем.
+            Missed::Waiting => return,
+            Missed::Closed => None,
         }
     }) else {
-        // Кэш закрыл заказ целиком — производить нечего, а ступень тем самым
-        // пройдена. Спросить следующую надо здесь: иначе цикл «ступень доехала
-        // → просим следующую» замыкается только через конец прохода
-        // производителя, которого не было, и добыча встаёт до ближайшего
-        // движения камеры. Снаружи это выглядит как «полоса стоит на месте, а
-        // потом снимок мгновенно становится резким».
+        // Кэш закрыл заказ целиком — ступень пройдена, и спросить следующую
+        // надо здесь (см. `Missed::Closed`).
         state.epoch += 1;
         want_tiles(state);
         return;
@@ -665,11 +698,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         fingerprint: ctx.fingerprint.clone(),
         cells: produce_list.clone(),
     });
-    if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key)
-        && let Some(raster) = overlay.raster_mut(ctx.role)
-    {
-        raster.fetch.producing_now(correlation.clone(), level);
-    }
+    state.passes.begin(&ctx.fingerprint, (ctx.key.clone(), ctx.role), correlation.clone(), level);
     crate::calls::image_tiler::on_produce(&ProduceRequest {
         resource: Some(resource),
         level,
@@ -703,23 +732,34 @@ pub fn on_produce_progress(state: &mut State, msg: ProduceProgress) {
 pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.take(&correlation) else { return };
-    let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
-    let label = overlay.label.clone();
-    let Some(raster) = overlay.raster_mut(ctx.role) else { return };
+    // Сторож снимается раньше всего и безусловно: он стоял на источнике, а не
+    // на растре, и наложение могли снять, пока проход шёл. Уйди мы отсюда, не
+    // сняв его, — соседние растры того же файла ждали бы конца, которого уже
+    // не будет.
+    state.passes.finish(&correlation);
 
-    // Наложение успели заменить, пока проход шёл: его ячейки уже не про этот
-    // растр, и снять с учёта надо только сам проход.
-    let ours = raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
-    let failed = ours && !msg.error.is_empty();
-    raster.pass = (0, 0);
-    raster.fetch.produced(&correlation, if ours { &ctx.cells } else { &[] }, failed);
-    if failed {
-        // Не переспрашивать то, что уже не произвелось: каждый кадр долбил бы
-        // производителя тем же отказом.
-        veldsdk::log::warn!(target: "handlers", "{}: производство: {}", label, msg.error);
+    if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) {
+        let label = overlay.label.clone();
+        if let Some(raster) = overlay.raster_mut(ctx.role) {
+            // Наложение успели заменить, пока проход шёл: его ячейки уже не про
+            // этот растр, и относить к нему ни ожидания, ни отказ нельзя.
+            let ours =
+                raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
+            let failed = ours && !msg.error.is_empty();
+            raster.pass = (0, 0);
+            raster.fetch.produced(if ours { &ctx.cells } else { &[] }, failed);
+            if failed {
+                // Не переспрашивать то, что уже не произвелось: каждый кадр
+                // долбил бы производителя тем же отказом.
+                veldsdk::log::warn!(target: "handlers", "{}: производство: {}", label, msg.error);
+            }
+        }
     }
 
-    // Пока проход шёл, запросы откладывались — пересчитать нужное сейчас.
+    // Пока проход шёл, запросы по этому источнику откладывались — и не только
+    // у заказчика: соседний слой с тем же файлом всё это время ждал молча.
+    // Пересчёт идёт по всем наложениям, и разбудить их больше некому.
+    //
     // Эпоха двигается и здесь: конец прохода видно только по ней — тайлов он
     // может не принести вовсе, а ход добычи о нём сказать обязан.
     state.epoch += 1;
@@ -772,41 +812,40 @@ fn want_overlay(state: &mut State, key: &str, wanted: overlay::Wanted) {
     let fingerprint = meta.fingerprint.clone();
     let label = overlay.label.clone();
 
-    let overlay = state.overlays.iter_mut().find(|o| o.key == key).expect("наложение только что было");
-    let raster = overlay.raster_mut(wanted.choice.role).expect("растр только что был");
-    if let Some(correlation) = raster.fetch.stale(wanted.choice.level) {
+    let owner = (key.to_string(), wanted.choice.role);
+    if let Some(correlation) = state.passes.stale(&fingerprint, &owner, wanted.choice.level) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
-    let Some(ask) =
-        raster.fetch.want(&state.tiles, &fingerprint, wanted.choice.level, wanted.cells)
-    else {
+    let overlay = state.overlays.iter_mut().find(|o| o.key == key).expect("наложение только что было");
+    let raster = overlay.raster_mut(wanted.choice.role).expect("растр только что был");
+    let Some(cells) = raster.fetch.ask(&state.tiles, &fingerprint, wanted.want.cells) else {
         return;
     };
 
     // Своей строки состояния у глобуса нет, и видно ход добычи только здесь:
     // какой уровень какого растра понадобился и сколько его ячеек не хватает.
     veldsdk::log::debug!(target: "handlers", "{}: {:?} уровень {}, ячеек {}",
-        label, wanted.choice.role, ask.level, ask.cells.len());
+        label, wanted.choice.role, wanted.choice.level, cells.len());
 
     let correlation = state.pending_query.begin(QueryCtx {
         key: key.to_string(),
         role: wanted.choice.role,
         fingerprint: fingerprint.clone(),
-        cells: ask.cells,
+        cells: cells.clone(),
     });
     crate::calls::tile_cache::on_query(&QueryRequest {
         fingerprint,
-        level: ask.level,
-        x0: ask.x0,
-        y0: ask.y0,
-        x1: ask.x1,
-        y1: ask.y1,
+        level: wanted.choice.level,
+        tiles: cells.iter().map(|&(_, x, y)| QueryAddr { x, y }).collect(),
         label,
     }, &correlation);
 }
 
-/// Тайл приехал — в хранилище и вон из ожиданий. Чей бы он ни был, текстура
-/// уже наша: не принять её значит потерять видеопамять.
+/// Тайл приехал — в хранилище и вон из ожиданий.
+///
+/// С ожиданий ячейка снимается в любом случае: ответ про неё пришёл, а не
+/// легший тайл — это промах, и переспросится он следующим пересчётом. Оставь
+/// мы его в ожиданиях — не переспросился бы никогда.
 fn accept_tile(
     state: &mut State,
     key: &str,
@@ -817,33 +856,26 @@ fn accept_tile(
     width: u32,
     height: u32,
 ) {
-    let Some(texture) = texture else { return };
-    let Some(device) = &state.device else {
-        return veldsdk::resource::release(texture);
+    let landed = match &state.device {
+        Some(device) => state.tiles.land(fingerprint, addr, texture, width, height, |view| {
+            device.overlay_bind_group(view)
+        }),
+        // Устройства нет — рисовать нечем и класть некуда; ячейка при этом ни в
+        // чём не виновата и спросится заново, когда место под кадр появится.
+        None => {
+            tiles::discard(texture);
+            true
+        }
     };
-    if width == 0 || height == 0 {
-        return veldsdk::resource::release(texture);
-    }
-
-    let insert = state.tiles.insert(fingerprint, addr, texture, width, height, |view| {
-        device.overlay_bind_group(view)
-    });
-    if let Err(error) = insert {
-        veldsdk::log::warn!(target: "handlers", "тайл {}:{}:{} не принят: {}",
-            addr.0, addr.1, addr.2, error);
-    }
 
     if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == key)
         && let Some(raster) = overlay.raster_mut(role)
         && raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == fingerprint)
     {
-        raster.fetch.arrived(addr);
-    }
-}
-
-fn discard_tile(texture: Option<veldsdk::proto::core::ResourceHandle>) {
-    if let Some(handle) = texture {
-        veldsdk::resource::release(handle);
+        match landed {
+            true => raster.fetch.arrived(addr),
+            false => raster.fetch.rejected(addr),
+        }
     }
 }
 
@@ -955,12 +987,11 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             0 => 1.0,
             total => (f64::from(ready) / f64::from(total)).max(raster.read()),
         };
-        let steps = f64::from(mine.top - mine.target + 1);
-        let done = f64::from(mine.top - mine.choice.level);
         overlay.progress = overlay::Progress {
             ready,
             total,
-            share: ((done + within) / steps).clamp(0.0, 1.0) as f32,
+            share: ((f64::from(mine.want.climbed) + within) / f64::from(mine.want.steps.max(1)))
+                .clamp(0.0, 1.0) as f32,
         };
     }
 
@@ -968,18 +999,26 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
         .overlays
         .iter()
         .map(|overlay| {
-            // Работа идёт, пока путь не пройден, — а не пока что-то в полёте:
-            // между «последний тайл ступени приехал» и «оформлен заказ
-            // следующей» в полёте нет ничего, и признак, выведенный из одного
-            // полёта, мигал бы на каждой ступени, дёргая за собой полосу и
-            // высоту строки. Слой, которому не дают считать (скрыт, места под
-            // кадр нет), работой не занят по определению.
-            let live = wanted.iter().any(|(key, ..)| key == &overlay.key);
+            // Слой, которому не дают считать (скрыт, места под кадр нет),
+            // работой не занят по определению — потому и `live`. Всё
+            // остальное решает общее правило (`tiles::working`): оно и есть
+            // «путь не пройден», а не «что-то в полёте».
+            //
+            // Второго признака рядом нет намеренно, хотя напрашивается:
+            // `share < 1.0` — тот же самый факт, записанный дробью. Доля
+            // внутри ступени доходит до единицы ровно тогда, когда пустеют
+            // ожидания (`Fetch::ordered` считает дошедшим и то, в чём
+            // отказали), так что дробь меньше единицы ровно при «ячейки в
+            // полёте либо ступень не последняя». Держать это двумя способами
+            // значило бы однажды поправить один и не поправить другой.
+            let mine = wanted.iter().filter(|(key, ..)| key == &overlay.key).next_back();
+            let live = mine.is_some();
             OverlayProgress {
                 key: overlay.key.clone(),
                 ready: overlay.progress.ready,
                 total: overlay.progress.total,
-                working: live && (overlay.busy() || overlay.progress.share < 1.0),
+                working: live
+                    && overlay.busy(&state.passes, mine.map(|(.., wanted)| wanted)),
                 share: overlay.progress.share,
                 error: overlay.error.clone(),
             }

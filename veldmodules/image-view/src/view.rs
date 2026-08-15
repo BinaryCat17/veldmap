@@ -8,7 +8,7 @@
 //! перекрытий нет и буфер глубины не нужен.
 
 use veldmap_image_tiler_wrap::pyramid::{self, TILE};
-use veldmap_image_tiler_wrap::tiles::{self, Addr, Fetch, Store};
+use veldmap_image_tiler_wrap::tiles::{self, Fetch, Meta, Passes, Store};
 use veldsdk::graphics::GrowingBuffer;
 
 use super::camera::Camera;
@@ -41,12 +41,6 @@ pub struct Shown {
     pub meta: Option<Meta>,
 }
 
-pub struct Meta {
-    pub fingerprint: String,
-    pub width: u32,
-    pub height: u32,
-    pub levels: u32,
-}
 
 /// То, из чего собран кадр. Поколение хранилища тайлов заменяет сравнение
 /// самих наборов: любой пришедший или вытесненный тайл его двигает.
@@ -78,58 +72,69 @@ impl View {
         self.shown.as_ref()?.meta.as_ref()
     }
 
-    /// Показ идёт: описание в пути или производство не кончилось.
-    pub fn busy(&self) -> bool {
-        self.describe.is_pending() || self.fetch.producing()
+    /// Показ идёт: описание в пути либо по пирамиде ещё есть работа. Второе
+    /// считает общее правило (`tiles::working`) — то же, по которому отвечает
+    /// на этот вопрос наложение на шаре.
+    pub fn busy<K: PartialEq>(&self, passes: &Passes<K>, want: Option<&tiles::Want>) -> bool {
+        self.describe.is_pending()
+            || self.meta().is_some_and(|meta| {
+                tiles::working(&self.fetch, passes, &meta.fingerprint, want)
+            })
     }
 }
 
-/// Видимые ячейки: ступень добычи под текущий масштаб и адреса тайлов,
-/// накрывающих видимый прямоугольник. `None` — рисовать пока не из чего (нет
-/// места, снимка или камеры).
+/// Что нужно канве прямо сейчас: цель, ступень к ней и её ячейки. `None` —
+/// рисовать пока не из чего (нет места, снимка или камеры).
 ///
-/// Ступень, а не уровень под масштаб: пирамида набирается сверху вниз, и на
-/// прыжке к глубокому уровню канва стояла бы пустой, пока едут его тайлы
-/// (см. `tiles::rung`). Отвечает эта функция обоим — и запросу тайлов, и сборке
-/// кадра: рисовать не то, что просили, значит либо просить невидимое, либо не
-/// показывать добытое.
-pub fn desired_cells(view: &View, store: &Store) -> Option<(u32, Vec<Addr>)> {
+/// Считает это общее правило (`tiles::want`) — то же, по которому выбирает
+/// уровень наложение на шаре. Канва приносит туда одно своё: уровень под
+/// масштаб камеры и ячейки, накрывающие видимый прямоугольник.
+///
+/// Отвечает оно обоим — и запросу тайлов, и сборке кадра: рисовать не то, что
+/// просили, значит либо просить невидимое, либо не показывать добытое.
+pub fn wanted(view: &View, store: &Store, cap: u64) -> Option<tiles::Want> {
     let (target, camera, meta) = parts(view)?;
-    let sharpest = camera.level(meta.levels);
     let rect = camera.visible((meta.width, meta.height), (target.width, target.height));
-    if rect.0 >= rect.2 || rect.1 >= rect.3 {
-        return Some((sharpest, Vec::new()));
-    }
+    let empty = rect.0 >= rect.2 || rect.1 >= rect.3;
 
-    let cells_at = |level| {
-        let (xs, ys) = cell_range(rect, level, meta);
-        ys.flat_map(|y| xs.clone().map(move |x| (level, x, y))).collect()
-    };
-    Some(tiles::rung(sharpest, meta.levels - 1, cells_at, |addr| {
-        store.contains(&meta.fingerprint, addr) || view.fetch.hopeless(addr)
-    }))
+    Some(tiles::want(
+        camera.level(meta.levels),
+        meta.levels,
+        meta.finest,
+        cap,
+        meta.reach,
+        store,
+        &view.fetch,
+        &meta.fingerprint,
+        |level| match empty {
+            true => Vec::new(),
+            false => {
+                let (xs, ys) = cell_range(rect, level, meta);
+                ys.flat_map(|y| xs.clone().map(move |x| (level, x, y))).collect()
+            }
+        },
+    ))
 }
 
-/// Квады кадра: по одному на видимую ячейку, у которой нашёлся хоть какой-то
-/// тайл. Обращения продлевают тайлам жизнь в бюджете хранилища.
-pub fn quads(view: &View, store: &mut Store) -> Vec<Quad> {
+/// Квады кадра: по одному на видимую ячейку, у которой нашёлся носитель —
+/// точный тайл либо ближайший имеющийся предок (`Store::carrier`, общий с
+/// наложениями). Обращения продлевают тайлам жизнь в бюджете хранилища.
+pub fn quads(view: &View, store: &mut Store, cap: u64) -> Vec<Quad> {
     let Some((target, camera, meta)) = parts(view) else { return Vec::new() };
-    let Some((level, cells)) = desired_cells(view, store) else { return Vec::new() };
+    let Some(want) = wanted(view, store, cap) else { return Vec::new() };
 
-    let mut quads = Vec::with_capacity(cells.len());
-    for (_, x, y) in cells {
-        // Ближайший имеющийся предок, начиная с точного тайла.
-        for d in 0..=(meta.levels - 1 - level) {
-            let addr = (level + d, x >> d, y >> d);
-            let Some(stored) = store.touch(&meta.fingerprint, addr) else { continue };
-            let cell = pyramid::cell_image_rect(x, y, level, meta.width, meta.height);
-            quads.push(Quad {
-                rect: to_ndc(cell, camera, target),
-                uv: pyramid::cell_uv(cell, addr, stored.width, stored.height),
-                bind: stored.bind.clone(),
-            });
-            break;
-        }
+    let mut quads = Vec::with_capacity(want.cells.len());
+    for cell in want.cells {
+        let Some((addr, stored)) = store.carrier(&meta.fingerprint, cell, meta.levels) else {
+            continue;
+        };
+        let (bind, tex) = (stored.bind.clone(), (stored.width, stored.height));
+        let rect = pyramid::cell_image_rect(cell.1, cell.2, want.level, meta.width, meta.height);
+        quads.push(Quad {
+            rect: to_ndc(rect, camera, target),
+            uv: pyramid::cell_uv(rect, addr, tex.0, tex.1),
+            bind,
+        });
     }
     quads
 }
@@ -179,6 +184,8 @@ mod tests {
             width,
             height,
             levels: pyramid::level_count(width, height),
+            reach: crate::proto::image_tiler::Reach::Exact,
+            finest: 0,
         }
     }
 

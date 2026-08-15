@@ -104,8 +104,22 @@ impl MemoryManager {
         self.registry.register(ResourcePayload::Data(backing), owner_id)
     }
 
-    pub fn alloc_cpu(&self, data: Vec<u8>, owner_id: u32) -> ResourceId {
-        self.alloc(DataBacking::Cpu(data), owner_id)
+    /// Обнулённая область в куче хоста. 0 — размер не по силам: число приходит
+    /// из wasm, и без потолка `Vec` такого размера роняет процесс целиком —
+    /// хост вместе со всеми остальными модулями. Потолок общий с линейной
+    /// памятью инстанса (см. [`crate::INSTANCE_MEMORY_LIMIT`]): поручить хосту
+    /// больше, чем модулю позволено держать самому, он не вправе.
+    ///
+    /// Проверка здесь, а не у вызывающего, — по той же причине, что и у
+    /// [`Self::alloc_texture`]: отказ должен доехать до модуля значением, а не
+    /// снять процесс на пути к нему.
+    pub fn alloc_cpu(&self, size: u64, owner_id: u32) -> ResourceId {
+        if size > crate::INSTANCE_MEMORY_LIMIT {
+            log::warn!(target: "memory",
+                "CPU region of {} bytes rejected: limit is {}", size, crate::INSTANCE_MEMORY_LIMIT);
+            return 0;
+        }
+        self.alloc(DataBacking::Cpu(vec![0u8; size as usize]), owner_id)
     }
 
     /// Ресурс поверх файла: содержимое остаётся на диске, читатель тянет
@@ -124,7 +138,15 @@ impl MemoryManager {
         self.alloc(DataBacking::Range(source), owner_id)
     }
 
+    /// 0 — размер не по силам устройству. Проверка по той же причине, что и у
+    /// [`Self::alloc_texture`]: create_buffer сверх лимита — ошибка валидации
+    /// wgpu, а её обработчик по умолчанию роняет процесс.
     pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, owner_id: u32) -> ResourceId {
+        let max = self.device.limits().max_buffer_size;
+        if size > max {
+            log::warn!(target: "memory", "Buffer of {} bytes rejected: limit is {}", size, max);
+            return 0;
+        }
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !mapped { final_usage |= wgpu::BufferUsages::COPY_DST; }
         if mapped { final_usage |= wgpu::BufferUsages::MAP_WRITE; }
