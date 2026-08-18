@@ -34,6 +34,12 @@ use crate::proto::globe::{
 };
 use veldsdk::proto::core::ResourceOpened;
 
+/// Начиная с какого размаха долгот контур перестаёт быть четырёхугольником и
+/// становится поясом вокруг Земли. Полоса съёмки такой ширины не бывает: самая
+/// широкая гранула — четыреста километров, а виток пересекает меридианы,
+/// оставаясь полосой, и в габарит по долготе укладывается с большим запасом.
+const WHOLE_EARTH_DEG: f64 = 350.0;
+
 /// Роль растра у провайдера и роль растра у глобуса — два разных перечисления
 /// в двух разных контрактах, и связаны они здесь, а не совпадением чисел.
 ///
@@ -346,17 +352,21 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
         return give_up(state, &key, &label, format!("растры не спросились: {}", response.error));
     }
     if response.rasters.is_empty() {
-        return give_up(state, &key, &label, "нет растров для наложения".to_string());
+        // Причину называет провайдер — он один видел, что в продукте лежит.
+        // Своя фраза остаётся на случай, когда он промолчал: пустая строка на
+        // экране хуже общей.
+        let why = match response.reason.is_empty() {
+            true => "нет растров для наложения".to_string(),
+            false => response.reason,
+        };
+        return give_up(state, &key, &label, why);
     }
-    // Привязки нет ни рамкой, ни квадом — снимку негде лежать; честнее не
-    // открывать ресурсы, чем дать глобусу отказаться от готового.
+    // Геометрии нет вовсе — ни рамки, ни контура: снимку негде лежать даже
+    // приблизительно, и открывать растры незачем. Сложный контур сюда не
+    // относится: привязку принесёт сам растр, а до него о ней не узнать
+    // (см. [`quad_of`]).
     if response.utm.is_none() && overlay.quad.is_none() {
-        return give_up(
-            state,
-            &key,
-            &label,
-            "без привязки: контур не четырёхугольник и рамки нет".to_string(),
-        );
+        return give_up(state, &key, &label, "без привязки: у продукта нет геометрии".to_string());
     }
 
     let utm = response.utm.map(|utm| UtmFrame {
@@ -486,6 +496,7 @@ fn send_set(state: &State) {
                     .unwrap_or_default(),
                 false => Vec::new(),
             },
+            rough: overlay.rough,
             rasters: overlay.rasters.clone(),
             opacity: Some(overlay.opacity),
             hidden: overlay.hidden,
@@ -508,6 +519,8 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
             total: progress.total,
             share: progress.share,
             working: progress.working,
+            step: progress.step,
+            steps: progress.steps,
         });
     }
 
@@ -529,19 +542,50 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
     }
 }
 
-/// Четырёхугольник футпринта: первое кольцо ровно из четырёх вершин (замыкающий
-/// дубль не в счёт). Сложный контур квадом не является — рамка тогда
-/// обязательна.
-fn quad_of(product: &DataProduct) -> Option<[(f64, f64); 4]> {
-    let ring = product.footprint.first()?;
-    let points = match ring.points.as_slice() {
-        [first, .., last] if first.lat == last.lat && first.lon == last.lon => {
-            &ring.points[..ring.points.len() - 1]
+/// Запасная привязка по контуру каталога и то, насколько ей можно верить.
+///
+/// Ровно четыре вершины — это углы снятого куска, и растр по ним натягивают
+/// (`rough: false`). Всё сложнее — полоса съёмки, очерченная десятками вершин:
+/// углов у неё нет, и вместо них берётся габарит вписанного круга
+/// (`rough: true`). Натягивать по нему нельзя, и глобус этого не делает — он
+/// держит место, пока привязку не принесёт сам растр (см. `Frame::Rough`).
+///
+/// Отказывать сложному контуру здесь было бы рано: привязка живёт в растре
+/// чаще, чем в каталоге, — гранула Sentinel-5P несёт широту и долготу
+/// поотсчётно, — а спросить растр можно только открыв его.
+///
+/// Четырёхугольник во всю Землю углами тоже не описывается, и это не редкость:
+/// глобальная сетка климатики очерчена прямоугольником от −180 до 180, а это на
+/// шаре одна и та же долгота. Растягивать по нему нечего — все четыре угла
+/// сходятся на одном меридиане, — поэтому такой контур идёт тем же путём, что и
+/// полоса съёмки: местом, а не привязкой.
+fn quad_of(product: &DataProduct) -> Option<([(f64, f64); 4], bool)> {
+    if let Some(ring) = product.footprint.first() {
+        let points = match ring.points.as_slice() {
+            [first, .., last] if first.lat == last.lat && first.lon == last.lon => {
+                &ring.points[..ring.points.len() - 1]
+            }
+            all => all,
+        };
+        if let [a, b, c, d] = points {
+            let lons = [a.lon, b.lon, c.lon, d.lon];
+            let span = lons.iter().fold(f64::MIN, |wide, lon| wide.max(*lon))
+                - lons.iter().fold(f64::MAX, |narrow, lon| narrow.min(*lon));
+            if span < WHOLE_EARTH_DEG {
+                return Some((
+                    [(a.lat, a.lon), (b.lat, b.lon), (c.lat, c.lon), (d.lat, d.lon)],
+                    false,
+                ));
+            }
         }
-        all => all,
-    };
-    match points {
-        [a, b, c, d] => Some([(a.lat, a.lon), (b.lat, b.lon), (c.lat, c.lon), (d.lat, d.lon)]),
-        _ => None,
     }
+    // Круг, в который вписан контур, — единственная мера сложного контура,
+    // которая не врёт ни у полюса, ни на шве (см. `footprint::frame`).
+    let circle = footprint::frame(&product.footprint)?;
+    let (north, south) = (
+        (circle.lat + circle.radius_deg).min(90.0),
+        (circle.lat - circle.radius_deg).max(-90.0),
+    );
+    let (west, east) = (circle.lon - circle.radius_deg, circle.lon + circle.radius_deg);
+    Some(([(north, west), (north, east), (south, east), (south, west)], true))
 }

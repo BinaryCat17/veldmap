@@ -16,7 +16,6 @@ mod host {
     unsafe extern "C" {
         pub fn veld_host_publish(ptr: u64, len: u64);
         pub fn veld_host_log(level: u64, target_ptr: u64, target_len: u64, ptr: u64, len: u64);
-        pub fn veld_get_config(ptr: u64, len: u64) -> u64;
         pub fn veld_random_bytes(ptr: u64, len: u64);
         pub fn veld_resource_create(ptr: u64, len: u64) -> u64;
         pub fn veld_graphics_execute(ptr: u64, len: u64) -> u64;
@@ -58,7 +57,6 @@ mod host {
 
     pub unsafe fn veld_host_publish(_ptr: u64, _len: u64) {}
     pub unsafe fn veld_host_log(_level: u64, _tp: u64, _tl: u64, _p: u64, _l: u64) {}
-    pub unsafe fn veld_get_config(_ptr: u64, _len: u64) -> u64 { 0 }
 
     pub unsafe fn veld_random_bytes(ptr: u64, len: u64) {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -289,15 +287,6 @@ pub fn log(level: log::Level, target: &str, message: &str) {
 }
 
 // ── System helpers ─────────────────────────────────────────────
-
-/// Значение из конфига модуля (инжектирован хостом при загрузке).
-/// None — ключа нет.
-pub fn get_config(key: &str) -> Option<String> {
-    unsafe {
-        let packed = veld_get_config(key.as_ptr() as u64, key.len() as u64);
-        take_host_bytes(packed).and_then(|b| String::from_utf8(b).ok())
-    }
-}
 
 /// UUID v4 из хостовой энтропии: у wasm нет своего источника случайности.
 pub fn generate_id() -> String {

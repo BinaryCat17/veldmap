@@ -25,6 +25,7 @@ use hayro_jpeg2000::{ColorSpace, DecodeSettings, DecoderContext, Image};
 
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid;
+use super::radiometry::Pixel;
 use super::{to_rgba, Info, Kind, Metered};
 
 /// Потолок памяти одного прохода: сам файл, f32-плоскости декодера, его
@@ -96,6 +97,10 @@ pub fn produce(
         ColorSpace::Gray | ColorSpace::RGB => {}
         // ICC-профиль не применяется — для превью числа берутся как есть.
         ColorSpace::Icc { .. } => {}
+        // Кодопоток без бокса цвета — обычный JP2, а не поломка: чем считать
+        // компоненты, там просто не сказано. Сколько их и сходятся ли они по
+        // длине, проверяется ниже по самим компонентам, а не по имени модели.
+        ColorSpace::Unknown { .. } => {}
         other => return Err(format!("jp2: цветовая модель {:?} не поддерживается", other)),
     }
 
@@ -135,7 +140,7 @@ pub fn produce(
     let samples = decoded.data_u8();
     drop(data);
 
-    let mut rgba = to_rgba(&samples, channels, (dw as usize) * (dh as usize));
+    let mut rgba = to_rgba(&samples, Pixel::named(channels), (dw as usize) * (dh as usize));
     drop(samples);
 
     // У файлов без собственной альфы поля гранулы приезжают нулём: у

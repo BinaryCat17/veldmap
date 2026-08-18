@@ -8,7 +8,27 @@ use crate::proto::data_provider::{
     SearchRequest, SearchResponse, SignRequest, SignedUrl, UtmFrame,
 };
 use aws_smithy_runtime_api::client::identity::Identity;
-use super::{catalogue, imagery, mgrs, s3, Asked, Config, Pending, State};
+use super::{catalogue, imagery, mgrs, s3, scene, Asked, Config, Pending, State};
+
+/// Сейчас, unix-секунды. Нужно одному — нижней границе окна поиска
+/// (см. `catalogue::FRESH_DAYS`).
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Спросить каталог и запомнить, чей это ход.
+fn ask(state: &mut State, correlation_id: String, url: String, what: Asked) {
+    let internal_id = state.pending_http.begin(Pending { correlation_id, what });
+    crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
+        url,
+        method: "GET".to_string(),
+        headers: Default::default(),
+        body: Vec::new(),
+    }, &internal_id);
+}
 
 pub fn module_init(config: Config) -> anyhow::Result<State> {
     let credentials = aws_credential_types::Credentials::new(
@@ -66,20 +86,10 @@ pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
 /// нужны только хранилищу. Ответ уходит заказчику эхом по correlation_id — как
 /// и у листинга, с которым поиск делит и путь через сеть, и топик ответа.
 pub fn on_search(state: &mut State, request: SearchRequest) {
-    let url = catalogue::search(&request);
-    let internal_id = state.pending_http.begin(Pending {
-        correlation_id: veldsdk::correlation(),
-        what: Asked::Search,
-    });
-
+    let floor = now() - catalogue::FRESH_DAYS * 24 * 60 * 60;
+    let url = catalogue::search(&request, floor);
     log::info!(target: "handlers", "Поиск в каталоге: {}", url);
-
-    crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
-        url,
-        method: "GET".to_string(),
-        headers: Default::default(),
-        body: Vec::new(),
-    }, &internal_id);
+    ask(state, veldsdk::correlation(), url, Asked::Search { request, widened: false });
 }
 
 /// Подписать адрес продукта — единственное, чего заказчик не может сам.
@@ -112,6 +122,24 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
         return;
     }
 
+    // Продукт-объект листать нечем: под его путём в хранилище нет ключей, и
+    // пустой листинг сказал бы «ничего нет» там, где на самом деле «это файл».
+    // Растром такой продукт бывает и сам — тогда он же и единственный растр.
+    if s3::is_single_object(&request.identifier) {
+        let response = match imagery::single(&request.identifier) {
+            Some((identifier, role)) => ImageryResponse {
+                rasters: vec![raster(identifier, role)],
+                ..Default::default()
+            },
+            None => ImageryResponse {
+                reason: imagery::just_a_file(&request.identifier),
+                ..Default::default()
+            },
+        };
+        crate::emit::on_imagery_result(&response, &veldsdk::correlation());
+        return;
+    }
+
     let path = format!("{}/", request.identifier.trim_end_matches('/'));
     let listing = s3::listing_deep(&state.identity, &path, "");
     let internal_id = state.pending_http.begin(Pending {
@@ -129,18 +157,31 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
     }, &internal_id);
 }
 
-/// Конец обхода поддерева: ключи → роли растров и рамка тайла из имени.
-fn imagery_response(identifier: &str, keys: &[String]) -> ImageryResponse {
-    let rasters = imagery::scan(keys)
-        .into_iter()
-        .map(|(identifier, role)| ImageryRaster {
-            identifier,
-            role: match role {
-                imagery::Role::Preview => ImageryRole::ImageryPreview,
-                imagery::Role::Detailed => ImageryRole::ImageryDetailed,
-            } as i32,
-        })
-        .collect::<Vec<_>>();
+/// Растр в том виде, в каком его понимает контракт: роль здесь и роль в
+/// `imagery` — два разных перечисления, и связаны они match'ем, а не
+/// совпадением чисел.
+fn raster(identifier: String, role: imagery::Role) -> ImageryRaster {
+    ImageryRaster {
+        identifier,
+        role: match role {
+            imagery::Role::Preview => ImageryRole::ImageryPreview,
+            imagery::Role::Detailed => ImageryRole::ImageryDetailed,
+        } as i32,
+    }
+}
+
+/// Конец обхода поддерева: роли растров, рамка тайла из имени и объяснение,
+/// если растров не нашлось.
+///
+/// `keys` — ключи самого продукта: ими объясняется пустой ответ, и ключи
+/// зеркала для этого не годятся — спрашивали не о нём.
+fn imagery_response(
+    identifier: &str,
+    keys: &[String],
+    found: Vec<(String, imagery::Role)>,
+) -> ImageryResponse {
+    let empty = found.is_empty();
+    let rasters = found.into_iter().map(|(key, role)| raster(key, role)).collect::<Vec<_>>();
 
     // Рамка — только когда её видно из имени (тайл Sentinel-2). Ошибка разбора
     // не валит ответ: без рамки потребитель живёт на футпринте каталога.
@@ -160,10 +201,14 @@ fn imagery_response(identifier: &str, keys: &[String]) -> ImageryResponse {
         }
     });
 
-    if rasters.is_empty() {
-        log::info!(target: "handlers", "У '{}' нет растров для наложения", name);
+    let reason = match empty {
+        true => imagery::nothing_here(identifier, keys),
+        false => String::new(),
+    };
+    if empty {
+        log::info!(target: "handlers", "У '{}' наложению нечего показать: {}", name, reason);
     }
-    ImageryResponse { rasters, utm, error: String::new() }
+    ImageryResponse { rasters, utm, error: String::new(), reason }
 }
 
 /// Продукт каталога по ключу хранилища. Подъём к корню — знание раскладки
@@ -204,19 +249,8 @@ pub fn on_locate(state: &mut State, request: LocateRequest) {
     let root = s3::product_root(trimmed).unwrap_or(trimmed);
     let name = root.rsplit('/').next().unwrap_or(root).to_string();
     let url = catalogue::locate(&name);
-    let internal_id = state.pending_http.begin(Pending {
-        correlation_id: veldsdk::correlation(),
-        what: Asked::Locate { name },
-    });
-
     log::info!(target: "handlers", "Продукт по имени: {}", url);
-
-    crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
-        url,
-        method: "GET".to_string(),
-        headers: Default::default(),
-        body: Vec::new(),
-    }, &internal_id);
+    ask(state, veldsdk::correlation(), url, Asked::Locate { name });
 }
 
 pub fn on_list_path(
@@ -269,13 +303,26 @@ pub fn on_http_result(
             let (entries, next_token, error) = match listing {
                 Ok(listing) => (
                     listing.entries.into_iter()
-                        .map(|entry| ListEntry {
-                            product: s3::product_root(&entry.identifier)
+                        .map(|entry| {
+                            let product = s3::product_root(&entry.identifier)
                                 .unwrap_or_default()
-                                .to_string(),
-                            key: entry.identifier,
-                            size: entry.size,
-                            modified: entry.modified,
+                                .to_string();
+                            // На шар кладут снимок; уровня обработки листинг не
+                            // знает — его сообщает только каталог.
+                            let itself = product == entry.identifier.trim_end_matches('/');
+                            let viewable = itself
+                                && imagery::showable(
+                                    &entry.identifier,
+                                    entry.identifier.ends_with('/'),
+                                    None,
+                                );
+                            ListEntry {
+                                product,
+                                key: entry.identifier,
+                                size: entry.size,
+                                modified: entry.modified,
+                                viewable,
+                            }
                         })
                         .collect(),
                     listing.next_token,
@@ -321,7 +368,7 @@ pub fn on_http_result(
                         return;
                     }
                     crate::emit::on_imagery_result(
-                        &imagery_response(&identifier, &keys),
+                        &imagery_response(&identifier, &keys, imagery::scan(&keys)),
                         &pending.correlation_id,
                     );
                 }
@@ -334,9 +381,9 @@ pub fn on_http_result(
                 }
             }
         }
-        Asked::Search => {
+        Asked::Search { request, widened } => {
             let found = if ok {
-                catalogue::parse(&response.body).map_err(|error| error.to_string())
+                catalogue::scenes(&response.body).map_err(|error| error.to_string())
             } else {
                 // Каталог объясняет отказ телом ответа, и объяснение полезнее
                 // кода: «негодный фильтр» и «нет такой коллекции» с виду
@@ -345,17 +392,38 @@ pub fn on_http_result(
                     .unwrap_or_else(|| format!("каталог ответил {}", response.status)))
             };
 
-            let (products, error) = match found {
-                Ok(products) => {
-                    log::info!(target: "handlers", "Найдено снимков: {}", products.len());
-                    (products, String::new())
-                }
+            let (found, error) = match found {
+                Ok(found) => (found, String::new()),
                 Err(error) => {
                     log::warn!(target: "handlers", "Поиск не удался: {}", error);
-                    (Vec::new(), error)
+                    (catalogue::Found { scenes: Vec::new(), products: 0 }, error)
                 }
             };
+            let catalogue::Found { scenes: mut products, products: raw } = found;
 
+            // Окно свежести кончилось, а страница не набралась — значит границу
+            // поставили мы, и снять её должны тоже мы. Кончилось оно тогда,
+            // когда каталог отдал меньше продуктов, чем спрошено: полная
+            // страница продуктов при короткой странице снимков означает не
+            // пустое окно, а сведение — там есть ещё, надо просто листать
+            // дальше. Второй раз окно уже не ставится: медленный ответ
+            // каталога здесь оплачен делом (см. `catalogue::FRESH_DAYS`).
+            let want = catalogue::wanted(&request) as usize;
+            let drained = raw < catalogue::asked(&request) as usize;
+            if error.is_empty() && !widened && drained && products.len() < want && request.from <= 0
+            {
+                let url = catalogue::search(&request, 0);
+                log::info!(target: "handlers",
+                    "В свежем окне всего {} продуктов — ищем за всё время", raw);
+                ask(state, pending.correlation_id, url, Asked::Search { request, widened: true });
+                return;
+            }
+
+            products.truncate(want);
+            if error.is_empty() {
+                log::info!(target: "handlers",
+                    "Найдено снимков: {} (продуктов в ответе каталога: {})", products.len(), raw);
+            }
             crate::emit::on_search_result(&SearchResponse { products, error }, &pending.correlation_id);
         }
         Asked::Locate { name } => {
@@ -366,26 +434,71 @@ pub fn on_http_result(
                     .unwrap_or_else(|| format!("каталог ответил {}", response.status)))
             };
 
-            let response = match found.map(|products| products.into_iter().next()) {
-                Ok(Some(product)) => LocateResponse {
-                    product: Some(product),
-                    error: String::new(),
-                    answered: true,
-                },
-                // Пустой ответ — тоже ответ: ключ не из каталога (климатика,
-                // вспомогательные данные) либо продукт из него уже ушёл.
-                Ok(None) => LocateResponse {
-                    product: None,
-                    error: format!("в каталоге нет продукта с именем '{}'", name),
-                    answered: true,
-                },
+            let found = match found {
+                Ok(found) => found,
                 // А это не ответ вовсе — спросить не вышло.
                 Err(error) => {
                     log::warn!(target: "handlers", "Продукт '{}' не нашёлся: {}", name, error);
-                    LocateResponse { product: None, error, answered: false }
+                    crate::emit::on_locate_result(
+                        &LocateResponse { product: None, error, answered: false },
+                        &pending.correlation_id,
+                    );
+                    return;
                 }
             };
-            crate::emit::on_locate_result(&response, &pending.correlation_id);
+
+            let Some((facts, product)) = found.into_iter().next() else {
+                // Пустой ответ — тоже ответ: ключ не из каталога (климатика,
+                // вспомогательные данные) либо продукт из него уже ушёл.
+                crate::emit::on_locate_result(&LocateResponse {
+                    product: None,
+                    error: format!("в каталоге нет продукта с именем '{}'", name),
+                    answered: true,
+                }, &pending.correlation_id);
+                return;
+            };
+
+            // Спросили об одной части, а показывать надо снимок — то есть ту из
+            // частей, которая для этого годится. Соседей каталог знает, и это
+            // ещё один ход к нему, а не ответ.
+            match scene::acquisition(&facts) {
+                Some(key) => {
+                    let url = catalogue::siblings(&facts.platform, product.acquired);
+                    ask(state, pending.correlation_id, url, Asked::Siblings { key, found: product });
+                }
+                None => crate::emit::on_locate_result(&LocateResponse {
+                    product: Some(product),
+                    error: String::new(),
+                    answered: true,
+                }, &pending.correlation_id),
+            }
+        }
+        Asked::Siblings { key, found } => {
+            // Соседние части — добавка, а не ответ: не нашлись или не
+            // спросились — заказчик получает найденное как есть. Отказывать
+            // из-за соседей значило бы потерять и сам продукт.
+            let others = match ok {
+                true => catalogue::parse(&response.body).unwrap_or_default(),
+                false => Vec::new(),
+            };
+            let same: Vec<_> = others
+                .into_iter()
+                .filter(|(facts, _)| scene::acquisition(facts).as_deref() == Some(key.as_str()))
+                .collect();
+            let product = match scene::about(same, &found.identifier) {
+                Some(scene) => {
+                    if scene.identifier != found.identifier {
+                        log::info!(target: "handlers", "'{}' показывается частью '{}'", found.name, scene.name);
+                    }
+                    scene
+                }
+                None => found,
+            };
+            crate::emit::on_locate_result(&LocateResponse {
+                product: Some(product),
+                error: String::new(),
+                answered: true,
+            }, &pending.correlation_id);
         }
     }
 }

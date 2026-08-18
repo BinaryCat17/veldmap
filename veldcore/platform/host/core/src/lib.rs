@@ -33,6 +33,26 @@ pub use veldmap_host_bindings::proto::{app, core};
 /// которого те обязаны отказать сами.
 pub const INSTANCE_MEMORY_LIMIT: u64 = 1024 * 1024 * 1024;
 
+/// Хост гасится: рантайм вот-вот разберут.
+///
+/// Флаг нужен долгожителям на blocking-пуле, и прежде всего оконному чтению
+/// удалённого ресурса. Оно синхронно для гостя — вызов ABI памяти, а не задача,
+/// — и отменить его снаружи нечем: система задач до этого слоя не достаёт.
+/// Поэтому спрашивает оно само, и ответ у него один: в сеть больше не ходить.
+/// Таймеры рантайма разбирают первыми, и запрос, начатый после начала гашения,
+/// паникует внутри реквеста, — а результата такого чтения всё равно уже никто
+/// не ждёт.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Объявить гашение. Зовёт раннер — раньше, чем роняет рантайм.
+pub fn begin_shutdown() {
+    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn shutting_down() -> bool {
+    SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct CallContextInner {
     pub input: Vec<u8>,
     pub output: Vec<u8>,
@@ -55,7 +75,6 @@ pub struct HostState {
     pub tasks: Arc<crate::tasks::TaskRegistry>,
     pub plugin_name: String,
     pub instance_id: u32,
-    pub config: std::collections::HashMap<String, serde_json::Value>,
     pub call_context: Option<CallContext>,
     pub wasi: wasmtime_wasi::p1::WasiP1Ctx,
     pub resource_limiter: wasmtime::StoreLimits,

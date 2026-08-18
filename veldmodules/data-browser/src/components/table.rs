@@ -507,11 +507,23 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
         vec![line.width(Length::Fill).height(Length::Fixed(height)).into()];
     match (row_data.globe.any(), onto_globe) {
         (true, Some(share)) => lines.push(
-            progress_bar::<Msg>(0.0..=1.0, share)
-                .style(theme::progress(theme::ACCENT))
-                .width(Length::Fill)
-                .height(Length::Fixed(ONTO_GLOBE))
-                .into(),
+            // Подпись у полосы своя, а не только у значка в правом краю строки:
+            // смотрят-то на полосу, и без подписи она — доля неизвестно чего.
+            tooltip(
+                progress_bar::<Msg>(0.0..=1.0, share)
+                    .style(theme::progress(theme::ACCENT))
+                    .width(Length::Fill)
+                    .height(Length::Fixed(ONTO_GLOBE)),
+                match row_data.globe.said() {
+                    Some(said) => format!("Набирается пирамида — {}", said),
+                    None => "Кладётся на глобус".to_string(),
+                },
+                TooltipPosition::TooltipTop,
+            )
+            .style(theme::panel())
+            .text_size(theme::TEXT_SMALL)
+            .padding(6.0)
+            .into(),
         ),
         // Добыча кончилась, а место остаётся за ней: пустым, чтобы строка не
         // дрогнула. Что снимок на шаре, говорит зажжённый значок.
@@ -779,7 +791,10 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
             Msg::In(view, ViewMsg::PreviewProduct(key.clone())),
         ));
     }
-    if row.is_snapshot() && !key.is_empty() {
+    // `viewable` — не «покажется наверняка», а «есть смысл предлагать»
+    // (см. `Row::viewable`): значок над сырьём уровня 0 или над архивом обещает
+    // то, чего не бывает.
+    if row.is_snapshot() && row.viewable && !key.is_empty() {
         // Значок горит, когда снимок лежит на шаре растром, — и это
         // единственное, по чему в списке видно, что именно там лежит. Подпись
         // при этом называет то, что случится по нажатию, а не то, что есть:
@@ -794,9 +809,14 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
                 (theme::IconTone::Lit, "На шаре — навести и выделить")
             }
         };
+        // Полосу под строкой рисует ход добычи, и объяснить её больше негде:
+        // подписи у полосы нет, а без неё она — доля неизвестно чего.
+        let hint = match row.globe.said() {
+            Some(said) => format!("{} · {}", hint, said),
+            None => hint.to_string(),
+        };
         quick.push(
-            Quick::new(theme::glyph::GLOBE, hint.to_string(), Msg::In(view, ViewMsg::GlobeShow(key)))
-                .tone(tone),
+            Quick::new(theme::glyph::GLOBE, hint, Msg::In(view, ViewMsg::GlobeShow(key))).tone(tone),
         );
     }
     quick

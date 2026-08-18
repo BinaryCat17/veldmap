@@ -32,8 +32,12 @@ pub async fn init_wgpu<'a>(
     window_width: u32,
     window_height: u32,
 ) -> anyhow::Result<(wgpu::Adapter, Arc<wgpu::Device>, Arc<Mutex<wgpu::Queue>>, wgpu::SurfaceConfiguration, wgpu::TextureFormat)> {
-    log::info!(target: "render", "Enumerating Vulkan adapters...");
-    let adapters = instance.enumerate_adapters(wgpu::Backends::VULKAN).await;
+    // Все основные бэкенды, а не один Vulkan: под Windows аппаратный адаптер
+    // приходит через DX12, под macOS — через Metal, и перебор одного лишь
+    // Vulkan не нашёл бы там ничего вовсе. Тогда сработал бы запасной путь ниже,
+    // и единственным режимом на этих платформах стал бы программный растеризатор.
+    log::info!(target: "render", "Перебор графических адаптеров...");
+    let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
     for (i, adapter) in adapters.iter().enumerate() {
         let info = adapter.get_info();
         log::info!(target: "render", "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 

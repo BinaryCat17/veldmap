@@ -423,6 +423,16 @@ impl ApplicationHandler for App<'_> {
         }
     }
 
+    /// Цикл событий закрывается — рантайм сейчас разберут.
+    ///
+    /// Объявляется это здесь, в самый ранний момент, какой есть: на
+    /// blocking-пуле может доживать оконное чтение удалённого ресурса, отменить
+    /// которое нечем — оно живёт под синхронным ABI памяти, а не под задачей, —
+    /// и в сеть ему теперь нельзя (см. `veldmap_host_core::shutting_down`).
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        veldmap_host_core::begin_shutdown();
+    }
+
     /// Сценарий дошёл до `exit` — закрываемся здесь, между кадрами.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.running.as_ref().is_some_and(|r| r.exit_requested) {

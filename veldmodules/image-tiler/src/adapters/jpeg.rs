@@ -10,6 +10,7 @@ use std::io::Read;
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid;
 use super::super::resample::resample;
+use super::radiometry::Pixel;
 use super::{to_rgba, Info, Kind, FULL_DECODE_BUDGET};
 
 pub fn describe<R: Read>(reader: R) -> Result<Info, String> {
@@ -39,12 +40,12 @@ pub fn produce<R: Read>(reader: R, info: &Info, level: u32, emit: Emit) -> Resul
     }
 
     let rgba = match dinfo.pixel_format {
-        jpeg_decoder::PixelFormat::L8 => to_rgba(&pixels, 1, (dw as usize) * (dh as usize)),
-        jpeg_decoder::PixelFormat::RGB24 => to_rgba(&pixels, 3, (dw as usize) * (dh as usize)),
+        jpeg_decoder::PixelFormat::L8 => to_rgba(&pixels, Pixel::named(1), (dw as usize) * (dh as usize)),
+        jpeg_decoder::PixelFormat::RGB24 => to_rgba(&pixels, Pixel::named(3), (dw as usize) * (dh as usize)),
         // 16 бит на канал: старший байт, как у остальных форматов.
         jpeg_decoder::PixelFormat::L16 => {
             let bytes: Vec<u8> = pixels.chunks_exact(2).map(|p| p[1]).collect();
-            to_rgba(&bytes, 1, (dw as usize) * (dh as usize))
+            to_rgba(&bytes, Pixel::named(1), (dw as usize) * (dh as usize))
         }
         other => return Err(format!("jpeg: формат пикселей {:?} не поддерживается", other)),
     };

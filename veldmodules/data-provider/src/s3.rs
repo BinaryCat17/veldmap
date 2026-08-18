@@ -88,10 +88,17 @@ fn identifier(key: &str) -> String {
 /// «перейти» в такой продукт показывает пустую папку и «вверх», а не 404.
 pub fn is_single_object(identifier: &str) -> bool {
     let name = identifier.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    // Растр — тоже один объект, и список его расширений живёт у наложения:
+    // разойдись эти два перечисления, и продукт-файл `…/tile.TIF` считался бы
+    // папкой, листался бы префиксом и отвечал «в хранилище нет ни одного
+    // файла» — при том что значок показа над ним уже нарисован.
+    if super::imagery::is_raster(name) {
+        return true;
+    }
     let Some((_, suffix)) = name.rsplit_once('.') else { return false };
     matches!(
         suffix.to_ascii_lowercase().as_str(),
-        "tgz" | "zip" | "tar" | "gz" | "nc" | "n1" | "e1" | "e2" | "hdf" | "h5" | "dbl"
+        "tgz" | "zip" | "tar" | "gz" | "n1" | "e1" | "e2" | "hdf" | "dbl"
     )
 }
 

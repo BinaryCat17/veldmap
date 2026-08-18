@@ -183,6 +183,7 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
 
     view.fetch.reset();
     view.error = None;
+    view.trouble = None;
     view.read_bytes = 0;
     view.total_bytes = resource.size;
     view.camera = None;
@@ -317,9 +318,12 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         return;
     }
 
+    // Кэш отказал — но снимок от этого не портится: ожидания снимаются, и
+    // ячейки спросятся заново следующим пересчётом. Показывать причину вместо
+    // кадра значило бы стереть картинку из-за осечки, которая пройдёт сама.
     if !msg.error.is_empty() {
         view.fetch.forget_asked(&ctx.cells);
-        view.error = Some(msg.error);
+        view.trouble = Some(msg.error);
         report(state, &ctx.view);
         return;
     }
@@ -406,11 +410,22 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
         let ours = view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
         let failed = ours && !msg.error.is_empty();
         view.fetch.produced(if ours { &ctx.cells } else { &[] }, failed);
+        if ours {
+            // Прочитанное — про кончившийся проход, и пережить его оно не
+            // вправе: между ступенями не читается ничего, а полоса состояния
+            // всё это время показывала бы «читается… 512 МБ из 512 МБ».
+            (view.read_bytes, view.total_bytes) = (0, 0);
+        }
         if failed {
             // Не переспрашивать то, что уже не произвелось: каждый сдвиг камеры
             // долбил бы производителя тем же отказом.
+            //
+            // Но и смотреть при этом есть на что: сорвавшийся проход — это
+            // недоехавшие ячейки одной ступени, а не негодный снимок. Ступени
+            // выше уже нарисованы, и заменить их причиной значило бы стереть
+            // готовую картинку из-за одного оборванного чтения.
             veldsdk::log::warn!(target: "handlers", "{}: производство: {}", view.label, msg.error);
-            view.error = Some(msg.error);
+            view.trouble = Some(msg.error);
         }
     }
 
@@ -574,7 +589,10 @@ fn accept_tile(
         && view.meta().is_some_and(|meta| meta.fingerprint == fingerprint)
     {
         match landed {
-            true => view.fetch.arrived(addr),
+            true => {
+                view.fetch.arrived(addr);
+                view.landed();
+            }
             false => view.fetch.rejected(addr),
         }
     }
@@ -600,6 +618,7 @@ fn report(state: &State, key: &str) {
         total_bytes: view.total_bytes,
         busy: view.busy(&state.passes, want.as_ref()),
         error: view.error.clone().unwrap_or_default(),
+        trouble: view.trouble.clone().unwrap_or_default(),
     };
     crate::emit::on_view_state(&current);
 }

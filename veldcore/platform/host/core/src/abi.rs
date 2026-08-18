@@ -55,24 +55,6 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
 
     // ── System ────────────────────────────────────────────────
 
-    // veld_get_config(key_ptr, key_len) → (len << 32 | ptr), 0 если ключа нет.
-    // Конфиг инжектирован загрузчиком плагинов прямо в HostState.
-    linker.func_wrap_async("env", "veld_get_config", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
-        Box::new(async move {
-            let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(0u64) };
-            let key = match mem.data(&caller).get(ptr as usize..(ptr + len) as usize)
-                .and_then(|s| std::str::from_utf8(s).ok()) {
-                Some(k) => k.to_string(),
-                None => return Ok(0u64),
-            };
-            let value = match caller.data().config.get(&key) {
-                Some(v) => v.as_str().map(|s| s.to_string()).unwrap_or_else(|| v.to_string()),
-                None => return Ok(0u64),
-            };
-            write_response_back(&mut caller, value.as_bytes()).await
-        })
-    })?;
-
     // veld_random_bytes(ptr, len) — хостовая энтропия: у wasm нет своего
     // источника случайности (uuid и пр. собираются на стороне SDK).
     linker.func_wrap("env", "veld_random_bytes", |mut caller: Caller<'_, HostState>, ptr: u64, len: u64| {

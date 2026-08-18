@@ -46,6 +46,11 @@ pub fn on_expand(state: &mut State, view: ViewId, key: String) {
     if !listing.expand(key.clone()) {
         return;
     }
+    // Упаковки снимка приехали вместе с ответом каталога, и путём в хранилище
+    // их ключ не является (см. `row::scene_key`) — листать по нему нечего.
+    if crate::module::components::row::is_scene_key(&key) {
+        return;
+    }
     super::browse::request_children(state, view, key);
 }
 

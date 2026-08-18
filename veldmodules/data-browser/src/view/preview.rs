@@ -1,9 +1,15 @@
 //! view/preview.rs — вид предпросмотра снимка.
 //!
 //! Сам кадр рисует канва (image-view) в делегированную ей текстуру; здесь —
-//! место под неё, тулбар с масштабом и панель свойств. Правда о показе
-//! (размеры источника, масштаб, ход производства) приходит рассылкой канвы и
-//! лежит в `PreviewState::view_state` — своей копии этой правды у нас нет.
+//! место под неё, тулбар с масштабом и полоса свойств под кадром. Правда о
+//! показе (размеры источника, масштаб, ход производства) приходит рассылкой
+//! канвы и лежит в `PreviewState::view_state` — своей копии этой правды у нас
+//! нет.
+//!
+//! Свойства идут полосой, а не колонкой сбоку: сказать о снимке можно четыре
+//! вещи, и колонка под них отнимала бы у кадра треть ширины ради четырёх строк.
+//! Полоса — та же, что под глобусом (`theme::chrome_bar`): вид, у которого всё
+//! содержимое рисует чужой модуль, обрамляется одинаково.
 //!
 //! Выход отсюда — закрытие вкладки, поэтому своей кнопки «назад» нет: она
 //! знала бы, куда возвращаться, только назвав другой вид по имени, а
@@ -11,19 +17,19 @@
 
 use veld_ui_service_wrap::{column, row, viewport};
 use crate::proto::ui_service::{
-    container, mono, text, Alignment, Element, FontWeight, Length, Padding,
+    container, mono, text, Alignment, Element, Length, Padding,
 };
 use crate::module::components::format;
 use crate::module::state::{PreviewState, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
 
-/// Ширина панели свойств. Фиксирована: колонка значений не должна ездить от
-/// длины имени файла.
-const PANEL_WIDTH: f32 = 290.0;
+/// Сколько места оставить имени в тулбаре: всё, кроме кнопок масштаба.
+const CONTROLS_WIDTH: f32 = 230.0;
 
 pub fn view(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     // Отказ вытесняет канву: показывать поверх мёртвого кадра нечего, а
-    // причина отказа — единственное, что тут можно сообщить.
+    // причина отказа — единственное, что тут можно сообщить. Неполный кадр
+    // сюда не относится — он живой, и говорит о себе полоса внизу.
     let body: Element<Msg> = match preview.failure() {
         Some(error) => container(text::<Msg>(error.to_string()).size(theme::TEXT_BODY).color(theme::INK_DIM))
             .width(Length::Fill)
@@ -35,14 +41,11 @@ pub fn view(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg>
         None => canvas(view, preview),
     };
 
-    row![
-        column![
-            toolbar(state, view, preview),
-            theme::hairline(theme::LINE_SOFT),
-            container(body).background(theme::CHROME).width(Length::Fill).height(Length::Fill),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill),
+    column![
+        toolbar(state, view, preview),
+        theme::hairline(theme::LINE_SOFT),
+        container(body).background(theme::CHROME).width(Length::Fill).height(Length::Fill),
+        theme::hairline(theme::LINE),
         properties(state, preview),
     ]
     .width(Length::Fill)
@@ -65,21 +68,15 @@ fn canvas(view: ViewId, preview: &PreviewState) -> Element<Msg> {
     container(area).width(Length::Fill).height(Length::Fill).into()
 }
 
-/// Имя снимка, ход показа и масштаб.
+/// Имя снимка и масштаб. Ход показа сюда не входит: он не про снимок, а про
+/// то, что с ним сейчас происходит, и место ему в полосе состояния внизу.
 fn toolbar(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     let name = mono::<Msg>(format::ellipsize(
         &preview.label,
-        format::mono_fit(state.pane_width(view) - PANEL_WIDTH - 230.0, theme::TEXT_LABEL),
+        format::mono_fit(state.pane_width(view) - CONTROLS_WIDTH, theme::TEXT_LABEL),
     ))
     .size(theme::TEXT_LABEL)
     .color(theme::INK);
-
-    // Ход показа — рядом с именем: канва рисует тайлы по мере готовности, и
-    // «читается…» здесь объясняет, почему часть кадра ещё пуста.
-    let status: Element<Msg> = match progress_line(preview) {
-        Some(line) => text::<Msg>(line).size(theme::TEXT_SMALL).color(theme::INK_DIM).single_line().into(),
-        None => theme::nothing(),
-    };
 
     let step = |label: &str, direction: f32| {
         theme::surface_button(text::<Msg>(label.to_string()).size(theme::TEXT_LABEL).single_line(), false)
@@ -107,7 +104,6 @@ fn toolbar(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> 
 
     row![
         container(name).width(Length::Fill),
-        status,
         step("−", -1.0),
         current,
         step("+", 1.0),
@@ -119,12 +115,22 @@ fn toolbar(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> 
     .into()
 }
 
-/// Строка хода показа. `None` — показывать нечего: канва не занята.
+/// Строка хода показа. `None` — показывать нечего: канва не занята и ни на что
+/// не жалуется.
+///
+/// Жалоба старше хода: «читается…» рядом с недоехавшей ступенью говорило бы,
+/// что всё идёт своим чередом, — а оно как раз не идёт.
 fn progress_line(preview: &PreviewState) -> Option<String> {
     if preview.request.is_pending() {
         return Some("открывается…".to_string());
     }
     let view = preview.view_state.as_ref()?;
+    // Причина — от канвы, а сколько её показать, решаем мы: в полосе она
+    // соседствует со свойствами и, не будучи укорочена, вытолкнула бы их.
+    // Целиком она всегда в логе.
+    if !view.trouble.is_empty() {
+        return Some(format!("неполно — {}", format::ellipsize(&view.trouble, 60)));
+    }
     if !view.busy {
         return None;
     }
@@ -138,61 +144,57 @@ fn progress_line(preview: &PreviewState) -> Option<String> {
     Some("готовится…".to_string())
 }
 
-/// Свойства снимка: то, что о нём известно, не читая его здесь. Размеры — от
-/// канвы (описал тайлер); размер и время на диске — из библиотеки, и только у
-/// скачанного: за удалённым записи нет.
+/// Полоса под кадром: чем снимок является слева, что с ним сейчас происходит
+/// справа.
+///
+/// Размеры — от канвы (описал тайлер); размер и время на диске — из библиотеки,
+/// и только у скачанного: за удалённым записи нет. Ничего из этого не
+/// вычисляется здесь — полоса только называет.
 fn properties(state: &State, preview: &PreviewState) -> Element<Msg> {
     let entry = preview.entry.as_ref().and_then(|name| {
         state.library.entries.iter().find(|entry| &entry.name == name)
     });
 
-    let mut lines: Vec<Element<Msg>> = vec![
-        text::<Msg>("Свойства снимка".to_string())
-            .size(theme::TEXT_LABEL)
-            .color(theme::INK_DIM)
-            .weight(FontWeight::WeightBold)
-            .single_line()
-            .into(),
-    ];
-
+    let mut facts: Vec<String> = Vec::new();
     if let Some(view) = &preview.view_state {
         if view.source_width > 0 {
-            lines.push(property("разрешение", format!("{} × {}", view.source_width, view.source_height)));
+            facts.push(format!("{} × {}", view.source_width, view.source_height));
         }
         if view.scale > 0.0 {
-            lines.push(property("масштаб", format!("{:.0}%", view.scale * 100.0)));
+            facts.push(format!("{:.0}%", view.scale * 100.0));
         }
     }
     if let Some(entry) = entry {
         if entry.done > 0 {
-            lines.push(property("размер", format::bytes(entry.done)));
+            facts.push(format::bytes(entry.done));
         }
         if entry.modified > 0 {
-            lines.push(property("скачан", format::date(entry.modified, format::now())));
+            facts.push(format!("скачан {}", format::date(entry.modified, format::now())));
         }
     }
 
-    container(column(lines).spacing(8.0).width(Length::Fill))
-        .background(theme::SHELF)
-        .width(Length::Fixed(PANEL_WIDTH))
-        .height(Length::Fill)
-        .padding(Padding::new(theme::GUTTER))
-        .into()
-}
+    let mut parts: Vec<Element<Msg>> = vec![
+        mono::<Msg>(facts.join("   ·   "))
+            .size(theme::TEXT_SMALL)
+            .color(theme::INK_SOFT)
+            .single_line()
+            .into(),
+        theme::spacer().into(),
+    ];
+    // Ход показа — справа, у края: он меняется на глазах, и рядом со свойствами
+    // дёргал бы их с места.
+    if let Some(line) = progress_line(preview) {
+        parts.push(
+            text::<Msg>(line).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line().into(),
+        );
+    }
 
-fn property(name: &str, value: String) -> Element<Msg> {
-    column![
-        row![
-            text::<Msg>(name.to_string()).size(theme::TEXT_BODY).color(theme::INK_DIM).single_line(),
-            container(mono::<Msg>(value).size(theme::TEXT_SMALL).color(theme::INK))
-                .width(Length::Fill)
-                .align_x(Alignment::End),
-        ]
-        .width(Length::Fill)
-        .padding(Padding { top: 6.0, bottom: 6.0, left: 0.0, right: 0.0 })
-        .align_items(Alignment::Center),
-        theme::hairline(theme::LINE_SOFT),
-    ]
-    .width(Length::Fill)
+    theme::chrome_bar(
+        row(parts)
+            .spacing(crate::module::view::BAR_SPACING)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_items(Alignment::Center),
+    )
     .into()
 }

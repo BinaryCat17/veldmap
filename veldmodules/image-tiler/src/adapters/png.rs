@@ -5,6 +5,7 @@
 use std::io::{BufRead, Seek};
 
 use super::super::cascade::{Cascade, Emit};
+use super::radiometry::Pixel;
 use super::{to_rgba, Info, Kind, FULL_DECODE_BUDGET};
 
 pub fn describe<R: BufRead + Seek>(reader: R) -> Result<Info, String> {
@@ -46,14 +47,14 @@ pub fn produce_pass<R: BufRead + Seek>(reader: R, info: &Info, emit: Emit) -> Re
         let mut buf = vec![0u8; size];
         let out = reader.next_frame(&mut buf).map_err(|e| format!("png: {}", e))?;
         let channels = usize::from(out.color_type.samples());
-        let rgba = to_rgba(&buf, channels, (w as usize) * (h as usize));
+        let rgba = to_rgba(&buf, Pixel::named(channels), (w as usize) * (h as usize));
         cascade.push_rows(&rgba, h, emit)?;
         return cascade.finish(emit);
     }
 
     let channels = usize::from(reader.output_color_type().0.samples());
     while let Some(row) = reader.next_row().map_err(|e| format!("png: {}", e))? {
-        let rgba = to_rgba(row.data(), channels, w as usize);
+        let rgba = to_rgba(row.data(), Pixel::named(channels), w as usize);
         cascade.push_rows(&rgba, 1, emit)?;
     }
     cascade.finish(emit)

@@ -17,9 +17,9 @@ pub use crate::proto::graphics as proto;
 
 pub use proto::{
     TextureFormat, VertexFormat, IndexFormat, FilterMode, StepMode,
-    PrimitiveTopology, BlendFactor, BlendOperation, FrontFace, CullMode,
+    PrimitiveTopology, FrontFace, CullMode,
     BufferBindingType, SamplerBindingType, TextureSampleType, TextureViewDimension,
-    CompareFunction, VertexAttribute, VertexBufferLayout, BlendComponent, BlendState,
+    CompareFunction, VertexAttribute, VertexBufferLayout,
     BindGroupLayoutEntry, BindGroupEntry, CreateRenderPipeline, DepthStencilState,
 };
 

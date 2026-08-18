@@ -45,6 +45,10 @@ pub use resource::{opened, opened_handle};
 // для читателя диск и сеть — один и тот же ресурс.
 pub use veldmap_host_core::memory::RangeSource;
 
+// Носитель, который ходит в сеть, обязан знать, что хост гасится: отменить его
+// снаружи нечем — он живёт под синхронным ABI, а не под задачей.
+pub use veldmap_host_core::shutting_down;
+
 // ── Протокол ────────────────────────────────────────────────────────────────
 // Protobuf-типы шины (veldmap.core): запросы/ответы/события.
 pub use veldmap_host_core::core;

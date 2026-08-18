@@ -22,7 +22,6 @@ struct PluginSpec {
     ctx: Arc<crate::setup::HostContext>,
     instance_id: u32,
     name: String,
-    config: std::collections::HashMap<String, serde_json::Value>,
     init_input: Vec<u8>,
 }
 
@@ -42,7 +41,6 @@ impl PluginSpec {
             tasks: self.ctx.tasks.clone(),
             plugin_name: self.name.clone(),
             instance_id: self.instance_id,
-            config: self.config.clone(),
             call_context: None,
             wasi: WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build_p1(),
             resource_limiter: StoreLimitsBuilder::new()
@@ -261,7 +259,6 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             ctx: ctx.clone(),
             instance_id,
             name: String::new(),
-            config: std::collections::HashMap::new(),
             init_input: Vec::new(),
         };
 
@@ -303,11 +300,6 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             }
         };
 
-        // Для veld_get_config — разобранные ключи конфига модуля, как они
-        // лежат в <name>.json. Служебных инъекций здесь нет: конфиг целиком
-        // едет в init входом вызова, а имя модуль знает сам (SERVICE_NAME).
-        let config_map = ctx.config.plugin_configs.get(&name).cloned().unwrap_or_default();
-
         // Конфиг модуля едет в init одним JSON, как он записан в файле.
         // Инъектируемых хостом ключей здесь нет: всё, что модуль узнаёт от
         // платформы, приезжает ему топиком — а значит адресно, вовремя и
@@ -317,7 +309,6 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             .unwrap_or_default();
 
         spec.name = name.clone();
-        spec.config = config_map;
         spec.init_input = serde_json::to_vec(&serde_json::Value::Object(init_config))?;
 
         // Подписки спрашиваем у пробного инстанса: они свойство бинарника, а

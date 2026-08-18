@@ -55,6 +55,53 @@ impl Samples<'_> {
     }
 }
 
+/// Как читать сэмплы одного пикселя.
+///
+/// Числа сэмплов для этого мало, и разница не тонкая. Два сэмпла у названной
+/// цветовой модели — это серый с альфой, а два сэмпла у стопки измеренных
+/// величин — две величины, и вторая из них не прозрачность: прочитанная альфой,
+/// она погасила бы половину снимка. Поэтому решает не счёт, а то, чем файл себя
+/// назвал.
+#[derive(Clone, Copy)]
+pub struct Pixel {
+    /// Сколько сэмплов приходится на пиксель — шаг по массиву.
+    pub channels: usize,
+    /// Сколько первых из них составляют цвет.
+    colors: usize,
+    /// Последний сэмпл — прозрачность.
+    alpha: bool,
+}
+
+impl Pixel {
+    /// Модель, названная файлом: серый, серый с альфой, RGB, RGBA.
+    pub fn named(channels: usize) -> Self {
+        Self {
+            channels,
+            colors: match channels {
+                1 | 2 => 1,
+                _ => 3,
+            },
+            alpha: matches!(channels, 2 | 4),
+        }
+    }
+
+    /// Стопка измеренных величин без цветовой интерпретации — так GDAL пишет
+    /// всё, что не три и не четыре канала цвета. Показывается первая: какая из
+    /// них изображение, файл не говорит, а сложить их в цвет значило бы выдать
+    /// догадку за снятое.
+    pub fn stack(channels: usize) -> Self {
+        Self { channels, colors: 1, alpha: false }
+    }
+
+    pub fn colors(&self) -> usize {
+        self.colors
+    }
+
+    pub fn has_alpha(&self) -> bool {
+        self.alpha
+    }
+}
+
 /// Маппинг показа одного файла. Строится один раз на файл (см. tiff.rs) и
 /// применяется ко всем его чанкам — иначе соседние тайлы растянулись бы
 /// каждый по-своему и разошлись швами.
@@ -75,22 +122,17 @@ impl Mapping {
         Self { stretch: Some((lo, hi)), nodata }
     }
 
-    /// Развёртка сэмплов в RGBA8: 1 канал — серый, 2 — серый с альфой,
-    /// 3 — RGB, 4 — как есть; хвост за пределами `pixels` отбрасывается.
-    pub fn rgba(&self, samples: &Samples<'_>, channels: usize, pixels: usize) -> Vec<u8> {
+    /// Развёртка сэмплов в RGBA8 по раскладке пикселя (см. [`Pixel`]); хвост за
+    /// пределами `pixels` отбрасывается.
+    pub fn rgba(&self, samples: &Samples<'_>, pixel: Pixel, pixels: usize) -> Vec<u8> {
         // Байты без растяга и ключевания — готовый путь без пересчёта.
         if let (Samples::U8(v), None, None) = (samples, self.stretch, self.nodata) {
-            return super::to_rgba(v, channels, pixels);
+            return super::to_rgba(v, pixel, pixels);
         }
 
         let (lo, hi) = self.stretch.unwrap_or((0.0, 255.0));
         let scale = 255.0 / (hi - lo);
-        // Цветовых каналов у «серого с альфой» один — альфа не цвет.
-        let colors = match channels {
-            1 | 2 => 1,
-            _ => 3,
-        };
-        let has_alpha = matches!(channels, 2 | 4);
+        let Pixel { channels, colors, alpha: has_alpha } = pixel;
 
         let count = pixels.min(samples.len() / channels);
         let mut rgba = Vec::with_capacity(count * 4);
@@ -146,8 +188,8 @@ mod tests {
         let mapping = Mapping::identity(None);
         let bytes = [7u8, 9, 200];
         assert_eq!(
-            mapping.rgba(&Samples::U8(&bytes), 1, 3),
-            super::super::to_rgba(&bytes, 1, 3)
+            mapping.rgba(&Samples::U8(&bytes), Pixel::named(1), 3),
+            super::super::to_rgba(&bytes, Pixel::named(1), 3)
         );
     }
 
@@ -155,7 +197,7 @@ mod tests {
     fn nodata_pixel_turns_transparent_black() {
         // Серый u8 с nodata 7: первый пиксель — поле, второй — данные.
         let mapping = Mapping::identity(Some(7.0));
-        let out = mapping.rgba(&Samples::U8(&[7, 9]), 1, 2);
+        let out = mapping.rgba(&Samples::U8(&[7, 9]), Pixel::named(1), 2);
         assert_eq!(out, vec![0, 0, 0, 0, 9, 9, 9, 255]);
     }
 
@@ -163,7 +205,7 @@ mod tests {
     fn nodata_keys_only_when_every_colour_matches() {
         // RGB: (0,0,0) — поле, (0,0,1) — законный почти-чёрный.
         let mapping = Mapping::stretched(0.0, 255.0, Some(0.0));
-        let out = mapping.rgba(&Samples::U8(&[0, 0, 0, 0, 0, 1]), 3, 2);
+        let out = mapping.rgba(&Samples::U8(&[0, 0, 0, 0, 0, 1]), Pixel::named(3), 2);
         assert_eq!(&out[..4], &[0, 0, 0, 0]);
         assert_eq!(&out[4..], &[0, 0, 1, 255]);
     }
@@ -171,7 +213,7 @@ mod tests {
     #[test]
     fn stretch_maps_range_and_clamps_edges() {
         let mapping = Mapping::stretched(100.0, 355.0, None);
-        let out = mapping.rgba(&Samples::U16(&[100, 355, 50, 1000, 22750]), 1, 4);
+        let out = mapping.rgba(&Samples::U16(&[100, 355, 50, 1000, 22750]), Pixel::named(1), 4);
         assert_eq!(&out[0..4], &[0, 0, 0, 255]); // lo → 0
         assert_eq!(&out[4..8], &[255, 255, 255, 255]); // hi → 255
         assert_eq!(&out[8..12], &[0, 0, 0, 255]); // ниже lo — кламп
@@ -182,14 +224,14 @@ mod tests {
     fn f32_nodata_is_compared_raw_before_stretch() {
         // DEM: nodata −32767 не участвует ни в цвете, ни в растяге.
         let mapping = Mapping::stretched(0.0, 100.0, Some(-32767.0));
-        let out = mapping.rgba(&Samples::F32(&[-32767.0, 50.0]), 1, 2);
+        let out = mapping.rgba(&Samples::F32(&[-32767.0, 50.0]), Pixel::named(1), 2);
         assert_eq!(out, vec![0, 0, 0, 0, 128, 128, 128, 255]);
     }
 
     #[test]
     fn nan_sample_is_transparent_even_without_declared_nodata() {
         let mapping = Mapping::stretched(0.0, 100.0, None);
-        let out = mapping.rgba(&Samples::F32(&[f32::NAN, 50.0]), 1, 2);
+        let out = mapping.rgba(&Samples::F32(&[f32::NAN, 50.0]), Pixel::named(1), 2);
         assert_eq!(out, vec![0, 0, 0, 0, 128, 128, 128, 255]);
     }
 
@@ -197,7 +239,7 @@ mod tests {
     fn alpha_channel_is_scaled_not_stretched() {
         // Серый с альфой u16: цвет растягивается, альфа — старший байт.
         let mapping = Mapping::stretched(0.0, 1000.0, None);
-        let out = mapping.rgba(&Samples::U16(&[500, 0x8000]), 2, 1);
+        let out = mapping.rgba(&Samples::U16(&[500, 0x8000]), Pixel::named(2), 1);
         assert_eq!(out, vec![128, 128, 128, 0x80]);
     }
 

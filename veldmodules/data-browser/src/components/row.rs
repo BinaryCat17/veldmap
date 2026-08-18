@@ -5,6 +5,7 @@
 //! сопоставление «запись каталога → то, что рисуем».
 
 use crate::module::state::library::{status_of, LibraryState};
+use crate::module::state::overlay::Progress;
 use crate::proto::data_library::{LibraryEntry, LibraryStatus};
 
 /// Состояние строки. Сумма-тип, а не набор булевых полей: сочетания вроде
@@ -53,9 +54,13 @@ pub enum OnGlobe {
     /// Растры спрошены у провайдера или открываются: на шаре его ещё нет, но
     /// он туда едет.
     Assembling,
-    /// Лежит растром. `hidden` — остаётся в наборе, но не рисуется; `share` —
-    /// доля пути до подробной картинки, пока она набирается (`None` — набрана).
-    Laid { hidden: bool, share: Option<f32> },
+    /// Лежит растром. `hidden` — остаётся в наборе, но не рисуется; `progress`
+    /// — ход добычи, каким его рассказал глобус.
+    ///
+    /// Ход целиком, а не одна доля из него: полосу рисует доля, а объясняет её
+    /// подпись, и считаться они обязаны из одного и того же — иначе полоса и
+    /// подсказка под одним значком говорят разное.
+    Laid { hidden: bool, progress: Progress },
 }
 
 impl OnGlobe {
@@ -67,7 +72,17 @@ impl OnGlobe {
         match self {
             OnGlobe::Off => None,
             OnGlobe::Assembling => Some(0.0),
-            OnGlobe::Laid { share, .. } => share,
+            OnGlobe::Laid { progress, .. } => progress.share(),
+        }
+    }
+
+    /// Чем подписать полосу: что она отсчитывает и что едет прямо сейчас.
+    /// `None` — работа кончилась либо о ней ещё нечего сказать.
+    pub fn said(self) -> Option<String> {
+        match self {
+            OnGlobe::Off => None,
+            OnGlobe::Assembling => Some("растры открываются…".to_string()),
+            OnGlobe::Laid { progress, .. } => progress.said(),
         }
     }
 
@@ -171,10 +186,33 @@ pub fn preview_of(
     }
 }
 
+/// Приставка ключа строки снимка, у которого упаковок несколько
+/// (см. [`scene_key`]).
+const SCENE: &str = "снимок:";
+
+/// Ключ строки снимка, собранного из нескольких упаковок.
+///
+/// Путём продукта ему быть нельзя: показываемая упаковка стои́т под снимком
+/// собственной строкой, и с одинаковыми ключами раскрывались бы обе разом.
+/// Двоеточия в ключах хранилища не бывает, поэтому приставка ни с чем не
+/// совпадёт.
+pub fn scene_key(identifier: &str) -> String {
+    format!("{}{}", SCENE, identifier)
+}
+
+/// Ключ строки снимка — не путь в хранилище: листать по нему нечего, упаковки
+/// приехали вместе с ответом каталога.
+pub fn is_scene_key(key: &str) -> bool {
+    key.starts_with(SCENE)
+}
+
 pub struct Row {
     /// Ключ провайдера; пустой — неизвестен, тогда докачка и просмотр
     /// удалённого не предлагаются.
     pub identifier: String,
+    /// Собственный ключ строки — только у снимка с несколькими упаковками
+    /// (см. [`scene_key`]). У всех остальных `None`, и ключом им служит путь.
+    pub group: Option<String>,
     /// Имя записи в библиотеке — ключ для удаления и просмотра. Пустое, если
     /// записи ещё нет (файл не скачан).
     pub name: String,
@@ -217,6 +255,14 @@ pub struct Row {
     /// не в разметке, потому что спрашивают это по ключу снимка, а ключ есть у
     /// строки.
     pub globe: OnGlobe,
+    /// Есть ли смысл предлагать «на глобус». Сказал провайдер — только он знает
+    /// и уровень обработки, и то, какие форматы открывает наложение
+    /// (см. `DataProduct.viewable`). Значок над тем, что заведомо не покажется,
+    /// обещает то, чего не бывает, и объяснять это потом отказом поздно.
+    ///
+    /// У строки, о которой провайдер ничего не говорил, — `true`: молчание не
+    /// повод отнимать действие (так стои́т скачанное — его собрала библиотека).
+    pub viewable: bool,
     pub status: RowStatus,
 }
 
@@ -226,6 +272,9 @@ impl Row {
     /// него имя записи: пустыми оба сразу не бывают, иначе строке неоткуда
     /// взяться.
     pub fn key(&self) -> &str {
+        if let Some(group) = &self.group {
+            return group;
+        }
         if self.identifier.is_empty() { &self.name } else { &self.identifier }
     }
 
@@ -239,8 +288,13 @@ impl Row {
     /// Та ли это строка, о которой говорит ключ перехода. Сравнивается голыми
     /// ключами по той же причине, по какой они и голые: слэш есть в каталоге и
     /// нет в выдаче, а строка одна и та же.
+    ///
+    /// Спрашивают и путём продукта: ведут к снимку отовсюду по ключу
+    /// хранилища, а собственный ключ есть только у строки снимка с несколькими
+    /// упаковками, и знают его одни её же дети.
     pub fn named(&self, key: &str) -> bool {
-        !key.is_empty() && bare(self.key()) == bare(key)
+        !key.is_empty()
+            && (bare(self.key()) == bare(key) || bare(&self.identifier) == bare(key))
     }
 
     /// Снимок ли это — то, у чего есть контур, растры и своя единица показа.
@@ -252,10 +306,11 @@ impl Row {
             || (!self.product.is_empty() && self.product == self.snapshot_key())
     }
 
-    /// Есть ли что раскрыть под этой строкой: файлы снимка или содержимое
-    /// папки. У папки каталога оно ещё не приехало — раскрытие его и спросит.
+    /// Есть ли что раскрыть под этой строкой: упаковки снимка, его файлы или
+    /// содержимое папки. У папки каталога оно ещё не приехало — раскрытие его
+    /// и спросит.
     pub fn expandable(&self) -> bool {
-        self.folded || self.kind.is_folder()
+        self.folded || self.group.is_some() || self.kind.is_folder()
     }
 
     /// Путь папки, в которой лежит запись: по нему строки группируются, он же
@@ -307,6 +362,7 @@ impl Row {
     pub fn container_row(identifier: String, title: String, status: RowStatus, kind: RowKind) -> Row {
         Row {
             identifier,
+            group: None,
             name: String::new(),
             title,
             kind,
@@ -318,6 +374,7 @@ impl Row {
             folded: false,
             loading: false,
             globe: OnGlobe::Off,
+            viewable: true,
             status,
         }
     }
@@ -331,6 +388,7 @@ impl Row {
         };
         Row {
             identifier: entry.identifier.clone(),
+            group: None,
             name: entry.name.clone(),
             // Имя записи — путь внутри снимка, и целиком оно в строке не нужно:
             // снимок уже назван строкой выше, а под ним читают файл. Ключом при
@@ -348,6 +406,7 @@ impl Row {
             folded: false,
             loading: false,
             globe: OnGlobe::Off,
+            viewable: true,
             status,
         }
     }
@@ -377,6 +436,7 @@ impl Row {
             },
             None => Row {
                 identifier,
+                group: None,
                 name: String::new(),
                 title,
                 kind,
@@ -388,6 +448,7 @@ impl Row {
                 folded: false,
                 loading: false,
                 globe: OnGlobe::Off,
+                viewable: true,
                 status: RowStatus::Remote,
             },
         }
@@ -471,6 +532,7 @@ fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
     Row {
         title: product.rsplit('/').next().unwrap_or(&product).to_string(),
         identifier: product.clone(),
+        group: None,
         name: String::new(),
         kind: RowKind::Product { folder: true },
         size,
@@ -481,6 +543,7 @@ fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
         folded: true,
         loading: false,
         globe: OnGlobe::Off,
+        viewable: true,
         status,
     }
 }

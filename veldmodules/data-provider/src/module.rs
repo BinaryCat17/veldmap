@@ -3,9 +3,11 @@ pub mod cdse;
 pub mod imagery;
 pub mod mgrs;
 pub mod s3;
+pub mod scene;
 pub mod time;
 
 use aws_smithy_runtime_api::client::identity::Identity;
+use crate::proto::data_provider::{DataProduct, SearchRequest};
 
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {
@@ -38,13 +40,21 @@ pub enum Asked {
     /// Листинг пути. Сам путь нужен, чтобы отсеять из ответа S3 запрошенный
     /// префикс — в списке содержимого папке незачем быть собой.
     List(String),
-    Search,
+    /// Поиск. Запрос хранится, потому что ответ может его не закрыть: своё окно
+    /// свежести мы вправе снять и спросить заново (см. `catalogue::FRESH_DAYS`),
+    /// а `widened` говорит, что это уже второй заход и третьего не будет.
+    Search { request: SearchRequest, widened: bool },
     /// Растры продукта: поддерево листается страницами, найденные ключи
     /// копятся здесь, пока хранилище не отдаст последнюю.
     Imagery { identifier: String, keys: Vec<String> },
     /// Продукт по точному имени — обратный ход поиска. Имя хранится для
     /// объяснения пустого ответа: каталог на «не нашлось» отвечает молча.
     Locate { name: String },
+    /// Упаковки той же съёмки — второй ход после `Locate`: спросили об одной
+    /// упаковке, а показывать надо снимок. `key` — ключ съёмки, которым из
+    /// ответа отбираются свои (см. `scene::acquisition`); `found` — то, что
+    /// нашлось по имени, и ответ, если упаковок не подъехало.
+    Siblings { key: String, found: DataProduct },
 }
 
 // Реэкспорт обработчиков: имена совпадают с ключами топиков в schema.yaml,

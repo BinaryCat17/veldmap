@@ -23,8 +23,14 @@ use tiff::tags::Tag;
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::{self, TILE};
 use super::super::resample::resample;
-use super::radiometry::{percentile_stretch, Mapping, Samples};
+use super::radiometry::{percentile_stretch, Mapping, Pixel, Samples};
 use super::{Info, Kind, Tie};
+
+/// Сигнатуры BigTIFF: у него в заголовке стоит версия 43 вместо 42, и по этому
+/// числу его и узнают. Смотрится она здесь, рядом с JP2 и NetCDF, потому что
+/// крейт `image` знает только классические сигнатуры и отвечает «это не
+/// изображение» — тогда как крейт `tiff` такой файл читает наравне с обычным.
+pub const BIG_MAGIC: [&[u8]; 2] = [b"II\x2b\x00", b"MM\x00\x2b"];
 
 /// Потолок области источника, читаемой ради одного тайла (в пикселях).
 /// При обычных для COG копиях-половинах область — до 1024², а больше 4096²
@@ -72,6 +78,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     let mut decoder = Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
     let (width, height) = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
     ensure_chunky(&mut decoder)?;
+    ensure_readable(&mut decoder)?;
     let tiled = decoder.get_tag_unsigned::<u32>(Tag::TileWidth).is_ok();
     let ties = ties(&mut decoder, width, height);
 
@@ -179,7 +186,7 @@ pub fn produce_direct<R: Read + Seek>(
     // Копии могут быть раскложены иначе, чем базовый IFD, — проверяется та,
     // которую читаем.
     ensure_chunky(&mut decoder)?;
-    let channels = channels(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
+    let pixel = pixel(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
     let (cw, ch) = decoder.chunk_dimensions();
     if cw == 0 || ch == 0 {
         return Err("tiff: нулевой размер чанка".to_string());
@@ -223,7 +230,7 @@ pub fn produce_direct<R: Read + Seek>(
         let mut region = vec![0u8; (rw as usize) * (rh as usize) * 4];
         for cy in sy0 / ch..=(sy0 + rh - 1) / ch {
             for cx in sx0 / cw..=(sx0 + rw - 1) / cw {
-                let (data, dw, dh) = chunks.get(&mut decoder, cy * across + cx, channels, &mapping)?;
+                let (data, dw, dh) = chunks.get(&mut decoder, cy * across + cx, pixel, &mapping)?;
                 let (chunk_x, chunk_y) = (cx * cw, cy * ch);
                 let ix0 = sx0.max(chunk_x);
                 let iy0 = sy0.max(chunk_y);
@@ -276,7 +283,7 @@ impl ChunkCache {
         &mut self,
         decoder: &mut Decoder<R>,
         index: u32,
-        channels: usize,
+        pixel: Pixel,
         mapping: &Mapping,
     ) -> Result<(&[u8], u32, u32), String> {
         if let Some(at) = self.entries.iter().position(|(i, ..)| *i == index) {
@@ -286,7 +293,7 @@ impl ChunkCache {
 
         let (dw, dh) = decoder.chunk_data_dimensions(index);
         let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
-        let rgba = mapping.rgba(&typed(&data)?, channels, (dw as usize) * (dh as usize));
+        let rgba = chunk_rgba(mapping, &data, pixel, dw, dh)?;
 
         // Свежий остаётся при любом бюджете: без него не собрать текущий тайл.
         self.bytes += rgba.len();
@@ -309,7 +316,7 @@ pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emi
     // стоит ни одного лишнего чтения.
     let mapping = mapping(&mut decoder, 0)?;
     ensure_chunky(&mut decoder)?;
-    let channels = channels(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
+    let pixel = pixel(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
     let (cw, ch) = decoder.chunk_dimensions();
     if cw == 0 || ch == 0 {
         return Err("tiff: нулевой размер чанка".to_string());
@@ -337,7 +344,7 @@ pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emi
             let index = cy * across + cx;
             let (dw, dh) = decoder.chunk_data_dimensions(index);
             let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
-            let rgba = mapping.rgba(&typed(&data)?, channels, (dw as usize) * (dh as usize));
+            let rgba = chunk_rgba(&mapping, &data, pixel, dw, dh)?;
             let run = (dw as usize) * 4;
             for y in 0..dh.min(rows) as usize {
                 let dst = (y * (info.width as usize) + (cx * cw) as usize) * 4;
@@ -362,13 +369,78 @@ fn ensure_chunky<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<(), String>
     Ok(())
 }
 
-fn channels(color: tiff::ColorType) -> Result<usize, String> {
+/// Чанк в RGBA — с проверкой, что он вышел целым.
+///
+/// Растяг укорачивает выход молча, когда сэмплов пришло меньше, чем обещает
+/// размер чанка, а сборка и тайла, и полосы блитит по обещанному. Обрезанный
+/// чанк битого файла обязан кончиться строкой, а не выходом за границу среза:
+/// последнее для wasm-модуля — трап, после которого хост поднимает инстанс
+/// заново, а заказчик остаётся ждать ответа, которого уже никто не пришлёт.
+fn chunk_rgba(
+    mapping: &Mapping,
+    data: &DecodingResult,
+    pixel: Pixel,
+    dw: u32,
+    dh: u32,
+) -> Result<Vec<u8>, String> {
+    let pixels = (dw as usize) * (dh as usize);
+    let rgba = mapping.rgba(&typed(data)?, pixel, pixels);
+    match rgba.len() == pixels * 4 {
+        true => Ok(rgba),
+        false => Err(format!(
+            "tiff: чанк {}×{} пришёл неполным — {} пикселей вместо {}",
+            dw,
+            dh,
+            rgba.len() / 4,
+            pixels
+        )),
+    }
+}
+
+/// Цветовая модель растра числами: сколько сэмплов на пиксель и сколько бит на
+/// сэмпл. Один разбор на всех, кто об этом спрашивает: список принятых моделей
+/// иначе жил бы в двух видах и разошёлся бы молча.
+fn model(color: tiff::ColorType) -> Result<(Pixel, u8), String> {
     match color {
-        tiff::ColorType::Gray(_) => Ok(1),
-        tiff::ColorType::GrayA(_) => Ok(2),
-        tiff::ColorType::RGB(_) => Ok(3),
-        tiff::ColorType::RGBA(_) => Ok(4),
+        tiff::ColorType::Gray(bits) => Ok((Pixel::named(1), bits)),
+        tiff::ColorType::GrayA(bits) => Ok((Pixel::named(2), bits)),
+        tiff::ColorType::RGB(bits) => Ok((Pixel::named(3), bits)),
+        tiff::ColorType::RGBA(bits) => Ok((Pixel::named(4), bits)),
+        // Так крейт называет всё, у чего сэмплов больше одного, а цветовой
+        // интерпретации нет, — то есть обычный вывод GDAL для любого стека
+        // полос. Это не «неподдерживаемая модель», а стопка измеренных величин:
+        // показывается первая, остальные шагаются мимо (см. `Pixel::stack`).
+        tiff::ColorType::Multiband { bit_depth, num_samples } => {
+            Ok((Pixel::stack(usize::from(num_samples)), bit_depth))
+        }
         other => Err(format!("tiff: цветовая модель {:?} не поддерживается", other)),
+    }
+}
+
+fn pixel(color: tiff::ColorType) -> Result<Pixel, String> {
+    Ok(model(color)?.0)
+}
+
+/// Отказ на том, что иначе упало бы посреди прохода.
+///
+/// Спрашивается это при описании, а не при производстве, потому что цветовая
+/// модель и разрядность у файла одни на все его тайлы: отказ здесь — честное
+/// «смотреть не на что», а тот же отказ на первом тайле выглядел бы как
+/// «кадр неполон» и предлагал бы переспросить.
+///
+/// Разрядность меньше байта названа отдельно: сэмплы такой глубины крейт не
+/// распаковывает, а отдаёт как они лежат — по нескольку в байте, — тогда как
+/// сборка тайла считает, что на пиксель приходится целое их число. Раньше это
+/// был не отказ, а выход за границу буфера, то есть трап всего инстанса.
+fn ensure_readable<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<(), String> {
+    let color = decoder.colortype().map_err(|e| format!("tiff: {}", e))?;
+    let (_, bits) = model(color)?;
+    match bits < 8 {
+        true => Err(format!(
+            "tiff: {} бит на сэмпл — такая разрядность не разворачивается в пиксели",
+            bits
+        )),
+        false => Ok(()),
     }
 }
 
@@ -415,13 +487,7 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
         .get_tag_ascii_string(Tag::GdalNodata)
         .ok()
         .and_then(|s| s.trim().trim_end_matches('\0').parse::<f32>().ok());
-    let bits = match decoder.colortype().map_err(|e| format!("tiff: {}", e))? {
-        tiff::ColorType::Gray(bits)
-        | tiff::ColorType::GrayA(bits)
-        | tiff::ColorType::RGB(bits)
-        | tiff::ColorType::RGBA(bits) => bits,
-        other => return Err(format!("tiff: цветовая модель {:?} не поддерживается", other)),
-    };
+    let (_, bits) = model(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
     if bits <= 8 {
         return Ok(Mapping::identity(nodata));
     }
@@ -508,5 +574,35 @@ mod tests {
         assert!(geo_ties(&geokeys(1), &points, &[10.0, 10.0, 0.0], 10, 10).is_empty());
         // Как и файл вовсе без геотегов.
         assert!(geo_ties(&[], &points, &[10.0, 10.0, 0.0], 10, 10).is_empty());
+    }
+
+    /// Цветовая модель разбирается один раз и отвечает обоим спрашивающим — и
+    /// о раскладке пикселя, и о разрядности. Многополосный без цветовой
+    /// интерпретации — это стопка величин: показывается первая, а вторая не
+    /// прозрачность, хотя сэмплов у неё, как у серого с альфой, ровно два.
+    #[test]
+    fn colour_model_answers_channels_and_depth() {
+        assert_eq!(model(tiff::ColorType::Gray(16)).unwrap().1, 16);
+        assert_eq!(model(tiff::ColorType::RGBA(8)).unwrap().0.channels, 4);
+        assert_eq!(pixel(tiff::ColorType::RGB(8)).unwrap().channels, 3);
+        let (stack, bits) = model(tiff::ColorType::Multiband { bit_depth: 8, num_samples: 2 })
+            .expect("стопка величин — не отказ");
+        assert_eq!((stack.channels, stack.colors(), stack.has_alpha(), bits), (2, 1, false, 8));
+        assert!(pixel(tiff::ColorType::CMYK(8)).is_err());
+    }
+
+    /// Обрезанный чанк кончается строкой, а не выходом за границу среза.
+    /// Разница здесь не стилистическая: срез уронил бы инстанс трапом, после
+    /// которого заказчик ждёт ответа, которого никто не пришлёт.
+    #[test]
+    fn a_short_chunk_is_refused_not_blitted() {
+        let mapping = Mapping::identity(None);
+        let whole = DecodingResult::U8(vec![7u8; 4 * 4]);
+        let rgba = chunk_rgba(&mapping, &whole, Pixel::named(1), 4, 4).expect("целый чанк");
+        assert_eq!(rgba.len(), 4 * 4 * 4);
+
+        let short = DecodingResult::U8(vec![7u8; 4 * 3]);
+        let refused = chunk_rgba(&mapping, &short, Pixel::named(1), 4, 4).expect_err("чанк неполон");
+        assert!(refused.contains("неполным"), "{}", refused);
     }
 }

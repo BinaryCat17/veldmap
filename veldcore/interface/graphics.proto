@@ -70,27 +70,6 @@ enum PrimitiveTopology {
     TOPOLOGY_LINE_STRIP = 4;
 }
 
-enum BlendFactor {
-    ZERO = 0;
-    ONE = 1;
-    SRC = 2;
-    ONE_MINUS_SRC = 3;
-    SRC_ALPHA = 4;
-    ONE_MINUS_SRC_ALPHA = 5;
-    DST = 6;
-    ONE_MINUS_DST = 7;
-    DST_ALPHA = 8;
-    ONE_MINUS_DST_ALPHA = 9;
-}
-
-enum BlendOperation {
-    ADD = 0;
-    SUBTRACT = 1;
-    REVERSE_SUBTRACT = 2;
-    MIN = 3;
-    MAX = 4;
-}
-
 enum FrontFace {
     CCW = 0;
     CW = 1;
@@ -204,17 +183,6 @@ message VertexBufferLayout {
     repeated VertexAttribute attributes = 3;
 }
 
-message BlendComponent {
-    BlendFactor src_factor = 1;
-    BlendFactor dst_factor = 2;
-    BlendOperation operation = 3;
-}
-
-message BlendState {
-    BlendComponent color = 1;
-    BlendComponent alpha = 2;
-}
-
 // Работа с буфером глубины. Формат назван здесь второй раз (первый — при
 // выделении самой текстуры) не по недосмотру: пайплайн компилируется до того,
 // как у него появляется таргет, и вывести формат ему неоткуда. Расхождение
@@ -234,11 +202,9 @@ message CreateRenderPipeline {
     repeated VertexBufferLayout vertex_layouts = 4;
     repeated uint64 bind_group_layout_ids = 5;
     PrimitiveTopology primitive_topology = 6;
-    IndexFormat strip_index_format = 7;
     FrontFace front_face = 8;
     CullMode cull_mode = 9;
     TextureFormat target_format = 10;
-    BlendState blend = 11; // не задан — альфа-блендинг по умолчанию
     string label = 12;
     // Не задан — теста глубины нет вовсе, и приложить буфер глубины к такому
     // пайплайну нельзя. Плоскому интерфейсу он и не нужен: порядок там задаёт

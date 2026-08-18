@@ -34,6 +34,9 @@ pub struct BrowseItem {
     pub size: u64,
     /// Время объекта, unix-секунды; 0 — неизвестно.
     pub modified: i64,
+    /// Есть ли смысл предлагать «на глобус» — сказал провайдер, потому что
+    /// список читаемых форматов есть только у него (см. `ListEntry.viewable`).
+    pub viewable: bool,
 }
 
 impl BrowseState {
@@ -146,6 +149,7 @@ mod tests {
             product: String::new(),
             size: 0,
             modified: 0,
+            viewable: false,
         }
     }
 

@@ -20,6 +20,7 @@ use crate::proto::image_tiler::Reach;
 pub mod full;
 pub mod jp2;
 pub mod jpeg;
+pub mod netcdf;
 pub mod png;
 pub mod radiometry;
 pub mod tiff;
@@ -71,6 +72,10 @@ pub enum Kind {
     Tiff(tiff::Layout),
     /// Форматы без потокового пути: декодируются целиком, они малы по природе.
     Full(ImageFormat),
+    /// NetCDF-4: не картинка, а набор измеренных величин. Одна из них выбрана
+    /// показываемой ещё при описании — вместе с открытым файлом она и лежит
+    /// здесь (см. `netcdf::Source`).
+    Netcdf(Box<netcdf::Source>),
 }
 
 impl Info {
@@ -89,7 +94,7 @@ impl Info {
         match &self.kind {
             Kind::Tiff(layout) if layout.random_access() => Reach::Exact,
             // Каскад этих стартует с нулевого уровня и строит пирамиду целиком.
-            Kind::Tiff(_) | Kind::Png | Kind::Full(_) => Reach::Pyramid,
+            Kind::Tiff(_) | Kind::Png | Kind::Full(_) | Kind::Netcdf(_) => Reach::Pyramid,
             // А эти декодируют сразу в масштаб запрошенного уровня, и каскад
             // идёт от него вниз: подробнее — только новым проходом.
             Kind::Jpeg | Kind::Jp2 => Reach::Coarser,
@@ -105,9 +110,18 @@ pub fn describe(resource_id: u64, len: u64, bytes: &Rc<Cell<u64>>) -> Result<Inf
     let read = reader.read(&mut head).map_err(|e| format!("чтение заголовка: {}", e))?;
     reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
 
-    // JPEG 2000 крейт `image` не знает — его сигнатуры смотрятся до него.
+    // Ни JPEG 2000, ни NetCDF, ни BigTIFF крейт `image` не знает — их сигнатуры
+    // смотрятся до него.
     if head.starts_with(jp2::JP2_MAGIC) || head.starts_with(jp2::CODESTREAM_MAGIC) {
         let info = jp2::describe(reader, len)?;
+        return checked(info);
+    }
+    if head.starts_with(netcdf::MAGIC) {
+        let info = netcdf::describe(reader, len)?;
+        return checked(info);
+    }
+    if tiff::BIG_MAGIC.iter().any(|magic| head.starts_with(magic)) {
+        let info = tiff::describe(reader)?;
         return checked(info);
     }
 
@@ -115,7 +129,8 @@ pub fn describe(resource_id: u64, len: u64, bytes: &Rc<Cell<u64>>) -> Result<Inf
     // изображения — обычное дело в каталоге (сырец L0, разметка, XML), и
     // «не распознан» без списка читается как поломка, а не как ответ.
     let format = image::guess_format(&head[..read]).map_err(|_| {
-        "по заголовку это не изображение (открываются PNG, JPEG, TIFF, JPEG 2000, GIF, BMP, WebP)"
+        "по заголовку это не изображение \
+         (открываются PNG, JPEG, TIFF, JPEG 2000, NetCDF, GIF, BMP, WebP)"
             .to_string()
     })?;
 
@@ -171,19 +186,80 @@ pub fn produce(
         Kind::Jpeg => jpeg::produce(reader, info, level, emit),
         Kind::Jp2 => jp2::produce(reader, len, info, level, emit),
         Kind::Full(format) => full::produce(reader, info, *format, emit),
+        // Файл уже прочитан описанием, и читателя этому проходу не нужно.
+        Kind::Netcdf(source) => netcdf::produce(info, source, emit),
     }
 }
 
 /// Развёртка сэмплов в RGBA8 — общая всем адаптерам: 1 канал — серый,
 /// 2 — серый с альфой, 3 — RGB, 4 — как есть.
-pub fn to_rgba(samples: &[u8], channels: usize, pixels: usize) -> Vec<u8> {
+/// За сколько шагов растекается цвет под прозрачное. Фильтрация смешивает
+/// тексель с непосредственными соседями, поэтому дальше второго кольца
+/// растекаться незачем.
+const BLEED_STEPS: u32 = 2;
+
+/// Цвет под прозрачным — от ближайшего непрозрачного соседа.
+///
+/// Под полностью прозрачным пикселем лежит чёрный: цвета у него нет, а ноль
+/// держит выход детерминированным (см. `resample`). На экране этот ноль виден.
+/// И канва, и шар фильтруют текстуру линейно и смешивают непремультиплицированной
+/// альфой, поэтому на кромке поля `nodata` интерполяция даёт половину цвета при
+/// половине непрозрачности — тёмный ореол шириной в тексель. Ячейка,
+/// нарисованная предком, растягивает его вдвое на каждую ступень, так что на
+/// грубой ступени это заметная тёмная обводка вокруг снимка.
+///
+/// Альфа при этом не трогается: кромка остаётся ровно там же, где была, а
+/// смешиваться начинает цвет с цветом, а не цвет с чернотой.
+pub fn bleed_alpha(rgba: &mut [u8], width: u32, height: u32) {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return;
+    }
+    let mut coloured: Vec<bool> = (0..w * h).map(|at| rgba[at * 4 + 3] != 0).collect();
+    // Сплошь непрозрачный тайл — кромки нет; сплошь прозрачный — брать цвет
+    // неоткуда.
+    if coloured.iter().all(|has| *has) || coloured.iter().all(|has| !has) {
+        return;
+    }
+
+    for _ in 0..BLEED_STEPS {
+        // Снимок прошлого кольца: без него цвет уезжал бы вглубь поля за один
+        // проход, и растекание зависело бы от порядка обхода.
+        let known = coloured.clone();
+        let mut spread = false;
+        for at in 0..w * h {
+            if known[at] {
+                continue;
+            }
+            let (x, y) = (at % w, at / w);
+            let neighbours = [
+                (x > 0).then(|| at - 1),
+                (x + 1 < w).then_some(at + 1),
+                (y > 0).then(|| at - w),
+                (y + 1 < h).then_some(at + w),
+            ];
+            let Some(from) = neighbours.into_iter().flatten().find(|near| known[*near]) else {
+                continue;
+            };
+            let colour = [rgba[from * 4], rgba[from * 4 + 1], rgba[from * 4 + 2]];
+            rgba[at * 4..at * 4 + 3].copy_from_slice(&colour);
+            coloured[at] = true;
+            spread = true;
+        }
+        if !spread {
+            break;
+        }
+    }
+}
+
+pub fn to_rgba(samples: &[u8], pixel: radiometry::Pixel, pixels: usize) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(pixels * 4);
-    for px in samples.chunks_exact(channels).take(pixels) {
-        let (rgb, alpha) = match channels {
-            1 => ([px[0], px[0], px[0]], 255),
-            2 => ([px[0], px[0], px[0]], px[1]),
-            3 => ([px[0], px[1], px[2]], 255),
-            _ => ([px[0], px[1], px[2]], px[3]),
+    for px in samples.chunks_exact(pixel.channels).take(pixels) {
+        let (rgb, alpha) = match (pixel.colors(), pixel.has_alpha()) {
+            (1, false) => ([px[0], px[0], px[0]], 255),
+            (1, true) => ([px[0], px[0], px[0]], px[pixel.channels - 1]),
+            (_, false) => ([px[0], px[1], px[2]], 255),
+            (_, true) => ([px[0], px[1], px[2]], px[pixel.channels - 1]),
         };
         rgba.extend_from_slice(&rgb);
         rgba.push(alpha);
@@ -250,12 +326,30 @@ mod tests {
 
     #[test]
     fn to_rgba_expands_all_channel_counts() {
-        assert_eq!(to_rgba(&[7], 1, 1), vec![7, 7, 7, 255]);
-        assert_eq!(to_rgba(&[7, 9], 2, 1), vec![7, 7, 7, 9]);
-        assert_eq!(to_rgba(&[1, 2, 3], 3, 1), vec![1, 2, 3, 255]);
-        assert_eq!(to_rgba(&[1, 2, 3, 4], 4, 1), vec![1, 2, 3, 4]);
+        assert_eq!(to_rgba(&[7], radiometry::Pixel::named(1), 1), vec![7, 7, 7, 255]);
+        assert_eq!(to_rgba(&[7, 9], radiometry::Pixel::named(2), 1), vec![7, 7, 7, 9]);
+        assert_eq!(to_rgba(&[1, 2, 3], radiometry::Pixel::named(3), 1), vec![1, 2, 3, 255]);
+        assert_eq!(to_rgba(&[1, 2, 3, 4], radiometry::Pixel::named(4), 1), vec![1, 2, 3, 4]);
         // Хвост за пределами pixels отбрасывается — у краевых чанков TIFF
         // данные бывают шире полезной части.
-        assert_eq!(to_rgba(&[1, 2, 3, 4, 5, 6], 3, 1), vec![1, 2, 3, 255]);
+        assert_eq!(to_rgba(&[1, 2, 3, 4, 5, 6], radiometry::Pixel::named(3), 1), vec![1, 2, 3, 255]);
+    }
+
+    /// Под прозрачным оказывается цвет соседа, а не чернота, — иначе линейная
+    /// фильтрация даёт по кромке `nodata` тёмный ореол. Сама прозрачность при
+    /// этом остаётся на месте: кромка там же, где была.
+    #[test]
+    fn colour_bleeds_under_the_transparent_edge() {
+        // Две колонки: левая — данные, правая — поле.
+        let mut tile = vec![9, 9, 9, 255, 0, 0, 0, 0, 9, 9, 9, 255, 0, 0, 0, 0];
+        bleed_alpha(&mut tile, 2, 2);
+        assert_eq!(&tile[4..8], &[9, 9, 9, 0], "цвет пришёл, прозрачность осталась");
+        assert_eq!(&tile[12..16], &[9, 9, 9, 0]);
+        assert_eq!(&tile[0..4], &[9, 9, 9, 255], "данные не тронуты");
+
+        // Сплошь прозрачный тайл брать цвет неоткуда — он и остаётся чёрным.
+        let mut empty = vec![0u8; 16];
+        bleed_alpha(&mut empty, 2, 2);
+        assert_eq!(empty, vec![0u8; 16]);
     }
 }

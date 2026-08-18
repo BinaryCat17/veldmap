@@ -15,9 +15,8 @@ use proto::{
     render_command::Command as RenderCommand,
     bind_group_layout_entry::Ty,
     VertexFormat, StepMode, FilterMode, PrimitiveTopology,
-    BlendFactor, BlendOperation, FrontFace, CullMode,
+    FrontFace, CullMode,
     BufferBindingType, SamplerBindingType, TextureSampleType, TextureViewDimension,
-    IndexFormat,
 };
 
 // ── Render command queue ───────────────────────────────────────
@@ -291,38 +290,9 @@ impl GraphicsDevice {
             });
         }
 
-        let map_blend_factor = |f: i32| match BlendFactor::try_from(f).unwrap_or(BlendFactor::One) {
-            BlendFactor::Zero => wgpu::BlendFactor::Zero,
-            BlendFactor::One => wgpu::BlendFactor::One,
-            BlendFactor::Src => wgpu::BlendFactor::Src,
-            BlendFactor::OneMinusSrc => wgpu::BlendFactor::OneMinusSrc,
-            BlendFactor::SrcAlpha => wgpu::BlendFactor::SrcAlpha,
-            BlendFactor::OneMinusSrcAlpha => wgpu::BlendFactor::OneMinusSrcAlpha,
-            BlendFactor::Dst => wgpu::BlendFactor::Dst,
-            BlendFactor::OneMinusDst => wgpu::BlendFactor::OneMinusDst,
-            BlendFactor::DstAlpha => wgpu::BlendFactor::DstAlpha,
-            BlendFactor::OneMinusDstAlpha => wgpu::BlendFactor::OneMinusDstAlpha,
-        };
-        let map_blend_op = |o: i32| match BlendOperation::try_from(o).unwrap_or(BlendOperation::Add) {
-            BlendOperation::Add => wgpu::BlendOperation::Add,
-            BlendOperation::Subtract => wgpu::BlendOperation::Subtract,
-            BlendOperation::ReverseSubtract => wgpu::BlendOperation::ReverseSubtract,
-            BlendOperation::Min => wgpu::BlendOperation::Min,
-            BlendOperation::Max => wgpu::BlendOperation::Max,
-        };
-
-        let blend = req.blend.as_ref().map(|b| wgpu::BlendState {
-            color: wgpu::BlendComponent {
-                src_factor: b.color.as_ref().map(|c| map_blend_factor(c.src_factor)).unwrap_or(wgpu::BlendFactor::One),
-                dst_factor: b.color.as_ref().map(|c| map_blend_factor(c.dst_factor)).unwrap_or(wgpu::BlendFactor::Zero),
-                operation: b.color.as_ref().map(|c| map_blend_op(c.operation)).unwrap_or(wgpu::BlendOperation::Add),
-            },
-            alpha: wgpu::BlendComponent {
-                src_factor: b.alpha.as_ref().map(|c| map_blend_factor(c.src_factor)).unwrap_or(wgpu::BlendFactor::One),
-                dst_factor: b.alpha.as_ref().map(|c| map_blend_factor(c.dst_factor)).unwrap_or(wgpu::BlendFactor::Zero),
-                operation: b.alpha.as_ref().map(|c| map_blend_op(c.operation)).unwrap_or(wgpu::BlendOperation::Add),
-            },
-        }).or(Some(wgpu::BlendState::ALPHA_BLENDING));
+        // Смешивание одно на все пайплайны: обычная альфа поверх готового.
+        // Настраивать его нечем и незачем — все, кто рисует, рисуют так.
+        let blend = Some(wgpu::BlendState::ALPHA_BLENDING);
 
         // Формат проверяется здесь, а не отдаётся wgpu: у него это ошибка
         // валидации, а её обработчик по умолчанию роняет процесс — тогда как
@@ -368,14 +338,7 @@ impl GraphicsDevice {
                     PrimitiveTopology::TopologyLineList => wgpu::PrimitiveTopology::LineList,
                     PrimitiveTopology::TopologyLineStrip => wgpu::PrimitiveTopology::LineStrip,
                 },
-                strip_index_format: if req.primitive_topology == PrimitiveTopology::TopologyTriangleStrip as i32
-                    || req.primitive_topology == PrimitiveTopology::TopologyLineStrip as i32
-                {
-                    match IndexFormat::try_from(req.strip_index_format).unwrap_or(IndexFormat::IdxUint16) {
-                        IndexFormat::IdxUint16 => Some(wgpu::IndexFormat::Uint16),
-                        IndexFormat::IdxUint32 => Some(wgpu::IndexFormat::Uint32),
-                    }
-                } else { None },
+                strip_index_format: None,
                 front_face: match FrontFace::try_from(req.front_face).unwrap_or(FrontFace::Ccw) {
                     FrontFace::Ccw => wgpu::FrontFace::Ccw,
                     FrontFace::Cw => wgpu::FrontFace::Cw,

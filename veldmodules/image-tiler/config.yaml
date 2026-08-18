@@ -36,3 +36,12 @@ rust:
       version: "0.4"
       default-features: false
       features: ["std", "simd"]
+    # NetCDF-4 (Sentinel-5P, климатика): это HDF5, и читается он целиком —
+    # чанки величины разбросаны по файлу вперемешку с каталогом чанков.
+    # Чистый Rust без libhdf5: C-библиотека потребовала бы clang с бэкендом
+    # wasm32 и своей сборки под каждую цель. Из фич — только чтение и
+    # deflate: пишущая половина и палитра фильтров тут не нужны.
+    hdf5-pure:
+      version: "0.36"
+      default-features: false
+      features: ["std", "checksum", "deflate"]

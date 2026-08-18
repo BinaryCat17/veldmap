@@ -31,7 +31,12 @@ pub struct View {
     pub describe: veldsdk::Latest,
     pub read_bytes: u64,
     pub total_bytes: u64,
+    /// Смотреть не на что: ресурс не открылся или не описался.
     pub error: Option<String>,
+    /// Кадр неполон: сорвался проход, отказал кэш. Снимок при этом жив, и
+    /// показывать причину вместо него было бы неправдой — а держать её вечно
+    /// незачем: снимается первым же приехавшим тайлом (см. [`View::landed`]).
+    pub trouble: Option<String>,
 }
 
 /// Показанный ресурс. Метаданные приходят вторым тактом (on_described),
@@ -65,11 +70,19 @@ impl View {
             read_bytes: 0,
             total_bytes: 0,
             error: None,
+            trouble: None,
         }
     }
 
     pub fn meta(&self) -> Option<&Meta> {
         self.shown.as_ref()?.meta.as_ref()
+    }
+
+    /// Тайл лёг — жалоба на прошлое снимается. Картинка достраивается прямо
+    /// сейчас, и подпись «не доехало» рядом с ней говорила бы о том, чего уже
+    /// нет.
+    pub fn landed(&mut self) {
+        self.trouble = None;
     }
 
     /// Показ идёт: описание в пути либо по пирамиде ещё есть работа. Второе

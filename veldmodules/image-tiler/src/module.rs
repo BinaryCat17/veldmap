@@ -178,6 +178,21 @@ struct Sink<'a> {
 
 impl Sink<'_> {
     fn emit(&mut self, level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
+        // Кромка прозрачного заливается цветом соседа здесь, а не в адаптерах:
+        // сюда сходятся все тайлы всех рукавов, и ореол на границе `nodata`
+        // одинаков у каждого (см. `adapters::bleed_alpha`). Копия делается
+        // только там, где прозрачное вообще есть, — у обычного снимка её нет.
+        let bled;
+        let rgba = match rgba.chunks_exact(4).any(|pixel| pixel[3] == 0) {
+            false => rgba,
+            true => {
+                let mut copy = rgba.to_vec();
+                adapters::bleed_alpha(&mut copy, w, h);
+                bled = copy;
+                &bled
+            }
+        };
+
         // В кэш — всё произведённое: второй запрос по этому источнику должен
         // обслуживаться без прохода. Fire-and-forget, подтверждение не ждётся.
         let encoded = qoi::encode_to_vec(rgba, w, h).map_err(|e| format!("qoi: {}", e))?;

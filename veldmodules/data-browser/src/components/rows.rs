@@ -62,7 +62,7 @@ fn onto_globe(state: &State, key: &str) -> OnGlobe {
     };
     match overlay.on_globe() {
         false => OnGlobe::Assembling,
-        true => OnGlobe::Laid { hidden: overlay.hidden, share: overlay.progress.share() },
+        true => OnGlobe::Laid { hidden: overlay.hidden, progress: overlay.progress },
     }
 }
 
@@ -71,8 +71,8 @@ pub fn browse(state: &State, view: &BrowseState) -> Vec<Row> {
     entries(state, &view.items, &view.children, &view.listing)
 }
 
-/// Выдача поиска: каждая строка — снимок, а раскрытая показывает свои файлы
-/// тем же листингом, что и каталог.
+/// Выдача поиска: каждая строка — снимок, а раскрытая показывает своё
+/// содержимое тем же листингом, что и каталог.
 pub fn search(state: &State, view: &SearchState) -> Vec<Row> {
     view.results
         .iter()
@@ -84,6 +84,7 @@ pub fn search(state: &State, view: &SearchState) -> Vec<Row> {
             let kind = RowKind::Product { folder: product.folder };
             let mut row = Row {
                 product_type: product.product_type.clone(),
+                viewable: product.viewable,
                 ..from_key(
                     state,
                     product.identifier.clone(),
@@ -95,10 +96,73 @@ pub fn search(state: &State, view: &SearchState) -> Vec<Row> {
                     product.identifier.clone(),
                 )
             };
-            fill(state, &mut row, &view.children, &view.listing);
+            match product.parts.len() {
+                // Часть одна — снимок это она и есть, и раскрывается он прямо
+                // в свои файлы.
+                0 | 1 => fill(state, &mut row, &view.children, &view.listing),
+                _ => parted(state, &mut row, product, &view.children, &view.listing),
+            }
             row
         })
         .collect()
+}
+
+/// Снимок, о котором каталог отдал несколько продуктов: раскрывается он в свои
+/// части, а уже они — каждая в свои файлы.
+///
+/// Ярусом больше, потому что часть — не файл снимка, а сама съёмка в другом
+/// виде: другая обработка того же (сырьё приёмника, полосный TIFF, тайловый
+/// COG) или другая измеренная величина того же пролёта (двуокись азота,
+/// угарный газ, озон). Уложить их вперемешку с файлами значило бы сказать, что
+/// снимок из них состои́т.
+fn parted(
+    state: &State,
+    row: &mut Row,
+    product: &crate::proto::data_provider::DataProduct,
+    children: &Children,
+    listing: &ListingState,
+) {
+    // Свой ключ, потому что показываемая часть стои́т под снимком собственной
+    // строкой: с одним ключом на двоих раскрывались бы обе разом.
+    row.group = Some(crate::module::components::row::scene_key(&product.identifier));
+    if !listing.expanded.contains(row.key()) {
+        return;
+    }
+    row.children = product
+        .parts
+        .iter()
+        .map(|part| {
+            let mut child = Row {
+                // Подписана часть своим типом, а не именем файла: имена частей
+                // одной съёмки расходятся только хвостом, и строки с такими
+                // именами друг под другом не сообщают ничего.
+                title: match part.product_type.is_empty() {
+                    true => part.name.clone(),
+                    false => part.product_type.clone(),
+                },
+                // Колонка вида у части свободна — типом её уже подписали, — и
+                // занята она тем, что о ней и надо знать: показывают её или она
+                // лежит про запас. В подпись это не влезает: имя строки
+                // ужимается по ширине колонки, и пометка ужалась бы первой.
+                product_type: match part.shown {
+                    true => "показана".to_string(),
+                    false => "часть".to_string(),
+                },
+                viewable: part.viewable,
+                ..from_key(
+                    state,
+                    part.identifier.clone(),
+                    part.name.clone(),
+                    part.size,
+                    product.acquired,
+                    RowKind::Product { folder: part.folder },
+                    part.identifier.clone(),
+                )
+            };
+            fill(state, &mut child, children, listing);
+            child
+        })
+        .collect();
 }
 
 /// Записи листинга → строки вместе с содержимым раскрытых папок.
@@ -120,15 +184,18 @@ fn entries(
                 (false, true) => RowKind::Folder,
                 (false, false) => RowKind::File,
             };
-            let mut row = from_key(
-                state,
-                item.identifier.clone(),
-                item.name.clone(),
-                item.size,
-                item.modified,
-                kind,
-                item.product.clone(),
-            );
+            let mut row = Row {
+                viewable: item.viewable,
+                ..from_key(
+                    state,
+                    item.identifier.clone(),
+                    item.name.clone(),
+                    item.size,
+                    item.modified,
+                    kind,
+                    item.product.clone(),
+                )
+            };
             fill(state, &mut row, children, listing);
             row
         })

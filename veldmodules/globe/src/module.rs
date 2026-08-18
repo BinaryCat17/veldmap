@@ -403,12 +403,16 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             y1: utm.y1,
         }
     } else if incoming.quad.len() == 4 {
-        overlay::Frame::quad([
+        let points = [
             (incoming.quad[0].lat, incoming.quad[0].lon),
             (incoming.quad[1].lat, incoming.quad[1].lon),
             (incoming.quad[2].lat, incoming.quad[2].lon),
             (incoming.quad[3].lat, incoming.quad[3].lon),
-        ])
+        ];
+        match incoming.rough {
+            true => overlay::Frame::rough(points),
+            false => overlay::Frame::quad(points),
+        }
     } else {
         release_rasters(incoming.rasters);
         return refuse(state, incoming.key, &label, "снимку негде лежать: привязки нет");
@@ -550,6 +554,17 @@ pub fn on_described(state: &mut State, msg: Described) {
             veldsdk::log::warn!(target: "handlers",
                 "{}: ни один растр не описался — накладывать нечего", overlay.label);
             overlay.error = "ни один растр не описался".to_string();
+        } else if matches!(overlay.frame, overlay::Frame::Rough(_)) {
+            // Место держали в расчёте на решётку из растра, а её не оказалось.
+            // Габарит сложного контура привязкой не является (см.
+            // `Frame::Rough`), и растянуть по нему снимок было бы неправдой.
+            veldsdk::log::warn!(target: "handlers",
+                "{}: контур каталога сложнее четырёхугольника, а привязки в растре нет",
+                overlay.label);
+            overlay.error =
+                "привязки нет: в растре нет опорных точек, а контур каталога сложнее \
+                 четырёхугольника"
+                    .to_string();
         }
     }
 
@@ -632,15 +647,31 @@ pub fn on_produced(state: &mut State, msg: ProducedTile) {
     accept_tile(state, &key, role, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
 }
 
-/// Кэш ответил всем, чем мог; промахи — производителю. Желанность здесь не
-/// пересчитывается: желаемое наложения — весь выбранный уровень, а устаревший
-/// уровень убьёт следующий want_tiles, как у канвы.
+/// Кэш ответил всем, чем мог; промахи — производителю.
 pub fn on_query_done(state: &mut State, msg: QueryDone) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.take(&correlation) else { return };
-    // Желанность здесь не пересчитывается: то, что спрошено, спрошено под тот
-    // же кадр, а устаревший уровень убьёт следующий `want_tiles`.
     let level = ctx.cells.first().map_or(0, |(level, ..)| *level);
+
+    // Что слою нужно прямо сейчас — этим и отсеиваются промахи. Пока кэш искал,
+    // камера могла уехать, и производство единственно: отдав ему ячейку, уже
+    // покинувшую кадр, мы занимаем его на минуту тем, чего не видно, — а видимое
+    // всё это время ждёт. Уехавшее не теряется: оно переспросится, когда
+    // вернётся в кадр (так же считает канва).
+    let cap = cap_tiles(state);
+    let desired: HashSet<Addr> = looking(state)
+        .and_then(|look| {
+            let overlay = state.overlays.iter().find(|o| o.key == ctx.key)?;
+            Some(
+                overlay
+                    .wanted(&look, cap, &state.tiles)
+                    .into_iter()
+                    .filter(|wanted| wanted.choice.role == ctx.role)
+                    .flat_map(|wanted| wanted.want.cells)
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
 
     let Some((label, produce_list, resource)) = ({
         let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
@@ -676,7 +707,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             &ctx.fingerprint,
             &ctx.cells,
             msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
-            |_| true,
+            |addr| desired.contains(&addr),
         );
         match missed {
             Missed::Produce(cells) => Some((label, cells, raster.resource.handle())),
@@ -685,8 +716,10 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             Missed::Closed => None,
         }
     }) else {
-        // Кэш закрыл заказ целиком — ступень пройдена, и спросить следующую
-        // надо здесь (см. `Missed::Closed`).
+        // Идти некуда и ждать нечего: кэш закрыл заказ целиком либо остальное
+        // уехало с глаз. Спросить нужное под нынешний кадр надо здесь же —
+        // иначе добыча встанет до ближайшего движения камеры (см.
+        // `Missed::Closed`).
         state.epoch += 1;
         want_tiles(state);
         return;
@@ -992,6 +1025,8 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             total,
             share: ((f64::from(mine.want.climbed) + within) / f64::from(mine.want.steps.max(1)))
                 .clamp(0.0, 1.0) as f32,
+            step: mine.want.climbed,
+            steps: mine.want.steps,
         };
     }
 
@@ -1021,6 +1056,8 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
                     && overlay.busy(&state.passes, mine.map(|(.., wanted)| wanted)),
                 share: overlay.progress.share,
                 error: overlay.error.clone(),
+                step: overlay.progress.step,
+                steps: overlay.progress.steps,
             }
         })
         // Отвергнутые — теми же строками: наложения у нас нет, а сказать о нём
@@ -1032,6 +1069,8 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             working: false,
             share: 0.0,
             error: why.clone(),
+            step: 0,
+            steps: 0,
         }))
         .collect();
 

@@ -30,6 +30,20 @@ const BLOCK: u64 = 512 * 1024;
 /// чтобы не платить задержкой запроса за каждый блок (см. [`Readahead`]).
 const READAHEAD: u64 = 8 * 1024 * 1024;
 
+/// Сколько раз пробовать один и тот же запрос, прежде чем признать чтение
+/// сорвавшимся.
+///
+/// Оконное чтение живёт весь показ снимка и уходит в сеть сотнями запросов, а
+/// соединение рвётся: оборванное тело ответа, сброс, 502 у шлюза. Без повтора
+/// одна такая осечка стоит целого прохода производителя, а сорвавшийся проход
+/// — ячеек, которые потребитель больше не просит (см. `tiles::Fetch::failed`):
+/// снимок остаётся с мутным пятном до переоткрытия.
+const ATTEMPTS: u32 = 3;
+
+/// Пауза перед повтором; удваивается с каждым. Сброшенное соединение
+/// переустанавливается сразу, а перегруженный шлюз — нет.
+const RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Потолок блочных кэшей — общий на процесс, а не на ресурс. Открытых
 /// ресурсов столько, сколько попросил сценарий: у наложения это по растру на
 /// слой, включая скрытые, — и потолок «на каждого» умножался бы на их число,
@@ -207,30 +221,117 @@ impl Readahead {
     }
 }
 
+/// Чем кончилась одна попытка сходить в сеть.
+///
+/// Названными исходами, а не одной ошибкой: повторять имеет смысл ровно
+/// оборвавшееся. На отказ сервера ответ будет тот же самый, сколько ни
+/// спрашивай, и три попытки с паузами стоили бы секунды на каждом блоке —
+/// а истёкшая подпись сделала бы такими все блоки до единого.
+enum Attempt {
+    /// Оборвалось: соединение, тело ответа, шлюз. Проходит само.
+    Broken(anyhow::Error),
+    /// Отказано: не тот статус, чужой адрес, истёкшая подпись.
+    Refused(anyhow::Error),
+}
+
+/// Отказ идти в сеть, когда хост гасится: таймеры рантайма разбирают первыми, и
+/// запрос, начатый после этого, паникует внутри реквеста. Отказом, а не
+/// обрывом, — повторять тут нечего и некому: результата этого чтения уже никто
+/// не ждёт (см. `veldmap_host_core::shutting_down`).
+fn shutting_down() -> Result<(), Attempt> {
+    match veldmap_host_util::shutting_down() {
+        true => Err(Attempt::Refused(anyhow::anyhow!("хост завершается"))),
+        false => Ok(()),
+    }
+}
+
+/// Как читать неудачный статус: перегруженный шлюз и «слишком часто» проходят
+/// сами, всё прочее — отказ. Различает их только код: тело у них одинаково
+/// пустое.
+fn refusal_or_hiccup(status: reqwest::StatusCode, error: anyhow::Error) -> Attempt {
+    match status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        true => Attempt::Broken(error),
+        false => Attempt::Refused(error),
+    }
+}
+
+/// Сколько ждать перед следующей попыткой. `None` — следующей не будет.
+///
+/// Отдельной функцией, а не условием внутри цикла: всё правило повторов —
+/// это она, и проверяется оно без сети и без ожидания.
+fn again(attempt: u32, outcome: &Attempt) -> Option<std::time::Duration> {
+    match outcome {
+        Attempt::Refused(_) => None,
+        Attempt::Broken(_) if attempt >= ATTEMPTS => None,
+        Attempt::Broken(_) => Some(RETRY_PAUSE * 2u32.pow(attempt - 1)),
+    }
+}
+
+/// Повторять, пока сбой из тех, что проходят сами.
+///
+/// `what` — что именно повторяется, для лога: без него в нём остаются
+/// одинаковые строки, по которым не видно, один блок переспрашивают или все
+/// подряд.
+///
+/// Пауза — сон самого потока, а не таймер рантайма, хотя запросы вокруг неё
+/// асинхронные. Чтение идёт с blocking-пула, поток на нём для того и заведён,
+/// чтобы его занимать, — а таймер к моменту паузы может быть уже разобран:
+/// выход из приложения не ждёт чтений, и `sleep` на гасящемся рантайме
+/// паникует.
+fn with_retries<T>(what: &str, mut once: impl FnMut() -> Result<T, Attempt>) -> anyhow::Result<T> {
+    let mut attempt = 1;
+    loop {
+        let outcome = match once() {
+            Ok(value) => return Ok(value),
+            Err(outcome) => outcome,
+        };
+        let Some(pause) = again(attempt, &outcome) else {
+            let (Attempt::Broken(error) | Attempt::Refused(error)) = outcome;
+            return Err(error);
+        };
+        log::warn!(target: "network", "{}: попытка {} из {} сорвалась, повтор через {} мс: {}",
+                   what, attempt, ATTEMPTS, pause.as_millis(),
+                   match &outcome { Attempt::Broken(e) | Attempt::Refused(e) => e });
+        std::thread::sleep(pause);
+        attempt += 1;
+    }
+}
+
 impl HttpRange {
     /// Пробный запрос первого байта: заодно проверяет, что сервер понимает
     /// Range, и узнаёт полный размер из Content-Range.
     fn open(url: &str, headers: HashMap<String, String>, blocks: Arc<Blocks>) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Handle::current();
-        let response = runtime.block_on(super::http::get(url, &headers, Some((0, 1))).send())?;
+        let len = with_retries(&format!("открытие {}", url), || {
+            shutting_down()?;
+            let response = runtime
+                .block_on(super::http::get(url, &headers, Some((0, 1))).send())
+                .map_err(|e| Attempt::Broken(e.into()))?;
 
-        // Range здесь ни при чём, если ответ вообще не про содержимое: 404 —
-        // это неверный адрес, 401/403 — просроченная или чужая подпись. Валить
-        // всё в «сервер не поддерживает Range» значило бы уводить от причины;
-        // отсутствие поддержки — это именно 200 вместо 206.
-        let status = response.status();
-        if status != reqwest::StatusCode::PARTIAL_CONTENT {
-            if status == reqwest::StatusCode::OK {
-                anyhow::bail!("сервер не поддерживает Range: на запрос диапазона ответил целым файлом (HTTP 200)");
+            // Range здесь ни при чём, если ответ вообще не про содержимое: 404 —
+            // это неверный адрес, 401/403 — просроченная или чужая подпись. Валить
+            // всё в «сервер не поддерживает Range» значило бы уводить от причины;
+            // отсутствие поддержки — это именно 200 вместо 206.
+            let status = response.status();
+            if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                if status == reqwest::StatusCode::OK {
+                    return Err(Attempt::Refused(anyhow::anyhow!(
+                        "сервер не поддерживает Range: на запрос диапазона ответил целым файлом (HTTP 200)"
+                    )));
+                }
+                return Err(refusal_or_hiccup(status, anyhow::anyhow!(
+                    "удалённый ресурс не открыт: HTTP {} на {}", status, url
+                )));
             }
-            anyhow::bail!("удалённый ресурс не открыт: HTTP {} на {}", status, url);
-        }
-        let len = response
-            .headers()
-            .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.rsplit('/').next()?.parse::<u64>().ok())
-            .ok_or_else(|| anyhow::anyhow!("сервер не сообщил размер файла (Content-Range)"))?;
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.rsplit('/').next()?.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    Attempt::Refused(anyhow::anyhow!("сервер не сообщил размер файла (Content-Range)"))
+                })
+        })?;
 
         Ok(Self {
             url: url.to_string(),
@@ -256,28 +357,45 @@ impl HttpRange {
         let from = index * BLOCK;
         let to = (from + run * BLOCK).min(self.len);
         let expected = to - from;
-        let response = self.runtime.block_on(
-            super::http::get(&self.url, &self.headers, Some((from, to))).send(),
+
+        // Повторяется запрос вместе с чтением тела: рвётся и то, и другое, а
+        // снаружи обрыв одинаково выглядит как «диапазон не прочитан».
+        let data = with_retries(
+            &format!("чтение диапазона {}..{} ({})", from, to, self.url),
+            || {
+                shutting_down()?;
+                let response = self
+                    .runtime
+                    .block_on(super::http::get(&self.url, &self.headers, Some((from, to))).send())
+                    .map_err(|e| Attempt::Broken(e.into()))?;
+
+                // Только 206: ответ 200 означал бы, что Range проигнорирован и
+                // пришёл весь файл — принять его за блок значило бы сдвинуть все
+                // смещения.
+                let status = response.status();
+                if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+                        return Err(Attempt::Refused(anyhow::anyhow!(
+                            "доступ к удалённому ресурсу больше не действителен (HTTP {}): \
+                             заголовки авторизации выданы при открытии и могли истечь", status)));
+                    }
+                    return Err(refusal_or_hiccup(status, anyhow::anyhow!(
+                        "чтение диапазона {}..{}: HTTP {}", from, to, status)));
+                }
+
+                let data = self
+                    .runtime
+                    .block_on(response.bytes())
+                    .map_err(|e| Attempt::Broken(e.into()))?;
+                // Короткий ответ — это обрыв, а не конец файла: длину мы знаем из
+                // Content-Range и запросили ровно столько, сколько есть.
+                if data.len() as u64 != expected {
+                    return Err(Attempt::Broken(anyhow::anyhow!(
+                        "получено {} байт вместо {}", data.len(), expected)));
+                }
+                Ok(data)
+            },
         )?;
-
-        // Только 206: ответ 200 означал бы, что Range проигнорирован и пришёл
-        // весь файл — принять его за блок значило бы сдвинуть все смещения.
-        let status = response.status();
-        if status != reqwest::StatusCode::PARTIAL_CONTENT {
-            if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-                anyhow::bail!("доступ к удалённому ресурсу больше не действителен (HTTP {}): \
-                               заголовки авторизации выданы при открытии и могли истечь", status);
-            }
-            anyhow::bail!("чтение диапазона {}..{}: HTTP {}", from, to, status);
-        }
-
-        let data = self.runtime.block_on(response.bytes())?;
-        // Короткий ответ — это обрыв, а не конец файла: длину мы знаем из
-        // Content-Range и запросили ровно столько, сколько есть.
-        if data.len() as u64 != expected {
-            anyhow::bail!("чтение диапазона {}..{}: получено {} байт вместо {}",
-                          from, to, data.len(), expected);
-        }
         self.fetched.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
 
         // Пришедшее раскладывается по блокам целиком: упреждающая часть за это
@@ -349,6 +467,34 @@ mod tests {
         let mut readahead = Readahead::default();
         assert_eq!(readahead.plan(8, 10), 1);
         assert_eq!(readahead.plan(9, 10), 1, "остался один блок");
+    }
+
+    /// Переспрашивается только то, что проходит само. Отказ повторять нельзя
+    /// не из экономии: истёкшая подпись отказывает одинаково всем блокам, и
+    /// пауза перед каждым растянула бы одно сообщение на минуты.
+    #[test]
+    fn обрыв_переспрашивают_отказ_нет() {
+        let broken = Attempt::Broken(anyhow::anyhow!("тело ответа оборвалось"));
+        let refused = Attempt::Refused(anyhow::anyhow!("HTTP 403"));
+
+        assert_eq!(again(1, &broken), Some(RETRY_PAUSE));
+        assert_eq!(again(2, &broken), Some(RETRY_PAUSE * 2), "пауза растёт");
+        assert_eq!(again(ATTEMPTS, &broken), None, "попытки кончились");
+        assert_eq!(again(1, &refused), None, "от повтора подпись не оживёт");
+    }
+
+    /// Осечку шлюза от отказа по существу отличает только код: тело у них
+    /// одинаково пустое, а повторять надо ровно первое.
+    #[test]
+    fn чужой_статус_разбирается_на_осечку_и_отказ() {
+        let hiccup = |code: u16| {
+            let status = reqwest::StatusCode::from_u16(code).expect("код статуса");
+            matches!(refusal_or_hiccup(status, anyhow::anyhow!("")), Attempt::Broken(_))
+        };
+        assert!(hiccup(502), "шлюз перегружен — пройдёт само");
+        assert!(hiccup(429), "слишком часто — тем более");
+        assert!(!hiccup(403), "подпись не станет действительной от повтора");
+        assert!(!hiccup(404), "и адрес не появится");
     }
 
     fn block() -> Arc<[u8]> {
