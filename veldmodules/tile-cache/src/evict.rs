@@ -55,6 +55,10 @@ pub fn maybe_sweep(state: &mut State) {
     }
     state.swept_once = true;
     state.stores_since_sweep = 0;
+    // Отмеченные забываются вместе с обходом: маркер источника, в который
+    // после этого положат хоть один тайл, перепишется заново (см.
+    // `store::touch`), и в следующий обход он придёт свежим.
+    state.touched.clear();
     state.sweep = Some(Sweep { pending: 0, sources: Vec::new() });
 
     let correlation = state.pending_lists.begin(ListPurpose::Root);

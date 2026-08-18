@@ -78,8 +78,9 @@ pub fn acquisition(facts: &Facts) -> Option<String> {
     // Ни того, ни другого — тогда съёмку называет виток вместе с прибором и
     // секундой. Виток длится полтора часа, и один он склеил бы весь пролёт;
     // прибор нужен затем, что на борту их бывает несколько. Так лежит
-    // Sentinel-5P: восемь полос радиометра и семь газов над одной и той же
-    // пятиминутной гранулой — пятнадцать продуктов с общим витком.
+    // Sentinel-5P: десять газов над одной и той же пятиминутной гранулой. Полосы
+    // радиометра того же витка сюда не попадают — они начинаются минутой раньше,
+    // и это отдельная съёмка, а не части этой.
     if !facts.orbit.is_empty() {
         return Some(format!(
             "по витку|{}|{}|{}|{}",
@@ -343,7 +344,6 @@ pub fn group(products: Vec<(Facts, DataProduct)>) -> Vec<DataProduct> {
                         product_type: facts.kind.clone(),
                         size: product.size,
                         folder: product.folder,
-                        online: product.online,
                         shown: at == 0,
                         viewable: product.viewable,
                     })

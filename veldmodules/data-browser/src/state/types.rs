@@ -3,6 +3,7 @@
 //! Своё состояние держит сам вариант `ViewKind`, а не модуль: два открытых
 //! Browse — это две независимые папки, а не один экран с общей переменной.
 
+use crate::module::components::last_segment;
 use super::listing::{choice, Choice};
 use super::browse::{BrowseState, Children};
 use super::globe::GlobeState;
@@ -160,11 +161,6 @@ impl ViewKind {
             ViewKind::Shown => "На просмотре".to_string(),
         }
     }
-}
-
-/// Последний непустой сегмент пути — им подписана вкладка.
-fn last_segment(path: &str) -> &str {
-    path.split('/').filter(|part| !part.is_empty()).next_back().unwrap_or("")
 }
 
 fn ellipsize(name: &str) -> String {

@@ -79,7 +79,7 @@ impl DataBacking {
     }
 }
 
-/// Host-managed shared memory manager: raw allocator
+/// Выделение памяти, разделяемой хостом с модулями.
 ///
 /// Сам менеджер ничего не хранит: записи (носитель + lease) живут в
 /// реестре, здесь только создание носителей и байтовые операции над ними.
@@ -98,7 +98,7 @@ impl MemoryManager {
         }
     }
 
-    // ── Allocation ────────────────────────────────────────────
+    // ── Выделение ─────────────────────────────────────────────
 
     fn alloc(&self, backing: DataBacking, owner_id: u32) -> ResourceId {
         self.registry.register(ResourcePayload::Data(backing), owner_id)
@@ -116,7 +116,7 @@ impl MemoryManager {
     pub fn alloc_cpu(&self, size: u64, owner_id: u32) -> ResourceId {
         if size > crate::INSTANCE_MEMORY_LIMIT {
             log::warn!(target: "memory",
-                "CPU region of {} bytes rejected: limit is {}", size, crate::INSTANCE_MEMORY_LIMIT);
+                "Область CPU в {} байт отвергнута: потолок {}", size, crate::INSTANCE_MEMORY_LIMIT);
             return 0;
         }
         self.alloc(DataBacking::Cpu(vec![0u8; size as usize]), owner_id)
@@ -144,7 +144,7 @@ impl MemoryManager {
     pub fn alloc_buffer(&self, size: u64, usage: u32, mapped: bool, owner_id: u32) -> ResourceId {
         let max = self.device.limits().max_buffer_size;
         if size > max {
-            log::warn!(target: "memory", "Buffer of {} bytes rejected: limit is {}", size, max);
+            log::warn!(target: "memory", "Буфер в {} байт отвергнут: потолок {}", size, max);
             return 0;
         }
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
@@ -152,7 +152,7 @@ impl MemoryManager {
         if mapped { final_usage |= wgpu::BufferUsages::MAP_WRITE; }
         let aligned = (size + 3) & !3;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("memory-buf"), // We don't have the ID yet before registering
+            label: Some("memory-buf"), // id ресурса выдаёт реестр, а он ещё впереди
             size: aligned,
             usage: final_usage,
             mapped_at_creation: mapped,
@@ -168,7 +168,7 @@ impl MemoryManager {
         let max = self.device.limits().max_texture_dimension_2d;
         if width == 0 || height == 0 || width > max || height > max {
             log::warn!(target: "memory",
-                "Texture {}x{} rejected: limit is {}x{}", width, height, max, max);
+                "Текстура {}x{} отвергнута: потолок {}x{}", width, height, max, max);
             return 0;
         }
         let format = proto_to_wgpu(format_proto);
@@ -198,7 +198,7 @@ impl MemoryManager {
         )
     }
 
-    // ── Data access ───────────────────────────────────────────
+    // ── Доступ к данным ───────────────────────────────────────
     // Проверки доступа выполняет вызывающий через ResourceRegistry
     // (см. abi.rs); здесь — только байтовые операции с носителем.
 
@@ -230,17 +230,20 @@ impl MemoryManager {
                     // ресурса это отдельный протокол (PUT, права на той
                     // стороне) — не «ещё один вариант write».
                     DataBacking::Range(_) => {
-                        return Err(anyhow::anyhow!("Range-backed resources are read-only"));
+                        return Err(anyhow::anyhow!("диапазонный носитель доступен только на чтение"));
                     }
                 }
                 Ok(())
             }
             ResourcePayload::Gpu(GpuObject::Texture { .. }) => {
-                Err(anyhow::anyhow!("resource {} is a texture: use upload_image", region_id))
+                Err(anyhow::anyhow!("ресурс {} — текстура: заливать её надо upload_image", region_id))
             }
-            // Прочие GPU-объекты байт не несут вовсе.
-            ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
-        }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?
+            // Прочие GPU-объекты байт не несут вовсе — и это не «не найден»:
+            // ресурс есть, читать в нём нечего.
+            ResourcePayload::Gpu(_) => {
+                Err(anyhow::anyhow!("ресурс {} — GPU-объект, байт за ним нет", region_id))
+            }
+        }).ok_or_else(|| anyhow::anyhow!("Ресурс {} не найден", region_id))?
     }
 
     /// Заливает изображение в текстуру целиком.
@@ -248,18 +251,17 @@ impl MemoryManager {
     /// Отдельная операция, а не `write` со смещением 0: смещения у текстуры
     /// нет, частичной заливки нет, и данные обязаны покрывать её всю — то
     /// есть от записи по смещению здесь не остаётся ни одного параметра.
-    /// Пока это был `write`, `offset` молча игнорировался.
     pub fn upload_image(&self, region_id: ResourceId, data: &[u8]) -> anyhow::Result<()> {
         self.registry.payload(region_id, |payload| match payload {
             ResourcePayload::Gpu(GpuObject::Texture { texture, width, height, format }) => {
                 if crate::format::is_depth(*format) {
                     return Err(anyhow::anyhow!(
-                        "resource {} is a depth buffer: only the rasterizer writes it", region_id));
+                        "ресурс {} — буфер глубины: в него пишет только растеризатор", region_id));
                 }
                 let expected = (bytes_per_pixel(*format) * *width) as u64 * (*height as u64);
                 if (data.len() as u64) < expected {
                     return Err(anyhow::anyhow!(
-                        "image is {} bytes, texture {}x{} needs {}",
+                        "в изображении {} байт, а текстуре {}x{} нужно {}",
                         data.len(), width, height, expected));
                 }
                 let q = self.queue.lock().unwrap();
@@ -280,8 +282,8 @@ impl MemoryManager {
                 );
                 Ok(())
             }
-            _ => Err(anyhow::anyhow!("resource {} is not a texture", region_id)),
-        }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))?
+            _ => Err(anyhow::anyhow!("ресурс {} — не текстура", region_id)),
+        }).ok_or_else(|| anyhow::anyhow!("Ресурс {} не найден", region_id))?
     }
 
     /// Байты ресурса со смещения.
@@ -319,10 +321,13 @@ impl MemoryManager {
             // Смещение у текстуры не определено, и копия GPU→CPU остановила бы
             // конвейер: превью снимают, рисуя текстуру, а не вычитывая её.
             ResourcePayload::Gpu(GpuObject::Texture { .. }) => {
-                Err(anyhow::anyhow!("Direct read from texture regions is not supported"))
+                Err(anyhow::anyhow!("прямое чтение текстуры не поддерживается"))
             }
-            ResourcePayload::Gpu(_) => Err(anyhow::anyhow!("Region {} not found", region_id)),
-        }).ok_or_else(|| anyhow::anyhow!("Region {} not found", region_id))??;
+            // Как и при чтении: ресурс есть, байт за ним нет.
+            ResourcePayload::Gpu(_) => {
+                Err(anyhow::anyhow!("ресурс {} — GPU-объект, байт за ним нет", region_id))
+            }
+        }).ok_or_else(|| anyhow::anyhow!("Ресурс {} не найден", region_id))??;
 
         match source {
             Source::Bytes(data) => Ok(data),
@@ -390,7 +395,7 @@ impl MemoryManager {
         }).unwrap_or(false)
     }
 
-    // ── Lookup helpers ────────────
+    // ── Поиск носителя ────────────
 
     pub fn get_buffer(&self, region_id: ResourceId) -> Option<Arc<wgpu::Buffer>> {
         self.registry.payload(region_id, |p| match p {

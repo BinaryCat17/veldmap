@@ -11,7 +11,7 @@
 
 // ── Трейты сервисов ─────────────────────────────────────────────────────────
 // Контракт, который реализует каждый нативный модуль.
-pub use veldmap_host_core::dispatcher::{AsyncNativeService, Caller, Dispatcher};
+pub use veldmap_host_core::dispatcher::{AsyncNativeService, Caller};
 
 // ── Контекст хоста ──────────────────────────────────────────────────────────
 // Ручка на собранную платформу: dispatcher, memory, registry.
@@ -115,7 +115,7 @@ pub mod wire {
         match T::decode(payload) {
             Ok(v) => Some(v),
             Err(e) => {
-                log::error!(target: "bus", "Failed to decode {}: {}", topic, e);
+                log::error!(target: "bus", "Не разобрано сообщение топика {}: {}", topic, e);
                 None
             }
         }

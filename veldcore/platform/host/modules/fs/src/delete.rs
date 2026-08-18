@@ -13,7 +13,7 @@ pub fn on_delete(state: &State, req: FsDeleteRequest, caller: Caller) {
     let correlation = caller.correlation;
     if !is_path_safe(&req.path) {
         bus::emit::on_delete_result(&*state.ctx.publisher, &FsDeleteResult {
-            error: "Access denied".into(),
+            error: "Путь за пределами дозволенного".into(),
         }, &correlation);
         return;
     }

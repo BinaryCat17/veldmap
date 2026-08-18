@@ -23,4 +23,3 @@ interface:
     on_window_resized:
       type: app/WindowResized
       targeted: true
-    on_ready: {} # без payload

@@ -126,7 +126,7 @@ pub fn read_config_string<P: AsRef<Path>>(path: P) -> anyhow::Result<String> {
     let path = path.as_ref();
     
     if !path.exists() {
-        return Err(anyhow::anyhow!("Config file not found: {:?}", path));
+        return Err(anyhow::anyhow!("Файл конфигурации не найден: {:?}", path));
     }
 
     let content = fs::read_to_string(path)?;
@@ -148,7 +148,7 @@ fn expand_env_vars(text: &str) -> String {
         let var_name = &caps[1];
         std::env::var(var_name).unwrap_or_else(|_| {
             // Конфиг грузится до init_logging, поэтому предупреждение — в stderr.
-            eprintln!("Warning: environment variable '{}' is not set, substituting empty string", var_name);
+            eprintln!("Внимание: переменная окружения '{}' не задана, подставлена пустая строка", var_name);
             String::new()
         })
     }).to_string()

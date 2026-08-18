@@ -455,6 +455,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         opacity,
         hidden,
         error: String::new(),
+        trouble: None,
         progress: overlay::Progress::default(),
     });
 }
@@ -579,12 +580,18 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     // Годность описания решает общее правило: тайлер один, пирамида одна, и
     // разойтись с канвой в том, какой ответ считать пригодным, нечем. Своё
     // здесь одно — что делать с непригодным: растров у наложения два, и
-    // отказавший один оставляет слой жить вторым, поэтому наружу уходит не
-    // ошибка слоя, а строка в лог.
+    // отказавший один оставляет слой жить вторым, поэтому ошибкой слоя это не
+    // становится. Но и молчанием тоже: приблизившийся ждёт резкости, которая
+    // теперь не придёт никогда, а по пустой подписи «ещё едет» от «не будет»
+    // не отличить. Причина уезжает подписью рядом с полосой хода.
     let meta = match tiles::describe(&msg) {
         Ok(meta) => meta,
         Err(error) => {
             veldsdk::log::warn!(target: "handlers", "{}: описание растра: {}", label, error);
+            overlay.trouble = Some(match role {
+                Role::Detailed => format!("подробный растр не открылся: {}", error),
+                Role::Preview => format!("превью не открылось: {}", error),
+            });
             return;
         }
     };
@@ -1056,6 +1063,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
                     && overlay.busy(&state.passes, mine.map(|(.., wanted)| wanted)),
                 share: overlay.progress.share,
                 error: overlay.error.clone(),
+                trouble: overlay.trouble.clone().unwrap_or_default(),
                 step: overlay.progress.step,
                 steps: overlay.progress.steps,
             }
@@ -1069,6 +1077,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             working: false,
             share: 0.0,
             error: why.clone(),
+            trouble: String::new(),
             step: 0,
             steps: 0,
         }))

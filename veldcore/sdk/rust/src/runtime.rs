@@ -34,9 +34,9 @@ pub fn set_state<S: 'static>(state: anyhow::Result<S>) {
 /// Выполняет замыкание с &mut на состояние модуля.
 pub fn with_state<S: 'static, R>(f: impl FnOnce(&mut S) -> R) -> Result<R, String> {
     let mut slot = MODULE_STATE.0.borrow_mut();
-    let cell = slot.as_mut().ok_or_else(|| "Module not initialized".to_string())?;
-    let boxed = cell.as_mut().map_err(|e| format!("Module initialization failed: {}", e))?;
-    let state = boxed.downcast_mut::<S>().expect("Failed to downcast state");
+    let cell = slot.as_mut().ok_or_else(|| "модуль не инициализирован".to_string())?;
+    let boxed = cell.as_mut().map_err(|e| format!("инициализация модуля не удалась: {}", e))?;
+    let state = boxed.downcast_mut::<S>().expect("состояние модуля не того типа");
     Ok(f(state))
 }
 
@@ -54,7 +54,7 @@ where
     Req: prost::Message + Default,
     F: Fn(&mut S, Req),
 {
-    let req = Req::decode(payload).map_err(|e| anyhow::anyhow!("Decode error: {}", e))?;
+    let req = Req::decode(payload).map_err(|e| anyhow::anyhow!("сообщение не разобрано: {}", e))?;
     func(state, req);
     Ok(())
 }

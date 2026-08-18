@@ -117,19 +117,10 @@ fn divider(label: &str) -> Element<Msg> {
 /// (см. `list_screen::heading`) — заголовок здесь такой же, как над всяким
 /// списком, и своя его копия разошлась бы кеглем и высотой.
 fn header(total: usize, contours: usize, shown: usize, ready: usize) -> Element<Msg> {
-    // Пустых слов в подписи нет: чего нет, о том и не сказано.
-    let mut said: Vec<String> = Vec::new();
-    if total > 0 {
-        said.push(format!("{} {}", total, format::plural(total, ["слой", "слоя", "слоёв"])));
-    }
-    if contours > 0 {
-        said.push(format!(
-            "{} {}",
-            contours,
-            format::plural(contours, ["контур", "контура", "контуров"])
-        ));
-    }
-    let mut counts = said.join(", ");
+    let mut counts = format::counted(&[
+        (total, ["слой", "слоя", "слоёв"]),
+        (contours, ["контур", "контура", "контуров"]),
+    ]);
     // О том, что не доехало, говорится только пока оно не доехало: строка
     // «0 собирается» на готовом наборе — шум.
     let assembling = total - ready;
@@ -220,62 +211,41 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize)
     .align_items(Alignment::Center)
     .width(Length::Fill);
 
-    let buttons = row![
-        table::hinted(
-            theme::row_button_icon(
-                if overlay.hidden { theme::glyph::EYE_OFF } else { theme::glyph::EYE },
-                // Скрытие — включённый режим строки, и кнопка, которая его
-                // держит, стои́т нажатой: иначе о нём говорит один
-                // перечёркнутый глаз в одиннадцать точек.
-                match overlay.hidden {
-                    true => theme::IconTone::Raised,
-                    false => theme::IconTone::Rest,
-                },
-            )
-            .on_press(Msg::OverlayHidden(key.clone(), !overlay.hidden)),
+    let buttons = vec![
+        table::icon_button(
+            if overlay.hidden { theme::glyph::EYE_OFF } else { theme::glyph::EYE },
+            // Скрытие — включённый режим строки, и кнопка, которая его держит,
+            // стои́т нажатой: иначе о нём говорит один перечёркнутый глаз в
+            // одиннадцать точек.
+            match overlay.hidden {
+                true => theme::IconTone::Raised,
+                false => theme::IconTone::Rest,
+            },
             if overlay.hidden { "Показать на шаре" } else { "Скрыть" },
+            Msg::OverlayHidden(key.clone(), !overlay.hidden),
         ),
-        table::hinted(
-            theme::row_button_icon(theme::glyph::GLOBE, theme::IconTone::Rest)
-                .on_press(Msg::OutlineFocus(key.clone())),
+        table::icon_button(
+            theme::glyph::GLOBE,
+            theme::IconTone::Rest,
             "Навести и выделить",
+            Msg::OutlineFocus(key.clone()),
         ),
-        table::hinted(
-            theme::row_button_icon(theme::glyph::TRASH, theme::IconTone::Rest)
-                .on_press(Msg::OverlayRemove(key.clone())),
+        table::icon_button(
+            theme::glyph::TRASH,
+            theme::IconTone::Rest,
             "Убрать",
+            Msg::OverlayRemove(key.clone()),
         ),
         options(state, view, overlay),
-    ]
-    .spacing(6.0)
-    .align_items(Alignment::Center);
+    ];
 
-    // Высота строки объявляется здесь, а не только у обёртки: `Length::Fill`
-    // у кнопок внутри строки высотой `Shrink` схлопывается в ноль, и кнопки
-    // пропадают, не оставив следа в раскладке (то же правило, что у переноса
-    // текста, — Fill нужен на обоих уровнях).
-    let line = row![
-        column![name, opacity].spacing(6.0).width(Length::Fill),
-        container(buttons).height(Length::Fill).align_y(Alignment::Center),
-    ]
-    .spacing(12.0)
-    .align_items(Alignment::Center)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(Padding {
-        top: 0.0,
-        bottom: 0.0,
-        left: theme::GUTTER,
-        right: theme::GUTTER,
-    });
-
-    column![
-        theme::layer_row(line, tint).width(Length::Fill).height(Length::Fixed(ROW_HEIGHT)),
-        theme::hairline(theme::LINE_ROW),
-    ]
-    .width(Length::Fill)
-    .key(key)
-    .into()
+    line(
+        column![name, opacity].spacing(6.0).width(Length::Fill).into(),
+        buttons,
+        key,
+        tint,
+        ROW_HEIGHT,
+    )
 }
 
 /// Одна строка контура: снимок, который на шаре только очерчен.
@@ -285,7 +255,6 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize)
 /// контур и меню с переходами к самому снимку.
 fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) -> Element<Msg> {
     let key = outlined.key.clone();
-    let open = state.layer_menu(&key);
 
     let name = row![
         theme::row_glyph::<Msg>(theme::glyph::SATELLITE, theme::INK_FAINT),
@@ -302,15 +271,94 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
     .align_items(Alignment::Center)
     .width(Length::Fill);
 
-    let items = vec![
-        menu::Item::new(
-            "Смотреть снимок",
-            Msg::In(view, preview_of(&state.library, &key, outlined.folder)),
-        )
-        .glyph(theme::glyph::EYE),
-        menu::Item::new("Показать в каталоге", Msg::In(view, ViewMsg::InCatalog(key.clone())))
-            .glyph(theme::glyph::FOLDER),
+    // Значки те же и в том же порядке, что у строки слоя, и повторяющиеся —
+    // те же самые: слои и контуры лежат в одном списке друг под другом, и
+    // одинаково подписанное действие обязано быть одним и тем же. Разводит их
+    // первый значок — то, чего у соседней строки нет: контур кладут растром, а
+    // слою прятать.
+    let buttons = vec![
+        table::icon_button(
+            theme::glyph::LAYERS,
+            theme::IconTone::Rest,
+            "Положить растром",
+            Msg::In(view, ViewMsg::GlobeShow(key.clone())),
+        ),
+        table::icon_button(
+            theme::glyph::GLOBE,
+            theme::IconTone::Rest,
+            "Навести и выделить",
+            Msg::OutlineFocus(key.clone()),
+        ),
+        table::icon_button(
+            theme::glyph::TRASH,
+            theme::IconTone::Rest,
+            "Убрать контур",
+            Msg::OutlineRemove(key.clone()),
+        ),
+        menu_button(state, key.clone(), jumps(state, view, &key, outlined.folder)),
     ];
+
+    let tint = match state.picked_key() == key {
+        true => theme::RowTint::Picked,
+        false => theme::RowTint::Plain,
+    };
+    line(
+        container(name).width(Length::Fill).into(),
+        buttons,
+        key,
+        tint,
+        theme::ROW_HEIGHT,
+    )
+}
+
+/// Хвост, общий у обеих строк списка: тело слева, ряд кнопок справа, подсветка
+/// под ними и черта под строкой. Один на слой и на контур — стоят они в одном
+/// списке друг под другом, и, разъехавшись отступом, зазором кнопок или высотой
+/// черты, читались бы как два разных списка.
+///
+/// Высота объявляется и здесь, а не только у обёртки: `Length::Fill` у кнопок
+/// внутри строки высотой `Shrink` схлопывается в ноль, и кнопки пропадают, не
+/// оставив следа в раскладке (то же правило, что у переноса текста, — Fill
+/// нужен на обоих уровнях).
+fn line(
+    body: Element<Msg>,
+    buttons: Vec<Element<Msg>>,
+    key: String,
+    tint: theme::RowTint,
+    height: f32,
+) -> Element<Msg> {
+    let content = row![
+        body,
+        container(row(buttons).spacing(table::BUTTON_GAP).align_items(Alignment::Center))
+            .height(Length::Fill)
+            .align_y(Alignment::Center),
+    ]
+    .spacing(12.0)
+    .align_items(Alignment::Center)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(Padding {
+        top: 0.0,
+        bottom: 0.0,
+        left: theme::GUTTER,
+        right: theme::GUTTER,
+    });
+
+    column![
+        theme::layer_row(content, tint).width(Length::Fill).height(Length::Fixed(height)),
+        theme::hairline(theme::LINE_ROW),
+    ]
+    .width(Length::Fill)
+    .key(key)
+    .into()
+}
+
+/// Меню строки: значок «ещё», раскрытая под ним панель и её закрытие. Одно на
+/// слой и на контур — раскрытое адресуется ключом снимка (см.
+/// `State::layer_menu`), и вторая запись этого правила однажды оставила бы
+/// панель висеть над закрывшейся строкой.
+fn menu_button(state: &State, key: String, items: Vec<menu::Item>) -> Element<Msg> {
+    let open = state.layer_menu(&key);
     let anchor = theme::row_button_icon(
         theme::glyph::MORE,
         match open {
@@ -318,57 +366,27 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
             false => theme::IconTone::Rest,
         },
     )
-    .on_press(Msg::OverlayMenu(if open { None } else { Some(key.clone()) }));
+    .on_press(Msg::OverlayMenu(if open { None } else { Some(key) }));
+    popover(anchor, open, || menu::panel(items))
+        .align_x(Alignment::End)
+        .gap(4.0)
+        .on_dismiss(Msg::OverlayMenu(None))
+        .into()
+}
 
-    // Значки те же и в том же порядке, что у строки слоя: слои и контуры лежат
-    // в одном списке друг под другом, и одинаково подписанное действие обязано
-    // быть одним и тем же. Разводит их первый значок — то, чего у соседней
-    // строки нет: слой кладут растром, а слою прятать.
-    let buttons = row![
-        table::hinted(
-            theme::row_button_icon(theme::glyph::LAYERS, theme::IconTone::Rest)
-                .on_press(Msg::In(view, ViewMsg::GlobeShow(key.clone()))),
-            "Положить растром",
-        ),
-        table::hinted(
-            theme::row_button_icon(theme::glyph::GLOBE, theme::IconTone::Rest)
-                .on_press(Msg::OutlineFocus(key.clone())),
-            "Навести и выделить",
-        ),
-        table::hinted(
-            theme::row_button_icon(theme::glyph::TRASH, theme::IconTone::Rest)
-                .on_press(Msg::OutlineRemove(key.clone())),
-            "Убрать контур",
-        ),
-        popover(anchor, open, || menu::panel(items))
-            .align_x(Alignment::End)
-            .gap(4.0)
-            .on_dismiss(Msg::OverlayMenu(None)),
+/// Пункты, которыми со строки уходят к самому снимку: посмотреть его и найти в
+/// каталоге. Одни и те же у слоя и у контура — снимок за ними один, и
+/// одинаково подписанное действие обязано быть одним и тем же.
+///
+/// `folder` — лежит ли снимок в хранилище каталогом: этим и различается, чем
+/// его открывать (см. [`preview_of`]).
+fn jumps(state: &State, view: ViewId, key: &str, folder: bool) -> Vec<menu::Item> {
+    vec![
+        menu::Item::new("Смотреть снимок", Msg::In(view, preview_of(&state.library, key, folder)))
+            .glyph(theme::glyph::EYE),
+        menu::Item::new("Показать в каталоге", Msg::In(view, ViewMsg::InCatalog(key.to_string())))
+            .glyph(theme::glyph::FOLDER),
     ]
-    .spacing(6.0)
-    .align_items(Alignment::Center);
-
-    let line = row![
-        container(name).width(Length::Fill),
-        container(buttons).height(Length::Fill).align_y(Alignment::Center),
-    ]
-    .spacing(12.0)
-    .align_items(Alignment::Center)
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .padding(Padding { top: 0.0, bottom: 0.0, left: theme::GUTTER, right: theme::GUTTER });
-
-    let tint = match state.picked_key() == key {
-        true => theme::RowTint::Picked,
-        false => theme::RowTint::Plain,
-    };
-    column![
-        theme::layer_row(line, tint).width(Length::Fill).height(Length::Fixed(theme::ROW_HEIGHT)),
-        theme::hairline(theme::LINE_ROW),
-    ]
-    .width(Length::Fill)
-    .key(key)
-    .into()
 }
 
 /// Меню слоя: то, что делают редко.
@@ -383,35 +401,14 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) 
 /// экране это `Shift::Up` в наборе: переворот один и живёт он здесь.
 fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> {
     let key = overlay.identifier.clone();
-    let open = state.layer_menu(&key);
-
-    let anchor = theme::row_button_icon(
-        theme::glyph::MORE,
-        match open {
-            true => theme::IconTone::Raised,
-            false => theme::IconTone::Rest,
-        },
-    )
-    .on_press(Msg::OverlayMenu(if open { None } else { Some(key.clone()) }));
-    popover(anchor, open, || {
-        menu::panel(vec![
-            menu::Item::new(Shift::Up.title(), Msg::OverlayShift(key.clone(), Shift::Up))
-                .glyph(theme::glyph::UP),
-            menu::Item::new(Shift::Down.title(), Msg::OverlayShift(key.clone(), Shift::Down))
-                .glyph(theme::glyph::DOWN),
-            menu::Item::new(
-                "Смотреть снимок",
-                Msg::In(view, preview_of(&state.library, &key, overlay.folder)),
-            )
-            .glyph(theme::glyph::EYE),
-            menu::Item::new("Показать в каталоге", Msg::In(view, ViewMsg::InCatalog(key.clone())))
-                .glyph(theme::glyph::FOLDER),
-        ])
-    })
-    .align_x(Alignment::End)
-    .gap(4.0)
-    .on_dismiss(Msg::OverlayMenu(None))
-    .into()
+    let mut items = vec![
+        menu::Item::new(Shift::Up.title(), Msg::OverlayShift(key.clone(), Shift::Up))
+            .glyph(theme::glyph::UP),
+        menu::Item::new(Shift::Down.title(), Msg::OverlayShift(key.clone(), Shift::Down))
+            .glyph(theme::glyph::DOWN),
+    ];
+    items.extend(jumps(state, view, &key, overlay.folder));
+    menu_button(state, key, items)
 }
 
 /// Что со слоем прямо сейчас. Пусто у доехавшего видимого слоя: сказать о нём
@@ -425,9 +422,13 @@ fn state_label(overlay: &OverlayState) -> Element<Msg> {
     let (label, color) = match (overlay.on_globe(), overlay.hidden) {
         (false, _) => ("готовится…".to_string(), theme::INK_FAINT),
         (true, true) => ("скрыт".to_string(), theme::INK_FAINT),
-        (true, false) => match overlay.progress.said() {
-            Some(said) => (said, theme::ACCENT_TEXT),
-            None => return theme::nothing(),
+        // Отказ растра говорится последним и остаётся насовсем: пока слой
+        // чего-то ждёт, важнее ожидание, а когда дождался — только он и
+        // объясняет, почему приближение больше ничего не даст.
+        (true, false) => match (overlay.progress.said(), overlay.trouble.as_str()) {
+            (Some(said), _) => (said, theme::ACCENT_TEXT),
+            (None, "") => return theme::nothing(),
+            (None, trouble) => (trouble.to_string(), theme::INK_FAINT),
         },
     };
     text::<Msg>(label).size(theme::TEXT_SMALL).color(color).single_line().into()

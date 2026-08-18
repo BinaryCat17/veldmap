@@ -17,15 +17,10 @@ pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg>
     // из трёх снимков называла бы не то, что в нём стоит.
     let snapshots = rows.iter().filter(|row| row.kind.is_product()).count();
     let files = rows.len() - snapshots;
-    let counts = [
+    let said = format::counted(&[
         (snapshots, ["снимок", "снимка", "снимков"]),
         (files, ["файл", "файла", "файлов"]),
-    ];
-    let said: Vec<String> = counts
-        .iter()
-        .filter(|(count, _)| *count > 0)
-        .map(|(count, forms)| format!("{} {}", count, format::plural(*count, *forms)))
-        .collect();
+    ]);
 
     list_screen::view(
         view,
@@ -35,7 +30,7 @@ pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg>
             outlined: state.outlined_in(listing),
             subtitle: match said.is_empty() {
                 true => format::bytes(on_disk),
-                false => format!("{} · {}", said.join(", "), format::bytes(on_disk)),
+                false => format!("{} · {}", said, format::bytes(on_disk)),
             },
             path: None,
             empty: "Ничего не скачано",

@@ -691,9 +691,7 @@ fn primary(view: ViewId, row: &Row) -> Option<Primary> {
 fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
     let mut buttons: Vec<Element<Msg>> = quick(view, entry)
         .into_iter()
-        .map(|Quick { glyph, hint, message, tone }| {
-            hinted(theme::row_button_icon(glyph, tone).on_press(message), &hint)
-        })
+        .map(|Quick { glyph, hint, message, tone }| icon_button(glyph, tone, &hint, message))
         .collect();
 
     let items = menu_items(view, entry, context.here);
@@ -866,6 +864,19 @@ fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
             false => "Очертить на шаре",
         },
     )
+}
+
+/// Значок-кнопка строки: чем нарисован, каким лицом стоит, что скажет подсказка
+/// и что пошлёт. Ряд таких кнопок стоит и справа в строке таблицы, и в списке
+/// слоёв — собирается он поэтому здесь, а не в каждом списке по-своему: иначе
+/// одинаковые с виду значки разъезжаются лицом и подсказкой.
+pub fn icon_button(
+    glyph: &'static str,
+    tone: theme::IconTone,
+    hint: &str,
+    message: Msg,
+) -> Element<Msg> {
+    hinted(theme::row_button_icon(glyph, tone).on_press(message), hint)
 }
 
 /// Кнопка с подсказкой: подсказка одинакова у всех значков строки, и написанная

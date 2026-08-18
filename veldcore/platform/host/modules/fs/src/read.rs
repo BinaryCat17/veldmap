@@ -16,7 +16,7 @@ pub fn on_read(state: &State, req: FsReadRequest, caller: Caller) {
     let Caller { instance, correlation, .. } = caller;
     if !is_path_safe(&req.path) {
         bus::emit::on_read_result(&*state.ctx.publisher,
-            &opened(Err("Access denied".into())), &correlation);
+            &opened(Err("Путь за пределами дозволенного".into())), &correlation);
         return;
     }
 

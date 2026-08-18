@@ -90,8 +90,8 @@ impl PluginSpec {
         wasm.store.data_mut().call_context = None;
         match code {
             Ok(0) => Ok(()),
-            Ok(code) => anyhow::bail!("init returned code {}", code),
-            Err(e) => anyhow::bail!("init failed: {}", e),
+            Ok(code) => anyhow::bail!("init вернул код {}", code),
+            Err(e) => anyhow::bail!("init не выполнился: {}", e),
         }
     }
 }
@@ -172,9 +172,9 @@ impl WasmActor {
     async fn revive(&mut self, trap: wasmtime::Error) {
         let started = std::time::Instant::now();
         if self.doomed.load(Ordering::SeqCst) {
-            log::info!(target: "tasks", "Plugin '{}' killed mid-handler, reviving", self.spec.name);
+            log::info!(target: "tasks", "Модуль '{}' снят посреди обработчика, поднимаем заново", self.spec.name);
         } else {
-            log::error!("Plugin '{}' trapped: {:#}; reviving", self.spec.name, trap);
+            log::error!("Модуль '{}' поймал трап: {:#}; поднимаем заново", self.spec.name, trap);
         }
 
         // Деструкторов у убитого не было — их исполняет хост. Модуль мог
@@ -182,18 +182,18 @@ impl WasmActor {
         // может только тот, у кого лежит таблица владения.
         let freed = self.spec.ctx.registry.free_owned_by(self.spec.instance_id);
         if freed > 0 {
-            log::info!(target: "tasks", "Reclaimed {} resource(s) from '{}'", freed, self.spec.name);
+            log::info!(target: "tasks", "Возвращено ресурсов: {} — от модуля '{}'", freed, self.spec.name);
         }
         match self.spec.build().await {
             Ok((module, doomed)) => {
                 self.module = module;
                 self.doomed = doomed;
-                log::info!(target: "tasks", "Plugin '{}' revived in {:?}", self.spec.name, started.elapsed());
+                log::info!(target: "tasks", "Модуль '{}' поднят заново за {:?}", self.spec.name, started.elapsed());
             }
             // Инстанс не поднялся — актор остаётся с отравленным стором, и
             // каждое следующее событие будет падать. Молчать об этом нельзя:
             // сервис фактически выбыл из системы.
-            Err(e) => log::error!("Plugin '{}' failed to revive: {:#}", self.spec.name, e),
+            Err(e) => log::error!("Модуль '{}' не поднялся заново: {:#}", self.spec.name, e),
         }
     }
 }
@@ -201,8 +201,8 @@ impl WasmActor {
 /// Загружает все *.wasm из `plugins_dir`. Имя каждого плагина на шине — то,
 /// что он сам сообщает через `get_service_name` (единственный источник
 /// истины), а не имя файла и не запись в каком-либо манифесте. Instance id
-/// локальных wasm-сервисов регистрируются в диспетчере
-/// (`Dispatcher::instance_of`).
+/// локальных wasm-сервисов заводит диспетчер
+/// (`Dispatcher::register_instance`).
 pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Result<()> {
     let mut config = Config::new();
     // Без этого вызов wasm нельзя прервать ничем: движок не проверяет условий
@@ -229,7 +229,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("wasm"))
             .collect(),
         Err(e) => {
-            log::warn!("Cannot read plugins dir {:?}: {}", ctx.config.plugins_dir, e);
+            log::warn!("Каталог модулей {:?} не читается: {}", ctx.config.plugins_dir, e);
             Vec::new()
         }
     };
@@ -267,7 +267,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         // что бинарник вообще поднимается.
         let (mut probe, _) = match spec.instantiate().await {
             Ok(built) => built,
-            Err(e) => { log::error!("{:?}: cannot instantiate: {:#}, skipping", wasm_path, e); continue; }
+            Err(e) => { log::error!("{:?}: не инстанцируется: {:#}, пропускаем", wasm_path, e); continue; }
         };
 
         // Спрашиваем у бинарника его имя (сгенерированный экспорт,
@@ -277,7 +277,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             .and_then(|out| String::from_utf8(out).ok())
             .filter(|n| !n.is_empty())
         else {
-            log::error!("{:?}: no usable get_service_name export, skipping", wasm_path);
+            log::error!("{:?}: экспорт get_service_name не назвал имени, пропускаем", wasm_path);
             continue;
         };
 
@@ -285,7 +285,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         // занятость имён знает диспетчер, отдельный учёт здесь был бы вторым
         // источником того же факта.
         if ctx.dispatcher.instance_of(&name).is_some() {
-            log::error!("Duplicate service name '{}' (from {:?}), skipping", name, wasm_path);
+            log::error!("Имя сервиса '{}' уже занято (из {:?}), пропускаем", name, wasm_path);
             continue;
         }
 
@@ -295,7 +295,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
                 // Модуль назвал себя `name`, но в config_dir нет файла `<name>.json` —
                 // скорее всего схему переименовали, а конфиг забыли. Не падаем
                 // (конфиг может быть модулю и не нужен), но не молчим.
-                log::warn!("Plugin '{}' ({:?}): no '{}.json' in config dir, using empty config", name, wasm_path, name);
+                log::warn!("Модуль '{}' ({:?}): в каталоге конфигов нет '{}.json', берём пустой", name, wasm_path, name);
                 "{}".to_string()
             }
         };
@@ -321,9 +321,9 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         // Рабочий инстанс — уже с именем и конфигом, то есть прошедший init.
         let (module, doomed) = match spec.build().await {
             Ok(built) => built,
-            Err(e) => { log::error!("Plugin '{}' failed to initialize: {:#}, skipping", name, e); continue; }
+            Err(e) => { log::error!("Модуль '{}' не инициализировался: {:#}, пропускаем", name, e); continue; }
         };
-        log::info!("Plugin '{}' initialized successfully.", name);
+        log::info!("Модуль '{}' поднят.", name);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         Dispatcher::spawn_actor(rx, WasmActor {
@@ -352,7 +352,7 @@ async fn call_for_output(wasm: &mut WasmModule, export: &str) -> Option<Vec<u8>>
     wasm.store.data_mut().call_context = None;
     match code {
         Ok(0) => Some(call_ctx.0.lock().unwrap().output.clone()),
-        Ok(code) => { log::warn!("export '{}' returned code {}", export, code); None }
-        Err(e) => { log::warn!("export '{}' failed: {}", export, e); None }
+        Ok(code) => { log::warn!("экспорт '{}' вернул код {}", export, code); None }
+        Err(e) => { log::warn!("экспорт '{}' не выполнился: {}", export, e); None }
     }
 }

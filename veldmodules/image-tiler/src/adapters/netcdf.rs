@@ -20,7 +20,7 @@ use hdf5_pure::{AttrValue, DType, File};
 
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::TILE;
-use super::radiometry::{percentile_stretch, Mapping, Pixel, Samples};
+use super::radiometry::{percentile_stretch, Mapping, Pixel, Samples, STRETCH_SAMPLES};
 use super::{Info, Kind, Tie};
 
 /// Сигнатура HDF5 — с неё начинается всякий NetCDF-4. Классический NetCDF-3
@@ -52,11 +52,6 @@ const TIES_BUDGET: u64 = 64 * 1024 * 1024;
 /// интерполяция внутри ячейки расходится с поверхностью на метры.
 const TIE_GRID: u32 = 21;
 
-/// Сколько отсчётов берётся на растяг. Перцентиль — про форму распределения, а
-/// не про каждое значение: миллиона хватает, а сортировать сотню миллионов
-/// значит потратить на растяг больше, чем на весь показ.
-const STRETCH_SAMPLES: usize = 1 << 20;
-
 /// Сколько всего может лежать в файле — предел обхода, а не ожидание. Обходятся
 /// заголовки всех величин, и у файла с тысячами их обход стоил бы дороже
 /// показа.
@@ -76,10 +71,6 @@ pub struct Source {
     fill: Option<f32>,
     /// Как величина называется в файле по-человечески — для журнала.
     said: String,
-    /// Отсчётов по строке и строк: те же, что в [`Info`], но нужны и здесь —
-    /// `produce` режет плоскость на полосы сам.
-    width: u32,
-    height: u32,
 }
 
 pub fn describe<R: Read + Seek>(mut reader: R, len: u64) -> Result<Info, String> {
@@ -114,8 +105,6 @@ pub fn describe<R: Read + Seek>(mut reader: R, len: u64) -> Result<Info, String>
             path: chosen.path.clone(),
             fill: chosen.fill,
             said: chosen.said.clone(),
-            width,
-            height,
         })),
         finest: 0,
         ties,
@@ -123,12 +112,12 @@ pub fn describe<R: Read + Seek>(mut reader: R, len: u64) -> Result<Info, String>
 }
 
 pub fn produce(info: &Info, source: &Source, emit: Emit) -> Result<(), String> {
-    let values = plane(source)?;
-    let expected = (source.width as usize) * (source.height as usize);
+    let values = plane(source, info.width, info.height)?;
+    let expected = (info.width as usize) * (info.height as usize);
     if values.len() != expected {
         return Err(format!(
             "NetCDF: у '{}' {} отсчётов вместо {}×{}",
-            source.path, values.len(), source.width, source.height
+            source.path, values.len(), info.width, info.height
         ));
     }
     let mapping = mapping(&values, source.fill);
@@ -136,13 +125,13 @@ pub fn produce(info: &Info, source: &Source, emit: Emit) -> Result<(), String> {
     veldsdk::log::debug!(target: "decode",
         "NetCDF проход: '{}' ({}), {}×{}", source.path, source.said, info.width, info.height);
 
-    let width = source.width as usize;
+    let width = info.width as usize;
     let mut cascade = Cascade::new(0, info.width, info.height);
     let mut top = 0u32;
-    while top < source.height {
+    while top < info.height {
         // Полоса ровно в тайл: границы полос каскада стоят там же, и лишнего
         // деления внутри него не случается.
-        let rows = TILE.min(source.height - top);
+        let rows = TILE.min(info.height - top);
         let from = (top as usize) * width;
         let slice = &values[from..from + (rows as usize) * width];
         let rgba = mapping.rgba(&Samples::F32(slice), Pixel::named(1), slice.len());
@@ -160,17 +149,17 @@ pub fn produce(info: &Info, source: &Source, emit: Emit) -> Result<(), String> {
 /// возрастающее, а растяг считается по перцентилям тех же значений: в яркость
 /// оно не вносит ничего, зато «нет данных» сравнивается с сырым значением, как
 /// оно и записано.
-fn plane(source: &Source) -> Result<Vec<f32>, String> {
+fn plane(source: &Source, width: u32, height: u32) -> Result<Vec<f32>, String> {
     let dataset =
         source.file.dataset(&source.path).map_err(|e| format!("NetCDF: {}: {}", source.path, e))?;
-    let pixels = u64::from(source.width) * u64::from(source.height);
+    let pixels = u64::from(width) * u64::from(height);
     let element = width_of(&dataset.dtype().map_err(|e| format!("NetCDF: {}", e))?).unwrap_or(8);
     let needed = pixels.saturating_mul(u64::from(element) + 4);
     if needed > PLANE_BUDGET {
         return Err(format!(
             "NetCDF {}×{}: величина в памяти займёт {} МБ при потолке {} МБ",
-            source.width,
-            source.height,
+            width,
+            height,
             needed / (1024 * 1024),
             PLANE_BUDGET / (1024 * 1024)
         ));

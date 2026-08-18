@@ -30,8 +30,8 @@ pub enum Access {
 pub struct Lease {
     pub owner_id: u32,
     pub readers: Vec<u32>,
-    /// Modules granted write access by the owner (e.g. a renderer writing into
-    /// a window target texture owned by the window's module). Writers can read.
+    /// Кому владелец выдал право писать — так владелец окна назначает
+    /// рендерера его целевой текстуры. Право писать включает и чтение.
     pub writers: Vec<u32>,
 }
 

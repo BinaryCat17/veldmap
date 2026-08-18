@@ -128,7 +128,7 @@ impl Dispatcher {
     }
 
     pub fn register_subscription(&self, topic: String, name: String, subscriber: Subscriber) {
-        log::trace!(target: "dispatcher", "[DISPATCHER] Registering subscription: {}", topic);
+        log::trace!(target: "dispatcher", "[DISPATCHER] Подписка на топик: {}", topic);
         let mut subscriptions = self.subscriptions.lock().unwrap();
         subscriptions.entry(topic).or_default().push((name, subscriber));
     }
@@ -159,30 +159,33 @@ impl Dispatcher {
         });
     }
 
-    /// Fire-and-forget delivery to every subscriber of the topic, published by
-    /// the host itself and correlated with nothing.
-    /// Delivery is synchronous into each subscriber's queue, so events published
-    /// from one thread arrive at each subscriber in publish order.
+    /// Публикация от имени самого хоста: без корреляции и без ответа —
+    /// отправил и забыл.
+    ///
+    /// В очередь каждого подписчика событие кладётся синхронно, поэтому
+    /// опубликованное из одного потока приходит к каждому подписчику в
+    /// порядке публикации.
     pub fn publish(&self, topic: &str, payload: Vec<u8>) {
         self.publish_from(topic, payload, 0, "", "");
     }
 
-    /// Like `publish`, carrying the publisher's instance id. Subscribers
-    /// receive it as requestor_id and can authorize commands (0 = host itself).
+    /// То же, что `publish`, но с идентичностью паблишера. Подписчик получает
+    /// её как requestor_id и по ней решает, позволено ли команду выполнять
+    /// (0 — сам хост).
     ///
     /// `correlation`: пусто у топиков, не объявленных парой `replies_to`;
     /// у запроса — id, выданный заказчиком, у ответа — он же, возвращённый
     /// эхом. Хост его не выдаёт и не проверяет, только переносит.
     ///
-    /// `target`: empty delivers to every subscriber of `topic` (broadcast,
-    /// the historical behavior). Non-empty delivers only to the subscriber
-    /// registered under that module name — every other subscriber of the same
-    /// topic doesn't see it. An addressed event with no matching subscriber is
-    /// dropped, same as an unsubscribed topic.
+    /// `target`: пусто — событие идёт всем подписчикам `topic` (широковещание);
+    /// непусто — только подписчику, зарегистрированному под этим именем
+    /// модуля, остальные подписчики того же топика его не видят. Адресованное
+    /// событие без подходящего подписчика теряется — ровно как публикация в
+    /// топик, на который никто не подписан.
     pub fn publish_from(&self, topic: &str, payload: Vec<u8>, publisher: u32, correlation: &str, target: &str) {
         let parts: Vec<&str> = topic.splitn(2, '/').collect();
         if parts.len() != 2 {
-            log::warn!(target: "dispatcher", "[DISPATCHER] Invalid publish topic: {}", topic);
+            log::warn!(target: "dispatcher", "[DISPATCHER] Негодный топик публикации: {}", topic);
             return;
         }
         let (service_name, method) = (parts[0], parts[1]);
@@ -203,8 +206,9 @@ impl Dispatcher {
         };
 
         if recipients.is_empty() {
-            // A published message with no receiver is almost always a wiring bug.
-            log::warn!(target: "dispatcher", "[DISPATCHER] Publish to '{}' (target '{}') dropped: no matching subscriber", topic, target);
+            // Сообщение, которое некому получить, — почти всегда несведённая
+            // проводка схемы, а не штатный исход.
+            log::warn!(target: "dispatcher", "[DISPATCHER] Публикация в '{}' (адресат '{}') отброшена: подписчика нет", topic, target);
             // Учёт, открытый этой же публикацией, некому закрыть: исполнителя
             // нет, и терминального ответа не будет. Закрываем сами — тем же
             // синтезированным ответом, что и при убийстве, — иначе запись
@@ -227,7 +231,7 @@ impl Dispatcher {
                 correlation: correlation.to_string(),
                 accounted,
             }).is_err() {
-                log::error!(target: "dispatcher", "[DISPATCHER] Subscriber actor for '{}' is gone", topic);
+                log::error!(target: "dispatcher", "[DISPATCHER] Актор-подписчик топика '{}' больше не жив", topic);
             }
         }
     }
@@ -279,17 +283,17 @@ impl Dispatcher {
                 // выглядит как обычный терминальный, только исполнителя за ним
                 // уже нет. Пусть в логе будет видно, что конец операции
                 // договорил хост.
-                log::info!(target: "tasks", "Task {} killed by requestor {}, answering with {}",
+                log::info!(target: "tasks", "Операция {} снята заказчиком {}, отвечаем за неё топиком {}",
                     task_id, requestor, terminal_topic);
                 self.publish_from(terminal_topic, Vec::new(), 0, task_id, "");
                 true
             }
             crate::tasks::CancelOutcome::NotFound => {
-                log::debug!(target: "tasks", "Nothing to kill for task {}", task_id);
+                log::debug!(target: "tasks", "Снимать нечего: операции {} нет", task_id);
                 false
             }
             crate::tasks::CancelOutcome::Denied => {
-                log::warn!(target: "tasks", "Kill of task {} denied for requestor {}", task_id, requestor);
+                log::warn!(target: "tasks", "Снять операцию {} заказчику {} не позволено", task_id, requestor);
                 false
             }
         }

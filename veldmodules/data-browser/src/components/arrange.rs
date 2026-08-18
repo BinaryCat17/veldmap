@@ -4,8 +4,8 @@
 //! виджета: это правила, а не оформление, и проверяются они по данным, а не
 //! глазами. Разметка получает уже готовый список строк (см. `table`).
 
-use crate::module::components::{format, Row};
-use crate::module::state::listing::{Grouping, ListingState};
+use crate::module::components::{format, last_segment, Row};
+use crate::module::state::listing::{Filter, Grouping, ListingState};
 
 /// Сколько записей на странице. Число фиксированное, а не выведенное из высоты
 /// окна: страница, меняющая состав при изменении размера окна, теряет место, на
@@ -91,10 +91,8 @@ impl Arranged<'_> {
 /// где это заметнее всего.
 pub fn filtered<'a>(rows: &'a [Row], listing: &ListingState) -> Vec<&'a Row> {
     let query = listing.query.to_lowercase();
-    let mut passing: Vec<&Row> = rows
-        .iter()
-        .filter(|row| matches_query(row, &query) && listing.filter.matches(&row.status))
-        .collect();
+    let mut passing: Vec<&Row> =
+        rows.iter().filter(|row| passes(row, &query, listing.filter)).collect();
     sort(&mut passing, listing);
     passing
 }
@@ -107,18 +105,14 @@ pub fn page_of(rows: &[Row], listing: &ListingState, key: &str) -> Option<usize>
 }
 
 pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
-    use crate::module::state::listing::{Choice, Filter};
+    use crate::module::state::listing::Choice;
 
     // Счётчики меню считаются до отбора по состоянию, но после отбора по
     // имени: «Все» иначе показывало бы столько же, сколько выбранное.
     let query = listing.query.to_lowercase();
     let counts = Filter::ALL
         .iter()
-        .map(|filter| {
-            rows.iter()
-                .filter(|row| matches_query(row, &query) && filter.matches(&row.status))
-                .count()
-        })
+        .map(|filter| rows.iter().filter(|row| passes(row, &query, *filter)).count())
         .collect();
 
     let passing = filtered(rows, listing);
@@ -132,6 +126,15 @@ pub fn arrange<'a>(rows: &'a [Row], listing: &ListingState) -> Arranged<'a> {
         .collect();
 
     Arranged { lines: group(shown, listing), total, pages, page, counts }
+}
+
+/// Проходит ли строка отбор: набранным именем и названным состоянием.
+///
+/// Одно правило на показ и на счётчики меню — они считаются тем же отбором, но
+/// каждый со своим состоянием (см. [`arrange`]), — а два выражения одного и
+/// того же однажды написали бы в меню не то число, что стои́т в списке.
+fn passes(row: &Row, query: &str, filter: Filter) -> bool {
+    matches_query(row, query) && filter.matches(&row.status)
 }
 
 /// Отбор по имени — по вхождению, без учёта регистра: пользователь помнит
@@ -233,8 +236,12 @@ fn expand<'a>(row: &'a Row, listing: &ListingState, depth: usize, lines: &mut Ve
 fn segments(folder: &str, grouping: Grouping) -> Vec<&str> {
     match grouping {
         // Заголовком названа сама папка, а путь к ней не показан: он одинаков
-        // у всех строк вида и места в заголовке не стоит.
-        Grouping::Folder => folder.rsplit('/').next().filter(|name| !name.is_empty()).into_iter().collect(),
+        // у всех строк вида и места в заголовке не стоит. У строк корня папки
+        // нет вовсе — им и заголовка не открывается.
+        Grouping::Folder => match last_segment(folder) {
+            "" => Vec::new(),
+            name => vec![name],
+        },
         Grouping::Tree => folder.split('/').filter(|name| !name.is_empty()).collect(),
         Grouping::None => Vec::new(),
     }

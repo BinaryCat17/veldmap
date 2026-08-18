@@ -23,7 +23,7 @@ use tiff::tags::Tag;
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::{self, TILE};
 use super::super::resample::resample;
-use super::radiometry::{percentile_stretch, Mapping, Pixel, Samples};
+use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples};
 use super::{Info, Kind, Tie};
 
 /// Сигнатуры BigTIFF: у него в заголовке стоит версия 43 вместо 42, и по этому
@@ -185,17 +185,8 @@ pub fn produce_direct<R: Read + Seek>(
 
     // Копии могут быть раскложены иначе, чем базовый IFD, — проверяется та,
     // которую читаем.
-    ensure_chunky(&mut decoder)?;
+    let (cw, ch) = chunk_grid(&mut decoder)?;
     let pixel = pixel(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
-    let (cw, ch) = decoder.chunk_dimensions();
-    if cw == 0 || ch == 0 {
-        return Err("tiff: нулевой размер чанка".to_string());
-    }
-    // Чанк декодируется целиком, и проверить его габарит надо до чтения:
-    // REGION_CAP меряет область тайла, а не то, какими кусками она лежит.
-    if u64::from(cw) * u64::from(ch) * 4 > BAND_CAP {
-        return Err(format!("tiff: чанк {}×{} не влезает в бюджет памяти", cw, ch));
-    }
     let across = sw.div_ceil(cw);
     let mut chunks = ChunkCache::new();
 
@@ -315,12 +306,8 @@ pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emi
     // Копий нет — выборка растяга из базового IFD; байтовым файлам она не
     // стоит ни одного лишнего чтения.
     let mapping = mapping(&mut decoder, 0)?;
-    ensure_chunky(&mut decoder)?;
+    let (cw, ch) = chunk_grid(&mut decoder)?;
     let pixel = pixel(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
-    let (cw, ch) = decoder.chunk_dimensions();
-    if cw == 0 || ch == 0 {
-        return Err("tiff: нулевой размер чанка".to_string());
-    }
     let across = info.width.div_ceil(cw);
     let down = info.height.div_ceil(ch);
     if u64::from(info.width) * u64::from(ch) * 4 > BAND_CAP {
@@ -361,6 +348,27 @@ pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emi
 /// Планарная раскладка (плоскость на канал) чанкуется по-другому: чанк несёт
 /// одну плоскость, а сборка здесь считает его всеми каналами вперемешку.
 /// Отказ, а не каша из серых плоскостей.
+/// Размер чанка у образа, на котором стои́т декодер, — вместе с проверками, без
+/// которых его нельзя читать.
+///
+/// Спрашивают это все три пути: прямой доступ, последовательный проход и
+/// выборка растяга. Нужно им одно и то же — раскладка обязана быть
+/// интерливленной, размер чанка ненулевым, а сам чанк влезать в память, потому
+/// что декодируется он целиком. Проверка габарита стои́т до чтения и меряет
+/// именно чанк: `REGION_CAP` меряет область тайла, а не то, какими кусками она
+/// лежит.
+fn chunk_grid<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<(u32, u32), String> {
+    ensure_chunky(decoder)?;
+    let (cw, ch) = decoder.chunk_dimensions();
+    if cw == 0 || ch == 0 {
+        return Err("tiff: нулевой размер чанка".to_string());
+    }
+    if u64::from(cw) * u64::from(ch) * 4 > BAND_CAP {
+        return Err(format!("tiff: чанк {}×{} не влезает в бюджет памяти", cw, ch));
+    }
+    Ok((cw, ch))
+}
+
 fn ensure_chunky<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<(), String> {
     let planar = decoder.get_tag_unsigned::<u16>(Tag::PlanarConfiguration).unwrap_or(1);
     if planar != 1 {
@@ -469,14 +477,10 @@ fn typed(data: &DecodingResult) -> Result<Samples<'_>, String> {
     })
 }
 
-/// Сколько значений хватает выборке растяга на файл: перцентили по миллиону
-/// не отличимы от перцентилей по всем, а сортировка остаётся мгновенной.
-const STAT_SAMPLES: usize = 1 << 20;
-
 /// Маппинг показа файла: байтам — тождество, широким форматам — растяг
 /// перцентилей (см. radiometry.rs). Выборка — до четырёх чанков вразброс из
 /// IFD `stats` (у COG — самая мелкая копия, у прохода — базовый), прорежена
-/// до [`STAT_SAMPLES`]. Выбор детерминирован: одному файлу — один растяг,
+/// до [`radiometry::STRETCH_SAMPLES`]. Выбор детерминирован: одному файлу — один растяг,
 /// какие тайлы и в каком порядке ни спроси.
 ///
 /// Декодер после возврата стоит на IFD `stats` — вызывающий сам наводит его
@@ -493,15 +497,8 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
     }
 
     decoder.seek_to_image(stats).map_err(|e| format!("tiff: {}", e))?;
-    ensure_chunky(decoder)?;
     let (w, h) = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
-    let (cw, ch) = decoder.chunk_dimensions();
-    if cw == 0 || ch == 0 {
-        return Err("tiff: нулевой размер чанка".to_string());
-    }
-    if u64::from(cw) * u64::from(ch) * 4 > BAND_CAP {
-        return Err(format!("tiff: чанк {}×{} не влезает в бюджет памяти", cw, ch));
-    }
+    let (cw, ch) = chunk_grid(decoder)?;
 
     let total = w.div_ceil(cw) * h.div_ceil(ch);
     let mut picks = [0, total / 3, 2 * total / 3, total.saturating_sub(1)].to_vec();
@@ -511,7 +508,7 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
     for &index in &picks {
         let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
         let samples = typed(&data)?;
-        let step = (samples.len() * picks.len() / STAT_SAMPLES).max(1);
+        let step = (samples.len() * picks.len() / radiometry::STRETCH_SAMPLES).max(1);
         for i in (0..samples.len()).step_by(step) {
             let v = samples.get(i);
             if v.is_finite() && Some(v) != nodata {

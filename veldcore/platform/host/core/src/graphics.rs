@@ -65,7 +65,8 @@ pub struct GraphicsDevice {
     memory: Arc<MemoryManager>,
     device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
-    /// Render ops submitted by modules, drained by the runner's frame loop.
+    /// Кадровые команды, записанные модулями; дренирует их кадровый цикл
+    /// раннера.
     pending_ops: Mutex<Vec<PendingRenderOp>>,
 }
 
@@ -88,7 +89,7 @@ impl GraphicsDevice {
         }
     }
 
-    /// Drain render ops queued by modules since the last frame.
+    /// Забрать всё, что модули записали с прошлого кадра.
     pub fn take_pending_ops(&self) -> Vec<PendingRenderOp> {
         std::mem::take(&mut *self.pending_ops.lock().unwrap())
     }

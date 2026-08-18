@@ -4,6 +4,7 @@ mod state;
 mod handlers;
 mod renderer;
 mod converter;
+mod delegate;
 mod divider;
 mod drag;
 mod graphics;

@@ -78,7 +78,6 @@ gpu_id! {
 
 pub const VISIBILITY_VERTEX: u32 = 1;
 pub const VISIBILITY_FRAGMENT: u32 = 2;
-pub const VISIBILITY_COMPUTE: u32 = 4;
 
 /// Битовые флаги wgpu::BufferUsages для `abi::resource_alloc_buffer`.
 pub mod buffer_usage {
@@ -89,7 +88,6 @@ pub mod buffer_usage {
     pub const INDEX: u32 = 1 << 4;
     pub const VERTEX: u32 = 1 << 5;
     pub const UNIFORM: u32 = 1 << 6;
-    pub const STORAGE: u32 = 1 << 7;
 }
 
 /// Битовые флаги wgpu::TextureUsages для `abi::resource_alloc_texture`.
@@ -97,7 +95,6 @@ pub mod texture_usage {
     pub const COPY_SRC: u32 = 1 << 0;
     pub const COPY_DST: u32 = 1 << 1;
     pub const TEXTURE_BINDING: u32 = 1 << 2;
-    pub const STORAGE_BINDING: u32 = 1 << 3;
     pub const RENDER_ATTACHMENT: u32 = 1 << 4;
 }
 
@@ -167,7 +164,7 @@ fn create(command: resource_request::Command) -> anyhow::Result<u64> {
     let req = ResourceRequest { command: Some(command) };
     let res_bytes = crate::abi::resource_create(req.encode_to_vec())?;
     let id_bytes: [u8; 8] = res_bytes.as_slice().try_into()
-        .map_err(|_| anyhow::anyhow!("graphics create_resource: malformed id ({} bytes)", res_bytes.len()))?;
+        .map_err(|_| anyhow::anyhow!("graphics create_resource: испорченный id ({} байт)", res_bytes.len()))?;
     Ok(u64::from_le_bytes(id_bytes))
 }
 

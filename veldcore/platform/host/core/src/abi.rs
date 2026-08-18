@@ -6,7 +6,7 @@ use prost::Message;
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // ── Шина событий ──────────────────────────────────────────
 
-    // veld_host_publish — fire-and-forget
+    // veld_host_publish — отправил и забыл, ответа нет.
     linker.func_wrap_async("env", "veld_host_publish", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
             let mem = match caller.get_export("memory") {
@@ -17,7 +17,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let req_buf = match data_bytes { Some(b) => b, None => return Ok(()) };
             let request = match EventEnvelope::decode(&req_buf[..]) {
                 Ok(r) => r,
-                Err(e) => { log::error!(target: "abi", "[{}] publish decode error: {}", caller.data().plugin_name, e); return Ok(()); }
+                Err(e) => { log::error!(target: "abi", "[{}] не разобрано опубликованное сообщение: {}", caller.data().plugin_name, e); return Ok(()); }
             };
             let topic = format!("{}/{}", request.service, request.method);
             let publisher = caller.data().instance_id;
@@ -27,7 +27,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // veld_host_log — direct logging
+    // veld_host_log — запись в общий лог хоста, минуя шину.
     linker.func_wrap_async("env", "veld_host_log", |mut caller: Caller<'_, HostState>, (level, target_ptr, target_len, ptr, len): (u64, u64, u64, u64, u64)| {
         Box::new(async move {
             use log::Level;
@@ -53,7 +53,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // ── System ────────────────────────────────────────────────
+    // ── Система ───────────────────────────────────────────────
 
     // veld_random_bytes(ptr, len) — хостовая энтропия: у wasm нет своего
     // источника случайности (uuid и пр. собираются на стороне SDK).
@@ -100,14 +100,14 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
             let memory = caller.data().memory.clone();
 
             let result = if !registry.check_access(id, instance_id, crate::registry::Access::Read) {
-                Err(anyhow::anyhow!("read access to resource {} denied", id))
+                Err(anyhow::anyhow!("чтение ресурса {} запрещено", id))
             } else if memory.read_blocks(id) {
                 // Диск, сеть и ожидание GPU — на blocking-пул. Гость этого не
                 // замечает (вызов для него синхронный), но поток рантайма при
                 // медленном носителе остаётся свободным для других плагинов.
                 match tokio::task::spawn_blocking(move || memory.read(id, offset, size)).await {
                     Ok(inner) => inner,
-                    Err(e) => Err(anyhow::anyhow!("read of resource {} panicked: {}", id, e)),
+                    Err(e) => Err(anyhow::anyhow!("чтение ресурса {} упало с паникой: {}", id, e)),
                 }
             } else {
                 memory.read(id, offset, size)
@@ -156,7 +156,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         u64::from(dispatcher.kill(&id, requestor))
     })?;
 
-    // ── Memory management ─────────────────────────────────────
+    // ── Выделение памяти ──────────────────────────────────────
 
     // veld_resource_alloc_buffer(size, usage, mapped) → region_id
     linker.func_wrap("env", "veld_resource_alloc_buffer", |caller: Caller<'_, HostState>, size: u64, usage: u64, mapped: u64| -> u64 {
@@ -210,7 +210,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // ── Call context ──────────────────────────────────────────
+    // ── Контекст вызова ───────────────────────────────────────
 
     linker.func_wrap("env", "veld_input_len", |caller: Caller<'_, HostState>| -> u64 {
         caller.data().call_context.as_ref()
@@ -239,7 +239,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         }
     })?;
 
-    // ── Graphics ──────────────────────────────────────────────
+    // ── Графика ───────────────────────────────────────────────
 
     linker.func_wrap_async("env", "veld_resource_create", |mut caller: Caller<'_, HostState>, (ptr, len): (u64, u64)| {
         Box::new(async move {
@@ -267,7 +267,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
-    // ── Dummy wbindgen ────────────────────────────────────────
+    // ── Заглушки wbindgen ─────────────────────────────────────
 
     linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_describe", |_: u32| {})?;
     linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_throw", |_: u32, _: u32| {})?;
@@ -307,19 +307,17 @@ fn read_str(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<St
         .map(str::to_string)
 }
 
-/// Helper: read a service name from WASM memory and resolve its instance id.
+/// Читает из памяти гостя имя сервиса и переводит его в id инстанса: наружу
+/// ABI выдаёт только имена, числовые id живут внутри хоста.
 fn resolve_service_arg(caller: &mut Caller<'_, HostState>, ptr: u64, len: u64) -> Option<u32> {
     let name = read_str(caller, ptr, len)?;
     let resolved = caller.data().dispatcher.instance_of(&name);
     if resolved.is_none() {
-        log::warn!(target: "abi", "[{}] lease grant to unknown service '{}'", caller.data().plugin_name, name);
+        log::warn!(target: "abi", "[{}] права на ресурс выдаются неизвестному сервису '{}'", caller.data().plugin_name, name);
     }
     resolved
 }
 
-/// Кодирует результат синхронного ABI-вызова без protobuf: первый байт —
-/// тег (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст).
-/// Разбирается на SDK-стороне (sdk/rust/src/abi.rs::take_host_response).
 /// Общая часть записи в ресурс: границы гостевой памяти, проверка права и
 /// выбор операции. `offset: None` — заливка изображения в текстуру, у неё
 /// смещения нет.
@@ -327,24 +325,27 @@ fn write_bytes(caller: &mut Caller<'_, HostState>, id: u64, offset: Option<u64>,
                ptr: u64, len: u64) -> anyhow::Result<()> {
     let mem = match caller.get_export("memory") {
         Some(Extern::Memory(m)) => m,
-        _ => return Err(anyhow::anyhow!("guest exports no memory")),
+        _ => return Err(anyhow::anyhow!("гость не экспортирует память")),
     };
     let instance_id = caller.data().instance_id;
     let registry = caller.data().registry.clone();
     if !registry.check_access(id, instance_id, crate::registry::Access::Write) {
-        return Err(anyhow::anyhow!("write access to resource {} denied", id));
+        return Err(anyhow::anyhow!("запись в ресурс {} запрещена", id));
     }
     // Cpu — memcpy, GPU — постановка в очередь wgpu: ни то, ни другое поток не
     // держит, поэтому blocking-пул здесь не нужен (в отличие от чтения).
     let memory = caller.data().memory.clone();
     let data = mem.data(&*caller).get(ptr as usize..(ptr + len) as usize)
-        .ok_or_else(|| anyhow::anyhow!("source range lies outside guest memory"))?;
+        .ok_or_else(|| anyhow::anyhow!("исходный диапазон выходит за память гостя"))?;
     match offset {
         Some(offset) => memory.write(id, offset, data),
         None => memory.upload_image(id, data),
     }
 }
 
+/// Кодирует результат синхронного ABI-вызова без protobuf: первый байт — тег
+/// (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст). Разбирается на
+/// SDK-стороне (sdk/rust/src/abi.rs::take_host_response).
 fn tagged_response(result: anyhow::Result<Vec<u8>>) -> Vec<u8> {
     match result {
         Ok(payload) => {
@@ -363,7 +364,9 @@ fn tagged_response(result: anyhow::Result<Vec<u8>>) -> Vec<u8> {
     }
 }
 
-/// Helper: write response back to WASM via veld_alloc
+/// Кладёт ответ обратно в память гостя: место под него просит сам гость
+/// (экспорт `veld_alloc`), а возвращается упакованная пара длина/указатель.
+///
 /// Тип ошибки здесь wasmtime'овский, а не anyhow: это возврат хостовой функции
 /// прямо в гостя, и его сигнатуру задаёт `func_wrap_async`. Внутри хоста
 /// ошибки остаются anyhow — граница проходит ровно по этой функции.

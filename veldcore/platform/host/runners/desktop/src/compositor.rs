@@ -1,7 +1,10 @@
-//! GPU Compositor for VeldMap Host
-//! 
-//! Handles final composition of plugin renders to the screen.
-//! Uses a simple fullscreen triangle blit for texture overlay.
+//! Композитор кадра: последний шаг, на котором нарисованное модулем попадает
+//! на экран.
+//!
+//! Модуль рисует в свою текстуру и об окне ничего не знает; сюда она приходит
+//! готовой, и остаётся только натянуть её на поверхность окна. Делается это
+//! одним треугольником во весь экран — вершинных буферов и геометрии тут нет,
+//! координаты считает сам вершинный шейдер (blit.wgsl).
 
 pub struct Compositor {
     blit_pipeline: wgpu::RenderPipeline,
@@ -85,7 +88,8 @@ impl Compositor {
         }
     }
 
-    /// Create a bind group for blitting a texture
+    /// Bind group под конкретную текстуру: раскладка одна на всех, а вид
+    /// текстуры у каждого кадра свой — поэтому группа собирается заново.
     pub fn create_bind_group(&self, device: &wgpu::Device, texture_view: &wgpu::TextureView) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Compositor Bind Group"),
@@ -103,7 +107,7 @@ impl Compositor {
         })
     }
 
-    /// Render the UI texture to the surface via blit
+    /// Натягивает текстуру модуля на поверхность окна.
     pub fn blit_ui(&self, render_pass: &mut wgpu::RenderPass, bind_group: &wgpu::BindGroup) {
         render_pass.set_pipeline(&self.blit_pipeline);
         render_pass.set_bind_group(0, bind_group, &[]);

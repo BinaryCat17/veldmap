@@ -14,16 +14,14 @@
 
 use std::sync::Mutex;
 
-use iced_core::layout::{self, Layout};
+use iced_core::layout::Layout;
 use iced_core::mouse;
-use iced_core::overlay;
 use iced_core::renderer::{self, Renderer as _};
 use iced_core::widget::{self, Widget};
-use iced_core::{
-    Clipboard, Color, Element, Event, Length, Point, Rectangle, Shell, Size, Vector,
-};
+use iced_core::{Clipboard, Color, Element, Event, Point, Rectangle, Shell};
 
 use crate::module::converter::UiMessage;
+use crate::module::delegate::delegate_to_child;
 use crate::module::renderer::GpuRenderer;
 use crate::proto::ui_service::{DropEdge, DropEvent};
 
@@ -96,30 +94,10 @@ impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for Draggable {
         widget::tree::State::new(Held::default())
     }
 
-    fn children(&self) -> Vec<widget::Tree> {
-        vec![widget::Tree::new(&self.content)]
-    }
-
-    fn diff(&self, tree: &mut widget::Tree) {
-        tree.diff_children(&[self.content.as_widget()]);
-    }
-
-    fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.content.as_widget().size_hint()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &GpuRenderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
-    }
+    // Взятое ничего не добавляет ни к тому, как содержимое лежит, ни к тому,
+    // как оно рисуется: своё у него — только слежение за курсором ниже.
+    delegate_to_child!(content: UiMessage, iced_core::Theme, GpuRenderer;
+        children, diff, size, size_hint, layout, mouse_interaction, draw, operate, overlay);
 
     fn update(
         &mut self,
@@ -165,57 +143,6 @@ impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for Draggable {
             }
             _ => {}
         }
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &widget::Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &GpuRenderer,
-    ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0], layout, cursor, viewport, renderer,
-        )
-    }
-
-    fn draw(
-        &self,
-        tree: &widget::Tree,
-        renderer: &mut GpuRenderer,
-        theme: &iced_core::Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        self.content.as_widget().draw(
-            &tree.children[0], renderer, theme, style, layout, cursor, viewport,
-        );
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut widget::Tree,
-        layout: Layout<'_>,
-        renderer: &GpuRenderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut widget::Tree,
-        layout: Layout<'b>,
-        renderer: &GpuRenderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, UiMessage, iced_core::Theme, GpuRenderer>> {
-        self.content.as_widget_mut().overlay(
-            &mut tree.children[0], layout, renderer, viewport, translation,
-        )
     }
 }
 
@@ -291,30 +218,10 @@ impl DropZone {
 }
 
 impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for DropZone {
-    fn children(&self) -> Vec<widget::Tree> {
-        vec![widget::Tree::new(&self.content)]
-    }
-
-    fn diff(&self, tree: &mut widget::Tree) {
-        tree.diff_children(&[self.content.as_widget()]);
-    }
-
-    fn size(&self) -> Size<Length> {
-        self.content.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.content.as_widget().size_hint()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &GpuRenderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
-    }
+    // Место в разметке у зоны — место её содержимого; своё у неё только приём
+    // брошенного и подсветка поверх, поэтому `draw` пишется ниже руками.
+    delegate_to_child!(content: UiMessage, iced_core::Theme, GpuRenderer;
+        children, diff, size, size_hint, layout, mouse_interaction, operate, overlay);
 
     fn update(
         &mut self,
@@ -347,19 +254,6 @@ impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for DropZone {
         ));
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &widget::Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &GpuRenderer,
-    ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
-            &tree.children[0], layout, cursor, viewport, renderer,
-        )
-    }
-
     /// Поверх содержимого — обещание: место, которое займёт брошенное.
     /// Рисуется, только пока что-то несут: в покое зона ничем не отличается от
     /// обычной коробки, и знать о ней заранее незачем.
@@ -383,29 +277,6 @@ impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for DropZone {
         let Some(at) = cursor.position_over(layout.bounds()) else { return };
         let target = Self::target(layout.bounds(), self.edge(layout.bounds(), at));
         renderer.fill_quad(renderer::Quad { bounds: target, ..Default::default() }, self.highlight);
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut widget::Tree,
-        layout: Layout<'_>,
-        renderer: &GpuRenderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
-    }
-
-    fn overlay<'b>(
-        &'b mut self,
-        tree: &'b mut widget::Tree,
-        layout: Layout<'b>,
-        renderer: &GpuRenderer,
-        viewport: &Rectangle,
-        translation: Vector,
-    ) -> Option<overlay::Element<'b, UiMessage, iced_core::Theme, GpuRenderer>> {
-        self.content.as_widget_mut().overlay(
-            &mut tree.children[0], layout, renderer, viewport, translation,
-        )
     }
 }
 

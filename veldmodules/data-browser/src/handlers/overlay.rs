@@ -514,6 +514,7 @@ fn send_set(state: &State) {
 pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::OverlaysProgress) {
     for overlay in &mut state.overlays {
         let said = msg.overlays.iter().find(|progress| progress.key == overlay.identifier);
+        overlay.trouble = said.map_or(String::new(), |progress| progress.trouble.clone());
         overlay.progress = said.map_or(Progress::default(), |progress| Progress {
             ready: progress.ready,
             total: progress.total,

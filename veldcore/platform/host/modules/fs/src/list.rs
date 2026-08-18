@@ -17,7 +17,7 @@ pub fn on_list(state: &State, req: FsListRequest, caller: Caller) {
     let correlation = caller.correlation;
     if !is_path_safe(&req.path) {
         bus::emit::on_list_result(&*state.ctx.publisher, &FsListResult {
-            entries: vec![], error: "Access denied".into(),
+            entries: vec![], error: "Путь за пределами дозволенного".into(),
         }, &correlation);
         return;
     }

@@ -24,13 +24,13 @@ impl Surfaces {
         if requestor_id != 0 {
             if self.ctx.dispatcher.instance_of(plugin_id) != Some(requestor_id) {
                 log::warn!(target: "surfaces",
-                    "set_surface rejected: requestor {} is not the owner of window '{}'",
+                    "set_surface отклонён: заказчик {} не владеет окном '{}'",
                     requestor_id, plugin_id);
                 return;
             }
             if !self.ctx.registry.check_access(texture_id, requestor_id, Access::Write) {
                 log::warn!(target: "surfaces",
-                    "set_surface rejected: requestor {} has no write access to texture {}",
+                    "set_surface отклонён: заказчику {} не позволено писать в текстуру {}",
                     requestor_id, texture_id);
                 return;
             }

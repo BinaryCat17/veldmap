@@ -154,7 +154,6 @@ impl Widget<UiMessage, iced_core::Theme, GpuRenderer> for Viewport {
                 x,
                 y,
                 button: button.unwrap_or(0),
-                scroll_x: scroll.0,
                 scroll_y: scroll.1,
             }));
         };

@@ -125,9 +125,10 @@ impl Running {
         let window = Arc::new(event_loop.create_window(attributes)?);
 
         // ── 2. GPU ──────────────────────────────────────────────────────────
-        log::info!(target: "render", "Creating wgpu instance (Vulkan only)...");
+        log::info!(target: "render", "Поднимаем wgpu (только Vulkan)...");
         // Валидация Vulkan — только по запросу через env (WGPU_VALIDATION=1 и т.п.):
-        // InstanceFlags::all() в релизе включал полный validation layer и тормозил.
+        // `InstanceFlags::all()` включил бы её и в релизе, а полный validation
+        // layer стоит кадрового бюджета.
         // ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER обязателен: Dozen (Vulkan поверх
         // DX12 в WSL) — non-conformant драйвер, без флага остаётся только llvmpipe.
         // Базой служит `new_without_display_handle`, а не `Default`: у
@@ -162,7 +163,7 @@ impl Running {
 
         veldmap_host_core::plugins::load_services(ctx.clone()).await?;
         if dispatcher.instance_of(&owner_name).is_none() {
-            anyhow::bail!("Window owner '{}' is not a loaded service", owner_name);
+            anyhow::bail!("Владелец окна '{}' — не загруженный сервис", owner_name);
         }
 
         let compositor = Compositor::new(&device, surface_format);
@@ -208,7 +209,6 @@ impl Running {
             &self.app_pub, &self.hw.owner,
             self.hw.size.0, self.hw.size.1, self.effective_scale(), self.format_proto,
         );
-        app_bus::emit::on_ready(&self.app_pub);
         self.window.request_redraw();
     }
 
@@ -227,7 +227,6 @@ impl Running {
 
         publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Frame(app::FrameEvent {
             dt,
-            actual_fps: if dt > 0.0 { 1.0 / dt } else { 0.0 },
             // По запросу у окна, а не константой: окно могли перенести на
             // другой экран, а поле контракта не должно врать на 144 Гц.
             monitor_fps: self.window.current_monitor()
@@ -244,9 +243,9 @@ impl Running {
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                     let bind_group = self.compositor.create_bind_group(&self.device, &view);
                     self.hw.surface = Some((texture_id, bind_group));
-                    log::debug!(target: "render", "Window '{}' surface attached: texture {}", self.hw.owner, texture_id);
+                    log::debug!(target: "render", "К окну '{}' подключена поверхность: текстура {}", self.hw.owner, texture_id);
                 }
-                None => log::warn!(target: "render", "set_surface for '{}' names unknown texture {}", self.hw.owner, texture_id),
+                None => log::warn!(target: "render", "set_surface для '{}' назвал неизвестную текстуру {}", self.hw.owner, texture_id),
             }
         }
 
@@ -257,7 +256,7 @@ impl Running {
             Acquired::Success(f) | Acquired::Suboptimal(f) => f,
             Acquired::Lost | Acquired::Outdated => {
                 self.surface.configure(&self.device, &self.surface_config);
-                log::debug!(target: "render", "Surface reconfigured after loss");
+                log::debug!(target: "render", "Поверхность окна перенастроена после потери");
                 self.window.request_redraw();
                 return;
             }
@@ -349,7 +348,7 @@ impl Running {
     /// Левая кнопка сценария там, где сейчас стоит его курсор.
     fn publish_button(&self, pressed: bool) {
         publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Click(
-            app::ClickEvent { button: 1, pressed, x: self.cursor_pos.0, y: self.cursor_pos.1 },
+            app::ClickEvent { button: 1, pressed },
         ));
     }
 
@@ -417,7 +416,7 @@ impl ApplicationHandler for App<'_> {
                 self.running = Some(running);
             }
             Err(e) => {
-                log::error!(target: "render", "Runner failed to start: {:#}", e);
+                log::error!(target: "render", "Раннер не запустился: {:#}", e);
                 event_loop.exit();
             }
         }
@@ -473,8 +472,6 @@ impl ApplicationHandler for App<'_> {
                     app::ClickEvent {
                         button: b_idx,
                         pressed: button_state == winit::event::ElementState::Pressed,
-                        x: r.cursor_pos.0,
-                        y: r.cursor_pos.1,
                     },
                 ));
             }
@@ -533,11 +530,11 @@ fn main() -> anyhow::Result<()> {
     // ── 1. Окна: декларации владельцев ─────────────────────────────────────
     let declared = window::extract_window_configs(&host_config);
     let (owner_name, win_cfg) = match declared.len() {
-        1 => declared.into_iter().next().expect("len checked"),
-        0 => anyhow::bail!("No module declares a window; the desktop runner has nothing to present"),
-        n => anyhow::bail!("{} modules declare windows, but the desktop runner supports exactly one for now", n),
+        1 => declared.into_iter().next().expect("длина проверена"),
+        0 => anyhow::bail!("Окна не объявил ни один модуль — настольному раннеру нечего показывать"),
+        n => anyhow::bail!("окна объявили {} модулей, а настольный раннер ведёт ровно одно", n),
     };
-    log::info!(target: "render", "Window '{}': owner '{}'", win_cfg.title, owner_name);
+    log::info!(target: "render", "Окно '{}': владелец '{}'", win_cfg.title, owner_name);
 
     // Рантайм заводится руками, а не `#[tokio::main]`: цикл событий винита
     // забирает поток себе и вызывает нас синхронно, поэтому асинхронная

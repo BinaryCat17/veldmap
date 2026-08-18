@@ -21,19 +21,19 @@ pub fn on_write(state: &State, req: FsWriteRequest, caller: Caller) {
     let fail = |error: &str| FsWriteResult { error: error.into() };
 
     if !is_path_safe(&req.path) {
-        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Access denied"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Путь за пределами дозволенного"), &correlation);
         return;
     }
     let Some(handle) = req.handle else {
-        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Missing handle"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Хендл ресурса не назван"), &correlation);
         return;
     };
     if handle.id == 0 {
-        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Handle ID 0 not supported for fs_write yet"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Хендл 0 в fs/write не поддерживается"), &correlation);
         return;
     }
     if !state.ctx.registry.check_access(handle.id, instance, Access::Read) {
-        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Access denied to resource"), &correlation);
+        bus::emit::on_write_result(&*state.ctx.publisher, &fail("Чтение этого ресурса запрещено"), &correlation);
         return;
     }
 

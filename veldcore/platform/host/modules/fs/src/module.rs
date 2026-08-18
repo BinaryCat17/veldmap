@@ -23,7 +23,7 @@ pub fn hook_init(ctx: Arc<HostContext>) -> State {
     State { ctx }
 }
 
-// -- Input handlers --
+// -- Обработчики входящих топиков --
 pub use delete::on_delete;
 pub use list::on_list;
 pub use read::on_read;

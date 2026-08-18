@@ -131,10 +131,10 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
                 state.device = Some(device);
             }
             Err(error) => {
-                veldsdk::log::error!(target: "handlers", "ресурсы устройства: {:#}", error);
-                if let Some(view) = state.views.get_mut(&msg.view) {
-                    view.target = None;
-                }
+                // Причина уезжает на экран, а не в один лишь лог: без места
+                // под рендер канва не покажет ничего никогда, и молчащая
+                // пустая вкладка читается как «зависло», а не как отказ.
+                refuse(state, &msg.view, format!("не собрались ресурсы устройства: {:#}", error));
                 return;
             }
         }
@@ -144,8 +144,7 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
     match gpu::Target::create(texture.id, surface.width, surface.height) {
         Ok(target) => view.target = Some(target),
         Err(error) => {
-            veldsdk::log::error!(target: "handlers", "{}: view таргета: {:#}", view.label, error);
-            view.target = None;
+            refuse(state, &msg.view, format!("не собрался view таргета: {:#}", error));
             return;
         }
     }
@@ -153,6 +152,20 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
     fit_if_first(state, &msg.view);
     want_tiles(state, &msg.view);
     report(state, &msg.view);
+}
+
+/// Отказ, после которого рисовать нечем: причина уходит и в лог, и на экран.
+///
+/// На экран — потому что «смотреть не на что» и «кадр неполон» это разные
+/// ответы (см. `ViewState`), а место под рендер, которого нет, — первое из
+/// них: ступени выше не нарисованы, показывать вместо причины нечего.
+fn refuse(state: &mut State, key: &str, why: String) {
+    veldsdk::log::error!(target: "handlers", "{}: {}", key, why);
+    if let Some(view) = state.views.get_mut(key) {
+        view.target = None;
+        view.error = Some(why);
+    }
+    report(state, key);
 }
 
 /// Показать снимок. Ресурс уже наш: владение передал отправитель.

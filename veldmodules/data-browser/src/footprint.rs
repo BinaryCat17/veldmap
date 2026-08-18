@@ -12,12 +12,21 @@
 //! нужны, чтобы отойти от снимка на расстояние, с которого он виден целиком, и
 //! чтобы понять, ткнули в него или мимо.
 //!
+//! Сама арифметика при этом не своя: единичный вектор, обратный ход к углам,
+//! дуга между точками и разворот долготы берутся из `veldmap_globe_wrap::geodesy`
+//! — того же файла, которым глобус и рисует. Своя копия сошлась бы с ним на
+//! глаз и разошлась на числах, а расхождение здесь означает снимок, который
+//! очерчен в одном месте, а выбирается щелчком в другом. Своё тут одно —
+//! азимут: он нужен для счёта оборотов и больше нигде.
+//!
 //! Пары углов не хватает, и это не придирка: у широты с долготой есть полюс и
 //! есть шов. Полярная гранула Sentinel-1 обходит макушку кольцом, у которого
 //! все вершины лежат южнее любой точки внутри него, — счёт пересечений вдоль
 //! широты отвечает на такую «снаружи», а среднее сырых долгот кладёт её центр
 //! на противоположную сторону Земли. Единичных векторов ни того, ни другого не
 //! знают.
+
+use veldmap_globe_wrap::geodesy;
 
 use crate::proto::data_provider::Ring;
 
@@ -45,7 +54,7 @@ pub fn frame(rings: &[Ring]) -> Option<Frame> {
     let radius_deg = rings
         .iter()
         .flat_map(|ring| &ring.points)
-        .map(|point| arc(lat, lon, point.lat, point.lon))
+        .map(|point| geodesy::separation((lat, lon), (point.lat, point.lon)))
         .fold(0.0, f64::max);
 
     Some(Frame { lat, lon: wrap(lon), radius_deg })
@@ -113,13 +122,13 @@ fn turn(ring: &Ring, lat: f64, lon: f64) -> f64 {
 fn middle(rings: &[Ring]) -> Option<(f64, f64)> {
     let mut sum = [0.0_f64; 3];
     for point in rings.iter().flat_map(|ring| &ring.points) {
-        let unit = unit(point.lat, point.lon);
+        let unit = geodesy::unit(point.lat, point.lon);
         for axis in 0..3 {
             sum[axis] += unit[axis];
         }
     }
     let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
-    (length > 1e-9).then(|| angles([sum[0] / length, sum[1] / length, sum[2] / length]))
+    (length > 1e-9).then(|| geodesy::angles([sum[0] / length, sum[1] / length, sum[2] / length]))
 }
 
 /// Азимут взгляда из первой точки на вторую, градусы. Ноль — на север.
@@ -131,33 +140,12 @@ fn bearing(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> f64 {
     east.atan2(north).to_degrees()
 }
 
-/// Единичный вектор по паре углов — точка на шаре.
-fn unit(lat_deg: f64, lon_deg: f64) -> [f64; 3] {
-    let (sin_lat, cos_lat) = lat_deg.to_radians().sin_cos();
-    let (sin_lon, cos_lon) = lon_deg.to_radians().sin_cos();
-    [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat]
-}
-
-/// Пара углов по единичному вектору — обратное к [`unit`].
-fn angles(unit: [f64; 3]) -> (f64, f64) {
-    (unit[2].clamp(-1.0, 1.0).asin().to_degrees(), unit[1].atan2(unit[0]).to_degrees())
-}
-
-/// Дуга между двумя точками, градусы. По шару: на размере снимка сжатие
-/// эллипсоида даёт доли процента, а нужно это число только затем, чтобы
-/// отойти от снимка на расстояние, с которого он виден целиком.
-fn arc(from_lat: f64, from_lon: f64, to_lat: f64, to_lon: f64) -> f64 {
-    let (from, to) = (from_lat.to_radians(), to_lat.to_radians());
-    let delta = (to_lon - from_lon).to_radians();
-    (from.sin() * to.sin() + from.cos() * to.cos() * delta.cos())
-        .clamp(-1.0, 1.0)
-        .acos()
-        .to_degrees()
-}
-
-/// Разница долгот в −180..180 — та же сторона, с которой её видит глаз.
+/// Разница углов в −180..180 — та же сторона, с которой её видит глаз.
+///
+/// Тем же разворотом, что и у решётки привязки, только от нуля: там долготу
+/// разворачивают к соседнему узлу, здесь — к началу отсчёта.
 fn wrap(degrees: f64) -> f64 {
-    degrees - 360.0 * ((degrees + 180.0) / 360.0).floor()
+    geodesy::unwind(0.0, degrees)
 }
 
 #[cfg(test)]

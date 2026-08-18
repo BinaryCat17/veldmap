@@ -5,7 +5,7 @@
 //! в запрос к ней, а состояние получает рассылкой.
 
 use crate::proto::data_library::{
-    DownloadRequest, ItemRequest, LibraryState as LibraryStateMsg, SnapshotFiles,
+    DownloadRequest, ItemRequest, LibraryEntry, LibraryState as LibraryStateMsg, SnapshotFiles,
 };
 use crate::proto::data_provider::{ListPathRequest, ListPathResponse};
 
@@ -117,7 +117,7 @@ pub fn on_snapshot_files(
     // кончается, не должна превращаться в бесконечную закачку. Молча
     // обрывать её нельзя — недокачанный снимок с виду ничем не отличается от
     // целого.
-    let short = product.rsplit('/').next().unwrap_or(&product).to_string();
+    let short = crate::module::components::last_segment(&product).to_string();
     if response.next_token.is_empty() {
         veldsdk::log::info!(target: "handlers", "снимок '{}': {} файлов, в закачке {}", product, files, queued);
         // Обход дошёл до конца — значит, состав снимка известен целиком, и это
@@ -160,15 +160,8 @@ pub fn on_snapshot_files(
 pub fn on_pause_snapshot(state: &mut State, product: String) {
     if product.is_empty() { return; }
 
-    let names: Vec<String> = state
-        .library
-        .entries
-        .iter()
-        .filter(|entry| entry.product == product)
-        .filter(|entry| status_of(entry) == LibraryStatus::LibDownloading)
-        .map(|entry| entry.name.clone())
-        .collect();
-    for name in names {
+    let going = |entry: &LibraryEntry| status_of(entry) == LibraryStatus::LibDownloading;
+    for name in files_of(state, &product, going) {
         crate::calls::data_library::on_pause(&ItemRequest { name });
     }
 }
@@ -183,16 +176,26 @@ pub fn on_pause_snapshot(state: &mut State, product: String) {
 pub fn on_delete_snapshot(state: &mut State, product: String) {
     if product.is_empty() { return; }
 
-    let names: Vec<String> = state
+    for name in files_of(state, &product, |_| true) {
+        crate::calls::data_library::on_delete(&ItemRequest { name });
+    }
+}
+
+/// Имена записей снимка — то, чем библиотека адресует его файлы. Правило «что
+/// считать файлом этого снимка» написано здесь одно на всех: разворачивают
+/// снимок и пауза, и удаление, а два обхода её записей однажды разошлись бы —
+/// и пауза оставила бы качаться то, что удаление стёрло.
+///
+/// Именами, а не ссылками на записи: следом за обходом идут запросы к
+/// библиотеке, и держать её состояние занятым до конца перебора незачем.
+fn files_of(state: &State, product: &str, wanted: impl Fn(&LibraryEntry) -> bool) -> Vec<String> {
+    state
         .library
         .entries
         .iter()
-        .filter(|entry| entry.product == product)
+        .filter(|entry| entry.product == product && wanted(*entry))
         .map(|entry| entry.name.clone())
-        .collect();
-    for name in names {
-        crate::calls::data_library::on_delete(&ItemRequest { name });
-    }
+        .collect()
 }
 
 /// Библиотека прислала состояние — своё или в ответ на наш запрос. Второго

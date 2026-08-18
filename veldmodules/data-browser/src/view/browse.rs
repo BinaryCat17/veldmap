@@ -17,24 +17,18 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
         None if browse.request.is_pending() => "загружается…".to_string(),
         // Снимки считаются отдельно от папок: в списке они и выглядят иначе, а
         // «шесть папок» там, где четыре из них — снимки, не сообщает главного.
-        // Пустого в подписи нет — чего нет, о том и не сказано.
         None => {
             let products = rows.iter().filter(|row| row.kind.is_product()).count();
             let folders = rows.iter().filter(|row| matches!(row.kind, RowKind::Folder)).count();
             let files = rows.len() - products - folders;
-            let counts = [
+            let said = format::counted(&[
                 (products, ["снимок", "снимка", "снимков"]),
                 (folders, ["папка", "папки", "папок"]),
                 (files, ["файл", "файла", "файлов"]),
-            ];
-            let said: Vec<String> = counts
-                .iter()
-                .filter(|(count, _)| *count > 0)
-                .map(|(count, forms)| format!("{} {}", count, format::plural(*count, *forms)))
-                .collect();
+            ]);
             match said.is_empty() {
                 true => "пусто".to_string(),
-                false => said.join(", "),
+                false => said,
             }
         }
     };

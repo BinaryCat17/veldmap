@@ -91,12 +91,6 @@ impl OnGlobe {
         !matches!(self, OnGlobe::Off)
     }
 
-    /// Видно ли его там прямо сейчас. Скрытый и собирающийся — не видно, и
-    /// значок у них горит вполсилы: сказать о них «его там нет» было бы
-    /// неправдой, а «вот он» — тем более.
-    pub fn visible(self) -> bool {
-        matches!(self, OnGlobe::Laid { hidden: false, .. })
-    }
 }
 
 /// Чем запись является для приложения. Сумма-тип, а не пара булевых полей:
@@ -136,10 +130,23 @@ impl RowKind {
 /// Слэш — признак строки листинга, а не часть пути: один и тот же продукт
 /// приходит из каталога со слэшем, а из выдачи поиска без него. Правило
 /// написано здесь одно на всех — от него зависят и папка записи, и путь
-/// листинга, и ключ снимка, и сравнение строки с ключом перехода, а пять его
-/// копий однажды сочли бы один снимок за два.
+/// листинга, и ключ снимка, и имя, которым его называют (см. [`last_segment`]),
+/// и сравнение строки с ключом перехода, а пять его копий однажды сочли бы один
+/// снимок за два.
 pub fn bare(key: &str) -> &str {
     key.trim_end_matches('/')
+}
+
+/// Последний сегмент пути — то, чем путь называют человеку: имя файла у ключа
+/// объекта, имя снимка у ключа каталога, заголовок у пути вкладки.
+///
+/// Слэш на конце в счёт не идёт (см. [`bare`]): он помечает строку листинга, а
+/// не отделяет за собой пустой сегмент, и `eodata/S2B_X.SAFE/` зовётся тем же
+/// именем, что и `eodata/S2B_X.SAFE`, — снимок за ними один. Пусто отвечается
+/// только пути без единого сегмента: корню и пустому ключу, — и читается это
+/// как «имя брать неоткуда», а не как «имя пустое».
+pub fn last_segment(path: &str) -> &str {
+    bare(path).rsplit('/').next().unwrap_or("")
 }
 
 /// Папка, в которой лежит ключ провайдера. Выводится из самого ключа — своего
@@ -266,6 +273,38 @@ pub struct Row {
     pub status: RowStatus,
 }
 
+/// Строка, о которой ничего не известно: ключа нет, содержимого нет, на шаре её
+/// нет. Заведено ради `..Default::default()` в сборках строки — полей у неё
+/// полтора десятка, и выписанные по разу на сборку они расходятся молча:
+/// приписанное поле достаётся не всем.
+///
+/// Написано руками, а не выведено: два поля отвечают не нулём своего типа. Род
+/// умолчания — файл: это единственная запись, которая ничего в себе не
+/// содержит. `viewable` — `true`, потому что молчание провайдера не повод
+/// отнимать действие (см. [`Row::viewable`]), а состояние — `Remote`: пока
+/// библиотека о записи не сказала, запись лежит в хранилище.
+impl Default for Row {
+    fn default() -> Row {
+        Row {
+            identifier: String::new(),
+            group: None,
+            name: String::new(),
+            title: String::new(),
+            kind: RowKind::File,
+            size: 0,
+            date: 0,
+            product_type: String::new(),
+            product: String::new(),
+            children: Vec::new(),
+            folded: false,
+            loading: false,
+            globe: OnGlobe::Off,
+            viewable: true,
+            status: RowStatus::Remote,
+        }
+    }
+}
+
 impl Row {
     /// Устойчивое имя строки в списке — им она сопоставляется между кадрами
     /// (см. `Element::key`) и им же адресуется её меню. Ключ провайдера, а без
@@ -360,23 +399,7 @@ impl Row {
     /// префикс ключей, и ни того, ни другого за ним нет; у снимка их знает
     /// каталог, и приписывает их вызывающий (см. `components::rows::from_key`).
     pub fn container_row(identifier: String, title: String, status: RowStatus, kind: RowKind) -> Row {
-        Row {
-            identifier,
-            group: None,
-            name: String::new(),
-            title,
-            kind,
-            size: 0,
-            date: 0,
-            product_type: String::new(),
-            product: String::new(),
-            children: Vec::new(),
-            folded: false,
-            loading: false,
-            globe: OnGlobe::Off,
-            viewable: true,
-            status,
-        }
+        Row { identifier, title, kind, status, ..Default::default() }
     }
 
     /// Строка из записи библиотеки — вид «Скачанное».
@@ -388,26 +411,20 @@ impl Row {
         };
         Row {
             identifier: entry.identifier.clone(),
-            group: None,
             name: entry.name.clone(),
             // Имя записи — путь внутри снимка, и целиком оно в строке не нужно:
             // снимок уже назван строкой выше, а под ним читают файл. Ключом при
             // этом остаётся имя целиком (поле `name`) — им запись адресуют.
-            title: entry.name.rsplit('/').next().unwrap_or(&entry.name).to_string(),
+            title: last_segment(&entry.name).to_string(),
             kind: RowKind::File,
             size: if entry.total > 0 { entry.total } else { entry.done },
             date: entry.modified,
-            product_type: String::new(),
             // Снимок едет с записью дальше: продолжение закачки уходит тем же
             // сообщением, и потерянный здесь снимок стёр бы принадлежность в
             // сидкаре — файл вывалился бы из своего снимка молча.
             product: entry.product.clone(),
-            children: Vec::new(),
-            folded: false,
-            loading: false,
-            globe: OnGlobe::Off,
-            viewable: true,
             status,
+            ..Default::default()
         }
     }
 
@@ -434,23 +451,9 @@ impl Row {
                 date: if date > 0 { date } else { entry.modified },
                 ..Row::from_entry(entry)
             },
-            None => Row {
-                identifier,
-                group: None,
-                name: String::new(),
-                title,
-                kind,
-                size,
-                date,
-                product_type: String::new(),
-                product: String::new(),
-                children: Vec::new(),
-                folded: false,
-                loading: false,
-                globe: OnGlobe::Off,
-                viewable: true,
-                status: RowStatus::Remote,
-            },
+            // Записи у библиотеки нет — значит запись лежит в хранилище, и это
+            // ровно то, чем строка отвечает по умолчанию.
+            None => Row { identifier, title, kind, size, date, ..Default::default() },
         }
     }
 }
@@ -530,21 +533,16 @@ fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
     };
 
     Row {
-        title: product.rsplit('/').next().unwrap_or(&product).to_string(),
         identifier: product.clone(),
-        group: None,
-        name: String::new(),
+        title: last_segment(&product).to_string(),
         kind: RowKind::Product { folder: true },
         size,
         date,
-        product_type: String::new(),
         product,
         children: files,
         folded: true,
-        loading: false,
-        globe: OnGlobe::Off,
-        viewable: true,
         status,
+        ..Default::default()
     }
 }
 
@@ -708,6 +706,20 @@ mod tests {
         assert!(row.named("eodata/S2B_X.SAFE/"));
         assert!(!row.named("eodata/S2B_Y.SAFE"));
         assert!(!row.named(""), "пустой ключ не называет никого");
+    }
+
+    /// Имя пути одно на всех, кто его называет, и слэш папки в счёт не идёт: из
+    /// каталога снимок приходит со слэшем, из выдачи поиска без него, а зовут
+    /// его одинаково.
+    #[test]
+    fn the_last_segment_ignores_the_folder_slash() {
+        assert_eq!(last_segment("eodata/S2B_X.SAFE/"), "S2B_X.SAFE");
+        assert_eq!(last_segment("eodata/S2B_X.SAFE"), "S2B_X.SAFE");
+        assert_eq!(last_segment("S2B_X.SAFE/GRANULE/B01.jp2"), "B01.jp2");
+        assert_eq!(last_segment("dem.tif"), "dem.tif");
+        // Сегмента нет вовсе — имя брать неоткуда: так выглядит корень бакета.
+        assert_eq!(last_segment(""), "");
+        assert_eq!(last_segment("/"), "");
     }
 
     /// Смотреть скачанное надо с диска: файл под рукой, и ходить за ним по

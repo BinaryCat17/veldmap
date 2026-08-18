@@ -29,7 +29,6 @@ pub use proto::core::ResourceHandle;
 pub use abi::generate_id;
 pub use abi::event_publisher;
 pub use abi::correlation;
-pub use abi::reply_is_intermediate;
 pub use correlator::Correlator;
 pub use latest::{Latest, Reply};
 pub use resource::{OwnedResource, ResourceReader};

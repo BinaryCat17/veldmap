@@ -16,9 +16,9 @@ use iced_core::mouse;
 use iced_core::overlay;
 use iced_core::renderer;
 use iced_core::widget::{self, Widget};
-use iced_core::{
-    Clipboard, Element, Event, Length, Point, Rectangle, Shell, Size, Vector,
-};
+use iced_core::{Clipboard, Element, Event, Point, Rectangle, Shell, Size, Vector};
+
+use crate::module::delegate::delegate_to_child;
 
 /// Каким краем панель равняется на якорь.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -91,73 +91,10 @@ where
     }
 
     // Ниже — всё, что относится к месту в разметке: это место якоря, панели
-    // здесь нет вовсе.
-    fn size(&self) -> Size<Length> {
-        self.anchor.as_widget().size()
-    }
-
-    fn size_hint(&self) -> Size<Length> {
-        self.anchor.as_widget().size_hint()
-    }
-
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
-        self.anchor.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut widget::Tree,
-        event: &Event,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-        clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
-        viewport: &Rectangle,
-    ) {
-        self.anchor.as_widget_mut().update(
-            &mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport,
-        );
-    }
-
-    fn mouse_interaction(
-        &self,
-        tree: &widget::Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.anchor.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
-    }
-
-    fn draw(
-        &self,
-        tree: &widget::Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
-        self.anchor.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut widget::Tree,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        self.anchor.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
-    }
+    // здесь нет вовсе. Её показывает `overlay`, и он единственный знает про
+    // второго ребёнка.
+    delegate_to_child!(anchor: Message, Theme, Renderer;
+        size, size_hint, layout, update, mouse_interaction, draw, operate);
 
     fn overlay<'b>(
         &'b mut self,

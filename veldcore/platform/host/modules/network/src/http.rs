@@ -18,7 +18,7 @@ use std::collections::HashMap;
 /// останавливает не запрос, а весь модуль-читатель (его актор ждёт возврата
 /// из handle_event). Отмена задачи такому чтению не поможет — оно опрашивает
 /// её только между порциями. Ограничение по времени — единственное, что
-/// делает зависание конечным. Пишется на весь ответ намеренно не берётся:
+/// делает зависание конечным. На весь ответ его при этом намеренно не ставят:
 /// скачивание снимка легально идёт долго, а вот молчание сервера — нет.
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -61,12 +61,12 @@ pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
     let ctx = state.ctx.clone();
     let label = format!("{} {}", req.method, req.url);
 
-    log::info!(target: "network", "Received HTTP request: {}", label);
+    log::info!(target: "network", "Пришёл HTTP-запрос: {}", label);
 
     // Операция именуется корреляцией запроса: под ней её учёл диспетчер, ею
     // же заказчик её убьёт и по ней опознает ответ.
     state.tasks.spawn(&caller, |correlation_id| async move {
-        log::info!(target: "network", "Executing HTTP request {}...", correlation_id);
+        log::info!(target: "network", "Выполняем HTTP-запрос {}...", correlation_id);
         let method = match req.method.to_uppercase().as_str() {
             "POST" => reqwest::Method::POST,
             "PUT" => reqwest::Method::PUT,
@@ -82,12 +82,12 @@ pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
             Ok(res) => {
                 let status = res.status().as_u16() as u32;
                 let body = res.bytes().await.unwrap_or_default().to_vec();
-                log::info!(target: "network", "HTTP request {} finished with status {}", correlation_id, status);
+                log::info!(target: "network", "HTTP-запрос {} закончился статусом {}", correlation_id, status);
                 bus::emit::on_http_result(&*ctx.publisher, &HttpTaskResponse { status, body }, &correlation_id);
                 Ok(())
             }
             Err(e) => {
-                log::warn!(target: "network", "HTTP request {} failed: {}", correlation_id, e);
+                log::warn!(target: "network", "HTTP-запрос {} не удался: {}", correlation_id, e);
                 let error = e.to_string();
                 bus::emit::on_http_result(&*ctx.publisher, &HttpTaskResponse { status: 0, body: Vec::new() }, &correlation_id);
                 Err(error)

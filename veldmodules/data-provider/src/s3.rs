@@ -160,25 +160,34 @@ pub fn object(identity: &Identity, identifier: &str) -> Request {
 /// Листинг одного уровня: папки отдаются как CommonPrefixes, а не разворотом
 /// всего поддерева — отсюда delimiter.
 pub fn listing(identity: &Identity, path: &str, token: &str) -> Request {
-    let prefix = key(path);
-    let mut query = vec![("delimiter", "/"), ("list-type", "2"), ("max-keys", PAGE_SIZE)];
-    if !prefix.is_empty() {
-        query.push(("prefix", prefix));
-    }
-    if !token.is_empty() {
-        query.push(("continuation-token", token));
-    }
-    query.sort_by_key(|(name, _)| *name);
-
-    signed(identity, &format!("/{}/", BUCKET), &query)
+    page(identity, path, token, true)
 }
 
 /// Листинг поддерева целиком: без delimiter S3 разворачивает все ключи под
 /// префиксом. Так растры продукта находятся одним запросом на страницу —
 /// обходить .SAFE по уровням было бы четыре-пять запросов на гранулу.
 pub fn listing_deep(identity: &Identity, path: &str, token: &str) -> Request {
-    let prefix = key(path);
+    page(identity, path, token, false)
+}
+
+/// Страница ListObjectsV2. Уровень и поддерево — один и тот же запрос к бакету,
+/// и подписывается он одинаково; вся разница между ними — в параметрах.
+fn page(identity: &Identity, path: &str, token: &str, by_level: bool) -> Request {
+    signed(identity, &format!("/{}/", BUCKET), &query(key(path), token, by_level))
+}
+
+/// Параметры страницы листинга.
+///
+/// Разделитель и есть выбор между «покажи, что лежит прямо здесь» и «разверни
+/// всё, что под префиксом», — больше уровень от поддерева ничем не отличается.
+/// Пустые prefix и continuation-token не отправляются вовсе: у корня бакета
+/// префикса нет, а токен появляется только со второй страницы, и пустым он
+/// был бы для хранилища негодным продолжением.
+fn query<'a>(prefix: &'a str, token: &'a str, by_level: bool) -> Vec<(&'a str, &'a str)> {
     let mut query = vec![("list-type", "2"), ("max-keys", PAGE_SIZE)];
+    if by_level {
+        query.push(("delimiter", "/"));
+    }
     if !prefix.is_empty() {
         query.push(("prefix", prefix));
     }
@@ -186,8 +195,7 @@ pub fn listing_deep(identity: &Identity, path: &str, token: &str) -> Request {
         query.push(("continuation-token", token));
     }
     query.sort_by_key(|(name, _)| *name);
-
-    signed(identity, &format!("/{}/", BUCKET), &query)
+    query
 }
 
 /// Единственное место, где рождается пара «адрес + подпись».
@@ -405,6 +413,31 @@ mod tests {
             "eodata/Landsat-5/1988/P.TIFF/B1.TIF",
             "eodata/Landsat-5/1988/P.TIFF/",
         ], "папка осталась одна — общим префиксом");
+    }
+
+    /// Уровень от поддерева отличает один разделитель, а всё пустое до
+    /// хранилища не доезжает: у корня бакета префикса нет, а токен появляется
+    /// только со второй страницы.
+    #[test]
+    fn a_level_differs_from_a_subtree_by_the_delimiter_alone() {
+        assert_eq!(
+            query("Sentinel-2/MSI/", "", true),
+            vec![
+                ("delimiter", "/"),
+                ("list-type", "2"),
+                ("max-keys", PAGE_SIZE),
+                ("prefix", "Sentinel-2/MSI/"),
+            ]
+        );
+        assert_eq!(
+            query("Sentinel-2/MSI/", "", false),
+            vec![("list-type", "2"), ("max-keys", PAGE_SIZE), ("prefix", "Sentinel-2/MSI/")]
+        );
+        assert_eq!(query("", "", false), vec![("list-type", "2"), ("max-keys", PAGE_SIZE)]);
+        assert_eq!(
+            query("", "1/N7Ab", false),
+            vec![("continuation-token", "1/N7Ab"), ("list-type", "2"), ("max-keys", PAGE_SIZE)]
+        );
     }
 
     /// Дата — это ровно три разряда нужной длины и только из цифр: «08» месяцем

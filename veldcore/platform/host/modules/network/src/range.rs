@@ -67,14 +67,14 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
             Ok(source) => {
                 let len = source.len();
                 let id = ctx.memory.alloc_range(Arc::new(source), instance);
-                log::info!(target: "network", "Opened remote resource {} ({} bytes): {}", id, len, req.url);
+                log::info!(target: "network", "Открыт удалённый ресурс {} ({} байт): {}", id, len, req.url);
                 opened_handle(id, len)
             }
             Err(e) => {
                 // Ошибка уходит событием заказчику, но на экране её увидит
                 // только тот, кто в этот момент смотрит на превью — в логе она
                 // нужна независимо от этого.
-                log::warn!(target: "network", "Failed to open remote resource {}: {}", req.url, e);
+                log::warn!(target: "network", "Удалённый ресурс {} не открылся: {}", req.url, e);
                 opened(Err(e.to_string()))
             }
         };
@@ -110,7 +110,7 @@ impl Drop for HttpRange {
         self.blocks.release(self.owner);
         let fetched = self.fetched.load(std::sync::atomic::Ordering::Relaxed);
         let share = if self.len > 0 { fetched * 100 / self.len } else { 0 };
-        log::info!(target: "network", "Closed remote resource: fetched {} of {} bytes ({}%): {}",
+        log::info!(target: "network", "Закрыт удалённый ресурс: прочитано {} из {} байт ({}%): {}",
                    fetched, self.len, share, self.url);
     }
 }

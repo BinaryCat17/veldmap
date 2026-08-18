@@ -5,36 +5,36 @@
 
 use serde::Deserialize;
 
-/// Window configuration that a plugin can request
+/// Окно, которое просит модуль.
 #[derive(Deserialize, Clone, Debug)]
 pub struct PluginWindowConfig {
-    /// Window title
+    /// Заголовок окна.
     #[serde(default = "default_title")]
     pub title: String,
     
-    /// Window width in logical pixels
+    /// Ширина в логических пикселях.
     #[serde(default = "default_width")]
     pub width: u32,
     
-    /// Window height in logical pixels
+    /// Высота в логических пикселях.
     #[serde(default = "default_height")]
     pub height: u32,
     
-    /// UI scale factor (DPI scaling). Нижняя граница масштаба: хост шлёт
+    /// Масштаб интерфейса. Нижняя граница: хост шлёт
     /// модулям `max(window.scale_factor(), ui_scale)`, т.к. на X11/WSLg winit
     /// часто репортит 1.0 даже на HiDPI-экранах.
     #[serde(default = "default_scale")]
     pub ui_scale: f32,
     
-    /// Whether window should be resizable
+    /// Можно ли тянуть за край.
     #[serde(default = "default_resizable")]
     pub resizable: bool,
     
-    /// Whether window should be fullscreen
+    /// Открывать ли во весь экран.
     #[serde(default)]
     pub fullscreen: bool,
 
-    /// Window position (None = center on screen)
+    /// Где открыть. `None` — посередине экрана.
     pub position: Option<WindowPosition>,
 }
 
@@ -64,22 +64,8 @@ fn default_resizable() -> bool {
     true
 }
 
-impl Default for PluginWindowConfig {
-    fn default() -> Self {
-        Self {
-            title: default_title(),
-            width: default_width(),
-            height: default_height(),
-            ui_scale: default_scale(),
-            resizable: default_resizable(),
-            fullscreen: false,
-            position: None,
-        }
-    }
-}
-
-/// Collect window declarations from module configs: each module may declare
-/// its own window under the "window" key. Returned as (owner, config) pairs.
+/// Окна, объявленные модулями: каждый вправе попросить своё ключом `window`
+/// в конфиге. Возвращаются парами «владелец — что просил».
 pub fn extract_window_configs(config: &veldmap_host_core::config::HostConfig) -> Vec<(String, PluginWindowConfig)> {
     let mut windows = Vec::new();
 

@@ -27,7 +27,7 @@ use tokio::io::AsyncWriteExt;
 /// Логирует провал скачивания и уведомляет подписчиков терминальным
 /// on_fs_download_result — им же операция снимается с учёта.
 fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> String {
-    log::warn!(target: "network", "Download {} failed: {}", correlation_id, error);
+    log::warn!(target: "network", "Скачивание {} не удалось: {}", correlation_id, error);
     bus::emit::on_fs_download_result(&*ctx.publisher, &FsDownloadResponse {
         error: error.clone(),
     }, correlation_id);
@@ -37,7 +37,7 @@ fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> Stri
 pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
     if !is_path_safe(&req.path) {
         bus::emit::on_fs_download_result(&*state.ctx.publisher, &FsDownloadResponse {
-            error: format!("Unsafe path: {}", req.path),
+            error: format!("Путь за пределами дозволенного: {}", req.path),
         }, &caller.correlation);
         return;
     }
@@ -45,7 +45,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
     let ctx = state.ctx.clone();
     let path = resolve_path(&ctx, &req.path);
     if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
-    log::info!(target: "network", "Received download request: {}", req.path);
+    log::info!(target: "network", "Запрошено скачивание: {}", req.path);
     // Суффикс, а не замена расширения (set_extension) — иначе "foo.tif" и
     // "foo.zip" в одной папке схлопнулись бы в один и тот же "foo.part".
     let part_path: PathBuf = {
@@ -121,7 +121,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
                     match chunk_res {
                         Ok(chunk) => {
                             if let Err(e) = async_file.write_all(&chunk).await {
-                                return Err(fail_download(&ctx, &correlation_id, format!("Write error: {}", e)));
+                                return Err(fail_download(&ctx, &correlation_id, format!("Ошибка записи: {}", e)));
                             }
                             downloaded += chunk.len() as u64;
                             // Прогресс событием, с троттлингом: по целым процентам,
@@ -143,22 +143,22 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
                                 }, &correlation_id);
                             }
                         }
-                        Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("Stream error: {}", e))),
+                        Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("Обрыв потока: {}", e))),
                     }
                 }
                 let _ = async_file.flush().await;
             }
-            Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("File open error: {}", e))),
+            Err(e) => return Err(fail_download(&ctx, &correlation_id, format!("Файл не открылся: {}", e))),
         }
 
         // Атомарно проявляем файл под конечным именем только теперь: до
         // этой строки на диске в любой прерванной ветке лежит только .part,
         // а не файл под именем, которое fs/list отдаёт как "скачано".
         if let Err(e) = tokio::fs::rename(&part_path, &path).await {
-            return Err(fail_download(&ctx, &correlation_id, format!("Rename error: {}", e)));
+            return Err(fail_download(&ctx, &correlation_id, format!("Переименование не удалось: {}", e)));
         }
 
-        log::info!(target: "network", "Download {} completed ({}/{} bytes)", correlation_id, downloaded, total_size);
+        log::info!(target: "network", "Скачивание {} завершено ({}/{} байт)", correlation_id, downloaded, total_size);
         bus::emit::on_fs_download_result(&*ctx.publisher, &FsDownloadResponse {
             error: String::new(),
         }, &correlation_id);

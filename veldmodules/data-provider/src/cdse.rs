@@ -3,11 +3,12 @@
 //! Как устроен бакет — в s3.rs; здесь только жизненный цикл запросов и задач.
 
 use crate::proto::data_provider::{
-    ImageryRaster, ImageryRequest, ImageryResponse, ImageryRole, ListEntry, ListPathRequest,
-    ListPathResponse, LocateRequest, LocateResponse, ProductRoots, ProductRootsRequest,
-    SearchRequest, SearchResponse, SignRequest, SignedUrl, UtmFrame,
+    DataProduct, ImageryRaster, ImageryRequest, ImageryResponse, ImageryRole, ListEntry,
+    ListPathRequest, ListPathResponse, LocateRequest, LocateResponse, ProductRoots,
+    ProductRootsRequest, SearchRequest, SearchResponse, SignRequest, SignedUrl, UtmFrame,
 };
 use aws_smithy_runtime_api::client::identity::Identity;
+use std::collections::HashMap;
 use super::{catalogue, imagery, mgrs, s3, scene, Asked, Config, Pending, State};
 
 /// Сейчас, unix-секунды. Нужно одному — нижней границе окна поиска
@@ -19,15 +20,53 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Спросить каталог и запомнить, чей это ход.
-fn ask(state: &mut State, correlation_id: String, url: String, what: Asked) {
+/// Спросить сеть и запомнить, чей это ход.
+///
+/// Единственное место, где заводится задача HTTP: ожидание должно появиться
+/// раньше ответа, и вид запроса записан в нём же — каталог и хранилище отвечают
+/// в один топик, и по ответу их не различить. Заголовки бывают только у запроса
+/// к хранилищу, приходят они парой с адресом (см. `s3::Request`), и разойтись
+/// им нельзя.
+fn ask(
+    state: &mut State,
+    correlation_id: String,
+    url: String,
+    headers: HashMap<String, String>,
+    what: Asked,
+) {
     let internal_id = state.pending_http.begin(Pending { correlation_id, what });
     crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
         url,
         method: "GET".to_string(),
-        headers: Default::default(),
+        headers,
         body: Vec::new(),
     }, &internal_id);
+}
+
+/// Страница обхода поддерева продукта. Страниц бывает несколько, и все они —
+/// одно ожидание: найденные ключи копятся в нём, пока хранилище не отдаст
+/// последнюю (см. `Asked::Imagery`).
+fn imagery_page(
+    state: &mut State,
+    correlation_id: String,
+    identifier: String,
+    keys: Vec<String>,
+    token: &str,
+) {
+    let path = format!("{}/", identifier.trim_end_matches('/'));
+    let listing = s3::listing_deep(&state.identity, &path, token);
+    let what = Asked::Imagery { identifier, keys };
+    ask(state, correlation_id, listing.url, listing.headers, what);
+}
+
+/// Ответ на `on_locate` — собирается он только здесь.
+///
+/// Кончиться `on_locate` может в пяти местах, и всюду ответ одной формы —
+/// разнится в нём `answered`: «такого продукта нет» это ответ, а «спросить не
+/// вышло» нет, и заказчик вправе прийти с тем же ключом снова (см.
+/// `LocateResponse` в types.proto).
+fn answer(correlation_id: &str, product: Option<DataProduct>, error: String, answered: bool) {
+    crate::emit::on_locate_result(&LocateResponse { product, error, answered }, correlation_id);
 }
 
 pub fn module_init(config: Config) -> anyhow::Result<State> {
@@ -78,7 +117,7 @@ pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceO
     crate::emit::on_open_result(&veldsdk::resource::relay(&opened, &owner), &correlation_id);
 }
 
-//  inputs ---------------------------------------------------------------------------------------------------------------------------
+// ── Входы ──────────────────────────────────────────────────────
 
 /// Поиск по каталогу.
 ///
@@ -89,7 +128,8 @@ pub fn on_search(state: &mut State, request: SearchRequest) {
     let floor = now() - catalogue::FRESH_DAYS * 24 * 60 * 60;
     let url = catalogue::search(&request, floor);
     log::info!(target: "handlers", "Поиск в каталоге: {}", url);
-    ask(state, veldsdk::correlation(), url, Asked::Search { request, widened: false });
+    ask(state, veldsdk::correlation(), url, HashMap::new(),
+        Asked::Search { request, widened: false });
 }
 
 /// Подписать адрес продукта — единственное, чего заказчик не может сам.
@@ -140,21 +180,9 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
         return;
     }
 
-    let path = format!("{}/", request.identifier.trim_end_matches('/'));
-    let listing = s3::listing_deep(&state.identity, &path, "");
-    let internal_id = state.pending_http.begin(Pending {
-        correlation_id: veldsdk::correlation(),
-        what: Asked::Imagery { identifier: request.identifier, keys: Vec::new() },
-    });
-
-    log::info!(target: "handlers", "Растры продукта: {}", path);
-
-    crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
-        url: listing.url,
-        method: "GET".to_string(),
-        headers: listing.headers,
-        body: Vec::new(),
-    }, &internal_id);
+    log::info!(target: "handlers",
+        "Растры продукта: {}/", request.identifier.trim_end_matches('/'));
+    imagery_page(state, veldsdk::correlation(), request.identifier, Vec::new(), "");
 }
 
 /// Растр в том виде, в каком его понимает контракт: роль здесь и роль в
@@ -234,11 +262,12 @@ pub fn on_product_roots(_state: &mut State, request: ProductRootsRequest) {
 pub fn on_locate(state: &mut State, request: LocateRequest) {
     if request.identifier.is_empty() {
         // Отвечено, и повторять нечего: пустой ключ пустым и останется.
-        crate::emit::on_locate_result(&LocateResponse {
-            error: "пустой identifier: искать в каталоге нечего".to_string(),
-            answered: true,
-            ..Default::default()
-        }, &veldsdk::correlation());
+        answer(
+            &veldsdk::correlation(),
+            None,
+            "пустой identifier: искать в каталоге нечего".to_string(),
+            true,
+        );
         return;
     }
 
@@ -250,7 +279,7 @@ pub fn on_locate(state: &mut State, request: LocateRequest) {
     let name = root.rsplit('/').next().unwrap_or(root).to_string();
     let url = catalogue::locate(&name);
     log::info!(target: "handlers", "Продукт по имени: {}", url);
-    ask(state, veldsdk::correlation(), url, Asked::Locate { name });
+    ask(state, veldsdk::correlation(), url, HashMap::new(), Asked::Locate { name });
 }
 
 pub fn on_list_path(
@@ -264,22 +293,40 @@ pub fn on_list_path(
         true => s3::listing_deep(&state.identity, &request.path, &request.token),
         false => s3::listing(&state.identity, &request.path, &request.token),
     };
-    let internal_id = state.pending_http.begin(Pending {
-        correlation_id: veldsdk::correlation(),
-        what: Asked::List(request.path),
-    });
-
     log::info!(target: "handlers", "Листинг S3: {}", listing.url);
 
-    crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
-        url: listing.url,
-        method: "GET".to_string(),
-        headers: listing.headers,
-        body: Vec::new(),
-    }, &internal_id);
+    ask(state, veldsdk::correlation(), listing.url, listing.headers, Asked::List(request.path));
 }
 
-// subs ---------------------------------------------------------------------------------------------------------------------------
+// ── Ответы сети ────────────────────────────────────────────────
+
+/// Разобрать ответ хранилища или сказать, почему разбирать нечего.
+///
+/// Об отказе хранилище говорит одним кодом состояния — тела с объяснением у
+/// него нет, и код здесь всё, что можно показать.
+fn from_storage<T>(
+    response: &veldsdk::proto::network::HttpTaskResponse,
+    parse: impl FnOnce(&[u8]) -> anyhow::Result<T>,
+) -> Result<T, String> {
+    match (200..300).contains(&response.status) {
+        true => parse(&response.body).map_err(|error| error.to_string()),
+        false => Err(format!("хранилище ответило {}", response.status)),
+    }
+}
+
+/// То же для каталога, с одной разницей: отказ он объясняет телом ответа, и
+/// объяснение полезнее кода — «негодный фильтр» и «нет такой коллекции» с виду
+/// одинаковы.
+fn from_catalogue<T>(
+    response: &veldsdk::proto::network::HttpTaskResponse,
+    parse: impl FnOnce(&[u8]) -> anyhow::Result<T>,
+) -> Result<T, String> {
+    match (200..300).contains(&response.status) {
+        true => parse(&response.body).map_err(|error| error.to_string()),
+        false => Err(catalogue::failure(&response.body)
+            .unwrap_or_else(|| format!("каталог ответил {}", response.status))),
+    }
+}
 
 /// Ответ сети. Чей он — листинга или поиска — записано в самом ожидании, и
 /// разбирается он тем, кто его просил.
@@ -290,15 +337,10 @@ pub fn on_http_result(
     let Some(pending) = state.pending_http.take(&veldsdk::correlation()) else {
         return;
     };
-    let ok = (200..300).contains(&response.status);
 
     match pending.what {
         Asked::List(path) => {
-            let listing = if ok {
-                s3::parse_listing(&response.body, &path).map_err(|error| error.to_string())
-            } else {
-                Err(format!("хранилище ответило {}", response.status))
-            };
+            let listing = from_storage(&response, |body| s3::parse_listing(body, &path));
 
             let (entries, next_token, error) = match listing {
                 Ok(listing) => (
@@ -341,11 +383,7 @@ pub fn on_http_result(
             }, &pending.correlation_id);
         }
         Asked::Imagery { identifier, mut keys } => {
-            let listing = if ok {
-                s3::parse_listing(&response.body, &identifier).map_err(|error| error.to_string())
-            } else {
-                Err(format!("хранилище ответило {}", response.status))
-            };
+            let listing = from_storage(&response, |body| s3::parse_listing(body, &identifier));
 
             match listing {
                 Ok(listing) => {
@@ -353,18 +391,13 @@ pub fn on_http_result(
                     // Страница не последняя — тем же ожиданием за следующей;
                     // заказчику отвечать рано.
                     if !listing.next_token.is_empty() {
-                        let path = format!("{}/", identifier.trim_end_matches('/'));
-                        let next = s3::listing_deep(&state.identity, &path, &listing.next_token);
-                        let internal_id = state.pending_http.begin(Pending {
-                            correlation_id: pending.correlation_id,
-                            what: Asked::Imagery { identifier, keys },
-                        });
-                        crate::calls::network::on_http(&veldsdk::proto::network::HttpTaskRequest {
-                            url: next.url,
-                            method: "GET".to_string(),
-                            headers: next.headers,
-                            body: Vec::new(),
-                        }, &internal_id);
+                        imagery_page(
+                            state,
+                            pending.correlation_id,
+                            identifier,
+                            keys,
+                            &listing.next_token,
+                        );
                         return;
                     }
                     crate::emit::on_imagery_result(
@@ -382,17 +415,7 @@ pub fn on_http_result(
             }
         }
         Asked::Search { request, widened } => {
-            let found = if ok {
-                catalogue::scenes(&response.body).map_err(|error| error.to_string())
-            } else {
-                // Каталог объясняет отказ телом ответа, и объяснение полезнее
-                // кода: «негодный фильтр» и «нет такой коллекции» с виду
-                // одинаковы.
-                Err(catalogue::failure(&response.body)
-                    .unwrap_or_else(|| format!("каталог ответил {}", response.status)))
-            };
-
-            let (found, error) = match found {
+            let (found, error) = match from_catalogue(&response, catalogue::scenes) {
                 Ok(found) => (found, String::new()),
                 Err(error) => {
                     log::warn!(target: "handlers", "Поиск не удался: {}", error);
@@ -415,7 +438,8 @@ pub fn on_http_result(
                 let url = catalogue::search(&request, 0);
                 log::info!(target: "handlers",
                     "В свежем окне всего {} продуктов — ищем за всё время", raw);
-                ask(state, pending.correlation_id, url, Asked::Search { request, widened: true });
+                ask(state, pending.correlation_id, url, HashMap::new(),
+                    Asked::Search { request, widened: true });
                 return;
             }
 
@@ -427,22 +451,12 @@ pub fn on_http_result(
             crate::emit::on_search_result(&SearchResponse { products, error }, &pending.correlation_id);
         }
         Asked::Locate { name } => {
-            let found = if ok {
-                catalogue::parse(&response.body).map_err(|error| error.to_string())
-            } else {
-                Err(catalogue::failure(&response.body)
-                    .unwrap_or_else(|| format!("каталог ответил {}", response.status)))
-            };
-
-            let found = match found {
+            let found = match from_catalogue(&response, catalogue::parse) {
                 Ok(found) => found,
                 // А это не ответ вовсе — спросить не вышло.
                 Err(error) => {
                     log::warn!(target: "handlers", "Продукт '{}' не нашёлся: {}", name, error);
-                    crate::emit::on_locate_result(
-                        &LocateResponse { product: None, error, answered: false },
-                        &pending.correlation_id,
-                    );
+                    answer(&pending.correlation_id, None, error, false);
                     return;
                 }
             };
@@ -450,11 +464,12 @@ pub fn on_http_result(
             let Some((facts, product)) = found.into_iter().next() else {
                 // Пустой ответ — тоже ответ: ключ не из каталога (климатика,
                 // вспомогательные данные) либо продукт из него уже ушёл.
-                crate::emit::on_locate_result(&LocateResponse {
-                    product: None,
-                    error: format!("в каталоге нет продукта с именем '{}'", name),
-                    answered: true,
-                }, &pending.correlation_id);
+                answer(
+                    &pending.correlation_id,
+                    None,
+                    format!("в каталоге нет продукта с именем '{}'", name),
+                    true,
+                );
                 return;
             };
 
@@ -464,23 +479,17 @@ pub fn on_http_result(
             match scene::acquisition(&facts) {
                 Some(key) => {
                     let url = catalogue::siblings(&facts.platform, product.acquired);
-                    ask(state, pending.correlation_id, url, Asked::Siblings { key, found: product });
+                    ask(state, pending.correlation_id, url, HashMap::new(),
+                        Asked::Siblings { key, found: product });
                 }
-                None => crate::emit::on_locate_result(&LocateResponse {
-                    product: Some(product),
-                    error: String::new(),
-                    answered: true,
-                }, &pending.correlation_id),
+                None => answer(&pending.correlation_id, Some(product), String::new(), true),
             }
         }
         Asked::Siblings { key, found } => {
             // Соседние части — добавка, а не ответ: не нашлись или не
             // спросились — заказчик получает найденное как есть. Отказывать
             // из-за соседей значило бы потерять и сам продукт.
-            let others = match ok {
-                true => catalogue::parse(&response.body).unwrap_or_default(),
-                false => Vec::new(),
-            };
+            let others = from_catalogue(&response, catalogue::parse).unwrap_or_default();
             let same: Vec<_> = others
                 .into_iter()
                 .filter(|(facts, _)| scene::acquisition(facts).as_deref() == Some(key.as_str()))
@@ -494,11 +503,7 @@ pub fn on_http_result(
                 }
                 None => found,
             };
-            crate::emit::on_locate_result(&LocateResponse {
-                product: Some(product),
-                error: String::new(),
-                answered: true,
-            }, &pending.correlation_id);
+            answer(&pending.correlation_id, Some(product), String::new(), true);
         }
     }
 }

@@ -44,62 +44,67 @@ pub fn asked(request: &SearchRequest) -> u32 {
     wanted(request).saturating_mul(OVERFETCH).min(MAX_LIMIT)
 }
 
-/// Адрес запроса поиска.
+/// Адрес запроса к каталогу: у всех трёх запросов он один и тот же, а разнятся
+/// они фильтром, порядком (`order`, `None` — как отдаст каталог) и тем, сколько
+/// продуктов брать.
+///
+/// Собирается через `Url`, а не форматированием: в фильтр попадают кавычки,
+/// скобки и пробелы, и кодировать их по месту значит однажды забыть.
 ///
 /// Атрибуты просятся всегда: миссия, тип продукта и облачность живут только
 /// там, а показать найденное без них — значит показать одни имена файлов.
 /// Стоит это около четырёх килобайт на снимок, и выбрать из атрибутов нужные
 /// нельзя — вложенный фильтр на `$expand` каталог отвергает.
+fn address(filter: &str, order: Option<&str>, top: u32) -> String {
+    let mut url = Url::parse(&format!("https://{}{}", HOST, PATH))
+        .expect("адрес каталога собирается из констант");
+    {
+        let mut pairs = url.query_pairs_mut();
+        if !filter.is_empty() {
+            pairs.append_pair("$filter", filter);
+        }
+        pairs.append_pair("$expand", "Attributes");
+        if let Some(order) = order {
+            pairs.append_pair("$orderby", order);
+        }
+        pairs.append_pair("$top", &top.to_string());
+    }
+    url.into()
+}
+
+/// Адрес запроса поиска.
 ///
 /// `floor` — нижняя граница по времени, которую мы ставим сами, когда заказчик
 /// её не задал (unix-секунды; 0 — не ставить). Она не про выдачу, а про
 /// скорость: см. [`FRESH_DAYS`].
 pub fn search(request: &SearchRequest, floor: i64) -> String {
-    // Через Url, а не форматированием: в фильтр попадают кавычки, скобки и
-    // пробелы, и кодировать их по месту значит однажды забыть.
-    let mut url = Url::parse(&format!("https://{}{}", HOST, PATH))
-        .expect("адрес каталога собирается из констант");
-    {
-        let mut pairs = url.query_pairs_mut();
-        let filter = filter(request, floor);
-        if !filter.is_empty() {
-            pairs.append_pair("$filter", &filter);
-        }
-        pairs.append_pair("$expand", "Attributes");
-        // Свежее сверху: снимок недельной давности нужен чаще, чем снимок
-        // десятилетней.
-        pairs.append_pair("$orderby", "ContentDate/Start desc");
-        pairs.append_pair("$top", &asked(request).to_string());
-    }
-    url.into()
+    // Свежее сверху: снимок недельной давности нужен чаще, чем снимок
+    // десятилетней.
+    address(&filter(request, floor), Some("ContentDate/Start desc"), asked(request))
 }
 
 /// Адрес запроса упаковок той же съёмки — второй ход после [`locate`].
 ///
-/// Спрашивается секундой съёмки, а не именем: имена упаковок расходятся
-/// хвостом (контрольная сумма упаковки у каждой своя), а время начала у них
-/// одно с точностью до долей секунды. Отсюда окно в секунду по обе стороны;
-/// лишнее отсеет сборка снимков (`scene::acquisition`).
+/// Спрашивается временем съёмки, а не именем: имена упаковок расходятся хвостом
+/// (контрольная сумма упаковки у каждой своя), а время начала у них общее.
+/// Окно в секунду по обе стороны — не допуск, а единственный способ спросить
+/// вообще: у продуктов время идёт с долями секунды, а спрашивать мы умеем
+/// только целыми (см. `time::format`), и точное равенство не совпало бы ни с
+/// чем. Лишнее из ответа отсеет сравнение ключей съёмки — оно в
+/// `cdse::on_http_result`, и оно точное (`scene::acquisition`).
 ///
 /// Коллекция в фильтре не для отбора, а ради индекса: без неё каталог сортирует
 /// весь архив — см. [`FRESH_DAYS`].
 pub fn siblings(mission: &str, acquired: i64) -> String {
-    let mut url = Url::parse(&format!("https://{}{}", HOST, PATH))
-        .expect("адрес каталога собирается из констант");
-    {
-        let mut pairs = url.query_pairs_mut();
-        let mut terms = vec![
-            format!("ContentDate/Start ge {}", super::time::format(acquired - 1)),
-            format!("ContentDate/Start le {}", super::time::format(acquired + 1)),
-        ];
-        if !mission.is_empty() {
-            terms.push(format!("Collection/Name eq {}", literal(mission)));
-        }
-        pairs.append_pair("$filter", &terms.join(" and "));
-        pairs.append_pair("$expand", "Attributes");
-        pairs.append_pair("$top", "30");
+    let mut terms = vec![
+        format!("ContentDate/Start ge {}", super::time::format(acquired - 1)),
+        format!("ContentDate/Start le {}", super::time::format(acquired + 1)),
+    ];
+    if !mission.is_empty() {
+        terms.push(format!("Collection/Name eq {}", literal(mission)));
     }
-    url.into()
+    // Упаковок у одной съёмки единицы: тридцать — потолок с запасом.
+    address(&terms.join(" and "), None, 30)
 }
 
 /// Адрес запроса одного продукта по точному имени — обратный ход поиска: имя
@@ -107,15 +112,7 @@ pub fn siblings(mission: &str, acquired: i64) -> String {
 /// футпринтом и атрибутами. Точное равенство, а не `contains`: имя продукта —
 /// ключ каталога, и подстрочное совпадение здесь означало бы чужой продукт.
 pub fn locate(name: &str) -> String {
-    let mut url = Url::parse(&format!("https://{}{}", HOST, PATH))
-        .expect("адрес каталога собирается из констант");
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("$filter", &format!("Name eq {}", literal(name)));
-        pairs.append_pair("$expand", "Attributes");
-        pairs.append_pair("$top", "1");
-    }
-    url.into()
+    address(&format!("Name eq {}", literal(name)), None, 1)
 }
 
 /// Сколько суток назад смотрит запрос, у которого нижней границы нет.
@@ -303,10 +300,8 @@ fn product(product: Product) -> DataProduct {
         acquired: product.content_date.map(|date| super::time::parse(&date.start)).unwrap_or(0),
         size: product.size,
         footprint: product.footprint.map(rings).unwrap_or_default(),
-        mission: text("platformShortName"),
         product_type: text("productType"),
         cloud_cover: attribute("cloudCover").and_then(|value| value.as_f64()),
-        online: product.online,
         folder,
         // Части проставляет сведение снимков — оно одно видит соседей, —
         // а `viewable` требует уровня обработки и ставится в [`parse`].
@@ -372,8 +367,6 @@ struct Product {
     s3_path: String,
     #[serde(rename = "ContentLength", default)]
     size: u64,
-    #[serde(rename = "Online", default)]
-    online: bool,
     #[serde(rename = "ContentDate", default)]
     content_date: Option<ContentDate>,
     #[serde(rename = "GeoFootprint", default)]
@@ -402,4 +395,74 @@ struct Attribute {
     name: String,
     #[serde(rename = "Value", default)]
     value: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::time;
+    use super::*;
+
+    /// Значение одного параметра запроса — уже раскодированное, каким его
+    /// прочтёт каталог.
+    fn param(url: &str, name: &str) -> Option<String> {
+        Url::parse(url)
+            .expect("собранный адрес разбирается обратно")
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+    }
+
+    /// Постоянная часть есть у всех трёх запросов, и обе её половины
+    /// обязательны: без атрибутов ответ каталога — одни имена файлов, без
+    /// `$top` — весь архив. Порядок просит только поиск: у запросов за одним
+    /// известным продуктом сортировать нечего.
+    #[test]
+    fn every_request_carries_attributes_and_a_limit() {
+        let requests = [
+            search(&SearchRequest { limit: 10, ..Default::default() }, 0),
+            siblings("SENTINEL-1", 0),
+            locate("S2B_MSIL1C"),
+        ];
+        for url in &requests {
+            assert_eq!(param(url, "$expand").as_deref(), Some("Attributes"), "{}", url);
+            assert!(param(url, "$top").is_some(), "{}", url);
+        }
+        // Снимков просили десять, продуктов уходит вчетверо больше — см. [`OVERFETCH`].
+        assert_eq!(param(&requests[0], "$top").as_deref(), Some("40"));
+        assert!(param(&requests[0], "$orderby").is_some());
+        assert!(param(&requests[1], "$orderby").is_none());
+        assert!(param(&requests[2], "$orderby").is_none());
+    }
+
+    /// Запрос без единого условия — «всё подряд»: пустой фильтр не уходит
+    /// вовсе, потому что пустое выражение каталог считает негодным.
+    #[test]
+    fn a_request_without_conditions_has_no_filter() {
+        assert_eq!(param(&search(&SearchRequest::default(), 0), "$filter"), None);
+    }
+
+    /// Окно упаковок — секунда по обе стороны от съёмки: спрашивать точным
+    /// временем нечем, целые секунды с долями у продуктов не совпадут.
+    #[test]
+    fn siblings_ask_a_window_of_one_second() {
+        let acquired = time::parse("2024-05-04T08:23:58.000Z");
+        assert_eq!(
+            param(&siblings("SENTINEL-1", acquired), "$filter").as_deref(),
+            Some(
+                "ContentDate/Start ge 2024-05-04T08:23:57.000Z and \
+                 ContentDate/Start le 2024-05-04T08:23:59.000Z and \
+                 Collection/Name eq 'SENTINEL-1'"
+            )
+        );
+    }
+
+    /// Кавычка в имени доезжает до каталога удвоенной, а не обрывает выражение
+    /// фильтра: экранирование OData считается до кодирования адреса.
+    #[test]
+    fn a_quote_in_the_name_survives_the_url() {
+        assert_eq!(
+            param(&locate("S2B_D'ART"), "$filter").as_deref(),
+            Some("Name eq 'S2B_D''ART'")
+        );
+    }
 }

@@ -332,6 +332,10 @@ impl Raster {
 pub struct Overlay {
     pub key: String,
     pub label: String,
+    /// Чего у слоя не будет, хотя сам он лёг: один из растров не описался.
+    /// Рядом с [`Overlay::error`], но это другой ответ — «резче не станет»
+    /// против «смотреть не на что», и слой при нём остаётся на шаре.
+    pub trouble: Option<String>,
     pub frame: Frame,
     pub rasters: Vec<Raster>,
     /// Ресурсы, которыми наложение прислали, — в том виде, в каком они пришли.
@@ -770,6 +774,7 @@ mod tests {
             opacity: 1.0,
             hidden: false,
             error: String::new(),
+            trouble: None,
             progress: Progress::default(),
         }
     }

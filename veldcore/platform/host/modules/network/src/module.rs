@@ -28,7 +28,7 @@ pub fn hook_init(ctx: Arc<HostContext>) -> State {
     State { tasks: Tasks::new(&ctx), ctx, blocks: Arc::default() }
 }
 
-// -- Input handlers --
+// -- Обработчики входящих топиков --
 pub use download::on_fs_download;
 pub use http::on_http;
 pub use range::on_open;

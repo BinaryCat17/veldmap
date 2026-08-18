@@ -1,6 +1,6 @@
 //! Сетевой каталог: переходы по папкам и подгрузка раскрытых строк.
 
-use crate::module::components::{arrange, folder_of, folder_path, rows};
+use crate::module::components::{arrange, folder_of, folder_path, last_segment, rows};
 use crate::module::state::browse::BrowseItem;
 use crate::module::state::{Highlight, Listing, State, ViewId, ViewKind};
 use crate::proto::data_provider::{ListEntry, ListPathRequest, ListPathResponse};
@@ -279,19 +279,14 @@ fn on_children(
 }
 
 /// Запись листинга → то, чем её помнит вид. Одно место на все три листинга:
-/// признак папки и короткое имя выводятся из ключа, и три копии этого правила
-/// однажды ответили бы по-разному.
+/// признак папки выводится здесь из ключа, а короткое имя — общим правилом
+/// (см. [`last_segment`]), потому что так же его называют и строка списка, и
+/// заголовок вкладки.
 fn item(entry: ListEntry) -> BrowseItem {
     BrowseItem {
         is_folder: entry.key.ends_with('/'),
         product: entry.product,
-        name: entry
-            .key
-            .split('/')
-            .filter(|part| !part.is_empty())
-            .next_back()
-            .unwrap_or("")
-            .to_string(),
+        name: last_segment(&entry.key).to_string(),
         identifier: entry.key,
         size: entry.size,
         modified: entry.modified,

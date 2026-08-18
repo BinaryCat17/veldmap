@@ -19,13 +19,13 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
         log_path: &log_path,
     })?;
 
-    log::info!(target: "log", "Filter: {} (trace.log: {})", core_config.log_filter, core_config.trace_filter);
-    log::info!(target: "log", "Rate limit: {}ms", core_config.log_rate_limit_ms);
+    log::info!(target: "log", "Фильтр: {} (trace.log: {})", core_config.log_filter, core_config.trace_filter);
+    log::info!(target: "log", "Подавление повторов: {} мс", core_config.log_rate_limit_ms);
 
     Ok(())
 }
 
-/// Initializes WGPU Adapter, Device, Queue and Surface configuration
+/// Поднимает графику: адаптер, устройство, очередь и настройку поверхности.
 pub async fn init_wgpu<'a>(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'a>,
@@ -40,7 +40,7 @@ pub async fn init_wgpu<'a>(
     let adapters = instance.enumerate_adapters(wgpu::Backends::PRIMARY).await;
     for (i, adapter) in adapters.iter().enumerate() {
         let info = adapter.get_info();
-        log::info!(target: "render", "Adapter {}: {:?} (vendor: 0x{:04X}, device: 0x{:04X})", 
+        log::info!(target: "render", "Адаптер {}: {:?} (вендор 0x{:04X}, устройство 0x{:04X})", 
             i, info.name, info.vendor, info.device);
     }
     
@@ -58,17 +58,17 @@ pub async fn init_wgpu<'a>(
     let adapter = match adapter {
         Some(a) => a,
         None => {
-            log::warn!(target: "render", "No discrete GPU found, trying fallback...");
+            log::warn!(target: "render", "Аппаратного адаптера не нашлось — берём программный");
             instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(surface),
                 force_fallback_adapter: true,
                 ..Default::default()
-            }).await.map_err(|e| anyhow::anyhow!("Adapter error: {}", e))?
+            }).await.map_err(|e| anyhow::anyhow!("адаптер не выдан: {}", e))?
         }
     };
 
-    log::info!(target: "render", "Selected GPU: {:?}", adapter.get_info().name);
+    log::info!(target: "render", "Выбран адаптер: {:?}", adapter.get_info().name);
 
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
         label: None,

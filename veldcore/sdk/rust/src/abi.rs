@@ -5,7 +5,7 @@
 use crate::proto::core::EventEnvelope;
 use prost::Message;
 
-// ── VELD MICROKERNEL ABI ───────────────────────────────────────
+// ── ABI микроядра Veld ─────────────────────────────────────────
 
 // Имя wasm-модуля импортов объявлено явно: хост регистрирует эти функции
 // именно в "env" (см. host-side `abi.rs::register`), и подразумеваемое
@@ -89,7 +89,7 @@ mod host {
 
 use host::*;
 
-// ── WASM MEMORY EXPORTS ────────────────────────────────────────
+// ── Экспорты памяти wasm ───────────────────────────────────────
 
 // Выделение/освобождение памяти wasm для ответов хоста: хост пишет
 // результаты синхронных ABI-вызовов через veld_alloc (см. host
@@ -129,11 +129,11 @@ unsafe fn take_host_bytes(packed: u64) -> Option<Vec<u8>> {
 /// тег (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст),
 /// см. host-side `abi.rs::tagged_response`.
 unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
-    let buf = unsafe { take_host_bytes(packed) }.ok_or_else(|| anyhow::anyhow!("{} failed", what))?;
+    let buf = unsafe { take_host_bytes(packed) }.ok_or_else(|| anyhow::anyhow!("{} не выполнился", what))?;
     match buf.split_first() {
         Some((0, payload)) => Ok(payload.to_vec()),
         Some((1, msg)) => Err(anyhow::anyhow!(String::from_utf8_lossy(msg).into_owned())),
-        _ => Err(anyhow::anyhow!("{}: malformed response", what)),
+        _ => Err(anyhow::anyhow!("{}: ответ хоста испорчен", what)),
     }
 }
 
@@ -153,7 +153,7 @@ pub fn resource_create(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
 pub fn graphics_execute(payload: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     unsafe {
         let packed = veld_graphics_execute(payload.as_ptr() as u64, payload.len() as u64);
-        take_host_response(packed, "Graphics execute")
+        take_host_response(packed, "graphics_execute")
     }
 }
 
@@ -252,13 +252,13 @@ pub(crate) fn resource_grant_read(region_id: u64, service: &str) -> bool {
     unsafe { veld_resource_grant_read(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
-/// Grant write access to another service (owner only).
-/// Низкий уровень ABI: прикладной код — `resource::grant_write_or_free`.
+/// Право записи другому сервису (только от владельца). Низкий уровень ABI:
+/// прикладной код — `resource::grant_write_or_free`.
 pub(crate) fn resource_grant_write(region_id: u64, service: &str) -> bool {
     unsafe { veld_resource_grant_write(region_id, service.as_ptr() as u64, service.len() as u64) != 0 }
 }
 
-/// Free a resource region.
+/// Освобождает ресурс.
 /// Низкий уровень ABI: прикладной код пользуется `OwnedResource` (RAII)
 /// и обрядами `resource::*`; прямой вызов — признак переписанного вручную
 /// обряда.
@@ -266,7 +266,7 @@ pub(crate) fn resource_free(region_id: u64) -> bool {
     unsafe { veld_resource_free(region_id) != 0 }
 }
 
-// ── Logging ────────────────────────────────────────────────────
+// ── Логи ───────────────────────────────────────────────────────
 
 /// Транспорт для HostLogger: прикладной код пишет макросами крейта `log`.
 /// `target` — подсистема записи; хост дополнит его именем плагина
@@ -286,7 +286,7 @@ pub fn log(level: log::Level, target: &str, message: &str) {
     }
 }
 
-// ── System helpers ─────────────────────────────────────────────
+// ── Системные помощники ────────────────────────────────────────
 
 /// UUID v4 из хостовой энтропии: у wasm нет своего источника случайности.
 pub fn generate_id() -> String {
@@ -301,7 +301,7 @@ pub fn generate_id() -> String {
     )
 }
 
-// ── Call context ───────────────────────────────────────────────
+// ── Контекст вызова ────────────────────────────────────────────
 
 /// Конверт обрабатываемого сейчас события — то, что известно о вызове помимо
 /// payload (заполняется handle_event из конверта, который кодирует хост, —
@@ -383,7 +383,7 @@ pub fn store_output(data: Vec<u8>) {
     unsafe { veld_output_set(data.as_ptr() as u64, data.len() as u64); }
 }
 
-// ── Pub/Sub ────────────────────────────────────────────────────
+// ── Публикация в шину ──────────────────────────────────────────
 
 /// Единственная форма общения между сервисами: fire-and-forget событие в
 /// шину. Не часть публичного API: прикладные модули используют
@@ -401,7 +401,7 @@ pub fn store_output(data: Vec<u8>) {
 pub fn publish(topic: &str, payload: Vec<u8>, correlation: &str, target: &str) {
     let parts: Vec<&str> = topic.splitn(2, '/').collect();
     if parts.len() != 2 {
-        log::error!(target: "sdk", "Invalid topic: {}", topic);
+        log::error!(target: "sdk", "Негодный топик: {}", topic);
         return;
     }
     // publisher не заполняется: его штампует хост при доставке, а в исходящем
