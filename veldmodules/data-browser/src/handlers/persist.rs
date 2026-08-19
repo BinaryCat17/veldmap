@@ -101,6 +101,15 @@ pub fn save_if_changed(state: &mut State) {
     write(state, &body);
 }
 
+/// Забыть, что раскладка записана. Зовётся с каждого отказа записи: отпечаток
+/// ставится до неё — иначе одно и то же тело уезжало бы на каждое событие, —
+/// и, оставленный после отказа, он молчал бы до следующей правки раскладки. А
+/// её может и не случиться: расставили вкладки один раз, запись сорвалась, и
+/// запомнить их больше нечем.
+fn forget(state: &mut State) {
+    state.last_saved = 0;
+}
+
 /// Запоминает нынешнюю раскладку как записанную, ничего не записывая, — так
 /// восстановленная не переписывает сама себя тем же содержимым.
 fn remember(state: &mut State) {
@@ -121,6 +130,7 @@ fn fingerprint(body: &[u8]) -> u64 {
 fn write(state: &mut State, body: &[u8]) {
     let Some(region_id) = veldsdk::abi::resource_alloc_cpu(body.len() as u64) else {
         veldsdk::log::warn!(target: "handlers", "раскладка не записана: нет памяти под регион");
+        forget(state);
         return;
     };
     // Во владельца сразу после выделения: сорвись запись, регион освободит
@@ -128,6 +138,7 @@ fn write(state: &mut State, body: &[u8]) {
     let region = veldsdk::OwnedResource::from_raw_id(region_id);
     if let Err(error) = veldsdk::abi::resource_write(region.id(), 0, body) {
         veldsdk::log::warn!(target: "handlers", "раскладка не записана: {}", error);
+        forget(state);
         return;
     }
 
@@ -150,6 +161,7 @@ pub fn on_write_result(state: &mut State, result: FsWriteResult) {
         // Незаписанная раскладка стоит одного расставления вкладок — жаловаться
         // человеку не о чем, а в логе след нужен.
         veldsdk::log::warn!(target: "handlers", "раскладка не записана: {}", result.error);
+        forget(state);
     }
 }
 
@@ -254,6 +266,12 @@ fn save_tab(kind: &ViewKind) -> SavedTab {
 fn restore(state: &mut State, saved: &Saved) {
     let mut panes = Vec::new();
     rebuild(state, state.focused(), &saved.root, &mut panes);
+    // Панель, чьи вкладки все до одной оказались повторами синглтона, вышла
+    // пустой — а пустых панелей не бывает: закрыть в ней нечего, и убрать её
+    // потом было бы нечем. Правило то же, что у закрытой вкладки.
+    for pane in &panes {
+        state.forget_if_empty(*pane);
+    }
     // Взгляд — туда, где он был; панели вне списка не бывает, но список мог
     // приехать от другой версии формата.
     if let Some(pane) = panes.get(saved.focus).or(panes.first())
@@ -359,7 +377,7 @@ fn singleton_kind(tab: &SavedTab) -> Option<NewTab> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::state::Side;
+    use crate::module::state::{Side, MIN_PANE};
 
     fn state() -> State {
         State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние")
@@ -409,5 +427,60 @@ mod tests {
         };
         restore(&mut restored, &saved);
         assert_eq!(restored.views().len(), 2);
+    }
+
+    /// Синглтон, названный в файле дважды, оставлял свою вторую панель пустой
+    /// навсегда: закрывать в ней нечего, а уходит панель из дерева только по
+    /// закрытой вкладке.
+    #[test]
+    fn a_pane_left_empty_by_a_duplicate_goes_away() {
+        let mut restored = state();
+        let saved = Saved {
+            root: SavedNode::Split {
+                axis: "row".to_string(),
+                fraction: 0.5,
+                first: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Globe], active: 0 }),
+                second: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Globe], active: 0 }),
+            },
+            focus: 0,
+        };
+        restore(&mut restored, &saved);
+        assert_eq!(restored.views().len(), 1, "глобус один");
+        assert_eq!(restored.layout().count(), 1, "пустая панель осталась в дереве");
+    }
+
+    /// Доля из файла зажимается тем же пределом, что живая граница: панель,
+    /// открывшаяся в ноль, не показывает ни вкладок, ни границы, за которую ей
+    /// вернуть место.
+    #[test]
+    fn a_restored_fraction_obeys_the_same_floor_as_the_border() {
+        for fraction in [0.0f32, 1.0, 0.001, 0.999] {
+            let mut restored = state();
+            // Окно к моменту чтения раскладки уже известно: его размер
+            // приезжает владельцу сразу по поднятии модуля, а раскладку
+            // приносит ответ fs — то есть заведомо позже.
+            restored.window = (2048, 1536);
+            let saved = Saved {
+                root: SavedNode::Split {
+                    axis: "row".to_string(),
+                    fraction,
+                    first: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Shown], active: 0 }),
+                    second: Box::new(SavedNode::Pane { tabs: vec![SavedTab::Globe], active: 0 }),
+                },
+                focus: 0,
+            };
+            restore(&mut restored, &saved);
+            let panes: Vec<crate::module::state::PaneId> =
+                restored.views().iter().filter_map(|view| restored.pane_of(view.id)).collect();
+            for pane in panes {
+                let share = restored.layout().share(pane).0;
+                assert!(
+                    share * restored.logical_width() >= MIN_PANE,
+                    "доля {} дала панели {} точек",
+                    fraction,
+                    share * restored.logical_width()
+                );
+            }
+        }
     }
 }

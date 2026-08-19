@@ -46,8 +46,12 @@ pub struct Screen<'a> {
     pub target: &'a str,
 }
 
-/// `width` — ширина окна в логических точках: по ней считается, сколько знаков
-/// имени влезает в свою колонку.
+/// Сколько знаков подзаголовка помещается в строку заголовка. Числом, а не
+/// шириной: подзаголовок стои́т между названием и кнопками, и ширина у него
+/// та, что осталась от обоих, — а обрезать его должен клиент, потому что
+/// коробка срезала бы вместо него кнопки.
+const SUBTITLE_CHARS: usize = 72;
+
 /// Заголовок экрана: название, подпись под ним и кнопки справа.
 ///
 /// Роль, а не сборка на месте: заголовок стоит над каждым списком, и
@@ -60,7 +64,14 @@ pub fn heading(title: &str, subtitle: String, trailing: Vec<Element<Msg>>) -> El
             .color(theme::INK)
             .weight(FontWeight::WeightBold)
             .single_line(),
-        text::<Msg>(subtitle).size(theme::TEXT_BODY).color(theme::INK_DIM).single_line(),
+        // Подзаголовком приезжает и текст ошибки от провайдера — строка
+        // произвольной длины. Нетронутая, она стои́т в строке перед распоркой и
+        // выдавливает за край кнопки заголовка («Снять отметки»), а коробка их
+        // потом срезает: длинная сетевая ошибка делала бы их ненажимаемыми.
+        text::<Msg>(format::ellipsize(&subtitle, SUBTITLE_CHARS))
+            .size(theme::TEXT_BODY)
+            .color(theme::INK_DIM)
+            .single_line(),
         // Кнопки прижимаются вправо; без них распорка ничего не меняет.
         container(veld_ui_service_wrap::space::<Msg>(Length::Fill, Length::Fixed(0.0)))
             .width(Length::Fill),
@@ -105,6 +116,12 @@ fn aim(arranged: &arrange::Arranged<'_>, listing: &ListingState, target: &str) -
     })
 }
 
+/// Экран списка целиком.
+///
+/// `width` — ширина ПАНЕЛИ в логических точках, а не окна: по ней считается,
+/// какие колонки помещаются и сколько знаков имени влезает в свою колонку.
+/// Окно шире, и посчитанное по нему схлопнуло бы имя в ноль (см.
+/// `State::pane_width` и [`table::fit`]).
 pub fn view(
     view: ViewId,
     screen: Screen<'_>,
@@ -125,7 +142,7 @@ pub fn view(
         twisty: arranged.shown().any(Row::expandable),
         checkable: arranged.marks().next().is_some(),
     };
-    let (columns, name_width) = table::fit(width, optional);
+    let table::Fit { columns, name: name_width, compact } = table::fit(width, optional);
 
     // Сколько снимков этого списка очерчено на шаре — и чем это снять. Без
     // такой подписи коробочки говорят только «отмечено», а отмечено-то ради
@@ -175,6 +192,11 @@ pub fn view(
                 menu: screen.menu,
                 columns: &columns,
                 name_width,
+                compact,
+                shared: format::shared(
+                    &arranged.shown().map(|row| row.title.as_str()).collect::<Vec<&str>>(),
+                    format::mono_fit(name_width, theme::TEXT_MONO),
+                ),
                 here: screen.path.unwrap_or_default(),
                 picked: screen.picked,
                 target: screen.target,
@@ -205,11 +227,11 @@ pub fn view(
     // ровно один. Второго признака под это заводить не нужно — этот уже есть.
     screen_rows.push(controls::toolbar(
         view, listing, screen.menu, &arranged.counts, screen.path.is_none(), width));
-    screen_rows.push(table::header(view, &columns, arranged.all_marked(listing)));
+    screen_rows.push(table::header(view, &columns, arranged.all_marked(listing), compact));
     screen_rows.push(body);
     if arranged.pages > 1 {
         screen_rows.push(theme::hairline(theme::LINE_SOFT));
-        screen_rows.push(controls::pager(view, &arranged));
+        screen_rows.push(controls::pager(view, &arranged, width));
     }
 
     column(screen_rows).width(Length::Fill).height(Length::Fill).into()

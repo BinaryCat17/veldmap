@@ -71,7 +71,28 @@ pub fn on_describe(_state: &mut State, req: DescribeRequest) {
 fn describe(req: &DescribeRequest) -> Result<Described, String> {
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
     let fingerprint = fingerprint::fingerprint(resource.id, resource.size)?;
-    let info = adapters::describe(resource.id, resource.size, &Rc::new(Cell::new(0)))?;
+    let mut info = adapters::describe(resource.id, resource.size, &Rc::new(Cell::new(0)))?;
+
+    // Координаты из соседнего файла — только когда в самом растре их нет: то,
+    // что записано в нём, знает о своей раскладке точнее любого соседа.
+    //
+    // Неудача здесь описания не отменяет. Растр от этого не портится, он лишь
+    // остаётся без привязки — и что с ним тогда делать, решает заказчик: у
+    // него есть контур каталога, а у нас нет ничего.
+    if info.ties.is_empty()
+        && let Some(coordinates) = req.geolocation.as_ref()
+    {
+        match adapters::netcdf::geolocation(
+            coordinates.id,
+            coordinates.size,
+            info.width,
+            info.height,
+        ) {
+            Ok(ties) => info.ties = ties,
+            Err(error) => veldsdk::log::warn!(target: "decode", "файл координат: {}", error),
+        }
+    }
+
     Ok(Described {
         fingerprint,
         width: info.width,

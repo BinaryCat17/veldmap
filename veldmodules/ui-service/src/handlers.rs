@@ -79,6 +79,12 @@ pub fn handle_set_surface(state: &mut State, req: veldsdk::proto::core::SurfaceD
         veldsdk::log::info!(target: "handlers", "Поверхность '{}' отозвана", plugin_id);
         if let Some(plugin) = state.plugins.get_mut(&plugin_id) {
             plugin.surface_handle = None;
+            // View и bind group'ы держат текстуры живыми в обход реестра, а
+            // чистит их только рисующий кадр — которого после отзыва больше не
+            // будет. Оставленные, они удерживают видеопамять размером с окно и
+            // со все показанные картинки до конца сессии.
+            plugin.target_view = None;
+            plugin.external_bind_groups.clear();
         }
         return;
     };
@@ -354,17 +360,29 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
     let has_live = GpuRenderer::has_live_image(&renderer.draw_commands);
     veldsdk::log::trace!(target: "render", "commands_changed={}, is_layout_dirty={}, live={}", commands_changed, plugin.is_layout_dirty, has_live);
 
-    if commands_changed || plugin.is_layout_dirty || has_live {
-        veldsdk::log::trace!(target: "render", "Rendering into target texture {}", target_texture);
-        crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf)?;
-
-        // Снимок кадра для диффа — обменом, а не клонированием: рендерер
-        // пересобирает геометрию каждый кадр с нуля (clear в начале сборки),
-        // а клонировать тысячи вершин на каждом изменившемся кадре дорого.
-        std::mem::swap(&mut plugin.last_draw_commands, &mut renderer.draw_commands);
-        std::mem::swap(&mut plugin.last_vertices, &mut renderer.vertices);
-        plugin.is_layout_dirty = false;
-    }
+    // Неудача кадра не отменяет всего, что случилось до него. Кэш виджетов
+    // вынут отсюда (`mem::take` выше) и держит фокус, прокрутку и наведение, а
+    // пойманные сообщения — уже случившиеся нажатия; выйдя с ошибкой раньше
+    // возврата, кадр уносил бы и то, и другое. Возвращаем их, а ошибку отдаём
+    // после — она про кадр, а не про состояние.
+    let drawn = match commands_changed || plugin.is_layout_dirty || has_live {
+        true => {
+            veldsdk::log::trace!(target: "render", "Rendering into target texture {}", target_texture);
+            let drawn =
+                crate::module::graphics::render_ui(plugin, renderer, target_texture, width, height, sf);
+            if drawn.is_ok() {
+                // Снимок кадра для диффа — обменом, а не клонированием:
+                // рендерер пересобирает геометрию каждый кадр с нуля (clear в
+                // начале сборки), а клонировать тысячи вершин на каждом
+                // изменившемся кадре дорого.
+                std::mem::swap(&mut plugin.last_draw_commands, &mut renderer.draw_commands);
+                std::mem::swap(&mut plugin.last_vertices, &mut renderer.vertices);
+                plugin.is_layout_dirty = false;
+            }
+            drawn
+        }
+        false => Ok(()),
+    };
 
     plugin.needs_redrawing = false;
     veldsdk::log::trace!(target: "render", "Caching UI");
@@ -377,7 +395,7 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
     plugin.pending_messages.extend(captured_messages);
 
     veldsdk::log::trace!(target: "render", "END");
-    Ok(())
+    drawn
 }
 
 /// Наводит области прокрутки туда, куда просит разметка.

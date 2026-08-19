@@ -631,10 +631,15 @@ fn convert_alignment(a: proto::Alignment) -> Option<alignment::Alignment> {
     }
 }
 
+/// Цвет, которого разметка не назвала, — прозрачный, а не чёрный.
+///
+/// Неназванное в этом протоколе означает «ничего не рисовать»: непрозрачный
+/// чёрный на месте неназванной подсветки зоны приёма закрашивает зону целиком
+/// вместо того, чтобы её подсветить.
 fn convert_color(c: &Option<proto::Color>) -> Color {
     match c {
         Some(c) => convert_color_value(c),
-        None => Color::BLACK,
+        None => Color::TRANSPARENT,
     }
 }
 

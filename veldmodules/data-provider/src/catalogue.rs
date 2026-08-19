@@ -95,13 +95,23 @@ pub fn search(request: &SearchRequest, floor: i64) -> String {
 ///
 /// Коллекция в фильтре не для отбора, а ради индекса: без неё каталог сортирует
 /// весь архив — см. [`FRESH_DAYS`].
-pub fn siblings(mission: &str, acquired: i64) -> String {
+pub fn siblings(mission: &str, tile: &str, acquired: i64) -> String {
     let mut terms = vec![
         format!("ContentDate/Start ge {}", super::time::format(acquired - 1)),
         format!("ContentDate/Start le {}", super::time::format(acquired + 1)),
     ];
     if !mission.is_empty() {
         terms.push(format!("Collection/Name eq {}", literal(mission)));
+    }
+    // Плитка, если каталог её назвал. Секундное окно у Sentinel-2 накрывает не
+    // упаковки одной плитки, а всю строку съёмки — под три сотни продуктов
+    // (проверено по живому каталогу), — и упаковки нужной терялись бы за
+    // потолком выдачи по жребию. Плитка сужает то же окно до единиц.
+    if !tile.is_empty() {
+        terms.push(format!(
+            "Attributes/OData.CSC.StringAttribute/any(a:a/Name eq 'tileId'              and a/OData.CSC.StringAttribute/Value eq {})",
+            literal(tile)
+        ));
     }
     // Упаковок у одной съёмки единицы: тридцать — потолок с запасом.
     address(&terms.join(" and "), None, 30)
@@ -139,17 +149,25 @@ fn filter(request: &SearchRequest, floor: i64) -> String {
     if !request.name.is_empty() {
         terms.push(format!("contains(Name,{})", literal(&request.name)));
     }
-    // Своя граница — только когда заказчик не назвал свою.
-    if request.from <= 0 && floor > 0 {
+    // Своя граница — только когда заказчик не назвал ни одной своей. Верхняя
+    // считается наравне с нижней: «всё до 2020 года» с приписанным «свежее
+    // позавчерашнего» — пустое пересечение по построению, и первый заход уходит
+    // в сеть заведомо ни за чем.
+    if request.from <= 0 && request.to <= 0 && floor > 0 {
         terms.push(format!("ContentDate/Start gt {}", super::time::format(floor)));
     }
     // Меньше трёх точек — не область: такой полигон каталог считает негодным
-    // запросом и отвечает отказом на весь поиск.
-    if let Some(area) = request.area.as_ref().filter(|area| area.points.len() >= 3) {
-        terms.push(format!(
+    // запросом и отвечает отказом на весь поиск. Молчать об этом нельзя:
+    // отброшенное условие означает не «чуть шире», а «вся Земля», и выдача
+    // после него выглядит правдоподобно — прочие условия-то остались.
+    match request.area.as_ref() {
+        Some(area) if area.points.len() >= 3 => terms.push(format!(
             "OData.CSC.Intersects(area=geography'SRID=4326;{}')",
             polygon(area)
-        ));
+        )),
+        Some(area) => log::warn!(target: "handlers",
+            "область из {} вершин — не область, поиск идёт по всей Земле", area.points.len()),
+        None => {}
     }
     // Время — по началу съёмки и без кавычек: литерал даты в OData не строка.
     if request.from > 0 {
@@ -222,12 +240,18 @@ pub fn parse(body: &[u8]) -> anyhow::Result<Vec<(Facts, DataProduct)>> {
         .value
         .into_iter()
         .map(|raw| {
-            let facts = facts(&raw);
+            let mut facts = facts(&raw);
             let mut product = product(raw);
             // Уровень обработки знает только каталог, а список читаемых
             // форматов — только `imagery`: здесь они и встречаются.
             product.viewable =
                 super::imagery::showable(&product.identifier, product.folder, facts.level);
+            // «Снимок это или вспомогательные данные» решает контур, и контур
+            // тут один — тот, что вышел кольцами. Присутствие поля в ответе
+            // каталога тем же самым не является: у геометрии, которую мы не
+            // разбираем, колец не выходит, и снимок оставался в списке, не
+            // очерчиваясь ничем.
+            facts.framed = !product.footprint.is_empty();
             (facts, product)
         })
         .collect())
@@ -253,15 +277,28 @@ fn facts(product: &Product) -> Facts {
     Facts {
         platform: text("platformShortName"),
         instrument: text("instrumentShortName"),
-        datatake: text("datatakeID"),
-        tile: text("tileId"),
+        // Каталог сообщает дататейк не всему архиву; чего он не сказал,
+        // сказано в самом имени (см. `scene::datatake_in_name`).
+        datatake: match text("datatakeID") {
+            said if !said.is_empty() => said,
+            _ => scene::datatake_in_name(&product.name).unwrap_or_default(),
+        },
+        // Плитку каталог тоже называет не всем: у клеток Sentinel-1 RTC
+        // `tileId` пуст, а сама клетка стои́т в начале имени (см.
+        // `scene::tile_in_name`).
+        tile: match text("tileId") {
+            said if !said.is_empty() => said,
+            _ => scene::tile_in_name(&product.name).unwrap_or_default(),
+        },
         slice: text("sliceNumber"),
         orbit: text("orbitNumber"),
         second: product.content_date.as_ref().map_or(0, |date| super::time::parse(&date.start)),
         level: scene::level(&text("processingLevel")),
         kind: text("productType"),
         size: product.size,
-        framed: product.footprint.is_some(),
+        // Ставится в [`parse`]: контур — это разобранные кольца, а не поле в
+        // ответе каталога.
+        framed: false,
     }
 }
 
@@ -314,23 +351,35 @@ fn product(product: Product) -> DataProduct {
 ///
 /// Дырки полигона попадают сюда наравне с внешним контуром: очерчены они так же,
 /// а закрашивать здесь нечего — рисуются кольца линиями.
+///
+/// Ломаные — тоже кольца, и по той же причине: у надирного прибора снятое и
+/// есть линия, а не площадь, и каталог отдаёт её `LineString`. Отброшенная,
+/// она оставляла снимок в списке без единой вершины — очертить его было
+/// нечем, а `framed` при этом говорил, что контур есть (см. [`parse`]).
 fn rings(geometry: Geometry) -> Vec<Ring> {
-    let polygons: Vec<Vec<Vec<[f64; 2]>>> = match geometry.kind.as_str() {
+    // Наружу все формы приходят одним видом — списком ломаных: полигон это
+    // замкнутая ломаная, а разница между «через шов разрезано на два» и «две
+    // ломаные» рисующему не важна.
+    let lines: Vec<Vec<[f64; 2]>> = match geometry.kind.as_str() {
         // Снимок через 180-й меридиан каталог отдаёт разрезанным, и тогда
         // полигонов несколько.
-        "MultiPolygon" => serde_json::from_value(geometry.coordinates).unwrap_or_default(),
-        "Polygon" => serde_json::from_value(geometry.coordinates)
-            .map(|rings| vec![rings])
+        "MultiPolygon" => serde_json::from_value::<Vec<Vec<Vec<[f64; 2]>>>>(geometry.coordinates)
+            .map(|polygons| polygons.into_iter().flatten().collect())
+            .unwrap_or_default(),
+        "Polygon" | "MultiLineString" => {
+            serde_json::from_value(geometry.coordinates).unwrap_or_default()
+        }
+        "LineString" => serde_json::from_value(geometry.coordinates)
+            .map(|line| vec![line])
             .unwrap_or_default(),
         _ => Vec::new(),
     };
 
-    polygons
+    lines
         .into_iter()
-        .flatten()
-        .map(|ring| Ring {
+        .map(|line| Ring {
             // В GeoJSON координаты идут долготой вперёд.
-            points: closed(ring)
+            points: closed(line)
                 .iter()
                 .map(|&[lon, lat]| GeoPoint { lat, lon })
                 .collect(),
@@ -420,7 +469,7 @@ mod tests {
     fn every_request_carries_attributes_and_a_limit() {
         let requests = [
             search(&SearchRequest { limit: 10, ..Default::default() }, 0),
-            siblings("SENTINEL-1", 0),
+            siblings("SENTINEL-1", "", 0),
             locate("S2B_MSIL1C"),
         ];
         for url in &requests {
@@ -432,6 +481,36 @@ mod tests {
         assert!(param(&requests[0], "$orderby").is_some());
         assert!(param(&requests[1], "$orderby").is_none());
         assert!(param(&requests[2], "$orderby").is_none());
+    }
+
+    /// Снятое надирным прибором — линия, а не площадь, и каталог отдаёт её
+    /// ломаной. Отброшенная, она оставляла снимок в списке без единой вершины.
+    #[test]
+    fn a_track_is_an_outline_too() {
+        let line = |kind: &str, coordinates: serde_json::Value| Geometry {
+            kind: kind.to_string(),
+            coordinates,
+        };
+        let track = rings(line(
+            "MultiLineString",
+            serde_json::json!([[[166.3, -81.4], [165.0, -80.0]], [[10.0, 0.0], [11.0, 1.0]]]),
+        ));
+        assert_eq!(track.len(), 2, "{:?}", track);
+        assert_eq!(track[0].points.len(), 2);
+        assert_eq!(track[0].points[0].lat, -81.4);
+        assert_eq!(track[0].points[0].lon, 166.3);
+
+        let one = rings(line("LineString", serde_json::json!([[1.0, 2.0], [3.0, 4.0]])));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].points.len(), 2);
+
+        // Полигон и разрезанный швом полигон остаются тем, чем были.
+        let square = serde_json::json!([[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]]]);
+        assert_eq!(rings(line("Polygon", square.clone()))[0].points.len(), 3);
+        assert_eq!(rings(line("MultiPolygon", serde_json::json!([square]))).len(), 1);
+
+        // Точка контуром не становится: рисовать по ней нечего.
+        assert!(rings(line("Point", serde_json::json!([1.0, 2.0]))).is_empty());
     }
 
     /// Запрос без единого условия — «всё подряд»: пустой фильтр не уходит
@@ -447,13 +526,29 @@ mod tests {
     fn siblings_ask_a_window_of_one_second() {
         let acquired = time::parse("2024-05-04T08:23:58.000Z");
         assert_eq!(
-            param(&siblings("SENTINEL-1", acquired), "$filter").as_deref(),
+            param(&siblings("SENTINEL-1", "", acquired), "$filter").as_deref(),
             Some(
                 "ContentDate/Start ge 2024-05-04T08:23:57.000Z and \
                  ContentDate/Start le 2024-05-04T08:23:59.000Z and \
                  Collection/Name eq 'SENTINEL-1'"
             )
         );
+    }
+
+    /// Плитка сужает то же окно: у Sentinel-2 секунда по обе стороны накрывает
+    /// не упаковки одной плитки, а всю строку съёмки, и нужная терялась бы за
+    /// потолком выдачи.
+    #[test]
+    fn siblings_narrow_down_to_the_tile_when_it_is_known() {
+        let acquired = time::parse("2026-08-18T01:21:12.000Z");
+        let filter = param(&siblings("SENTINEL-2", "55SBD", acquired), "$filter")
+            .expect("фильтр собран");
+        assert!(filter.contains("Collection/Name eq 'SENTINEL-2'"), "{}", filter);
+        assert!(filter.contains("a/Name eq 'tileId'"), "{}", filter);
+        assert!(filter.contains("a/OData.CSC.StringAttribute/Value eq '55SBD'"), "{}", filter);
+        // Плитки нет — нет и терма: у радара её не бывает вовсе.
+        let without = param(&siblings("SENTINEL-1", "", acquired), "$filter").expect("фильтр");
+        assert!(!without.contains("tileId"), "{}", without);
     }
 
     /// Кавычка в имени доезжает до каталога удвоенной, а не обрывает выражение

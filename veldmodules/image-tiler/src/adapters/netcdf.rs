@@ -20,7 +20,7 @@ use hdf5_pure::{AttrValue, DType, File};
 
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::TILE;
-use super::radiometry::{percentile_stretch, Mapping, Pixel, Samples, STRETCH_SAMPLES};
+use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples, STRETCH_SAMPLES};
 use super::{Info, Kind, Tie};
 
 /// Сигнатура HDF5 — с неё начинается всякий NetCDF-4. Классический NetCDF-3
@@ -58,13 +58,29 @@ const TIE_GRID: u32 = 21;
 const MAX_DATASETS: usize = 512;
 const MAX_DEPTH: usize = 8;
 
+/// Сколько всего может быть прочитано пробами, прежде чем сдаться.
+///
+/// Счётом проб это не выражается: у гранулы SLSTR плоскость в 157×126
+/// отсчётов, и пустых подряд перед заполненной бывает десяток («только над
+/// океаном», «только над сушей», по алфавиту), — а у полосы Sentinel-5P одна
+/// плоскость стои́т мегабайтов, и второй такой пробы уже жалко. Потолок тот
+/// же, что у одной величины: сколько мы согласны держать в памяти ради показа,
+/// столько же согласны и прочитать ради выбора.
+const PROBE_BUDGET: u64 = PLANE_BUDGET;
+
 /// Открытый файл вместе с тем, что в нём решено показывать.
 ///
 /// Файл держится целиком: он уже прочитан, а `produce` вызывается сразу за
 /// `describe` — перечитывать его по сети второй раз значит платить дважды за
 /// то же самое.
 pub struct Source {
-    file: File,
+    /// Отсчёты показываемой величины, развёрнутые в f32.
+    ///
+    /// Держатся с описания, а не читаются заново: годность величины видна
+    /// только по ним (см. [`describe`]), значит к концу описания они уже
+    /// прочитаны — а второе чтение стои́т второго разбора всего файла. Сам
+    /// файл после этого не нужен и не держится: из него взято всё.
+    values: Vec<f32>,
     /// Путь показываемой величины внутри файла.
     path: String,
     /// Чем в ней помечено «нет данных» (`_FillValue`).
@@ -86,22 +102,200 @@ pub fn describe<R: Read + Seek>(mut reader: R, len: u64) -> Result<Info, String>
     let file = File::from_bytes(bytes).map_err(|e| format!("NetCDF: {}", e))?;
 
     let surveyed = survey(&file)?;
-    let chosen = choose(&surveyed).ok_or_else(|| explain(&surveyed))?;
-    let Some((height, width)) = chosen.plane else {
+    let order = preferred(&surveyed);
+    if order.is_empty() {
         return Err(explain(&surveyed));
+    }
+
+    // Пустая величина — не ответ, и узнаётся это только чтением. Гранула
+    // Sentinel-3 несёт величины, снятые не над всякой поверхностью («только
+    // над океаном»), и над сушей такая лежит сплошным `_FillValue`:
+    // показанная, она даёт прозрачный кадр без единого слова о том, почему на
+    // шаре ничего нет. Однотонная — ответ последней очереди: показать её можно
+    // (ровное поле встаёт в середину шкалы), но всякая соседка с перепадом
+    // говорит больше. Прочитанное при этом остаётся показу.
+    let mut skipped: Vec<String> = Vec::new();
+    let mut flat: Option<(&Item, Vec<f32>)> = None;
+    let mut probed: u64 = 0;
+    for chosen in &order {
+        let Some((height, width)) = chosen.plane else { continue };
+        probed += u64::from(width) * u64::from(height) * 4;
+        if probed > PROBE_BUDGET {
+            break;
+        }
+        let values = match plane(&file, &chosen.path, width, height) {
+            Ok(values) => values,
+            Err(why) => {
+                skipped.push(why);
+                continue;
+            }
+        };
+        match spread(&values, chosen.fill) {
+            Spread::Varying => {}
+            Spread::Empty => {
+                skipped.push(format!("'{}' пуста", chosen.path));
+                continue;
+            }
+            Spread::Flat => {
+                skipped.push(format!("'{}' однотонна", chosen.path));
+                flat.get_or_insert((chosen, values));
+                continue;
+            }
+        }
+        return told(&file, &surveyed, chosen, values, &order, &skipped);
+    }
+    match flat {
+        Some((chosen, values)) => told(&file, &surveyed, chosen, values, &order, &skipped),
+        None => Err(match skipped.is_empty() {
+            true => explain(&surveyed),
+            false => format!(
+                "NetCDF: все {} годных величин файла пусты в этой грануле: {}",
+                skipped.len(),
+                listed(&skipped)
+            ),
+        }),
+    }
+}
+
+/// Привязка из отдельного файла координат — там, где растр её не несёт.
+///
+/// Так упакован Sentinel-3: измерение лежит в одном `.nc`, а широта с долготой
+/// — в соседнем, и какой это файл, говорит провайдер (раскладку продукта знает
+/// только он). Здесь остаётся прочитать записанное: пара плоскостей `latitude`
+/// и `longitude` одной формы — по единицам, тем же правилом, что и внутри
+/// растра (см. [`northing`]).
+///
+/// Координатная сетка бывает разрежена: у OLCI опорная сетка вчетверо у́же
+/// снимка по столбцам. Шаг выводится из самих размеров — крайние отсчёты
+/// сетки стоят на крайних пикселях растра, — и поотсчётный файл под то же
+/// правило даёт шаг единица. Второго источника этого числа (атрибут
+/// подвыборки) не спрашиваем: он есть не во всякой упаковке, а размеры есть
+/// всегда.
+///
+/// Отказ — это «привязки не вышло», а не «растр плох»: снимок ляжет тем, что
+/// сказал о нём каталог.
+pub fn geolocation(resource_id: u64, len: u64, width: u32, height: u32) -> Result<Vec<Tie>, String> {
+    if width < 2 || height < 2 {
+        return Err(format!("растр {}×{} мельче узла привязки", width, height));
+    }
+    if len > TIES_BUDGET {
+        return Err(format!(
+            "{} МБ на одни координаты — больше потолка привязки в {} МБ",
+            len / (1024 * 1024),
+            TIES_BUDGET / (1024 * 1024)
+        ));
+    }
+    let mut reader = veldsdk::ResourceReader::new(resource_id, len);
+    let mut bytes = Vec::with_capacity(len as usize);
+    reader.read_to_end(&mut bytes).map_err(|e| format!("чтение: {}", e))?;
+    let file = File::from_bytes(bytes).map_err(|e| format!("{}", e))?;
+    let items = survey(&file)?;
+
+    // Плоскость координат в файле не одна: рядом с широтой лежит высота, а у
+    // SLSTR — ещё и координаты соседних сеток. Берётся самая подробная пара
+    // одной формы: узлов у решётки два десятка, и чем гуще сетка, тем ближе
+    // они к тому месту, о котором спрашивают.
+    let pair = |pick: fn(&Item) -> bool, plane: (u32, u32)| -> Option<&Item> {
+        items.iter().find(|item| item.plane == Some(plane) && pick(item))
     };
+    let mut planes: Vec<(u32, u32)> = items
+        .iter()
+        .filter(|item| northing(item))
+        .filter_map(|item| item.plane)
+        .collect();
+    planes.sort_unstable_by_key(|plane| std::cmp::Reverse(u64::from(plane.0) * u64::from(plane.1)));
+    planes.dedup();
 
+    let found = planes
+        .into_iter()
+        .find_map(|plane| Some((plane, pair(northing, plane)?, pair(easting, plane)?)));
+    let Some(((geo_h, geo_w), lat, lon)) = found else {
+        return Err(format!(
+            "в файле нет пары широта—долгота одной формы: {}",
+            listed(&items.iter().map(|item| item.path.clone()).collect::<Vec<String>>())
+        ));
+    };
+    if geo_w < 2 || geo_h < 2 {
+        return Err(format!("координатная сетка {}×{} — не сетка", geo_w, geo_h));
+    }
+
+    let read = |item: &Item| {
+        file.dataset(&item.path)
+            .and_then(|dataset| dataset.read_f32())
+            .map(|values| unpacked(item, values))
+            .map_err(|e| format!("чтение '{}': {}", item.path, e))
+    };
+    let (lat_values, lon_values) = (read(lat)?, read(lon)?);
+
+    // Крайний отсчёт сетки стои́т на крайнем пикселе растра — отсюда и шаг.
+    let step = (
+        f64::from(width - 1) / f64::from(geo_w - 1),
+        f64::from(height - 1) / f64::from(geo_h - 1),
+    );
+    let at = |row: u32, column: u32| -> Option<(f64, f64)> {
+        let index = (row as usize) * (geo_w as usize) + (column as usize);
+        Some((f64::from(*lat_values.get(index)?), f64::from(*lon_values.get(index)?)))
+    };
+    let ties = lattice(&nodes(geo_h), &nodes(geo_w), step, at);
+    if ties.is_empty() {
+        return Err(format!("узлы сетки {}×{} не годятся в привязку", geo_w, geo_h));
+    }
     veldsdk::log::debug!(target: "decode",
-        "NetCDF: показывается '{}' ({}) — {}×{}, {} из {} величин годятся",
-        chosen.path, chosen.said, width, height,
-        surveyed.iter().filter(|item| item.candidate).count(), surveyed.len());
+        "NetCDF привязка из соседнего файла: сетка {}×{} ('{}' и '{}'), шаг {:.2}×{:.2} пикселя, узлов {}",
+        geo_w, geo_h, lat.path, lon.path, step.0, step.1, ties.len());
+    Ok(ties)
+}
 
-    let ties = ties(&file, &surveyed, chosen);
+/// Есть ли на что смотреть в отсчётах величины.
+#[derive(PartialEq, Debug)]
+enum Spread {
+    /// Ни одного годного отсчёта: над этим местом величина не измерялась.
+    Empty,
+    /// Годные есть, но все до одного равны: показать можно, узнать нечего.
+    Flat,
+    /// Есть перепад — это изображение.
+    Varying,
+}
+
+fn spread(values: &[f32], fill: Option<f32>) -> Spread {
+    let mut first = None;
+    for value in values.iter().copied().filter(|value| radiometry::is_data(*value, fill)) {
+        match first {
+            None => first = Some(value),
+            Some(seen) if seen != value => return Spread::Varying,
+            Some(_) => {}
+        }
+    }
+    match first.is_some() {
+        true => Spread::Flat,
+        false => Spread::Empty,
+    }
+}
+
+/// Собрать описание выбранной величины и сказать в журнале, чем выбор кончился.
+fn told(
+    file: &File,
+    surveyed: &[Item],
+    chosen: &Item,
+    values: Vec<f32>,
+    order: &[&Item],
+    skipped: &[String],
+) -> Result<Info, String> {
+    let (height, width) = chosen.plane.ok_or_else(|| explain(surveyed))?;
+    veldsdk::log::debug!(target: "decode",
+        "NetCDF: показывается '{}' ({}, единицы '{}') — {}×{}, {} из {} величин годятся{}",
+        chosen.path, chosen.said, chosen.units, width, height, order.len(), surveyed.len(),
+        match skipped.is_empty() {
+            true => String::new(),
+            false => format!("; пропущено: {} ({})", skipped.len(), listed(skipped)),
+        });
+
+    let ties = ties(file, surveyed, chosen);
     Ok(Info {
         width,
         height,
         kind: Kind::Netcdf(Box::new(Source {
-            file,
+            values,
             path: chosen.path.clone(),
             fill: chosen.fill,
             said: chosen.said.clone(),
@@ -111,8 +305,18 @@ pub fn describe<R: Read + Seek>(mut reader: R, len: u64) -> Result<Info, String>
     })
 }
 
+/// Перечисление для одной строки журнала: первые три и «и ещё N».
+/// Полный список бывает в полсотни имён, а в подписи слоя ему места нет.
+fn listed(names: &[String]) -> String {
+    let head = names.iter().take(3).cloned().collect::<Vec<String>>().join(", ");
+    match names.len() > 3 {
+        true => format!("{} и ещё {}", head, names.len() - 3),
+        false => head,
+    }
+}
+
 pub fn produce(info: &Info, source: &Source, emit: Emit) -> Result<(), String> {
-    let values = plane(source, info.width, info.height)?;
+    let values = &source.values;
     let expected = (info.width as usize) * (info.height as usize);
     if values.len() != expected {
         return Err(format!(
@@ -120,7 +324,7 @@ pub fn produce(info: &Info, source: &Source, emit: Emit) -> Result<(), String> {
             source.path, values.len(), info.width, info.height
         ));
     }
-    let mapping = mapping(&values, source.fill);
+    let mapping = mapping(&source.path, values, source.fill, info.width as usize);
 
     veldsdk::log::debug!(target: "decode",
         "NetCDF проход: '{}' ({}), {}×{}", source.path, source.said, info.width, info.height);
@@ -149,9 +353,22 @@ pub fn produce(info: &Info, source: &Source, emit: Emit) -> Result<(), String> {
 /// возрастающее, а растяг считается по перцентилям тех же значений: в яркость
 /// оно не вносит ничего, зато «нет данных» сравнивается с сырым значением, как
 /// оно и записано.
-fn plane(source: &Source, width: u32, height: u32) -> Result<Vec<f32>, String> {
-    let dataset =
-        source.file.dataset(&source.path).map_err(|e| format!("NetCDF: {}: {}", source.path, e))?;
+/// Разупакованные координаты: `значение · scale_factor + add_offset`.
+///
+/// Показываемой величине эти коэффициенты не нужны (см. [`plane`]), а
+/// координатам нужны обязательно: широта у Sentinel-3 записана целыми с шагом
+/// в миллионную долю градуса, и без разупаковки это не градусы, а десятки
+/// миллионов — то есть не привязка, а её отсутствие.
+fn unpacked(item: &Item, values: Vec<f32>) -> Vec<f32> {
+    let (scale, offset) = item.packing;
+    if scale == 1.0 && offset == 0.0 {
+        return values;
+    }
+    values.into_iter().map(|value| (f64::from(value) * scale + offset) as f32).collect()
+}
+
+fn plane(file: &File, path: &str, width: u32, height: u32) -> Result<Vec<f32>, String> {
+    let dataset = file.dataset(path).map_err(|e| format!("NetCDF: {}: {}", path, e))?;
     let pixels = u64::from(width) * u64::from(height);
     let element = width_of(&dataset.dtype().map_err(|e| format!("NetCDF: {}", e))?).unwrap_or(8);
     let needed = pixels.saturating_mul(u64::from(element) + 4);
@@ -164,21 +381,62 @@ fn plane(source: &Source, width: u32, height: u32) -> Result<Vec<f32>, String> {
             PLANE_BUDGET / (1024 * 1024)
         ));
     }
-    dataset.read_f32().map_err(|e| format!("NetCDF: {}: {}", source.path, e))
+    dataset.read_f32().map_err(|e| format!("NetCDF: {}: {}", path, e))
+}
+
+/// Шаг выборки растяга по развёрнутой в строку плоскости.
+///
+/// Взаимно простой с шириной: отсчёты лежат построчно, и шаг, у которого с
+/// шириной есть общий делитель, каждую строку попадает в одни и те же столбцы.
+/// Полоса съёмки этим и опасна — у неё край полосы не измерен вовсе, и выборка
+/// из одних краевых столбцов дала бы растяг по «нет данных», то есть кадр,
+/// растянутый мимо своих значений. Шаг увеличивается, а не уменьшается:
+/// выборка от этого только реже потолка, а реже — это дешевле.
+fn sampling_step(len: usize, width: usize) -> usize {
+    let mut stride = (len / STRETCH_SAMPLES).max(1);
+    // Ширина ноль или один — разводить не с чем: столбец всего один.
+    if width < 2 {
+        return stride;
+    }
+    let gcd = |mut a: usize, mut b: usize| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    // Шаг не длиннее самой плоскости: иначе выборка окажется пустой.
+    while gcd(stride, width) != 1 && stride < len {
+        stride += 1;
+    }
+    stride
 }
 
 /// Растяг показа по выборке значений: те же перцентили, что у широких
 /// TIFF-сэмплов. «Нет данных» в выборку не идёт — иначе метка −9999 утянула бы
 /// нижний край и весь снимок вышел бы белым.
-fn mapping(values: &[f32], fill: Option<f32>) -> Mapping {
-    let stride = (values.len() / STRETCH_SAMPLES).max(1);
+///
+/// `width` — ширина растра; по ней шаг выборки разводится со строкой (см.
+/// [`sampling_step`]).
+fn mapping(path: &str, values: &[f32], fill: Option<f32>, width: usize) -> Mapping {
+    let stride = sampling_step(values.len(), width);
+    let taken = values.iter().step_by(stride).count();
     let mut sample: Vec<f32> = values
         .iter()
         .step_by(stride)
         .copied()
-        .filter(|value| value.is_finite() && Some(*value) != fill)
+        .filter(|value| radiometry::is_data(*value, fill))
         .collect();
-    match percentile_stretch(&mut sample) {
+    let stretch = percentile_stretch(&mut sample);
+
+    // Числа, по которым кадр вышел таким, а не другим. Без них «белый
+    // прямоугольник» на шаре объясняется только догадками: не видно ни того,
+    // сколько отсчётов оказалось «нет данных», ни того, во что растянулись
+    // остальные.
+    veldsdk::log::debug!(target: "decode",
+        "NetCDF растяг: '{}' — годных {} из {} в выборке, «нет данных» {:?}, растяг {:?}",
+        path, sample.len(), taken, fill, stretch);
+
+    match stretch {
         Some((lo, hi)) => Mapping::stretched(lo, hi, fill),
         // Ни одного годного значения — растягивать нечего, и весь кадр всё
         // равно уйдёт в прозрачность.
@@ -204,9 +462,18 @@ struct Item {
     line: Option<u32>,
     /// Величина с плавающей точкой.
     real: bool,
+    /// Измеряется в угловых градусах — см. [`angular`].
+    angular: bool,
     /// Годится в показываемые — см. [`choose`].
     candidate: bool,
     fill: Option<f32>,
+    /// Упаковка величины: `scale_factor` и `add_offset`, как их записал файл.
+    /// Единица и ноль — величина записана как есть.
+    ///
+    /// Показу они не нужны (см. [`plane`]), а координатам нужны обязательно:
+    /// широта пакуется целыми с шагом в миллионную долю градуса, и без
+    /// разупаковки это не градусы, а десятки миллионов.
+    packing: (f64, f64),
     /// `long_name` или `standard_name`, если файл их назвал.
     said: String,
     /// Что записано в `units`, приведённое к нижнему регистру.
@@ -236,11 +503,13 @@ fn survey(file: &File) -> Result<Vec<Item>, String> {
     }
     let named: HashSet<String> = named.into_iter().map(str::to_string).collect();
     for item in &mut items {
-        // Широта и долгота — это «где», а не «что», даже когда на них никто не
-        // сослался: полоса съёмки Sentinel-5P держит их плоскостями рядом с
-        // измерениями, и без этого правила показывалась бы лестница градусов.
-        let place = northing(item) || easting(item);
-        item.candidate = item.plane.is_some() && !place && !named.contains(&item.path);
+        // «Где» и «когда» — не «что», даже когда на них никто не сослался:
+        // полоса съёмки Sentinel-5P держит широту с долготой плоскостями рядом
+        // с измерениями, а гранула Sentinel-3 — ещё и время съёмки поотсчётно.
+        // Без этого правила показывалась бы лестница градусов или лестница
+        // микросекунд, и обе — поперёк полосы.
+        let bearings = northing(item) || easting(item) || timing(item);
+        item.candidate = item.plane.is_some() && !bearings && !named.contains(&item.path);
     }
     Ok(items)
 }
@@ -311,8 +580,13 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
         plane: plane.filter(|_| !coded),
         line,
         real,
+        angular: angular(&text(&attrs, "units").to_ascii_lowercase()),
         candidate: false,
         fill: attrs.get("_FillValue").and_then(number),
+        packing: (
+            attrs.get("scale_factor").and_then(number).map_or(1.0, f64::from),
+            attrs.get("add_offset").and_then(number).map_or(0.0, f64::from),
+        ),
         said,
         units: text(&attrs, "units").to_ascii_lowercase(),
         coordinates,
@@ -329,16 +603,20 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
 /// дробное. Дальше по алфавиту, и это не выбор, а определённость: файл больше
 /// ничего о старшинстве не говорит, а показывать всякий раз другое — хуже, чем
 /// показывать всегда одно.
-fn choose(items: &[Item]) -> Option<&Item> {
-    items
-        .iter()
-        .filter(|item| item.candidate)
-        .min_by(|left, right| {
-            left.depth
-                .cmp(&right.depth)
-                .then(right.real.cmp(&left.real))
-                .then(left.path.cmp(&right.path))
-        })
+///
+/// Список, а не один ответ: годность величины видна только по её отсчётам, а
+/// они читаются (см. [`describe`]). Пустая в этой грануле величина — не
+/// измерение этой гранулы, и следующий по порядку кандидат честнее её.
+fn preferred(items: &[Item]) -> Vec<&Item> {
+    let mut order: Vec<&Item> = items.iter().filter(|item| item.candidate).collect();
+    order.sort_by(|left, right| {
+        left.depth
+            .cmp(&right.depth)
+            .then(right.real.cmp(&left.real))
+            .then(left.angular.cmp(&right.angular))
+            .then(left.path.cmp(&right.path))
+    });
+    order
 }
 
 /// Почему показывать нечего — теми же словами, какими решали.
@@ -383,13 +661,13 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> Vec<Tie> {
             let index = (row as usize) * (width as usize) + (column as usize);
             Some((f64::from(*lat.get(index)?), f64::from(*lon.get(index)?)))
         };
-        return lattice(&rows, &columns, at);
+        return lattice(&rows, &columns, (1.0, 1.0), at);
     }
     if let Some((lat, lon)) = grid(items, chosen, file) {
         let at = |row: u32, column: u32| -> Option<(f64, f64)> {
             Some((*lat.get(row as usize)?, *lon.get(column as usize)?))
         };
-        return lattice(&rows, &columns, at);
+        return lattice(&rows, &columns, (1.0, 1.0), at);
     }
     Vec::new()
 }
@@ -411,21 +689,33 @@ fn nodes(side: u32) -> Vec<u32> {
 ///
 /// Узел стои́т в середине отсчёта (+0.5): широта записана для центра пикселя, а
 /// не для его угла.
+///
+/// `step` — сколько пикселей растра приходится на отсчёт координатной сетки по
+/// столбцам и по строкам. Единица — координаты записаны поотсчётно, отсчёт и
+/// есть пиксель; больше — координаты лежат на опорной сетке, разреженной в
+/// столько раз (см. [`geolocation`]).
 fn lattice(
     rows: &[u32],
     columns: &[u32],
+    step: (f64, f64),
     at: impl Fn(u32, u32) -> Option<(f64, f64)>,
 ) -> Vec<Tie> {
     let mut ties = Vec::with_capacity(rows.len() * columns.len());
     for &row in rows {
         for &column in columns {
             let Some((lat, lon)) = at(row, column) else { return Vec::new() };
-            if !lat.is_finite() || !lon.is_finite() || !(-90.0..=90.0).contains(&lat) {
+            // Долгота проверяется так же, как широта: незаполненный отсчёт
+            // помечен не только `NaN`, но и числом (9.96921e36 у CF), и
+            // проверенная лишь по широте дыра прошла бы долготой. Круг здесь
+            // полный с запасом: файлы пишут долготу и как −180…180, и как
+            // 0…360, а развернёт её потребитель (см. `Grid::unwind`).
+            let placed = (-90.0..=90.0).contains(&lat) && (-360.0..=360.0).contains(&lon);
+            if !lat.is_finite() || !lon.is_finite() || !placed {
                 return Vec::new();
             }
             ties.push(Tie {
-                px: f64::from(column) + 0.5,
-                py: f64::from(row) + 0.5,
+                px: f64::from(column) * step.0 + 0.5,
+                py: f64::from(row) * step.1 + 0.5,
                 lat,
                 lon,
             });
@@ -444,8 +734,32 @@ fn swath(file: &File, items: &[Item], chosen: &Item) -> Option<(Vec<f32>, Vec<f3
         .filter_map(|path| items.iter().find(|item| &item.path == path))
         .filter(|item| item.plane == chosen.plane)
         .collect();
-    let lat = named.iter().copied().find(|item| northing(item))?;
-    let lon = named.iter().copied().find(|item| easting(item))?;
+    // Названное `coordinates` — первый ответ: файл сам сказал, где лежат его
+    // отсчёты, и спорить тут не с чем. Не сказал — спрашиваем единицы:
+    // плоскость в `degrees_north` той же формы и той же группы и есть широта
+    // этого измерения. Так лежит `.nc` внутри `.SAFE`: упаковка там своя, и
+    // CF-атрибута `coordinates` у измерений нет вовсе, а широта с долготой
+    // лежат рядом и названы единицами.
+    //
+    // Единственность обязательна: две широты одной формы — это уже вопрос
+    // «которая», а ответа на него у файла нет. Гранула SLSTR держит их
+    // несколько (`latitude_in`, `latitude_tx`), но разной формы, и под это
+    // условие они не подпадают.
+    let alone = |pick: fn(&Item) -> bool| -> Option<&Item> {
+        let mut found = items
+            .iter()
+            .filter(|item| item.plane == chosen.plane && item.group == chosen.group && pick(item));
+        let one = found.next()?;
+        found.next().is_none().then_some(one)
+    };
+    let lat = match named.iter().copied().find(|item| northing(item)) {
+        Some(lat) => lat,
+        None => alone(northing)?,
+    };
+    let lon = match named.iter().copied().find(|item| easting(item)) {
+        Some(lon) => lon,
+        None => alone(easting)?,
+    };
     // Бюджет проверяется здесь, а не в начале: у регулярной сетки поотсчётных
     // координат нет вовсе, и жаловаться на их размер было бы не про неё.
     let pixels = u64::from(plane.0) * u64::from(plane.1);
@@ -454,7 +768,8 @@ fn swath(file: &File, items: &[Item], chosen: &Item) -> Option<(Vec<f32>, Vec<f3
             "NetCDF: решётки координат {}×{} не влезают в бюджет привязки", plane.1, plane.0);
         return None;
     }
-    let read = |item: &Item| file.dataset(&item.path).ok()?.read_f32().ok();
+    let read =
+        |item: &Item| Some(unpacked(item, file.dataset(&item.path).ok()?.read_f32().ok()?));
     Some((read(lat)?, read(lon)?))
 }
 
@@ -467,12 +782,53 @@ fn grid(items: &[Item], chosen: &Item, file: &File) -> Option<(Vec<f64>, Vec<f64
         items.iter().find(|item| nearby(item) && item.line == Some(height) && northing(item))?;
     let lon =
         items.iter().find(|item| nearby(item) && item.line == Some(width) && easting(item))?;
-    let read = |item: &Item| file.dataset(&item.path).ok()?.read_f64().ok();
+    let read = |item: &Item| {
+        let values = file.dataset(&item.path).ok()?.read_f64().ok()?;
+        let (scale, offset) = item.packing;
+        Some(values.into_iter().map(|value| value * scale + offset).collect::<Vec<f64>>())
+    };
     Some((read(lat)?, read(lon)?))
 }
 
 /// Широта ли это. По единицам измерения — так CF велит их и записывать; имя
 /// величины при этом бывает любым (`lat`, `latitude`, `LATITUDE`).
+/// Время съёмки — «когда», а не «что», и правило то же, что у широты с
+/// долготой: плоскость времени лежит рядом с измерениями, а растягивается в
+/// ровную лесенку поперёк полосы.
+///
+/// Узнаётся по первому слову единиц. CF пишет время как «<единица> since
+/// <момент>», упаковки Sentinel-3 обходятся одной единицей («microseconds»,
+/// а «с какого мига» написано словами в `long_name`), — ловится и то, и
+/// другое. По первому слову, а не по вхождению: «m s-1» — это скорость.
+fn timing(item: &Item) -> bool {
+    matches!(
+        item.units.split_whitespace().next().unwrap_or_default(),
+        "s" | "sec" | "secs" | "second" | "seconds"
+            | "ms" | "millisecond" | "milliseconds"
+            | "us" | "microsecond" | "microseconds"
+            | "ns" | "nanosecond" | "nanoseconds"
+            | "min" | "minute" | "minutes"
+            | "h" | "hr" | "hour" | "hours"
+            | "d" | "day" | "days"
+            | "year" | "years"
+    )
+}
+
+/// Угловая величина: направление ветра, зенит солнца, азимут наблюдения.
+///
+/// Яркостью такое не показывается, и дело не в красоте. Угол замкнут: 359° и
+/// 1° — соседи, а растяг перцентилей разводит их по краям шкалы, и ровное поле
+/// направления выходит белым с чёрным клином на месте оборота. Угол наблюдения
+/// — и вовсе не измерение, а геометрия съёмки: ровная лесенка поперёк полосы.
+///
+/// Поэтому такая величина идёт последней среди годных (см. [`preferred`]), но
+/// не выбрасывается: если ничего другого в файле нет, показать её честнее, чем
+/// промолчать. Широта с долготой сюда не попадают — их отбирают раньше и по
+/// своим единицам (`degrees_north`, `degrees_east`).
+fn angular(units: &str) -> bool {
+    matches!(units.trim(), "degrees" | "degree" | "deg" | "degrees_t" | "radians" | "rad")
+}
+
 fn northing(item: &Item) -> bool {
     item.units.starts_with("degrees_north") || item.units.starts_with("degree_north")
 }
@@ -558,22 +914,58 @@ mod tests {
     fn a_single_broken_node_drops_the_whole_lattice() {
         let rows = [0u32, 1];
         let columns = [0u32, 1];
-        let whole = lattice(&rows, &columns, |row, column| {
+        let whole = lattice(&rows, &columns, (1.0, 1.0), |row, column| {
             Some((f64::from(row), f64::from(column)))
         });
         assert_eq!(whole.len(), 4);
         assert_eq!(whole[0].px, 0.5, "узел стои́т в середине отсчёта");
 
-        let holed = lattice(&rows, &columns, |row, column| match (row, column) {
+        let holed = lattice(&rows, &columns, (1.0, 1.0), |row, column| match (row, column) {
             (1, 1) => Some((f64::NAN, 0.0)),
             _ => Some((f64::from(row), f64::from(column))),
         });
         assert!(holed.is_empty());
 
         // Широта за пределами шара — тоже дыра, только записанная числом:
-        // так лежит незаполненный край полосы съёмки.
-        let filled = lattice(&rows, &columns, |_, _| Some((9.969_21e36, 0.0)));
+        // так лежит незаполненный край полосы съёмки. И долгота тоже: у
+        // решётки, проверенной лишь по широте, такая дыра проходила бы.
+        let filled = lattice(&rows, &columns, (1.0, 1.0), |_, _| Some((9.969_21e36, 0.0)));
         assert!(filled.is_empty());
+        let eastless = lattice(&rows, &columns, (1.0, 1.0), |_, _| Some((0.0, 9.969_21e36)));
+        assert!(eastless.is_empty());
+
+        // Опорная сетка разрежена: отсчёт координат стои́т не на каждом пикселе,
+        // и узел уезжает туда, куда указывает шаг.
+        let sparse = lattice(&rows, &columns, (64.0, 1.0), |row, column| {
+            Some((f64::from(row), f64::from(column)))
+        });
+        assert_eq!(sparse[1].px, 64.5, "второй столбец опорной сетки — 64-й пиксель");
+        assert_eq!(sparse[1].py, 0.5);
+    }
+
+    /// Шаг выборки разводится со строкой: общий делитель у шага и ширины
+    /// оставил бы выборку в одних и тех же столбцах каждой строки, а у полосы
+    /// съёмки крайние столбцы не измерены вовсе.
+    #[test]
+    fn the_sampling_step_never_walks_one_column() {
+        // 450×372 — гранула Sentinel-5P: шаг 16 делил бы ширину нацело.
+        let step = sampling_step(450 * 372, 450);
+        assert_eq!(step % 2, 1, "чётный шаг делит чётную ширину: {}", step);
+        assert!((450 * 372 / step) >= 1000, "выборка не должна оскудеть: {}", step);
+        for width in 2..64usize {
+            let step = sampling_step(width * 1000, width);
+            assert_eq!(
+                gcd_for_test(step, width), 1,
+                "шаг {} и ширина {} не взаимно просты", step, width
+            );
+        }
+    }
+
+    fn gcd_for_test(mut a: usize, mut b: usize) -> usize {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
     }
 
     /// Растяг считается по годным значениям: метка «нет данных» утянула бы
@@ -582,12 +974,27 @@ mod tests {
     fn stretch_ignores_the_fill_value() {
         let mut values = vec![-9999.0f32; 100];
         values.extend((0..=100i16).map(|value| f32::from(value) + 300.0));
-        let mapping = mapping(&values, Some(-9999.0));
+        let mapping = mapping("/проба", &values, Some(-9999.0), 1);
         // Поле «нет данных» — прозрачное, а живое значение попадает в середину
         // растяга, а не в белое.
         let out = mapping.rgba(&Samples::F32(&[-9999.0, 350.0]), Pixel::named(1), 2);
         assert_eq!(&out[..4], &[0, 0, 0, 0]);
         assert!((100..=160).contains(&out[4]), "середина растяга: {}", out[4]);
+    }
+
+    /// Пустая величина — не изображение гранулы, однотонная — изображение
+    /// последней очереди. Ловится это только по самим отсчётам: заголовок у
+    /// пустой и у заполненной один и тот же.
+    #[test]
+    fn an_unfilled_variable_is_not_a_picture() {
+        let fill = Some(65535.0);
+        assert_eq!(spread(&[65535.0; 8], fill), Spread::Empty);
+        assert_eq!(spread(&[], fill), Spread::Empty);
+        assert_eq!(spread(&[f32::NAN, f32::INFINITY], None), Spread::Empty);
+        assert_eq!(spread(&[0.0, 65535.0, 0.0], fill), Spread::Flat);
+        assert_eq!(spread(&[0.0, 1.0, 65535.0], fill), Spread::Varying);
+        // Без метки «нет данных» пустоту делают только нечисла.
+        assert_eq!(spread(&[7.0, 7.0], None), Spread::Flat);
     }
 
     /// Имена координат разрешаются в пути: относительное — от группы величины,
@@ -625,8 +1032,10 @@ mod tests {
             plane: Some((10, 10)),
             line: None,
             real,
+            angular: false,
             candidate: true,
             fill: None,
+            packing: (1.0, 0.0),
             said: String::new(),
             units: String::new(),
             coordinates: Vec::new(),
@@ -640,14 +1049,47 @@ mod tests {
         ];
         // Глубина важнее дробности, дробность — важнее алфавита, алфавит —
         // последний, и он же делает выбор одним и тем же от запуска к запуску.
-        assert_eq!(choose(&items).unwrap().path, "/PRODUCT/aerosol_index_335_367");
+        let order = preferred(&items);
+        // Угловая величина идёт после всех прочих той же глубины и дробности:
+        // замкнутый угол в яркость не растягивается (см. `angular`).
+        let angles = vec![
+            Item { angular: true, ..item("/PRODUCT/aerosol_index_000", 1, true) },
+            item("/PRODUCT/zzz_last_by_alphabet", 1, true),
+        ];
+        assert_eq!(
+            preferred(&angles).iter().map(|item| item.path.as_str()).collect::<Vec<&str>>(),
+            ["/PRODUCT/zzz_last_by_alphabet", "/PRODUCT/aerosol_index_000"],
+        );
+        assert!(angular("degrees") && angular(" deg ") && angular("radians"));
+        assert!(!angular("m s-1") && !angular("degrees_north") && !angular("k"));
+
+        // Время — «когда», а не «что»: по первому слову единиц, иначе «m s-1»
+        // прочиталось бы секундами.
+        let with_units = |units: &str| Item {
+            units: units.to_string(),
+            ..item("/x", 1, true)
+        };
+        assert!(timing(&with_units("microseconds")));
+        assert!(timing(&with_units("seconds since 2000-01-01 00:00:00")));
+        assert!(!timing(&with_units("m s-1")));
+        assert!(!timing(&with_units("kelvin")));
+        assert!(!timing(&with_units("")));
+        assert_eq!(
+            order.iter().map(|item| item.path.as_str()).collect::<Vec<&str>>(),
+            [
+                "/PRODUCT/aerosol_index_335_367",
+                "/PRODUCT/aerosol_index_354_388",
+                "/PRODUCT/qa_value",
+                "/PRODUCT/SUPPORT_DATA/cloud_fraction",
+            ],
+        );
 
         // Не осталось годных — сказано, чего именно не нашлось.
         let none: Vec<Item> = items
             .into_iter()
             .map(|item| Item { candidate: false, ..item })
             .collect();
-        assert!(choose(&none).is_none());
+        assert!(preferred(&none).is_empty());
         assert!(explain(&none).contains("координаты"), "{}", explain(&none));
     }
 }

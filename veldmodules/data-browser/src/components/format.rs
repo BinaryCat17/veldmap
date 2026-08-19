@@ -97,8 +97,11 @@ pub fn parse_date(text: &str) -> Option<i64> {
     Some(veldsdk::time::days_from_civil(year, month, day) * DAY)
 }
 
-/// Обрезает середину: у имён снимков различаются и начало (миссия, дата), и
-/// хвост (полоса, расширение), а совпадает как раз то, что посередине.
+/// Обрезает середину: имя, у которого не видно ни начала, ни хвоста, не
+/// опознать вовсе, а середина — обычно то, что у соседей и так совпадает.
+///
+/// Обрезает вслепую: что именно совпадает у соседей, знает список, а не
+/// строка (см. [`shared`]).
 pub fn ellipsize(text: &str, limit: usize) -> String {
     let length = text.chars().count();
     if length <= limit || limit < 4 {
@@ -111,6 +114,99 @@ pub fn ellipsize(text: &str, limit: usize) -> String {
         "{}…{}",
         chars[..head].iter().collect::<String>(),
         chars[length - tail..].iter().collect::<String>(),
+    )
+}
+
+/// Что у всех имён страницы одинаково: сколько знаков совпало в начале и
+/// сколько в хвосте.
+///
+/// Совпавшее ничего не различает, а место занимает — и занимает его как раз
+/// там, где смотрят. У имён Copernicus совпадают именно края: миссия с типом
+/// продукта в начале, базовая линия обработки с расширением в конце, а
+/// различает середина — время съёмки, виток, плитка. Обрезанная посередине,
+/// страница каталога превращается в два десятка строк «S3A_SL_2_A…R_003.SEN3»,
+/// в которых не выбрать ни одной.
+///
+/// Считается по показанному, а не по всему списку: сличают глазами страницу.
+/// Ответ один на неё всю — иначе соседние строки резались бы в разных местах и
+/// сравнивать пришлось бы разное.
+///
+/// Пусто, когда резать незачем (самое длинное имя и так влезает) или нечего
+/// (имена разные с первого знака). Совпавшее не съедает имя целиком: у
+/// одинаковых строк резать нечего, и режется тогда ничего.
+pub fn shared(names: &[&str], limit: usize) -> (usize, usize) {
+    let Some(longest) = names.iter().map(|name| name.chars().count()).max() else {
+        return (0, 0);
+    };
+    if names.len() < 2 || longest <= limit {
+        return (0, 0);
+    }
+    let shortest = names.iter().map(|name| name.chars().count()).min().unwrap_or(0);
+    let chars: Vec<Vec<char>> = names.iter().map(|name| name.chars().collect()).collect();
+    let same = |at: &dyn Fn(&Vec<char>) -> Option<char>| -> bool {
+        let first = at(&chars[0]);
+        first.is_some() && chars.iter().all(|name| at(name) == first)
+    };
+
+    let mut head = 0;
+    while head < shortest && same(&|name: &Vec<char>| name.get(head).copied()) {
+        head += 1;
+    }
+    let mut tail = 0;
+    // Хвост не залезает в голову: у имён, совпавших целиком, они сошлись бы
+    // посередине и вычли бы одно и то же дважды.
+    while head + tail < shortest && same(&|name: &Vec<char>| name.get(name.len() - 1 - tail).copied())
+    {
+        tail += 1;
+    }
+    // От самого короткого имени обязан остаться хоть знак: строка из одних
+    // многоточий не имя.
+    while head + tail >= shortest && tail > 0 {
+        tail -= 1;
+    }
+    if head + tail >= shortest {
+        return (0, 0);
+    }
+    // Срезанное помечается многоточием, и знак под него берётся из того же
+    // места. Значит, край короче двух знаков срезать незачем: он не освободит
+    // ничего, а имя станет читаться на знак хуже. Так и выходит на странице
+    // разных миссий, где совпадает одна буква «S».
+    (if head > 1 { head } else { 0 }, if tail > 1 { tail } else { 0 })
+}
+
+/// Имя строки списка: в отведённое число знаков, и режется в нём первым то,
+/// что у соседей одинаково (см. [`shared`]).
+///
+/// Общее срезается не всё, а сколько нужно: место, освободившееся сверх
+/// различающегося, возвращается началу имени — по нему его и узнают. У
+/// страницы плиток Sentinel-2 различаются три знака кода плитки, и обрезанная
+/// до них строка различима, но неопознаваема; с возвратом начала выходит
+/// «S2A_MSIL2A_20260…RWV…» — и то, и другое сразу.
+///
+/// Срезанное с краёв помечено многоточием так же, как срезанное в середине:
+/// иначе укороченное имя не отличить от полного.
+pub fn distinct(text: &str, limit: usize, shared: (usize, usize)) -> String {
+    let (head, tail) = shared;
+    let chars: Vec<char> = text.chars().collect();
+    if (head == 0 && tail == 0) || head + tail >= chars.len() || limit < 4 {
+        return ellipsize(text, limit);
+    }
+    let body: Vec<char> = chars[head..chars.len() - tail].to_vec();
+    let trail = usize::from(tail > 0);
+
+    // Начало оставляем настолько, насколько различающееся оставляет место; на
+    // ведущее многоточие при этом тоже нужен знак.
+    let room = limit.saturating_sub(trail);
+    let keep = room.saturating_sub(body.len() + 1).min(head);
+    let lead = usize::from(keep < head);
+    let body: String = body.into_iter().collect();
+
+    format!(
+        "{}{}{}{}",
+        chars[..keep].iter().collect::<String>(),
+        if lead > 0 { "…" } else { "" },
+        ellipsize(&body, limit.saturating_sub(keep + lead + trail)),
+        if trail > 0 { "…" } else { "" },
     )
 }
 
@@ -226,5 +322,94 @@ mod tests {
         assert_eq!(counted(&parts), "3 снимка, 2 файла");
         assert_eq!(counted(&[(0usize, ["слой", "слоя", "слоёв"])]), "");
         assert_eq!(counted(&[]), "");
+    }
+
+    /// Страница каталога: имена расходятся только серединой, и режется у них
+    /// как раз то, что совпало. Иначе все двадцать строк выглядят одинаково.
+    #[test]
+    fn страница_режется_по_тому_чем_строки_отличаются() {
+        let names = [
+            "S3A_SL_2_AOD____20260818T201914_20260818T202213_0180_143_057______MAR_O_NR_003.SEN3",
+            "S3A_SL_2_AOD____20260818T201614_20260818T201912_0179_143_057______MAR_O_NR_003.SEN3",
+            "S3A_SL_2_AOD____20260818T201314_20260818T201612_0179_143_057______MAR_O_NR_003.SEN3",
+        ];
+        let shared = shared(&names, 21);
+        assert!(shared.0 > 0 && shared.1 > 0, "края не совпали: {:?}", shared);
+        let shown: Vec<String> = names.iter().map(|name| distinct(name, 21, shared)).collect();
+        assert_eq!(shown.len(), 3);
+        assert_ne!(shown[0], shown[1], "строки неразличимы: {}", shown[0]);
+        assert_ne!(shown[1], shown[2], "строки неразличимы: {}", shown[1]);
+        for one in &shown {
+            assert!(one.chars().count() <= 21, "{} знаков: {}", one.chars().count(), one);
+            assert!(one.starts_with('…') && one.ends_with('…'), "срез не помечен: {}", one);
+        }
+
+        // Прежнее правило на этих же именах даёт три одинаковые строки — ради
+        // этого сравнение здесь и стоит.
+        let blind: Vec<String> = names.iter().map(|name| ellipsize(name, 21)).collect();
+        assert_eq!(blind[0], blind[1]);
+    }
+
+    /// Резать незачем, пока имя влезает целиком: обрезанное без нужды теряет
+    /// то, по чему строку узнают в другом списке.
+    #[test]
+    fn помещающееся_имя_не_режется() {
+        let names = ["одна_и_та_же_шапка_A", "одна_и_та_же_шапка_B"];
+        assert_eq!(shared(&names, 40), (0, 0));
+        assert_eq!(distinct(names[0], 40, (0, 0)), names[0]);
+    }
+
+    /// Имена, совпавшие целиком (или одно на всю страницу), резать нечем — и
+    /// правило отступает к слепому многоточию, а не к строке из одних точек.
+    #[test]
+    fn совпавшему_целиком_резать_нечего() {
+        let same = ["S1C_IW_GRDH_1SDV_20260818T000000.SAFE"; 3];
+        assert_eq!(shared(&same, 21), (0, 0));
+        assert_eq!(shared(&[same[0]], 21), (0, 0));
+        assert_eq!(shared(&[], 21), (0, 0));
+        // Короткое имя рядом с длинными: хвост не залезает в голову.
+        let mixed = ["AxB", "AyB", "AzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzB"];
+        let (head, tail) = shared(&mixed, 8);
+        assert!(head + tail < 3, "съедено всё короткое имя: {:?}", (head, tail));
+    }
+
+    /// Разные с первого знака — резать по краям нечего, работает прежнее
+    /// правило. Совпавшая одна буква — тоже: место под многоточие она не
+    /// окупает.
+    #[test]
+    fn разное_с_первого_знака_режется_как_прежде() {
+        let names = [
+            "S1C_IW_GRDH_1SDV_20260818T000000_009054_011F94_A43C.SAFE",
+            "LC08_L1TP_170025_20260818_20260818_02_T1",
+        ];
+        assert_eq!(shared(&names, 21), (0, 0));
+
+        let missions = [
+            "S3B_SR_1_SRA_A__20260818T110337_20260818T111337_0600_123_293.SEN3",
+            "S2B_MSIL1C_20260818T093549_N0511_R036_T35UNV_20260818T113217.SAFE",
+        ];
+        assert_eq!(shared(&missions, 21), (0, 0));
+    }
+
+    /// Различающегося на странице бывает три знака — код плитки Sentinel-2, —
+    /// и обрезанное до них имя различимо, но не опознаваемо. Освободившееся
+    /// место возвращается началу: видно и что это, и какая плитка.
+    #[test]
+    fn освободившееся_место_возвращается_началу_имени() {
+        let names = [
+            "S2A_MSIL2A_20260818T012111_N0512_R031_T54RWV_20260818T042717.SAFE",
+            "S2A_MSIL2A_20260818T012111_N0512_R031_T54RXV_20260818T042717.SAFE",
+            "S2A_MSIL2A_20260818T012111_N0512_R031_T54SUA_20260818T042717.SAFE",
+        ];
+        let shared = shared(&names, 21);
+        let shown: Vec<String> = names.iter().map(|name| distinct(name, 21, shared)).collect();
+        for (name, one) in names.iter().zip(&shown) {
+            assert!(one.chars().count() <= 21, "{} знаков: {}", one.chars().count(), one);
+            assert!(one.starts_with("S2A_MSIL2A"), "имя неопознаваемо: {}", one);
+            let tile = &name[41..44];
+            assert!(one.contains(tile), "нет различающего куска {}: {}", tile, one);
+        }
+        assert_ne!(shown[0], shown[1]);
+        assert_ne!(shown[1], shown[2]);
     }
 }

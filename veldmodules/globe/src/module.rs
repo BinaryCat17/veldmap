@@ -431,12 +431,31 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             veldsdk::log::warn!(target: "handlers", "{}: грант растра: {}", label, error);
             continue;
         }
+        // Координаты — второй ресурс того же растра: у Sentinel-3 широта с
+        // долготой лежат в соседнем файле, и без них полосе съёмки негде лечь.
+        // Не открылись — растр остаётся при своём: привязку он либо несёт сам,
+        // либо её не будет вовсе, и слой кончится обычным отказом.
+        let coordinates = raster.geolocation.filter(|handle| {
+            match veldsdk::resource::grant_read_or_free(handle.id, "image-tiler") {
+                Ok(()) => true,
+                Err(error) => {
+                    veldsdk::log::warn!(target: "handlers",
+                        "{}: грант координат: {}", label, error);
+                    false
+                }
+            }
+        });
         let mut raster = Raster::new(role, veldsdk::OwnedResource::new(handle.clone()));
+        raster.geolocation = coordinates.clone().map(veldsdk::OwnedResource::new);
 
         let correlation = raster.describe.begin();
         state.pending_describe.insert(correlation.clone(), (incoming.key.clone(), role));
         crate::calls::image_tiler::on_describe(
-            &DescribeRequest { resource: Some(handle), label: label.clone() },
+            &DescribeRequest {
+                resource: Some(handle),
+                label: label.clone(),
+                geolocation: coordinates,
+            },
             &correlation,
         );
         rasters.push(raster);
@@ -510,7 +529,10 @@ fn release_pass(state: &mut State, key: &str, role: Role, fingerprint: &str) {
 /// Освободить ресурсы наложения, которое не приживётся.
 fn release_rasters(rasters: Vec<crate::proto::globe::OverlayRaster>) {
     for raster in rasters {
-        if let Some(handle) = raster.resource {
+        // Координаты приходят во владение так же, как сам растр, и отпускать
+        // их надо тем же движением: оставленные, они держали бы открытым файл,
+        // о котором больше некому вспомнить.
+        for handle in [raster.resource, raster.geolocation].into_iter().flatten() {
             veldsdk::resource::release(handle);
         }
     }
@@ -555,6 +577,15 @@ pub fn on_described(state: &mut State, msg: Described) {
             veldsdk::log::warn!(target: "handlers",
                 "{}: ни один растр не описался — накладывать нечего", overlay.label);
             overlay.error = "ни один растр не описался".to_string();
+        } else if !overlay.frame.measurable() {
+            // Рамка есть, а протяжённости у неё нет: контур каталога сошёлся в
+            // точку или в линию. Ни ячейки по ней не нарисовать, ни уровня не
+            // выбрать — а молча оставленный, такой слой висит «готовится…»
+            // и не показывает ничего.
+            veldsdk::log::warn!(target: "handlers",
+                "{}: у контура каталога нет протяжённости — класть снимок не по чему",
+                overlay.label);
+            overlay.error = "контур снимка сошёлся в точку: класть растр не по чему".to_string();
         } else if matches!(overlay.frame, overlay::Frame::Rough(_)) {
             // Место держали в расчёте на решётку из растра, а её не оказалось.
             // Габарит сложного контура привязкой не является (см.
@@ -585,12 +616,24 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     // теперь не придёт никогда, а по пустой подписи «ещё едет» от «не будет»
     // не отличить. Причина уезжает подписью рядом с полосой хода.
     let meta = match tiles::describe(&msg) {
-        Ok(meta) => meta,
+        Ok(meta) => {
+            // Описалось — сказать больше не о чем: пустая подпись и означает
+            // «сказать нечего». Оставленная от прошлого захода, она обещала бы
+            // «резче не станет» тому растру, который как раз открылся.
+            overlay.trouble = None;
+            meta
+        }
         Err(error) => {
             veldsdk::log::warn!(target: "handlers", "{}: описание растра: {}", label, error);
-            overlay.trouble = Some(match role {
+            // Причин бывает две — по одной на растр, — и вторая не отменяет
+            // первую: слой живёт, пока жив хоть один, и сказать надо про оба.
+            let said = match role {
                 Role::Detailed => format!("подробный растр не открылся: {}", error),
                 Role::Preview => format!("превью не открылось: {}", error),
+            };
+            overlay.trouble = Some(match overlay.trouble.take() {
+                Some(before) if before != said => format!("{}; {}", before, said),
+                _ => said,
             });
             return;
         }
@@ -924,7 +967,15 @@ fn accept_tile(
 /// Камера сюда не входит: мир патчей от неё не зависит, взгляд двигает только
 /// uniform.
 fn build_patches(state: &mut State) {
-    let Some(look) = looking(state) else { return };
+    let Some(look) = looking(state) else {
+        // Места под кадр нет — считать по нему нечего, а сказать есть о чём:
+        // отвергнутый слой и слой, кончившийся ошибкой, известны и без кадра.
+        // Молча оставленные, они висят у приславшего «готовится…» до тех пор,
+        // пока вкладку шара не откроют, — а `on_overlay_progress` у него
+        // единственный путь, которым слой снимается по `error`.
+        report_progress(state, &[]);
+        return;
+    };
 
     // Пока камера, хранилище и состав наложений прежние, прежние и выборы —
     // холостой тик не строит даже списка для сравнения.

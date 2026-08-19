@@ -20,6 +20,18 @@
 /// по-разному.
 pub const STRETCH_SAMPLES: usize = 1 << 20;
 
+/// Годен ли отсчёт: число и не метка «нет данных».
+///
+/// Один предикат на все места, где об этом спрашивают, — выборку растяга у
+/// TIFF, выборку растяга у NetCDF и сам показ. Разойдясь, они дают ровно то,
+/// чего не хотел ни один: значение, выброшенное из выборки как негодное,
+/// выходит на экран непрозрачным — и, поскольку выше верхнего края растяга,
+/// белым. Нечисло (`NaN`, бесконечности) не данные по самому своему смыслу:
+/// float-растры нередко метят им пустоту вместо тега.
+pub fn is_data(value: f32, nodata: Option<f32>) -> bool {
+    value.is_finite() && Some(value) != nodata
+}
+
 /// Сэмплы чанка в типизированном виде — то, что разбирает показ.
 pub enum Samples<'a> {
     U8(&'a [u8]),
@@ -147,20 +159,20 @@ impl Mapping {
         let mut rgba = Vec::with_capacity(count * 4);
         for px in 0..count {
             let at = px * channels;
-            let mut void = self.nodata.is_some();
-            let mut nan = false;
+            // Пустым пиксель делают два разных обстоятельства, и путать их
+            // нельзя. Все цветовые каналы — метка «нет данных»: это поле за
+            // краем снятого. Хоть один канал не число: цвета у такого пикселя
+            // нет вовсе, и один нечисловой канал портит его целиком.
+            let mut void = true;
+            let mut broken = false;
             let mut bytes = [0u8; 3];
             for c in 0..colors {
                 let v = samples.get(at + c);
-                // NaN — «не данные» по самому своему смыслу: float-растры
-                // нередко метят им пустоту вместо тега.
-                nan |= v.is_nan();
-                if void && Some(v) != self.nodata {
-                    void = false;
-                }
+                broken |= !v.is_finite();
+                void &= !is_data(v, self.nodata);
                 bytes[c] = ((v - lo) * scale).round().clamp(0.0, 255.0) as u8;
             }
-            if void || nan {
+            if void || broken {
                 rgba.extend_from_slice(&[0, 0, 0, 0]);
                 continue;
             }
@@ -176,8 +188,16 @@ impl Mapping {
 
 /// Растяг по выборке файла: [2-й, 98-й] перцентили валидных значений.
 /// `None` — выборка пуста (весь файл «нет данных» — растягивать нечего).
-/// Совпавшие перцентили (ровное поле) раздвигаются на единицу: деление на
-/// ноль — не про показ, а однотонный кадр однотонным и останется.
+///
+/// Совпавшие перцентили — это ровное поле, и раздвигается оно **вокруг**
+/// значения, а не вверх от него: вверх означало бы, что всё поле лежит у
+/// нижнего края шкалы, то есть чёрный кадр, неотличимый от пустоты. Ровному
+/// полю место посередине.
+///
+/// Шаг берётся от величины самого значения, а не единицей: у f32 за 2²⁴
+/// прибавка единицы не меняет числа вовсе, и деление на ноль возвращается —
+/// а именно такие значения и стоят метками «нет данных» (штатное `_FillValue`
+/// netCDF — 9,96921·10³⁶).
 pub fn percentile_stretch(values: &mut [f32]) -> Option<(f32, f32)> {
     if values.is_empty() {
         return None;
@@ -185,7 +205,11 @@ pub fn percentile_stretch(values: &mut [f32]) -> Option<(f32, f32)> {
     values.sort_unstable_by(f32::total_cmp);
     let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
     let (lo, hi) = (at(0.02), at(0.98));
-    if hi > lo { Some((lo, hi)) } else { Some((lo, lo + 1.0)) }
+    if hi > lo {
+        return Some((lo, hi));
+    }
+    let half = lo.abs().max(1.0) * 1e-6 * 0.5;
+    Some((lo - half, lo + half))
 }
 
 #[cfg(test)]
@@ -262,10 +286,34 @@ mod tests {
         assert!((98.0..=100.0).contains(&hi), "hi = {}", hi);
     }
 
+    /// Ровное поле встаёт посередине шкалы, а не в её нижний край: чёрный
+    /// кадр неотличим от пустоты, а поле однотонно, а не пусто.
     #[test]
-    fn flat_field_widens_instead_of_dividing_by_zero() {
-        let mut values = vec![42.0; 10];
-        assert_eq!(percentile_stretch(&mut values), Some((42.0, 43.0)));
+    fn flat_field_lands_in_the_middle_of_the_scale() {
+        for value in [0.0f32, 42.0, -273.15, 1.0e7, 9.969_21e36] {
+            let mut values = vec![value; 10];
+            let (lo, hi) = percentile_stretch(&mut values).expect("выборка не пуста");
+            assert!(hi > lo, "растяг вырожден при {}: {}..{}", value, lo, hi);
+            let grey = Mapping::stretched(lo, hi, None)
+                .rgba(&Samples::F32(&[value]), Pixel::named(1), 1);
+            assert!((100..=160).contains(&grey[0]), "{} дало яркость {}", value, grey[0]);
+            assert_eq!(grey[3], 255, "ровное поле не пусто");
+        }
         assert_eq!(percentile_stretch(&mut []), None);
+    }
+
+    /// Один и тот же вопрос — годен ли отсчёт — у выборки растяга и у показа.
+    /// Разойдясь, они дают белый непрозрачный пиксель там, где выборка
+    /// посчитала значение негодным.
+    #[test]
+    fn what_the_sample_throws_out_the_frame_does_not_show() {
+        let nodata = Some(-9999.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -9999.0] {
+            assert!(!is_data(bad, nodata), "{} сочтено данными", bad);
+            let out = Mapping::stretched(0.0, 100.0, nodata)
+                .rgba(&Samples::F32(&[bad]), Pixel::named(1), 1);
+            assert_eq!(&out[..], &[0, 0, 0, 0], "{} вышло непрозрачным", bad);
+        }
+        assert!(is_data(0.0, nodata) && is_data(-9999.0, None));
     }
 }

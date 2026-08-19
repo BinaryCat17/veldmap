@@ -22,8 +22,16 @@ pub fn on_mission(state: &mut State, view: ViewId, mission: Mission) {
     // Радар про облачность не спрашивают, и его чипа на полосе нет — а
     // оставшийся от прошлой миссии потолок обнулил бы выдачу молча, потому что
     // условие по облачности отбирает снимки, у которых атрибут есть.
+    //
+    // Снятый потолок называется вслух: чип вместе с ним уходит с полосы, и по
+    // экрану не видно ни того, что он был, ни того, что выдача от этого стала
+    // шире.
+    let dropped = !mission.clouded() && search.cloud != Cloud::default();
     if !mission.clouded() {
         search.cloud = Cloud::default();
+    }
+    if dropped {
+        state.notice = Some("Потолок облачности снят: у этой миссии её не измеряют".to_string());
     }
     state.refine(view);
     run(state, view);

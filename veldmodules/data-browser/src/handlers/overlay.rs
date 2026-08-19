@@ -23,7 +23,8 @@
 
 use crate::module::footprint;
 use crate::module::state::{
-    overlay::Assembly, overlay::OverlayState, overlay::Progress, Locate, Located, Open, Shift,
+    overlay::Assembly, overlay::OverlayState, overlay::Part, overlay::Progress, Locate, Located,
+    Open, Shift,
     State, ViewId,
 };
 use crate::proto::data_provider::{
@@ -32,7 +33,7 @@ use crate::proto::data_provider::{
 use crate::proto::globe::{
     GeoPoint, Overlay, OverlayRaster, OverlayRole, Overlays, UtmFrame,
 };
-use veldsdk::proto::core::ResourceOpened;
+use veldsdk::proto::core::{ResourceHandle, ResourceOpened};
 
 /// Начиная с какого размаха долгот контур перестаёт быть четырёхугольником и
 /// становится поясом вокруг Земли. Полоса съёмки такой ширины не бывает: самая
@@ -230,7 +231,7 @@ fn abandon(state: &mut State, overlay: OverlayState) {
     for correlation in &assembly.opens {
         state.opens.take(correlation);
     }
-    for (_, handle) in assembly.collected {
+    for (_, _, handle) in assembly.collected {
         veldsdk::resource::release(handle);
     }
 }
@@ -379,24 +380,36 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     });
     let mut opens = Vec::new();
     for raster in response.rasters {
-        // Чем открывать, решается по растру, а не по снимку: у продукта
-        // скачана бывает часть, и лежащий рядом квиклук не делает локальным
-        // измерительный растр. Правило общее с просмотром строки — оно в
-        // `LibraryState::local_name`.
-        let local = state.library.local_name(&raster.identifier).map(str::to_string);
-        // Роль переводится сразу, на границе: дальше по нашему коду ездит уже
-        // та, которую поймёт глобус.
-        let correlation = state.opens.begin((key.clone(), role_for_globe(raster.role())));
-        opens.push(correlation.clone());
-        match local {
-            Some(name) => crate::calls::data_library::on_open(
-                &crate::proto::data_library::OpenRequest { name },
-                &correlation,
-            ),
-            None => crate::calls::data_provider::on_open(
-                &crate::proto::data_provider::OpenRequest { identifier: raster.identifier },
-                &correlation,
-            ),
+        let role = role_for_globe(raster.role());
+        // Координаты открываются тем же порядком и наравне с растром: у
+        // Sentinel-3 они лежат соседним файлом, и без них полосе съёмки негде
+        // лечь. Пусто — координаты в самом растре либо их нет вовсе.
+        let files = [(Part::Raster, raster.identifier)]
+            .into_iter()
+            .chain((!raster.geolocation.is_empty()).then_some((
+                Part::Geolocation,
+                raster.geolocation,
+            )));
+        for (part, identifier) in files {
+            // Чем открывать, решается по файлу, а не по снимку: у продукта
+            // скачана бывает часть, и лежащий рядом квиклук не делает локальным
+            // измерительный растр. Правило общее с просмотром строки — оно в
+            // `LibraryState::local_name`.
+            let local = state.library.local_name(&identifier).map(str::to_string);
+            // Роль переводится сразу, на границе: дальше по нашему коду ездит
+            // уже та, которую поймёт глобус.
+            let correlation = state.opens.begin((key.clone(), role, part));
+            opens.push(correlation.clone());
+            match local {
+                Some(name) => crate::calls::data_library::on_open(
+                    &crate::proto::data_library::OpenRequest { name },
+                    &correlation,
+                ),
+                None => crate::calls::data_provider::on_open(
+                    &crate::proto::data_provider::OpenRequest { identifier },
+                    &correlation,
+                ),
+            }
         }
     }
 
@@ -411,7 +424,7 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
 /// приехавший ресурс добьёт общий discard (см. module::on_open_result).
 pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     let correlation = veldsdk::correlation();
-    let Some((key, role)) = state.opens.take(&correlation) else { return false };
+    let Some((key, role, part)) = state.opens.take(&correlation) else { return false };
 
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else {
         // Наложение убрали между запросом и ответом: ресурс наш, и отпустить
@@ -432,9 +445,10 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 
     assembly.opens.retain(|waiting| waiting != &correlation);
     match veldsdk::resource::accept(opened) {
-        Ok(handle) => assembly.collected.push((role, handle)),
-        // Роль пропускается: наложение живёт тем, что открылось.
-        Err(error) => veldsdk::log::warn!(target: "handlers", "растр наложения: {}", error),
+        Ok(handle) => assembly.collected.push((role, part, handle)),
+        // Не открылось — наложение живёт тем, что открылось: без растра нет
+        // роли, без координат нет привязки, и оба исхода объясняются ниже.
+        Err(error) => veldsdk::log::warn!(target: "handlers", "файл наложения: {}", error),
     }
     if assembly.opens.is_empty() {
         finish(state, &key);
@@ -449,17 +463,42 @@ fn finish(state: &mut State, key: &str) {
     let Some(assembly) = overlay.assembly.take() else { return };
     let label = overlay.label.clone();
 
-    let mut rasters = Vec::new();
-    for (role, handle) in assembly.collected {
-        // Передача владения — до сообщения: получив набор, глобус вправе сразу
-        // считать ресурсы своими. При отказе хелпер освободил его сам.
+    // Передача владения — до сообщения: получив набор, глобус вправе сразу
+    // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
+    let mut given: Vec<(OverlayRole, Part, ResourceHandle)> = Vec::new();
+    for (role, part, handle) in assembly.collected {
         match veldsdk::resource::hand_off(handle, "globe") {
-            Ok(handle) => {
-                rasters.push(OverlayRaster { resource: Some(handle), role: role as i32 })
-            }
+            Ok(handle) => given.push((role, part, handle)),
             Err(error) => {
-                veldsdk::log::warn!(target: "handlers", "растр не передался глобусу: {}", error)
+                veldsdk::log::warn!(target: "handlers", "файл не передался глобусу: {}", error)
             }
+        }
+    }
+    // Координаты уезжают при своём растре: сами по себе они наложению не файл,
+    // а его свойство. Растр не открылся — отпускаем их здесь, иначе о них
+    // некому будет вспомнить.
+    let mut rasters = Vec::new();
+    for (role, part, handle) in &given {
+        if *part != Part::Raster {
+            continue;
+        }
+        let coordinates = given
+            .iter()
+            .find(|(other, part, _)| other == role && *part == Part::Geolocation)
+            .map(|(_, _, handle)| handle.clone());
+        rasters.push(OverlayRaster {
+            resource: Some(handle.clone()),
+            role: *role as i32,
+            geolocation: coordinates,
+        });
+    }
+    for (role, part, handle) in given {
+        let orphan = part == Part::Geolocation
+            && !rasters.iter().any(|raster| raster.role == role as i32);
+        if orphan {
+            veldsdk::log::warn!(target: "handlers",
+                "координаты без растра — отпускаем: '{}'", label);
+            veldsdk::resource::release(handle);
         }
     }
     if rasters.is_empty() {
@@ -561,7 +600,16 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
 /// сходятся на одном меридиане, — поэтому такой контур идёт тем же путём, что и
 /// полоса съёмки: местом, а не привязкой.
 fn quad_of(product: &DataProduct) -> Option<([(f64, f64); 4], bool)> {
-    if let Some(ring) = product.footprint.first() {
+    // Колец несколько — снимок разрезан швом: через антимеридиан каталог
+    // отдаёт его двумя полигонами, по половине с каждой стороны. Взять первое
+    // и растянуть по нему весь растр значит показать снимок вдвое у́же снятого
+    // и на своей же половине; сшить их обратно по вершинам, лежащим ровно на
+    // ±180, нечем — порядок обхода у половин свой. Значит, это не
+    // четырёхугольник, и путь у него тот же, что у полосы съёмки: место, а не
+    // привязка.
+    if product.footprint.len() == 1
+        && let Some(ring) = product.footprint.first()
+    {
         let points = match ring.points.as_slice() {
             [first, .., last] if first.lat == last.lat && first.lon == last.lon => {
                 &ring.points[..ring.points.len() - 1]
@@ -589,4 +637,53 @@ fn quad_of(product: &DataProduct) -> Option<([(f64, f64); 4], bool)> {
     );
     let (west, east) = (circle.lon - circle.radius_deg, circle.lon + circle.radius_deg);
     Some(([(north, west), (north, east), (south, east), (south, west)], true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::data_provider::{GeoPoint, Ring};
+
+    fn ring(points: &[(f64, f64)]) -> Ring {
+        Ring { points: points.iter().map(|&(lat, lon)| GeoPoint { lat, lon }).collect() }
+    }
+
+    fn shot(footprint: Vec<Ring>) -> DataProduct {
+        DataProduct { footprint, ..Default::default() }
+    }
+
+    /// Обычный четырёхугольник остаётся привязкой-догадкой: по нему растр и
+    /// кладут, пока из самого растра не приехала решётка.
+    #[test]
+    fn один_четырёхугольник_остаётся_догадкой() {
+        let (corners, rough) = quad_of(&shot(vec![ring(&[
+            (60.0, 10.0),
+            (60.0, 20.0),
+            (50.0, 20.0),
+            (50.0, 10.0),
+        ])]))
+        .expect("контур есть");
+        assert!(!rough, "четырёхугольник назван местом");
+        assert_eq!(corners[0], (60.0, 10.0));
+    }
+
+    /// Снимок через антимеридиан каталог отдаёт двумя полигонами. Первый из
+    /// них — половина снимка, и растянутый по ней растр лёг бы вдвое у́же
+    /// снятого; такой контур идёт местом, а не привязкой.
+    #[test]
+    fn разрезанный_швом_контур_привязкой_не_становится() {
+        // Живой футпринт S1C_EW_OCN…: две половины по обе стороны от ±180.
+        let halves = vec![
+            ring(&[(83.13, 180.0), (86.61, 180.0), (87.43, 136.38), (83.76, 147.32)]),
+            ring(&[(86.61, -180.0), (83.13, -180.0), (83.09, -178.30), (86.10, -153.28)]),
+        ];
+        let (_, rough) = quad_of(&shot(halves)).expect("контур есть");
+        assert!(rough, "половина снимка выдана за его привязку");
+    }
+
+    /// Контура нет вовсе — наводить и класть не по чему.
+    #[test]
+    fn без_контура_нет_и_места() {
+        assert!(quad_of(&shot(Vec::new())).is_none());
+    }
 }

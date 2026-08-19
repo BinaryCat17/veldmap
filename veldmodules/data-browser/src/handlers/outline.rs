@@ -151,19 +151,33 @@ fn select(state: &mut State, key: Option<String>) {
     if state.picked_key() == key.as_deref().unwrap_or_default() {
         return;
     }
-    state.highlight = key.map(|key| Highlight { key, view: None, on_globe: true });
+    match key {
+        // Щелчок мимо контуров гасит ленту — и только её. Отметку перехода
+        // ставил не он, живёт она до ухода из папки, и снимать её заодно
+        // значило бы убрать со экрана строку, к которой только что привели
+        // (`State::deselect` для того и написан).
+        None => {
+            state.deselect();
+        }
+        Some(key) => state.highlight = Some(Highlight { key, view: None, on_globe: true }),
+    }
     send(state);
 }
 
 /// Снять контуры с шара — то есть снять отметки во всех списках: контур живёт
 /// отметкой, и убрать его иначе нечем.
 pub fn clear(state: &mut State) {
-    if !state.clear_selection() {
-        return;
-    }
-    state.deselect();
+    // Следов у очерченного три — отметки в списках, набор контуров и лента на
+    // шаре, — и снимаются они вместе. Уйти по первому же «отметок не было»
+    // нельзя: лента переживает отметку, снятую руками, и строка осталась бы
+    // подсвеченной как лежащая на шаре, которого на ней уже нет.
+    let unmarked = state.clear_selection();
+    let unpicked = state.deselect();
+    let outlined = !state.outlined.is_empty();
     state.outlined.clear();
-    send(state);
+    if unmarked || unpicked || outlined {
+        send(state);
+    }
 }
 
 /// Погасить выбор контура, не трогая сами контуры. Нужно показу снимка на шаре

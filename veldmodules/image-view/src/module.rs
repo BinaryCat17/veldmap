@@ -220,6 +220,9 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     crate::calls::image_tiler::on_describe(&DescribeRequest {
         resource: Some(resource),
         label: view.label.clone(),
+        // Канве привязка не нужна вовсе: она показывает растр как картинку, а
+        // не кладёт его на Землю.
+        geolocation: None,
     }, &correlation);
 
     report(state, &msg.view);

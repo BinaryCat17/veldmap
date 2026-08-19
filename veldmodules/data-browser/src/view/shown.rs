@@ -30,17 +30,35 @@ use crate::module::{theme, Msg, ViewMsg};
 /// табличный: у слоя есть порядок, а у записи каталога его нет.
 const BUTTONS: f32 = 4.0;
 
-/// Что занимает в строке место помимо имени: ряд кнопок со своими зазорами,
-/// отступы экрана, зазор до кнопок и подпись состояния. Считается по числу
-/// кнопок, а не подбирается: приписанная кнопка иначе молча уедет под обрезку.
+/// Что занимает в строке место помимо имени и подписи состояния: ряд кнопок со
+/// своими зазорами, отступы экрана, зазор до кнопок, значок слева и два зазора
+/// вокруг него. Считается по числу кнопок, а не подбирается: приписанная кнопка
+/// иначе молча уедет под обрезку.
+///
+/// Подписи состояния здесь нет: её ширина своя у каждой строки, и постоянным
+/// числом её не выразить — «скрыт» это шесть знаков, а «ступень 1 из 9 · тайлы
+/// 3/12» двадцать семь. Названная одним числом, она обрезалась ровно там, где
+/// говорила больше всего (см. [`row_name_chars`]).
 const NAME_OVERHEAD: f32 = theme::ROW_BUTTON * BUTTONS
     + table::BUTTON_GAP * (BUTTONS - 1.0)
     + table::BUTTON_GAP * 2.0
     + theme::GUTTER * 2.0
-    + STATE_WIDTH;
+    + NAME_GLYPH
+    + NAME_GAPS;
 
-/// Место под подпись состояния справа от имени («готовится…», «скрыт»).
-const STATE_WIDTH: f32 = 90.0;
+/// Значок слева от имени и два зазора вокруг него (`row![…].spacing(8.0)`).
+const NAME_GLYPH: f32 = 13.0;
+const NAME_GAPS: f32 = 8.0 * 2.0;
+
+/// Сколько знаков имени влезает в строку слоя рядом с его подписью состояния.
+///
+/// Подпись меряется по себе самой: она стои́т справа от имени, растёт вместе с
+/// ходом добычи и в тесной панели отнимает у имени вдвое больше, чем отнимало
+/// постоянное число.
+fn row_name_chars(width: f32, state: &str) -> usize {
+    let room = width - NAME_OVERHEAD - format::text_width(state, theme::TEXT_SMALL);
+    format::mono_fit(room.max(60.0), theme::TEXT_MONO)
+}
 
 /// Высота строки слоя: две строчки — имя и ползунок под ним.
 const ROW_HEIGHT: f32 = 54.0;
@@ -48,10 +66,7 @@ const ROW_HEIGHT: f32 = 54.0;
 pub fn view(state: &State, view: ViewId) -> Element<Msg> {
     // Ширина под имя — от панели, в которой список стоит: та же арифметика,
     // что у таблицы, и по той же причине.
-    let name_chars = format::mono_fit(
-        (state.pane_width(view) - NAME_OVERHEAD).max(120.0),
-        theme::TEXT_MONO,
-    );
+    let width = state.pane_width(view);
     let shown = state.overlays.iter().filter(|overlay| !overlay.hidden).count();
     let ready = state.overlays.iter().filter(|overlay| overlay.on_globe()).count();
     // Снимок, лежащий растром, очерчен и сам: показывать его дважды значило бы
@@ -68,14 +83,14 @@ pub fn view(state: &State, view: ViewId) -> Element<Msg> {
         let mut lines: Vec<Element<Msg>> = Vec::new();
         // Снизу вверх у набора — сверху вниз на экране.
         lines.extend(
-            state.overlays.iter().rev().map(|overlay| layer(state, view, overlay, name_chars)),
+            state.overlays.iter().rev().map(|overlay| layer(state, view, overlay, width)),
         );
         if !contours.is_empty() {
             if !state.overlays.is_empty() {
                 lines.push(divider("Только контур"));
             }
             lines.extend(
-                contours.iter().map(|outlined| contour(state, view, outlined, name_chars)),
+                contours.iter().map(|outlined| contour(state, view, outlined, width)),
             );
         }
         scrollable(column(lines).width(Length::Fill))
@@ -144,7 +159,7 @@ fn header(total: usize, contours: usize, shown: usize, ready: usize) -> Element<
 }
 
 /// Одна строка: значок, имя, состояние и ползунок прозрачности.
-fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize) -> Element<Msg> {
+fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Element<Msg> {
     let key = overlay.identifier.clone();
     let dim = overlay.hidden || !overlay.on_globe();
     // Скрытый слой гасится фоном, а не только чернилами: приглушённые чернила
@@ -160,6 +175,8 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize)
         theme::RowTint::Plain
     };
 
+    let said = state_said(overlay).map(|(said, _)| said).unwrap_or_default();
+    let name_chars = row_name_chars(width, &said);
     let name = row![
         theme::row_glyph::<Msg>(
             theme::glyph::SATELLITE,
@@ -253,12 +270,12 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, name_chars: usize)
 /// Строчка одна, а не две: у контура нет ни прозрачности, ни порядка — он
 /// либо есть, либо нет. Оттого и кнопок меньше: положить растром, убрать
 /// контур и меню с переходами к самому снимку.
-fn contour(state: &State, view: ViewId, outlined: &Outlined, name_chars: usize) -> Element<Msg> {
+fn contour(state: &State, view: ViewId, outlined: &Outlined, width: f32) -> Element<Msg> {
     let key = outlined.key.clone();
 
     let name = row![
         theme::row_glyph::<Msg>(theme::glyph::SATELLITE, theme::INK_FAINT),
-        mono::<Msg>(format::ellipsize(&outlined.label, name_chars))
+        mono::<Msg>(format::ellipsize(&outlined.label, row_name_chars(width, "контур")))
             .size(theme::TEXT_MONO)
             .color(theme::INK_SOFT),
         theme::spacer(),
@@ -418,8 +435,8 @@ fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> 
 /// скрыт — тоже наше, а сколько тайлов осталось, знает только глобус и
 /// рассказывает сам (см. `state::overlay::Progress`). Ждать снимок приходится
 /// десятками секунд, и без этой подписи он выглядит зависшим.
-fn state_label(overlay: &OverlayState) -> Element<Msg> {
-    let (label, color) = match (overlay.on_globe(), overlay.hidden) {
+fn state_said(overlay: &OverlayState) -> Option<(String, crate::proto::ui_service::Color)> {
+    let said = match (overlay.on_globe(), overlay.hidden) {
         (false, _) => ("готовится…".to_string(), theme::INK_FAINT),
         (true, true) => ("скрыт".to_string(), theme::INK_FAINT),
         // Отказ растра говорится последним и остаётся насовсем: пока слой
@@ -427,10 +444,21 @@ fn state_label(overlay: &OverlayState) -> Element<Msg> {
         // объясняет, почему приближение больше ничего не даст.
         (true, false) => match (overlay.progress.said(), overlay.trouble.as_str()) {
             (Some(said), _) => (said, theme::ACCENT_TEXT),
-            (None, "") => return theme::nothing(),
+            (None, "") => return None,
             (None, trouble) => (trouble.to_string(), theme::INK_FAINT),
         },
     };
-    text::<Msg>(label).size(theme::TEXT_SMALL).color(color).single_line().into()
+    Some(said)
+}
+
+/// Та же подпись элементом. Врозь с [`state_said`] затем, что её ширину надо
+/// знать до сборки строки: место под имя считается по ней.
+fn state_label(overlay: &OverlayState) -> Element<Msg> {
+    match state_said(overlay) {
+        Some((label, color)) => {
+            text::<Msg>(label).size(theme::TEXT_SMALL).color(color).single_line().into()
+        }
+        None => theme::nothing(),
+    }
 }
 

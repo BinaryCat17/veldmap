@@ -89,11 +89,8 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
             break;
         }
         index += 1;
-        let reduced = decoder
-            .get_tag_unsigned::<u32>(Tag::NewSubfileType)
-            .map(|v| v & 1 != 0)
-            .unwrap_or(false);
-        if !reduced {
+        let subfile = decoder.get_tag_unsigned::<u32>(Tag::NewSubfileType).unwrap_or(0);
+        if !is_overview(subfile) {
             continue;
         }
         let Ok((w, h)) = decoder.dimensions() else { continue };
@@ -106,27 +103,51 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     Ok(Info { width, height, kind: Kind::Tiff(Layout { tiled, overviews }), finest: 0, ties })
 }
 
+/// Копия ли это картинки, ужатая, — по тегу NewSubfileType.
+///
+/// Мало «уменьшенной» (бит 1): маска прозрачности помечается битом 4, и её
+/// собственные копии несут 5 = 1|4 — так их пишет GDAL, и такой копией
+/// оказывается однобитная маска вместо снимка. Пирамида берёт копию по
+/// размеру, поэтому чужая среди своих не отвергается ниже по течению, а
+/// показывается.
+fn is_overview(subfile_type: u32) -> bool {
+    const REDUCED: u32 = 1;
+    const MASK: u32 = 4;
+    subfile_type & REDUCED != 0 && subfile_type & MASK == 0
+}
+
 /// Сетка геопривязки GeoTIFF — опорные точки в градусах. Пусто, если файл
 /// привязан к проекции, а не к градусам: перевести её мог бы только тот, кто
 /// знает саму проекцию, а тайлер знает про растр и не знает про Землю.
 ///
-/// Два вида привязки, и оба сводятся к одному: решётка точек (ModelTiepoint по
+/// Три вида привязки, и все сводятся к одному: решётка точек (ModelTiepoint по
 /// шесть чисел — пиксель, потом место) — как есть; одна точка с шагом пикселя
-/// (ModelPixelScale) — четырьмя углами, потому что такой растр лежит в градусах
-/// ровным прямоугольником и промежуточные точки в нём линейны.
+/// (ModelPixelScale) и матрица (ModelTransformation) — четырьмя углами, потому
+/// что оба задают одно преобразование на весь растр, а линейное между углами
+/// восстанавливается точно.
 ///
 /// Декодер после возврата стоит на том же образе: наводки здесь нет.
 fn ties<R: Read + Seek>(decoder: &mut Decoder<R>, width: u32, height: u32) -> Vec<Tie> {
     let keys = decoder.get_tag_u16_vec(Tag::GeoKeyDirectoryTag).unwrap_or_default();
     let points = decoder.get_tag_f64_vec(Tag::ModelTiepointTag).unwrap_or_default();
     let scale = decoder.get_tag_f64_vec(Tag::ModelPixelScaleTag).unwrap_or_default();
-    geo_ties(&keys, &points, &scale, width, height)
+    // Матрицу крейт тегом не знает: у него перечислены только ходовые. Номер
+    // из спецификации GeoTIFF — ModelTransformationTag.
+    let matrix = decoder.get_tag_f64_vec(Tag::Unknown(34264)).unwrap_or_default();
+    geo_ties(&keys, &points, &scale, &matrix, width, height)
 }
 
 /// Разбор геотегов — отдельно от чтения, потому что проверяется он ими же:
 /// файла с решёткой в тестах нет, а правила «градусы или проекция», «шесть
 /// чисел на узел» и «шаг по Y идёт на юг» есть.
-fn geo_ties(keys: &[u16], points: &[f64], scale: &[f64], width: u32, height: u32) -> Vec<Tie> {
+fn geo_ties(
+    keys: &[u16],
+    points: &[f64],
+    scale: &[f64],
+    matrix: &[f64],
+    width: u32,
+    height: u32,
+) -> Vec<Tie> {
     // GTModelTypeGeoKey (1024): 2 — градусы. Ключи лежат четвёрками после
     // заголовка из четырёх же чисел; значение простого ключа (место 0) —
     // четвёртое в четвёрке.
@@ -148,7 +169,7 @@ fn geo_ties(keys: &[u16], points: &[f64], scale: &[f64], width: u32, height: u32
     // Одна точка с шагом пикселя: растр лежит в градусах ровным
     // прямоугольником, и хватает его углов.
     let (Some(tie), true) = (points.get(..6), scale.len() >= 2) else {
-        return Vec::new();
+        return corners_from_matrix(matrix, width, height);
     };
     // Шаг по Y положителен, а строки растра идут на юг — отсюда минус.
     let (x, y) = (tie[3] - tie[0] * scale[0], tie[4] + tie[1] * scale[1]);
@@ -159,6 +180,32 @@ fn geo_ties(keys: &[u16], points: &[f64], scale: &[f64], width: u32, height: u32
         point(0.0, bottom, x, y - bottom * scale[1]),
         point(right, bottom, x + right * scale[0], y - bottom * scale[1]),
     ]
+}
+
+/// Углы растра, привязанного матрицей (ModelTransformationTag).
+///
+/// Матрица — четыре строки по четыре числа, и место пикселя (i, j) даёт первая
+/// пара строк: `x = a·i + b·j + d`, `y = e·i + f·j + h`. Такая привязка стои́т
+/// вместо пары «точка + шаг» и тем от неё отличается, что растр может лежать
+/// повёрнутым: у пары шаг задан по осям, повернуть его нечем.
+///
+/// Углов хватает и повёрнутому: преобразование линейное, а между четырьмя
+/// узлами решётка и восстанавливает линейное точно.
+fn corners_from_matrix(matrix: &[f64], width: u32, height: u32) -> Vec<Tie> {
+    let Some(a) = matrix.get(..8) else { return Vec::new() };
+    let (right, bottom) = (f64::from(width), f64::from(height));
+    // Вырожденная матрица (нулевая строка, единичная заглушка) привязкой не
+    // является: все четыре угла сошлись бы в точку, и растр лёг бы в ничто.
+    if a[0] * a[5] - a[1] * a[4] == 0.0 {
+        return Vec::new();
+    }
+    let place = |px: f64, py: f64| Tie {
+        px,
+        py,
+        lon: a[0] * px + a[1] * py + a[3],
+        lat: a[4] * px + a[5] * py + a[7],
+    };
+    vec![place(0.0, 0.0), place(right, 0.0), place(0.0, bottom), place(right, bottom)]
 }
 
 // ── Прямой доступ ──────────────────────────────────────────────
@@ -499,6 +546,7 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
     decoder.seek_to_image(stats).map_err(|e| format!("tiff: {}", e))?;
     let (w, h) = decoder.dimensions().map_err(|e| format!("tiff: {}", e))?;
     let (cw, ch) = chunk_grid(decoder)?;
+    let pixel = pixel(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
 
     let total = w.div_ceil(cw) * h.div_ceil(ch);
     let mut picks = [0, total / 3, 2 * total / 3, total.saturating_sub(1)].to_vec();
@@ -508,19 +556,32 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
     for &index in &picks {
         let data = decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
         let samples = typed(&data)?;
-        let step = (samples.len() * picks.len() / radiometry::STRETCH_SAMPLES).max(1);
-        for i in (0..samples.len()).step_by(step) {
-            let v = samples.get(i);
-            if v.is_finite() && Some(v) != nodata {
-                values.push(v);
+        // Выборка идёт по пикселям и берёт из каждого только цветовые сэмплы:
+        // в кадр идут ровно они (см. `Mapping::rgba`), а альфа и
+        // непоказываемые полосы двигали бы перцентили, ни на что не влияя.
+        // Разница не тонкая: у серого с альфой постоянная альфа 65535 — это
+        // половина выборки на верхнем краю формата, и снимок выходит почти
+        // чёрным; в стопке полос GDAL маска 0..1 рядом с амплитудой утягивает
+        // нижний край в ноль.
+        let pixels = samples.len() / pixel.channels.max(1);
+        let step = (pixels * picks.len() / radiometry::STRETCH_SAMPLES).max(1);
+        for at in (0..pixels).step_by(step) {
+            for channel in 0..pixel.colors() {
+                let v = samples.get(at * pixel.channels + channel);
+                if radiometry::is_data(v, nodata) {
+                    values.push(v);
+                }
             }
         }
     }
     match percentile_stretch(&mut values) {
         Some((lo, hi)) => Ok(Mapping::stretched(lo, hi, nodata)),
         // Вся выборка — «нет данных»: растягивать нечего, а прозрачным файл
-        // сделает само ключевание.
-        None => Ok(Mapping::identity(nodata)),
+        // сделает само ключевание. Растяг при этом всё равно нужен, и тот же,
+        // что у NetCDF: тождество для широких сэмплов означает «значения уже
+        // байты», то есть всё, что больше 255, — белое, и уцелевший за
+        // выборкой пиксель вышел бы белым пятном вместо своего цвета.
+        None => Ok(Mapping::stretched(0.0, 1.0, nodata)),
     }
 }
 
@@ -544,7 +605,7 @@ mod tests {
             0.0, 0.0, 0.0, 2.707, 73.395, 0.0, //
             529.0, 0.0, 0.0, 2.096, 73.470, 0.0,
         ];
-        let ties = geo_ties(&geokeys(2), &points, &[], 10572, 9993);
+        let ties = geo_ties(&geokeys(2), &points, &[], &[], 10572, 9993);
         assert_eq!(ties.len(), 2);
         assert_eq!((ties[0].px, ties[0].py), (0.0, 0.0));
         assert_eq!((ties[0].lat, ties[0].lon), (73.395, 2.707));
@@ -556,11 +617,68 @@ mod tests {
     #[test]
     fn pixel_scale_becomes_four_corners_facing_south() {
         let points = vec![0.0, 0.0, 0.0, 10.0, 50.0, 0.0];
-        let ties = geo_ties(&geokeys(2), &points, &[0.5, 0.25, 0.0], 100, 200);
+        let ties = geo_ties(&geokeys(2), &points, &[0.5, 0.25, 0.0], &[], 100, 200);
         assert_eq!(ties.len(), 4);
         assert_eq!((ties[0].lon, ties[0].lat), (10.0, 50.0));
         assert_eq!((ties[1].lon, ties[1].lat), (60.0, 50.0), "правый край восточнее");
         assert_eq!((ties[2].lon, ties[2].lat), (10.0, 0.0), "нижний край южнее");
+    }
+
+    /// Копией считается уменьшенная картинка, но не уменьшенная маска: GDAL
+    /// пишет копии маски как 5 = 1|4, и взятая за копию однобитная маска
+    /// показалась бы вместо снимка.
+    #[test]
+    fn a_mask_is_not_an_overview() {
+        assert!(is_overview(1), "уменьшенная копия");
+        assert!(!is_overview(5), "уменьшенная копия маски");
+        assert!(!is_overview(4), "маска в полный размер");
+        assert!(!is_overview(0), "сам снимок");
+        assert!(is_overview(3), "копия страницы многостраничного — всё ещё копия");
+    }
+
+    /// Повёрнутый растр привязан матрицей, и углы её слушаются: у повёрнутого
+    /// верхний правый угол не на той же широте, что верхний левый, — а пара
+    /// «точка + шаг» такого сказать не умеет вовсе.
+    #[test]
+    fn a_transformation_matrix_places_the_rotated_corners() {
+        // Поворот на 90°: столбцы растра идут на восток, строки — на север.
+        let matrix = vec![
+            0.0, 0.5, 0.0, 10.0, //
+            0.25, 0.0, 0.0, 50.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let ties = geo_ties(&geokeys(2), &[], &[], &matrix, 100, 200);
+        assert_eq!(ties.len(), 4);
+        assert_eq!((ties[0].lon, ties[0].lat), (10.0, 50.0));
+        assert_eq!((ties[1].lon, ties[1].lat), (10.0, 75.0), "вправо по растру — на север");
+        assert_eq!((ties[2].lon, ties[2].lat), (110.0, 50.0), "вниз по растру — на восток");
+    }
+
+    /// Матрица читается только там, где пары «точка + шаг» нет: спецификация
+    /// разрешает ровно одну из двух привязок, и файл с обеими врёт хотя бы
+    /// одной. Верить в таком случае надо той, которую понимают все.
+    #[test]
+    fn the_pair_outranks_the_matrix() {
+        let points = vec![0.0, 0.0, 0.0, 10.0, 50.0, 0.0];
+        let matrix = vec![
+            0.0, 0.5, 0.0, 999.0, //
+            0.25, 0.0, 0.0, 999.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let ties = geo_ties(&geokeys(2), &points, &[0.5, 0.25, 0.0], &matrix, 100, 200);
+        assert_eq!((ties[0].lon, ties[0].lat), (10.0, 50.0));
+    }
+
+    /// Вырожденная матрица — не привязка: масштаба у неё нет, и все четыре
+    /// угла сошлись бы в одну точку.
+    #[test]
+    fn a_degenerate_matrix_is_no_binding() {
+        let flat = vec![0.0; 16];
+        assert!(geo_ties(&geokeys(2), &[], &[], &flat, 100, 200).is_empty());
+        // Как и обрезанная: восьми чисел на две строки не набралось.
+        assert!(geo_ties(&geokeys(2), &[], &[], &[1.0, 0.0, 0.0], 100, 200).is_empty());
     }
 
     /// Привязка к проекции — не наше дело: перевести её в градусы может только
@@ -568,9 +686,9 @@ mod tests {
     #[test]
     fn projected_files_yield_nothing() {
         let points = vec![0.0, 0.0, 0.0, 600_000.0, 7_800_000.0, 0.0];
-        assert!(geo_ties(&geokeys(1), &points, &[10.0, 10.0, 0.0], 10, 10).is_empty());
+        assert!(geo_ties(&geokeys(1), &points, &[10.0, 10.0, 0.0], &[], 10, 10).is_empty());
         // Как и файл вовсе без геотегов.
-        assert!(geo_ties(&[], &points, &[10.0, 10.0, 0.0], 10, 10).is_empty());
+        assert!(geo_ties(&[], &points, &[10.0, 10.0, 0.0], &[], 10, 10).is_empty());
     }
 
     /// Цветовая модель разбирается один раз и отвечает обоим спрашивающим — и

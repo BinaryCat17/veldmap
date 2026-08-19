@@ -21,7 +21,12 @@ pub enum Role {
 
 /// Ключи поддерева продукта → растры с ролями. Ключи — полные идентификаторы
 /// (с префиксом бакета), как их отдаёт листинг.
-pub fn scan(keys: &[String]) -> Vec<(String, Role)> {
+///
+/// `measured` — файлы, которые манифест продукта назвал измерением (пути от
+/// корня продукта; см. `manifest::measurements`). Пусто — манифеста не было
+/// или он ничего не сказал, и подробный растр выбирается по именам файлов, как
+/// и до него.
+pub fn scan(keys: &[String], measured: &[String]) -> Vec<(String, Role)> {
     let mut rasters = Vec::new();
 
     // Sentinel-2: квиклук гранулы лежит в QI_DATA, истинный цвет — в
@@ -75,12 +80,22 @@ pub fn scan(keys: &[String]) -> Vec<(String, Role)> {
         if let Some(quicklook) = readable.iter().copied().find(|key| a_quicklook(key)) {
             rasters.push((quicklook.clone(), Role::Preview));
         }
+        // Названное манифестом сужает выбор до измерения — там, где манифест
+        // есть и говорит о читаемом файле. Не сужает до пустоты: измерением
+        // бывает и то, что растром не открыть (сырьё уровня 0 записано `.dat`),
+        // и тогда вопрос остаётся прежним.
+        let named: Vec<&String> =
+            readable.iter().copied().filter(|key| measured_by(key, measured)).collect();
+        let among = match named.is_empty() {
+            true => readable,
+            false => named,
+        };
         // Порядок выбора: сперва то, что похоже на цветной снимок целиком,
         // потом по алфавиту — не выбор, а определённость: одному продукту один
         // и тот же ответ от запуска к запуску.
-        let detailed = readable
+        let detailed = among
             .into_iter()
-            .filter(|key| !a_quicklook(key))
+            .filter(|key| !a_quicklook(key) && !a_decoration(key))
             .min_by_key(|key| (!a_whole_picture(key), file_name(key)));
         if let Some(detailed) = detailed {
             rasters.push((detailed.clone(), Role::Detailed));
@@ -103,10 +118,87 @@ fn a_quicklook(key: &str) -> bool {
         .any(|hint| name.contains(hint))
 }
 
+/// Назван ли ключ манифестом среди измерений. Пути манифеста идут от корня
+/// продукта, ключи — от корня бакета, и сходятся они хвостом.
+fn measured_by(key: &str, measured: &[String]) -> bool {
+    measured.iter().any(|href| key.ends_with(&format!("/{}", href)))
+}
+
+/// Лежит ли ключ в подкаталоге показа, а не измерения.
+///
+/// Каталог `preview/` — это часть раскладки, и сказано в нём то же, что
+/// словом: внутри обзорная картинка, цветовая шкала прибора, логотип миссии.
+/// Подробным растром там не лежит ничего, а по имени файла это не разобрать —
+/// у Sentinel-1 OCN подробным выходил `preview/icons/logo.png`, потому что
+/// «logo» стои́т в алфавите раньше «measurement».
+fn a_decoration(key: &str) -> bool {
+    key.contains("/preview/")
+}
+
 /// Имя, за которым обычно лежит цветной снимок целиком, а не одна его полоса.
+///
+/// Сравнение по слову, а не по куску: «TCI» внутри слова ничего не значит, и
+/// подстрокой оно ловит `otci.nc` — индекс хлорофилла OLCI, у которого с
+/// цветным снимком общего только три буквы.
 fn a_whole_picture(key: &str) -> bool {
     let name = file_name(key).to_ascii_uppercase();
-    ["TCI", "TRUE_COLOR", "TRUECOLOR", "_RGB"].iter().any(|hint| name.contains(hint))
+    let mut words = name.split(['_', '-', '.', ' ']).peekable();
+    while let Some(word) = words.next() {
+        if ["TCI", "TRUECOLOR", "RGB"].contains(&word) {
+            return true;
+        }
+        if word == "TRUE" && words.peek() == Some(&"COLOR") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Файл с координатами пикселей растра — там, где они лежат отдельно от него.
+///
+/// Так упакован Sentinel-3: в измерительном `.nc` лежит одна полоса чисел, а
+/// широта с долготой — в соседнем файле того же продукта. Без него полосу
+/// съёмки некуда класть: контур каталога говорит, какой кусок Земли снят, но
+/// не тем, каким пикселем куда.
+///
+/// Ищется он среди соседей по каталогу и по имени — раскладку продукта знает
+/// только этот модуль. Порядок ответов — от точного к дешёвому:
+///  * `geodetic_<сетка>.nc` — координаты ровно той сетки, на которой записан
+///    растр (SLSTR держит их по одному файлу на сетку: `_in`, `_an`, `_fn`);
+///  * `tie_geo_coordinates.nc` — опорная сетка OLCI, полмегабайта на весь
+///    снимок против тридцати мегабайт поотсчётного файла; узлов в ней хватает
+///    с запасом (привязка всё равно берётся решёткой),
+///  * `geo_coordinates.nc` — поотсчётные координаты OLCI, когда опорной сетки
+///    в продукте нет.
+///
+/// Пусто — координаты либо в самом растре, либо их нет; спрашивать нечего.
+pub fn geolocation(keys: &[String], raster: &str) -> Option<String> {
+    // Только рядом с растром: у продукта бывает несколько подкаталогов, и
+    // координаты чужой сетки хуже, чем никаких.
+    let folder = raster.rsplit_once('/')?.0;
+    let sibling = |name: &str| {
+        let wanted = format!("{}/{}", folder, name);
+        keys.iter().find(|key| key.as_str() == wanted).cloned()
+    };
+    if let Some(grid) = grid_tag(raster)
+        && let Some(found) = sibling(&format!("geodetic_{}.nc", grid))
+    {
+        return Some(found);
+    }
+    sibling("tie_geo_coordinates.nc").or_else(|| sibling("geo_coordinates.nc"))
+}
+
+/// Хвост имени, которым Sentinel-3 называет сетку записи: `LST_in.nc` → `in`,
+/// `F1_BT_fn.nc` → `fn`. Две буквы: первая — канал или вид (надир `n`,
+/// косой `o`), и все файлы одной сетки кончаются одинаково.
+///
+/// `None` — имя так не устроено, и о сетке ничего не сказано.
+fn grid_tag(key: &str) -> Option<&str> {
+    let name = file_name(key);
+    let stem = name.strip_suffix(".nc")?;
+    let (_, tag) = stem.rsplit_once('_')?;
+    let two = tag.len() == 2 && tag.chars().all(|c| c.is_ascii_lowercase());
+    two.then_some(tag)
 }
 
 /// Расширения, за которыми стои́т растр. Перечислены они здесь и только здесь:
@@ -158,10 +250,35 @@ pub fn showable(identifier: &str, folder: bool, level: Option<u32>) -> bool {
     folder || single(identifier).is_some()
 }
 
-/// Форматы, которые открывает наложение, — теми же словами, что и в отказе
-/// тайлера: список одному человеку показывают с обеих сторон, и разойтись им
-/// незачем.
-const READABLE: &str = "PNG, JPEG, TIFF, JPEG 2000, NetCDF, GIF, BMP, WebP";
+/// Форматы, которые открывает наложение, — словами, для отказа.
+///
+/// Собираются из того же [`RASTER_SUFFIXES`], по которому растр и отбирают:
+/// написанные списком отдельно, эти двое уже разошлись — `h5` отбирался и не
+/// назывался, — а показывают их одному человеку с обеих сторон.
+fn readable() -> String {
+    fn said(suffix: &str) -> &str {
+        match suffix {
+            "tif" | "tiff" => "TIFF",
+            "jp2" | "j2k" => "JPEG 2000",
+            "png" => "PNG",
+            "jpg" | "jpeg" => "JPEG",
+            "nc" => "NetCDF",
+            "h5" => "HDF5",
+            "gif" => "GIF",
+            "bmp" => "BMP",
+            "webp" => "WebP",
+            other => other,
+        }
+    }
+    let mut names: Vec<&str> = Vec::new();
+    for suffix in RASTER_SUFFIXES {
+        let name = said(suffix);
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names.join(", ")
+}
 
 /// Продукт — один файл, и растром он не является. Что за файл — видно по нему
 /// самому, и это весь ответ: распаковывать архивы наложение не умеет.
@@ -171,9 +288,9 @@ pub fn just_a_file(identifier: &str) -> String {
         Some((_, suffix)) => format!(
             "продукт лежит одним файлом .{}, а наложить можно растр — {}",
             suffix.to_ascii_lowercase(),
-            READABLE
+            readable()
         ),
-        None => format!("продукт лежит одним файлом, а наложить можно растр — {}", READABLE),
+        None => format!("продукт лежит одним файлом, а наложить можно растр — {}", readable()),
     }
 }
 
@@ -243,7 +360,7 @@ mod tests {
             "eodata/…/S2C_MSIL2A_T40WFC.SAFE/GRANULE/L2A_T40WFC_A/IMG_DATA/R10m/T40WFC_20260812_B08_10m.jp2",
             "eodata/…/S2C_MSIL2A_T40WFC.SAFE/MTD_MSIL2A.xml",
         ]);
-        let rasters = scan(&keys);
+        let rasters = scan(&keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("_PVI.jp2") && rasters[0].1 == Role::Preview);
         assert!(rasters[1].0.ends_with("_TCI_10m.jp2") && rasters[1].1 == Role::Detailed);
@@ -256,7 +373,7 @@ mod tests {
             "eodata/…/S2B_MSIL1C_T33UUP.SAFE/GRANULE/L1C_T33UUP_A/IMG_DATA/T33UUP_20260601_TCI.jp2",
             "eodata/…/S2B_MSIL1C_T33UUP.SAFE/GRANULE/L1C_T33UUP_A/IMG_DATA/T33UUP_20260601_B02.jp2",
         ]);
-        let rasters = scan(&keys);
+        let rasters = scan(&keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[1].0.ends_with("_TCI.jp2") && rasters[1].1 == Role::Detailed);
     }
@@ -269,7 +386,7 @@ mod tests {
             "eodata/…/S1C_IW_GRDH.SAFE/measurement/s1c-iw-grd-vv.tiff",
             "eodata/…/S1C_IW_GRDH.SAFE/manifest.safe",
         ]);
-        let rasters = scan(&keys);
+        let rasters = scan(&keys, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
     }
@@ -282,7 +399,7 @@ mod tests {
             "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/measurement/s1c-iw-grd-vv-20260812t153507-001-cog.tiff",
             "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/manifest.safe",
         ]);
-        let rasters = scan(&keys);
+        let rasters = scan(&keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
         // Из двух поляризаций подробной выбрана ко- (vv), не первая по списку.
@@ -296,7 +413,7 @@ mod tests {
         let clms = keys(&[
             "eodata/CLMS/lst/c_gls_LST_202608161000_GLOBE_GEO_V3.0.1_nc/c_gls_LST.nc",
         ]);
-        let rasters = scan(&clms);
+        let rasters = scan(&clms, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with(".nc") && rasters[0].1 == Role::Detailed);
     }
@@ -311,23 +428,92 @@ mod tests {
             "eodata/Landsat-5/LT51780121988065ESA00/LT51780121988065ESA00_B2.TIF",
             "eodata/Landsat-5/LT51780121988065ESA00/LT51780121988065ESA00_B1.TIF",
         ]);
-        let rasters = scan(&bands);
+        let rasters = scan(&bands, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("_thumb_large.jpg") && rasters[0].1 == Role::Preview);
         assert!(rasters[1].0.ends_with("_B1.TIF") && rasters[1].1 == Role::Detailed);
     }
 
     /// Цветной снимок целиком идёт вперёд отдельных полос — по имени, потому
-    /// что до открытия о файлах больше ничего и не известно.
+    /// что до открытия о файлах больше ничего и не известно. Слово целиком, а
+    /// не кусок: `otci.nc` — индекс хлорофилла, а не цветной снимок.
     #[test]
     fn a_true_colour_file_wins_over_single_bands() {
         let granule = keys(&[
             "eodata/Sentinel-3/SR/x.SEN3/Oa01_radiance.nc",
             "eodata/Sentinel-3/SR/x.SEN3/rgb_TCI.nc",
         ]);
-        let rasters = scan(&granule);
+        let rasters = scan(&granule, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with("rgb_TCI.nc"));
+
+        assert!(a_whole_picture("x/T35UNV_20260818_TCI_10m.jp2"));
+        assert!(a_whole_picture("x/scene_true_color.tif"));
+        assert!(a_whole_picture("x/L2_TRUECOLOR.png"));
+        assert!(!a_whole_picture("eodata/…/S3A_OL_2_LFR.SEN3/otci.nc"));
+        assert!(!a_whole_picture("eodata/…/S3A_OL_2_LFR.SEN3/rc_gifapar.nc"));
+    }
+
+    /// Подкаталог `preview/` — часть раскладки, и в нём лежит показ: обзорная
+    /// картинка, шкала прибора, логотип миссии. Подробным растром оттуда не
+    /// берётся ничего — иначе у Sentinel-1 OCN на шар ложится логотип
+    /// Copernicus, а измерение остаётся неоткрытым.
+    #[test]
+    fn a_logo_never_becomes_the_detailed_raster() {
+        let ocn = keys(&[
+            "eodata/…/S1C_EW_OCN__2SDH.SAFE/preview/icons/logo.png",
+            "eodata/…/S1C_EW_OCN__2SDH.SAFE/preview/quick-look-l2-owi.png",
+            "eodata/…/S1C_EW_OCN__2SDH.SAFE/preview/owi-colorbar.png",
+            "eodata/…/S1C_EW_OCN__2SDH.SAFE/measurement/s1c-ew-ocn-hh-20260818t193953-001.nc",
+            "eodata/…/S1C_EW_OCN__2SDH.SAFE/measurement/s1c-ew1-osw-hh-20260818t193953-002.nc",
+            "eodata/…/S1C_EW_OCN__2SDH.SAFE/manifest.safe",
+        ]);
+        let rasters = scan(&ocn, &[]);
+        assert_eq!(rasters.len(), 2, "{:?}", rasters);
+        assert!(
+            rasters[0].0.ends_with("quick-look-l2-owi.png") && rasters[0].1 == Role::Preview,
+            "{:?}", rasters[0]
+        );
+        assert!(
+            rasters[1].0.ends_with("-ocn-hh-20260818t193953-001.nc")
+                && rasters[1].1 == Role::Detailed,
+            "{:?}", rasters[1]
+        );
+    }
+
+    /// Растр лежит только в `preview/` — тогда у продукта есть обзорная
+    /// картинка и нет подробного. Это ответ, а не отказ: показать её честнее,
+    /// чем промолчать.
+    #[test]
+    fn a_product_with_only_a_quicklook_still_has_one() {
+        let only = keys(&[
+            "eodata/…/X.SAFE/preview/quick-look.png",
+            "eodata/…/X.SAFE/preview/icons/logo.png",
+            "eodata/…/X.SAFE/annotation/report.xml",
+        ]);
+        let rasters = scan(&only, &[]);
+        assert_eq!(rasters.len(), 1, "{:?}", rasters);
+        assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
+    }
+
+    /// Список читаемого — один: чем отбирают растр, тем и называют форматы в
+    /// отказе. Разойдясь, они говорят одному человеку разное.
+    #[test]
+    fn the_refusal_names_what_the_scan_accepts() {
+        let said = readable();
+        for suffix in RASTER_SUFFIXES {
+            assert!(
+                just_a_file(&format!("x/y.{}", suffix)).contains(&said)
+                    || !said.is_empty(),
+                "{} не назван",
+                suffix
+            );
+        }
+        assert!(said.contains("HDF5"), "h5 отбирается, а не назван: {}", said);
+        assert!(said.contains("NetCDF") && said.contains("JPEG 2000") && said.contains("WebP"));
+        // Синонимы названы по разу: «TIFF» не повторяется за tif и tiff.
+        assert_eq!(said.matches("TIFF").count(), 1, "{}", said);
+        assert_eq!(said.matches("JPEG 2000").count(), 1, "{}", said);
     }
 
     /// Продукт-файл: растр он или нет, видно по нему самому.
@@ -378,5 +564,65 @@ mod tests {
 
         // Листинг пустой — это про хранилище, а не про раскладку.
         assert!(nothing_here("eodata/…/X.SAFE", &[]).contains("ни одного файла"));
+    }
+
+    /// Sentinel-3 держит координаты отдельным файлом, и его-то и надо назвать.
+    /// У OLCI это опорная сетка — полмегабайта против тридцати мегабайт
+    /// поотсчётного файла, а решётка привязки всё равно берётся по узлам.
+    #[test]
+    fn olci_points_at_the_cheap_tie_grid() {
+        let olci: Vec<String> = [
+            "eodata/…/S3A_OL_2_LFR.SEN3/gifapar.nc",
+            "eodata/…/S3A_OL_2_LFR.SEN3/geo_coordinates.nc",
+            "eodata/…/S3A_OL_2_LFR.SEN3/tie_geo_coordinates.nc",
+        ]
+        .iter()
+        .map(|key| key.to_string())
+        .collect();
+        assert_eq!(
+            geolocation(&olci, &olci[0]),
+            Some("eodata/…/S3A_OL_2_LFR.SEN3/tie_geo_coordinates.nc".to_string())
+        );
+        // Опорной сетки нет — остаются поотсчётные координаты.
+        assert_eq!(
+            geolocation(&olci[..2], &olci[0]),
+            Some("eodata/…/S3A_OL_2_LFR.SEN3/geo_coordinates.nc".to_string())
+        );
+    }
+
+    /// У SLSTR сеток несколько, и координаты у каждой свои: растр сетки `in`
+    /// привязывается `geodetic_in.nc`, а не первым попавшимся файлом координат.
+    #[test]
+    fn slstr_takes_the_coordinates_of_its_own_grid() {
+        let slstr: Vec<String> = [
+            "eodata/…/S3A_SL_2_LST.SEN3/LST_in.nc",
+            "eodata/…/S3A_SL_2_LST.SEN3/geodetic_in.nc",
+            "eodata/…/S3A_SL_2_LST.SEN3/geodetic_tx.nc",
+            "eodata/…/S3A_SL_2_LST.SEN3/geo_coordinates.nc",
+        ]
+        .iter()
+        .map(|key| key.to_string())
+        .collect();
+        assert_eq!(
+            geolocation(&slstr, &slstr[0]),
+            Some("eodata/…/S3A_SL_2_LST.SEN3/geodetic_in.nc".to_string())
+        );
+    }
+
+    /// Координаты берутся только у соседей по каталогу: у продукта бывает
+    /// несколько подкаталогов, и чужая сетка хуже, чем никакой.
+    #[test]
+    fn coordinates_come_from_the_same_folder() {
+        let keys: Vec<String> = [
+            "eodata/…/product.SEN3/measurement/band.nc",
+            "eodata/…/product.SEN3/geo_coordinates.nc",
+        ]
+        .iter()
+        .map(|key| key.to_string())
+        .collect();
+        assert_eq!(geolocation(&keys, &keys[0]), None);
+        // И у растра, который координат не просит, соседей не ищут вовсе.
+        let s2 = vec!["eodata/…/GRANULE/IMG_DATA/T36UXV_TCI_10m.jp2".to_string()];
+        assert_eq!(geolocation(&s2, &s2[0]), None);
     }
 }

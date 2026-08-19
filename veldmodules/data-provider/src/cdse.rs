@@ -9,7 +9,7 @@ use crate::proto::data_provider::{
 };
 use aws_smithy_runtime_api::client::identity::Identity;
 use std::collections::HashMap;
-use super::{catalogue, imagery, mgrs, s3, scene, Asked, Config, Pending, State};
+use super::{catalogue, imagery, manifest, mgrs, s3, scene, Asked, Config, Pending, State};
 
 /// Сейчас, unix-секунды. Нужно одному — нижней границе окна поиска
 /// (см. `catalogue::FRESH_DAYS`).
@@ -167,8 +167,10 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
     // Растром такой продукт бывает и сам — тогда он же и единственный растр.
     if s3::is_single_object(&request.identifier) {
         let response = match imagery::single(&request.identifier) {
+            // Соседей у продукта-объекта нет по определению: в хранилище он
+            // один ключ, и координатам лежать негде, кроме как в нём самом.
             Some((identifier, role)) => ImageryResponse {
-                rasters: vec![raster(identifier, role)],
+                rasters: vec![raster(identifier, role, &[])],
                 ..Default::default()
             },
             None => ImageryResponse {
@@ -188,8 +190,15 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
 /// Растр в том виде, в каком его понимает контракт: роль здесь и роль в
 /// `imagery` — два разных перечисления, и связаны они match'ем, а не
 /// совпадением чисел.
-fn raster(identifier: String, role: imagery::Role) -> ImageryRaster {
+fn raster(identifier: String, role: imagery::Role, keys: &[String]) -> ImageryRaster {
     ImageryRaster {
+        // Координаты просит только измерительный растр: привязка у наложения
+        // одна на все его растры, и приносит её он — квиклук ложится по ней же
+        // (своей у него нет и быть не может, картинка о Земле не знает).
+        geolocation: match role {
+            imagery::Role::Detailed => imagery::geolocation(keys, &identifier).unwrap_or_default(),
+            imagery::Role::Preview => String::new(),
+        },
         identifier,
         role: match role {
             imagery::Role::Preview => ImageryRole::ImageryPreview,
@@ -209,7 +218,8 @@ fn imagery_response(
     found: Vec<(String, imagery::Role)>,
 ) -> ImageryResponse {
     let empty = found.is_empty();
-    let rasters = found.into_iter().map(|(key, role)| raster(key, role)).collect::<Vec<_>>();
+    let rasters =
+        found.into_iter().map(|(key, role)| raster(key, role, keys)).collect::<Vec<_>>();
 
     // Рамка — только когда её видно из имени (тайл Sentinel-2). Ошибка разбора
     // не валит ответ: без рамки потребитель живёт на футпринте каталога.
@@ -400,8 +410,23 @@ pub fn on_http_result(
                         );
                         return;
                     }
+                    // Обход кончился. Раскладку продукта называет он сам —
+                    // сходим за манифестом, если он в продукте есть; ответ
+                    // соберётся уже с ним.
+                    if let Some(manifest) = manifest::key(&identifier, &keys) {
+                        let object = s3::object(&state.identity, manifest);
+                        let what = Asked::Manifest { identifier, keys };
+                        ask(
+                            state,
+                            pending.correlation_id,
+                            object.url,
+                            object.headers,
+                            what,
+                        );
+                        return;
+                    }
                     crate::emit::on_imagery_result(
-                        &imagery_response(&identifier, &keys, imagery::scan(&keys)),
+                        &imagery_response(&identifier, &keys, imagery::scan(&keys, &[])),
                         &pending.correlation_id,
                     );
                 }
@@ -413,6 +438,28 @@ pub fn on_http_result(
                     }, &pending.correlation_id);
                 }
             }
+        }
+        Asked::Manifest { identifier, keys } => {
+            // Манифест не достался — это не отказ продукту: раскладка
+            // разбирается по именам файлов, как и до манифеста. Сказать об
+            // этом стоит: выбор растра тогда объясняется другим правилом.
+            let measured = match (200..300).contains(&response.status) {
+                true => manifest::measurements(&response.body),
+                false => {
+                    log::warn!(target: "handlers",
+                        "Манифест '{}' не достался: хранилище ответило {}",
+                        identifier, response.status);
+                    Vec::new()
+                }
+            };
+            if measured.is_empty() {
+                log::debug!(target: "handlers",
+                    "Манифест '{}' измерений не назвал — выбор по именам файлов", identifier);
+            }
+            crate::emit::on_imagery_result(
+                &imagery_response(&identifier, &keys, imagery::scan(&keys, &measured)),
+                &pending.correlation_id,
+            );
         }
         Asked::Search { request, widened } => {
             let (found, error) = match from_catalogue(&response, catalogue::scenes) {
@@ -476,24 +523,30 @@ pub fn on_http_result(
             // Спросили об одной части, а показывать надо снимок — то есть ту из
             // частей, которая для этого годится. Соседей каталог знает, и это
             // ещё один ход к нему, а не ответ.
-            match scene::acquisition(&facts) {
-                Some(key) => {
-                    let url = catalogue::siblings(&facts.platform, product.acquired);
+            // Спрашивать соседей стои́т только там, где каталог вообще связал
+            // продукт с чем-то: не связал — соседей у него и не будет, а ход к
+            // каталогу лишний.
+            match scene::acquisition(&facts).is_some() {
+                true => {
+                    let url =
+                        catalogue::siblings(&facts.platform, &facts.tile, product.acquired);
                     ask(state, pending.correlation_id, url, HashMap::new(),
-                        Asked::Siblings { key, found: product });
+                        Asked::Siblings { facts, found: product });
                 }
-                None => answer(&pending.correlation_id, Some(product), String::new(), true),
+                false => answer(&pending.correlation_id, Some(product), String::new(), true),
             }
         }
-        Asked::Siblings { key, found } => {
+        Asked::Siblings { facts, found } => {
             // Соседние части — добавка, а не ответ: не нашлись или не
             // спросились — заказчик получает найденное как есть. Отказывать
             // из-за соседей значило бы потерять и сам продукт.
+            //
+            // Отбирает их то же правило, которым поиск сводит снимки
+            // (`scene::same_scene`), а не голый ключ: у частей без номера
+            // слайса ключи расходятся, и та же строка раскрывалась бы
+            // по-разному в зависимости от того, откуда о ней спросили.
             let others = from_catalogue(&response, catalogue::parse).unwrap_or_default();
-            let same: Vec<_> = others
-                .into_iter()
-                .filter(|(facts, _)| scene::acquisition(facts).as_deref() == Some(key.as_str()))
-                .collect();
+            let same = scene::same_scene(&facts, &found.name, others);
             let product = match scene::about(same, &found.identifier) {
                 Some(scene) => {
                     if scene.identifier != found.identifier {

@@ -102,7 +102,7 @@ pub struct Highlight {
 
 /// Насколько узкой человек вправе сделать панель, в точках разметки. Уже этого
 /// в ней не видно ни полосы вкладок, ни того, что в них.
-const MIN_PANE: f32 = 180.0;
+pub const MIN_PANE: f32 = 180.0;
 
 pub struct State {
     /// Открытые виды в порядке вкладок. Порядок — свойство разметки, а не
@@ -199,7 +199,7 @@ pub struct State {
     /// Растры наложений: открытие ресурса у провайдера. Контекст — ключ
     /// наложения и роль растра; сборка помнит свои корреляции, чтобы снять их
     /// отсюда, когда наложение убирают (см. overlay::Assembly).
-    pub opens: Correlator<(String, crate::proto::globe::OverlayRole)>,
+    pub opens: Correlator<(String, crate::proto::globe::OverlayRole, overlay::Part)>,
     /// data-provider/on_imagery_result — какие растры у продукта. Контекст —
     /// ключ наложения, которое их ждёт.
     pub imageries: Correlator<String>,
@@ -285,6 +285,11 @@ impl State {
         let fresh = self.layout.split(pane, side)?;
         if let Some(split) = self.layout.split_of(fresh) {
             self.layout.set_fraction(split, fraction);
+            // Тот же предел, что у живой границы, и тем же способом: доля
+            // приезжает из файла, а он бывает и правленым, и писанным другой
+            // раскладкой окна. Открывшаяся в ноль панель не показывает ни
+            // вкладок, ни границы, за которую ей вернуть место.
+            self.divide(split, 0.0);
         }
         Some(fresh)
     }
@@ -331,7 +336,12 @@ impl State {
     /// Убирает опустевшую панель: место отдаётся соседней, к ней же переходит
     /// взгляд. Последняя панель остаётся пустой — отдавать её место некому, а
     /// «все вкладки закрыты» надо где-то показать.
-    fn forget_if_empty(&mut self, pane: PaneId) {
+    ///
+    /// Публично не только ради закрытия вкладки: пустой панель выходит и из
+    /// сохранённой раскладки, где синглтон назван дважды (см.
+    /// `handlers::persist::restore`), а правило «пустых панелей не бывает» на
+    /// то и правило, чтобы быть одним.
+    pub fn forget_if_empty(&mut self, pane: PaneId) {
         if self.views_in(pane).next().is_some() {
             return;
         }

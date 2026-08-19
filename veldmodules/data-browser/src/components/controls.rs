@@ -321,11 +321,63 @@ pub fn path(view: ViewId, current: &str) -> Element<Msg> {
 /// Кнопка страницы: номера растягиваются по своей подписи, стрелки — нет.
 const STEP_HEIGHT: f32 = 24.0;
 const STEP_WIDTH: f32 = 26.0;
+/// Зазор между частями подвала.
+const STEP_GAP: f32 = 8.0;
+/// Поля кнопки страницы по обе стороны от номера (`theme::page_button`).
+const STEP_PAD: f32 = 14.0;
+
+/// Сколько номеров помещается в подвал отведённой ширины.
+///
+/// Постоянного в нём три вещи — подпись диапазона и обе стрелки; остальное
+/// отдано номерам, и мерка у них одна, по самому широкому: номера разной
+/// длины стоят в ряд, а посчитанный по короткому не влез бы, когда до
+/// трёхзначных дойдёт очередь.
+fn room(width: f32, pages: usize, range: &str) -> usize {
+    let fixed = theme::GUTTER * 2.0
+        + format::text_width(range, theme::TEXT_LABEL)
+        + (STEP_WIDTH + STEP_GAP) * 2.0;
+    let slot =
+        format::text_width(&pages.to_string(), theme::TEXT_LABEL) + STEP_PAD + STEP_GAP;
+    (((width - fixed) / slot) as i32).max(1) as usize
+}
+
+/// Номера страниц в подвале: окно вокруг текущей, а края названы всегда.
+/// `None` — разрыв, на месте которого стои́т многоточие.
+///
+/// Окно, а не весь список: номеров у каталога бывает под полсотни, в ряд они
+/// не помещаются, а коробка режет по себе — и срезается при этом хвост ряда,
+/// то есть стрелка «дальше». Список без единого способа уйти со своей первой
+/// страницы выглядит короче, чем он есть. Края же названы затем, что до
+/// последней страницы иначе идти по одной.
+fn numbers(page: usize, pages: usize, room: usize) -> Vec<Option<usize>> {
+    // Меньше пяти мест окно не выражает: первая, разрыв, текущая, разрыв,
+    // последняя — его наименьшая форма. Тесно и так, и так, но с окном до
+    // краёв хотя бы можно дойти.
+    let room = room.max(5);
+    if pages <= room {
+        return (0..pages).map(Some).collect();
+    }
+    // Края и оба разрыва заняты, подвижному окну достаётся остаток.
+    let span = room - 4;
+    let first = page.saturating_sub(span / 2).clamp(1, pages - 1 - span);
+    let last = first + span - 1;
+
+    let mut slots = vec![Some(0)];
+    if first > 1 {
+        slots.push(None);
+    }
+    slots.extend((first..=last).map(Some));
+    if last < pages - 2 {
+        slots.push(None);
+    }
+    slots.push(Some(pages - 1));
+    slots
+}
 
 /// Подвал со страницами. Длинный каталог режется на страницы, и прокрутка
 /// остаётся внутри страницы — поэтому место, на котором стоял пользователь,
 /// не теряется при переходе.
-pub fn pager(view: ViewId, arranged: &Arranged<'_>) -> Element<Msg> {
+pub fn pager(view: ViewId, arranged: &Arranged<'_>, width: f32) -> Element<Msg> {
     let step = |glyph: &str, to: usize, enabled: bool| {
         let step = theme::surface_button(
             icon::<Msg>(glyph).size(9.0).color(if enabled { theme::INK_SOFT } else { theme::LINE_STRONG }),
@@ -336,28 +388,36 @@ pub fn pager(view: ViewId, arranged: &Arranged<'_>) -> Element<Msg> {
         if enabled { step.on_press(Msg::In(view, ViewMsg::Page(to))) } else { step }
     };
 
-    let pages = (0..arranged.pages).map(|index| {
-        theme::page_button(
-            text::<Msg>((index + 1).to_string())
+    let range = arranged.range();
+    let pages = numbers(arranged.page, arranged.pages, room(width, arranged.pages, &range))
+        .into_iter()
+        .map(|slot| match slot {
+            Some(index) => theme::page_button(
+                text::<Msg>((index + 1).to_string())
+                    .size(theme::TEXT_LABEL)
+                    .color(theme::INK_MUTED)
+                    .single_line(),
+                index == arranged.page,
+            )
+            .height(Length::Fixed(STEP_HEIGHT))
+            .on_press(Msg::In(view, ViewMsg::Page(index)))
+            .into(),
+            None => text::<Msg>("…")
                 .size(theme::TEXT_LABEL)
-                .color(theme::INK_MUTED)
-                .single_line(),
-            index == arranged.page,
-        )
-        .height(Length::Fixed(STEP_HEIGHT))
-        .on_press(Msg::In(view, ViewMsg::Page(index)))
-        .into()
-    });
+                .color(theme::INK_DIM)
+                .single_line()
+                .into(),
+        });
 
     let bar = row![
-        text::<Msg>(arranged.range()).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line(),
+        text::<Msg>(range).size(theme::TEXT_LABEL).color(theme::INK_DIM).single_line(),
         // Распорка: подпись слева, страницы справа.
         space::<Msg>(Length::Fill, Length::Fixed(0.0)),
     ]
     .push(step(theme::glyph::LEFT, arranged.page.saturating_sub(1), arranged.page > 0))
     .extend(pages)
     .push(step(theme::glyph::RIGHT, arranged.page + 1, arranged.page + 1 < arranged.pages))
-    .spacing(8.0)
+    .spacing(STEP_GAP)
     .width(Length::Fill)
     .align_items(Alignment::Center)
     .padding(Padding { top: 7.0, bottom: 7.0, left: theme::GUTTER, right: theme::GUTTER });
@@ -441,5 +501,63 @@ mod tests {
     #[test]
     fn рычаг_шире_полосы_встаёт_один() {
         assert_eq!(shape(150.0, FIELD, &CHIPS), Shape::Stack(vec![1, 1, 1]));
+    }
+
+    /// Помещаются все номера — окна нет и разрывов нет.
+    #[test]
+    fn короткий_список_называет_все_страницы() {
+        assert_eq!(numbers(0, 3, 9), vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(numbers(2, 9, 9), (0..9).map(Some).collect::<Vec<_>>());
+    }
+
+    /// Длинный список: номеров ровно столько, сколько мест, края названы
+    /// всегда, а текущая страница в окне — иначе по ней не видно, где стои́шь.
+    #[test]
+    fn длинный_список_держится_в_отведённых_местах() {
+        for pages in [11usize, 41, 100] {
+            for room in [5usize, 8, 9, 10] {
+                for page in 0..pages {
+                    let slots = numbers(page, pages, room);
+                    assert!(slots.len() <= room.max(5), "{} мест на {}, стр. {}", slots.len(), pages, page);
+                    assert_eq!(slots.first(), Some(&Some(0)), "первая не названа");
+                    assert_eq!(slots.last(), Some(&Some(pages - 1)), "последняя не названа");
+                    assert!(slots.contains(&Some(page)), "текущей {} нет в окне", page);
+                    // Разрыв стои́т только там, где номера действительно
+                    // пропущены: подряд идущие им не разделяются.
+                    let named: Vec<usize> = slots.iter().flatten().copied().collect();
+                    let mut expected = Vec::new();
+                    for pair in named.windows(2) {
+                        expected.push(pair[1] - pair[0] > 1);
+                    }
+                    let gaps: Vec<bool> = slots
+                        .windows(3)
+                        .filter(|window| window[1].is_none())
+                        .map(|_| true)
+                        .collect();
+                    assert_eq!(gaps.len(), expected.iter().filter(|jump| **jump).count());
+                }
+            }
+        }
+    }
+
+    /// Мест меньше, чем нужно окну, — подвал всё равно остаётся проходимым:
+    /// края на месте, а стрелки за номера не отвечают.
+    #[test]
+    fn теснота_не_отнимает_края() {
+        let slots = numbers(20, 41, 1);
+        assert_eq!(slots.first(), Some(&Some(0)));
+        assert_eq!(slots.last(), Some(&Some(40)));
+        assert!(slots.contains(&Some(20)));
+        assert!(slots.len() <= 5);
+    }
+
+    /// Мест считается по самому широкому номеру: посчитанные по «1» не влезли
+    /// бы, когда дошло бы до «41».
+    #[test]
+    fn мест_тем_меньше_чем_длиннее_номера() {
+        let narrow = room(470.0, 41, "1–20 из 810");
+        let wide = room(900.0, 41, "1–20 из 810");
+        assert!(narrow >= 1 && narrow < wide, "{} против {}", narrow, wide);
+        assert!(room(470.0, 999, "1–20 из 19 980") < narrow);
     }
 }

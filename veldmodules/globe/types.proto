@@ -138,6 +138,10 @@ enum OverlayRole {
 message OverlayRaster {
   veldmap.core.ResourceHandle resource = 1;
   OverlayRole role = 2;
+  // Ресурс с координатами пикселей растра, когда они лежат отдельно от него
+  // (Sentinel-3). Приходит во владение вместе с самим растром и живёт столько
+  // же: спрашивают его один раз, при описании.
+  optional veldmap.core.ResourceHandle geolocation = 3;
 }
 
 // Одно наложение: привязка, растры и то, как его показывать. Рамка UTM —

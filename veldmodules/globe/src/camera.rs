@@ -319,14 +319,15 @@ pub fn project(view_proj: &Mat4, point: geodesy::World) -> [f32; 4] {
 /// выше, поэтому поместившееся по вертикали помещается и поперёк.
 fn height_for(radius_deg: f64) -> f64 {
     let half = (FOV_Y_DEG * 0.5).to_radians();
-    // Дальше горизонта кадр не растянуть: за ним Земля уходит от взгляда, а не
-    // прибавляется, — отсюда и потолок.
-    let arc = radius_deg.clamp(0.0, 89.0).to_radians();
-    let radius = if arc + half >= std::f64::consts::FRAC_PI_2 {
-        1.0 / arc.cos()
-    } else {
-        (arc + half).sin() / half.sin()
-    };
+    // Больше, чем полкадра до горизонта, не просят: за этой отметкой луч края
+    // кадра мимо Земли уже не приходит, и отойти ещё дальше значит не увидеть
+    // больше, а получить тот же шар мельче — при `radius_deg` в 90° Земля
+    // занимала восьмую часть кадра, потому что высота уходила в свой потолок.
+    // На самой отметке лимб Земли ровно по краю кадра, и видно всё, что вообще
+    // видно с одной стороны.
+    let arc = radius_deg.clamp(0.0, (std::f64::consts::FRAC_PI_2 - half).to_degrees())
+        .to_radians();
+    let radius = (arc + half).sin() / half.sin();
     (radius - 1.0) * geodesy::SEMI_MAJOR_M
 }
 
@@ -393,13 +394,41 @@ mod tests {
 
     #[test]
     fn height_inverts_visible_arc() {
-        for radius_deg in [0.5, 2.0, 10.0, 30.0, 55.0] {
+        // До полукадра от горизонта пара точная.
+        let brim = 90.0 - FOV_Y_DEG * 0.5;
+        for radius_deg in [0.5, 2.0, 10.0, 30.0, 55.0, brim] {
             let camera = at(0.0, 0.0, height_for(radius_deg));
             assert!(
                 (camera.visible_deg() - radius_deg).abs() < 1e-6,
                 "радиус {}° увиделся как {}°", radius_deg, camera.visible_deg()
             );
         }
+    }
+
+    /// Наводка на снимок во всю Землю не должна отгонять камеру в свой потолок:
+    /// оттуда шар занимает восьмую часть кадра, и «поместилось» превращается в
+    /// «не видно ничего».
+    #[test]
+    fn focusing_on_the_whole_earth_fills_the_frame() {
+        let brim = 90.0 - FOV_Y_DEG * 0.5;
+        // Всё, что просят сверх полукадра до горизонта, даёт одну и ту же
+        // высоту: дальше отходить не за чем.
+        let at_brim = height_for(brim);
+        for asked in [brim, 80.0, 90.0, 117.0, 1000.0] {
+            assert!(
+                (height_for(asked) - at_brim).abs() < 1.0,
+                "радиус {}° увёл камеру на {} м вместо {}", asked, height_for(asked), at_brim
+            );
+        }
+        // На этой высоте лимб Земли ровно по краю кадра: её угловой радиус
+        // равен половине угла обзора.
+        let camera = at(0.0, 0.0, at_brim);
+        let limb = (1.0 / (1.0 + at_brim / geodesy::SEMI_MAJOR_M)).asin().to_degrees();
+        assert!(
+            (limb - FOV_Y_DEG * 0.5).abs() < 1e-6,
+            "лимб {}° против полукадра {}°", limb, FOV_Y_DEG * 0.5
+        );
+        assert!((camera.visible_deg() - brim).abs() < 1e-6);
     }
 
     /// Рамка остаётся ортонормальной под любым жестом: из неё выводится и

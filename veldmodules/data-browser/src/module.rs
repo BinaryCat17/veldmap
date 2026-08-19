@@ -47,10 +47,12 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         state.notice = None;
     }
 
-    // Раскладку запоминаем после разбора, но не на каждом кадре перетаскивания:
-    // граница шлёт сдвиг десятками сообщений в секунду, а записать надо то
-    // место, где её отпустили (см. `Msg::Divided`).
-    let dragging = matches!(message, Msg::Divide(..));
+    // Раскладку запоминаем после разбора, но не на том, чего человек не
+    // отправлял: граница и область шлют десятки сообщений в секунду, и каждое
+    // прогоняло бы снимок всего дерева панелей через serde_json впустую.
+    // Отпускание границы сюда не входит — им перетаскивание и кончается, и
+    // записать надо ровно то место, где её отпустили (см. [`settled`]).
+    let settled = settled(&message);
 
     match message {
         Msg::TabSelect(id) => handlers::nav::on_tab_select(state, id),
@@ -91,9 +93,19 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::In(view, message) => on_view_message(state, view, message),
     }
 
-    if !dragging {
+    if settled {
         handlers::persist::save_if_changed(state);
     }
+}
+
+/// Есть ли раскладке что запоминать после этого сообщения.
+///
+/// Всё, чего человек не отправлял (см. [`idle`]), раскладки не меняет — кроме
+/// отпускания границы: оно и есть конец перетаскивания. Отдельным предикатом,
+/// а не своим списком сообщений: два списка одного и того же разошлись бы на
+/// первом же новом сообщении, приезжающем «само».
+fn settled(message: &Msg) -> bool {
+    !idle(message) || matches!(message, Msg::Divided)
 }
 
 /// Сообщение, которое человек не отправлял, — оно приезжает от того, что

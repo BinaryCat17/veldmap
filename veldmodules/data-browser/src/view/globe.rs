@@ -11,15 +11,31 @@ use crate::module::state::{GlobeState, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
 
 
-/// Сколько знаков имени выбранного снимка помещается в подпись. Числом, а не
-/// шириной: укорачивает имя многоточие в середине (см. `format::ellipsize`), а
-/// не разметка, — способа сказать тексту «сожмись» в этом протоколе нет.
+/// Сколько знаков имени помещается в полосу шириной `width`.
 ///
-/// Столько, сколько остаётся от полосы после трёх кнопок в панели шириной в
-/// пол-экрана: имя продукта длиной под семьдесят знаков целиком не показать
-/// всё равно, а вылезшее за край утащило бы за собой кнопки — то единственное,
-/// ради чего в эту полосу и смотрят.
-const PICKED_CHARS: usize = 34;
+/// Считается, а не назначается числом: имя укорачивает клиент
+/// (`format::ellipsize`) — способа сказать тексту «сожмись» в этом протоколе
+/// нет, — и названное с запасом оно выдавит за край кнопки, то единственное,
+/// ради чего в эту полосу и смотрят. Постоянным числом это не выражается:
+/// полоса бывает и во весь экран, и в половину.
+///
+/// Кнопки меряются по своим подписям — своей ширины у них нет, они её и есть,
+/// — и считаются все три, даже когда показаны не все: лишний запас укорачивает
+/// имя, недостача выдавливает кнопку.
+fn picked_chars(width: f32) -> usize {
+    const LABELS: [&str; 3] = ["Смотреть", "В каталоге", "Снять с шара"];
+    // Поля кнопки по обе стороны — те же, что ставит `theme::bar_button`.
+    const BUTTON_PAD: f32 = 8.0 * 2.0;
+    let buttons: f32 = LABELS
+        .iter()
+        .map(|label| {
+            format::text_width(label, theme::TEXT_SMALL)
+                + BUTTON_PAD
+                + crate::module::view::BAR_SPACING
+        })
+        .sum();
+    format::mono_fit((width - buttons - theme::GUTTER * 2.0).max(0.0), theme::TEXT_SMALL)
+}
 
 /// Снимок, о котором говорит полоса: чем его подписать, чем адресовать и каким
 /// способом смотреть. Три поля, а не тройка: имя и ключ у снимка похожи с виду,
@@ -110,7 +126,7 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
             // отводит первым, и никакое имя их за край не вытолкнет.
             trailing.push(
                 container(
-                    mono::<Msg>(format::ellipsize(subject.label, PICKED_CHARS))
+                    mono::<Msg>(format::ellipsize(subject.label, picked_chars(state.pane_width(view))))
                         .size(theme::TEXT_SMALL)
                         .color(theme::INK_SOFT)
                         .single_line(),
@@ -178,4 +194,22 @@ fn caption(state: &State, view: ViewId, globe: &GlobeState) -> Element<Msg> {
             .align_items(Alignment::Center),
     )
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::picked_chars;
+
+    /// Имени достаётся то, что осталось от кнопок, — и в узкой панели не
+    /// остаётся ничего. Ноль здесь честнее любого минимума: полоса, в которой
+    /// имени нет места, обязана показать кнопки целыми, а огрызок имени в две
+    /// буквы не назовёт снимка и всё равно отберёт у них место.
+    #[test]
+    fn the_name_gives_the_bar_buttons_their_room_first() {
+        let wide = picked_chars(1600.0);
+        let half = picked_chars(800.0);
+        assert!(wide > half, "широкая полоса вмещает больше: {} против {}", wide, half);
+        assert_eq!(picked_chars(260.0), 0, "кнопки занимают полосу целиком");
+        assert!(half > 0, "в половине экрана имя ещё помещается");
+    }
 }

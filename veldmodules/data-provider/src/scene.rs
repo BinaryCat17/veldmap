@@ -16,6 +16,7 @@ use crate::proto::data_provider::{DataProduct, Part};
 /// Что о продукте нужно знать, чтобы собрать снимки. Отдельно от самого
 /// продукта затем, что живёт это в атрибутах каталога и наружу не едет:
 /// заказчику нужен снимок, а не то, чем его собирали.
+#[derive(Clone)]
 pub struct Facts {
     /// Спутник словами каталога: «SENTINEL-1».
     pub platform: String,
@@ -88,6 +89,61 @@ pub fn acquisition(facts: &Facts) -> Option<String> {
         ));
     }
     None
+}
+
+/// Дататейк из имени продукта Sentinel-1 — десятичным числом, как его
+/// называет каталог.
+///
+/// Каталог называет `datatakeID` не всему архиву: у продуктов до осени 2023
+/// его нет вовсе (проверено по живому каталогу — 2019 и 2022 годы пусты, с
+/// октября 2023 поле заполнено). Без него правило «по слайсу» не срабатывает,
+/// ключ падает на «по витку с секундой», а секунды у сырья, комплексного и
+/// обработанного расходятся на две-четыре — и одна съёмка показывается тремя
+/// строками из пяти возможных, ровно тем, что [`acquisition`] и предотвращает.
+///
+/// В имени дататейк стои́т всегда — шестнадцатеричным полем сразу за парой
+/// времён съёмки и номером витка:
+/// `S1A_IW_GRDH_1SDV_<начало>_<конец>_<виток>_<дататейк>_<CRC>`.
+/// Ищется он от этой пары, а не по счёту полей: у `WV_SLC__1SSV` тип занимает
+/// два поля с пустым между ними, а у тайловой укладки в конце добавлен `_COG`,
+/// и счёт с любого края сбивается.
+pub fn datatake_in_name(name: &str) -> Option<String> {
+    let name = name.split('.').next().unwrap_or(name);
+    let fields: Vec<&str> = name.split('_').collect();
+    let a_time = |field: &&str| {
+        field.len() == 15
+            && field.as_bytes()[8] == b'T'
+            && field.chars().enumerate().all(|(at, sign)| at == 8 || sign.is_ascii_digit())
+    };
+    let pair = fields.windows(2).position(|pair| a_time(&pair[0]) && a_time(&pair[1]))?;
+    // За парой времён идут виток и дататейк — оба шестизначные, но виток
+    // десятичный, а дататейк шестнадцатеричный.
+    let datatake = fields.get(pair + 3)?;
+    let hex = |field: &&str| field.len() == 6 && field.chars().all(|sign| sign.is_ascii_hexdigit());
+    hex(datatake).then(|| u64::from_str_radix(datatake, 16).ok())?.map(|value| value.to_string())
+}
+
+/// Клетка градусной сетки из имени продукта — «N03W004», как называет свои
+/// плитки Sentinel-1 RTC.
+///
+/// Каталог о ней молчит: `tileId` у этих продуктов пуст, как пусты дататейк и
+/// номер слайса, — и без плитки ключ съёмки падает на виток с секундой. А
+/// виток у соседних клеток один, и секунда одна: пролёт нарезан на клетки уже
+/// после съёмки, время у всех от неё. Десяток клеток по разным углам Земли
+/// становился бы одной строкой списка.
+///
+/// Читается строго: две цифры широты, три долготы, полушария буквами и
+/// подчёркивание сразу за клеткой. Совпасть с этим случайно нечему — имена
+/// прочих миссий начинаются с платформы («S1A_», «S2B_»).
+pub fn tile_in_name(name: &str) -> Option<String> {
+    let tile = name.split('_').next()?;
+    let sign = tile.as_bytes();
+    let shaped = tile.len() == 7
+        && matches!(sign[0], b'N' | b'S')
+        && matches!(sign[3], b'E' | b'W')
+        && sign[1..3].iter().all(u8::is_ascii_digit)
+        && sign[4..7].iter().all(u8::is_ascii_digit);
+    shaped.then(|| tile.to_string())
 }
 
 /// Суффиксы, которыми в имени продукта записана укладка, а не съёмка.
@@ -301,6 +357,45 @@ fn beside_a_slice(slices: &[Slice], facts: &Facts) -> Option<String> {
 
 /// Продукты каталога → снимки, порядком каталога (свежие сверху).
 ///
+/// Ключ съёмки одного продукта — то единственное, чем во всём модуле отвечают
+/// на «одна ли это съёмка».
+///
+/// Слайсы приходят доводом, а не считаются здесь: узнаются они по всему набору
+/// сразу, а ключ спрашивают по одному продукту.
+fn key_of(slices: &[Slice], facts: &Facts, name: &str) -> String {
+    beside_a_slice(slices, facts)
+        .or_else(|| acquisition(facts))
+        .unwrap_or_else(|| by_name(facts, name))
+}
+
+/// Те из набора, что сняты той же съёмкой, что и названный продукт.
+///
+/// Ответ здесь тот же самый, которым сводит снимки [`group`], и это не
+/// вежливость. Второй ответ рядом уже был: обратный ход по ключу отбирал
+/// соседей голым [`acquisition`], и у частей без номера слайса ключи
+/// расходились — часть, которую поиск показывал внутри снимка, по ключу
+/// оставалась одиночкой. Одна и та же строка списка при этом раскрывалась
+/// по-разному в зависимости от того, откуда о ней спросили.
+pub fn same_scene(
+    facts: &Facts,
+    name: &str,
+    others: Vec<(Facts, DataProduct)>,
+) -> Vec<(Facts, DataProduct)> {
+    let framed: Vec<(Facts, DataProduct)> =
+        others.into_iter().filter(|(facts, _)| facts.framed).collect();
+    // Слайсы — по всему набору вместе с самим спрошенным: его слайс тоже
+    // называет съёмку, к которой прикладываются части без номера.
+    let mut all = framed.clone();
+    all.push((facts.clone(), DataProduct { name: name.to_string(), ..Default::default() }));
+    let slices = slices(&all);
+
+    let key = key_of(&slices, facts, name);
+    framed
+        .into_iter()
+        .filter(|(other, product)| key_of(&slices, other, &product.name) == key)
+        .collect()
+}
+
 /// Не снимок — то, у чего нет контура. Вспомогательные данные (калибровочные
 /// таблицы, эфемериды) каталог отдаёт продуктами наравне со съёмкой, и по
 /// свежести они её обгоняют: срок действия таблицы записан будущей датой.
@@ -318,9 +413,7 @@ pub fn group(products: Vec<(Facts, DataProduct)>) -> Vec<DataProduct> {
     let slices = slices(&framed);
 
     for (facts, product) in framed {
-        let key = beside_a_slice(&slices, &facts)
-            .or_else(|| acquisition(&facts))
-            .unwrap_or_else(|| by_name(&facts, &product.name));
+        let key = key_of(&slices, &facts, &product.name);
         if !scenes.contains_key(&key) {
             order.push(key.clone());
         }
@@ -396,6 +489,68 @@ mod tests {
         }
     }
 
+    /// Каталог называет дататейк не всему архиву, а имя — всегда. Без этого
+    /// одна съёмка Sentinel-1 до осени 2023 года распадалась на три строки:
+    /// секунды у сырья, комплексного и обработанного расходятся.
+    #[test]
+    fn a_datatake_is_read_from_the_name_when_the_catalogue_keeps_quiet() {
+        // Живые имена: обычное, с двойным подчёркиванием в типе и с `_COG`.
+        assert_eq!(
+            datatake_in_name("S1B_IW_GRDH_1SDV_20190601T001108_20190601T001137_016495_01F0AB_C0FF.SAFE"),
+            Some("127147".to_string())
+        );
+        assert_eq!(
+            datatake_in_name("S1D_WV_SLC__1SSV_20260818T000819_20260818T001004_004172_007A39_CEFE.SAFE"),
+            Some("31289".to_string())
+        );
+        assert_eq!(
+            datatake_in_name(
+                "S1C_IW_GRDH_1SDV_20260818T001104_20260818T001133_009042_011F30_E912_COG.SAFE"
+            ),
+            Some("73520".to_string())
+        );
+        // Не Sentinel-1 — поля стоя́т иначе, и выдумывать дататейк нельзя.
+        assert_eq!(
+            datatake_in_name("S2A_MSIL2A_20260818T012111_N0512_R031_T54RWV_20260818T042717.SAFE"),
+            None
+        );
+        assert_eq!(
+            datatake_in_name(
+                "S3A_SL_2_LST____20260818T000122_20260818T000422_20260818T011237_0179_143_045_0000_PS1_O_NR_005.SEN3"
+            ),
+            None
+        );
+        assert_eq!(datatake_in_name("что угодно"), None);
+    }
+
+    /// «Одна ли это съёмка» отвечают в двух местах — сведением выдачи и
+    /// обратным ходом по ключу, — и ответ у них обязан быть один. У части без
+    /// номера слайса (OCN) голый ключ расходится с ключом её слайса, и она
+    /// оставалась одиночкой ровно тогда, когда о ней спрашивали по ключу.
+    #[test]
+    fn the_same_scene_is_the_same_from_both_sides() {
+        let mut grd = bare("SENTINEL-1", "IW_GRDH_1S", 1, 1_600_000_000);
+        grd.datatake = "73290".to_string();
+        grd.slice = "17".to_string();
+        grd.second = 1_786_000_000;
+        let mut ocn = bare("SENTINEL-1", "IW_OCN__2S", 2, 69_000_000);
+        ocn.datatake = "73290".to_string();
+        ocn.second = 1_786_000_000;
+
+        let set = vec![
+            (grd.clone(), product("S1C_IW_GRDH_1SDV_A.SAFE")),
+            (ocn.clone(), product("S1C_IW_OCN__2SDV_B.SAFE")),
+        ];
+        // Сведение выдачи кладёт их в один снимок.
+        assert_eq!(group(set.clone()).len(), 1, "поиск развёл части по снимкам");
+        // И обратный ход по ключу отбирает те же самые две.
+        assert_eq!(
+            same_scene(&ocn, "S1C_IW_OCN__2SDV_B.SAFE", set).len(),
+            2,
+            "по ключу часть осталась одиночкой"
+        );
+    }
+
     /// Пять упаковок одной съёмки Sentinel-1 — один снимок, и показывается
     /// тайловая: сырьё нечем показать, полосной уровень 1 читается только
     /// целиком, а уровень 2 — уже не картинка.
@@ -430,6 +585,33 @@ mod tests {
 
     /// Съёмки одной плитки за разные пролёты — разные снимки, и пустой
     /// дататейк их не сливает.
+    #[test]
+    fn a_degree_tile_is_read_from_the_name_when_the_catalogue_is_silent() {
+        // Так называет свои клетки Sentinel-1 RTC: ни tileId, ни дататейка, ни
+        // слайса у них нет, а виток с секундой у соседних клеток общие.
+        assert_eq!(tile_in_name("N03W004_2018_01_19_010910"), Some("N03W004".to_string()));
+        assert_eq!(tile_in_name("S11E024_2018_01_19_010906"), Some("S11E024".to_string()));
+        // Имена прочих миссий начинаются с платформы — под правило не подпадают.
+        assert_eq!(tile_in_name("S1A_IW_GRDH_1SDV_20260817T070301"), None);
+        assert_eq!(tile_in_name("S2B_MSIL1C_20260812T093549"), None);
+        assert_eq!(tile_in_name("N03W04_2018_01_19"), None, "долгота трёхзначная");
+    }
+
+    /// Клетки одного витка — разные снимки: пролёт нарезан на них уже после
+    /// съёмки, и время у всех от неё одно.
+    #[test]
+    fn degree_tiles_of_one_pass_stay_apart() {
+        let rtc = |tile: &str| Facts {
+            tile: tile.to_string(),
+            orbit: "118".to_string(),
+            ..bare("SENTINEL-1", "RTC", 2, 100)
+        };
+        assert_ne!(
+            acquisition(&rtc("N03W004")).expect("ключ"),
+            acquisition(&rtc("N01W006")).expect("ключ")
+        );
+    }
+
     #[test]
     fn same_tile_at_another_pass_is_another_scene() {
         let tiled = |tile: &str, second: i64| Facts {

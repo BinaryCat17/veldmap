@@ -91,6 +91,15 @@ const ACTION_BUTTONS: f32 = 4.0;
 const ACTIONS: f32 =
     theme::ROW_BUTTON * ACTION_BUTTONS + BUTTON_GAP * (ACTION_BUTTONS - 1.0) + CELL_PADDING * 2.0;
 
+/// Та же колонка, когда в ней осталось одно меню.
+const ACTIONS_COMPACT: f32 = theme::ROW_BUTTON + CELL_PADDING * 2.0;
+
+/// Ниже этого имени не остаётся даже узнаваемого куска, и колонка действий
+/// уступает свои значки меню (см. [`Fit::compact`]). Число мельче
+/// [`NAME_MIN`]: то — ширина, ради которой уходят соседние колонки, а это —
+/// граница, за которой строка перестаёт быть строкой.
+const NAME_FLOOR: f32 = 64.0;
+
 /// Сколько места занимает колонка. У имени своей ширины нет — оно забирает
 /// остаток.
 fn width_of(column: Column) -> f32 {
@@ -142,7 +151,7 @@ pub struct Optional {
 /// это меньше [`NAME_MIN`]: по ней считается многоточие (`format::mono_fit`), и
 /// названное с запасом имя не влезло бы в свою ячейку — вместо многоточия его
 /// обрывала бы обрезка, на середине знака.
-pub fn fit(width: f32, optional: Optional) -> (Vec<Column>, f32) {
+pub fn fit(width: f32, optional: Optional) -> Fit {
     let mut columns: Vec<Column> = COLUMNS.to_vec();
     if !optional.checkable {
         columns.retain(|column| *column != Column::Check);
@@ -152,18 +161,38 @@ pub fn fit(width: f32, optional: Optional) -> (Vec<Column>, f32) {
     }
     // Отступы экрана и собственные поля колонки имени тратятся всегда.
     let overhead = theme::GUTTER * 2.0 + CELL_PADDING * 2.0;
-    let taken = |columns: &[Column]| -> f32 {
-        columns.iter().map(|column| width_of(*column)).sum::<f32>() + overhead
+    let taken = |columns: &[Column], compact: bool| -> f32 {
+        columns
+            .iter()
+            .map(|column| match (*column, compact) {
+                (Column::Actions, true) => ACTIONS_COMPACT,
+                (other, _) => width_of(other),
+            })
+            .sum::<f32>()
+            + overhead
     };
 
     for dropped in DROP_ORDER {
-        if width - taken(&columns) >= NAME_MIN {
+        if width - taken(&columns, false) >= NAME_MIN {
             break;
         }
         columns.retain(|column| *column != dropped);
     }
-    let name = (width - taken(&columns)).max(0.0);
-    (columns, name)
+    // Уступать больше нечем, а имени не осталось даже на узнаваемый кусок:
+    // тогда уступают значки строки. Уходят они не в никуда — то же действие
+    // стои́т пунктом её меню, и разница только в том, есть ли под него место.
+    let compact = width - taken(&columns, false) < NAME_FLOOR;
+    let name = (width - taken(&columns, compact)).max(0.0);
+    Fit { columns, name, compact }
+}
+
+/// Что вышло из [`fit`]: какие колонки показывать, сколько досталось имени и
+/// не пришлось ли колонке действий ужаться до одного меню.
+pub struct Fit {
+    pub columns: Vec<Column>,
+    pub name: f32,
+    /// Значки строки не поместились и ушли в её меню.
+    pub compact: bool,
 }
 
 /// Ступенька группировки.
@@ -196,6 +225,7 @@ fn grid(
     cells: impl Fn(Column) -> Element<Msg>,
     columns: &[Column],
     indent: f32,
+    compact: bool,
 ) -> RowBuilder<Msg> {
     // Ступень группировки расширяет первую показанную колонку, какой бы она ни
     // была: колонки отметки и раскрытия есть не всегда, и привязка ступени к
@@ -204,9 +234,15 @@ fn grid(
     row(columns.iter().map(|column| {
         let step = if Some(*column) == first { indent } else { 0.0 };
         let pad = padding_of(*column);
-        let (width, left) = match column {
-            Column::Name => (Length::Fill, pad),
-            other => (Length::Fixed(width_of(*other) + step), pad + step),
+        let (width, left) = match (column, compact) {
+            // Ступень достаётся и имени, когда первой показанной колонкой
+            // оказалось оно: своей ширины у имени нет, поэтому ступень уходит
+            // в отступ. Иначе ярусы группировки схлопывались бы в один — а
+            // ширина имени всё равно считалась бы за вычетом ступени, то есть
+            // подрезанной под отступ, которого нет (см. `entry_line`).
+            (Column::Name, _) => (Length::Fill, pad + step),
+            (Column::Actions, true) => (Length::Fixed(ACTIONS_COMPACT + step), pad + step),
+            (other, _) => (Length::Fixed(width_of(*other) + step), pad + step),
         };
         container(cells(*column))
             .width(width)
@@ -255,6 +291,13 @@ pub struct Context<'a> {
     pub columns: &'a [Column],
     /// Ширина колонки имени в точках разметки.
     pub name_width: f32,
+    /// Значки строки не поместились: у неё осталось одно меню, а то, что
+    /// стояло значками, ушло в него пунктами (см. [`Fit::compact`]).
+    pub compact: bool,
+    /// Сколько знаков имени совпадает у всех строк страницы — в начале и в
+    /// хвосте (см. [`format::shared`]). Одно на всю таблицу: режется по нему
+    /// каждая строка, и посчитанное построчно резало бы соседей по-разному.
+    pub shared: (usize, usize),
     /// Папка, которую сейчас показывают; пусто — вид её не знает (скачанное,
     /// поиск). По ней видно, куда вести «показать в каталоге» бессмысленно.
     pub here: &'a str,
@@ -277,7 +320,7 @@ pub struct Context<'a> {
 /// `all` — отмечено ли всё, что видно под ней (см. `Arranged::all_marked`): в
 /// колонке отметки стоит та же коробочка, что и в строках, и действует она на
 /// тот же набор, о котором говорит.
-pub fn header(view: ViewId, columns: &[Column], all: bool) -> Element<Msg> {
+pub fn header(view: ViewId, columns: &[Column], all: bool, compact: bool) -> Element<Msg> {
     let label = |name: &str| {
         text::<Msg>(name.to_string())
             .size(theme::TEXT_HEADER)
@@ -308,6 +351,7 @@ pub fn header(view: ViewId, columns: &[Column], all: bool) -> Element<Msg> {
         },
         columns,
         0.0,
+        compact,
     )
     .height(Length::Fixed(HEADER_HEIGHT));
 
@@ -349,6 +393,7 @@ fn waiting_line(depth: usize, context: Context<'_>) -> Element<Msg> {
         },
         context.columns,
         indent,
+        context.compact,
     )
     .height(Length::Fixed(theme::ROW_HEIGHT));
 
@@ -387,6 +432,7 @@ fn group_line(title: &str, meta: &str, depth: usize, context: Context<'_>) -> El
         },
         context.columns,
         indent,
+        context.compact,
     )
     .height(Length::Fixed(theme::ROW_HEIGHT));
 
@@ -418,9 +464,10 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
             // пропорционального шрифта их ширина разная. Папка — обычным: это
             // подпись, а не значение.
             Column::Name => {
-                let title = format::ellipsize(
+                let title = format::distinct(
                     &row_data.title,
                     format::mono_fit(context.name_width - indent, theme::TEXT_MONO),
+                    context.shared,
                 );
                 match row_data.kind.is_folder() {
                     true => text::<Msg>(title)
@@ -475,6 +522,7 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
         },
         context.columns,
         indent,
+        context.compact,
     );
 
     // Снимок едет на шар — под строкой полоса хода: нажали значок здесь, и
@@ -689,12 +737,28 @@ fn primary(view: ViewId, row: &Row) -> Option<Primary> {
 
 /// Кнопки справа: быстрые значки и меню всего остального.
 fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
-    let mut buttons: Vec<Element<Msg>> = quick(view, entry)
+    // В тесноте значки уступают место имени: строка без имени не строка. Уходят
+    // они не в никуда — то же действие становится пунктом меню, и значок с
+    // пунктом здесь одно и то же, разница только в том, есть ли место.
+    let shown = match context.compact {
+        true => Vec::new(),
+        false => quick(view, entry),
+    };
+    let mut buttons: Vec<Element<Msg>> = shown
         .into_iter()
         .map(|Quick { glyph, hint, message, tone }| icon_button(glyph, tone, &hint, message))
         .collect();
 
-    let items = menu_items(view, entry, context.here);
+    let mut items = menu_items(view, entry, context.here);
+    if context.compact {
+        // Пунктами — впереди прочего: это главные действия строки, значками
+        // они и стояли.
+        let moved: Vec<super::menu::Item> = quick(view, entry)
+            .into_iter()
+            .map(|Quick { hint, message, .. }| super::menu::Item::new(hint, message))
+            .collect();
+        items.splice(0..0, moved);
+    }
     if !items.is_empty() {
         let menu = Menu::Row(entry.key().to_string());
         let open = context.menu == Some(&menu);
@@ -756,7 +820,10 @@ impl Quick {
 fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
     let mut quick = Vec::new();
     let key = row.snapshot_key().to_string();
-    if let Some(action) = primary(view, row).filter(|action| !action.transition) {
+    let main = primary(view, row).filter(|action| !action.transition);
+    // Показ уже стои́т главным действием — у скачанного файла это «открыть».
+    let showing = main.as_ref().is_some_and(|action| action.glyph == theme::glyph::EYE);
+    if let Some(action) = main {
         quick.push(Quick::new(action.glyph, action.hint.to_string(), action.message));
     }
     // Снимок, лежащий папкой, скачивается целиком: его файлы разложены по
@@ -778,11 +845,13 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
         };
         quick.push(Quick::new(theme::glyph::DOWNLOAD, hint, Msg::DownloadSnapshot(key.clone())));
     }
-    // Главное действие снимка-папки — переход внутрь, а значком оно не стоит
-    // (см. выше), поэтому просмотр остаётся единственным значком показа: иначе
-    // смотреть снимок можно было бы только через меню, а это его основное
-    // занятие.
-    if row.kind.is_product() && row.kind.is_folder() && !key.is_empty() {
+    // Смотреть снимок — его собственное действие, и значок у него один, чем бы
+    // снимок ни лежал: папкой ярусов или единственным файлом. Условие здесь то
+    // же, что у значка глобуса, и это не совпадение — вопрос у них один
+    // («можно ли это показать»), и два ответа на него разошлись бы молча: у
+    // гранулы Sentinel-5P и у климатики значок глобуса стоял, а значка
+    // просмотра не было, хотя смотреть их — основное занятие.
+    if row.is_snapshot() && row.viewable && !key.is_empty() && !showing {
         quick.push(Quick::new(
             theme::glyph::EYE,
             "Смотреть снимок".to_string(),
@@ -981,10 +1050,10 @@ mod tests {
     #[test]
     fn optional_columns_appear_only_where_they_are_needed() {
         let wide = 1400.0;
-        let (bare, _) = fit(wide, Optional::default());
+        let bare = fit(wide, Optional::default()).columns;
         assert!(!bare.contains(&Column::Check) && !bare.contains(&Column::Twist));
 
-        let (full, _) = fit(wide, Optional { twisty: true, checkable: true });
+        let full = fit(wide, Optional { twisty: true, checkable: true }).columns;
         assert_eq!(full.first(), Some(&Column::Check));
         assert_eq!(full.get(1), Some(&Column::Twist));
     }
@@ -994,10 +1063,11 @@ mod tests {
     #[test]
     fn narrow_panes_drop_columns_instead_of_squeezing_the_name() {
         let optional = Optional { twisty: true, checkable: true };
-        let (columns, name) = fit(420.0, optional);
-        assert!(name >= NAME_MIN, "имени досталось {}", name);
-        assert!(columns.contains(&Column::Name) && columns.contains(&Column::Actions));
-        assert!(!columns.contains(&Column::Progress), "справочное уходит первым");
+        let fit = fit(420.0, optional);
+        assert!(fit.name >= NAME_MIN, "имени досталось {}", fit.name);
+        assert!(!fit.compact, "значки уступают только когда имени не остаётся вовсе");
+        assert!(fit.columns.contains(&Column::Name) && fit.columns.contains(&Column::Actions));
+        assert!(!fit.columns.contains(&Column::Progress), "справочное уходит первым");
     }
 
     /// Уступать бывает нечему: в половине узкого окна одни лишь кнопки строки
@@ -1006,18 +1076,28 @@ mod tests {
     #[test]
     fn a_pane_too_narrow_for_the_minimum_reports_what_is_left() {
         let optional = Optional { twisty: false, checkable: true };
-        let (columns, name) = fit(272.0, optional);
+        let fit = fit(272.0, optional);
 
-        assert!(name < NAME_MIN, "проверяется именно нехватка, а досталось {}", name);
-        assert!(!columns.contains(&Column::Icon), "значок уступает последним");
+        assert!(fit.name < NAME_MIN, "проверяется именно нехватка, а досталось {}", fit.name);
+        assert!(!fit.columns.contains(&Column::Icon), "значок уступает последним");
         // Ровно то, что достанется тянущейся колонке: всё место минус
         // фиксированные колонки, отступы экрана и собственные поля ячейки.
-        let fixed: f32 = columns.iter().map(|column| width_of(*column)).sum();
-        assert_eq!(name, 272.0 - fixed - theme::GUTTER * 2.0 - CELL_PADDING * 2.0);
+        let fixed: f32 = fit.columns.iter().map(|column| width_of(*column)).sum();
+        assert_eq!(fit.name, 272.0 - fixed - theme::GUTTER * 2.0 - CELL_PADDING * 2.0);
+    }
 
-        // Совсем без места имени не остаётся ничего — но и отрицательным оно
-        // не бывает: на такой ширине по нему всё равно считают знаки.
-        let (_, none) = fit(100.0, optional);
-        assert_eq!(none, 0.0);
+    /// Панель в свой предел (`MIN_PANE`) не оставляла имени ни точки: одни лишь
+    /// кнопки строки шире её. Строка из одних значков не строка — поэтому
+    /// уступают и значки, уходя пунктами в меню.
+    #[test]
+    fn the_narrowest_pane_keeps_the_name_and_moves_the_icons_into_the_menu() {
+        let optional = Optional { twisty: true, checkable: true };
+        let tight = fit(crate::module::state::MIN_PANE, optional);
+        assert!(tight.compact, "значки не уступили");
+        assert!(tight.name > 0.0, "имени опять не осталось");
+        assert!(tight.columns.contains(&Column::Name) && tight.columns.contains(&Column::Actions));
+
+        // Просторной панели это не касается: там значки на месте.
+        assert!(!fit(900.0, optional).compact);
     }
 }

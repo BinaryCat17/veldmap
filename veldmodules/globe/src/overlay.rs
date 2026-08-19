@@ -136,13 +136,30 @@ impl Frame {
     /// Метров земли на пиксель растра шириной `width`. У квада и сетки — по
     /// верхнему ребру и грубой метрике градусов: спрашивают это, чтобы выбрать
     /// уровень пирамиды, а он меняется вдвое за раз.
-    pub fn ground_m_per_px(&self, width: u32) -> f64 {
-        let width = f64::from(width.max(1));
-        match self {
-            Self::Utm { x0, x1, .. } => (x1 - x0) / width,
-            Self::Quad([ul, ur, ..]) | Self::Rough([ul, ur, ..]) => ground_span(*ul, *ur) / width,
-            Self::Grid(grid) => grid.top_span() / width,
-        }
+    ///
+    /// `None` — рамку нечем измерить, и это не «очень мелко», а «нет ширины
+    /// вовсе»: так лежит квад с совпавшими вершинами. Отданный числом, ноль
+    /// делит выбор уровня на себя — `sharpest` уходит в `u32::MAX`, слой
+    /// навсегда остаётся вершиной пирамиды, а сравнение «превью хватает»
+    /// становится вечно истинным, и подробный растр не просится ни разу.
+    ///
+    /// Модуль ширины, а не разность: у рамки UTM края приезжают снаружи, и
+    /// какой из них левее, контракт не оговаривает; отрицательная ширина дала
+    /// бы `log2` от отрицательного, то есть `NaN`, то есть нулевой уровень
+    /// целиком.
+    pub fn ground_m_per_px(&self, width: u32) -> Option<f64> {
+        let span = match self {
+            Self::Utm { x0, x1, .. } => (x1 - x0).abs(),
+            Self::Quad([ul, ur, ..]) | Self::Rough([ul, ur, ..]) => ground_span(*ul, *ur),
+            Self::Grid(grid) => grid.top_span(),
+        };
+        (span.is_finite() && span > 0.0).then(|| span / f64::from(width.max(1)))
+    }
+
+    /// Есть ли у рамки протяжённость на Земле — то есть можно ли по ней вообще
+    /// выбрать уровень и нарисовать ячейку.
+    pub fn measurable(&self) -> bool {
+        self.ground_m_per_px(1).is_some()
     }
 }
 
@@ -162,6 +179,11 @@ pub struct Grid {
     /// непрерывный ход вдоль самой решётки — см. [`Grid::new`].
     nodes: Vec<(f64, f64)>,
 }
+
+/// Насколько разность долгот должна приблизиться к полному кругу, чтобы её
+/// считали им и не сворачивали к ближней ветви (см. [`Grid::unwind`]).
+/// То же число и по той же причине держит контуры (`outlines::FULL_CIRCLE_DEG`).
+const FULL_CIRCLE_DEG: f64 = 359.0;
 
 /// Насколько узлы могут разойтись, оставаясь на одной линии решётки.
 ///
@@ -210,7 +232,13 @@ impl Grid {
         let nodes: Option<Vec<(f64, f64)>> = nodes.into_iter().collect();
         let mut grid = Self { xs, ys, nodes: nodes? };
         grid.unwind();
-        Some(grid)
+        // Решётчатость долей растра — ещё не привязка: у надирного прибора
+        // поперёк трека протяжённости нет вовсе, и узлы, разложенные по долям
+        // в честную сетку, ложатся на Земле в одну линию. Квады такой решётки
+        // выходят нулевой площади — рисуется ничто, — а деление на её ширину
+        // прибивает слой к вершине пирамиды. Отказ здесь возвращает снимок на
+        // уже написанный путь «точек нет, ляжет по контуру каталога».
+        (grid.top_span() > 0.0 && grid.side_span() > 0.0).then_some(grid)
     }
 
     /// Долготы — в непрерывный ход вдоль решётки: каждый узел разворачивается
@@ -227,6 +255,15 @@ impl Grid {
             for col in 1..across {
                 let previous = self.nodes[row * across + col - 1].1;
                 let node = &mut self.nodes[row * across + col];
+                // Полный круг остаётся кругом. Решётка бывает и в два узла на
+                // строку — так лежит глобальный растр, у которого край записан
+                // как −180 → 180, — и свёрнутый к ближней ветви он даёт нулевую
+                // ширину: ту самую, на которую потом делят, выбирая уровень.
+                // «Соседи не дальше полукруга» верно для решётки в двадцать
+                // один узел, а не для всякой.
+                if (node.1 - previous).abs() >= FULL_CIRCLE_DEG {
+                    continue;
+                }
                 node.1 = geodesy::unwind(previous, node.1);
             }
             // Строка развёрнута сама в себе, а к предыдущей её надо ещё
@@ -264,6 +301,17 @@ impl Grid {
             .sum();
         along / (self.xs[self.xs.len() - 1] - self.xs[0]).max(f64::EPSILON)
     }
+
+    /// То же по левому ребру: сколько земли приходится на всю высоту растра.
+    /// Спрашивают об этом одни — [`Grid::new`], чтобы отличить решётку от
+    /// линии.
+    fn side_span(&self) -> f64 {
+        let across = self.xs.len();
+        let down: f64 = (1..self.ys.len())
+            .map(|row| ground_span(self.nodes[(row - 1) * across], self.nodes[row * across]))
+            .sum();
+        down / (self.ys[self.ys.len() - 1] - self.ys[0]).max(f64::EPSILON)
+    }
 }
 
 /// Ячейка оси и доля внутри неё. За краем решётки доля выходит за [0, 1]:
@@ -286,13 +334,33 @@ fn lerp(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
 /// полуосью: сжатие даёт треть процента, а спрашивают это ради выбора уровня
 /// пирамиды, который меняется вдвое за раз.
 fn ground_span(from: (f64, f64), to: (f64, f64)) -> f64 {
-    geodesy::separation(from, to).to_radians() * geodesy::SEMI_MAJOR_M
+    arc_deg(from, to).to_radians() * geodesy::SEMI_MAJOR_M
+}
+
+/// Угловое расстояние между точками привязки, градусы.
+///
+/// Меряется по самим координатам, а не хордой шара, и разница здесь не в
+/// точности. Долготы у привязки развёрнуты вдоль неё самой (см.
+/// [`Grid::unwind`] и [`Frame::quad`]), поэтому ребро в полный круг честно
+/// даёт 360°, — а хорда между его концами равна нулю: концы её одна и та же
+/// точка шара. Именно на этом нуле глобальный растр и терял всё сразу: ширину,
+/// по которой выбирают уровень, и густоту варп-сетки.
+///
+/// Грубости довольно: спрашивают об этом, чтобы выбрать ступень пирамиды и
+/// поделить ячейку, а обе меняются вдвое за раз.
+fn arc_deg(from: (f64, f64), to: (f64, f64)) -> f64 {
+    let along = (to.1 - from.1) * ((from.0 + to.0) * 0.5).to_radians().cos();
+    (to.0 - from.0).hypot(along)
 }
 
 /// Один растр наложения и все его ожидания.
 pub struct Raster {
     pub role: Role,
     pub resource: veldsdk::OwnedResource,
+    /// Файл с координатами пикселей растра, когда они лежат отдельно от него
+    /// (Sentinel-3). Держится ровно затем, чтобы освободиться вместе с
+    /// растром: спрашивают его один раз, при описании.
+    pub geolocation: Option<veldsdk::OwnedResource>,
     pub meta: Option<Meta>,
     pub describe: veldsdk::Latest,
     /// Что уже спрошено, что производится и чего больше не просить — общий
@@ -312,6 +380,7 @@ impl Raster {
         Self {
             role,
             resource,
+            geolocation: None,
             meta: None,
             describe: veldsdk::Latest::default(),
             fetch: Fetch::default(),
@@ -488,9 +557,15 @@ impl Overlay {
             Some((raster, raster.meta.as_ref()?))
         };
 
+        // Неизмеримую рамку не спрашивают ни о чём: выбирать по ней уровень —
+        // делить на ноль. Слой с такой рамкой отказан ещё при описании
+        // (см. `module::describe_settled`), и сюда доходить не должен.
+        if !self.frame.measurable() {
+            return Vec::new();
+        }
         if let Some((raster, meta)) = described(Role::Preview) {
             wanted.push(self.at_level(raster, meta, look, cap_tiles, store));
-            if look.mpp >= self.frame.ground_m_per_px(meta.width) {
+            if self.frame.ground_m_per_px(meta.width).is_some_and(|mpp| look.mpp >= mpp) {
                 // Родного разрешения превью хватает — подробный не нужен.
                 return wanted;
             }
@@ -537,7 +612,10 @@ impl Overlay {
     /// уровня знает наложение и не знает канва: у растра на шаре масштаб
     /// задаётся привязкой, а не камерой над картинкой.
     fn sharpest(&self, meta: &Meta, look: &Look) -> u32 {
-        let mpp_raster = self.frame.ground_m_per_px(meta.width);
+        // Рамку без ширины сюда не пускает `wanted`; ноль здесь — самый
+        // подробный уровень, то есть самый дорогой ответ на вопрос, которого
+        // не задавали.
+        let Some(mpp_raster) = self.frame.ground_m_per_px(meta.width) else { return 0 };
         match look.mpp <= mpp_raster {
             true => 0,
             false => (look.mpp / mpp_raster).log2().floor() as u32,
@@ -589,10 +667,19 @@ impl Overlay {
             faces |= faces_eye(point, look.eye);
 
             let clip = camera::project(&look.view_proj, point);
-            // Угол за камерой: делить на такое w нельзя, а ячейка при этом
+            // Точка за камерой: делить на такое w нельзя, а ячейка при этом
             // заведомо близко — считаем её видимой и не гадаем.
+            //
+            // Сегодня сюда не попадают: узел наложения поднят не выше
+            // `HEIGHT_M + sag_m`, а камера не спускается ниже
+            // `camera::HEIGHT_RANGE_M.0`, и запас между ними больше километра.
+            // Ответ здесь всё равно свой, а не через `faces`: связь этих
+            // констант нигде не объявлена, и первая же правка густоты сетки
+            // сделала бы ветку живой — а `faces || faces_eye(point, eye)`
+            // тождественно `faces`, то есть отвечало бы «не видно» по одной
+            // уже пройденной точке.
             if clip[3] <= 0.0 {
-                return faces || faces_eye(point, look.eye);
+                return true;
             }
             for axis in 0..2 {
                 let ndc = clip[axis] / clip[3];
@@ -671,7 +758,13 @@ fn patch(
 ) {
     let span = span_deg(frame, meta, cell);
     let segments = segments_for(span);
-    let height_m = HEIGHT_M + sag_m(span / f64::from(segments));
+    // Провал меряется по диагонали квада, а не по его ребру: квад режется на
+    // два треугольника, и глубже всего под поверхность уходит середина
+    // гипотенузы — до неё в √2 раза дальше, чем до середины стороны, а провал
+    // растёт как квадрат расстояния. Поднятые на ребро, треугольники верхней
+    // ступени глобального растра всё равно ныряют под эллипсоид, и снимок
+    // виден клочками у самых узлов.
+    let height_m = HEIGHT_M + sag_m(span / f64::from(segments) * std::f64::consts::SQRT_2);
 
     // Узлы решётки считаются один раз: у соседних квадов они общие, а проекция
     // — самая дорогая часть узла.
@@ -718,19 +811,16 @@ fn span_deg(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> f64 {
     let at = |x: f64, y: f64| frame.geodetic(x / f64::from(meta.width), y / f64::from(meta.height));
     let (ul, ur) = (at(cell[0], cell[1]), at(cell[2], cell[1]));
     let (ll, lr) = (at(cell[0], cell[3]), at(cell[2], cell[3]));
-    [
-        geodesy::separation(ul, ur),
-        geodesy::separation(ll, lr),
-        geodesy::separation(ul, ll),
-        geodesy::separation(ur, lr),
-    ]
-    .into_iter()
-    .fold(0.0, f64::max)
+    [arc_deg(ul, ur), arc_deg(ll, lr), arc_deg(ul, ll), arc_deg(ur, lr)]
+        .into_iter()
+        .fold(0.0, f64::max)
 }
 
 /// На сколько середина хорды уходит под поверхность, метры. Дуга задаётся в
 /// градусах, шаром: сжатие эллипсоида здесь — доли процента от величины,
 /// которая сама по себе поправка.
+///
+/// Хорда, а не сторона квада: спрашивают об этом по диагонали (см. [`patch`]).
 fn sag_m(quad_deg: f64) -> f64 {
     geodesy::SEMI_MAJOR_M * (1.0 - (quad_deg.to_radians() / 2.0).cos())
 }
@@ -930,7 +1020,7 @@ mod tests {
         // Метр на пиксель — по верхнему ребру целиком, и ребро это идёт по
         // узлам, а не по хорде между его концами: выпирающий узел делает его
         // длиннее, и снимок на этой ширине лежит именно такой.
-        let mpp = frame.ground_m_per_px(100);
+        let mpp = frame.ground_m_per_px(100).expect("рамка измерима");
         let along = ground_span((60.0, 0.0), (61.0, 10.0)) + ground_span((61.0, 10.0), (60.0, 20.0));
         assert!((mpp - along / 100.0).abs() < 1e-9, "{}", mpp);
         assert!(along > ground_span((60.0, 0.0), (60.0, 20.0)), "по узлам длиннее хорды");
@@ -946,6 +1036,76 @@ mod tests {
                 .is_none(),
             "угла не хватает"
         );
+    }
+
+    /// Глобальный растр лежит решёткой в два узла на строку, и края его
+    /// записаны как −180 → 180. Свёрнутые к ближней ветви, они дают нулевую
+    /// ширину — ту самую, на которую потом делят, выбирая уровень.
+    #[test]
+    fn a_whole_earth_grid_keeps_its_full_turn() {
+        let world = Grid::new(&[
+            tie(0.0, 0.0, 80.0, -180.0),
+            tie(1.0, 0.0, 80.0, 180.0),
+            tie(0.0, 1.0, -60.0, -180.0),
+            tie(1.0, 1.0, -60.0, 180.0),
+        ])
+        .expect("глобальная решётка — привязка");
+        let frame = Frame::Grid(world);
+        let mpp = frame.ground_m_per_px(14_400).expect("рамка измерима");
+        // Ширина Земли по 80-й параллели — около семи тысяч километров, и на
+        // четырнадцать тысяч отсчётов это сотни метров, а не ноль.
+        assert!(mpp > 100.0, "{} м на отсчёт", mpp);
+        // Середина строки приходится на нулевой меридиан, а не на шов.
+        let (lat, lon) = frame.geodetic(0.5, 0.0);
+        assert!((lat - 80.0).abs() < 1e-9, "{}", lat);
+        assert!(lon.abs() < 1e-9, "середина глобальной строки на {}°", lon);
+    }
+
+    /// Решётка по долям растра — ещё не привязка: у трека надирного прибора
+    /// поперёк протяжённости нет вовсе, и на Земле такая «решётка» ложится
+    /// линией. Квады по ней нулевой площади, а её ширина делит выбор уровня.
+    #[test]
+    fn a_lattice_flattened_on_the_ground_is_not_a_binding() {
+        // Доли раскладываются честной сеткой 2×2, а на Земле все четыре узла
+        // стоя́т на одном меридиане: снятого поперёк трека нет.
+        let track = Grid::new(&[
+            tie(0.0, 0.0, 60.0, 10.0),
+            tie(1.0, 0.0, 60.0, 10.0),
+            tie(0.0, 1.0, 50.0, 10.0),
+            tie(1.0, 1.0, 50.0, 10.0),
+        ]);
+        assert!(track.is_none(), "линия принята за решётку");
+
+        // И то же вдоль: без хода по строкам решётки тоже нет.
+        assert!(
+            Grid::new(&[
+                tie(0.0, 0.0, 60.0, 10.0),
+                tie(1.0, 0.0, 60.0, 20.0),
+                tie(0.0, 1.0, 60.0, 10.0),
+                tie(1.0, 1.0, 60.0, 20.0),
+            ])
+            .is_none(),
+            "лента без высоты принята за решётку"
+        );
+    }
+
+    /// Рамка без протяжённости не отвечает на «сколько земли на пиксель»: ноль
+    /// делит выбор уровня на себя, и слой навсегда остаётся вершиной пирамиды.
+    /// Ширина при этом берётся по модулю — какой край рамки UTM левее,
+    /// контракт не оговаривает.
+    #[test]
+    fn a_frame_without_extent_answers_nothing() {
+        let point = Frame::Quad([(10.0, 20.0); 4]);
+        assert!(point.ground_m_per_px(100).is_none());
+        assert!(!point.measurable());
+
+        let zone = projection::Zone { number: 33, south: false };
+        let backwards =
+            Frame::Utm { zone, x0: 700_000.0, y0: 0.0, x1: 600_000.0, y1: 100_000.0 };
+        let forwards =
+            Frame::Utm { zone, x0: 600_000.0, y0: 0.0, x1: 700_000.0, y1: 100_000.0 };
+        assert_eq!(backwards.ground_m_per_px(100), forwards.ground_m_per_px(100));
+        assert!(backwards.ground_m_per_px(100).is_some_and(|mpp| mpp > 0.0));
     }
 
     /// Долготы сетки разворачиваются в одну ветвь — тем же правилом, что у
@@ -1026,13 +1186,38 @@ mod tests {
         assert_eq!(segments_for(20.0), 20, "средняя ячейка — по градусу на звено");
         assert_eq!(segments_for(360.0), MAX_PATCH_SEGMENTS, "потолок густоты");
 
-        let lift = |span: f64| sag_m(span / f64::from(segments_for(span)));
+        let lift = |span: f64| {
+            sag_m(span / f64::from(segments_for(span)) * std::f64::consts::SQRT_2)
+        };
         assert!(lift(0.9) < 30.0, "у гранулы подниматься не с чего: {} м", lift(0.9));
         // Провал без подъёма — сотни километров, то есть снимок ушёл бы под
         // поверхность целиком; с подъёмом он ложится на неё сверху.
         assert!(sag_m(45.0) > 400_000.0, "{} м", sag_m(45.0));
         let whole = lift(360.0);
-        assert!(whole > 5_000.0 && whole < 10_000.0, "подъём на верхней ступени: {} м", whole);
-        assert!(whole / geodesy::SEMI_MAJOR_M < 0.002, "оболочка вокруг Земли: {} м", whole);
+        assert!(whole > 5_000.0 && whole < 20_000.0, "подъём на верхней ступени: {} м", whole);
+        assert!(whole / geodesy::SEMI_MAJOR_M < 0.004, "оболочка вокруг Земли: {} м", whole);
+    }
+
+    /// Подъём считается по тому, что проваливается глубже всего, — по середине
+    /// гипотенузы, а не стороны. Меряется это тем же `sag_m`, что и провал:
+    /// разойдись они, и снимок верхней ступени опять ушёл бы под поверхность.
+    #[test]
+    fn the_lift_covers_the_deepest_point_of_the_triangle() {
+        for span in [0.9f64, 20.0, 90.0, 360.0] {
+            let segments = f64::from(segments_for(span));
+            let quad = span / segments;
+            let lift = sag_m(quad * std::f64::consts::SQRT_2);
+            // Глубже всего под хордой лежит середина диагонали квада.
+            let deepest = sag_m(quad * std::f64::consts::SQRT_2);
+            assert!(lift >= deepest, "подъём {} меньше провала {}", lift, deepest);
+            // А до подъёма по ребру не хватало вдвое — ровно та ошибка, из-за
+            // которой снимок во всю Землю рисовался клочками.
+            let by_edge = sag_m(quad);
+            assert!(
+                span < 10.0 || deepest > by_edge * 1.5,
+                "разница по ребру и по диагонали при {}°: {} против {}",
+                span, deepest, by_edge
+            );
+        }
     }
 }
