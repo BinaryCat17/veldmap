@@ -287,6 +287,10 @@ pub struct GpuRenderer {
     /// Появились ли в атласе новые глифы с последней выгрузки. Именно флаг, а
     /// не диапазон строк: выгружается атлас всегда целиком (см. `atlas_data`).
     atlas_dirty: bool,
+    /// Атлас кончился в этом кадре. Начать его заново можно только между
+    /// кадрами: посреди кадра перемотка испортила бы уже размещённые глифы
+    /// (см. `prepare_glyphs`).
+    atlas_full: bool,
     font_map: HashMap<String, String>,
     default_family: String,
     pub current_sf: f32,
@@ -336,6 +340,7 @@ impl GpuRenderer {
             current_atlas_y: ATLAS_PADDING,
             row_height: 1,
             atlas_dirty: true,
+            atlas_full: false,
             font_map,
             default_family,
             current_sf: 1.0,
@@ -355,6 +360,16 @@ impl GpuRenderer {
     /// Сброс кадра: геометрия, команды и стеки состояния. Единственная точка
     /// сброса — её же зовёт `iced_core::Renderer::clear`.
     pub fn clear(&mut self) {
+        // Кончившийся атлас начинается заново здесь, между кадрами: кадр, в
+        // котором он кончился, уже нарисован, и затирать теперь нечего.
+        if self.atlas_full {
+            self.atlas_full = false;
+            self.current_atlas_x = ATLAS_PADDING;
+            self.current_atlas_y = ATLAS_PADDING;
+            self.row_height = 0;
+            self.glyph_cache.clear();
+            self.atlas_dirty = true;
+        }
         self.vertices.clear();
         self.indices.clear();
         self.draw_commands.clear();
@@ -1065,11 +1080,19 @@ impl GpuRenderer {
                             self.row_height = 0;
                         }
 
+                        // Атлас кончился. Перематывать его здесь нельзя: глифы,
+                        // уже размещённые в этом кадре, стоя́т в нём выданными
+                        // координатами, и записанное поверх показалось бы
+                        // вместо них — испорчен был бы весь набранный кадр, а
+                        // не одна надпись. Поэтому этот глиф в кадр не попадает
+                        // вовсе (его не окажется в кэше, и рисующий проход его
+                        // пропустит), а начинается атлас заново между кадрами.
                         if self.current_atlas_y + height + ATLAS_PADDING > self.atlas_height {
-                            self.current_atlas_x = ATLAS_PADDING;
-                            self.current_atlas_y = ATLAS_PADDING;
-                            self.row_height = 0;
-                            self.glyph_cache.clear();
+                            self.atlas_full = true;
+                            veldsdk::log::warn!(target: "handlers",
+                                "глифовый атлас {}×{} кончился — часть надписей не нарисуется до следующего кадра",
+                                self.atlas_width, self.atlas_height);
+                            continue;
                         }
 
                         let x = self.current_atlas_x;
