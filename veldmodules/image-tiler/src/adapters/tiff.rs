@@ -22,7 +22,7 @@ use tiff::tags::Tag;
 
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::{self, TILE};
-use super::super::resample::resample;
+use super::super::resample::{resample_window, Window};
 use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples};
 use super::{Info, Kind, Tie};
 
@@ -247,10 +247,24 @@ pub fn produce_direct<R: Read + Seek>(
 
         // Прямоугольник тайла в пикселях источника. Масштаб дробный, границы
         // наружу (floor/ceil): усреднению нужен каждый задетый пиксель.
+        //
+        // Прочитанное при этом ШИРЕ того, что тайлу принадлежит, — на долю
+        // пикселя с каждой стороны. Тайлу принадлежит окно `window` ниже, и
+        // ужимается именно оно: растянутое на тайл прочитанное целиком уехало
+        // бы на эту долю, у соседнего тайла — в другую сторону, и на стыке
+        // остался бы шов. У двоичных копий доли нулевые и разницы нет, а
+        // небинарные (3, 5, 7/2) дают её на каждом тайле.
+        let exact = |at: u64, side: u64, level_side: u64| f64::from(at as u32) * side as f64 / level_side as f64;
         let sx0 = (u64::from(tx) * u64::from(TILE) * u64::from(sw)) / u64::from(lw);
         let sy0 = (u64::from(ty) * u64::from(TILE) * u64::from(sh)) / u64::from(lh);
         let sx1 = (u64::from(tx * TILE + tw) * u64::from(sw)).div_ceil(u64::from(lw)).min(u64::from(sw));
         let sy1 = (u64::from(ty * TILE + th) * u64::from(sh)).div_ceil(u64::from(lh)).min(u64::from(sh));
+        let window = Window {
+            x0: exact(u64::from(tx) * u64::from(TILE), u64::from(sw), u64::from(lw)) - sx0 as f64,
+            y0: exact(u64::from(ty) * u64::from(TILE), u64::from(sh), u64::from(lh)) - sy0 as f64,
+            x1: exact(u64::from(tx * TILE + tw), u64::from(sw), u64::from(lw)) - sx0 as f64,
+            y1: exact(u64::from(ty * TILE + th), u64::from(sh), u64::from(lh)) - sy0 as f64,
+        };
         let (rw, rh) = ((sx1 - sx0) as u32, (sy1 - sy0) as u32);
         if rw == 0 || rh == 0 {
             return Err(format!("tiff: тайлу {}:{} не досталось пикселей источника", tx, ty));
@@ -286,7 +300,7 @@ pub fn produce_direct<R: Read + Seek>(
             }
         }
 
-        let tile = resample(&region, rw, rh, tw, th);
+        let tile = resample_window(&region, rw, rh, window, tw, th);
         emit(level, tx, ty, tw, th, &tile)?;
     }
     Ok(())

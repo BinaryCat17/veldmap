@@ -66,6 +66,29 @@ pub fn halve(src: &[u8], w: u32, h: u32) -> Vec<u8> {
 /// Пустые размеры дают пустой буфер: звать так — ошибка вызывающего,
 /// но паниковать в конвейере из-за неё не за чем.
 pub fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let whole = Window { x0: 0.0, y0: 0.0, x1: f64::from(sw), y1: f64::from(sh) };
+    resample_window(src, sw, sh, whole, dw, dh)
+}
+
+/// Окно источника в его же пикселях, дробное. Дробное — потому что кусок
+/// источника под тайл границами пикселей не ложится: масштаб между уровнем и
+/// копией бывает каким угодно (у небинарных копий — 3, 5, 7/2).
+#[derive(Clone, Copy)]
+pub struct Window {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+}
+
+/// Ужатие куска источника в кадр `dw × dh`.
+///
+/// Кусок задаётся дробным окном, а не всем буфером: читается источник целыми
+/// пикселями (иначе их не прочесть), а тайлу принадлежит не весь прочитанный
+/// прямоугольник, а ровно окно внутри него. Растянуть на тайл прочитанное
+/// целиком — значит сдвинуть содержимое на долю пикселя и растянуть его на ту
+/// же долю: соседние тайлы уезжают в разные стороны, и на стыке видно шов.
+pub fn resample_window(src: &[u8], sw: u32, sh: u32, window: Window, dw: u32, dh: u32) -> Vec<u8> {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
         return Vec::new();
     }
@@ -73,12 +96,14 @@ pub fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
 
     // Быстрый путь тождества: каскад зовёт ресемпл безусловно, а полоса
     // вершины уже нужного размера.
-    if sw == dw && sh == dh {
+    if sw == dw && sh == dh && window.x0 == 0.0 && window.y0 == 0.0
+        && window.x1 == f64::from(sw) && window.y1 == f64::from(sh)
+    {
         return src.to_vec();
     }
 
-    let x_spans = spans(sw, dw);
-    let y_spans = spans(sh, dh);
+    let x_spans = spans(window.x0, window.x1.min(f64::from(sw)), dw);
+    let y_spans = spans(window.y0, window.y1.min(f64::from(sh)), dh);
 
     let mut out = vec![0u8; (dw as usize) * (dh as usize) * 4];
     for (dy, (y0, y1)) in y_spans.iter().enumerate() {
@@ -124,16 +149,17 @@ pub fn resample(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
 }
 
 /// Границы исходного диапазона для каждого целевого индекса, в исходных
-/// пикселях: ячейка d накрывает [d·s/d_total, (d+1)·s/d_total).
-fn spans(src: u32, dst: u32) -> Vec<(f64, f64)> {
-    let scale = f64::from(src) / f64::from(dst);
+/// пикселях: ячейка d накрывает часть окна [from, to), делённого на `dst`
+/// равных долей.
+fn spans(from: f64, to: f64, dst: u32) -> Vec<(f64, f64)> {
+    let scale = (to - from) / f64::from(dst);
     (0..dst)
         .map(|d| {
-            let a = f64::from(d) * scale;
-            let b = (f64::from(d) + 1.0) * scale;
-            // Правый край клампится источником: плавающая арифметика может
-            // дать s + ε, а пикселя за краем нет.
-            (a, b.min(f64::from(src)))
+            let a = from + f64::from(d) * scale;
+            let b = from + (f64::from(d) + 1.0) * scale;
+            // Правый край клампится окном: плавающая арифметика может дать
+            // to + ε, а пикселя за краем нет.
+            (a, b.min(to))
         })
         .collect()
 }
@@ -160,6 +186,54 @@ mod tests {
             let out = resample(&solid(sw, sh, 137), sw, sh, dw, dh);
             assert!(out.iter().all(|&v| v == 137), "{}x{} → {}x{}", sw, sh, dw, dh);
         }
+    }
+
+    /// Ужимается окно, а не весь прочитанный кусок. Читать приходится целыми
+    /// пикселями, и прочитанное шире того, что тайлу принадлежит; растянутое
+    /// целиком, оно уехало бы на долю пикселя — у соседнего тайла в другую
+    /// сторону, и на стыке остался бы шов.
+    #[test]
+    fn only_the_window_is_squeezed() {
+        let mut src = Vec::new();
+        for v in [10u8, 20, 30, 40] {
+            src.extend_from_slice(&[v, v, v, 255]);
+        }
+        let window = Window { x0: 1.0, y0: 0.0, x1: 3.0, y1: 1.0 };
+        let out = resample_window(&src, 4, 1, window, 2, 1);
+        assert_eq!(&out[0..4], &[20, 20, 20, 255], "первая ячейка — второй пиксель");
+        assert_eq!(&out[4..8], &[30, 30, 30, 255], "вторая — третий");
+        // Без окна тот же буфер даёт средние по парам — то самое смещение.
+        assert_eq!(&resample(&src, 4, 1, 2, 1)[0..4], &[15, 15, 15, 255]);
+    }
+
+    /// Два соседних тайла, взятые каждый из своего расширенного куска,
+    /// складываются в то же самое, что и одно ужатие всей строки: шва нет.
+    #[test]
+    fn neighbouring_tiles_join_without_a_seam() {
+        // Строка из девяти пикселей ужимается в шесть — масштаб 3/2, то есть
+        // границы тайлов приходятся на середины исходных пикселей.
+        let values: Vec<u8> = (0..9).map(|v| v * 25).collect();
+        let mut src = Vec::new();
+        for v in &values {
+            src.extend_from_slice(&[*v, *v, *v, 255]);
+        }
+        let whole = resample(&src, 9, 1, 6, 1);
+
+        // Тайл шириной три: первый берёт долю [0, 4.5), второй — [4.5, 9).
+        let mut joined = Vec::new();
+        for tile in 0..2u32 {
+            let (from, to) = (f64::from(tile) * 4.5, f64::from(tile + 1) * 4.5);
+            let (sx0, sx1) = (from.floor() as u32, (to.ceil() as u32).min(9));
+            let region = &src[(sx0 as usize) * 4..(sx1 as usize) * 4];
+            let window = Window {
+                x0: from - f64::from(sx0),
+                y0: 0.0,
+                x1: to - f64::from(sx0),
+                y1: 1.0,
+            };
+            joined.extend(resample_window(region, sx1 - sx0, 1, window, 3, 1));
+        }
+        assert_eq!(joined, whole);
     }
 
     #[test]
