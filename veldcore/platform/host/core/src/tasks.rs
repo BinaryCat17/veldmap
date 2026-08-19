@@ -6,7 +6,7 @@
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::task::AbortHandle;
 
 /// Операция в полёте. Владелец — instance id заказчика (0 = хост): только он
@@ -20,14 +20,42 @@ pub struct TaskEntry {
     pub victim: Victim,
 }
 
+/// Приговор wasm-инстансу — той доставке, на которой он выписан.
+///
+/// Флаг у инстанса один: его читает epoch-колбэк его стора и валит идущий
+/// вызов трапом, а вызов у актора в каждый миг ровно один. Поэтому приговор
+/// помнит номер доставки, на которой выписан, и на чужую не действует: `kill`
+/// приходит из другого потока и успевает опоздать — обработчик к тому времени
+/// вернулся, а актор взялся за следующее событие. Без номера такой опоздавший
+/// снимал бы работу, о которой заказчик ничего не просил.
+pub struct Doom {
+    flag: Arc<AtomicBool>,
+    /// Счётчик доставок актора — общий с ним.
+    run: Arc<AtomicU64>,
+    /// Номер доставки, на которой приговор выписан.
+    at: u64,
+}
+
+impl Doom {
+    pub fn new(flag: Arc<AtomicBool>, run: Arc<AtomicU64>) -> Self {
+        let at = run.load(Ordering::SeqCst);
+        Self { flag, run, at }
+    }
+
+    fn strike(self) {
+        if self.run.load(Ordering::SeqCst) == self.at {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 /// Чем снять исполнителя операции.
 #[derive(Default)]
 pub struct Victim {
     /// Фьючерс нативного исполнителя — появляется, когда тот его запустил.
     pub abort: Option<AbortHandle>,
-    /// Приговор wasm-инстансу: его читает epoch-колбэк соответствующего стора
-    /// и валит идущий вызов трапом. Общий с актором, поэтому Arc.
-    pub doomed: Option<Arc<AtomicBool>>,
+    /// Приговор wasm-инстансу — см. [`Doom`].
+    pub doomed: Option<Doom>,
 }
 
 impl Victim {
@@ -39,7 +67,7 @@ impl Victim {
             abort.abort();
         }
         if let Some(doomed) = self.doomed {
-            doomed.store(true, Ordering::SeqCst);
+            doomed.strike();
         }
     }
 }
@@ -110,5 +138,42 @@ impl TaskRegistry {
     /// Снимает учёт по терминальному ответу: операция дошла до конца сама.
     pub fn complete(&self, task_id: &str) {
         self.tasks.remove(task_id);
+    }
+
+    /// Исполнителя больше нет: он упал посреди работы. Снимает учёт и называет
+    /// топик, которым за него ответят.
+    ///
+    /// Врозь с [`Self::cancel`] затем, что убивать здесь уже некого — приговор
+    /// приводить не над кем, — а инвариант заказчика тот же: конец операции
+    /// приходит всегда и одним и тем же топиком, как бы она ни кончилась.
+    /// `None` — учёта нет: операция уже кончилась или её сняли.
+    pub fn abandon(&self, task_id: &str) -> Option<&'static str> {
+        self.tasks.remove(task_id).map(|(_, entry)| entry.terminal_topic)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Приговор действует на ту доставку, на которой выписан, и ни на какую
+    /// другую. `kill` приходит из другого потока и успевает опоздать:
+    /// обработчик к тому времени вернулся, а актор взялся за следующее
+    /// событие — и приговор, не помнящий своей доставки, снял бы работу, о
+    /// которой заказчик ничего не просил.
+    #[test]
+    fn a_late_sentence_spares_the_next_delivery() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let run = Arc::new(AtomicU64::new(7));
+
+        let mine = Doom::new(flag.clone(), run.clone());
+        mine.strike();
+        assert!(flag.load(Ordering::SeqCst), "своя доставка приговором снимается");
+
+        flag.store(false, Ordering::SeqCst);
+        let stale = Doom::new(flag.clone(), run.clone());
+        run.fetch_add(1, Ordering::SeqCst);
+        stale.strike();
+        assert!(!flag.load(Ordering::SeqCst), "следующая доставка чужому приговору не достаётся");
     }
 }

@@ -142,7 +142,10 @@ impl GraphicsDevice {
         let (texture, width, height, format) = self.get_texture_info(texture_id, owner_id)
             .ok_or_else(|| anyhow::anyhow!("Texture region {} not found or access denied", texture_id))?;
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Ok(self.insert_gpu(GpuObject::TextureView { view: Arc::new(view), width, height, format }, owner_id))
+        Ok(self.insert_gpu(
+            GpuObject::TextureView { view: Arc::new(view), texture: texture_id, width, height, format },
+            owner_id,
+        ))
     }
 
     pub fn create_sampler(&self, mag_proto: i32, min_proto: i32, owner_id: u32) -> ResourceId {
@@ -440,16 +443,13 @@ impl GraphicsDevice {
     /// Разрешение всех id — здесь же, синхронно с вызовом модуля: ошибка
     /// уходит ему ответом на submit, то есть туда, где ошиблись, а не warn'ом
     /// кадрового цикла спустя произвольное число сообщений.
+    /// Право на оба аттачмента спрашивается там же, где они разрешаются
+    /// (`resolve_attachments`), и спрашивается у текстуры, а не у вида: вид
+    /// заводит тот, кто им рисует, и владеет им он же. Второй проверки здесь
+    /// нет намеренно — разойдясь, две проверки одного и того же однажды
+    /// пропустят то, что другая ловит.
     pub fn execute(&self, payload: Vec<u8>, requestor_id: u32) -> anyhow::Result<()> {
         let req = Submit::decode(&payload[..])?;
-        if !self.registry.check_access(req.target_texture_view_id, requestor_id, Access::Write) {
-            return Err(anyhow::anyhow!("Access denied to target view {}", req.target_texture_view_id));
-        }
-        if req.depth_texture_view_id != 0
-            && !self.registry.check_access(req.depth_texture_view_id, requestor_id, Access::Write)
-        {
-            return Err(anyhow::anyhow!("Access denied to depth view {}", req.depth_texture_view_id));
-        }
         if let Some(cb) = req.command_buffer {
             let op = PendingRenderOp {
                 attachments: self.resolve_attachments(
@@ -552,7 +552,17 @@ impl GraphicsDevice {
         requestor_id: u32,
     ) -> anyhow::Result<Attachments> {
         let view = |id: u64| match self.get_gpu(id, requestor_id) {
-            Ok(GpuObject::TextureView { view, width, height, format }) => Ok((view, width, height, format)),
+            Ok(GpuObject::TextureView { view, texture, width, height, format }) => {
+                // Право на аттачмент спрашивается у текстуры: вид сделал тот,
+                // кто им и рисует, и владельцем вида он же и стал — на нём
+                // право записи у него есть всегда, что бы ему ни выдавали на
+                // саму текстуру.
+                match self.registry.check_access(texture, requestor_id, Access::Write) {
+                    true => Ok((view, width, height, format)),
+                    false => Err(anyhow::anyhow!(
+                        "Access denied to texture {} behind view {}", texture, id)),
+                }
+            }
             _ => Err(anyhow::anyhow!("view {} is unknown or not a texture view", id)),
         };
 

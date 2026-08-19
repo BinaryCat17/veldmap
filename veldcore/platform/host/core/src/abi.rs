@@ -107,6 +107,12 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 // медленном носителе остаётся свободным для других плагинов.
                 match tokio::task::spawn_blocking(move || memory.read(id, offset, size)).await {
                     Ok(inner) => inner,
+                    // Отмена — не паника, и путать их нельзя: снятая операция
+                    // это обычный конец работы (заказчик передумал, окно
+                    // закрылось), а паника внутри чтения — поломка носителя.
+                    Err(e) if e.is_cancelled() => {
+                        Err(anyhow::anyhow!("чтение ресурса {} снято вместе с задачей", id))
+                    }
                     Err(e) => Err(anyhow::anyhow!("чтение ресурса {} упало с паникой: {}", id, e)),
                 }
             } else {
@@ -203,11 +209,15 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
         let can_free = registry.check_access(region_id, owner_id, crate::registry::Access::Write);
-        if can_free {
-            if registry.unregister(region_id) { 1 } else { 0 }
-        } else {
-            0
+        if can_free && registry.unregister(region_id) {
+            log::debug!(target: "abi",
+                "[{}] ресурс {} освобождён", caller.data().plugin_name, region_id);
+            return 1;
         }
+        log::debug!(target: "abi",
+            "[{}] освобождение ресурса {} отклонено: {}", caller.data().plugin_name, region_id,
+            match can_free { true => "такого ресурса в реестре нет", false => "не наш" });
+        0
     })?;
 
     // ── Контекст вызова ───────────────────────────────────────
@@ -286,14 +296,29 @@ fn lease_op(
         let Some(target) = resolve_service_arg(&mut caller, name_ptr, name_len) else { return 0 };
         let registry = caller.data().registry.clone();
         let owner_id = caller.data().instance_id;
+        let mut found = false;
         let mut ok = false;
         registry.update_lease(region_id, |lease| {
+            found = true;
             if lease.owner_id == owner_id || owner_id == 0 {
                 apply(lease, target);
                 ok = true;
             }
         });
-        if ok { 1 } else { 0 }
+        if ok {
+            return 1;
+        }
+        // Отказ отвечается числом — причин у него одна на вызов (см. README,
+        // «Как сообщается об ошибке»), — но в журнале причина нужна: «ресурса
+        // нет» и «ресурс не твой» лечатся по-разному, а снаружи выглядят
+        // одинаково.
+        log::debug!(target: "abi", "[{}] {} ресурса {} отклонён: {}",
+            caller.data().plugin_name, name, region_id,
+            match found {
+                true => "ресурс не принадлежит вызывающему",
+                false => "такого ресурса в реестре нет",
+            });
+        0
     })?;
     Ok(())
 }

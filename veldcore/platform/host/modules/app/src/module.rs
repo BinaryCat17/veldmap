@@ -68,7 +68,16 @@ pub fn on_reveal_path(state: &State, req: RevealPath, _caller: Caller) {
         _ => "xdg-open",
     };
     match std::process::Command::new(command).arg(&target).spawn() {
-        Ok(_) => {}
+        // Ждать нельзя — файловый менеджер живёт своей жизнью и не вернётся, —
+        // но и бросать нечего: неподобранный потомок остаётся зомби до конца
+        // сеанса, а показывают путь по разу на строку.
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                if let Err(error) = child.wait() {
+                    log::debug!(target: "app", "reveal_path: {} не подобран: {}", command, error);
+                }
+            });
+        }
         Err(error) => log::warn!(target: "app", "reveal_path: {} не запустился: {}", command, error),
     }
 }

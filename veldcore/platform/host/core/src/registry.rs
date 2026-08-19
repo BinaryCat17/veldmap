@@ -84,7 +84,19 @@ pub enum GpuObject {
     /// Размеры и формат — исходной текстуры: кадровый цикл клампит по размерам
     /// viewport и scissor (знать размеры окна для этого ему не нужно), а по
     /// формату отличает цветной аттачмент от буфера глубины.
-    TextureView { view: Arc<wgpu::TextureView>, width: u32, height: u32, format: i32 },
+    ///
+    /// `texture` — она же, по id: право писать принадлежит текстуре, а не
+    /// сделанному по ней виду. Вид заводит тот, кто собирается им пользоваться,
+    /// и владельцем вида становится он же — то есть на самом виде право записи
+    /// у него есть всегда. Спрашивать надо у текстуры, иначе выданное право
+    /// читать превращается в право писать одним лишним вызовом.
+    TextureView {
+        view: Arc<wgpu::TextureView>,
+        texture: ResourceId,
+        width: u32,
+        height: u32,
+        format: i32,
+    },
     Sampler(Arc<wgpu::Sampler>),
     BindGroupLayout(Arc<wgpu::BindGroupLayout>),
     RenderPipeline(Arc<wgpu::RenderPipeline>),

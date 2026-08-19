@@ -103,6 +103,10 @@ struct WasmActor {
     module: WasmModule,
     /// Приговор текущему инстансу, общий с epoch-колбэком его стора.
     doomed: Arc<AtomicBool>,
+    /// Номер идущей доставки. Им приговор привязывается к той операции, на
+    /// которую выписан: флаг у инстанса один, а операций через него проходит
+    /// сколько угодно (см. `tasks::Doom`).
+    run: Arc<std::sync::atomic::AtomicU64>,
     dispatcher: Arc<Dispatcher>,
     tasks: Arc<crate::tasks::TaskRegistry>,
 }
@@ -110,8 +114,11 @@ struct WasmActor {
 #[async_trait::async_trait]
 impl Actor for WasmActor {
     async fn deliver(&mut self, ev: Event) {
-        // Приговор действует ровно на одну операцию: снимаем его перед каждым
-        // событием, чтобы опоздавший на микросекунду kill не унёс следующее.
+        // Приговор действует ровно на одну операцию: перед каждым событием
+        // счётчик доставок сдвигается, и выписанный на прошлую он уже не
+        // действует, а сам флаг снимается — иначе опоздавший на микросекунду
+        // kill унёс бы следующую работу (см. `tasks::Doom`).
+        self.run.fetch_add(1, Ordering::SeqCst);
         self.doomed.store(false, Ordering::SeqCst);
 
         // Учтённый запрос: отдаём платформе то, чем нас снять. Убийство —
@@ -124,9 +131,13 @@ impl Actor for WasmActor {
         // за убитого уже опубликовал хост, и исполненный сейчас запрос
         // прислал бы заказчику второй конец той же операции (нативная
         // сторона это окно закрывает так же — см. util::Tasks::spawn).
+        // Учтённая операция запоминается: упади модуль посреди неё, за него
+        // придётся договорить конец (см. ниже) — из конверта корреляция к тому
+        // времени уже уедет.
+        let accounted = ev.accounted.then(|| ev.correlation.clone());
         if ev.accounted {
-            let doomed = self.doomed.clone();
-            if !self.tasks.arm(&ev.correlation, move |victim| victim.doomed = Some(doomed)) {
+            let doom = crate::tasks::Doom::new(self.doomed.clone(), self.run.clone());
+            if !self.tasks.arm(&ev.correlation, move |victim| victim.doomed = Some(doom)) {
                 return;
             }
         }
@@ -151,7 +162,20 @@ impl Actor for WasmActor {
             return;
         };
         if let Err(trap) = handle_event.call_async(&mut self.module.store, ()).await {
+            let killed = self.doomed.load(Ordering::SeqCst);
             self.revive(trap).await;
+            // Терминальный ответ приходит всегда — иначе заказчик ждёт вечно, а
+            // запись об операции живёт до конца процесса. За убитого его уже
+            // договорил диспетчер (`Dispatcher::kill`); за упавшего сам
+            // отвечать некому — его больше нет.
+            if let (false, Some(task)) = (killed, accounted)
+                && let Some(topic) = self.tasks.abandon(&task)
+            {
+                log::warn!(target: "tasks",
+                    "Модуль '{}' упал посреди операции {}, отвечаем за неё топиком {}",
+                    self.spec.name, task, topic);
+                self.dispatcher.publish_from(&topic, Vec::new(), 0, &task, "");
+            }
         }
     }
 }
@@ -330,6 +354,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
             spec,
             module,
             doomed,
+            run: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             dispatcher: ctx.dispatcher.clone(),
             tasks: ctx.tasks.clone(),
         });

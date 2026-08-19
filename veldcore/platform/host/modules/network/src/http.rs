@@ -81,7 +81,27 @@ pub fn on_http(state: &State, req: HttpTaskRequest, caller: Caller) {
         match builder.send().await {
             Ok(res) => {
                 let status = res.status().as_u16() as u32;
-                let body = res.bytes().await.unwrap_or_default().to_vec();
+                // Заголовки пришли, а тело оборвалось — это не ответ сервера,
+                // а обрыв, и отдать его успешным пустым телом значит соврать:
+                // разобранный как ответ, он выглядит «каталог не нашёл
+                // ничего». Поля ошибки в `HttpTaskResponse` нет, и обрыв
+                // называется тем же, чем неудавшийся запрос, — нулевым
+                // статусом (так же его разбирает `range.rs`).
+                let body = match res.bytes().await {
+                    Ok(body) => body.to_vec(),
+                    Err(e) => {
+                        log::warn!(target: "network",
+                            "HTTP-запрос {}: статус {}, а тело оборвалось: {}",
+                            correlation_id, status, e);
+                        let error = e.to_string();
+                        bus::emit::on_http_result(
+                            &*ctx.publisher,
+                            &HttpTaskResponse { status: 0, body: Vec::new() },
+                            &correlation_id,
+                        );
+                        return Err(error);
+                    }
+                };
                 log::info!(target: "network", "HTTP-запрос {} закончился статусом {}", correlation_id, status);
                 bus::emit::on_http_result(&*ctx.publisher, &HttpTaskResponse { status, body }, &correlation_id);
                 Ok(())

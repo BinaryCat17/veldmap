@@ -205,13 +205,42 @@ impl MemoryManager {
     /// Записывает байты по смещению. Только для байтовых носителей: у
     /// текстуры смещение не определено, и заливается она [`Self::upload_image`].
     pub fn write(&self, region_id: ResourceId, offset: u64, data: &[u8]) -> anyhow::Result<()> {
+        // Конец записи — то, что решает судьбу всех трёх носителей, и считать
+        // его надо один раз: смещение приходит из wasm, и `offset + len`
+        // переполняет `usize` раньше, чем что-либо успевает его проверить.
+        let end = (offset as u128) + (data.len() as u128);
         self.registry.payload_mut(region_id, |payload| match payload {
             ResourcePayload::Data(backing) => {
                 match backing {
                     DataBacking::Cpu(vec) => {
-                        let end = offset as usize + data.len();
+                        // Область растёт под запись — иначе модулю пришлось бы
+                        // знать её конец заранее, — но растёт до того же
+                        // потолка, что и `alloc_cpu`: без него одна запись по
+                        // смещению в терабайт роняет хост со всеми остальными
+                        // модулями, а поручить ему больше, чем модулю
+                        // позволено держать самому, никто не вправе.
+                        if end > u128::from(crate::INSTANCE_MEMORY_LIMIT) {
+                            return Err(anyhow::anyhow!(
+                                "запись до {} байт при потолке {}",
+                                end,
+                                crate::INSTANCE_MEMORY_LIMIT
+                            ));
+                        }
+                        let end = end as usize;
                         if end > vec.len() { vec.resize(end, 0); }
                         vec[offset as usize..end].copy_from_slice(data);
+                    }
+                    // Буфер GPU не растёт: размер ему назначен при выделении.
+                    // Выход за него wgpu разбирает сам — ошибкой валидации у
+                    // очереди и паникой у отображённого среза, — а и то, и
+                    // другое снимает процесс. Довод пришёл из wasm, значит
+                    // проверяем мы.
+                    DataBacking::Buffer { buffer, .. } if end > u128::from(buffer.size()) => {
+                        return Err(anyhow::anyhow!(
+                            "запись до {} байт в буфер размером {}",
+                            end,
+                            buffer.size()
+                        ));
                     }
                     DataBacking::Buffer { buffer, mapped: false } => {
                         let q = self.queue.lock().unwrap();
