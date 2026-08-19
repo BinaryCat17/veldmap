@@ -301,9 +301,18 @@ impl Running {
                 self.window.request_redraw();
                 return;
             }
-            // Таймаут и перекрытое окно — пропуск кадра без перенастройки:
-            // следующий Frame-тик придёт обычным порядком.
-            _ => return,
+            // Таймаут и перекрытое окно — пропуск кадра без перенастройки.
+            // Просьбу нарисовать снова при этом надо повторить: цикл событий
+            // ждёт (`ControlFlow::Wait`), а весь его завод — та самая просьба
+            // в конце `redraw`, до которой этот пропуск не доходит. Без неё
+            // приложение замирает насовсем и молча: ни кадров, ни ввода, ни
+            // строки в логе — а вместе с кадрами встают и часы прогона по
+            // сценарию.
+            other => {
+                log::debug!(target: "render", "Кадр пропущен: поверхность вернула {:?}", other);
+                self.window.request_redraw();
+                return;
+            }
         };
         let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });

@@ -49,8 +49,8 @@ def scenarios(names: list[str]) -> list[str]:
             for name in sorted(os.listdir(SCENARIOS_DIR)) if name.endswith(".txt")]
 
 
-def play(path: str, name: str) -> tuple[bool, float]:
-    """Один сценарий: True — сошёлся."""
+def play(path: str, name: str) -> tuple[str, float]:
+    """Один сценарий: чем он кончился."""
     env = os.environ.copy()
     env["VELDMAP_SCRIPT"] = path
     started = time.monotonic()
@@ -60,11 +60,14 @@ def play(path: str, name: str) -> tuple[bool, float]:
             cwd=PROJECT_ROOT, env=env, timeout=LIMIT_SECONDS,
             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
         )
-        passed = done.returncode == 0
+        outcome = "сошёлся" if done.returncode == 0 else "НЕ СОШЁЛСЯ"
     except subprocess.TimeoutExpired:
-        passed = False
+        # Отличается от «не сошёлся» намеренно: сценарий, дошедший до своего
+        # конца, кончается сам, а упёршийся в предел — это зависшее
+        # приложение, и искать его причину надо не в сценарии.
+        outcome = "ЗАВИС"
     keep_log(name)
-    return passed, time.monotonic() - started
+    return outcome, time.monotonic() - started
 
 
 def keep_log(name: str) -> None:
@@ -96,15 +99,15 @@ def main() -> int:
             name = os.path.splitext(os.path.basename(path))[0]
             if not os.path.exists(path):
                 print(f"  {name}: нет такого сценария")
-                failed.append(name)
+                failed.append(f"{name} (нет файла)")
                 continue
             if os.path.exists(WINDOW_STATE):
                 os.remove(WINDOW_STATE)
             print(f"  {name}: ", end="", flush=True)
-            passed, spent = play(path, name)
-            print(f"{'сошёлся' if passed else 'НЕ СОШЁЛСЯ'} — {spent:.1f}s")
-            if not passed:
-                failed.append(name)
+            outcome, spent = play(path, name)
+            print(f"{outcome} — {spent:.1f}s")
+            if outcome != "сошёлся":
+                failed.append(f"{name} ({outcome.lower()})")
     finally:
         if stashed is not None:
             os.makedirs(os.path.dirname(WINDOW_STATE), exist_ok=True)

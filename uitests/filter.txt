@@ -4,7 +4,8 @@
 # раскладка к этому времени уже применена.
 100 timeout 10000
 500 wait query
-700 expect text:Landsat-5
+# Список едет из сети, поэтому ждём его, а не требуем «уже сейчас».
+700 wait text:Landsat-5
 900 tap query
 1200 type Sentinel
 2500 absent text:Landsat-5
