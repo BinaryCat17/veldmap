@@ -158,6 +158,20 @@ fn smooth(delta: f32) -> f32 {
 const SCROLL_CURVE: f32 = 1.0 / 6.0;
 const SCROLL_REACH: f32 = 24.0;
 
+/// Какая доля скорости прокрутки переживает секунду затухания.
+///
+/// Мера здесь время, а не число кадров, и это не педантизм: показатель вида
+/// `трение^(dt · развёртка)` меряет затухание кадрами, и тогда один и тот же
+/// щелчок колеса докатывается на 144 Гц вдвое быстрее, чем на 60. От времени —
+/// значит одинаково на любом мониторе, а пропущенный кадр учитывается сам
+/// собой: за длинный `dt` гасится ровно столько, сколько за это время и
+/// полагается.
+///
+/// Величина отсюда: 0.92 за кадр шестидесятигерцевой развёртки — тот темп, на
+/// котором один щелчок докатывается примерно за секунду, — то есть 0.92⁶⁰ за
+/// саму секунду.
+const SCROLL_LEFT_PER_S: f32 = 0.0067;
+
 /// Один щелчок колеса — 120 единиц: так его называет окно (`main.rs`), и так
 /// его называет всякая оконная система со времён Windows.
 const RAW_WHEEL_NOTCH: f32 = 120.0;
@@ -177,7 +191,13 @@ fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_
 
     match ev {
         app_proto::ui_event::Event::Scroll(s) => {
+            // Разворот гасит прежнюю скорость по той же оси: сложившись с
+            // непогасшей, обратный жест сперва доезжал бы вперёд. Обе оси, а не
+            // одна вертикальная: горизонтальная прокрутка разворачивается так же.
             let vel = &mut plugin.scroll_velocity;
+            if (s.delta_x > 0.0 && vel.x < 0.0) || (s.delta_x < 0.0 && vel.x > 0.0) {
+                vel.x = 0.0;
+            }
             if (s.delta_y > 0.0 && vel.y < 0.0) || (s.delta_y < 0.0 && vel.y > 0.0) {
                 vel.y = 0.0;
             }
@@ -186,8 +206,6 @@ fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_
             vel.y = (vel.y + smooth(s.delta_y)).clamp(-3000.0, 3000.0);
         }
         app_proto::ui_event::Event::Frame(f) => {
-            plugin.monitor_fps = f.monitor_fps;
-
             // Темп разбора кадров. Отладочная величина, поэтому debug: в
             // консоли ей делать нечего, а в trace.log она попадёт.
             if let Some(report) = plugin.frames.tick() {
@@ -197,8 +215,7 @@ fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_
             // Инерция прокрутки.
             let velocity = plugin.scroll_velocity;
             if velocity.x.abs() > 0.1 || velocity.y.abs() > 0.1 {
-                let friction = 0.92f32;
-                let factor = 1.0 - friction.powf(f.dt * (plugin.monitor_fps as f32).max(60.0));
+                let factor = 1.0 - SCROLL_LEFT_PER_S.powf(f.dt);
                 let scrolled = Point::new(velocity.x * factor, velocity.y * factor);
 
                 plugin.pending_events.push(Event::Mouse(iced_core::mouse::Event::WheelScrolled {

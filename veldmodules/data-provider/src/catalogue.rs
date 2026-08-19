@@ -236,11 +236,13 @@ pub fn scenes(body: &[u8]) -> anyhow::Result<Found> {
 /// спросили» по такому ответу уже не сказать.
 pub fn parse(body: &[u8]) -> anyhow::Result<Vec<(Facts, DataProduct)>> {
     let response: Response = serde_json::from_slice(body)?;
-    Ok(response
+    let mut lost = 0usize;
+    let parsed: Vec<(Facts, DataProduct)> = response
         .value
         .into_iter()
         .map(|raw| {
             let mut facts = facts(&raw);
+            let had_geometry = raw.footprint.is_some();
             let mut product = product(raw);
             // Уровень обработки знает только каталог, а список читаемых
             // форматов — только `imagery`: здесь они и встречаются.
@@ -248,13 +250,24 @@ pub fn parse(body: &[u8]) -> anyhow::Result<Vec<(Facts, DataProduct)>> {
                 super::imagery::showable(&product.identifier, product.folder, facts.level);
             // «Снимок это или вспомогательные данные» решает контур, и контур
             // тут один — тот, что вышел кольцами. Присутствие поля в ответе
-            // каталога тем же самым не является: у геометрии, которую мы не
-            // разбираем, колец не выходит, и снимок стои́т в списке, не
-            // очерчиваясь ничем.
+            // каталога тем же самым не является, и цена ошибки здесь не
+            // «снимок без контура», а «снимка нет»: бесконтурное сведение
+            // снимков считает вспомогательными данными и выбрасывает
+            // (`scene::group`). Потому и считается вслух — см. `lost` ниже.
             facts.framed = !product.footprint.is_empty();
+            lost += usize::from(had_geometry && product.footprint.is_empty());
             (facts, product)
         })
-        .collect())
+        .collect();
+
+    // Одной строкой на ответ, а не на продукт: расходится обычно формат, то
+    // есть сразу все, и тысяча одинаковых строк сказала бы то же самое.
+    if lost > 0 {
+        log::warn!(target: "catalogue",
+            "геометрия не разобрана у {} продуктов из {}: они уйдут из выдачи как \
+             вспомогательные данные", lost, parsed.len());
+    }
+    Ok(parsed)
 }
 
 /// Факты каталога, по которым продукты сводятся в снимки. Живут они в

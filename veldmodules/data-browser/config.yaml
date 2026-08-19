@@ -9,3 +9,6 @@ rust:
     serde_json: "1.0"
     anyhow: "1.0"
     log: "0.4"
+    # Ради geodesy из wrap-крейта глобуса: контур считается его векторами
+    # (см. footprint.rs).
+    glam: "0.25"

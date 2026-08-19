@@ -25,6 +25,16 @@ from jinja2 import Environment, FileSystemLoader
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def cargo_deps(raw) -> dict:
+    """Список зависимостей из config.yaml в вид, который ждут шаблоны.
+
+    Один на оба списка модуля (`dependencies` и `wrap_dependencies`): форма
+    записи в config.yaml обязана значить в них одно и то же, иначе одна и та же
+    строка давала бы разные манифесты у крейтов, компилирующих один файл.
+    """
+    return {name: yaml_dep_to_toml(val) for name, val in (raw or {}).items()}
+
+
 def yaml_dep_to_toml(val) -> str:
     """Convert a YAML dependency value to a TOML inline-table or version string.
 
@@ -950,8 +960,13 @@ def main():
     cargo_dependencies = {}
 
     # 1. Add explicitly defined third-party deps
-    for dep_name, dep_val in raw_deps.items():
-        cargo_dependencies[dep_name] = yaml_dep_to_toml(dep_val)
+    cargo_dependencies.update(cargo_deps(raw_deps))
+
+    # Зависимости wrap-крейта объявляются отдельно, а не наследуются от модуля:
+    # в wrap попадает не весь модуль, а те его файлы, которые включены в оба
+    # (`#[path]` в wraps/rust/src/wrap.rs). Унаследуй он весь список — потребитель
+    # чужого API тянул бы за собой и то, чем производитель пользуется у себя.
+    wrap_dependencies = cargo_deps(rust_config.get("wrap_dependencies"))
 
     # 2. Add schema-inferred internal dependencies
     schema_deps = schema.get("dependencies", {})
@@ -1058,6 +1073,7 @@ def main():
         template_data["proto_package"] = local_proto_package
         template_data["has_custom_wrap"] = has_wrap
         template_data["wrap_sdk_path"] = wrap_sdk_path
+        template_data["wrap_dependencies"] = wrap_dependencies
         template_data["include_proto_dir"] = os.path.join(os.path.relpath(project_root, wrap_dir), "veldcore", "interface").replace("\\", "/")
 
     render_all(renders, template_data)

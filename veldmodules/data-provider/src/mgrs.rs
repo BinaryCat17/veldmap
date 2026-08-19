@@ -30,11 +30,32 @@ const TILE_SIDE_M: f64 = 109_800.0;
 const SQUARE_M: f64 = 100_000.0;
 /// Период повторения буквы ряда.
 const ROW_CYCLE_M: f64 = 2_000_000.0;
+/// Высота широтной полосы, градусы.
+const BAND_DEG: f64 = 8.0;
+/// Высота полосы X — единственной, что шире прочих: ею закрыта Арктика до 84°.
+const LAST_BAND_DEG: f64 = 12.0;
 
 /// Буквы широтных полос, с юга на север по 8°; I и O пропущены.
 const BANDS: &[u8] = b"CDEFGHJKLMNPQRSTUVWX";
 /// Буквы рядов стоклиц, цикл из двадцати; I и O пропущены.
 const ROWS: &[u8] = b"ABCDEFGHJKLMNPQRSTUV";
+
+/// Середина широтной полосы по её номеру, градусы.
+///
+/// Полосы идут по 8° от −80°, и только последняя, X, — двенадцатиградусная: ею
+/// закрыли Арктику до 84°, не заводя ещё одной буквы. Считай её середину по
+/// общему правилу — и окно выбора ряда съедет на два градуса к югу: северному
+/// краю полосы останется 112 км запаса вместо 354. Этого пока хватает, но
+/// запас, ужавшийся втрое против остальных полос, держится уже ни на чём
+/// (см. тест).
+fn band_middle_deg(band: usize) -> f64 {
+    let south_edge = -80.0 + band as f64 * BAND_DEG;
+    let height = match band == BANDS.len() - 1 {
+        true => LAST_BAND_DEG,
+        false => BAND_DEG,
+    };
+    south_edge + height / 2.0
+}
 
 /// Код тайла из имени продукта: сегмент `_TxxABC_` с зоной и тремя буквами.
 ///
@@ -83,8 +104,10 @@ pub fn frame(tile: &str) -> Result<Frame, String> {
 
     // Ряд: буква даёт нортинг с точностью до периода 2000 км; чётные зоны
     // сдвинуты на пять букв. Период разрешается серединой широтной полосы:
-    // грубого метра на градус хватает с запасом — ошибка приближения на
-    // порядки меньше половины периода.
+    // грубого метра на градус хватает — от середины до края полосы 444 км
+    // (у полосы X 666), то есть до половины периода остаётся втрое больше
+    // пройденного, а ошибка линейного приближения (до 12 км у 84-й параллели)
+    // в этот запас укладывается с избытком.
     let row = ROWS
         .iter()
         .position(|&b| b == bytes[4])
@@ -92,7 +115,7 @@ pub fn frame(tile: &str) -> Result<Frame, String> {
     let shift = if zone % 2 == 0 { 5 } else { 0 };
     let base = ((row + ROWS.len() - shift) % ROWS.len()) as f64 * SQUARE_M;
 
-    let band_mid_deg = -80.0 + band as f64 * 8.0 + 4.0;
+    let band_mid_deg = band_middle_deg(band);
     let south = band_mid_deg < 0.0;
     let approx = band_mid_deg.abs() * 110_946.0;
     // Кандидаты нортинга южного края стоклицы: от экватора у северных полос,
@@ -110,6 +133,37 @@ pub fn frame(tile: &str) -> Result<Frame, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Окно выбора ряда обязано накрывать полосу с запасом с обеих сторон:
+    /// буква ряда называет нортинг с точностью до периода в 2000 км, и
+    /// разрешает её середина полосы. Полоса X двенадцатиградусная, и посчитай
+    /// мы её середину общим восьмиградусным правилом — окно съехало бы на два
+    /// градуса к югу, оставив северному краю 112 км запаса вместо 354.
+    #[test]
+    fn every_band_fits_the_row_window_from_both_sides() {
+        for band in 0..BANDS.len() {
+            let height = if band == BANDS.len() - 1 { LAST_BAND_DEG } else { BAND_DEG };
+            let south = -80.0 + band as f64 * BAND_DEG;
+            let target = band_middle_deg(band).abs() * 110_946.0;
+
+            for (edge, side) in [(south, "юг"), (south + height, "север")] {
+                let margin = ROW_CYCLE_M / 2.0 - (edge.abs() * 110_946.0 - target).abs();
+                assert!(
+                    margin > 250_000.0,
+                    "полоса {} с {}а: запас {:.0} м",
+                    BANDS[band] as char, side, margin
+                );
+            }
+        }
+    }
+
+    /// Полоса X шире прочих, и это записано в самом правиле, а не подогнано
+    /// числом: её середина 78°, а не 76°.
+    #[test]
+    fn the_x_band_is_twelve_degrees_wide() {
+        assert_eq!(band_middle_deg(BANDS.len() - 1), 78.0);
+        assert_eq!(band_middle_deg(0), -76.0, "полоса C — обычная, от −80° до −72°");
+    }
 
     #[test]
     fn tile_is_read_from_product_name() {

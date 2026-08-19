@@ -28,21 +28,24 @@
 //! управления: протаскивание на всю высоту области поворачивает ровно на то,
 //! что в ней видно, — на любой высоте.
 //!
-//! Матричная арифметика здесь своя и ровно на три операции. Библиотека линейной
-//! алгебры дала бы то же самое, но своей зависимостью — а весь долг перед ней
-//! составляет полсотни строк, которые больше не изменятся.
+//! ## Кватернион здесь ровно один и ровно там, где он сильнее рамки
+//!
+//! Хранит камера рамку, а не кватернион: потребителям (матрица вида, луч под
+//! курсором) нужны три оси, и кватернион пришлось бы разворачивать в них каждый
+//! кадр. Но у перелёта задача другая — провести кадр между двумя ориентациями,
+//! — и вот на ней рамка проигрывает: интерполировать пару ортов покомпонентно
+//! значит вести их по хорде и выправлять Грам–Шмидтом, то есть идти не тем
+//! путём и притворяться, что тем. Поэтому [`Flight`] держит концы кватернионами
+//! и ведёт между ними slerp'ом — единственную операцию, ради которой они здесь
+//! и заведены.
+
+use glam::{DMat3, DMat4, DQuat, DVec3, Vec3, Vec4};
+
+/// Матрица 4×4 в раскладке WGSL: по столбцам. Наружу отдаётся отсюда, потому
+/// что раскладка uniform'а — договор этого файла с шейдером.
+pub use glam::Mat4;
 
 use crate::module::geodesy::{self, Geodetic};
-
-/// Матрица 4×4 в раскладке WGSL: по столбцам, элемент `[col * 4 + row]`.
-pub type Mat4 = [f32; 16];
-
-/// Вектор внутренних выкладок — f64, как и вся геометрия Земли (см.
-/// `geodesy`). Наружу, в вершинный буфер и в uniform, уезжает f32.
-type Vec3 = [f64; 3];
-
-/// Северный полюс — он же «верх» кадра. Ось Z в ECEF (см. `geodesy`).
-const NORTH: Vec3 = [0.0, 0.0, 1.0];
 
 /// Вертикальный угол обзора. Им меряется не только проекция: жест и наводка
 /// считают через него, сколько дуги в кадре, — поэтому он один на всех.
@@ -69,26 +72,48 @@ const HEIGHT_RANGE_M: (f64, f64) = (10_000.0, 80_000_000.0);
 /// обрезанный.
 const FRAME_MARGIN: f64 = 1.3;
 
+/// Сколько длится перелёт к наведённому, секунды.
+///
+/// Одно число на любое расстояние: перелёт объясняет, куда уехал вид, а не
+/// отмеряет путь. Растянутый пропорционально дуге, он длился бы полминуты при
+/// наводке с другого полушария — и это ждали бы, а не смотрели.
+const FLIGHT_S: f64 = 0.6;
+
+/// Перелёт к наведённому: концы и пройденное время.
+///
+/// Концы, а не «цель и скорость»: у первой записи есть конец, у второй он
+/// только подразумевается, и камера подъезжала бы к нему бесконечно.
+#[derive(Clone, Copy, PartialEq)]
+struct Flight {
+    from: DQuat,
+    to: DQuat,
+    from_height_m: f64,
+    to_height_m: f64,
+    passed_s: f64,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Camera {
     /// Куда смотрит камера — единичная нормаль к эллипсоиду в подкамерной
     /// точке. Широта с долготой выводятся из неё (см. `geodesy::angles`), а не
     /// хранятся: у пары углов есть полюс, у направления его нет.
-    at: Vec3,
+    at: DVec3,
     /// Что на экране сверху — орт, перпендикулярный `at`. Хранится, а не
     /// выводится из оси мира: выведенный, он у полюса не определён, и жест
     /// упирался бы в стену ровно там.
-    up: Vec3,
+    up: DVec3,
     /// Высота считается от поверхности эллипсоида, поэтому «100 км» означает
     /// 100 км и над экватором, и над полюсом.
     height_m: f64,
+    /// Идущий перелёт. `None` — камера стои́т там, где её оставили.
+    flight: Option<Flight>,
 }
 
 impl Default for Camera {
     /// Начальный вид — Евразия целиком: то, ради чего приложение и открывают.
     fn default() -> Self {
         let at = geodesy::unit(45.0, 60.0);
-        Self { at, up: north_up(at).unwrap_or(NORTH), height_m: 14_000_000.0 }
+        Self { at, up: frame_up(at, DVec3::Z), height_m: 14_000_000.0, flight: None }
     }
 }
 
@@ -111,22 +136,38 @@ impl Camera {
     /// пол-оборота на глазах; север возвращают тем же протаскиванием обратно
     /// либо наводкой на снимок (см. [`Camera::focus`]).
     ///
-    /// Жест и точно обратный ему друг друга снимают. Обвод же по кругу
-    /// возвращает вид повёрнутым на площадь обойдённого — это свойство сферы, а
-    /// не здешней арифметики: поворотами вокруг разных осей иначе не выйдет.
+    /// Жест и точно обратный ему друг друга снимают — и косой тоже, потому что
+    /// поворот здесь один. Разбитый на рыскание и тангаж, он снимался бы
+    /// обратным только в пределе мелкого шага: два поворота конечной величины
+    /// вокруг разных осей не складываются в тот, о котором просили, и на полном
+    /// отлёте набегает градус промаха и градус крена.
+    ///
+    /// Обвод же по кругу возвращает вид повёрнутым на площадь обойдённого — вот
+    /// это свойство сферы, и оно остаётся: никаким выбором оси его не снять.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
+        // Жест — это перехват управления: доводить прежнюю наводку, пока её
+        // уводят руками, значит тянуть камеру в две стороны разом.
+        self.flight = None;
+
         // Во всю высоту области видно вдвое больше, чем от центра до края.
         let span = 2.0 * self.visible_deg();
-        let side = self.side();
+        // Ось поворота складывается из осей кадра, а угол — её длина: у
+        // горизонтального жеста это вертикаль кадра, у вертикального —
+        // горизонталь, у косого — та, что между ними.
+        let turn = (self.up * -f64::from(dx) + self.side() * -f64::from(dy)) * span;
+        let angle_deg = turn.length();
+        if angle_deg <= 0.0 {
+            return;
+        }
 
-        self.at = rotate(self.at, self.up, -f64::from(dx) * span);
-        let pitch = -f64::from(dy) * span;
-        self.at = rotate(self.at, side, pitch);
-        self.up = rotate(self.up, side, pitch);
+        let spin = DQuat::from_axis_angle(turn / angle_deg, angle_deg.to_radians());
+        self.at = spin * self.at;
+        self.up = spin * self.up;
         self.settle();
     }
 
     pub fn zoom(&mut self, steps: f32) {
+        self.flight = None;
         self.height_m = (self.height_m * ZOOM_PER_STEP.powf(f64::from(steps)))
             .clamp(HEIGHT_RANGE_M.0, HEIGHT_RANGE_M.1);
     }
@@ -136,14 +177,72 @@ impl Camera {
     ///
     /// Наводка ставит север кверху: к снимку приводят, чтобы его рассмотреть, а
     /// накопленный жестом крен к нему отношения не имеет. У самого полюса
-    /// «север кверху» не определено — там крен остаётся прежним, и это ничему
-    /// не противоречит: любой поворот кадра над макушкой равно хорош.
+    /// «север кверху» не определено — там за верх кадра берётся прежний, и это
+    /// ничему не противоречит: любой поворот кадра над макушкой равно хорош.
+    ///
+    /// Камера не прыгает, а едет: скачок через полшара не читается как
+    /// перемещение — вид просто становится другим, и куда делся прежний,
+    /// приходится соображать. Ведёт её [`Camera::advance`] по кадровому тику.
     pub fn focus(&mut self, lat_deg: f64, lon_deg: f64, radius_deg: f64) {
-        self.at = geodesy::unit(lat_deg, lon_deg);
-        self.up = north_up(self.at).unwrap_or(self.up);
-        self.settle();
-        self.height_m =
+        let at = geodesy::unit(lat_deg, lon_deg);
+        let up = frame_up(at, self.up);
+        let height_m =
             height_for(radius_deg * FRAME_MARGIN).clamp(HEIGHT_RANGE_M.0, HEIGHT_RANGE_M.1);
+
+        // Та же цель, что уже ведём, — не повод начинать сначала: приходи
+        // наводка каждый кадр, перелёт каждый раз возвращался бы в начало и
+        // камера ползла бы, не приезжая никогда. Со стороны это выглядит не
+        // зависанием, а «почти едет», и потому дороже обычной поломки.
+        let to = orientation(at, up);
+        if self.flight.is_some_and(|flight| flight.to == to && flight.to_height_m == height_m) {
+            return;
+        }
+
+        self.flight = Some(Flight {
+            from: orientation(self.at, self.up),
+            to,
+            from_height_m: self.height_m,
+            to_height_m: height_m,
+            passed_s: 0.0,
+        });
+    }
+
+    /// Продвинуть идущий перелёт на кадр. `false` — вести нечего.
+    ///
+    /// Ответ нужен не для перерисовки — кадр сравнивается с нарисованным
+    /// целиком, и подвинувшаяся камера видна там сама, — а для тайлов: уровень
+    /// и набор видимых ячеек наложений считают по камере, и пока она едет, их
+    /// приходится спрашивать заново (см. `module::on_ui_event`).
+    pub fn advance(&mut self, dt_s: f32) -> bool {
+        let Some(mut flight) = self.flight else { return false };
+
+        flight.passed_s += f64::from(dt_s).max(0.0);
+        let part = (flight.passed_s / FLIGHT_S).clamp(0.0, 1.0);
+        // Трогается и встаёт плавно: на постоянной скорости оба конца перелёта
+        // выглядят рывком, и особенно конец — вид замирает мгновенно.
+        let eased = part * part * (3.0 - 2.0 * part);
+
+        let spin = flight.from.slerp(flight.to, eased);
+        self.at = spin * DVec3::Z;
+        self.up = spin * DVec3::Y;
+        // Высота ведётся долями, а не метрами: приближение — это умножение (см.
+        // [`Camera::zoom`]), и на равномерном ходе весь перелёт съедался бы
+        // первым же кадром, а последние километры ползли бы.
+        let times = flight.to_height_m / flight.from_height_m;
+        self.height_m = flight.from_height_m * times.powf(eased);
+
+        match part >= 1.0 {
+            // Конец — это ровно та камера, о которой просили, а не то, что
+            // осталось от округлений на последнем шаге.
+            true => {
+                self.at = flight.to * DVec3::Z;
+                self.up = flight.to * DVec3::Y;
+                self.height_m = flight.to_height_m;
+                self.flight = None;
+            }
+            false => self.flight = Some(flight),
+        }
+        true
     }
 
     /// Где висит камера, в тех координатах, в которых приходит вся остальная
@@ -154,25 +253,20 @@ impl Camera {
     }
 
     /// Ось экрана вправо — она же ось вертикального жеста.
-    fn side(&self) -> Vec3 {
-        normalize(cross(self.up, self.at))
+    fn side(&self) -> DVec3 {
+        self.up.cross(self.at).normalize()
     }
 
     /// Вернуть рамке ортонормальность: поворотами она теряет её по капле, а
     /// матрица вида и луч под курсором выводятся из неё обе.
     fn settle(&mut self) {
-        self.at = normalize(self.at);
-        let along = dot(self.up, self.at);
-        let up = [
-            self.up[0] - self.at[0] * along,
-            self.up[1] - self.at[1] * along,
-            self.up[2] - self.at[2] * along,
-        ];
+        self.at = self.at.normalize();
+        let up = self.up.reject_from_normalized(self.at);
         // Ноль означал бы, что «верх» сошёлся с направлением взгляда, — такого
         // поворота нет ни у одного жеста, но молча вырожденной рамка остаться
         // не должна: из неё выводится вся геометрия кадра.
-        if dot(up, up) > 1e-12 {
-            self.up = normalize(up);
+        if up.length_squared() > 1e-12 {
+            self.up = up.normalize();
         }
     }
 
@@ -225,7 +319,7 @@ impl Camera {
     /// Обратное к проекции, но не обращением матрицы: базис камеры известен и
     /// без неё, а обратная матрица 4×4 — это ещё полсотни строк, которые
     /// сойдутся с прямой только на глаз.
-    pub fn ray(&self, x: f32, y: f32, aspect: f32) -> (Vec3, Vec3) {
+    pub fn ray(&self, x: f32, y: f32, aspect: f32) -> (DVec3, DVec3) {
         let (side, up, forward) = self.basis();
         // Кадр отстоит от камеры на единицу вдоль взгляда, поэтому полкадра по
         // вертикали — это тангенс половины угла обзора, а по горизонтали он же,
@@ -235,11 +329,7 @@ impl Camera {
         // Ось Y кадра смотрит вверх, а доли области считаются сверху вниз.
         let above = (1.0 - 2.0 * y as f64) * half;
 
-        let direction = normalize([
-            forward[0] + side[0] * right + up[0] * above,
-            forward[1] + side[1] * right + up[1] * above,
-            forward[2] + side[2] * right + up[2] * above,
-        ]);
+        let direction = (forward + side * right + up * above).normalize();
         (geodesy::world(self.geodetic()), direction)
     }
 
@@ -250,10 +340,10 @@ impl Camera {
         let near = geodesy::metres(self.height_m) * 0.5;
         // Дальний край эллипсоида не дальше, чем |eye| + большая полуось.
         let far = self.radius() as f32 + 1.05;
-        multiply(
-            &perspective((FOV_Y_DEG as f32).to_radians(), aspect.max(0.01), near, far),
-            &look_at(geodesy::world(self.geodetic()), self.basis()),
-        )
+        // Перспектива с диапазоном глубины 0..1 — тем, который ждёт wgpu (в
+        // отличие от -1..1 у OpenGL); у glam это `_rh`, а не `_rh_gl`.
+        Mat4::perspective_rh((FOV_Y_DEG as f32).to_radians(), aspect.max(0.01), near, far)
+            * look_at(geodesy::world(self.geodetic()), self.basis())
     }
 
     /// Оси кадра: вправо, вверх и вперёд. Одни на всех, кому нужна ориентация
@@ -264,11 +354,10 @@ impl Camera {
     /// не совпадает с хранимым `up` в точности: их разводит наклон нормали к
     /// радиусу-вектору, те самые 0.19° сжатия. Расходиться им негде — оба
     /// выводятся здесь.
-    fn basis(&self) -> (Vec3, Vec3, Vec3) {
-        let eye = geodesy::world(self.geodetic());
-        let forward = normalize([-eye[0], -eye[1], -eye[2]]);
-        let side = normalize(cross(forward, self.up));
-        (side, cross(side, forward), forward)
+    fn basis(&self) -> (DVec3, DVec3, DVec3) {
+        let forward = -geodesy::world(self.geodetic()).normalize();
+        let side = forward.cross(self.up).normalize();
+        (side, side.cross(forward), forward)
     }
 }
 
@@ -276,24 +365,37 @@ impl Camera {
 /// перпендикулярная взгляду. `None` — камера над самым полюсом, и такого
 /// направления там нет: все меридианы сходятся, и любой поворот кадра равно
 /// хорош.
-fn north_up(at: Vec3) -> Option<Vec3> {
-    let along = dot(NORTH, at);
-    let up = [NORTH[0] - at[0] * along, NORTH[1] - at[1] * along, NORTH[2] - at[2] * along];
-    (dot(up, up) > 1e-12).then(|| normalize(up))
+fn north_up(at: DVec3) -> Option<DVec3> {
+    let up = DVec3::Z.reject_from_normalized(at);
+    (up.length_squared() > 1e-12).then(|| up.normalize())
 }
 
-/// Поворот вектора вокруг единичной оси, формула Родрига. Кватернионов ради
-/// двух поворотов на кадр заводить незачем: у них то же самое и на десяток
-/// строк больше.
-fn rotate(v: Vec3, axis: Vec3, angle_deg: f64) -> Vec3 {
-    let (sin, cos) = angle_deg.to_radians().sin_cos();
-    let perp = cross(axis, v);
-    let along = dot(axis, v) * (1.0 - cos);
-    [
-        v[0] * cos + perp[0] * sin + axis[0] * along,
-        v[1] * cos + perp[1] * sin + axis[1] * along,
-        v[2] * cos + perp[2] * sin + axis[2] * along,
-    ]
+/// Верх кадра для этого направления взгляда: север, а над самой макушкой —
+/// то, что осталось от прежнего верха.
+///
+/// Пара обязана выйти ортонормальной, и это не придирка: из неё выводится
+/// поворот кадра ([`orientation`]), а у косой пары поворота нет — матрица из
+/// неё не ортогональна, и кватернион по ней получается неизвестно какой.
+fn frame_up(at: DVec3, previous: DVec3) -> DVec3 {
+    north_up(at).unwrap_or_else(|| {
+        let up = previous.reject_from_normalized(at);
+        match up.length_squared() > 1e-12 {
+            true => up.normalize(),
+            // Прежний верх смотрел туда же, куда взгляд: над полюсом любой
+            // поворот кадра равно хорош, и годится первый попавшийся.
+            false => at.any_orthonormal_vector(),
+        }
+    })
+}
+
+/// Ориентация кадра кватернионом — тем же, из которого её потом достают.
+///
+/// Столбцы матрицы это оси кадра: вправо, вверх и на камеру. Рамка
+/// ортонормальна (см. [`Camera::settle`]), поэтому матрица — поворот, а у
+/// поворота кватернион однозначен с точностью до знака, и знак slerp'у
+/// безразличен: он сам выбирает короткую дугу.
+fn orientation(at: DVec3, up: DVec3) -> DQuat {
+    DQuat::from_mat3(&DMat3::from_cols(up.cross(at), up, at))
 }
 
 /// Точка мира в пространство отсечения. Здесь, а не у того, кто спрашивает:
@@ -303,13 +405,8 @@ fn rotate(v: Vec3, axis: Vec3, angle_deg: f64) -> Vec3 {
 /// Отдаёт четвёрку как есть, не деля на w: делить можно только при w > 0, а
 /// что делать с точкой за камерой, решает спрашивающий (см.
 /// `overlay::on_screen`).
-pub fn project(view_proj: &Mat4, point: geodesy::World) -> [f32; 4] {
-    let mut out = [0.0; 4];
-    for (row, value) in out.iter_mut().enumerate() {
-        *value = (0..3).map(|col| view_proj[col * 4 + row] * point[col]).sum::<f32>()
-            + view_proj[3 * 4 + row];
-    }
-    out
+pub fn project(view_proj: &Mat4, point: geodesy::World) -> Vec4 {
+    *view_proj * Vec3::from(point).extend(1.0)
 }
 
 /// Высота, с которой видно круг такого углового радиуса, — обратное к
@@ -331,53 +428,22 @@ fn height_for(radius_deg: f64) -> f64 {
     (radius - 1.0) * geodesy::SEMI_MAJOR_M
 }
 
-/// Перспектива с диапазоном глубины 0..1 — тем, который ждёт wgpu (в отличие
-/// от -1..1 у OpenGL).
-fn perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-    let f = 1.0 / (fov_y * 0.5).tan();
-    let range = 1.0 / (near - far);
-    [
-        f / aspect, 0.0, 0.0, 0.0,
-        0.0, f, 0.0, 0.0,
-        0.0, 0.0, far * range, -1.0,
-        0.0, 0.0, near * far * range, 0.0,
-    ]
-}
-
 /// Взгляд из точки по готовым осям кадра. В f32 переводится здесь и только
 /// здесь: дальше матрица уезжает в шейдер, где другой точности и нет.
-fn look_at(eye: Vec3, (side, up, forward): (Vec3, Vec3, Vec3)) -> Mat4 {
-    [
-        side[0] as f32, up[0] as f32, -forward[0] as f32, 0.0,
-        side[1] as f32, up[1] as f32, -forward[1] as f32, 0.0,
-        side[2] as f32, up[2] as f32, -forward[2] as f32, 0.0,
-        -dot(side, eye) as f32, -dot(up, eye) as f32, dot(forward, eye) as f32, 1.0,
-    ]
-}
-
-fn multiply(a: &Mat4, b: &Mat4) -> Mat4 {
-    let mut out = [0.0; 16];
-    for col in 0..4 {
-        for row in 0..4 {
-            out[col * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[col * 4 + k]).sum();
-        }
-    }
-    out
-}
-
-fn dot(a: Vec3, b: Vec3) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn normalize(v: Vec3) -> Vec3 {
-    let len = dot(v, v).sqrt();
-    if len == 0.0 { v } else { [v[0] / len, v[1] / len, v[2] / len] }
+///
+/// Оси кадра ложатся строками, а не столбцами: матрица вида переводит мир в
+/// систему камеры, то есть обращает её ориентацию, а обратное к повороту —
+/// это его транспонирование.
+fn look_at(eye: DVec3, (side, up, forward): (DVec3, DVec3, DVec3)) -> Mat4 {
+    let rotation = DMat3::from_cols(side, up, -forward).transpose();
+    let shift = -(rotation * eye);
+    DMat4::from_cols(
+        rotation.x_axis.extend(0.0),
+        rotation.y_axis.extend(0.0),
+        rotation.z_axis.extend(0.0),
+        shift.extend(1.0),
+    )
+    .as_mat4()
 }
 
 #[cfg(test)]
@@ -389,7 +455,7 @@ mod tests {
     /// заявляет их парой — здесь пара сходится числом.
     fn at(lat_deg: f64, lon_deg: f64, height_m: f64) -> Camera {
         let at = geodesy::unit(lat_deg, lon_deg);
-        Camera { at, up: north_up(at).unwrap_or(NORTH), height_m }
+        Camera { at, up: frame_up(at, DVec3::Z), height_m, flight: None }
     }
 
     #[test]
@@ -442,12 +508,12 @@ mod tests {
             // и именно на ней рамка теряет ортогональность быстрее всего.
             let sign = if step % 7 < 3 { -1.0 } else { 1.0 };
             camera.orbit(0.37 * sign, 0.29);
-            assert!((dot(camera.at, camera.at) - 1.0).abs() < 1e-9, "шаг {}", step);
-            assert!((dot(camera.up, camera.up) - 1.0).abs() < 1e-9, "шаг {}", step);
-            assert!(dot(camera.at, camera.up).abs() < 1e-9, "шаг {}", step);
+            assert!((camera.at.dot(camera.at) - 1.0).abs() < 1e-9, "шаг {}", step);
+            assert!((camera.up.dot(camera.up) - 1.0).abs() < 1e-9, "шаг {}", step);
+            assert!(camera.at.dot(camera.up).abs() < 1e-9, "шаг {}", step);
             let (side, up, forward) = camera.basis();
             for (name, axis) in [("side", side), ("up", up), ("forward", forward)] {
-                assert!((dot(axis, axis) - 1.0).abs() < 1e-6, "{} на шаге {}", name, step);
+                assert!((axis.dot(axis) - 1.0).abs() < 1e-6, "{} на шаге {}", name, step);
             }
         }
     }
@@ -463,7 +529,7 @@ mod tests {
             let span = 2.0 * camera.visible_deg();
             let before = camera.at;
             camera.orbit(0.25, 0.0);
-            let moved = dot(before, camera.at).clamp(-1.0, 1.0).acos().to_degrees();
+            let moved = before.dot(camera.at).clamp(-1.0, 1.0).acos().to_degrees();
             assert!(
                 (moved - span * 0.25).abs() < 1e-6,
                 "на {}° жест сдвинул на {}° вместо {}°", lat, moved, span * 0.25
@@ -495,7 +561,7 @@ mod tests {
             "меридиан после перелёта {} вместо 210", lon
         );
         // И кадр за полюсом честно перевёрнут: север там книзу.
-        assert!(dot(camera.up, north_up(camera.at).expect("не полюс")) < 0.0);
+        assert!(camera.up.dot(north_up(camera.at).expect("не полюс")) < 0.0);
     }
 
     /// Обратное протаскивание возвращает камеру туда, откуда её увели: жест —
@@ -512,9 +578,105 @@ mod tests {
             camera.orbit(-0.3, 0.0);
         }
         assert!(
-            dot(before, camera.at) > 1.0 - 1e-9,
+            before.dot(camera.at) > 1.0 - 1e-9,
             "петля не замкнулась: {:?} против {:?}", before, camera.at
         );
+    }
+
+    /// Косой жест снимается обратным точно, а не в пределе мелкого шага. Это и
+    /// есть разница между одним поворотом и парой: у пары обратный жест
+    /// поворачивает вокруг уже повёрнутых осей, и петля не сходится.
+    #[test]
+    fn an_oblique_gesture_undoes_itself() {
+        let mut camera = at(60.0, -20.0, 14_000_000.0);
+        let (at_before, up_before) = (camera.at, camera.up);
+        camera.orbit(0.37, 0.29);
+        camera.orbit(-0.37, -0.29);
+        assert!(
+            at_before.dot(camera.at) > 1.0 - 1e-12,
+            "точка не вернулась: {:?} против {:?}", at_before, camera.at
+        );
+        assert!(
+            up_before.dot(camera.up) > 1.0 - 1e-12,
+            "кадр остался подкрученным: {:?} против {:?}", up_before, camera.up
+        );
+    }
+
+    /// Перелёт кончается ровно там, куда просили, а не рядом: конец — это цель,
+    /// а не то, что осталось от округлений на последнем шаге.
+    #[test]
+    fn a_flight_lands_exactly_where_asked() {
+        let mut camera = Camera::default();
+        camera.focus(-33.9, 151.2, 0.5);
+
+        let mut ticks = 0;
+        while camera.advance(1.0 / 60.0) {
+            ticks += 1;
+            assert!(ticks < 1000, "перелёт не кончился");
+        }
+        assert!(ticks > 1, "перелёт уложился в один кадр: {}", ticks);
+
+        let (lat, lon) = geodesy::angles(camera.at);
+        assert!((lat + 33.9).abs() < 1e-9, "широта {}", lat);
+        assert!((lon - 151.2).abs() < 1e-9, "долгота {}", lon);
+        assert_eq!(camera.height_m, height_for(0.5 * FRAME_MARGIN));
+        assert!(camera.at.dot(camera.up).abs() < 1e-12, "рамка не ортогональна");
+        // И камера, доехав, встаёт: ещё один тик вести уже нечего.
+        assert!(!camera.advance(1.0 / 60.0));
+    }
+
+    /// На середине перелёта камера между началом и целью, а не у одного из
+    /// концов: высота ведётся долями, поэтому середина — среднее геометрическое.
+    #[test]
+    fn a_flight_passes_between_its_ends() {
+        let mut camera = at(0.0, 0.0, 10_000_000.0);
+        let target = height_for(1.0 * FRAME_MARGIN);
+        camera.focus(0.0, 40.0, 1.0);
+        camera.advance((FLIGHT_S * 0.5) as f32);
+
+        // Допуск не на арифметику, а на долю: шаг приезжает в f32, и полсекунды
+        // в нём не полсекунды ровно.
+        let (lat, lon) = geodesy::angles(camera.at);
+        assert!(lat.abs() < 1e-9, "перелёт по экватору не должен уводить с него: {}", lat);
+        assert!((lon - 20.0).abs() < 1e-4, "середина дуги: {}", lon);
+        let middle = (10_000_000.0_f64 * target).sqrt();
+        assert!(
+            (camera.height_m / middle - 1.0).abs() < 1e-5,
+            "{} против среднего геометрического {}", camera.height_m, middle
+        );
+    }
+
+    /// Повторная наводка на ту же цель перелёт не перезапускает: приходи она
+    /// каждый кадр, камера возвращалась бы в начало пути и не приезжала никогда.
+    #[test]
+    fn a_repeated_focus_does_not_restart_the_flight() {
+        let mut camera = Camera::default();
+        camera.focus(-33.9, 151.2, 0.5);
+        for _ in 0..30 {
+            camera.advance(1.0 / 60.0);
+            camera.focus(-33.9, 151.2, 0.5);
+        }
+        // Полсекунды пути пройдено — значит перелёт шёл, а не начинался заново.
+        assert!(camera.advance(0.2), "перелёт кончился раньше времени");
+        assert!(!camera.advance(0.01), "перелёт не кончился за свой срок");
+
+        let (lat, lon) = geodesy::angles(camera.at);
+        assert!((lat + 33.9).abs() < 1e-9 && (lon - 151.2).abs() < 1e-9, "{} {}", lat, lon);
+    }
+
+    /// Жест перехватывает управление: доводить прежнюю наводку, пока камеру
+    /// тащат руками, значит тянуть её в две стороны разом.
+    #[test]
+    fn a_gesture_calls_off_the_flight() {
+        let mut camera = Camera::default();
+        camera.focus(-33.9, 151.2, 0.5);
+        camera.advance(0.1);
+        camera.orbit(0.1, 0.0);
+        assert!(!camera.advance(1.0), "перелёт пережил жест");
+
+        camera.focus(-33.9, 151.2, 0.5);
+        camera.zoom(1.0);
+        assert!(!camera.advance(1.0), "перелёт пережил колесо");
     }
 
     #[test]
@@ -534,9 +696,10 @@ mod tests {
         let mut camera = Camera::default();
         camera.orbit(0.4, 0.4);
         camera.focus(89.7, 15.0, 0.2);
+        camera.advance(10.0);
         let (lat, lon) = geodesy::angles(camera.at);
         assert!((lat - 89.7).abs() < 1e-9, "широта {}", lat);
         assert!((lon - 15.0).abs() < 1e-9, "долгота {}", lon);
-        assert!(dot(camera.at, camera.up).abs() < 1e-9, "рамка не ортогональна");
+        assert!(camera.at.dot(camera.up).abs() < 1e-9, "рамка не ортогональна");
     }
 }

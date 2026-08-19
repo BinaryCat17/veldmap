@@ -79,6 +79,43 @@ impl DataBacking {
     }
 }
 
+/// По какой границе wgpu копирует буферы: и смещение, и длину
+/// (`COPY_BUFFER_ALIGNMENT`). Невыровненное он отвергает ошибкой валидации, а
+/// та уходит в лог и процесс не роняет (`on_uncaptured_error` в setup.rs) —
+/// то есть отказ проходит незамеченным, а вызывающий получает нули как
+/// удавшееся чтение. Поэтому граница держится здесь, до вызова.
+const COPY_ALIGN: u64 = 4;
+
+/// По какой границе wgpu отображает буфер в память (`MAP_ALIGNMENT`). Крупнее
+/// копирования вдвое, поэтому окно чтения и строится по той из двух, которая
+/// нужна выбранному пути.
+const MAP_ALIGN: u64 = 8;
+
+/// Размер, дотянутый до границы.
+fn aligned(size: u64) -> u64 {
+    size.next_multiple_of(COPY_ALIGN)
+}
+
+/// Окно, которым берут с GPU запрошенное `[offset, offset + size)`: начало,
+/// длина и сколько байт в начале лишние.
+///
+/// Расширяется наружу, а не отвергается: смещение и длину называет модуль, то
+/// есть любые, а GPU отдаёт только выровненное. Отвергнув, мы объявили бы, что
+/// середину буфера прочитать нельзя. Записи это не касается — там расширить
+/// окно значит затереть чужие байты, и там отказ единственно верен.
+///
+/// `limit` — размер самого буфера: он выровнен по [`COPY_ALIGN`] уже при
+/// выделении, поэтому обрезка о него границу не портит.
+///
+/// Запрошенное обязано лежать в буфере (`offset + size <= limit`): окно растёт
+/// наружу, а обрезается только о `limit`, и за краем ему взяться неоткуда.
+/// Вызывающий это и обеспечивает — размер зажимается длиной носителя раньше.
+fn window(offset: u64, size: u64, align: u64, limit: u64) -> (u64, u64, usize) {
+    let from = offset - offset % align;
+    let to = (offset + size).next_multiple_of(align).min(limit);
+    (from, to - from, (offset - from) as usize)
+}
+
 /// Выделение памяти, разделяемой хостом с модулями.
 ///
 /// Сам менеджер ничего не хранит: записи (носитель + lease) живут в
@@ -150,10 +187,9 @@ impl MemoryManager {
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !mapped { final_usage |= wgpu::BufferUsages::COPY_DST; }
         if mapped { final_usage |= wgpu::BufferUsages::MAP_WRITE; }
-        let aligned = (size + 3) & !3;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("memory-buf"), // id ресурса выдаёт реестр, а он ещё впереди
-            size: aligned,
+            size: aligned(size),
             usage: final_usage,
             mapped_at_creation: mapped,
         });
@@ -243,12 +279,9 @@ impl MemoryManager {
                         ));
                     }
                     DataBacking::Buffer { buffer, mapped: false } => {
-                        // Очередь принимает только выровненное по четырём
-                        // байтам — и смещение, и длину (COPY_BUFFER_ALIGNMENT).
-                        // Невыровненное она разбирает ошибкой валидации, а та
-                        // снимает процесс: довод пришёл из wasm, значит
-                        // проверяем мы — тем же движением, что и границу.
-                        const COPY_ALIGN: u64 = 4;
+                        // Очередь принимает только выровненное (см.
+                        // [`COPY_ALIGN`]). Расширить окно здесь нельзя —
+                        // затёрлись бы чужие байты, — поэтому отказ.
                         if offset % COPY_ALIGN != 0 || data.len() as u64 % COPY_ALIGN != 0 {
                             return Err(anyhow::anyhow!(
                                 "запись в буфер не выровнена по {} байтам: смещение {}, длина {}",
@@ -387,9 +420,9 @@ impl MemoryManager {
                     q.submit([]);
                     let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                 }
-                let aligned_size = (size + 3) & !3;
-                if buffer.usage().contains(wgpu::BufferUsages::MAP_READ) && offset + aligned_size <= buffer.size() {
-                    let slice = buffer.slice(offset..(offset + aligned_size));
+                if buffer.usage().contains(wgpu::BufferUsages::MAP_READ) {
+                    let (from, len, skip) = window(offset, size, MAP_ALIGN, buffer.size());
+                    let slice = buffer.slice(from..(from + len));
                     let (tx, rx) = std::sync::mpsc::channel();
                     slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
                     {
@@ -397,24 +430,36 @@ impl MemoryManager {
                         let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
                     rx.recv()??;
-                    let data = slice.get_mapped_range()?[..size as usize].to_vec();
+                    let data = slice.get_mapped_range()?[skip..skip + size as usize].to_vec();
                     buffer.unmap();
                     Ok(data)
                 } else {
+                    // Копировать можно только то, что объявлено источником
+                    // копии. Проверяем сами, потому что отказ wgpu уходит в лог
+                    // (см. `on_uncaptured_error` в setup.rs), staging остаётся
+                    // нулевым, и модуль получает нули как удавшееся чтение —
+                    // худший из возможных ответов.
+                    if !buffer.usage().contains(wgpu::BufferUsages::COPY_SRC) {
+                        return Err(anyhow::anyhow!(
+                            "буфер {} не читается: выделен без COPY_SRC и без MAP_READ",
+                            region_id
+                        ));
+                    }
+                    let (from, len, skip) = window(offset, size, COPY_ALIGN, buffer.size());
                     let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("Memory-Staging-Read"),
-                        size: aligned_size,
+                        size: len,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     });
                     let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    encoder.copy_buffer_to_buffer(&buffer, offset, &staging, 0, size);
+                    encoder.copy_buffer_to_buffer(&buffer, from, &staging, 0, len);
                     {
                         let q = self.queue.lock().unwrap();
                         q.submit(Some(encoder.finish()));
                         let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
-                    let slice = staging.slice(..aligned_size);
+                    let slice = staging.slice(..len);
                     let (tx, rx) = std::sync::mpsc::channel();
                     slice.map_async(wgpu::MapMode::Read, move |res| { let _ = tx.send(res); });
                     {
@@ -422,7 +467,7 @@ impl MemoryManager {
                         let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                     }
                     rx.recv()??;
-                    let data = slice.get_mapped_range()?[..size as usize].to_vec();
+                    let data = slice.get_mapped_range()?[skip..skip + size as usize].to_vec();
                     staging.unmap();
                     Ok(data)
                 }
@@ -458,4 +503,54 @@ impl MemoryManager {
 
     // Освобождения отдельного метода нет: запись о ресурсе одна, поэтому и
     // освобождение одно — `ResourceRegistry::unregister`.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Размер буфера дотягивается до границы копирования, а не отвергается:
+    /// просить пять байт законно, копировать пять — нет.
+    #[test]
+    fn size_reaches_the_copy_boundary() {
+        assert_eq!(aligned(0), 0);
+        assert_eq!(aligned(1), 4);
+        assert_eq!(aligned(4), 4);
+        assert_eq!(aligned(5), 8);
+    }
+
+    /// Окно накрывает запрошенное целиком и попадает на границу обоими
+    /// концами: невыровненный конец — та же ошибка валидации, что и начало.
+    #[test]
+    fn the_window_covers_what_was_asked_and_lands_on_the_boundary() {
+        let limit = 1024;
+        for align in [COPY_ALIGN, MAP_ALIGN] {
+            for offset in 0..24_u64 {
+                for size in 1..24_u64 {
+                    let (from, len, skip) = window(offset, size, align, limit);
+                    assert_eq!(from % align, 0, "начало {} при выравнивании {}", from, align);
+                    assert_eq!(from + skip as u64, offset, "смещение внутри окна");
+                    assert!(skip as u64 + size <= len, "окно короче запрошенного: {} < {}", len, skip as u64 + size);
+                    assert!(from + len <= limit, "окно вышло за буфер");
+                }
+            }
+        }
+    }
+
+    /// У края буфера окно обрезается его размером, а не вылезает наружу.
+    /// Граница при этом остаётся: сам буфер выровнен уже при выделении.
+    #[test]
+    fn the_window_stops_at_the_end_of_the_buffer() {
+        let limit = aligned(30);
+        let (from, len, skip) = window(29, 3, COPY_ALIGN, limit);
+        assert_eq!(from + len, limit, "окно обязано доходить до конца буфера");
+        assert_eq!(from % COPY_ALIGN, 0);
+        assert!(skip as u64 + 3 <= len);
+    }
+
+    /// Нулевой размер окна не растит: читать нечего, и просить у GPU нечего.
+    #[test]
+    fn an_empty_window_stays_empty() {
+        assert_eq!(window(8, 0, COPY_ALIGN, 1024), (8, 0, 0));
+    }
 }

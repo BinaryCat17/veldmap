@@ -37,17 +37,32 @@ pub fn fingerprint(resource_id: u64, len: u64) -> Result<String, String> {
     let mut hash = Fnv::new();
     hash.update(&len.to_le_bytes());
 
-    let head = read_exact_at(&mut reader, 0, SAMPLE.min(len))?;
+    let (head, tail) = edges(len);
+    let head = read_exact_at(&mut reader, head.0, head.1)?;
     hash.update(&head);
-    // Хвост — только не перекрытый головой: у короткого файла второго куска
-    // нет, а не «тот же кусок ещё раз».
-    if len > SAMPLE {
-        let from = (len - SAMPLE).max(SAMPLE);
-        let tail = read_exact_at(&mut reader, from, len - from)?;
+    if let Some((from, size)) = tail {
+        let tail = read_exact_at(&mut reader, from, size)?;
         hash.update(&tail);
     }
 
     Ok(format!("{:016x}-t{}q{}", hash.finish(), TILE, DECODE_REV))
+}
+
+/// Какие куски файла попадают в отпечаток: голова и не перекрытый ею хвост.
+///
+/// Хвост отдельным ответом, а не вторым куском наравне с головой: у короткого
+/// файла второго куска нет вовсе, а не «тот же кусок ещё раз». Перехлёста быть
+/// не должно — не ради скорости, а ради смысла: перехлестнувшись, отпечаток
+/// хэшировал бы общие байты дважды и переставал отвечать заявленному правилу
+/// «длина ∥ голова ∥ хвост». Тихо: файлы 64–128 КиБ сменили бы отпечаток, и
+/// весь кэш тайлов для них промахнулся бы навсегда.
+fn edges(len: u64) -> ((u64, u64), Option<(u64, u64)>) {
+    let head = (0, SAMPLE.min(len));
+    let tail = (len > SAMPLE).then(|| {
+        let from = (len - SAMPLE).max(SAMPLE);
+        (from, len - from)
+    });
+    (head, tail)
 }
 
 fn read_exact_at(reader: &mut veldsdk::ResourceReader, from: u64, size: u64) -> Result<Vec<u8>, String> {
@@ -112,6 +127,37 @@ mod tests {
         // было бы неверно требовать от свёртки подряд идущих байт — важно,
         // что ДЛИНА разводит такие пары раньше самих байт.
         assert_ne!(of_slices(8, b"head", b"tail"), of_slices(9, b"headt", b"ail!"));
+    }
+
+    /// Голова и хвост не перехлёстываются и не оставляют дыры посередине
+    /// раньше, чем файл станет длиннее двух выборок.
+    #[test]
+    fn edges_never_overlap_and_never_leave_a_gap_too_early() {
+        for len in [0, 1, SAMPLE - 1, SAMPLE, SAMPLE + 1, 2 * SAMPLE - 1, 2 * SAMPLE, 2 * SAMPLE + 1] {
+            let ((head_at, head_len), tail) = edges(len);
+            assert_eq!((head_at, head_len), (0, SAMPLE.min(len)), "голова при {}", len);
+
+            let Some((tail_at, tail_len)) = tail else {
+                assert!(len <= SAMPLE, "хвост потерян при {}", len);
+                continue;
+            };
+            assert!(tail_at >= head_len, "перехлёст при длине {}: хвост с {}", len, tail_at);
+            assert_eq!(tail_at + tail_len, len, "хвост не доходит до конца при {}", len);
+            // Дыра посередине появляется только там, где ей и место, — когда
+            // файл длиннее двух выборок.
+            assert_eq!(tail_at > head_len, len > 2 * SAMPLE, "дыра не там при {}", len);
+        }
+    }
+
+    /// Прочитанное — ровно то, что назвали края: всякий байт файла короче двух
+    /// выборок попадает в свёртку ровно один раз.
+    #[test]
+    fn short_files_are_read_whole_and_once() {
+        for len in [1_u64, SAMPLE / 2, SAMPLE, SAMPLE + 1, 2 * SAMPLE] {
+            let ((_, head_len), tail) = edges(len);
+            let read = head_len + tail.map_or(0, |(_, size)| size);
+            assert_eq!(read, len, "длина {}: прочитано {}", len, read);
+        }
     }
 
     #[test]

@@ -58,7 +58,6 @@ pub struct PluginUiState {
     /// Инвалидируется сменой texture_id (владелец аллоцирует новый при resize).
     pub target_view: Option<(u64, TextureViewId)>,
 
-    pub monitor_fps: u32,
     /// Темп разбора кадров, раз в несколько секунд в trace.log.
     pub frames: crate::module::frames::FrameMeter,
 
@@ -151,7 +150,6 @@ impl PluginUiState {
             last_draw_commands: Vec::new(),
             external_bind_groups: HashMap::new(),
             target_view: None,
-            monitor_fps: 60,
             frames: crate::module::frames::FrameMeter::new(),
             aimed: HashMap::new(),
             offsets: HashMap::new(),

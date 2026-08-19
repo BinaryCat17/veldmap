@@ -123,7 +123,7 @@ impl Frame {
             }
             // Между углами футпринта нет ничего, кроме поверхности, — значит и
             // идти между ними надо по ней, дугой: у гранулы Sentinel-1 прямая в
-            // градусах отходит от снятого на 27 км (см. `geodesy::between`).
+            // градусах отходит от дуги на 13 км (см. `geodesy::between`).
             Self::Quad([ul, ur, lr, ll]) | Self::Rough([ul, ur, lr, ll]) => {
                 let top = geodesy::between(*ul, *ur, fx);
                 let bottom = geodesy::between(*ll, *lr, fx);
@@ -179,11 +179,6 @@ pub struct Grid {
     /// непрерывный ход вдоль самой решётки — см. [`Grid::new`].
     nodes: Vec<(f64, f64)>,
 }
-
-/// Насколько разность долгот должна приблизиться к полному кругу, чтобы её
-/// считали им и не сворачивали к ближней ветви (см. [`Grid::unwind`]).
-/// То же число и по той же причине держит контуры (`outlines::FULL_CIRCLE_DEG`).
-const FULL_CIRCLE_DEG: f64 = 359.0;
 
 /// Насколько узлы могут разойтись, оставаясь на одной линии решётки.
 ///
@@ -261,7 +256,7 @@ impl Grid {
                 // ширину: ту самую, на которую потом делят, выбирая уровень.
                 // «Соседи не дальше полукруга» верно для решётки в двадцать
                 // один узел, а не для всякой.
-                if (node.1 - previous).abs() >= FULL_CIRCLE_DEG {
+                if (node.1 - previous).abs() >= geodesy::FULL_CIRCLE_DEG {
                     continue;
                 }
                 node.1 = geodesy::unwind(previous, node.1);
@@ -883,6 +878,9 @@ mod tests {
         let (lat, lon) = overlay.frame.geodetic(0.5, 0.5);
         let mut camera = crate::module::camera::Camera::default();
         camera.focus(lat, lon, 1.0);
+        // Наводка едет, а проверяется приехавшее: шаг длиннее перелёта ставит
+        // камеру ровно в цель (см. `Camera::advance`).
+        camera.advance(10.0);
         Look { view_proj: camera.view_projection(1.0), eye: camera.eye(), mpp }
     }
 
@@ -951,6 +949,7 @@ mod tests {
         let (lat, lon) = overlay.frame.geodetic(0.5, 0.5);
         let mut camera = crate::module::camera::Camera::default();
         camera.focus(-lat, lon + 180.0, 1.0);
+        camera.advance(10.0);
         let look = Look { view_proj: camera.view_projection(1.0), eye: camera.eye(), mpp: 5.0 };
         assert!(overlay.wanted(&look, u64::MAX, &store())[0].want.cells.is_empty());
     }
