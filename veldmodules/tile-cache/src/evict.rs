@@ -8,8 +8,11 @@
 //! того же источника.
 //!
 //! Гонки с живыми запросами безопасны по построению: удалённый из-под чтения
-//! файл — это промах, промах — это пересборка. Активный источник в жертвы не
-//! попадает не запретом, а свежестью: его маркер только что перезаписан.
+//! файл — это промах, промах — это пересборка. А вот источник, который трогали
+//! в этом окне, в жертвы не попадает запретом (см. [`victims`]) — свежести
+//! маркера для этого мало: маркер отдаётся файловой системе отдельным
+//! заданием, и листинг обхода вполне читает его раньше, чем тот перезапишется.
+//! Тогда источник, на который сейчас смотрят, выглядит старейшим.
 
 use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsListResult, FsDeleteResult};
 
@@ -136,7 +139,7 @@ pub fn on_list_result(state: &mut State, result: FsListResult) {
 /// Конец обхода: посчитать, выбрать жертв, разослать удаления.
 fn settle(state: &mut State, sweep: Sweep) {
     let total: u64 = sweep.sources.iter().map(|s| s.bytes).sum();
-    let doomed = victims(sweep.sources, total, state.limit_bytes);
+    let doomed = victims(sweep.sources, total, state.limit_bytes, &state.touched);
     if doomed.is_empty() {
         veldsdk::log::debug!(target: "handlers",
             "кэш в бюджете: {} из {} байт", total, state.limit_bytes);
@@ -159,11 +162,23 @@ fn settle(state: &mut State, sweep: Sweep) {
 
 /// Решение вытеснения: старейшие источники, пока не станет свободно.
 /// Чистая функция — правило закреплено тестом, а не прогонами.
-fn victims(mut sources: Vec<Source>, total: u64, limit: u64) -> Vec<Source> {
+///
+/// `alive` — источники, которых трогали в этом окне обхода. Они не жертвы ни
+/// при какой свежести: свежесть меряется маркером на диске, а маркер к этому
+/// мигу может быть ещё не записан — задание файловой системы своё, листинг
+/// обхода своё, и порядка между ними нет. Из-за этого под нож попадал бы ровно
+/// тот источник, тайлы которого сейчас и просят.
+fn victims(
+    mut sources: Vec<Source>,
+    total: u64,
+    limit: u64,
+    alive: &std::collections::HashSet<String>,
+) -> Vec<Source> {
     if total <= limit {
         return Vec::new();
     }
     let target = limit - limit / HEADROOM_DIVISOR;
+    sources.retain(|source| !alive.contains(&source.key));
     sources.sort_by_key(|source| source.used);
     let mut left = total;
     let mut doomed = Vec::new();
@@ -192,9 +207,14 @@ mod tests {
         Source { key: key.to_string(), bytes, used, files: Vec::new() }
     }
 
+    /// Никого не трогали — обычный случай теста про свежесть.
+    fn none() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     #[test]
     fn under_budget_keeps_everything() {
-        let picked = victims(vec![source("a", 10, 1), source("b", 20, 2)], 30, 100);
+        let picked = victims(vec![source("a", 10, 1), source("b", 20, 2)], 30, 100, &none());
         assert!(picked.is_empty());
     }
 
@@ -206,9 +226,27 @@ mod tests {
             vec![source("c", 50, 30), source("a", 40, 10), source("b", 20, 20), source("d", 40, 40)],
             150,
             100,
+            &none(),
         );
         let keys: Vec<&str> = picked.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    /// Источник, которого трогали в этом окне, не жертва ни при какой
+    /// свежести маркера: маркер мог ещё не записаться, а тайлы у него просят
+    /// прямо сейчас.
+    #[test]
+    fn a_touched_source_is_never_a_victim() {
+        let alive: std::collections::HashSet<String> = ["hot".to_string()].into_iter().collect();
+        let picked = victims(
+            // «hot» самый старый по маркеру и самый большой — и всё равно жив.
+            vec![source("hot", 90, 1), source("old", 30, 2)],
+            120,
+            100,
+            &alive,
+        );
+        let keys: Vec<&str> = picked.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, vec!["old"]);
     }
 
     #[test]
@@ -218,6 +256,7 @@ mod tests {
             vec![source("hot", 90, 100), source("old", 30, 1)],
             120,
             100,
+            &none(),
         );
         let keys: Vec<&str> = picked.iter().map(|s| s.key.as_str()).collect();
         assert_eq!(keys, vec!["old"]);

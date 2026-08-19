@@ -227,6 +227,20 @@ pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened)
     let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return };
     if sidecar.provider != storage::PROVIDER_NAME { return }
 
+    // Прочитанное с диска — самое старое из того, что о записи известно:
+    // читать его начали листингом, а пока читали, о ней могли узнать больше.
+    // Поэтому оно только ДОПОЛНЯЕТ память, а не затирает её: свежий сидкар от
+    // начатой закачки иначе откатывался бы к прежнему, да ещё и уезжал бы в
+    // этом виде обратно на диск первым же прогрессом.
+    if state.origins.contains_key(&name) {
+        return;
+    }
+    // И не воскрешает удалённое: удаление сидкара стои́т на учёте, а чтение
+    // могло уйти раньше него.
+    if state.pending_delete.values().any(|path| path == &storage::origin_path(&name)) {
+        return;
+    }
+
     state.origins.insert(name, sidecar);
     publish(state);
     ask_product_roots(state);
@@ -254,8 +268,14 @@ pub fn write_sidecar(state: &mut State, name: &str, sidecar: OriginSidecar) {
         return;
     }
 
-    let Ok(json) = serde_json::to_vec(&sidecar) else { return };
-    let Some(region_id) = veldsdk::abi::resource_alloc_cpu(json.len() as u64) else { return };
+    let Ok(json) = serde_json::to_vec(&sidecar) else {
+        veldsdk::log::warn!(target: "handlers", "сидкар {} не собрался в json", name);
+        return;
+    };
+    let Some(region_id) = veldsdk::abi::resource_alloc_cpu(json.len() as u64) else {
+        veldsdk::log::warn!(target: "handlers", "сидкар {}: нет памяти под регион", name);
+        return;
+    };
     // Во владельца — сразу после выделения: сорвись запись, регион освободит
     // Drop, а голый id остался бы висеть на хосте до конца процесса.
     let region = veldsdk::OwnedResource::from_raw_id(region_id);
@@ -292,6 +312,20 @@ pub fn on_write_result(state: &mut State, response: FsWriteResult) {
     // должно остаться на диске.
     if let Some(waiting) = state.queued_sidecars.remove(&write.name) {
         write_sidecar(state, &write.name, waiting);
+        return;
+    }
+    // Записи в памяти больше нет — значит её удалили, пока запись шла в
+    // файловую систему. Отменить отданное задание нечем, поэтому сидкар
+    // сносится ещё раз: иначе он остаётся сиротой, и ближайший листинг
+    // воскрешает по нему строку-намерение. Подрезка `origins` записи с
+    // сидкаром в полёте не трогает, так что «нет в памяти» здесь означает
+    // именно удаление (см. `rescan` и [`delete_entry`]).
+    if !state.origins.contains_key(&write.name) {
+        veldsdk::log::debug!(target: "handlers",
+            "сидкар {} записан уже после удаления записи — сносим", write.name);
+        let path = storage::origin_path(&write.name);
+        let correlation_id = state.pending_delete.begin(path.clone());
+        crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
     }
 }
 

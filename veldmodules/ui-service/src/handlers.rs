@@ -470,16 +470,59 @@ fn aim_scrollables(plugin: &mut PluginUiState, ui: &mut UserInterface<'_, UiMess
         if plugin.aimed.get(&name) == Some(&aim.request) {
             continue;
         }
-        plugin.aimed.insert(name.clone(), aim.request);
-        veldsdk::log::debug!(target: "render", "наводка '{}' на {:.0}", name, aim.offset);
-        let mut operation = iced_core::widget::operation::scrollable::scroll_to(
-            iced_core::widget::Id::from(name.clone()),
-            iced_core::widget::operation::scrollable::AbsoluteOffset {
+        let mut operation = Aim {
+            target: iced_core::widget::Id::from(name.clone()),
+            offset: iced_core::widget::operation::scrollable::AbsoluteOffset {
                 x: None,
                 y: Some(aim.offset),
             },
-        );
+            landed: false,
+        };
         ui.operate(renderer, &mut operation);
+        // Просьба считается исполненной, только когда нашлось, кого наводить.
+        // Записанная до обхода, она снимала бы с учёта наводку, которая никуда
+        // не попала: область прокрутки с этим именем в дереве виджетов ещё не
+        // собрана — а второй раз о том же не попросят, и строка, к которой
+        // вели, так и осталась бы за краем списка.
+        match operation.landed {
+            true => {
+                plugin.aimed.insert(name.clone(), aim.request);
+                veldsdk::log::debug!(target: "render", "наводка '{}' на {:.0}", name, aim.offset);
+            }
+            false => veldsdk::log::debug!(target: "render",
+                "наводка '{}' не нашла своей области — попробуем следующим кадром", name),
+        }
+    }
+}
+
+/// Наводка на область прокрутки, помнящая, нашлась ли область.
+///
+/// Своя, а не `operation::scrollable::scroll_to`: та же работа, но исход её
+/// виден. У iced обход молчит о том, кого он нашёл, а нам это и нужно знать —
+/// см. [`aim_scrollables`].
+struct Aim {
+    target: iced_core::widget::Id,
+    offset: iced_core::widget::operation::scrollable::AbsoluteOffset<Option<f32>>,
+    landed: bool,
+}
+
+impl iced_core::widget::Operation for Aim {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced_core::widget::Operation)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&iced_core::widget::Id>,
+        _bounds: iced_core::Rectangle,
+        _content_bounds: iced_core::Rectangle,
+        _translation: iced_core::Vector,
+        state: &mut dyn iced_core::widget::operation::Scrollable,
+    ) {
+        if id == Some(&self.target) {
+            state.scroll_to(self.offset);
+            self.landed = true;
+        }
     }
 }
 

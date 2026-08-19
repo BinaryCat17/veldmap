@@ -118,18 +118,21 @@ pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
         Ok(tile) => crate::emit::on_tile(&tile, &read.query),
         Err(miss) => {
             // Промах и отказ выглядят одинаково для заказчика — он просто
-            // пойдёт к производителю, — но в журнале их разводить надо.
-            // «Файла нет» — обычный ход дела; всё прочее (не разобрался,
-            // текстура не выделилась) производитель не лечит: он перепишет
-            // годный файл, заказчик спросит снова, и отказ повторится — с той
-            // разницей, что каждый круг стои́т полного прохода по источнику.
-            let missing = miss.contains("не открыт") || miss.contains("не найден");
-            match missing {
-                true => veldsdk::log::debug!(target: "handlers",
-                    "{}: тайл {}:{}:{} — промах: {}", query.label, query.level, read.x, read.y, miss),
-                false => veldsdk::log::warn!(target: "handlers",
-                    "{}: тайл {}:{}:{} есть, но не отдался: {}",
-                    query.label, query.level, read.x, read.y, miss),
+            // пойдёт к производителю, — но в журнале их разводить надо:
+            // «файла нет» это обычный ход дела, а «файл есть, а тайла из него
+            // не вышло» производитель не лечит. Он перепишет годный файл,
+            // заказчик спросит снова, и отказ повторится — с той разницей,
+            // что каждый круг стои́т полного прохода по источнику.
+            //
+            // Спрашивается это у самого хода дела, а не у текста ошибки:
+            // открытие делает файловая система, и текст у неё свой на каждой
+            // операционной системе (то же правило, что в `fs::delete`).
+            match miss {
+                Miss::NoFile(why) => veldsdk::log::debug!(target: "handlers",
+                    "{}: тайл {}:{}:{} — промах: {}", query.label, query.level, read.x, read.y, why),
+                Miss::Broken(why) => veldsdk::log::warn!(target: "handlers",
+                    "{}: тайл {}:{}:{} есть, а тайла из него не вышло: {}",
+                    query.label, query.level, read.x, read.y, why),
             }
             query.misses.push((read.x, read.y));
         }
@@ -145,16 +148,28 @@ pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     }
 }
 
+/// Почему тайл не отдался. Различаются здесь не тексты, а места: открытие —
+/// не наше дело и обычно означает «такого тайла ещё нет», всё остальное делаем
+/// мы сами, и там отказ — это отказ.
+enum Miss {
+    /// Файл не открылся: чаще всего его просто нет.
+    NoFile(String),
+    /// Файл есть, а тайла из него не вышло: не разобрался, не выделилась
+    /// текстура, не залилась.
+    Broken(String),
+}
+
 /// Файл открыт → байты → RGBA → текстура с передачей владения заказчику.
-fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Result<TileResult, String> {
-    let handle = veldsdk::resource::accept(opened)?;
+fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Result<TileResult, Miss> {
+    let handle = veldsdk::resource::accept(opened).map_err(Miss::NoFile)?;
     let file = veldsdk::OwnedResource::new(handle.clone());
-    let bytes = veldsdk::abi::resource_read(file.id(), 0, handle.size).map_err(|e| e.to_string())?;
+    let bytes = veldsdk::abi::resource_read(file.id(), 0, handle.size)
+        .map_err(|e| Miss::Broken(e.to_string()))?;
     drop(file);
 
-    let (width, height, rgba) = decode(&bytes)?;
-    let texture =
-        veldsdk::graphics::upload_texture("тайл", width, height, TILE_FORMAT, &rgba, owner)?;
+    let (width, height, rgba) = decode(&bytes).map_err(Miss::Broken)?;
+    let texture = veldsdk::graphics::upload_texture("тайл", width, height, TILE_FORMAT, &rgba, owner)
+        .map_err(Miss::Broken)?;
     Ok(TileResult { level, x, y, texture: Some(texture), width, height })
 }
 

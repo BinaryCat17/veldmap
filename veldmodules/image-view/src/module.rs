@@ -131,10 +131,9 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
                 state.device = Some(device);
             }
             Err(error) => {
-                // Причина уезжает на экран, а не в один лишь лог: без места
-                // под рендер канва не покажет ничего никогда, и молчащая
+                // Причина уезжает на экран, а не в один лишь лог: молчащая
                 // пустая вкладка читается как «зависло», а не как отказ.
-                refuse(state, &msg.view, format!("не собрались ресурсы устройства: {:#}", error));
+                complain(state, &msg.view, format!("не собрались ресурсы устройства: {:#}", error));
                 return;
             }
         }
@@ -144,16 +143,11 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
     match gpu::Target::create(texture.id, surface.width, surface.height) {
         Ok(target) => {
             view.target = Some(target);
-            // Место под рендер есть — значит прежний отказ пережит. Снимать
-            // его надо здесь, а не только на новом показе: делегирование
-            // повторяется на каждое изменение размера, а вот сам показ —
-            // нет. Оставленный, отказ выкидывает канву из разметки у
-            // заказчика, а без канвы не придёт и следующее делегирование:
-            // вкладка становится мёртвой навсегда (см. `refuse`).
-            view.error = None;
+            // Место собрано — прежняя жалоба на него больше не про этот кадр.
+            view.trouble = None;
         }
         Err(error) => {
-            refuse(state, &msg.view, format!("не собрался view таргета: {:#}", error));
+            complain(state, &msg.view, format!("не собралось место под кадр: {:#}", error));
             return;
         }
     }
@@ -163,16 +157,24 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
     report(state, &msg.view);
 }
 
-/// Отказ, после которого рисовать нечем: причина уходит и в лог, и на экран.
+/// Место под кадр не собралось: причина уходит и в лог, и на экран — но
+/// жалобой, а не приговором.
 ///
-/// На экран — потому что «смотреть не на что» и «кадр неполон» это разные
-/// ответы (см. `ViewState`), а место под рендер, которого нет, — первое из
-/// них: ступени выше не нарисованы, показывать вместо причины нечего.
-fn refuse(state: &mut State, key: &str, why: String) {
+/// Разница не косметическая. Приговор (`ViewState.error`) заказчик читает как
+/// «смотреть не на что» и **убирает канву из разметки**; а без канвы к нам не
+/// придёт и следующее делегирование места — то есть вкладка остаётся мёртвой
+/// до закрытия, даже когда отказ был мгновенным (текстуру успели сменить,
+/// пока событие шло к нам). Жалоба (`trouble`) оставляет канву на месте:
+/// делегирование повторяется на каждое изменение размера области, и первое же
+/// удачное собирает место заново и жалобу снимает.
+///
+/// Приговор остаётся для того, что делегированием не лечится: источник не
+/// открылся или не описался — там и правда смотреть не на что.
+fn complain(state: &mut State, key: &str, why: String) {
     veldsdk::log::error!(target: "handlers", "{}: {}", key, why);
     if let Some(view) = state.views.get_mut(key) {
         view.target = None;
-        view.error = Some(why);
+        view.trouble = Some(why);
     }
     report(state, key);
 }
@@ -492,9 +494,13 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         return;
     }
     let cap = cap_tiles(state);
+    // Виды, у которых кадр не записался: о такой жалобе надо ещё и сказать, а
+    // рассылка состояния трогает `state` целиком — значит после обхода.
+    let mut complained: Vec<String> = Vec::new();
+    {
     let State { views, tiles, device: Some(device), .. } = state else { return };
 
-    for view in views.values_mut() {
+    for (key, view) in views.iter_mut() {
         let Some(camera) = view.camera else { continue };
         let Some(target) = &view.target else { continue };
         let stamp = Stamp {
@@ -509,22 +515,29 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         let quads = view::quads(view, tiles, cap);
         let target = view.target.as_ref().expect("место проверено выше");
         match gpu::render(device, target, &mut view.vertices, &quads) {
-            Ok(()) => {
-                view.drawn = Some(stamp);
-                view.trouble = None;
-            }
+            // Жалобу успешный кадр не снимает: она бывает не про него —
+            // «производство сорвалось» держится до приехавшего тайла
+            // (см. `View::landed`), а перерисовка той же дыры дырой её и
+            // оставляет.
+            Ok(()) => view.drawn = Some(stamp),
             Err(error) => {
                 veldsdk::log::error!(target: "render", "{}: кадр не записан: {:#}", view.label, error);
-                // Именно `trouble`, а не `error`: прошлый кадр на экране
-                // остался, и стирать его нечем — сказать надо, что он
-                // застыл. И отметиться нарисованным: без этого попытка
-                // повторяется каждым кадровым тиком, то есть шестьдесят раз
-                // в секунду пишет в журнал и жжёт кадр впустую, а причина у
+                // Именно `trouble`, а не `error`: смотреть по-прежнему есть на
+                // что, а вот кадр застыл. И отметиться нарисованным: без этого
+                // попытка повторяется каждым кадровым тиком, то есть шестьдесят
+                // раз в секунду пишет в журнал и жжёт кадр впустую, а причина у
                 // неё та же самая.
                 view.drawn = Some(stamp);
                 view.trouble = Some(format!("кадр не записан: {}", error));
+                complained.push(key.clone());
             }
         }
+    }
+    }
+    // Жалоба, о которой не сказали, — это молчащая канва: кадрового тика
+    // рассылка не делает, а других событий у застывшего вида не бывает.
+    for key in complained {
+        report(state, &key);
     }
 }
 

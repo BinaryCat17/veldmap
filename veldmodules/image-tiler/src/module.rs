@@ -2,10 +2,14 @@
 //!
 //! Откуда байты — не его забота: заказчик открывает ресурс сам и даёт
 //! read-грант, а читаются они окнами одинаково — файл, сеть или память.
-//! Состояния между вызовами нет вовсе: durable-состояние — тайловый кэш, им
-//! владеет tile-cache, и сюда приходят только его промахи. Поэтому убийство
-//! посреди самого долгого прохода ничего не разматывает: уже отданные тайлы
-//! у заказчика, уже отправленные — в кэше, остальное честно пропало.
+//! Durable-состояние — тайловый кэш, им владеет tile-cache, и сюда приходят
+//! только его промахи. Поэтому убийство посреди самого долгого прохода ничего
+//! не разматывает: уже отданные тайлы у заказчика, уже отправленные — в кэше,
+//! остальное честно пропало.
+//!
+//! Состояния, от которого зависел бы ответ, у модуля нет; разбор источника он
+//! держит между запросами (см. [`Parsed`]) — но это memo, а не память: ответ
+//! от него не меняется, меняется только цена.
 //!
 //! module.rs — фасад: State, init, обработчики и приёмник тайлов (Sink).
 //! Арифметика пирамиды — pyramid.rs (общий с потребителями через wrap),
@@ -94,6 +98,10 @@ fn parsed<'a>(
         let info = adapters::describe(resource_id, size, bytes)?;
         state.parsed = Some(Parsed { resource: resource_id, info });
     } else {
+        // Прочитанное засчитывается и на попадании: заказчик показывает долю
+        // прочитанного, и ноль на готовом разборе читается как «ещё не
+        // начали», хотя файл прочитан целиком.
+        bytes.set(size);
         veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
     }
     Ok(&state.parsed.as_ref().expect("разбор только что положен").info)
@@ -202,6 +210,7 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
         wants.insert((tile.x, tile.y));
     }
     let ordered: Vec<(u32, u32)> = wants.iter().copied().collect();
+    let single_pass = matches!(info.reach(), crate::proto::image_tiler::Reach::Pyramid);
 
     let mut sink = Sink {
         correlation,
@@ -219,7 +228,16 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
         let mut emit = |level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]| {
             sink.emit(level, tx, ty, w, h, rgba)
         };
-        adapters::produce(resource.id, resource.size, &info, req.level, &ordered, &bytes, &mut emit)?;
+        adapters::produce(resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit)?;
+    }
+
+    // Разбор, из которого проход строит всю пирамиду разом, после него не
+    // нужен: второго прохода по такому источнику не будет, пока не спросят
+    // заново, — а держит он с собой отсчёты величины, то есть до полугигабайта
+    // памяти инстанса (`netcdf::PLANE_BUDGET`). У прочих источников разбор —
+    // это заголовки, он дёшев и остаётся: у них проход на каждую ступень.
+    if single_pass {
+        state.parsed = None;
     }
 
     // Проход кончился, а запрошенное не всё отдано — это ошибка адаптера,
