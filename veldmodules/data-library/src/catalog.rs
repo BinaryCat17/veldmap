@@ -53,6 +53,8 @@ pub fn rescan(state: &mut State) {
 pub fn on_list_result(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     if state.pending_list.take(&veldsdk::correlation()).is_none() { return }
     ingest(state, response);
+    // Каталог прочитан — тем, кто спрашивал раньше, теперь есть чем ответить.
+    crate::module::open::resume(state);
     // Поводы, набежавшие пока обход шёл, стали ровно одним обходом. Отсюда, а
     // не из ingest: там ветки выхода, и в каждой отложенный повод пришлось бы
     // вспоминать заново.

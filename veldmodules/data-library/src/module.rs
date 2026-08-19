@@ -67,6 +67,10 @@ pub struct State {
     /// не очередью: сидкар пишется целиком, и промежуточные состояния диску не
     /// нужны — ждёт всегда последнее (см. `catalog::write_sidecar`).
     pub queued_sidecars: HashMap<String, OriginSidecar>,
+    /// Открытия, пришедшие раньше первого обхода каталога: отвечать им
+    /// «такой записи нет» значило бы отказать за то, что мы не успели
+    /// прочитать диск (см. `open::resume`).
+    pub deferred_opens: Vec<crate::module::open::Deferred>,
     /// Ожидание fs/on_delete — контекст: путь удаляемого файла.
     pub pending_delete: veldsdk::Correlator<String>,
 }
@@ -115,6 +119,7 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
         snapshot: HashMap::new(),
         origins: HashMap::new(),
         queued_sidecars: HashMap::new(),
+        deferred_opens: Vec::new(),
         downloads: HashMap::new(),
         pending_list: veldsdk::Correlator::new(),
         list_again: false,

@@ -141,8 +141,16 @@ fn settle(state: &mut State, sweep: Sweep) {
     let total: u64 = sweep.sources.iter().map(|s| s.bytes).sum();
     let doomed = victims(sweep.sources, total, state.limit_bytes, &state.touched);
     if doomed.is_empty() {
-        veldsdk::log::debug!(target: "handlers",
-            "кэш в бюджете: {} из {} байт", total, state.limit_bytes);
+        match total <= state.limit_bytes {
+            true => veldsdk::log::debug!(target: "handlers",
+                "кэш в бюджете: {} из {} байт", total, state.limit_bytes),
+            // Бюджет перебран, а вытеснять нечего: всё, что лежит, трогали в
+            // этом окне. Молчать об этом нельзя — кэш растёт сверх бюджета, и
+            // причина у этого одна и понятная.
+            false => veldsdk::log::info!(target: "handlers",
+                "кэш перебрал бюджет ({} из {} байт), но все источники в работе — вытеснять нечего",
+                total, state.limit_bytes),
+        }
         return;
     }
 

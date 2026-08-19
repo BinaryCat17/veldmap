@@ -224,18 +224,27 @@ fn fail(state: &mut State, view: ViewId, error: String) {
 /// не делаем — перевыделение сменило бы id текстуры на каждый пересчёт
 /// разметки (см. то же у глобуса).
 pub fn on_resized(state: &mut State, view: ViewId, size: ViewportSize) {
-    let scale = state.scale;
     let Some(preview) = state.preview_mut(view) else { return };
-
     if veldsdk::surface::Delegated::covers(preview.surface.as_ref(), size.width, size.height) {
         return;
     }
+    place(state, view, size.width, size.height);
+}
 
+/// Выделяет канве место под кадр и отдаёт его ей.
+///
+/// Отдельно от [`on_resized`] потому, что зовут её двое: событие области — с
+/// новым размером, и ответ канвы «места нет» — с прежним (см.
+/// [`on_view_state`]). Второму ждать события бессмысленно: оно приезжает
+/// только на смену размера, а размер не менялся.
+fn place(state: &mut State, view: ViewId, width: u32, height: u32) {
+    let scale = state.scale;
+    let Some(preview) = state.preview_mut(view) else { return };
     let key = view.to_string();
     preview.surface = veldsdk::surface::delegate(
         preview.surface.take(),
-        size.width,
-        size.height,
+        width,
+        height,
         scale,
         super::SURFACE_FORMAT as i32,
         "image-view",
@@ -310,7 +319,28 @@ pub fn on_zoom_step(state: &mut State, view: ViewId, direction: f32) {
 pub fn on_view_state(state: &mut State, view_state: ViewState) {
     let Ok(view) = view_state.view.parse::<ViewId>() else { return };
     let Some(ViewKind::Preview(preview)) = state.get_mut(view) else { return };
+    // Канва говорит, что места под кадр у неё нет. Выдать его заново может
+    // только владелец разметки — то есть мы, — и никто нас об этом больше не
+    // попросит: `on_resized` приезжает лишь на смену размера, а размер не
+    // менялся. Забываем прежнее место, и следующее же событие области выдаст
+    // новое (см. `on_resized`).
+    //
+    // Без этого канва оставалась бы пустой до тех пор, пока человек не потянет
+    // границу панели, — а причина отказа бывает мгновенной: текстуру сменили,
+    // пока событие шло.
+    // Одна попытка на жалобу: мгновенный отказ лечится первой же, а
+    // устойчивый (не хватило видеопамяти) не лечится повтором вовсе — и без
+    // счёта мы с канвой гоняли бы текстуры по кругу (см. `replaced`).
+    let retry = view_state.needs_place && !preview.replaced;
+    preview.replaced = view_state.needs_place;
+    let size = preview.surface.as_ref().map(|place| (place.width, place.height));
+    let label = preview.label.clone();
     preview.view_state = Some(view_state);
+    if let (true, Some((width, height))) = (retry, size) {
+        veldsdk::log::info!(target: "handlers",
+            "превью '{}': место под кадр не собралось — выдаём заново", label);
+        place(state, view, width, height);
+    }
 }
 
 fn send(view: &str, command: Command) {

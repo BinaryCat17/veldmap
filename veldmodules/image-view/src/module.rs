@@ -515,11 +515,16 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         let quads = view::quads(view, tiles, cap);
         let target = view.target.as_ref().expect("место проверено выше");
         match gpu::render(device, target, &mut view.vertices, &quads) {
-            // Жалобу успешный кадр не снимает: она бывает не про него —
-            // «производство сорвалось» держится до приехавшего тайла
-            // (см. `View::landed`), а перерисовка той же дыры дырой её и
-            // оставляет.
-            Ok(()) => view.drawn = Some(stamp),
+            // Снимается только СВОЯ жалоба — на застрявший кадр. Чужую
+            // («производство сорвалось») успешный кадр не трогает: она держится
+            // до приехавшего тайла (см. `View::landed`), а перерисовка той же
+            // дыры дырой её и оставляет.
+            Ok(()) => {
+                view.drawn = Some(stamp);
+                if view.stuck.take().is_some() {
+                    complained.push(key.clone());
+                }
+            }
             Err(error) => {
                 veldsdk::log::error!(target: "render", "{}: кадр не записан: {:#}", view.label, error);
                 // Именно `trouble`, а не `error`: смотреть по-прежнему есть на
@@ -528,7 +533,7 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
                 // раз в секунду пишет в журнал и жжёт кадр впустую, а причина у
                 // неё та же самая.
                 view.drawn = Some(stamp);
-                view.trouble = Some(format!("кадр не записан: {}", error));
+                view.stuck = Some(format!("кадр не записан: {}", error));
                 complained.push(key.clone());
             }
         }
@@ -667,7 +672,10 @@ fn report(state: &State, key: &str) {
         total_bytes: view.total_bytes,
         busy: view.busy(&state.passes, want.as_ref()),
         error: view.error.clone().unwrap_or_default(),
-        trouble: view.trouble.clone().unwrap_or_default(),
+        trouble: view.stuck.clone().or_else(|| view.trouble.clone()).unwrap_or_default(),
+        // Место не собралось — значит выдать его заново может только владелец
+        // разметки: сами мы его не выделяем (см. `complain`).
+        needs_place: view.target.is_none() && view.shown.is_some(),
     };
     crate::emit::on_view_state(&current);
 }

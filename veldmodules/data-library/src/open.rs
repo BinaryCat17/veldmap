@@ -11,6 +11,32 @@ use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
 use veldsdk::resource;
 
+/// Открытие, которое ждёт конца обхода каталога.
+///
+/// Ждать приходится с сохранённым владельцем и адресом ответа: и то, и другое
+/// читается из контекста вызова, а к моменту продолжения контекст будет уже
+/// чужой.
+pub struct Deferred {
+    pub name: String,
+    pub owner: String,
+    pub reply_to: String,
+}
+
+/// Повторяет отложенные открытия — зовётся, когда обход каталога кончился.
+pub fn resume(state: &mut State) {
+    for waiting in std::mem::take(&mut state.deferred_opens) {
+        match state.entry_for(&waiting.name) {
+            Some(entry) if entry.is_partial => {
+                fail(waiting.reply_to, format!("'{}' скачан не полностью", waiting.name));
+            }
+            Some(_) => read_file(state, waiting.name, waiting.owner, waiting.reply_to),
+            None => {
+                fail(waiting.reply_to, format!("в каталоге нет записи '{}'", waiting.name));
+            }
+        }
+    }
+}
+
 pub fn on_open(state: &mut State, req: OpenRequest) {
     let reply_to = veldsdk::correlation();
     let owner = match resource::requester("data-library/on_open") {
@@ -18,14 +44,31 @@ pub fn on_open(state: &mut State, req: OpenRequest) {
         Err(e) => return fail(reply_to, e),
     };
     let Some(entry) = state.entry_for(&req.name) else {
+        // Каталог ещё не прочитан — это не «нет такой записи», а «пока не
+        // знаю»: обход диска идёт своим заданием, и щелчок по «смотреть»
+        // успевает раньше него на первых секундах запуска. Отвечать отказом
+        // здесь значит убить вкладку показа за то, что мы не успели, — и
+        // повторить будет некому: заказчик спрашивает один раз.
+        if !state.pending_list.is_empty() {
+            veldsdk::log::debug!(target: "handlers",
+                "открытие '{}' ждёт первого обхода каталога", req.name);
+            state.deferred_opens.push(Deferred { name: req.name, owner, reply_to });
+            return;
+        }
         return fail(reply_to, format!("в каталоге нет записи '{}'", req.name));
     };
     if entry.is_partial {
         return fail(reply_to, format!("'{}' скачан не полностью", req.name));
     }
 
+    let _ = entry;
+    read_file(state, req.name, owner, reply_to);
+}
+
+/// Просит у файловой системы байты записи и запоминает, кому их отдать.
+fn read_file(state: &mut State, name: String, owner: String, reply_to: String) {
     // Недокачанное отсечено выше, значит файл лежит под своим именем.
-    let path = crate::module::storage::file_path(&req.name);
+    let path = crate::module::storage::file_path(&name);
     // Внешний id вернём в ответе; собственный — это ключ ожидания, по нему
     // же ответ и опознаётся как «открытие файла», а не чтение сидкара.
     let correlation_id = state.pending_reads.begin(ReadPurpose::File(OpenFor {

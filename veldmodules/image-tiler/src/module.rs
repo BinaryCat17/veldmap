@@ -98,11 +98,15 @@ fn parsed<'a>(
         let info = adapters::describe(resource_id, size, bytes)?;
         state.parsed = Some(Parsed { resource: resource_id, info });
     } else {
-        // Прочитанное засчитывается и на попадании: заказчик показывает долю
-        // прочитанного, и ноль на готовом разборе читается как «ещё не
-        // начали», хотя файл прочитан целиком.
-        bytes.set(size);
         veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
+    }
+    let info = &state.parsed.as_ref().expect("разбор только что положен").info;
+    // Прочитанное засчитывается и на готовом разборе — но только там, где
+    // разбор и правда прочитал файл целиком (NetCDF). У прочих байты идут
+    // проходом, и объявить их прочитанными значит показать заказчику «100 %»
+    // с первого тика и заглушить весь дальнейший счёт (см. `Sink::progress`).
+    if info.read_whole() {
+        bytes.set(size);
     }
     Ok(&state.parsed.as_ref().expect("разбор только что положен").info)
 }
@@ -224,21 +228,26 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
         total_bytes: resource.size,
         reported: 0,
     };
-    {
+    let outcome = {
         let mut emit = |level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]| {
             sink.emit(level, tx, ty, w, h, rgba)
         };
-        adapters::produce(resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit)?;
-    }
-
+        adapters::produce(resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit)
+    };
     // Разбор, из которого проход строит всю пирамиду разом, после него не
     // нужен: второго прохода по такому источнику не будет, пока не спросят
     // заново, — а держит он с собой отсчёты величины, то есть до полугигабайта
-    // памяти инстанса (`netcdf::PLANE_BUDGET`). У прочих источников разбор —
-    // это заголовки, он дёшев и остаётся: у них проход на каждую ступень.
+    // памяти инстанса (`netcdf::PLANE_BUDGET`). Остаётся он у тех, к кому
+    // приходят за каждой ступенью отдельно (тайловый TIFF, JPEG 2000), — там
+    // разбор это заголовки, и он дёшев.
+    //
+    // Отпускается до разбора исхода, а не после: сорвавшийся проход — самый
+    // обычный конец (оборвалось чтение по сети), и уйти по `?`, оставив
+    // полгигабайта висеть, значит не сделать ровно того, ради чего это здесь.
     if single_pass {
         state.parsed = None;
     }
+    outcome?;
 
     // Проход кончился, а запрошенное не всё отдано — это ошибка адаптера,
     // и молчать о ней значит показать заказчику дыру без причины.
