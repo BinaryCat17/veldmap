@@ -25,16 +25,15 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use veldsdk::graphics::{self as gfx};
-// Формат тайла — не наш: он общий с кэшем, и объявлен там, где его видят оба
-// (см. `layout.rs` в tile-cache). Своя копия здесь однажды разошлась бы с той.
-use veldmap_tile_cache_wrap::layout::TILE_FORMAT;
+use veldsdk::graphics as gfx;
+// Формат тайла — не наш: он общий с кэшем и объявлен там, где его видят оба
+// (см. `tile.rs` в tile-cache). Своя копия здесь однажды разошлась бы с той.
+use veldmap_tile_cache_wrap::tile::TILE_FORMAT;
 
 use crate::proto::image_tiler::{
     Described, DescribeRequest, GeoTie, ProduceDone, ProduceProgress, ProduceRequest, TileResult,
 };
 use crate::proto::tile_cache::StoreTile;
-
 
 /// Шаг прогресса по прочитанному: чаще — шум, реже — «висит».
 const PROGRESS_STEP: u64 = 8 * 1024 * 1024;

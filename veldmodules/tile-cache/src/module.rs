@@ -16,6 +16,7 @@
 
 pub mod evict;
 pub mod layout;
+pub mod tile;
 pub mod query;
 pub mod store;
 

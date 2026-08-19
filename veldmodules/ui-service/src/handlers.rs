@@ -488,8 +488,7 @@ fn answer_locate(
     let sought = match req.method.is_empty() {
         true => Sought::Said(req.text.clone()),
         false => Sought::Named(iced_core::widget::Id::from(
-            crate::module::locate::name(&req.method, &req.value)
-                .expect("вид имени взведён вопросом"),
+            crate::module::locate::spelling(&req.method, &req.value),
         )),
     };
     let mut search = Search::new(sought, req.ordinal, window);

@@ -900,9 +900,25 @@ mod tests {
             slice: String::new(),
             ..facts("IW_OCN__2S", 2, 69_000_000)
         };
-        let scenes = group(vec![(slc, product("slc")), (ocn, product("ocn"))]);
-        assert_eq!(scenes.len(), 1, "их связывает дататейк, а не номер слайса");
+        let scenes = group(vec![(slc.clone(), product("slc")), (ocn, product("ocn"))]);
+        assert_eq!(scenes.len(), 1, "одна секунда на двоих — один ключ");
         assert_eq!(scenes[0].parts.len(), 2);
+
+        // А вот чем это держится — только совпадением секунд, и это записанное
+        // в README ограничение, а не желаемое: разойдись начала (у сырья,
+        // комплексного и обработанного они расходятся на две-четыре секунды),
+        // и одна съёмка покажется несколькими строками. Приложить их не к
+        // чему: слайсов, рядом с которыми они сняты, у этого дататейка нет.
+        let later = Facts {
+            second: slc.second + 4,
+            ..Facts {
+                datatake: "191698".to_string(),
+                slice: String::new(),
+                ..facts("IW_RAW__0S", 0, 1_500_000_000)
+            }
+        };
+        let apart = group(vec![(slc, product("slc")), (later, product("raw"))]);
+        assert_eq!(apart.len(), 2, "секунда в ключе разводит части одной съёмки");
     }
 
     /// Уровень, не названный каталогом, не делает продукт снимком. Служебная

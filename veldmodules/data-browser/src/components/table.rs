@@ -519,9 +519,13 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
                 // не объясняет ничего. Целиком её показывает подсказка —
                 // единственное место в строке, чья ширина не задана колонкой.
                 match &row_data.status {
-                    RowStatus::Paused { trouble, .. } if !trouble.is_empty() => tooltip(
+                    RowStatus::Paused { trouble, .. } | RowStatus::Partial { trouble, .. }
+                        if !trouble.is_empty() => tooltip(
                         cell,
-                        trouble.clone(),
+                        // Ужимаем: причину пишет не разметка, а тот, кто
+                        // отказал, и длину её ничто не ограничивает — а
+                        // подсказка идёт одной строкой и шире окна не влезет.
+                        format::ellipsize(trouble, 90),
                         TooltipPosition::TooltipTop,
                     )
                     .style(theme::panel())
@@ -656,9 +660,10 @@ fn status_look(status: &RowStatus) -> (Color, String, Color) {
             if *total > 0 { format::progress(*done, *total) } else { "скачивается".to_string() },
             theme::ACCENT_TEXT,
         ),
-        // Сорвавшаяся закачка говорит своим голосом: «прервано» — это про
-        // остановленную человеком, и молчать о причине там, где он её не
-        // выбирал, значит предложить ему нажать «Продолжить» вслепую.
+        // Сорвавшаяся закачка говорит своим голосом. «Прервано» ниже — это всё
+        // остальное: и остановленная человеком, и та, чья причина не пережила
+        // перезапуск; молчать о причине там, где она есть, значит предложить
+        // нажать «Продолжить» вслепую.
         RowStatus::Paused { trouble, .. } if !trouble.is_empty() => (
             theme::DANGER,
             trouble.clone(),
@@ -669,7 +674,14 @@ fn status_look(status: &RowStatus) -> (Color, String, Color) {
             if *total > 0 { format::progress(*done, *total) } else { "прервано".to_string() },
             theme::WARN_TEXT,
         ),
-        RowStatus::Partial { done } => (theme::ACCENT, format!("{} на диске", done), theme::ACCENT_TEXT),
+        // Отказ важнее счёта: сколько скачано, видно и по размеру, а «3 на
+        // диске» зелёным — это спокойная надпись, за которой стоящее не видно.
+        RowStatus::Partial { trouble, .. } if !trouble.is_empty() => (
+            theme::DANGER,
+            trouble.clone(),
+            theme::DANGER,
+        ),
+        RowStatus::Partial { done, .. } => (theme::ACCENT, format!("{} на диске", done), theme::ACCENT_TEXT),
     }
 }
 

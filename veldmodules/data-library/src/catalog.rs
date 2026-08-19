@@ -10,8 +10,11 @@ use crate::proto::data_library::{
 use crate::proto::data_provider::{ProductRoots, ProductRootsRequest};
 use veldsdk::proto::core::ResourceOpened;
 
-/// Потолок сидкара. Это json из пяти полей — сотни байт с запасом на длинный
-/// ключ провайдера; всё, что крупнее, под этим именем оказалось не от нас.
+/// Потолок сидкара. Сам он — json из пяти полей, то есть сотни байт; потолок
+/// взят много выше не про запас на них, а затем, чтобы отделять
+/// неправдоподобное, а не необычное: файл в десятки килобайт под именем
+/// `.origin` ещё может оказаться нашим, выросшим в будущем, а мегабайтный —
+/// уже нет.
 const SIDECAR_CAP: u64 = 64 * 1024;
 use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsReadRequest, FsWriteRequest, FsWriteResult};
 
@@ -116,6 +119,9 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
             || in_flight.contains(&name.as_str())
             || downloading.contains(&name.as_str())
     });
+
+    // Причины срыва — вслед за записями.
+    state.forget_gone_troubles();
 
     // Дочитываем то, чего ещё нет в памяти. Сидкар — единственное, что
     // переживает рестарт, так что для файлов с прошлого запуска это
@@ -230,6 +236,10 @@ pub fn on_snapshot(state: &mut State, request: SnapshotFiles) {
 pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened) {
     let Some(handle) = &opened.handle else { return };
 
+    // RAII-гард заводится первым: файл открыт на нас, и освободить его обязаны
+    // мы — при любом выходе ниже, включая отказ по размеру.
+    let resource = veldsdk::OwnedResource::new(handle.clone());
+
     // Сидкар — это десятки байт json, который пишем мы сами. Что-то большее
     // под этим именем — не наш файл (обрезанная закачка, чужой мусор), и
     // втягивать его целиком в линейную память инстанса нельзя: неправдоподобный
@@ -239,9 +249,6 @@ pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened)
             "сидкар {} размером {} байт — это не наш файл, пропускаем", name, handle.size);
         return;
     }
-
-    // RAII-гард: регион освобождается при любом выходе ниже.
-    let resource = veldsdk::OwnedResource::new(handle.clone());
     let Ok(bytes) = veldsdk::abi::resource_read(resource.id(), 0, handle.size) else { return };
     let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return };
     if sidecar.provider != storage::PROVIDER_NAME { return }
@@ -437,4 +444,71 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
             siblings: state.siblings_of(name),
         }
     }).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::Config;
+
+    fn state() -> State {
+        crate::module::hook_init(Config {}).expect("состояние собирается без диска")
+    }
+
+    fn on_disk(state: &mut State, name: &str, is_partial: bool) {
+        state.snapshot.insert(name.to_string(), LocalFile { size: 7, is_partial, modified: 0 });
+    }
+
+    /// Причину срыва носит только стоящая запись.
+    ///
+    /// У доведённой она означала бы, что сорвалось то, что дошло, — а дойти
+    /// после срыва запись могла и мимо приложения: файл дозакачали руками,
+    /// подложили из копии, переименовали. Причина при этом остаётся в памяти
+    /// до следующего обхода диска, и рассылать её оттуда нельзя.
+    #[test]
+    fn only_a_stopped_entry_carries_its_trouble() {
+        let mut state = state();
+        on_disk(&mut state, "soil.tgz", true);
+        state.troubles.insert("soil.tgz".to_string(), "HTTP 403".to_string());
+
+        let stopped = entries(&state);
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].status, LibraryStatus::LibPaused as i32);
+        assert_eq!(stopped[0].trouble, "HTTP 403");
+
+        // Тот же файл, доведённый: причина остаётся в памяти, но наружу не
+        // едет.
+        on_disk(&mut state, "soil.tgz", false);
+        let done = entries(&state);
+        assert_eq!(done[0].status, LibraryStatus::LibComplete as i32);
+        assert!(done[0].trouble.is_empty(), "у доведённой записи причины срыва не бывает");
+    }
+
+    /// Обход диска уносит причины тех записей, которых на диске больше нет:
+    /// причина принадлежит записи, а не имени.
+    #[test]
+    fn troubles_leave_with_their_entries() {
+        let mut state = state();
+        on_disk(&mut state, "ушедший.tgz", true);
+        state.troubles.insert("ушедший.tgz".to_string(), "HTTP 403".to_string());
+
+        // Ни на диске, ни в сидкарах — записи не стало.
+        state.snapshot.clear();
+        state.forget_gone_troubles();
+        assert!(state.troubles.is_empty());
+
+        // А та, что осталась одним сидкаром, причину сохраняет: закачка
+        // сорвалась до первых байт, и это ровно тот случай, ради которого
+        // причину и показывают.
+        state.origins.insert("оборванный.tgz".to_string(), storage::OriginSidecar {
+            provider: storage::PROVIDER_NAME.to_string(),
+            identifier: "eodata/оборванный.tgz".to_string(),
+            total_bytes: None,
+            product: String::new(),
+            siblings: 0,
+        });
+        state.troubles.insert("оборванный.tgz".to_string(), "HTTP 403".to_string());
+        state.forget_gone_troubles();
+        assert_eq!(state.troubles.len(), 1);
+    }
 }

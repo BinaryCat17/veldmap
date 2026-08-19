@@ -17,15 +17,22 @@ pub enum RowStatus {
     Downloading { done: u64, total: u64 },
     /// Начато, но не доведено. `done: 0` — закачка сорвалась до первых байт.
     ///
-    /// `trouble` — почему сорвалась последняя попытка; пусто — её остановил
-    /// человек. Стои́т запись в обоих случаях одинаково и продолжается
+    /// `trouble` — почему сорвалась последняя попытка. Пусто — причины нет:
+    /// закачку остановил человек, либо попытка была до перезапуска (причина
+    /// живёт в памяти библиотеки), либо это строка снимка, чьи файлы стоя́т по
+    /// разным причинам. Стои́т запись во всех случаях одинаково и продолжается
     /// одинаково, поэтому это не отдельное состояние, а причина при нём:
     /// разница только в том, знает ли человек, почему она стои́т.
     Paused { done: u64, total: u64, trouble: String },
     Complete,
-    /// Папка, часть содержимого которой уже на диске. Сколько там файлов
-    /// всего, каталог не говорит, поэтому сказано только скачанное.
-    Partial { done: usize },
+    /// Папка или снимок, часть содержимого которых уже на диске. Сколько там
+    /// файлов всего, каталог не говорит, поэтому сказано только скачанное.
+    ///
+    /// `trouble` — почему стои́т остальное; пусто — не стои́т или причина у
+    /// частей разная. Нужно оно здесь по той же причине, что и у оборванной
+    /// строки, и даже больше: «3 на диске» — надпись спокойная, зелёная, и
+    /// отказ за ней не виден вовсе.
+    Partial { done: usize, trouble: String },
 }
 
 impl RowStatus {
@@ -512,6 +519,27 @@ pub fn downloaded_rows(library: &LibraryState) -> Vec<Row> {
         .collect()
 }
 
+/// Причина, общая всем остановленным файлам снимка. Пусто — причины у них
+/// разные или её нет вовсе.
+///
+/// Нужна она затем, что снимок приходит свёрнутым, и в самом частом случае —
+/// отказала подпись, и с ней все два десятка файлов сразу — человек видит
+/// только эту строку. Одну причину из нескольких разных она назвать не может:
+/// строка говорит за все файлы разом, и назвавшая одну соврала бы про
+/// остальные.
+fn common_trouble(files: &[Row]) -> String {
+    let mut said: Option<&str> = None;
+    for file in files {
+        let RowStatus::Paused { trouble, .. } = &file.status else { continue };
+        match said {
+            None => said = Some(trouble),
+            Some(before) if before == trouble => {}
+            Some(_) => return String::new(),
+        }
+    }
+    said.unwrap_or_default().to_string()
+}
+
 /// Строка снимка поверх его файлов: то, что о снимке можно сказать, сложено из
 /// того, что известно о каждом файле, — кроме одного. Сколько файлов в снимке
 /// всего (`siblings`), из записей не выводится: их столько, сколько качали.
@@ -537,8 +565,8 @@ fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
         // Не доведён ни один — снимок оборван, а не «частично скачан»: зелёная
         // строка с нулём на диске обещает то, чего нет, и проходит отбор «на
         // диске» вместе с целыми.
-        (false, 0, _) => RowStatus::Paused { done: size, total: 0, trouble: String::new() },
-        (false, done, _) => RowStatus::Partial { done },
+        (false, 0, _) => RowStatus::Paused { done: size, total: 0, trouble: common_trouble(&files) },
+        (false, done, _) => RowStatus::Partial { done, trouble: common_trouble(&files) },
     };
 
     Row {
@@ -629,7 +657,7 @@ mod tests {
                 entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibPaused, 5),
             ],
         });
-        assert!(matches!(rows[0].status, RowStatus::Partial { done: 1 }));
+        assert!(matches!(rows[0].status, RowStatus::Partial { done: 1, .. }));
     }
 
     /// Целым снимок называется только по обходу: доведённые файлы говорят,
@@ -642,10 +670,10 @@ mod tests {
         ];
         // Снимок не обходили: два доведённых файла — это два файла на диске.
         let rows = downloaded_rows(&LibraryState { entries: files.clone() });
-        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2 }));
+        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2, .. }));
         // Обошли и насчитали три — двух мало.
         let rows = downloaded_rows(&LibraryState { entries: walked(3, files.clone()) });
-        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2 }));
+        assert!(matches!(rows[0].status, RowStatus::Partial { done: 2, .. }));
         // Насчитали два — снимок на диске целиком.
         let rows = downloaded_rows(&LibraryState { entries: walked(2, files) });
         assert!(matches!(rows[0].status, RowStatus::Complete));
@@ -664,6 +692,33 @@ mod tests {
         assert!(matches!(rows[0].status, RowStatus::Paused { .. }));
         // Байты при этом не теряются: у строки с детьми они сумма детей.
         assert_eq!(rows[0].stored(), 7);
+    }
+
+    /// Причину срыва строка снимка берёт у файлов — но только если она у них
+    /// одна: снимок приходит свёрнутым, и назвавшая одну из нескольких разных
+    /// соврала бы про остальные.
+    #[test]
+    fn a_snapshot_speaks_the_trouble_only_when_its_files_agree() {
+        let troubled = |name: &str, said: &str| LibraryEntry {
+            trouble: said.to_string(),
+            ..entry(name, "S2B_X.SAFE", LibraryStatus::LibPaused, 3)
+        };
+
+        let rows = downloaded_rows(&LibraryState {
+            entries: vec![troubled("B1.TIF", "HTTP 403"), troubled("B2.TIF", "HTTP 403")],
+        });
+        match &rows[0].status {
+            RowStatus::Paused { trouble, .. } => assert_eq!(trouble, "HTTP 403"),
+            _ => panic!("ожидалась оборванная строка"),
+        }
+
+        let rows = downloaded_rows(&LibraryState {
+            entries: vec![troubled("B1.TIF", "HTTP 403"), troubled("B2.TIF", "нет места")],
+        });
+        match &rows[0].status {
+            RowStatus::Paused { trouble, .. } => assert!(trouble.is_empty(), "причины разные"),
+            _ => panic!("ожидалась оборванная строка"),
+        }
     }
 
     /// Снимок из одного файла — это и есть тот файл: обёртка над ним носила бы

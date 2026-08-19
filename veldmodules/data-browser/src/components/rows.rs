@@ -237,7 +237,8 @@ fn from_key(
         let status = match (whole, stored) {
             (true, _) => RowStatus::Complete,
             (false, 0) => RowStatus::Remote,
-            (false, done) => RowStatus::Partial { done },
+            // Папка каталога: у неё нет своих закачек, и стоять ей не по чему.
+            (false, done) => RowStatus::Partial { done, trouble: String::new() },
         };
         let row = Row::container_row(identifier, title, status, kind);
         return Row { size, date, product, globe, ..row };

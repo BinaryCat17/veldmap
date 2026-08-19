@@ -9,7 +9,7 @@
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
 
-use crate::module::{layout, store, State};
+use crate::module::{layout, store, tile, State};
 use crate::proto::tile_cache::{QueryDone, QueryRequest, TileAddr, TileResult};
 
 /// Потолок числа тайлов в одном запросе. Экран — это десятки тайлов;
@@ -155,7 +155,9 @@ fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Re
     drop(file);
 
     let (width, height, rgba) = decode(&bytes).map_err(Miss::Broken)?;
-    let texture = veldsdk::graphics::upload_texture("тайл", width, height, layout::TILE_FORMAT, &rgba, owner)
+    let texture = veldsdk::graphics::upload_texture(
+        "тайл", width, height, tile::TILE_FORMAT, &rgba, owner,
+    )
         .map_err(Miss::Broken)?;
     Ok(TileResult { level, x, y, texture: Some(texture), width, height })
 }
