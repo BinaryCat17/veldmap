@@ -239,11 +239,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             // locate.rs): каретку ставят нажатием, а нажимают по имени. Полю
             // оно нужно своё: коробкой оно себя обходу не объявляет, а надписи
             // у него нет — подсказку рисует оно само.
-            if crate::module::locate::naming()
-                && let Some(h) = &t.on_input
+            if let Some(h) = &t.on_input
                 && !h.method.is_empty()
+                && let Some(name) = crate::module::locate::name(&h.method, &h.value)
             {
-                input = input.id(crate::module::locate::name(&h.method, &h.value));
+                input = input.id(name);
             }
 
             input.into()
@@ -278,11 +278,11 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
             // разметки сверяет `Id` на равенство (см. locate.rs). Имя стои́т
             // строки на кнопку в кадр, поэтому появляется оно только после
             // первого вопроса — обычный запуск за обход не платит.
-            if crate::module::locate::naming()
-                && let Some(handler) = &interaction.on_press
+            if let Some(handler) = &interaction.on_press
                 && !handler.method.is_empty()
+                && let Some(name) = crate::module::locate::name(&handler.method, &handler.value)
             {
-                cont = cont.id(crate::module::locate::name(&handler.method, &handler.value));
+                cont = cont.id(name);
             }
 
             // Нажимаемая — та же коробка внутри кнопки iced: отступ,

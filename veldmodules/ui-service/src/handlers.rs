@@ -117,8 +117,8 @@ pub fn handle_locate_widget(state: &mut State, req: app_proto::LocateWidget) {
         return;
     };
     // Имена появляются со следующей сборки разметки — то есть с той, которую
-    // сейчас и вызовем.
-    crate::module::locate::start_naming();
+    // сейчас и вызовем; вид имени задаёт сам вопрос.
+    crate::module::locate::asking(&req.value);
     plugin.pending_locate = Some(req);
     plugin.needs_redrawing = true;
     render_plugin_if_needed(state, &plugin_id);
@@ -488,7 +488,8 @@ fn answer_locate(
     let sought = match req.method.is_empty() {
         true => Sought::Said(req.text.clone()),
         false => Sought::Named(iced_core::widget::Id::from(
-            crate::module::locate::name(&req.method, &req.value),
+            crate::module::locate::name(&req.method, &req.value)
+                .expect("вид имени взведён вопросом"),
         )),
     };
     let mut search = Search::new(sought, req.ordinal, window);
