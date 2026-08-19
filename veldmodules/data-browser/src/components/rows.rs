@@ -9,11 +9,11 @@
 //! записями библиотеки. Всё остальное про строку живёт в `row`.
 
 use crate::module::components::row::{
-    bare, downloaded_rows, folder_path, OnGlobe, Row, RowKind, RowStatus,
+    bare, downloaded_rows, folder_path, OnGlobe, OnOutline, Row, RowKind, RowStatus,
 };
 use crate::module::state::browse::{BrowseItem, Children};
 use crate::module::state::listing::ListingState;
-use crate::module::state::{BrowseState, SearchState, State, ViewId, ViewKind};
+use crate::module::state::{BrowseState, Located, SearchState, State, ViewId, ViewKind};
 
 /// Строки названного вида. Пусто — вид не списочный: у превью, глобуса и «На
 /// просмотре» таблицы нет вовсе.
@@ -44,6 +44,7 @@ pub fn of(state: &State, view: ViewId) -> Vec<Row> {
 fn mark_globe(state: &State, rows: &mut [Row]) {
     for row in rows {
         row.globe = onto_globe(state, row.snapshot_key());
+        row.outlined = outlined(state, row.snapshot_key());
         mark_globe(state, &mut row.children);
     }
 }
@@ -63,6 +64,37 @@ fn onto_globe(state: &State, key: &str) -> OnGlobe {
     match overlay.on_globe() {
         false => OnGlobe::Assembling,
         true => OnGlobe::Laid { hidden: overlay.hidden, progress: overlay.progress },
+    }
+}
+
+/// Очерчен ли снимок этой строки (см. [`OnOutline`]).
+///
+/// Просьба и нарисованное — разные вещи: геометрию знает каталог, ход к нему
+/// сетевой, и между нажатием и контуром проходят секунды. Значок обязан
+/// зажечься сразу, иначе нажатие выглядит пропавшим.
+fn outlined(state: &State, key: &str) -> OnOutline {
+    if key.is_empty() || !state.outlines.contains(key) {
+        return OnOutline::Off;
+    }
+    if state.outlined.iter().any(|outlined| outlined.key == key) {
+        return OnOutline::Drawn;
+    }
+    match state.located.get(key) {
+        // Ответа ещё нет: запрос уходит той же пересборкой, что и эта строка.
+        None | Some(Located::Asking) => OnOutline::Asking,
+        // Спросить не вышло — это про сеть, а не про снимок, и переспросить
+        // можно тем же значком.
+        Some(Located::Failed) => OnOutline::Failed,
+        // Каталог ответил, а рисовать нечего: он либо не знает этот ключ, либо
+        // знает продукт без геометрии.
+        Some(Located::Missing) => OnOutline::Blank,
+        // Геометрия известна: пустая — рисовать нечего, непустая — уже
+        // нарисована. Разойтись с `state.outlined` она может только внутри
+        // одной пересборки, которая кладёт туда и сюда.
+        Some(Located::Found(found)) => match found.footprint.is_empty() {
+            true => OnOutline::Blank,
+            false => OnOutline::Drawn,
+        },
     }
 }
 
@@ -218,10 +250,11 @@ fn from_key(
     kind: RowKind,
     product: String,
 ) -> Row {
-    // Ход укладки на шар — здесь, потому что здесь собираются строки и каталога,
-    // и выдачи поиска: снимок в них один и тот же, и два ответа на этот вопрос
+    // Оба состояния шара — здесь, потому что здесь собираются строки и каталога,
+    // и выдачи поиска: снимок в них один и тот же, и два ответа на эти вопросы
     // однажды разошлись бы.
     let globe = onto_globe(state, bare(&identifier));
+    let outlined = outlined(state, bare(&identifier));
     if kind.is_folder() {
         // Два разных вопроса о папке, и второй задаётся только снимку. Сколько
         // её содержимого на диске, видно по ключам записей — это и всё, что
@@ -241,9 +274,14 @@ fn from_key(
             (false, done) => RowStatus::Partial { done, trouble: String::new() },
         };
         let row = Row::container_row(identifier, title, status, kind);
-        return Row { size, date, product, globe, ..row };
+        return Row { size, date, product, globe, outlined, ..row };
     }
-    Row { product, globe, ..Row::remote(&state.library, identifier, title, size, date, kind) }
+    Row {
+        product,
+        globe,
+        outlined,
+        ..Row::remote(&state.library, identifier, title, size, date, kind)
+    }
 }
 
 /// Содержимое раскрытой папки — подстроками под ней, и так вглубь: раскрытая
@@ -258,4 +296,91 @@ fn fill(state: &State, row: &mut Row, children: &Children, listing: &ListingStat
     let path = folder_path(&row.identifier);
     row.loading = children.waiting(&path);
     row.children = entries(state, children.get(&path), children, listing);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::state::globe::Outlined;
+    use crate::proto::data_provider::{DataProduct, GeoPoint, Ring};
+
+    const KEY: &str = "eodata/store/A.SAFE";
+
+    fn state() -> State {
+        State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние")
+    }
+
+    fn answer(geometry: bool) -> Located {
+        let footprint = match geometry {
+            false => Vec::new(),
+            true => vec![Ring { points: vec![GeoPoint { lat: 10.0, lon: 10.0 }] }],
+        };
+        Located::Found(DataProduct {
+            identifier: KEY.to_string(),
+            footprint,
+            ..Default::default()
+        })
+    }
+
+    fn drawn() -> Outlined {
+        Outlined {
+            key: KEY.to_string(),
+            label: "A.SAFE".to_string(),
+            folder: false,
+            rings: Vec::new(),
+        }
+    }
+
+    /// Пять лиц значка контура: просьба, ход к каталогу и три его исхода.
+    ///
+    /// Значок — единственное, по чему в списке видно, что с контуром
+    /// происходит, и перепутанные лица врут молча: «спрашиваем» у того, за чем
+    /// никто не пошёл, или «геометрии нет» у оборвавшейся сети.
+    #[test]
+    fn the_outline_icon_tells_the_request_from_the_drawing() {
+        let mut state = state();
+        assert_eq!(outlined(&state, KEY), OnOutline::Off, "очертить не просили");
+        assert_eq!(outlined(&state, ""), OnOutline::Off, "адресовать нечем");
+
+        state.outlines.insert(KEY.to_string());
+        assert_eq!(outlined(&state, KEY), OnOutline::Asking, "запрос уходит этой же пересборкой");
+
+        state.located.insert(KEY.to_string(), Located::Asking);
+        assert_eq!(outlined(&state, KEY), OnOutline::Asking);
+
+        state.located.insert(KEY.to_string(), Located::Failed);
+        assert_eq!(outlined(&state, KEY), OnOutline::Failed, "сеть — не ответ про снимок");
+
+        state.located.insert(KEY.to_string(), Located::Missing);
+        assert_eq!(outlined(&state, KEY), OnOutline::Blank, "каталог такого не знает");
+
+        state.located.insert(KEY.to_string(), answer(false));
+        assert_eq!(outlined(&state, KEY), OnOutline::Blank, "знает, а геометрии нет");
+
+        state.outlined.push(drawn());
+        assert_eq!(outlined(&state, KEY), OnOutline::Drawn);
+    }
+
+    /// Состояние контура проставляется и строкам каталога, и строкам выдачи:
+    /// собирает их другая сборка, чем «Скачанное», и молчащий там значок
+    /// переключался бы против собственной подсказки.
+    #[test]
+    fn a_catalogue_row_knows_its_outline_too() {
+        let mut state = state();
+        state.outlines.insert(KEY.to_string());
+        state.outlined.push(drawn());
+
+        let row = from_key(
+            &state,
+            // Со слэшем — так ключ приезжает из листинга каталога.
+            format!("{}/", KEY),
+            "A.SAFE".to_string(),
+            0,
+            0,
+            RowKind::Product { folder: true },
+            KEY.to_string(),
+        );
+
+        assert_eq!(row.outlined, OnOutline::Drawn, "строка каталога не знает про контур");
+    }
 }

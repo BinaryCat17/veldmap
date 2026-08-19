@@ -15,6 +15,22 @@ use crate::proto::data_library::{DownloadRequest, ItemRequest};
 use crate::proto::data_provider::{SignRequest, SignedUrl};
 use veldsdk::proto::network::{FsDownloadProgress, FsDownloadRequest, FsDownloadResponse};
 
+/// Сколько закачек идёт разом. Остальные ждут места и трогаются, как только
+/// оно освободится.
+///
+/// Потолок нужен не нам, а той стороне: пакетное «скачать» на странице из
+/// двадцати снимков — это сотни файлов за одно нажатие, и хранилище отвечает
+/// на такое отказами, а не данными. Десять — с запасом ниже того, на чём
+/// хранилище начинает отказывать; точнее эта величина не мерена, и подпирать
+/// её числом было бы выдумкой.
+///
+/// Ждущая запись видна списком наравне с идущими — с тем, что у неё уже лежит
+/// на диске, или с нулём у перекачки: с нажатия
+/// «скачать» она уже намерение пользователя, и прятать её до старта значило бы
+/// терять нажатие из виду. Тем же самым выглядит и окно ожидания подписи —
+/// оно и есть та же пауза, только короче (см. [`Download::waiting`]).
+const AT_ONCE: usize = 10;
+
 /// Скачать или докачать продукт. Куда он ляжет — решаем мы: раскладка
 /// хранения наша, и заказчику её знать незачем.
 pub fn on_download(state: &mut State, req: DownloadRequest) {
@@ -63,38 +79,88 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
         siblings,
     });
 
-    // Перекачка доведённого файла сносит его до старта. Качальщик пишет в
-    // `.part` и переименовывает его только в конце, поэтому иначе рядом с
-    // готовым файлом лёг бы второй, недокачанный, под тем же именем записи —
-    // а «одно имя, одна запись» держится ровно тем, что такой пары на диске
-    // не бывает. Отсюда и предупреждение в меню: перекачка необратима.
-    if state.entry_for(&name).is_some_and(|file| !file.is_partial) {
-        delete_data(state, &name);
-    }
-
     // Засеваем тем, что уже известно, а не нулями: у недокачанной записи
     // закачка продолжится с лежащих на диске байт, и «0 B» на возобновлении
-    // было бы враньём. У доведённой `.part` нет — она только что снесена, и
-    // перекачка идёт с нуля.
+    // было бы враньём. У доведённой `.part` нет вовсе — перекачка идёт с нуля,
+    // и отбор по `is_partial` это и говорит.
     let done = state.entry_for(&name).filter(|file| file.is_partial).map(|file| file.size).unwrap_or(0);
     let total = state.total_bytes(&name);
 
     // Операцию именуем мы: этим же id мы спросим подпись, попросим закачку и
     // отменим задачу у платформы — она наша от начала до конца.
     let correlation_id = veldsdk::generate_id();
+    let queued = state.queue_tick;
+    state.queue_tick += 1;
+    // Место занято — запись встаёт в очередь, а не в сеть. Тронется она сама,
+    // когда какая-нибудь из идущих кончится (см. [`start_waiting`]).
+    let waiting = busy(state) >= AT_ONCE;
     state.downloads.insert(correlation_id.clone(), Download {
         identifier: req.identifier.clone(),
         name,
         done,
         total,
         delete_when_done: false,
+        queued,
+        waiting,
         loading: false,
     });
 
-    crate::calls::data_provider::on_sign(&SignRequest {
-        identifier: req.identifier,
-    }, &correlation_id);
+    if !waiting {
+        start(state, &correlation_id);
+    }
     catalog::publish(state);
+}
+
+/// Пустить запись в ход: снять ожидание и спросить подпись.
+///
+/// Единственное место, где закачка трогается с места, — и потому «ждёт» и «не
+/// подписана» здесь одно и то же, а не два согласованных факта. Второй пуск в
+/// обход этой функции развёл бы их молча: запись считалась бы ждущей, уже
+/// качаясь, и очередь пустила бы её второй раз под тем же id.
+///
+/// Перекачка доведённого файла сносит его здесь, а не на нажатии. Качальщик
+/// пишет в `.part` и переименовывает его только в конце, поэтому иначе рядом с
+/// готовым файлом лёг бы второй, недокачанный, под тем же именем записи — а
+/// «одно имя, одна запись» держится ровно тем, что такой пары на диске не
+/// бывает. Но между нажатием и стартом стои́т очередь, и снесённый заранее файл
+/// оставил бы человека без данных и без закачки на всё время ожидания.
+///
+/// Место держится до терминального события, и у не ответившей подписи его не
+/// бывает: убить ход к провайдеру нечем, и такая запись стои́т в очереди, пока
+/// её не снимут паузой. Это живое ограничение — своего срока у подписи нет.
+fn start(state: &mut State, id: &str) {
+    let Some(dl) = state.downloads.get_mut(id) else { return };
+    dl.waiting = false;
+    let (identifier, name) = (dl.identifier.clone(), dl.name.clone());
+
+    if state.entry_for(&name).is_some_and(|file| !file.is_partial) {
+        delete_data(state, &name);
+    }
+    crate::calls::data_provider::on_sign(&SignRequest { identifier }, id);
+}
+
+/// Сколько закачек уже пущено: ждущие места в счёт не идут, всё остальное идёт
+/// — включая ждущие подписи, у них ход уже начат.
+fn busy(state: &State) -> usize {
+    state.downloads.values().filter(|dl| !dl.waiting).count()
+}
+
+/// Пустить следующую по очереди, если освободилось место.
+///
+/// По одной на освободившееся место, а не «сколько влезет»: зовут это с каждого
+/// конца закачки, и мест ровно столько, сколько концов.
+fn start_waiting(state: &mut State) {
+    if busy(state) >= AT_ONCE {
+        return;
+    }
+    let next = state
+        .downloads
+        .iter()
+        .filter(|(_, dl)| dl.waiting)
+        .min_by_key(|(_, dl)| dl.queued)
+        .map(|(id, _)| id.clone());
+    let Some(correlation_id) = next else { return };
+    start(state, &correlation_id);
 }
 
 /// Адрес подписан — качаем. Путь на диске подставляется здесь: провайдер
@@ -239,6 +305,10 @@ pub fn on_fs_download_result(state: &mut State, response: FsDownloadResponse) {
 fn finish(state: &mut State, id: &str) {
     let Some(dl) = state.downloads.remove(id) else { return };
 
+    // Место освободилось — пускаем следующую. До разбора того, чем кончилась
+    // эта: очередь не должна ждать ни перечитывания каталога, ни удаления.
+    start_waiting(state);
+
     // Корзину нажимали во время закачки — тогда это не отмена ради отмены,
     // а отложенное удаление: `.part` остался ровно там, где abort его бросил,
     // и теперь его можно безопасно удалить.
@@ -250,4 +320,123 @@ fn finish(state: &mut State, id: &str) {
     // Перечитываем каталог: размер `.part`/готового файла берётся с диска, а
     // не переносится руками из реестра в запись.
     catalog::rescan(state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::Config;
+
+    fn state() -> State {
+        crate::module::hook_init(Config {}).expect("состояние собирается без диска")
+    }
+
+    fn ask(state: &mut State, at: usize) {
+        on_download(state, DownloadRequest {
+            identifier: format!("eodata/store/S{:02}.tif", at),
+            product: String::new(),
+        });
+    }
+
+    fn waiting(state: &State) -> usize {
+        state.downloads.values().filter(|dl| dl.waiting).count()
+    }
+
+    /// Разом пущено не больше потолка, а остальное ждёт места.
+    ///
+    /// Считаем по записям, а не по ходам к провайдеру: наружу ждущая запись
+    /// выглядит так же, как ждущая подписи, и отличает их только этот флаг.
+    #[test]
+    fn no_more_than_the_cap_goes_out_at_once() {
+        let mut state = state();
+        for at in 0..AT_ONCE + 3 {
+            ask(&mut state, at);
+        }
+
+        assert_eq!(state.downloads.len(), AT_ONCE + 3, "все нажатия учтены");
+        assert_eq!(busy(&state), AT_ONCE, "пущено ровно по потолку");
+        assert_eq!(waiting(&state), 3, "остальные ждут места");
+    }
+
+    /// Ключ ждущей записи, вставшей в очередь раньше прочих.
+    fn first_waiting(state: &State) -> String {
+        state
+            .downloads
+            .iter()
+            .filter(|(_, dl)| dl.waiting)
+            .min_by_key(|(_, dl)| dl.queued)
+            .map(|(id, _)| id.clone())
+            .expect("ждущая нашлась")
+    }
+
+    /// Ключ любой идущей записи.
+    fn any_going(state: &State) -> String {
+        state
+            .downloads
+            .iter()
+            .find(|(_, dl)| !dl.waiting)
+            .map(|(id, _)| id.clone())
+            .expect("идущая нашлась")
+    }
+
+    /// Освободившиеся места занимают те, которые нажали раньше, — и в том же
+    /// порядке.
+    ///
+    /// Проверяется пятью подряд, а не одной: реестр закачек — хеш-таблица, и с
+    /// одной ждущей потерянный порядок проходил бы такой тест в половине
+    /// прогонов, то есть выглядел бы флаки-тестом, а не находкой.
+    #[test]
+    fn the_freed_places_go_in_the_order_they_were_asked() {
+        let mut state = state();
+        for at in 0..AT_ONCE + 5 {
+            ask(&mut state, at);
+        }
+
+        let mut order: Vec<u64> = Vec::new();
+        for _ in 0..5 {
+            let next = first_waiting(&state);
+            let queued = state.downloads[&next].queued;
+            let going = any_going(&state);
+            finish(&mut state, &going);
+            assert!(!state.downloads[&next].waiting, "тронулась не та, которую ждали");
+            order.push(queued);
+            assert_eq!(busy(&state), AT_ONCE, "место занято ровно одной");
+        }
+
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(order, sorted, "очередь пошла не по порядку нажатий");
+        assert_eq!(waiting(&state), 0, "ждать больше некому");
+    }
+
+    /// Удалённая во время закачки запись место освобождает наравне с прочими.
+    ///
+    /// Её конец уходит по своей ветке — с `return`, — и очередь легко оставить
+    /// за ней: десять нажатых корзин по десяти идущим остановили бы её
+    /// навсегда, до перезапуска приложения.
+    #[test]
+    fn a_deleted_download_frees_its_place_too() {
+        let mut state = state();
+        for at in 0..AT_ONCE + 1 {
+            ask(&mut state, at);
+        }
+        let waited = first_waiting(&state);
+
+        let going = any_going(&state);
+        state.downloads.get_mut(&going).expect("запись жива").delete_when_done = true;
+        finish(&mut state, &going);
+
+        assert!(!state.downloads[&waited].waiting, "очередь встала за удалённой");
+        assert_eq!(busy(&state), AT_ONCE);
+    }
+
+    /// Пока потолок не выбран, ждать нечего: первое же нажатие уходит сразу.
+    #[test]
+    fn the_first_press_does_not_wait() {
+        let mut state = state();
+        ask(&mut state, 0);
+
+        assert_eq!(waiting(&state), 0);
+        assert_eq!(busy(&state), 1);
+    }
 }

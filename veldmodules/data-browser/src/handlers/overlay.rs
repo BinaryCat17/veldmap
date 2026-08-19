@@ -63,9 +63,11 @@ fn role_for_globe(role: crate::proto::data_provider::ImageryRole) -> OverlayRole
 /// продукта сама строка (см. `Row::snapshot_key`), и второе такое правило
 /// разошлось бы с первым.
 ///
-/// Показ на шаре — это и очерчивание: «где он» и «вот он» — одно намерение с
-/// двумя степенями подробности, и разводить их двумя нажатиями незачем. Отметка
-/// поэтому ставится здесь же, а не ждёт, пока до коробочки дойдут руки.
+/// Показ выбора не ставит: это разные намерения. Выбирают, чтобы что-то с
+/// набранным сделать — очертить, удалить, скачать, — а показывают, чтобы
+/// посмотреть, и живёт показанное своим списком («На просмотре»). Ставя заодно
+/// коробочку, показ клал бы снимок в состав следующего пакетного действия,
+/// которого никто не просил.
 pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     // Меню строки закрываем сами: показ уводит с этого экрана, а открытым оно
     // осталось бы до возвращения.
@@ -73,7 +75,6 @@ pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     // Сперва выдача: там у продукта есть всё, что нужно, и ходить за ним в
     // каталог второй раз незачем.
     if super::search::show(state, view, &identifier) {
-        super::outline::mark(state, view, &identifier);
         super::outline::focus(state, &identifier);
         return;
     }
@@ -81,16 +82,18 @@ pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     // положить туда ещё раз. Спрашивать ради этого каталог нечего: куда
     // смотреть, посчитано в момент показа.
     if focus(state, &identifier) {
-        super::outline::mark(state, view, &identifier);
         return;
     }
     // Продукт придётся восстанавливать у провайдера — и один ход отвечает
-    // обоим: и наложению, и контуру. Ответ помечается ожидаемым до отметки,
-    // иначе сборка контуров послала бы за тем же продуктом второй запрос.
-    state.located.insert(identifier.clone(), Located::Asking);
-    let ours = super::outline::mark(state, view, &identifier);
-    let correlation =
-        state.locates.begin(Locate::Overlay { key: identifier.clone(), ours });
+    // обоим: и наложению, и контуру. Ответ помечается ожидаемым здесь же, иначе
+    // сборка контуров послала бы за тем же продуктом второй запрос. Известное
+    // при этом не затирается: у очерченного геометрия уже лежит, и стёртая
+    // означала бы пропавший на кадр контур.
+    if !matches!(state.located.get(&identifier), Some(Located::Found(_))) {
+        state.located.insert(identifier.clone(), Located::Asking);
+    }
+    state.showing.insert(identifier.clone());
+    let correlation = state.locates.begin(Locate::Overlay(identifier.clone()));
     crate::calls::data_provider::on_locate(&LocateRequest { identifier }, &correlation);
 }
 
@@ -115,16 +118,17 @@ pub fn focus(state: &mut State, key: &str) -> bool {
 /// Ключ продукта может оказаться не тем, которым его позвали: спросили файл
 /// внутри снимка, а каталог отвечает корнем продукта (см. `on_locate` у
 /// провайдера). Наложение ложится под ключом продукта — иначе глобус получил
-/// бы два ключа на один снимок, — а отметку переносим туда же: оставшись на
-/// ключе строки, она развела бы один снимок на слой и «только контур» в списке
-/// «На просмотре».
-pub fn on_located(state: &mut State, key: &str, ours: bool, response: LocateResponse) {
-    // Пока ход к каталогу шёл, показа могли и расхотеть: отметку сняли, вкладку
-    // закрыли, «снять с шара» нажали. Убить запрос в полёте нечем — он ответит
-    // всё равно, — поэтому спрашиваем здесь, всё ли ещё его ждут. Иначе
+/// бы два ключа на один снимок.
+pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
+    // Пока ход к каталогу шёл, показа могли и расхотеть — «снять с шара» за
+    // эти секунды нажать успевают. Убить запрос в полёте нечем, он ответит
+    // всё равно, поэтому спрашиваем здесь, всё ли ещё его ждут. Иначе
     // приложение через несколько секунд после отмены само прыгает на вкладку
     // глобуса, уводит камеру и кладёт снимок, которого не просили.
-    if !state.marked(key) {
+    //
+    // Закрытая вкладка показа не отменяет: слой лежит в состоянии модуля и
+    // живёт своим списком, а не тем, из которого его позвали.
+    if !state.showing.remove(key) {
         veldsdk::log::info!(target: "handlers", "показ '{}' расхотели, пока шёл ответ", key);
         return;
     }
@@ -134,12 +138,11 @@ pub fn on_located(state: &mut State, key: &str, ours: bool, response: LocateResp
         return;
     };
 
-    if key != product.identifier {
-        // Убираем только своё: под тем же ключом человек мог выбрать файл
-        // коробочкой ради пакетного действия, и показ ему не хозяин.
-        if ours {
-            state.clear_mark(key);
-        }
+    // Ответ пришёл под другим ключом, и спрошенное под этим больше ничего не
+    // значит: следующий, кому понадобится геометрия файла, спросит заново.
+    // Кроме случая, когда этот ключ очерчен: там ответ ждут, и забытый он
+    // уехал бы в каталог второй раз за тем же самым.
+    if key != product.identifier && !state.outlines.contains(key) {
         state.located.remove(key);
     }
     // Продукт кладётся в кэш под своим ключом — тем, которым он теперь и
@@ -213,6 +216,9 @@ pub fn shift(state: &mut State, key: &str, shift: Shift) {
 
 /// Снять с шара всё.
 pub fn clear_all(state: &mut State) {
+    // И то, что ещё едет: ответ каталога придёт всё равно, а положить снимок
+    // после «снять с шара» значило бы вернуть на шар то, что с него убрали.
+    state.showing.clear();
     for overlay in std::mem::take(&mut state.overlays) {
         abandon(state, overlay);
     }

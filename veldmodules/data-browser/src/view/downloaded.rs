@@ -27,7 +27,6 @@ pub fn view(state: &State, view: ViewId, listing: &ListingState) -> Element<Msg>
         Screen {
             title: "Скачанное",
             picked: state.picked_key(),
-            outlined: state.outlined_in(listing),
             batch: crate::module::handlers::library::batch(state, view),
             subtitle: match said.is_empty() {
                 true => format::bytes(on_disk),

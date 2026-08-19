@@ -38,7 +38,6 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
         Screen {
             title: "Сетевой каталог",
             picked: state.picked_key(),
-            outlined: state.outlined_in(&browse.listing),
             batch: crate::module::handlers::library::batch(state, view),
             subtitle,
             path: Some(&browse.current_path),

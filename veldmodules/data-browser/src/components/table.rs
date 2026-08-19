@@ -10,7 +10,7 @@ use crate::proto::ui_service::{
     container, icon, mono, popover, progress_bar, text, tooltip,
     Alignment, Color, Container, Element, FontWeight, Length, Padding, TooltipPosition,
 };
-use crate::module::components::{arrange::Line, format, OnGlobe, Row, RowKind, RowStatus};
+use crate::module::components::{arrange::Line, format, OnGlobe, OnOutline, Row, RowKind, RowStatus};
 use crate::module::state::listing::{ListingState, Menu};
 use crate::module::state::ViewId;
 use crate::module::{theme, Msg, ViewMsg};
@@ -20,7 +20,7 @@ use crate::module::{theme, Msg, ViewMsg};
 /// однажды сдвинуть ячейку на соседнюю колонку.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Column {
-    /// Отметка снимка: отмеченные очерчены на шаре (см. handlers::outline).
+    /// Выбор строки: набор для пакетных действий (см. handlers::outline).
     /// Своя колонка по той же причине, что у раскрытия, — это отдельное
     /// действие, и нажимать его надо мимо главного действия строки.
     Check,
@@ -136,7 +136,8 @@ const CELL_PADDING: f32 = 8.0;
 pub struct Optional {
     /// Есть что раскрыть.
     pub twisty: bool,
-    /// Есть что отметить — то есть в списке стоят снимки.
+    /// Есть что выбрать — то есть в списке стои́т хоть одна выбираемая строка
+    /// (см. `Row::choosable`).
     pub checkable: bool,
 }
 
@@ -779,7 +780,7 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
     };
     let mut buttons: Vec<Element<Msg>> = shown
         .into_iter()
-        .map(|Quick { glyph, hint, message, tone }| icon_button(glyph, tone, &hint, message))
+        .map(|Quick { glyph, hint, message, tone, .. }| icon_button(glyph, tone, &hint, message))
         .collect();
 
     let mut items = menu_items(view, entry, context.here);
@@ -788,7 +789,9 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
         // они и стояли.
         let moved: Vec<super::menu::Item> = quick(view, entry)
             .into_iter()
-            .map(|Quick { hint, message, .. }| super::menu::Item::new(hint, message))
+            .map(|Quick { glyph, label, message, .. }| {
+                super::menu::Item::new(label, message).glyph(glyph)
+            })
             .collect();
         items.splice(0..0, moved);
     }
@@ -824,15 +827,21 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
 struct Quick {
     glyph: &'static str,
     hint: String,
+    /// Чем он зовётся пунктом меню, куда уезжает в тесноте. Отдельно от
+    /// подсказки: та рассказывает и состояние («спрашиваем каталог…»), а пункт
+    /// меню обязан называть действие — состояние в списке пунктов не читается
+    /// и предлагает непонятно что. Доводом конструктора, а не умолчанием:
+    /// забытая подпись дала бы безымянный пункт, и компилятор бы промолчал.
+    label: &'static str,
     message: Msg,
-    /// Горит ли он. Умолчание — покой: состояние есть только у значка шара,
-    /// остальные о мире ничего не рассказывают.
+    /// Горит ли он. Умолчание — покой: состояние есть у значков контура и
+    /// шара, остальные о мире ничего не рассказывают.
     tone: theme::IconTone,
 }
 
 impl Quick {
-    fn new(glyph: &'static str, hint: String, message: Msg) -> Self {
-        Self { glyph, hint, message, tone: theme::IconTone::Rest }
+    fn new(glyph: &'static str, label: &'static str, hint: String, message: Msg) -> Self {
+        Self { glyph, hint, label, message, tone: theme::IconTone::Rest }
     }
 
     fn tone(self, tone: theme::IconTone) -> Self {
@@ -840,67 +849,62 @@ impl Quick {
     }
 }
 
-/// Быстрые значки строки по порядку: сначала то, ради чего строку открывают,
-/// потом показ на шаре.
+/// Быстрые значки строки — только те два, что кладут снимок на шар: контур и
+/// растр.
 ///
-/// Перехода вглубь среди них нет: внутрь ведёт нажатие на саму строку, и
-/// стрелка рядом с ней говорила бы то же самое второй раз. Показать содержимое,
-/// не уходя со списка, — дело треугольника (см. `twist`).
+/// Всё остальное — скачать, приостановить, открыть, посмотреть — стои́т
+/// пунктами меню (см. [`menu_items`]). Строка узкая, панель делят пополам, и
+/// пятый значок подряд отнимал бы место у имени; а из двух оставшихся каждый
+/// говорит о своём состоянии цветом, чего пункт меню не умеет.
 ///
-/// Значок глобуса — только у снимка: класть на шар папку пути или файл внутри
-/// снимка нечего, а кнопка, которой нечего сделать, врёт о том, что строка
-/// умеет. Остальным этот пункт по-прежнему доступен из меню (см. `menu_items`).
+/// Перехода вглубь среди них нет: внутрь ведёт нажатие на саму
+/// строку, и стрелка рядом с ней говорила бы то же самое второй раз.
+///
+/// Оба — только у снимка: ни контура, ни растра у папки пути и у файла внутри
+/// снимка не бывает, а кнопка, которой нечего сделать, врёт о том, что строка
+/// умеет.
 fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
     let mut quick = Vec::new();
     let key = row.snapshot_key().to_string();
-    let main = primary(view, row).filter(|action| !action.transition);
-    // Показ уже стои́т главным действием — у скачанного файла это «открыть».
-    let showing = main.as_ref().is_some_and(|action| action.glyph == theme::glyph::EYE);
-    if let Some(action) = main {
-        quick.push(Quick::new(action.glyph, action.hint.to_string(), action.message));
+    if !row.is_snapshot() || key.is_empty() {
+        return quick;
     }
-    // Снимок, лежащий папкой, скачивается целиком: его файлы разложены по
-    // ярусам, и качать их по одному, обойдя каталог руками, — работа, которую
-    // приложение умеет сделать само (см. handlers::library::on_download_snapshot).
-    // Доведённому это предлагать незачем: он уже весь на диске.
-    if row.kind.is_product()
-        && row.kind.is_folder()
-        && !key.is_empty()
-        && !matches!(row.status, RowStatus::Complete)
-    {
-        // Вес — в подсказке: одно нажатие ставит в очередь весь снимок, а это
-        // гигабайты, и узнавать об этом по счётчику закачек поздно. Каталог
-        // размера папки не знает (в S3 за префиксом его нет), и тогда сказано
-        // просто, что качается снимок целиком.
-        let hint = match row.size > 0 {
-            true => format!("Скачать снимок целиком — {}", format::bytes(row.size)),
-            false => "Скачать снимок целиком".to_string(),
-        };
-        quick.push(Quick::new(theme::glyph::DOWNLOAD, hint, Msg::DownloadSnapshot(key.clone())));
-    }
-    // Смотреть снимок — его собственное действие, и значок у него один, чем бы
-    // снимок ни лежал: папкой ярусов или единственным файлом. Условие здесь то
-    // же, что у значка глобуса, и это не совпадение — вопрос у них один
-    // («можно ли это показать»), и два ответа на него разошлись бы молча: у
-    // гранулы Sentinel-5P и у климатики значок глобуса стоял, а значка
-    // просмотра не было, хотя смотреть их — основное занятие.
-    if row.is_snapshot() && row.viewable && !key.is_empty() && !showing {
-        quick.push(Quick::new(
-            theme::glyph::EYE,
-            "Смотреть снимок".to_string(),
-            Msg::In(view, ViewMsg::PreviewProduct(key.clone())),
-        ));
-    }
+
+    // Контур — своё состояние строки, не выбор и не показ (см.
+    // handlers::outline). Горит зелёным, когда нарисован; вполсилы — пока
+    // геометрия едет и когда её не оказалось вовсе.
+    //
+    // Подпись называет то, что случится по нажатию, а состояние объясняет
+    // после тире: у не спросившегося нажатие переспрашивает, а не снимает
+    // просьбу (см. `outline::toggle_outline`).
+    let (tone, hint) = match row.outlined {
+        OnOutline::Off => (theme::IconTone::Rest, "Очертить на шаре"),
+        OnOutline::Asking => (theme::IconTone::Half, "Убрать контур — спрашиваем каталог…"),
+        OnOutline::Blank => {
+            (theme::IconTone::Half, "Убрать контур — геометрии у снимка нет")
+        }
+        OnOutline::Failed => (theme::IconTone::Half, "Переспросить контур — не спросился"),
+        OnOutline::Drawn => (theme::IconTone::Lit, "Убрать контур с шара"),
+    };
+    quick.push(
+        Quick::new(
+            theme::glyph::OUTLINE,
+            "Контур на шаре",
+            hint.to_string(),
+            Msg::OutlineToggle(key.clone()),
+        )
+        .tone(tone),
+    );
+
     // `viewable` — не «покажется наверняка», а «есть смысл предлагать»
     // (см. `Row::viewable`): значок над сырьём уровня 0 или над архивом обещает
     // то, чего не бывает.
-    if row.is_snapshot() && row.viewable && !key.is_empty() {
-        // Значок горит, когда снимок лежит на шаре растром, — и это
-        // единственное, по чему в списке видно, что именно там лежит. Подпись
-        // при этом называет то, что случится по нажатию, а не то, что есть:
-        // у лежащего это переход к нему, а не второе наложение.
+    if row.viewable {
+        // Значок горит, когда снимок лежит на шаре растром. Подпись при этом
+        // называет то, что случится по нажатию, а не то, что есть: у лежащего
+        // это переход к нему, а не второе наложение.
         let (tone, hint) = match row.globe {
-            OnGlobe::Off => (theme::IconTone::Rest, "На глобус"),
+            OnGlobe::Off => (theme::IconTone::Rest, "Показать на шаре"),
             OnGlobe::Assembling => (theme::IconTone::Half, "Кладётся на глобус…"),
             OnGlobe::Laid { hidden: true, .. } => {
                 (theme::IconTone::Half, "На шаре, скрыт — показать и навести")
@@ -916,7 +920,13 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
             None => hint.to_string(),
         };
         quick.push(
-            Quick::new(theme::glyph::GLOBE, hint, Msg::In(view, ViewMsg::GlobeShow(key))).tone(tone),
+            Quick::new(
+                theme::glyph::GLOBE,
+                "Показать на шаре",
+                hint,
+                Msg::In(view, ViewMsg::GlobeShow(key)),
+            )
+            .tone(tone),
         );
     }
     quick
@@ -948,10 +958,9 @@ fn twist(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
 
 /// Коробочка выбора.
 ///
-/// Выбор — это выбор строки, а не показ контура: отмеченное удаляют и качают
-/// пакетом (см. заголовок списка), и файл сам по себе выбирается наравне со
-/// снимком. Контур из выбора следует, а не задаёт его — очерчивается то
-/// выбранное, у чего есть геометрия (см. handlers::outline).
+/// Выбор — набор строк для пакетных действий: выбранное удаляют и качают
+/// (см. заголовок списка). Шара он не касается вовсе — ни контура, ни показа:
+/// у тех свои значки и свои состояния (см. handlers::outline).
 ///
 /// Нет её только у папки пути: в папку заходят, а выбирают то, что лежит в
 /// каталоге или на диске. Снимок, лежащий каталогом (.SAFE, .SEN3), — тоже
@@ -963,8 +972,8 @@ fn twist(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
 /// так же, как и его отсутствие. Выключенный говорит правду и объясняет её
 /// подсказкой.
 ///
-/// С подсказкой, и это не украшение: у снимка выбор заодно кладёт контур на
-/// другую вкладку, и без подписи коробочка предлагает «отметить» неизвестно
+/// С подсказкой, и это не украшение: действует выбор не здесь, а кнопками в
+/// заголовке списка, и без подписи коробочка предлагает «отметить» неизвестно
 /// для чего.
 fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
     if matches!(row.kind, RowKind::Folder) {
@@ -980,11 +989,9 @@ fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
     let marked = context.listing.selected.contains_key(key);
     hinted(
         theme::row_check(Some(marked)).on_press(Msg::In(view, ViewMsg::Check(key.to_string()))),
-        match (row.is_snapshot(), marked) {
-            (true, false) => "Выбрать и очертить на шаре",
-            (true, true) => "Снять выбор и убрать контур с шара",
-            (false, false) => "Выбрать",
-            (false, true) => "Снять выбор",
+        match marked {
+            false => "Выбрать",
+            true => "Снять выбор",
         },
     )
 }
@@ -1018,6 +1025,49 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     use super::menu::Item;
     let mut items = Vec::new();
 
+    // Главное действие строки — скачать, приостановить, открыть. Значком оно
+    // не стои́т: в строке остались только те два, что кладут снимок на шар
+    // (см. [`quick`]). Переход вглубь пунктом не идёт по той же причине, по
+    // какой не шёл значком, — внутрь ведёт нажатие на саму строку.
+    if let Some(action) = primary(view, row).filter(|action| !action.transition) {
+        // Со значком: пункт этот главный, и знак у него тот же, каким действие
+        // называют везде — иначе одно и то же читалось бы как разное.
+        items.push(Item::new(action.hint, action.message).glyph(action.glyph));
+    }
+    let key = row.snapshot_key().to_string();
+    // Снимок, лежащий папкой, скачивается целиком: его файлы разложены по
+    // ярусам, и качать их по одному, обойдя каталог руками, — работа, которую
+    // приложение умеет сделать само (см. handlers::library::on_download_snapshot).
+    // Доведённому это предлагать незачем: он уже весь на диске.
+    if row.kind.is_product()
+        && row.kind.is_folder()
+        && !key.is_empty()
+        && !matches!(row.status, RowStatus::Complete)
+    {
+        // Вес — в подписи: одно нажатие ставит в очередь весь снимок, а это
+        // гигабайты, и узнавать об этом по счётчику закачек поздно. Каталог
+        // размера папки не знает (в S3 за префиксом его нет), и тогда сказано
+        // просто, что качается снимок целиком.
+        let label = match row.size > 0 {
+            true => format!("Скачать снимок целиком — {}", format::bytes(row.size)),
+            false => "Скачать снимок целиком".to_string(),
+        };
+        items.push(Item::new(label, Msg::DownloadSnapshot(key.clone())).glyph(theme::glyph::DOWNLOAD));
+    }
+    // Смотреть снимок — его собственное действие, чем бы снимок ни лежал:
+    // папкой ярусов или единственным файлом. Условие то же, что у значка шара,
+    // и это не совпадение — вопрос у них один («можно ли это показать»), и два
+    // ответа на него разошлись бы молча.
+    // Кроме случая, когда главным действием уже стои́т «Открыть»: это тот же
+    // глаз и тот же смысл, и два таких пункта подряд читались бы как два
+    // разных действия.
+    let opens = matches!(row.status, RowStatus::Complete) && !row.kind.is_folder();
+    if row.is_snapshot() && row.viewable && !key.is_empty() && !opens {
+        items.push(
+            Item::new("Смотреть снимок", Msg::In(view, ViewMsg::PreviewProduct(key.clone())))
+                .glyph(theme::glyph::EYE),
+        );
+    }
     // Показать на шаре можно всё, у чего есть ключ провайдера: у найденного
     // продукт с контуром уже под рукой, у строки каталога или скачанного его
     // восстанавливает провайдер по ключу (см. handlers::overlay). У снимка
@@ -1097,6 +1147,95 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::module::state::{BrowseState, State, ViewKind};
+
+    fn state_view() -> (State, ViewId) {
+        let mut state =
+            State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
+        let pane = state.focused();
+        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
+        (state, view)
+    }
+
+    fn snapshot(outlined: OnOutline) -> Row {
+        Row {
+            outlined,
+            ..Row::container_row(
+                "eodata/store/A.SAFE".to_string(),
+                "A.SAFE".to_string(),
+                RowStatus::Remote,
+                RowKind::Product { folder: false },
+            )
+        }
+    }
+
+    /// В строке стоят ровно два значка, и оба про шар: контур и растр.
+    ///
+    /// Остальное уехало пунктами меню, и вернувшийся значок отнял бы место у
+    /// имени. У не-снимка нет и этих двух: ни контура, ни растра у файла и у
+    /// папки пути не бывает.
+    #[test]
+    fn the_row_offers_only_the_two_globe_icons() {
+        let (_state, view) = state_view();
+
+        let icons = quick(view, &snapshot(OnOutline::Off));
+        let glyphs: Vec<&str> = icons.iter().map(|q| q.glyph).collect();
+        assert_eq!(glyphs, vec![theme::glyph::OUTLINE, theme::glyph::GLOBE]);
+        // В тесноте значок становится пунктом меню и обязан называть действие.
+        assert!(icons.iter().all(|q| !q.label.is_empty()), "безымянный пункт меню");
+
+        let file = Row::container_row(
+            "eodata/store/dem.tif".to_string(),
+            "dem.tif".to_string(),
+            RowStatus::Remote,
+            RowKind::File,
+        );
+        assert!(quick(view, &file).is_empty(), "у файла шара не бывает");
+    }
+
+    /// Зелёным горит сделанное, вполсилы — начатое и несбывшееся, покоем —
+    /// нетронутое. Подсказки при этом все разные: одинаковая на двух лицах
+    /// значит, что одно из них необъяснимо.
+    #[test]
+    fn the_outline_icon_burns_only_when_drawn() {
+        let (_state, view) = state_view();
+        let tone = |outlined| quick(view, &snapshot(outlined))[0].tone;
+
+        assert_eq!(tone(OnOutline::Drawn), theme::IconTone::Lit);
+        assert_eq!(tone(OnOutline::Off), theme::IconTone::Rest);
+        for half in [OnOutline::Asking, OnOutline::Blank, OnOutline::Failed] {
+            assert_eq!(tone(half), theme::IconTone::Half, "{:?} горит не вполсилы", half);
+        }
+
+        let hints: std::collections::HashSet<String> =
+            [OnOutline::Off, OnOutline::Asking, OnOutline::Blank, OnOutline::Failed, OnOutline::Drawn]
+                .into_iter()
+                .map(|outlined| quick(view, &snapshot(outlined))[0].hint.clone())
+                .collect();
+        assert_eq!(hints.len(), 5, "два лица объяснены одной подсказкой");
+    }
+
+    /// «Смотреть снимок» не встаёт рядом с «Открыть»: это тот же глаз и тот же
+    /// смысл, и два таких пункта подряд читались бы как два разных действия.
+    #[test]
+    fn the_menu_does_not_offer_the_same_eye_twice() {
+        let (_state, view) = state_view();
+        let named = |row: &Row| -> Vec<String> {
+            menu_items(view, row, "").iter().map(|item| item.named().to_string()).collect()
+        };
+
+        let mut done = snapshot(OnOutline::Off);
+        done.status = RowStatus::Complete;
+        done.name = "A.SAFE".to_string();
+        let items = named(&done);
+        assert!(items.contains(&"Открыть".to_string()));
+        assert!(!items.contains(&"Смотреть снимок".to_string()), "два глаза подряд");
+
+        // А у того, что на диске не лежит, «Смотреть снимок» — единственный
+        // способ его увидеть, и он остаётся.
+        let items = named(&snapshot(OnOutline::Off));
+        assert!(items.contains(&"Смотреть снимок".to_string()));
+    }
 
     /// Колонки отметки и раскрытия появляются только там, где им есть что
     /// показать: пустой столбец сдвигал бы весь список ради того, чего в нём

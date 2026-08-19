@@ -53,6 +53,12 @@ impl Item {
         self
     }
 
+    /// Чем пункт подписан. Спрашивают об этом тесты состава меню: набор
+    /// пунктов — это и есть то, что строка умеет.
+    pub fn named(&self) -> &str {
+        &self.label
+    }
+
     pub fn glyph(mut self, glyph: &'static str) -> Self {
         self.mark = Some(glyph);
         self

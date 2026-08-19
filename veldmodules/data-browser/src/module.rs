@@ -88,6 +88,7 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::OverlayShift(key, shift) => handlers::overlay::shift(state, &key, shift),
         Msg::OverlayHideAll(hidden) => handlers::overlay::hide_all(state, hidden),
         Msg::OverlayMenu(key) => handlers::overlay::menu(state, key),
+        Msg::OutlineToggle(key) => handlers::outline::toggle_outline(state, key),
         Msg::OutlineRemove(key) => handlers::outline::drop_one(state, &key),
         Msg::OutlineFocus(key) => handlers::outline::focus(state, &key),
         Msg::In(view, message) => on_view_message(state, view, message),
@@ -203,9 +204,9 @@ pub fn on_locate_result(
         // Один ход к каталогу отвечает обоим: показать снимок — это и очертить
         // его (см. `overlay::on_show_pressed`), и второй такой же запрос ради
         // той же геометрии был бы лишним.
-        state::Locate::Overlay { key, ours } => {
+        state::Locate::Overlay(key) => {
             handlers::outline::located(state, key.clone(), response.clone());
-            handlers::overlay::on_located(state, &key, ours, response);
+            handlers::overlay::on_located(state, &key, response);
         }
     }
 }

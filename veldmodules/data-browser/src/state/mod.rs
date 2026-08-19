@@ -26,15 +26,10 @@ pub enum Listing {
 /// Кому едет ответ на data-provider/on_locate_result. Ждут его двое, и по
 /// содержимому их не различить: продукт в обоих случаях один и тот же.
 pub enum Locate {
-    /// Положить снимок на шар — нажали значок глобуса в строке. Ключ тот же,
-    /// что у контура: показать снимок — это и очертить его, и один ход к
-    /// каталогу отвечает обоим (см. `handlers::overlay::on_show_pressed`).
-    ///
-    /// `ours` — выбор под этим ключом поставил показ, а не человек. Отличать
-    /// их надо: каталог отвечает корнем продукта, показ переносит своё туда же
-    /// и убирает за собой, — а выбор, сделанный рукой ради пакетного действия,
-    /// убирать не его дело.
-    Overlay { key: String, ours: bool },
+    /// Положить снимок на шар — нажали значок глобуса в строке. Тем же ходом
+    /// наполняется и кэш геометрии: контур этого снимка спросил бы у каталога
+    /// то же самое (см. `handlers::overlay::on_show_pressed`).
+    Overlay(String),
     /// Геометрия отмеченного снимка: очертить его. Ключ — тот, которым он
     /// отмечен в списке; он же ключ кэша (см. `State::located`).
     Outline(String),
@@ -190,6 +185,23 @@ pub struct State {
     /// которым его понимает глобус; список «На просмотре» переворачивает его
     /// сам, потому что «сверху новые» — свойство экрана, а не набора.
     pub overlays: Vec<overlay::OverlayState>,
+    /// Снимки, которые попросили очертить на шаре.
+    ///
+    /// Своё множество, а не производное от выбора в списках: контур, показ
+    /// растром и выбор строки — три независимых вещи, и сведённые в одну они
+    /// отвечали бы друг за друга. Одно на приложение, а не на вкладку: шар
+    /// один, и «контуры этой вкладки» на вопрос «что на шаре» не отвечает.
+    ///
+    /// Это просьба, а не нарисованное: геометрию знает каталог, и до его
+    /// ответа ключ здесь уже есть, а в [`State::outlined`] его ещё нет.
+    pub outlines: std::collections::HashSet<String>,
+    /// Снимки, для которых показ ждёт ответа каталога.
+    ///
+    /// Показ — не выбор: он кладёт слой во «На просмотре» и коробочку в списке
+    /// не трогает (см. handlers::overlay). Поэтому и «а не расхотели ли» по
+    /// выбору не спросить: ход к каталогу живёт секунды, убить его нечем, а
+    /// «Снять с шара» за это время нажать успевают.
+    pub showing: std::collections::HashSet<String>,
 
     // -- Маршруты ответов --
     //
@@ -267,6 +279,8 @@ impl State {
             speed: 0.0,
             measured: None,
             outlined: Vec::new(),
+            showing: std::collections::HashSet::new(),
+            outlines: std::collections::HashSet::new(),
             highlight: None,
             located: Default::default(),
             overlays: Vec::new(),
@@ -613,63 +627,6 @@ impl State {
         }
     }
 
-    /// Снять отметку с одного снимка — во всех списках сразу. `true` — было
-    /// что снимать.
-    ///
-    /// Во всех, потому что контур у снимка один: отмеченный и в каталоге, и в
-    /// выдаче, он снялся бы в одном списке и тут же вернулся из другого.
-    pub fn clear_mark(&mut self, key: &str) -> bool {
-        let mut cleared = false;
-        for view in &mut self.views {
-            if let Some(listing) = view.kind.listing_mut() {
-                cleared |= listing.selected.remove(key).is_some();
-            }
-        }
-        cleared
-    }
-
-    /// Снять выбор со снимка — только со снимка. Тем же ключом бывает выбран
-    /// файл сам по себе, и убирающий контур до него дела не имеет.
-    pub fn clear_outline_mark(&mut self, key: &str) -> bool {
-        let mut cleared = false;
-        for view in &mut self.views {
-            if let Some(listing) = view.kind.listing_mut() {
-                let snapshot = listing.selected.get(key) == Some(&listing::Chosen::Snapshot);
-                cleared |= snapshot && listing.selected.remove(key).is_some();
-            }
-        }
-        cleared
-    }
-
-    /// Отмечен ли снимок хоть в одном списке. Спрашивают об этом те, чей ответ
-    /// приехал позже, чем человек передумал: запрос к каталогу живёт секунды, а
-    /// отметку снимают одним нажатием, и убить его нечем.
-    pub fn marked(&self, key: &str) -> bool {
-        self.views().iter().any(|view| {
-            view.kind.listing().is_some_and(|listing| listing.selected.contains_key(key))
-        })
-    }
-
-    /// Снять с шара всё очерченное — во всех списках сразу. `true` — было что
-    /// снимать.
-    ///
-    /// По всем, а не по активному: контуры на шаре собраны из всех списков, и
-    /// снять их значит снять выбор снимков везде (см. handlers::outline::clear).
-    ///
-    /// Снимков, а не всего выбранного: файл сам по себе на шар не попадал
-    /// никогда, а набран бывает ради пакетного удаления — кнопка про шар
-    /// выбросила бы вместе с контурами чужую работу.
-    pub fn clear_outlined(&mut self) -> bool {
-        let mut cleared = false;
-        for view in &mut self.views {
-            if let Some(listing) = view.kind.listing_mut() {
-                let before = listing.selected.len();
-                listing.selected.retain(|_, what| *what != listing::Chosen::Snapshot);
-                cleared |= listing.selected.len() != before;
-            }
-        }
-        cleared
-    }
 
     /// Ключ снимка, обведённого на шаре лентой; пусто — подсвечено не это.
     pub fn picked_key(&self) -> &str {
@@ -744,22 +701,13 @@ impl State {
     }
 
     /// Выбранный щелчком по шару снимок вместе с геометрией. `None` — не
-    /// выбран ни один: щёлкнули мимо контуров либо сняли отметку в списке, и
+    /// выбран ни один: щёлкнули мимо контуров либо убрали контур, и
     /// контура больше нет.
     pub fn picked(&self) -> Option<&globe::Outlined> {
         let key = self.picked_key();
         self.outlined.iter().find(|outlined| outlined.key == key)
     }
 
-    /// Сколько отмеченного в этом списке действительно очерчено на шаре.
-    ///
-    /// Отмечают строку, а рисуется контур: у снимка без геометрии его нет
-    /// вовсе, а пока продукт спрашивают у каталога — ещё нет. «Отмечено» на
-    /// вопрос «что на шаре» поэтому не отвечает, и заголовок списка считает по
-    /// нарисованному (см. `list_screen`).
-    pub fn outlined_in(&self, listing: &listing::ListingState) -> usize {
-        self.outlined.iter().filter(|outlined| listing.selected.contains_key(&outlined.key)).count()
-    }
 }
 
 /// Поддаётся ли выбранное пакетному действию — по ответу на действие.

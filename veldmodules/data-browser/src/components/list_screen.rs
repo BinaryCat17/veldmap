@@ -35,10 +35,6 @@ pub struct Screen<'a> {
     /// Один на все списки: выбирают на шаре, а видно это должно быть везде, где
     /// этот снимок стоит строкой (см. `table::Context::picked`).
     pub picked: &'a str,
-    /// Сколько выбранного здесь очерчено на шаре. Считает его состояние
-    /// модуля (`State::outlined_in`), а не сам список: выбор — намерение, а
-    /// контур — то, что из него вышло, и совпадают они не всегда.
-    pub outlined: usize,
     /// Есть ли что делать пакетным кнопкам (`handlers::library::batch`).
     /// Этим и решается, показывать ли их.
     pub batch: Batch,
@@ -147,22 +143,13 @@ pub fn view(
     };
     let table::Fit { columns, name: name_width, compact } = table::fit(width, optional);
 
-    // Что выбрано и что с этим можно сделать.
-    //
-    // Контур считается по нарисованному, а не по выбранному: у снимка без
-    // геометрии его не бывает вовсе, а пока продукт спрашивают у каталога — ещё
-    // нет, и «1 на шаре» над пустым шаром было бы неправдой. Названо оно
-    // отдельно от выбора по той же причине: выбирают строку, а очерчивается
-    // снимок, и сводить два числа в одно значило бы обещать контур файлу.
+    // Что выбрано и что с этим можно сделать. Про шар здесь не сказано ничего:
+    // контур и показ — не выбор, у них свои значки в строке и свой список
+    // («На просмотре»).
     let mut trailing: Vec<Element<Msg>> = Vec::new();
     if !listing.selected.is_empty() {
-        let chosen = listing.selected.len();
-        let counts = match screen.outlined {
-            0 => format!("{} выбрано", chosen),
-            outlined => format!("{} выбрано, {} на шаре", chosen, outlined),
-        };
         trailing.push(
-            text::<Msg>(counts)
+            text::<Msg>(format!("{} выбрано", listing.selected.len()))
                 .size(theme::TEXT_LABEL)
                 .color(theme::ACCENT_TEXT)
                 .single_line()

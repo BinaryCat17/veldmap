@@ -235,17 +235,14 @@ pub fn on_tab_close(state: &mut State, id: ViewId) {
         ViewKind::Globe(globe) => {
             veldsdk::surface::revoke(globe.surface, crate::calls::globe::on_set_surface);
         }
-        // Отмеченное в этой выдаче было очерчено на шаре, а показанное из
-        // неё — наложено: и то, и другое уходит вместе с ней
-        // (см. search::on_source_closed).
+        // Наложенное из этой выдачи уходит вместе с ней
+        // (см. search::on_source_closed): слой помнит, откуда его позвали.
         ViewKind::Search(_) => {
             super::search::on_source_closed(state, id);
         }
-        // Отметки прочих списков живут в них же — закрытая вкладка уносит их
-        // с собой, и набор контуров надо пересобрать.
-        ViewKind::Browse(_) | ViewKind::Downloaded(_) => {
-            super::outline::refresh(state);
-        }
+        // Выбор прочих списков живёт в них же и уходит вместе с вкладкой, а
+        // шара не касается: ни контуры, ни слои вкладке не принадлежат.
+        ViewKind::Browse(_) | ViewKind::Downloaded(_) => {}
         // Слои лежат в состоянии модуля, а не здесь: закрытая вкладка не
         // снимает с шара ничего (см. `ViewKind::Shown`). У пустой убирать и
         // вовсе нечего — своего состояния у неё нет.
