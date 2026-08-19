@@ -355,7 +355,9 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
     let incoming_ids: Vec<u64> = incoming
         .rasters
         .iter()
-        .filter_map(|raster| raster.resource.as_ref().map(|handle| handle.id))
+        .flat_map(|raster| [raster.resource.as_ref(), raster.geolocation.as_ref()])
+        .flatten()
+        .map(|handle| handle.id)
         .collect();
     if let Some(index) = state.overlays.iter().position(|o| o.key == incoming.key) {
         if state.overlays[index].sources == incoming_ids {
@@ -420,7 +422,13 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
 
     let mut rasters = Vec::new();
     for raster in incoming.rasters {
-        let Some(handle) = raster.resource else { continue };
+        // Координаты приходят во владение вместе с растром, и без него они
+        // никому не нужны: отпускать их надо на каждом выходе из этого круга,
+        // иначе файл остаётся открытым до конца жизни модуля.
+        let Some(handle) = raster.resource else {
+            release_coordinates(raster.geolocation);
+            continue;
+        };
         let role = match raster.role() {
             crate::proto::globe::OverlayRole::OverlayPreview => Role::Preview,
             crate::proto::globe::OverlayRole::OverlayDetailed => Role::Detailed,
@@ -429,6 +437,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         // сам, и заворачивать его во владельца было бы вторым освобождением.
         if let Err(error) = veldsdk::resource::grant_read_or_free(handle.id, "image-tiler") {
             veldsdk::log::warn!(target: "handlers", "{}: грант растра: {}", label, error);
+            release_coordinates(raster.geolocation);
             continue;
         }
         // Координаты — второй ресурс того же растра: у Sentinel-3 широта с
@@ -527,6 +536,15 @@ fn release_pass(state: &mut State, key: &str, role: Role, fingerprint: &str) {
 }
 
 /// Освободить ресурсы наложения, которое не приживётся.
+/// Отпустить координаты растра, который в наложение не попал. Отдельной
+/// функцией затем, что выходов из круга приёма несколько, а забытый на любом
+/// из них файл держится открытым до выгрузки модуля.
+fn release_coordinates(coordinates: Option<veldsdk::proto::core::ResourceHandle>) {
+    if let Some(handle) = coordinates {
+        veldsdk::resource::release(handle);
+    }
+}
+
 fn release_rasters(rasters: Vec<crate::proto::globe::OverlayRaster>) {
     for raster in rasters {
         // Координаты приходят во владение так же, как сам растр, и отпускать

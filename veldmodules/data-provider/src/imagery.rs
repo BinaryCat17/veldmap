@@ -26,7 +26,7 @@ pub enum Role {
 /// корня продукта; см. `manifest::measurements`). Пусто — манифеста не было
 /// или он ничего не сказал, и подробный растр выбирается по именам файлов, как
 /// и до него.
-pub fn scan(keys: &[String], measured: &[String]) -> Vec<(String, Role)> {
+pub fn scan(keys: &[String], measured: &[String]) -> Scan {
     let mut rasters = Vec::new();
 
     // Sentinel-2: квиклук гранулы лежит в QI_DATA, истинный цвет — в
@@ -100,9 +100,23 @@ pub fn scan(keys: &[String], measured: &[String]) -> Vec<(String, Role)> {
         if let Some(detailed) = detailed {
             rasters.push((detailed.clone(), Role::Detailed));
         }
+        // Сюда доходят только неузнанные раскладки, и подробный растр здесь
+        // выбран именами файлов — то есть догадкой. Ею и отличается случай,
+        // ради которого стои́т идти за манифестом.
+        return Scan { rasters, guessed: true };
     }
 
-    rasters
+    Scan { rasters, guessed: false }
+}
+
+/// Что вышло из [`scan`]: растры с ролями и то, чем выбран подробный.
+pub struct Scan {
+    pub rasters: Vec<(String, Role)>,
+    /// Подробный растр выбран догадкой по именам файлов, а не раскладкой
+    /// известной миссии. Только такому выбору и нужен манифест: у Sentinel-1 и
+    /// Sentinel-2 раскладка названа, и лишний подписанный запрос на сотни
+    /// килобайт ничего не добавит.
+    pub guessed: bool,
 }
 
 /// Последний сегмент ключа.
@@ -128,9 +142,9 @@ fn measured_by(key: &str, measured: &[String]) -> bool {
 ///
 /// Каталог `preview/` — это часть раскладки, и сказано в нём то же, что
 /// словом: внутри обзорная картинка, цветовая шкала прибора, логотип миссии.
-/// Подробным растром там не лежит ничего, а по имени файла это не разобрать —
-/// у Sentinel-1 OCN подробным выходил `preview/icons/logo.png`, потому что
-/// «logo» стои́т в алфавите раньше «measurement».
+/// Подробным растром там не лежит ничего, а по имени файла это не разобрать:
+/// у Sentinel-1 OCN на подробный растр иначе претендует
+/// `preview/icons/logo.png` — «logo» стои́т в алфавите раньше «measurement».
 fn a_decoration(key: &str) -> bool {
     key.contains("/preview/")
 }
@@ -165,11 +179,13 @@ fn a_whole_picture(key: &str) -> bool {
 /// только этот модуль. Порядок ответов — от точного к дешёвому:
 ///  * `geodetic_<сетка>.nc` — координаты ровно той сетки, на которой записан
 ///    растр (SLSTR держит их по одному файлу на сетку: `_in`, `_an`, `_fn`);
-///  * `tie_geo_coordinates.nc` — опорная сетка OLCI, полмегабайта на весь
-///    снимок против тридцати мегабайт поотсчётного файла; узлов в ней хватает
-///    с запасом (привязка всё равно берётся решёткой),
+///  * `tie_geo_coordinates.nc` — опорная сетка OLCI: у полного разрешения это
+///    1,2 МБ против 50 МБ поотсчётного файла, а узлов в ней хватает с
+///    запасом (привязка всё равно берётся решёткой);
 ///  * `geo_coordinates.nc` — поотсчётные координаты OLCI, когда опорной сетки
-///    в продукте нет.
+///    в продукте нет;
+///  * `geolocation.nc` — так называет свой файл SYNERGY (`SY_2_SYN`), у
+///    которого нет ни одного из имён выше.
 ///
 /// Пусто — координаты либо в самом растре, либо их нет; спрашивать нечего.
 pub fn geolocation(keys: &[String], raster: &str) -> Option<String> {
@@ -185,20 +201,33 @@ pub fn geolocation(keys: &[String], raster: &str) -> Option<String> {
     {
         return Some(found);
     }
-    sibling("tie_geo_coordinates.nc").or_else(|| sibling("geo_coordinates.nc"))
+    sibling("tie_geo_coordinates.nc")
+        .or_else(|| sibling("geo_coordinates.nc"))
+        .or_else(|| sibling("geolocation.nc"))
 }
 
 /// Хвост имени, которым Sentinel-3 называет сетку записи: `LST_in.nc` → `in`,
-/// `F1_BT_fn.nc` → `fn`. Две буквы: первая — канал или вид (надир `n`,
-/// косой `o`), и все файлы одной сетки кончаются одинаково.
+/// `F1_BT_fn.nc` → `fn`. Две буквы, и обе с закрытым списком значений: первая
+/// — сама сетка (`a`, `b`, `c` — радиометрические каналы, `i` — инфракрасная,
+/// `f` — пожарная, `t` — опорная), вторая — вид (`n` — надир, `o` — косой,
+/// `x` — общая опорная).
+///
+/// Списками, а не «двумя строчными буквами»: под такое правило подпадают и
+/// `LST_ancillary_ds.nc`, и `chl_nn.nc` OLCI, у которых никакой сетки в хвосте
+/// нет. Файла координат для них не найдётся и так, но правило, отвечающее «да»
+/// не о том, однажды на что-нибудь и наткнётся.
 ///
 /// `None` — имя так не устроено, и о сетке ничего не сказано.
 fn grid_tag(key: &str) -> Option<&str> {
+    const GRIDS: [char; 6] = ['a', 'b', 'c', 'i', 'f', 't'];
+    const VIEWS: [char; 3] = ['n', 'o', 'x'];
     let name = file_name(key);
     let stem = name.strip_suffix(".nc")?;
     let (_, tag) = stem.rsplit_once('_')?;
-    let two = tag.len() == 2 && tag.chars().all(|c| c.is_ascii_lowercase());
-    two.then_some(tag)
+    let mut sign = tag.chars();
+    let (grid, view) = (sign.next()?, sign.next()?);
+    let shaped = sign.next().is_none() && GRIDS.contains(&grid) && VIEWS.contains(&view);
+    shaped.then_some(tag)
 }
 
 /// Расширения, за которыми стои́т растр. Перечислены они здесь и только здесь:
@@ -345,6 +374,11 @@ fn suffixes(keys: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Растры из [`scan`] — тестам нужны только они.
+    fn scan_rasters(keys: &[String], measured: &[String]) -> Vec<(String, Role)> {
+        scan(keys, measured).rasters
+    }
+
     use super::*;
 
     fn keys(paths: &[&str]) -> Vec<String> {
@@ -360,7 +394,7 @@ mod tests {
             "eodata/…/S2C_MSIL2A_T40WFC.SAFE/GRANULE/L2A_T40WFC_A/IMG_DATA/R10m/T40WFC_20260812_B08_10m.jp2",
             "eodata/…/S2C_MSIL2A_T40WFC.SAFE/MTD_MSIL2A.xml",
         ]);
-        let rasters = scan(&keys, &[]);
+        let rasters = scan_rasters(&keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("_PVI.jp2") && rasters[0].1 == Role::Preview);
         assert!(rasters[1].0.ends_with("_TCI_10m.jp2") && rasters[1].1 == Role::Detailed);
@@ -373,7 +407,7 @@ mod tests {
             "eodata/…/S2B_MSIL1C_T33UUP.SAFE/GRANULE/L1C_T33UUP_A/IMG_DATA/T33UUP_20260601_TCI.jp2",
             "eodata/…/S2B_MSIL1C_T33UUP.SAFE/GRANULE/L1C_T33UUP_A/IMG_DATA/T33UUP_20260601_B02.jp2",
         ]);
-        let rasters = scan(&keys, &[]);
+        let rasters = scan_rasters(&keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[1].0.ends_with("_TCI.jp2") && rasters[1].1 == Role::Detailed);
     }
@@ -386,7 +420,7 @@ mod tests {
             "eodata/…/S1C_IW_GRDH.SAFE/measurement/s1c-iw-grd-vv.tiff",
             "eodata/…/S1C_IW_GRDH.SAFE/manifest.safe",
         ]);
-        let rasters = scan(&keys, &[]);
+        let rasters = scan_rasters(&keys, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
     }
@@ -399,7 +433,7 @@ mod tests {
             "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/measurement/s1c-iw-grd-vv-20260812t153507-001-cog.tiff",
             "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/manifest.safe",
         ]);
-        let rasters = scan(&keys, &[]);
+        let rasters = scan_rasters(&keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
         // Из двух поляризаций подробной выбрана ко- (vv), не первая по списку.
@@ -413,7 +447,7 @@ mod tests {
         let clms = keys(&[
             "eodata/CLMS/lst/c_gls_LST_202608161000_GLOBE_GEO_V3.0.1_nc/c_gls_LST.nc",
         ]);
-        let rasters = scan(&clms, &[]);
+        let rasters = scan_rasters(&clms, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with(".nc") && rasters[0].1 == Role::Detailed);
     }
@@ -428,7 +462,7 @@ mod tests {
             "eodata/Landsat-5/LT51780121988065ESA00/LT51780121988065ESA00_B2.TIF",
             "eodata/Landsat-5/LT51780121988065ESA00/LT51780121988065ESA00_B1.TIF",
         ]);
-        let rasters = scan(&bands, &[]);
+        let rasters = scan_rasters(&bands, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("_thumb_large.jpg") && rasters[0].1 == Role::Preview);
         assert!(rasters[1].0.ends_with("_B1.TIF") && rasters[1].1 == Role::Detailed);
@@ -443,7 +477,7 @@ mod tests {
             "eodata/Sentinel-3/SR/x.SEN3/Oa01_radiance.nc",
             "eodata/Sentinel-3/SR/x.SEN3/rgb_TCI.nc",
         ]);
-        let rasters = scan(&granule, &[]);
+        let rasters = scan_rasters(&granule, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with("rgb_TCI.nc"));
 
@@ -468,7 +502,7 @@ mod tests {
             "eodata/…/S1C_EW_OCN__2SDH.SAFE/measurement/s1c-ew1-osw-hh-20260818t193953-002.nc",
             "eodata/…/S1C_EW_OCN__2SDH.SAFE/manifest.safe",
         ]);
-        let rasters = scan(&ocn, &[]);
+        let rasters = scan_rasters(&ocn, &[]);
         assert_eq!(rasters.len(), 2, "{:?}", rasters);
         assert!(
             rasters[0].0.ends_with("quick-look-l2-owi.png") && rasters[0].1 == Role::Preview,
@@ -491,7 +525,7 @@ mod tests {
             "eodata/…/X.SAFE/preview/icons/logo.png",
             "eodata/…/X.SAFE/annotation/report.xml",
         ]);
-        let rasters = scan(&only, &[]);
+        let rasters = scan_rasters(&only, &[]);
         assert_eq!(rasters.len(), 1, "{:?}", rasters);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
     }
@@ -501,13 +535,23 @@ mod tests {
     #[test]
     fn the_refusal_names_what_the_scan_accepts() {
         let said = readable();
+        // Каждое расширение, которое отбирает `is_raster`, названо в отказе —
+        // своим словом, а не самим суффиксом. Иначе человек читает «открываются
+        // …», не находит там своего файла и решает, что формат не тот.
         for suffix in RASTER_SUFFIXES {
+            assert!(is_raster(&format!("x/y.{}", suffix)), "{} не отбирается", suffix);
+            let named = readable().to_ascii_lowercase();
             assert!(
-                just_a_file(&format!("x/y.{}", suffix)).contains(&said)
-                    || !said.is_empty(),
-                "{} не назван",
-                suffix
+                named.contains(&suffix.to_ascii_lowercase())
+                    || ["tif", "tiff", "jp2", "j2k", "jpg", "jpeg", "nc", "h5"].contains(&suffix),
+                "{} не назван в «{}»",
+                suffix,
+                said
             );
+        }
+        // А у тех, чьё слово с суффиксом не совпадает, названо само слово.
+        for word in ["TIFF", "JPEG 2000", "JPEG", "NetCDF", "HDF5"] {
+            assert!(said.contains(word), "{} не назван: {}", word, said);
         }
         assert!(said.contains("HDF5"), "h5 отбирается, а не назван: {}", said);
         assert!(said.contains("NetCDF") && said.contains("JPEG 2000") && said.contains("WebP"));
@@ -606,6 +650,30 @@ mod tests {
         assert_eq!(
             geolocation(&slstr, &slstr[0]),
             Some("eodata/…/S3A_SL_2_LST.SEN3/geodetic_in.nc".to_string())
+        );
+        // Хвост из двух букв сеткой ещё не делает: так кончаются и служебный
+        // `LST_ancillary_ds.nc`, и `chl_nn.nc` у OLCI.
+        assert_eq!(grid_tag("x/LST_ancillary_ds.nc"), None);
+        assert_eq!(grid_tag("x/chl_nn.nc"), None);
+        assert_eq!(grid_tag("x/F1_BT_fn.nc"), Some("fn"));
+        assert_eq!(grid_tag("x/geodetic_tx.nc"), Some("tx"));
+    }
+
+    /// У SYNERGY файл координат называется своим третьим именем, и знать о нём
+    /// больше некому: ни одного из имён OLCI и SLSTR в продукте нет.
+    #[test]
+    fn synergy_calls_its_coordinates_by_a_third_name() {
+        let syn: Vec<String> = [
+            "eodata/…/S3B_SY_2_SYN.SEN3/Syn_Oa01_reflectance.nc",
+            "eodata/…/S3B_SY_2_SYN.SEN3/geolocation.nc",
+            "eodata/…/S3B_SY_2_SYN.SEN3/tiepoints_olci.nc",
+        ]
+        .iter()
+        .map(|key| key.to_string())
+        .collect();
+        assert_eq!(
+            geolocation(&syn, &syn[0]),
+            Some("eodata/…/S3B_SY_2_SYN.SEN3/geolocation.nc".to_string())
         );
     }
 

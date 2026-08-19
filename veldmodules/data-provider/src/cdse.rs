@@ -410,10 +410,16 @@ pub fn on_http_result(
                         );
                         return;
                     }
-                    // Обход кончился. Раскладку продукта называет он сам —
-                    // сходим за манифестом, если он в продукте есть; ответ
-                    // соберётся уже с ним.
-                    if let Some(manifest) = manifest::key(&identifier, &keys) {
+                    // Обход кончился. Манифест спрашивается только там, где
+                    // без него выбор был бы догадкой: у известных раскладок
+                    // (Sentinel-1, Sentinel-2) подробный растр уже назван их
+                    // собственным правилом, а манифест — это ещё один
+                    // подписанный запрос на сотни килобайт, а у OLCI полного
+                    // разрешения и на полтора мегабайта.
+                    let known = imagery::scan(&keys, &[]);
+                    if known.guessed
+                        && let Some(manifest) = manifest::key(&identifier, &keys)
+                    {
                         let object = s3::object(&state.identity, manifest);
                         let what = Asked::Manifest { identifier, keys };
                         ask(
@@ -426,7 +432,7 @@ pub fn on_http_result(
                         return;
                     }
                     crate::emit::on_imagery_result(
-                        &imagery_response(&identifier, &keys, imagery::scan(&keys, &[])),
+                        &imagery_response(&identifier, &keys, known.rasters),
                         &pending.correlation_id,
                     );
                 }
@@ -457,7 +463,7 @@ pub fn on_http_result(
                     "Манифест '{}' измерений не назвал — выбор по именам файлов", identifier);
             }
             crate::emit::on_imagery_result(
-                &imagery_response(&identifier, &keys, imagery::scan(&keys, &measured)),
+                &imagery_response(&identifier, &keys, imagery::scan(&keys, &measured).rasters),
                 &pending.correlation_id,
             );
         }
@@ -480,8 +486,12 @@ pub fn on_http_result(
             // каталога здесь оплачен делом (см. `catalogue::FRESH_DAYS`).
             let want = catalogue::wanted(&request) as usize;
             let drained = raw < catalogue::asked(&request) as usize;
-            if error.is_empty() && !widened && drained && products.len() < want && request.from <= 0
-            {
+            // Верхняя граница считается наравне с нижней: своей границы мы не
+            // ставили и там, где заказчик назвал только «по» (см.
+            // `catalogue::search`), — а повтор того же запроса ушёл бы в сеть
+            // побайтно тем же и вернул бы то же самое.
+            let ours = request.from <= 0 && request.to <= 0;
+            if error.is_empty() && !widened && drained && products.len() < want && ours {
                 let url = catalogue::search(&request, 0);
                 log::info!(target: "handlers",
                     "В свежем окне всего {} продуктов — ищем за всё время", raw);
@@ -543,8 +553,9 @@ pub fn on_http_result(
             //
             // Отбирает их то же правило, которым поиск сводит снимки
             // (`scene::same_scene`), а не голый ключ: у частей без номера
-            // слайса ключи расходятся, и та же строка раскрывалась бы
-            // по-разному в зависимости от того, откуда о ней спросили.
+            // слайса ключи расходятся, и по голому ключу та же строка
+            // раскрывается по-разному в зависимости от того, откуда о ней
+            // спросили.
             let others = from_catalogue(&response, catalogue::parse).unwrap_or_default();
             let same = scene::same_scene(&facts, &found.name, others);
             let product = match scene::about(same, &found.identifier) {

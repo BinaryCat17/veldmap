@@ -196,7 +196,20 @@ impl GraphicsDevice {
                 }
                 Some(proto::bind_group_entry::Resource::TextureViewId(tvid)) => {
                     match self.get_gpu(*tvid, owner_id) {
-                        Ok(GpuObject::TextureView { view, .. }) => { keep_views.push((e.binding, view)); }
+                        // Право спрашивается у самой текстуры, а не только у
+                        // вида: вид — это ссылка, и своё право на него правом
+                        // читать текстуру не является. Иначе выданный когда-то
+                        // вид переживал бы и передачу текстуры другому
+                        // владельцу (`transfer` чистит гранты), и снятие
+                        // гранта — а семплировать по нему можно по-прежнему.
+                        Ok(GpuObject::TextureView { view, texture, .. }) => {
+                            if !self.registry.check_access(texture, owner_id, Access::Read) {
+                                return Err(anyhow::anyhow!(
+                                    "TextureView {}: доступа к текстуре {} нет", tvid, texture
+                                ));
+                            }
+                            keep_views.push((e.binding, view));
+                        }
                         _ => {
                             if let Some((tex, _, _, _)) = self.get_texture_info(*tvid, owner_id) {
                                 let v = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor::default()));

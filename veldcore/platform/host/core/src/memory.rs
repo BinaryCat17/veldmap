@@ -243,6 +243,20 @@ impl MemoryManager {
                         ));
                     }
                     DataBacking::Buffer { buffer, mapped: false } => {
+                        // Очередь принимает только выровненное по четырём
+                        // байтам — и смещение, и длину (COPY_BUFFER_ALIGNMENT).
+                        // Невыровненное она разбирает ошибкой валидации, а та
+                        // снимает процесс: довод пришёл из wasm, значит
+                        // проверяем мы — тем же движением, что и границу.
+                        const COPY_ALIGN: u64 = 4;
+                        if offset % COPY_ALIGN != 0 || data.len() as u64 % COPY_ALIGN != 0 {
+                            return Err(anyhow::anyhow!(
+                                "запись в буфер не выровнена по {} байтам: смещение {}, длина {}",
+                                COPY_ALIGN,
+                                offset,
+                                data.len()
+                            ));
+                        }
                         let q = self.queue.lock().unwrap();
                         q.write_buffer(buffer, offset, data);
                     }

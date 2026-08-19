@@ -6,7 +6,7 @@
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::task::AbortHandle;
 
 /// Операция в полёте. Владелец — instance id заказчика (0 = хост): только он
@@ -20,32 +20,70 @@ pub struct TaskEntry {
     pub victim: Victim,
 }
 
-/// Приговор wasm-инстансу — той доставке, на которой он выписан.
+/// Приговор wasm-инстансу и то, чем он отмеряется, — номер идущей доставки.
 ///
 /// Флаг у инстанса один: его читает epoch-колбэк его стора и валит идущий
-/// вызов трапом, а вызов у актора в каждый миг ровно один. Поэтому приговор
-/// помнит номер доставки, на которой выписан, и на чужую не действует: `kill`
-/// приходит из другого потока и успевает опоздать — обработчик к тому времени
-/// вернулся, а актор взялся за следующее событие. Без номера такой опоздавший
-/// снимал бы работу, о которой заказчик ничего не просил.
+/// вызов трапом, а вызов у актора в каждый миг ровно один. Поэтому приговор —
+/// это не «да/нет», а НОМЕР приговорённой доставки, и решает по нему тот, кто
+/// читает: совпал с идущей — валить, не совпал — работа уже другая.
+///
+/// Так, а не флагом с проверкой перед записью: `kill` приходит из другого
+/// потока и успевает опоздать — обработчик к тому времени вернулся, а актор
+/// взялся за следующее событие. Проверка «моя ли доставка» на стороне
+/// пишущего этого не ловит: между проверкой и записью актор успевает шагнуть,
+/// и приговор достаётся работе, о которой заказчик ничего не просил. Читающий
+/// же сравнивает оба числа в один миг, и разойтись им негде.
+///
+/// Отдельного снятия приговора нет: шаг доставки и есть снятие — номер стал
+/// другим, и прежний приговор больше ни с чем не совпадает.
+pub struct Sentence {
+    /// Номер приговорённой доставки; [`Sentence::NONE`] — приговора нет.
+    doomed: AtomicU64,
+    /// Номер идущей доставки. Двигает его актор перед каждым событием.
+    run: AtomicU64,
+}
+
+impl Sentence {
+    /// Номер, которого не бывает у доставки: счётчик идёт с нуля вверх и до
+    /// него не доживёт ни одна программа.
+    const NONE: u64 = u64::MAX;
+
+    pub fn new() -> Self {
+        Self { doomed: AtomicU64::new(Self::NONE), run: AtomicU64::new(0) }
+    }
+
+    /// Взяться за следующее событие. Прежний приговор этим и снимается.
+    pub fn next(&self) {
+        self.run.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Приговорена ли идущая доставка. Спрашивает epoch-колбэк на каждом тике.
+    pub fn struck(&self) -> bool {
+        self.doomed.load(Ordering::SeqCst) == self.run.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for Sentence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Чем снять исполнителя-модуль: приговор, выписанный на ту доставку, что шла
+/// в миг постановки операции на учёт.
 pub struct Doom {
-    flag: Arc<AtomicBool>,
-    /// Счётчик доставок актора — общий с ним.
-    run: Arc<AtomicU64>,
-    /// Номер доставки, на которой приговор выписан.
+    sentence: Arc<Sentence>,
     at: u64,
 }
 
 impl Doom {
-    pub fn new(flag: Arc<AtomicBool>, run: Arc<AtomicU64>) -> Self {
-        let at = run.load(Ordering::SeqCst);
-        Self { flag, run, at }
+    pub fn new(sentence: Arc<Sentence>) -> Self {
+        let at = sentence.run.load(Ordering::SeqCst);
+        Self { sentence, at }
     }
 
     fn strike(self) {
-        if self.run.load(Ordering::SeqCst) == self.at {
-            self.flag.store(true, Ordering::SeqCst);
-        }
+        self.sentence.doomed.store(self.at, Ordering::SeqCst);
     }
 }
 
@@ -163,17 +201,22 @@ mod tests {
     /// которой заказчик ничего не просил.
     #[test]
     fn a_late_sentence_spares_the_next_delivery() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let run = Arc::new(AtomicU64::new(7));
+        let sentence = Arc::new(Sentence::new());
+        assert!(!sentence.struck(), "без приговора не снимается ничего");
 
-        let mine = Doom::new(flag.clone(), run.clone());
+        let mine = Doom::new(sentence.clone());
         mine.strike();
-        assert!(flag.load(Ordering::SeqCst), "своя доставка приговором снимается");
+        assert!(sentence.struck(), "своя доставка приговором снимается");
 
-        flag.store(false, Ordering::SeqCst);
-        let stale = Doom::new(flag.clone(), run.clone());
-        run.fetch_add(1, Ordering::SeqCst);
+        // Опоздавший: выписан на идущую доставку, приведён после того, как
+        // актор взялся за следующую.
+        let stale = Doom::new(sentence.clone());
+        sentence.next();
         stale.strike();
-        assert!(!flag.load(Ordering::SeqCst), "следующая доставка чужому приговору не достаётся");
+        assert!(!sentence.struck(), "следующая доставка чужому приговору не достаётся");
+
+        // И приговор своей доставке после шага по-прежнему работает.
+        Doom::new(sentence.clone()).strike();
+        assert!(sentence.struck());
     }
 }

@@ -229,7 +229,14 @@ fn abandon(state: &mut State, overlay: OverlayState) {
     // опознался бы следующей сборкой того же ключа, а его ресурс лёг бы в
     // чужой набор. Снятый доедет до общего discard в module::on_open_result.
     for correlation in &assembly.opens {
-        state.opens.take(correlation);
+        // Корреляция остаётся на учёте, но с пустым ключом: наложения с таким
+        // ключом нет, и приехавший позже ответ пройдёт по ветке «наложение
+        // убрали» — ресурс в нём наш, там его примут и отпустят. Снять с учёта
+        // совсем нельзя: неопознанный ответ уходит в `discard`, а тот ресурса
+        // не трогает — файл остался бы открытым до конца сеанса.
+        if let Some((_, role, part)) = state.opens.take(correlation) {
+            state.opens.insert(correlation.clone(), (String::new(), role, part));
+        }
     }
     for (_, _, handle) in assembly.collected {
         veldsdk::resource::release(handle);
@@ -463,43 +470,64 @@ fn finish(state: &mut State, key: &str) {
     let Some(assembly) = overlay.assembly.take() else { return };
     let label = overlay.label.clone();
 
-    // Передача владения — до сообщения: получив набор, глобус вправе сразу
-    // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
-    let mut given: Vec<(OverlayRole, Part, ResourceHandle)> = Vec::new();
+    // Пары «растр и его координаты» складываются ДО передачи владения.
+    // Порядок здесь не вкусовой: отпустить лишнее можно, только пока оно наше,
+    // а после `hand_off` ресурс принадлежит глобусу — освобождение отклонит
+    // хост, и о брошенном файле вспомнить будет некому.
+    let mut pairs: Vec<(OverlayRole, ResourceHandle, Option<ResourceHandle>)> = Vec::new();
+    let mut coordinates: Vec<(OverlayRole, ResourceHandle)> = Vec::new();
     for (role, part, handle) in assembly.collected {
-        match veldsdk::resource::hand_off(handle, "globe") {
-            Ok(handle) => given.push((role, part, handle)),
-            Err(error) => {
-                veldsdk::log::warn!(target: "handlers", "файл не передался глобусу: {}", error)
+        match part {
+            Part::Raster => pairs.push((role, handle, None)),
+            Part::Geolocation => coordinates.push((role, handle)),
+        }
+    }
+    for (role, handle) in coordinates {
+        match pairs.iter_mut().find(|(other, ..)| *other == role) {
+            Some(pair) => pair.2 = Some(handle),
+            // Координаты сами по себе наложению не файл, а свойство растра:
+            // растр не открылся — показывать по ним нечего.
+            None => {
+                veldsdk::log::warn!(target: "handlers",
+                    "'{}': координаты без растра — отпускаем", label);
+                veldsdk::resource::release(handle);
             }
         }
     }
-    // Координаты уезжают при своём растре: сами по себе они наложению не файл,
-    // а его свойство. Растр не открылся — отпускаем их здесь, иначе о них
-    // некому будет вспомнить.
+
+    // Передача владения — до сообщения: получив набор, глобус вправе сразу
+    // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
     let mut rasters = Vec::new();
-    for (role, part, handle) in &given {
-        if *part != Part::Raster {
-            continue;
-        }
-        let coordinates = given
-            .iter()
-            .find(|(other, part, _)| other == role && *part == Part::Geolocation)
-            .map(|(_, _, handle)| handle.clone());
+    for (role, raster, coordinates) in pairs {
+        let raster = match veldsdk::resource::hand_off(raster, "globe") {
+            Ok(handle) => handle,
+            Err(error) => {
+                veldsdk::log::warn!(target: "handlers", "растр не передался глобусу: {}", error);
+                // Координаты этого растра больше никому не нужны, и они пока
+                // наши — отпускаем, пока есть чем.
+                if let Some(handle) = coordinates {
+                    veldsdk::resource::release(handle);
+                }
+                continue;
+            }
+        };
+        let coordinates = coordinates.and_then(|handle| {
+            match veldsdk::resource::hand_off(handle, "globe") {
+                Ok(handle) => Some(handle),
+                // Растр уже у глобуса и ляжет по контуру каталога: привязки
+                // из файла у него не будет, но слой состоится.
+                Err(error) => {
+                    veldsdk::log::warn!(target: "handlers",
+                        "координаты не передались глобусу: {}", error);
+                    None
+                }
+            }
+        });
         rasters.push(OverlayRaster {
-            resource: Some(handle.clone()),
-            role: *role as i32,
+            resource: Some(raster),
+            role: role as i32,
             geolocation: coordinates,
         });
-    }
-    for (role, part, handle) in given {
-        let orphan = part == Part::Geolocation
-            && !rasters.iter().any(|raster| raster.role == role as i32);
-        if orphan {
-            veldsdk::log::warn!(target: "handlers",
-                "координаты без растра — отпускаем: '{}'", label);
-            veldsdk::resource::release(handle);
-        }
     }
     if rasters.is_empty() {
         // Тем же путём и с тем же словом, что и прочие отказы сборки (см.

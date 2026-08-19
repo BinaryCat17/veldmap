@@ -30,6 +30,14 @@ pub struct PluginUiState {
     pub scale_factor: f32,
     pub cursor_position: Point,
     pub scroll_velocity: Point,
+    /// Когда виджеты просят нарисовать себя снова сами по себе: мигающая
+    /// каретка ввода, анимация. Просьбу называет iced ответом `ui.update`
+    /// (`RedrawRequest`), и без неё каретка стои́т — разметка-то не меняется, а
+    /// по ней одной об устаревании кадра не узнать.
+    ///
+    /// `None` — никто ничего не просил. Мгновение прошлое означает «пора»:
+    /// кадровый тик сравнит его со своим временем (см. `handle_ui_event`).
+    pub redraw_at: Option<std::time::Instant>,
     pub pending_events: Vec<Event>,
     /// Последнее отправленное в iced состояние модификаторов: text_input
     /// хранит modifiers у себя и обновляет их только по ModifiersChanged.
@@ -116,6 +124,7 @@ impl PluginUiState {
             scale_factor: 1.0,
             cursor_position: Point::ORIGIN,
             scroll_velocity: Point::ORIGIN,
+            redraw_at: None,
             pending_events: Vec::new(),
             keyboard_modifiers: iced_core::keyboard::Modifiers::empty(),
             vertex_buffer: GrowingBuffer::new(buffer_usage::VERTEX, "вершины", GEOMETRY_BUFFER),

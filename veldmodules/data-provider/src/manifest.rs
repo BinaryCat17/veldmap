@@ -20,7 +20,9 @@
 //! ошибается там, где ошибиться дороже всего: у гранулы SLSTR
 //! `LST_ancillary_ds.nc` стои́т в алфавите раньше `LST_in.nc`, а у Sentinel-1
 //! OCN раньше всего стои́т `preview/icons/logo.png`. Манифест снимает вопрос
-//! целиком и стоит одного запроса на 20–300 КБ.
+//! целиком и стоит одного запроса: у Sentinel-1 и Sentinel-2 это 25–70 КБ, у
+//! гранул Sentinel-3 — сотни килобайт, а у OLCI полного разрешения манифест
+//! доходит до полутора мегабайт.
 
 use std::collections::{HashMap, HashSet};
 
@@ -42,8 +44,9 @@ enum Kind {
 /// Манифест в корне продукта — тот единственный ключ, чей последний сегмент
 /// один из [`NAMES`], а до него ровно путь продукта.
 ///
-/// Именно в корне: у Sentinel-2 манифесты лежат ещё и в гранулах, и взятый
-/// оттуда описывал бы часть продукта вместо целого.
+/// Именно в корне: манифест описывает продукт целиком, и найденный глубже —
+/// это уже чей-то чужой (продукт в продукте бывает у сборных поставок), а
+/// описывал бы он часть вместо целого.
 pub fn key<'a>(identifier: &str, keys: &'a [String]) -> Option<&'a String> {
     let root = format!("{}/", identifier.trim_end_matches('/'));
     keys.iter().find(|key| {
@@ -73,6 +76,8 @@ pub fn measurements(body: &[u8]) -> Vec<String> {
     let mut files: HashMap<String, String> = HashMap::new();
     let mut object = String::new();
     let mut buf = Vec::new();
+    // Дочитан ли манифест до закрытия корня — см. ниже.
+    let mut whole = false;
 
     loop {
         let event = match reader.read_event_into(&mut buf) {
@@ -113,6 +118,9 @@ pub fn measurements(body: &[u8]) -> Vec<String> {
                     depth.pop();
                 }
                 b"dataObject" => object.clear(),
+                // Корень закрылся — значит манифест дочитан до конца, и то,
+                // что в нём названо, названо целиком.
+                b"XFDU" => whole = true,
                 _ => {}
             },
             Event::Eof => break,
@@ -121,6 +129,13 @@ pub fn measurements(body: &[u8]) -> Vec<String> {
         buf.clear();
     }
 
+    // Тело, оборванное на границе элементов, ошибкой разбора не выглядит:
+    // `read_event` доходит до `Eof` и молчит. Половина манифеста назвала бы
+    // половину измерений — а это хуже, чем не назвать ничего: недостающее
+    // измерение выбиралось бы по алфавиту, и молча.
+    if !whole {
+        return Vec::new();
+    }
     order.into_iter().filter_map(|id| files.remove(&id)).filter(|href| !href.is_empty()).collect()
 }
 
@@ -229,6 +244,17 @@ mod tests {
         // Единица есть, а объекта, на который она указывает, нет.
         let dangling = SEN3.replace("NTC_AOD_Data\">", "otherData\">");
         assert!(measurements(dangling.as_bytes()).is_empty());
+
+        // Оборванное тело — тот же ответ, и это главное: разбор до `Eof`
+        // доходит без единой ошибки, и половина названных измерений выглядела
+        // бы целым ответом. Режем на границе элементов, у самого конца.
+        let cut = SEN3.rfind("</xfdu:XFDU>").expect("корень закрыт");
+        assert!(
+            measurements(SEN3[..cut].as_bytes()).is_empty(),
+            "оборванный манифест не называет ничего"
+        );
+        // А целый — называет.
+        assert!(!measurements(SEN3.as_bytes()).is_empty());
     }
 
     /// Манифест ищется в корне продукта, а не где придётся: у Sentinel-2 такой

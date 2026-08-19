@@ -1,6 +1,5 @@
 use std::fs;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use wasmtime::*;
 use wasmtime_wasi::WasiCtxBuilder;
@@ -32,7 +31,7 @@ impl PluginSpec {
     /// `init` сюда не входит: на первом заходе конфига ещё нет (его подбирают
     /// по имени, которое спрашивают у уже поднятого инстанса), а имя без
     /// конфига спросить можно.
-    async fn instantiate(&self) -> anyhow::Result<(WasmModule, Arc<AtomicBool>)> {
+    async fn instantiate(&self) -> anyhow::Result<(WasmModule, Arc<crate::tasks::Sentence>)> {
         let state = HostState {
             dispatcher: self.ctx.dispatcher.clone(),
             registry: self.ctx.registry.clone(),
@@ -55,11 +54,11 @@ impl PluginSpec {
         // Приговор и его исполнитель. Движок сам вызвать модуль не прервёт —
         // проверка живёт здесь и срабатывает на каждом тике эпохи; пока
         // приговора нет, дедлайн просто продлевается дальше.
-        let doomed = Arc::new(AtomicBool::new(false));
-        let watch = doomed.clone();
+        let sentence = Arc::new(crate::tasks::Sentence::new());
+        let watch = sentence.clone();
         store.set_epoch_deadline(1);
         store.epoch_deadline_callback(move |_| {
-            if watch.load(Ordering::SeqCst) {
+            if watch.struck() {
                 Err(wasmtime::Error::msg("killed"))
             } else {
                 Ok(UpdateDeadline::Continue(1))
@@ -67,13 +66,13 @@ impl PluginSpec {
         });
 
         let instance = self.linker.instantiate_async(&mut store, &self.module).await?;
-        Ok((WasmModule { store, instance }, doomed))
+        Ok((WasmModule { store, instance }, sentence))
     }
 
     /// Готовый к работе инстанс: поднятый и прошедший `init`. Один путь и для
     /// загрузки, и для воскрешения убитого — разойтись им негде, потому что
     /// он один.
-    async fn build(&self) -> anyhow::Result<(WasmModule, Arc<AtomicBool>)> {
+    async fn build(&self) -> anyhow::Result<(WasmModule, Arc<crate::tasks::Sentence>)> {
         let (mut wasm, doomed) = self.instantiate().await?;
         self.run_init(&mut wasm).await?;
         Ok((wasm, doomed))
@@ -101,12 +100,9 @@ impl PluginSpec {
 struct WasmActor {
     spec: PluginSpec,
     module: WasmModule,
-    /// Приговор текущему инстансу, общий с epoch-колбэком его стора.
-    doomed: Arc<AtomicBool>,
-    /// Номер идущей доставки. Им приговор привязывается к той операции, на
-    /// которую выписан: флаг у инстанса один, а операций через него проходит
-    /// сколько угодно (см. `tasks::Doom`).
-    run: Arc<std::sync::atomic::AtomicU64>,
+    /// Приговор текущему инстансу вместе с номером идущей доставки — общий с
+    /// epoch-колбэком его стора (см. `tasks::Sentence`).
+    sentence: Arc<crate::tasks::Sentence>,
     dispatcher: Arc<Dispatcher>,
     tasks: Arc<crate::tasks::TaskRegistry>,
 }
@@ -114,12 +110,10 @@ struct WasmActor {
 #[async_trait::async_trait]
 impl Actor for WasmActor {
     async fn deliver(&mut self, ev: Event) {
-        // Приговор действует ровно на одну операцию: перед каждым событием
-        // счётчик доставок сдвигается, и выписанный на прошлую он уже не
-        // действует, а сам флаг снимается — иначе опоздавший на микросекунду
-        // kill унёс бы следующую работу (см. `tasks::Doom`).
-        self.run.fetch_add(1, Ordering::SeqCst);
-        self.doomed.store(false, Ordering::SeqCst);
+        // Приговор действует ровно на одну операцию: шаг счётчика доставок
+        // его и снимает — выписанный на прошлую, он больше ни с чем не
+        // совпадает (см. `tasks::Sentence`).
+        self.sentence.next();
 
         // Учтённый запрос: отдаём платформе то, чем нас снять. Убийство —
         // это трап на ближайшем тике эпохи, посреди любой работы и без всякой
@@ -136,7 +130,7 @@ impl Actor for WasmActor {
         // времени уже уедет.
         let accounted = ev.accounted.then(|| ev.correlation.clone());
         if ev.accounted {
-            let doom = crate::tasks::Doom::new(self.doomed.clone(), self.run.clone());
+            let doom = crate::tasks::Doom::new(self.sentence.clone());
             if !self.tasks.arm(&ev.correlation, move |victim| victim.doomed = Some(doom)) {
                 return;
             }
@@ -158,29 +152,42 @@ impl Actor for WasmActor {
         };
         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
         self.module.store.data_mut().call_context = Some(call_ctx);
+        // Экспорта нет — инстанс не поднялся (отравленный стор после
+        // неудавшегося воскрешения). Учтённую операцию надо договорить и
+        // здесь: она уже на учёте, а исполнить её больше нечем.
         let Ok(handle_event) = self.module.instance.get_typed_func::<(), i32>(&mut self.module.store, "handle_event") else {
+            log::error!("Модуль '{}' не отвечает: экспорта handle_event нет", self.spec.name);
+            self.answer_for_lost(accounted);
             return;
         };
         if let Err(trap) = handle_event.call_async(&mut self.module.store, ()).await {
-            let killed = self.doomed.load(Ordering::SeqCst);
+            let killed = self.sentence.struck();
             self.revive(trap).await;
-            // Терминальный ответ приходит всегда — иначе заказчик ждёт вечно, а
-            // запись об операции живёт до конца процесса. За убитого его уже
-            // договорил диспетчер (`Dispatcher::kill`); за упавшего сам
-            // отвечать некому — его больше нет.
-            if let (false, Some(task)) = (killed, accounted)
-                && let Some(topic) = self.tasks.abandon(&task)
-            {
-                log::warn!(target: "tasks",
-                    "Модуль '{}' упал посреди операции {}, отвечаем за неё топиком {}",
-                    self.spec.name, task, topic);
-                self.dispatcher.publish_from(&topic, Vec::new(), 0, &task, "");
+            // За убитого терминальный ответ уже договорил диспетчер
+            // (`Dispatcher::kill`); за упавшего отвечать некому — его больше нет.
+            if !killed {
+                self.answer_for_lost(accounted);
             }
         }
     }
 }
 
 impl WasmActor {
+    /// Договорить конец учтённой операции за исполнителя, которого больше нет.
+    ///
+    /// Терминальный ответ приходит всегда — иначе заказчик ждёт вечно, а
+    /// запись об операции живёт до конца процесса. Зовётся из каждого пути,
+    /// где доставка кончилась, не дойдя до модуля: и из трапа, и из «инстанса
+    /// нет вовсе». `None` — операция не учтённая, договаривать нечего.
+    fn answer_for_lost(&self, accounted: Option<String>) {
+        let Some(task) = accounted else { return };
+        let Some(topic) = self.tasks.abandon(&task) else { return };
+        log::warn!(target: "tasks",
+            "Модуль '{}' не довёл операцию {}, отвечаем за неё топиком {}",
+            self.spec.name, task, topic);
+        self.dispatcher.publish_from(&topic, Vec::new(), 0, &task, "");
+    }
+
     /// Поднимает инстанс заново после трапа.
     ///
     /// Трап отравляет Store безвозвратно — продолжать в нём нельзя ни после
@@ -195,7 +202,7 @@ impl WasmActor {
     /// а её здесь нет.
     async fn revive(&mut self, trap: wasmtime::Error) {
         let started = std::time::Instant::now();
-        if self.doomed.load(Ordering::SeqCst) {
+        if self.sentence.struck() {
             log::info!(target: "tasks", "Модуль '{}' снят посреди обработчика, поднимаем заново", self.spec.name);
         } else {
             log::error!("Модуль '{}' поймал трап: {:#}; поднимаем заново", self.spec.name, trap);
@@ -209,9 +216,9 @@ impl WasmActor {
             log::info!(target: "tasks", "Возвращено ресурсов: {} — от модуля '{}'", freed, self.spec.name);
         }
         match self.spec.build().await {
-            Ok((module, doomed)) => {
+            Ok((module, sentence)) => {
                 self.module = module;
-                self.doomed = doomed;
+                self.sentence = sentence;
                 log::info!(target: "tasks", "Модуль '{}' поднят заново за {:?}", self.spec.name, started.elapsed());
             }
             // Инстанс не поднялся — актор остаётся с отравленным стором, и
@@ -343,7 +350,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         drop(probe);
 
         // Рабочий инстанс — уже с именем и конфигом, то есть прошедший init.
-        let (module, doomed) = match spec.build().await {
+        let (module, sentence) = match spec.build().await {
             Ok(built) => built,
             Err(e) => { log::error!("Модуль '{}' не инициализировался: {:#}, пропускаем", name, e); continue; }
         };
@@ -353,8 +360,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         Dispatcher::spawn_actor(rx, WasmActor {
             spec,
             module,
-            doomed,
-            run: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            sentence,
             dispatcher: ctx.dispatcher.clone(),
             tasks: ctx.tasks.clone(),
         });

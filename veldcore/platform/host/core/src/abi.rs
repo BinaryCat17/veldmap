@@ -214,9 +214,17 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
                 "[{}] ресурс {} освобождён", caller.data().plugin_name, region_id);
             return 1;
         }
+        // Причина спрашивается у реестра, а не выводится из отказа доступа:
+        // `check_access` отвечает `false` и «не твой», и «такого нет», а
+        // лечатся эти два по-разному (то же различение, что у `lease_op`).
+        let mut found = false;
+        registry.update_lease(region_id, |_| found = true);
         log::debug!(target: "abi",
             "[{}] освобождение ресурса {} отклонено: {}", caller.data().plugin_name, region_id,
-            match can_free { true => "такого ресурса в реестре нет", false => "не наш" });
+            match found {
+                true => "ресурс не принадлежит вызывающему",
+                false => "такого ресурса в реестре нет",
+            });
         0
     })?;
 

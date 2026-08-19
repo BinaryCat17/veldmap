@@ -194,7 +194,15 @@ fn process_ui_event(plugin: &mut PluginUiState, plugin_id: &str, req_event: app_
             // Живая текстура в прошлом кадре — тоже повод рисовать: её владелец
             // перерисовывает её сам, а наша разметка при этом не меняется, и по
             // ней об устаревании показанного не узнать.
-            if !plugin.pending_events.is_empty()
+            // Просьба виджета нарисовать себя снова: мигающая каретка. Срок
+            // вышел — рисуем и просьбу снимаем; жива она ровно до кадра, а
+            // нужна ли снова, скажет тот же `ui.update` (см. `asked_redraw`).
+            let asked = plugin.redraw_at.is_some_and(|at| at <= std::time::Instant::now());
+            if asked {
+                plugin.redraw_at = None;
+            }
+            if asked
+                || !plugin.pending_events.is_empty()
                 || plugin.is_layout_dirty
                 || GpuRenderer::has_live_image(&plugin.last_draw_commands)
             {
@@ -318,17 +326,25 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
     // позицией, а само движение — с новой, вместе с тем, что за ним следует.
     let mut at = plugin.cursor_position;
     let mut batch: Vec<Event> = Vec::new();
+    // Просьба виджетов нарисовать себя снова — ближайшая из всех отрезков
+    // пачки: разбиение по движениям наше, а просьба принадлежит кадру.
+    let mut redraw: Option<std::time::Instant> = None;
     for event in events {
         if let Event::Mouse(iced_core::mouse::Event::CursorMoved { position }) = event {
             if !batch.is_empty() {
-                let _ = ui.update(&batch, cursor_at(at), renderer, &mut clipboard, &mut captured_messages);
+                let (state, _) =
+                    ui.update(&batch, cursor_at(at), renderer, &mut clipboard, &mut captured_messages);
+                sooner(&mut redraw, asked_redraw(&state));
                 batch.clear();
             }
             at = position;
         }
         batch.push(event);
     }
-    let _ = ui.update(&batch, cursor_at(at), renderer, &mut clipboard, &mut captured_messages);
+    let (state, _) =
+        ui.update(&batch, cursor_at(at), renderer, &mut clipboard, &mut captured_messages);
+    sooner(&mut redraw, asked_redraw(&state));
+    plugin.redraw_at = redraw;
     // Позиция переживает кадр: следующий начинается там, где кончился этот, а
     // движения может и не быть вовсе.
     plugin.cursor_position = at;
@@ -396,6 +412,37 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
 
     veldsdk::log::trace!(target: "render", "END");
     drawn
+}
+
+/// Когда виджеты просят нарисовать себя снова. `None` — не просят.
+///
+/// Просьба принадлежит виджету, а не разметке: каретка `text_input` мигает
+/// сама по себе, и разметка при этом та же самая. Единственный, кто об этом
+/// знает, — iced, и говорит он это возвратом `update`, который до сих пор
+/// отбрасывался: каретка поэтому не мигала вовсе.
+///
+/// `NextFrame` — «сейчас»: прошедшее мгновение и означает «пора» (см.
+/// `PluginUiState::redraw_at`).
+fn asked_redraw(state: &iced_runtime::user_interface::State) -> Option<std::time::Instant> {
+    use iced_core::window::RedrawRequest;
+    let iced_runtime::user_interface::State::Updated { redraw_request, .. } = state else {
+        // Разметка устарела — её пересборка и есть повод рисовать, и она
+        // случится сама: интерфейс собирается заново каждый кадр.
+        return Some(std::time::Instant::now());
+    };
+    match redraw_request {
+        RedrawRequest::NextFrame => Some(std::time::Instant::now()),
+        RedrawRequest::At(when) => Some(*when),
+        RedrawRequest::Wait => None,
+    }
+}
+
+/// Оставляет ближайшую из двух просьб.
+fn sooner(kept: &mut Option<std::time::Instant>, asked: Option<std::time::Instant>) {
+    let Some(asked) = asked else { return };
+    if kept.is_none_or(|kept| asked < kept) {
+        *kept = Some(asked);
+    }
 }
 
 /// Наводит области прокрутки туда, куда просит разметка.

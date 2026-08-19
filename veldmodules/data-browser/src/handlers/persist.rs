@@ -180,10 +180,22 @@ pub fn load(state: &mut State) {
 /// нечего, открываем то, что назвал конфиг.
 pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     let correlation = veldsdk::correlation();
-    if state.layout_read.settle(&correlation) != veldsdk::Reply::Current {
-        // Ответ на вытесненный вопрос: ресурс всё равно наш, а собирать по нему
-        // экран второй раз нельзя.
-        return veldsdk::resource::discard("fs/on_read_result", opened);
+    match state.layout_read.settle(&correlation) {
+        veldsdk::Reply::Current => {}
+        // Ответ на вытесненный вопрос: собирать по нему экран второй раз
+        // нельзя, а ресурс в нём наш — владение уже передали нам, и отпустить
+        // его больше некому.
+        veldsdk::Reply::Stale => {
+            if let Ok(handle) = veldsdk::resource::accept(&opened) {
+                veldsdk::resource::release(handle);
+            }
+            return;
+        }
+        // Чужой ответ на общем топике: `fs/on_read_result` слушают трое, и
+        // трогать ресурс в чужом ответе нельзя — он уже может быть чьим-то.
+        veldsdk::Reply::Foreign => {
+            return veldsdk::resource::discard("fs/on_read_result", opened);
+        }
     }
 
     let Ok(handle) = veldsdk::resource::accept(&opened) else { return fresh(state) };

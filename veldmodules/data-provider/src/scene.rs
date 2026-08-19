@@ -26,8 +26,15 @@ pub struct Facts {
     /// Дататейк — непрерывный отрезок съёмки. Пусто у миссий, которые его не
     /// сообщают (Sentinel-2 обходится плиткой).
     pub datatake: String,
-    /// Плитка сетки — «43XDB» у Sentinel-2. Пусто у миссий без сетки.
+    /// Плитка сетки — «43XDB» у Sentinel-2, как её назвал каталог. Пусто у
+    /// миссий без сетки и у тех, кому каталог её не сообщил.
     pub tile: String,
+    /// Клетка, прочитанная из имени продукта (см. [`tile_in_name`]). Отдельно
+    /// от `tile` затем, что каталогу она неизвестна: спрашивать по ней
+    /// соседей — значит спрашивать про атрибут, которого у продукта нет, и
+    /// получать пустой ответ. Съёмку она называет наравне с `tile`, а в
+    /// запросы к каталогу не идёт.
+    pub named_tile: String,
     /// Номер слайса внутри дататейка. Дататейк — это непрерывный отрезок
     /// съёмки, и режется он на слайсы; номер слайса — единственное, что
     /// называет одну и ту же съёмку одинаково у всех её частей. Пусто у миссий
@@ -70,10 +77,14 @@ pub fn acquisition(facts: &Facts) -> Option<String> {
     // Дататейк без номера слайса и плитка сетки. Секунда нужна и там, и там: у
     // дататейка она отделяет слайсы друг от друга, у плитки — разные пролёты
     // над одной и той же клеткой.
-    if !facts.datatake.is_empty() || !facts.tile.is_empty() {
+    let tile = match facts.tile.is_empty() {
+        true => &facts.named_tile,
+        false => &facts.tile,
+    };
+    if !facts.datatake.is_empty() || !tile.is_empty() {
         return Some(format!(
             "по съёмке|{}|{}|{}|{}",
-            facts.platform, facts.datatake, facts.tile, facts.second
+            facts.platform, facts.datatake, tile, facts.second
         ));
     }
     // Ни того, ни другого — тогда съёмку называет виток вместе с прибором и
@@ -107,9 +118,23 @@ pub fn acquisition(facts: &Facts) -> Option<String> {
 /// Ищется он от этой пары, а не по счёту полей: у `WV_SLC__1SSV` тип занимает
 /// два поля с пустым между ними, а у тайловой укладки в конце добавлен `_COG`,
 /// и счёт с любого края сбивается.
+///
+/// Читается только у имён Sentinel-1, и это не осторожность: пара времён стои́т
+/// и в чужих именах, а поле за ней там значит другое. У COP-DEM
+/// (`DEM1_SAR_DTE_30_<t1>_<t2>_ADS_000000_rLrO`) на месте дататейка стоят нули,
+/// и все клетки одной даты слились бы в одну строку списка — проверено живым
+/// каталогом: 200 продуктов из 200.
 pub fn datatake_in_name(name: &str) -> Option<String> {
     let name = name.split('.').next().unwrap_or(name);
     let fields: Vec<&str> = name.split('_').collect();
+    // Спутник в первом поле: `S1A`…`S1D`. Тем и опознаётся раскладка имени.
+    let platform = fields.first()?;
+    let sentinel1 = platform.len() == 3
+        && platform.starts_with("S1")
+        && platform.as_bytes()[2].is_ascii_uppercase();
+    if !sentinel1 {
+        return None;
+    }
     let a_time = |field: &&str| {
         field.len() == 15
             && field.as_bytes()[8] == b'T'
@@ -340,9 +365,9 @@ fn slices(products: &[(Facts, DataProduct)]) -> Vec<Slice> {
 /// свой, либо рядом такого слайса нет.
 ///
 /// Нужно это затем, что номер слайса каталог сообщает не всем частям: у
-/// Sentinel-1 его нет у `OCN`, и без этого хода производная величина уезжала бы
-/// в собственный снимок — при том что начинается она в ту же микросекунду, что
-/// и снимок, из которого её посчитали.
+/// Sentinel-1 его нет у `OCN`, и без этого хода производная величина уезжает в
+/// собственный снимок — при том что начинается она в ту же микросекунду, что и
+/// снимок, из которого её посчитали.
 fn beside_a_slice(slices: &[Slice], facts: &Facts) -> Option<String> {
     if !facts.slice.is_empty() || facts.datatake.is_empty() {
         return None;
@@ -460,6 +485,7 @@ mod tests {
             instrument: String::new(),
             datatake: String::new(),
             tile: String::new(),
+            named_tile: String::new(),
             slice: String::new(),
             orbit: String::new(),
             second: 100,
@@ -597,12 +623,29 @@ mod tests {
         assert_eq!(tile_in_name("N03W04_2018_01_19"), None, "долгота трёхзначная");
     }
 
+    /// Пара времён стои́т не только в именах Sentinel-1, и поле за ней у чужих
+    /// значит другое. У COP-DEM там нули, и все его клетки одной даты слились
+    /// бы в одну строку списка.
+    #[test]
+    fn a_datatake_is_read_only_from_a_sentinel_one_name() {
+        assert_eq!(
+            datatake_in_name("DEM1_SAR_DTE_30_20101216T101933_20140316T000041_ADS_000000_rLrO"),
+            None
+        );
+        assert_eq!(datatake_in_name("S2B_MSIL1C_20260812T093549_N0511_R036_T33UVP_x"), None);
+        // А своё имя читается по-прежнему.
+        assert_eq!(
+            datatake_in_name("S1B_IW_GRDH_1SDV_20190601T001108_20190601T001137_016495_01F0AB_C0FF"),
+            Some("127147".to_string())
+        );
+    }
+
     /// Клетки одного витка — разные снимки: пролёт нарезан на них уже после
     /// съёмки, и время у всех от неё одно.
     #[test]
     fn degree_tiles_of_one_pass_stay_apart() {
         let rtc = |tile: &str| Facts {
-            tile: tile.to_string(),
+            named_tile: tile.to_string(),
             orbit: "118".to_string(),
             ..bare("SENTINEL-1", "RTC", 2, 100)
         };
