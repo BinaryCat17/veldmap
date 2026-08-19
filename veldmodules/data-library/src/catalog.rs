@@ -9,6 +9,7 @@ use crate::proto::data_library::{
 };
 use crate::proto::data_provider::{ProductRoots, ProductRootsRequest};
 use veldsdk::proto::core::ResourceOpened;
+use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsReadRequest, FsWriteRequest, FsWriteResult};
 
 /// Потолок сидкара. Сам он — json из пяти полей, то есть сотни байт; потолок
 /// взят много выше не про запас на них, а затем, чтобы отделять
@@ -16,7 +17,6 @@ use veldsdk::proto::core::ResourceOpened;
 /// `.origin` ещё может оказаться нашим, выросшим в будущем, а мегабайтный —
 /// уже нет.
 const SIDECAR_CAP: u64 = 64 * 1024;
-use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsReadRequest, FsWriteRequest, FsWriteResult};
 
 /// «Перечитай каталог». Ответ придёт не отсюда, а из on_list_result: диск
 /// отвечает не мгновенно, и врать про содержимое каталога по памяти — ровно

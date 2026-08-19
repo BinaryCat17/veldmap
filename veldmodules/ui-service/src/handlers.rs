@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::proto::ui_service::*;
 use crate::module::state::{PluginUiState, State};
 use veldsdk::proto::app as app_proto;
@@ -310,6 +312,11 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
             Event::Mouse(iced_core::mouse::Event::ButtonReleased(iced_core::mouse::Button::Left))
         )
     });
+    // Был ли кадр без ввода. Прокрутка бывает только от события — колеса,
+    // перетаскивания полосы, клавиши, — и в тихом кадре областям сдвинуться не
+    // от чего (см. `keep_offsets`). Считается до того, как пачку съест
+    // обработка, и до добавления перерисовки: она не ввод.
+    let quiet = events.is_empty();
     events.push(Event::Window(iced_core::window::Event::RedrawRequested(std::time::Instant::now())));
     veldsdk::log::trace!(target: "render", "Processing {} events", events.len());
 
@@ -373,6 +380,10 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
     if released {
         crate::module::drag::drop_carried();
     }
+
+    // Места областей — до наводки: наводка их же и двигает, и прочитанное
+    // после неё было бы не «где стояли», а «куда навели».
+    keep_offsets(plugin, &mut ui, renderer, quiet);
 
     // Наводка — после ввода и до отрисовки: колесо этого кадра уже учтено, а
     // нарисуется область уже там, куда её навели.
@@ -513,6 +524,101 @@ fn answer_locate(
             false => format!("'{}' с нагрузкой '{}'", req.method, req.value),
         },
         search.found());
+}
+
+/// Помнит, где стои́т каждая названная область, и возвращает её туда, если
+/// разметку пересобрали так, что состояние виджета потерялось.
+///
+/// Сброс отличается от «человек сам прокрутил в начало» точно, а не на глаз:
+/// прокрутить область может только событие, и в кадре, где событий не было
+/// вовсе, оказаться в начале она могла лишь одним способом — заново родившись.
+///
+/// Возвращать её в разметке нечем: `Scrollable.scroll_to` — просьба клиента, а
+/// клиент о потере не знает и знать не должен. Место — свойство показа, и
+/// живёт оно здесь же, где сам показ.
+fn keep_offsets(
+    plugin: &mut PluginUiState,
+    ui: &mut UserInterface<'_, UiMessage, Theme, GpuRenderer>,
+    renderer: &GpuRenderer,
+    quiet: bool,
+) {
+    let mut named: Vec<(String, Option<ScrollTo>)> = Vec::new();
+    collect_aims(plugin.layout.root.as_ref(), &mut named);
+    // Кадр без единой названной области — не повод забывать места: между
+    // прежней разметкой и новой бывает промежуточная (панель, где список ещё
+    // не собрался), и забытое на ней место терялось бы ровно перед тем кадром,
+    // ради которого всё и заведено. Лишние имена уходят сами: ниже память
+    // заменяется тем, что нашлось.
+    if named.is_empty() {
+        return;
+    }
+
+    let mut keeper = Keeper {
+        targets: named.into_iter()
+            .map(|(name, _)| (iced_core::widget::Id::from(name.clone()), name))
+            .collect(),
+        seen: HashMap::new(),
+        restore: HashMap::new(),
+    };
+    ui.operate(renderer, &mut keeper);
+
+    // Начало без единого события — это сброс, а не желание человека. Вернуть
+    // область на место можно только вторым обходом: где она стои́т, известно
+    // лишь после первого.
+    if quiet {
+        keeper.restore = keeper.seen.iter()
+            .filter(|(_, now)| **now == 0.0)
+            .filter_map(|(name, _)| {
+                let was = *plugin.offsets.get(name)?;
+                (was > 0.0).then(|| (name.clone(), was))
+            })
+            .collect();
+        if !keeper.restore.is_empty() {
+            veldsdk::log::debug!(target: "render",
+                "области вернулись на место после пересборки разметки: {}", keeper.restore.len());
+            ui.operate(renderer, &mut keeper);
+        }
+    }
+
+    plugin.offsets = keeper.seen;
+}
+
+/// Обход, читающий места названных областей и возвращающий их туда, где они
+/// стояли. Оба дела разом, потому что обход по дереву один и тот же, а имя
+/// области из `Id` не прочесть — сверять приходится с заранее собранным
+/// списком.
+struct Keeper {
+    targets: Vec<(iced_core::widget::Id, String)>,
+    seen: HashMap<String, f32>,
+    restore: HashMap<String, f32>,
+}
+
+impl iced_core::widget::Operation for Keeper {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced_core::widget::Operation)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&iced_core::widget::Id>,
+        _bounds: iced_core::Rectangle,
+        _content_bounds: iced_core::Rectangle,
+        translation: iced_core::Vector,
+        state: &mut dyn iced_core::widget::operation::Scrollable,
+    ) {
+        let Some((_, name)) = self.targets.iter().find(|(target, _)| Some(target) == id) else {
+            return;
+        };
+        if let Some(&back) = self.restore.get(name) {
+            state.scroll_to(iced_core::widget::operation::scrollable::AbsoluteOffset {
+                x: None,
+                y: Some(back),
+            });
+            self.seen.insert(name.clone(), back);
+            return;
+        }
+        self.seen.insert(name.clone(), translation.y);
+    }
 }
 
 /// Наводит области прокрутки туда, куда просит разметка.
