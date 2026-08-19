@@ -235,6 +235,17 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 }
             }
 
+            // Имя поля — то же, чем его зовёт прогон по сценарию (см.
+            // locate.rs): каретку ставят нажатием, а нажимают по имени. Полю
+            // оно нужно своё: коробкой оно себя обходу не объявляет, а надписи
+            // у него нет — подсказку рисует оно само.
+            if crate::module::locate::naming()
+                && let Some(h) = &t.on_input
+                && !h.method.is_empty()
+            {
+                input = input.id(crate::module::locate::name(&h.method, &h.value));
+            }
+
             input.into()
         }
         Some(proto::widget::Type::Container(c)) => {

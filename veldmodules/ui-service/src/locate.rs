@@ -83,6 +83,15 @@ pub struct Search {
 }
 
 impl Search {
+    /// Спрошено ли о чём-нибудь. Пустая надпись подошла бы каждой строке на
+    /// экране: `contains("")` истинно всегда, — а вопрос без имени не о чём.
+    pub fn asks(sought: &Sought) -> bool {
+        match sought {
+            Sought::Named(_) => true,
+            Sought::Said(said) => !said.is_empty(),
+        }
+    }
+
     /// Обход по окну размером `window` (в точках раскладки).
     pub fn new(sought: Sought, ordinal: u32, window: Size) -> Self {
         Self {
@@ -93,6 +102,11 @@ impl Search {
             found: 0,
             place: None,
         }
+    }
+
+    /// О ком спросили.
+    pub fn sought(&self) -> &Sought {
+        &self.sought
     }
 
     /// Сколько элементов подошло под вопрос.
@@ -113,9 +127,8 @@ impl Search {
     /// и обрезанный тем, внутри чего он лежит. `None` — не видно.
     fn visible(&self, bounds: Rectangle) -> Option<Rectangle> {
         let frame = self.frame();
-        (bounds - frame.offset)
-            .intersection(&frame.clip?)
-            .filter(|seen| seen.width > 0.0 && seen.height > 0.0)
+        // Вырожденное пересечение `intersection` и сама отдаёт как «нет».
+        (bounds - frame.offset).intersection(&frame.clip?)
     }
 
     /// Подошёл ещё один. Место запоминается у того, кого спросили: названного
@@ -161,6 +174,22 @@ impl Operation for Search {
             clip: self.visible(bounds),
             offset: self.frame().offset + translation,
         });
+    }
+
+    fn text_input(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        _state: &mut dyn iced_core::widget::operation::TextInput,
+    ) {
+        // Поле ввода о себе как о коробке не объявляет вовсе, а надписи у него
+        // нет: подсказка рисуется им самим. Без этой ветки поставить каретку
+        // по имени было бы нечем — только пикселями.
+        if let (Sought::Named(name), Some(id), Some(seen)) = (&self.sought, id, self.visible(bounds))
+            && id == name
+        {
+            self.matched(seen);
+        }
     }
 
     fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {

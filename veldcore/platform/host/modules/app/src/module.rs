@@ -3,9 +3,9 @@
 //! buildgen): State, init и сигнатуры — по конвенции, как в wasm-модулях.
 //!
 //! Здесь только входная половина контракта. Выходную (on_ui_event,
-//! on_window_resized, on_ready) публикует раннер через emit-стабы: эти события
-//! порождает цикл событий ОС, а им владеет он. Поэтому модуль общий для всех
-//! раннеров — winit'а тут нет.
+//! on_window_resized, on_locate_widget) публикует раннер через emit-стабы: и
+//! ввод, и вопрос о разметке порождает он, а не модуль. Поэтому модуль общий
+//! для всех раннеров — winit'а тут нет.
 
 use std::sync::Arc;
 use veldmap_host_util::bindings::proto::app::{RevealPath, SetSurface, WidgetLocated};
@@ -14,7 +14,8 @@ use veldmap_host_util::{Caller, HostContext, Place, Surfaces};
 
 pub struct State {
     surfaces: Surfaces,
-    /// Нужен для резолва путей: раскладка runtime известна только хосту.
+    /// Раскладка runtime и очереди хоста известны только ему: через него идут
+    /// и резолв путей, и найденные места.
     ctx: Arc<HostContext>,
 }
 
@@ -33,11 +34,12 @@ pub fn on_set_surface(state: &State, req: SetSurface, caller: Caller) {
     state.surfaces.attach(&req.plugin_id, surface.id, caller.instance);
 }
 
-/// Рендерер обошёл разметку и назвал место элемента.
+/// Разметку обошли и назвали место элемента.
 ///
-/// Модуль ответ не разбирает: спрашивал раннер — он же и разбирает, сняв
-/// ответ с очереди в кадровом цикле. Здесь ответ только перекладывается с шины
-/// в очередь, ровно как поверхность окна.
+/// Модуль ответ не разбирает: спрашивал раннер — он же и разбирает, сняв ответ
+/// с очереди в кадровом цикле. Здесь ответ только перекладывается с шины в
+/// очередь. Отправитель не проверяется, и проверить его нечем: кто вправе
+/// отвечать за это окно, хосту неоткуда узнать (см. `places.rs`).
 pub fn on_widget_located(state: &State, req: WidgetLocated, _caller: Caller) {
     state.ctx.places.answer(&req.plugin_id, Place {
         request: req.request,

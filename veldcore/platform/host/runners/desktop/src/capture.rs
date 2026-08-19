@@ -56,10 +56,16 @@ pub enum Action {
     /// время стоят: ожидание не должно съедать время у следующих шагов.
     Await { address: Address, gone: bool },
     /// Элемент обязан быть (или не быть) прямо сейчас. Тем и отличается от
-    /// ожидания: спрашивает один раз и не даёт второго шанса.
+    /// ожидания: спрашивает один раз и не даёт второго шанса — часы сценария
+    /// при этом всё равно стоят, пока идёт этот единственный вопрос.
     Assert { address: Address, gone: bool },
     /// Предел ожидания для последующих шагов.
     Patience { limit: Duration },
+    /// Набрать текст туда, где сейчас каретка. Раскладка уже применена: шаг
+    /// шлёт готовые знаки, а не коды клавиш.
+    Type { text: String },
+    /// Служебная клавиша целиком — нажать и отпустить.
+    Key { code: u32, name: String },
     /// Закрыть окно — конец прогона.
     Exit,
 }
@@ -119,8 +125,13 @@ fn parse_address(rest: &str) -> Option<Address> {
     // Номер отделяется, только когда за решёткой одни цифры: нагрузкой бывает
     // и путь, и ключ меню, и решётка в них не запрещена.
     let (body, ordinal) = match rest.rsplit_once('#') {
+        // Считают с единицы: `#0` — это не «нулевой», а описка, и молча
+        // принимать её за «должен быть один» значит скрывать её от писавшего.
         Some((body, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => {
-            (body, tail.parse().ok()?)
+            match tail.parse().ok()? {
+                0 => return None,
+                n => (body, n),
+            }
         }
         _ => (rest, 0),
     };
@@ -156,25 +167,21 @@ pub struct Script {
 }
 
 impl Script {
-    /// Сценарий из `VELDMAP_SCRIPT`. `None` — переменной нет, то есть обычный
-    /// запуск. Нечитаемый файл или непонятная строка — предупреждение в лог и
-    /// тоже `None`: прогон без сценария лучше, чем прогон по половине его.
-    pub fn from_env(logs: &Path) -> Option<Self> {
-        let path = std::env::var("VELDMAP_SCRIPT").ok()?;
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) => {
-                log::error!(target: "render", "Сценарий '{}' не читается: {}", path, e);
-                return None;
-            }
-        };
+    /// Сценарий из `VELDMAP_SCRIPT`. `Ok(None)` — переменной нет, то есть
+    /// обычный запуск.
+    ///
+    /// Нечитаемый файл или непонятная строка — отказ, а не запуск без
+    /// сценария: прогон затевали ради проверки, и молча отыграть вместо неё
+    /// пустоту значит объявить непроверенное пройденным.
+    pub fn from_env(logs: &Path) -> anyhow::Result<Option<Self>> {
+        let Ok(path) = std::env::var("VELDMAP_SCRIPT") else { return Ok(None) };
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("сценарий '{}' не читается: {}", path, e))?;
 
         // Каталог снимков заводится здесь: логов могло ещё не быть, а имена
         // файлов сценарий уже назвал.
-        if let Err(e) = std::fs::create_dir_all(logs) {
-            log::error!(target: "render", "Каталог снимков '{}' не создан: {}", logs.display(), e);
-            return None;
-        }
+        std::fs::create_dir_all(logs)
+            .map_err(|e| anyhow::anyhow!("каталог снимков '{}' не создан: {}", logs.display(), e))?;
 
         let mut steps = Vec::new();
         for (number, line) in text.lines().enumerate() {
@@ -182,18 +189,20 @@ impl Script {
             if line.is_empty() {
                 continue;
             }
-            match parse_step(line, logs) {
-                Some(step) => steps.push(step),
-                None => {
-                    log::error!(target: "render", "Сценарий '{}', строка {}: не разобрана — '{}'", path, number + 1, line);
-                    return None;
-                }
-            }
+            let step = parse_step(line, logs).ok_or_else(|| anyhow::anyhow!(
+                "сценарий '{}', строка {}: не разобрана — '{}'", path, number + 1, line))?;
+            steps.push(step);
         }
 
         steps.sort_by_key(|(at, _)| *at);
         log::info!(target: "render", "Сценарий '{}': {} шагов, снимки в {}", path, steps.len(), logs.display());
-        Some(Self { steps: steps.into(), started: None, held: None, paused: Duration::ZERO })
+        Ok(Some(Self { steps: steps.into(), started: None, held: None, paused: Duration::ZERO }))
+    }
+
+    /// Остались ли неотыгранные шаги. Сценарий кончается шагом `exit`, и
+    /// непустая очередь значит, что прогон оборвали снаружи.
+    pub fn unfinished(&self) -> bool {
+        !self.steps.is_empty()
     }
 
     /// Сценарий чего-то ждёт: часы стоят, пока не дождётся.
@@ -233,6 +242,31 @@ impl Script {
     }
 }
 
+/// Физический код служебной клавиши по её имени в сценарии.
+///
+/// Именами, а не числами: код — дискриминант `winit::keyboard::KeyCode`, и
+/// написанное числом в сценарии рассохлось бы с ним молча. Печатные клавиши
+/// сюда не входят вовсе — их набирают шагом `type`, где раскладка уже
+/// применена.
+fn named_key(name: &str) -> Option<u32> {
+    use winit::keyboard::KeyCode;
+    let code = match name {
+        "enter" => KeyCode::Enter,
+        "escape" => KeyCode::Escape,
+        "backspace" => KeyCode::Backspace,
+        "delete" => KeyCode::Delete,
+        "tab" => KeyCode::Tab,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "left" => KeyCode::ArrowLeft,
+        "right" => KeyCode::ArrowRight,
+        "up" => KeyCode::ArrowUp,
+        "down" => KeyCode::ArrowDown,
+        _ => return None,
+    };
+    Some(code as u32)
+}
+
 /// Комментарий — решётка, начинающая слово. Решётка внутри слова остаётся
 /// адресу: ею он называет, который из подошедших нужен (`tab_select#2`).
 fn strip_comment(line: &str) -> &str {
@@ -264,13 +298,23 @@ fn parse_step(line: &str, logs: &Path) -> Option<(Duration, Action)> {
             dx: words.next()?.parse().ok()?,
             dy: words.next()?.parse().ok()?,
         },
-        "shot" => Action::Shot { path: logs.join(format!("{}.png", words.next()?)) },
+        // Снимок ложится рядом с логами и только туда: имя — это имя, а не
+        // путь, и разделители в нём увели бы файл из каталога прогона.
+        "shot" => {
+            let name = words.next()?;
+            let plain = !name.contains(['/', '\\']) && name != "." && name != "..";
+            Action::Shot { path: logs.join(format!("{}.png", plain.then_some(name)?)) }
+        }
         "tap" => return Some((at, Action::Tap { address: parse_address(tail)? })),
         "wait" => return Some((at, Action::Await { address: parse_address(tail)?, gone: false })),
         "gone" => return Some((at, Action::Await { address: parse_address(tail)?, gone: true })),
         "expect" => return Some((at, Action::Assert { address: parse_address(tail)?, gone: false })),
         "absent" => return Some((at, Action::Assert { address: parse_address(tail)?, gone: true })),
         "timeout" => Action::Patience { limit: Duration::from_millis(words.next()?.parse().ok()?) },
+        // Набираемое забирает остаток строки: пробел в нём такой же знак, как
+        // и прочие, и разбирать текст по словам нельзя.
+        "type" => return (!tail.is_empty()).then(|| (at, Action::Type { text: tail.to_string() })),
+        "key" => return Some((at, Action::Key { code: named_key(tail)?, name: tail.to_string() })),
         "exit" => Action::Exit,
         _ => return None,
     };
@@ -490,6 +534,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn typed_text_keeps_its_spaces() {
+        let (_, action) = parse_step("2000 type Sentinel 1", Path::new("/tmp")).expect("шаг разобран");
+        match action {
+            Action::Type { text } => assert_eq!(text, "Sentinel 1"),
+            _ => panic!("ожидался набор текста"),
+        }
+    }
+
+    #[test]
+    fn a_key_is_named_not_numbered() {
+        assert!(parse_step("2000 key enter", Path::new("/tmp")).is_some());
+        assert!(parse_step("2000 key 13", Path::new("/tmp")).is_none());
+        assert!(parse_step("2000 type", Path::new("/tmp")).is_none());
+    }
+
+    /// Созревшее вместе с ждущим шагом — это созревшее ДО него, а не вместо:
+    /// после него часы встанут, и следующим шагам ещё не время.
+    #[test]
+    fn a_waiting_step_cuts_the_batch() {
+        let mut script = Script {
+            steps: VecDeque::from(vec![
+                (Duration::ZERO, Action::Click),
+                (Duration::ZERO, Action::Await { address: Address::default(), gone: false }),
+                (Duration::ZERO, Action::Click),
+            ]),
+            started: None,
+            held: None,
+            paused: Duration::ZERO,
+        };
+        assert_eq!(script.due().len(), 2, "выдача обрывается на ждущем шаге");
+        assert_eq!(script.due().len(), 1, "остаток дожидается следующего раза");
+    }
+
     /// Часы сценария стоят, пока он ждёт: иначе первое же долгое ожидание
     /// сделало бы все последующие времена просроченными, и остаток сценария
     /// отыгрался бы одним кадром.
@@ -498,7 +576,7 @@ mod tests {
         let mut script = Script {
             steps: VecDeque::from(vec![
                 (Duration::ZERO, Action::Click),
-                (Duration::from_millis(40), Action::Exit),
+                (Duration::from_millis(120), Action::Exit),
             ]),
             started: None,
             held: None,
@@ -508,13 +586,13 @@ mod tests {
         assert_eq!(script.due().len(), 1, "первый шаг созрел сразу");
 
         script.hold();
-        std::thread::sleep(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(200));
         assert!(script.due().is_empty(), "пока ждём, шаги не зреют");
 
         script.resume();
         assert!(script.due().is_empty(), "простой не засчитан сценарию");
 
-        std::thread::sleep(Duration::from_millis(60));
+        std::thread::sleep(Duration::from_millis(200));
         assert_eq!(script.due().len(), 1, "после простоя время идёт своим ходом");
     }
 }

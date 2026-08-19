@@ -1,0 +1,13 @@
+# Ввод с клавиатуры: отбор по имени сужает список.
+#
+# Каретка ставится нажатием на поле, дальше набранное едет знак за знаком —
+# раскладка к этому времени уже применена.
+100 timeout 10000
+500 wait query
+700 expect text:Landsat-5
+900 tap query
+1200 type Sentinel
+2500 absent text:Landsat-5
+2700 wait text:Sentinel-2
+2900 shot uitest-filter
+3100 exit

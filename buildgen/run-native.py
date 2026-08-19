@@ -68,7 +68,10 @@ def main():
         # отличает «сошлось» от «не сошлось», и глотать его нельзя.
         return process.wait()
     except KeyboardInterrupt:
+        # Хост дописывает логи уже после сигнала — дожидаемся его, иначе лог
+        # обрывается на середине последнего кадра.
         print("\nShutting down.")
+        process.wait()
         return 130
 
 if __name__ == "__main__":

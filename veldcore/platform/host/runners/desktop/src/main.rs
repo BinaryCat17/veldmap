@@ -73,6 +73,9 @@ struct App<'a> {
     owner_name: String,
     win_cfg: window::PluginWindowConfig,
     running: Option<Running>,
+    /// Раннер не поднялся. Отдельным полем, а не отсутствием `running`: без
+    /// окна прогон не состоялся вовсе, и снаружи это обязано быть отказом.
+    broken: bool,
 }
 
 /// Раннер после инициализации: окно, GPU и загруженные сервисы.
@@ -205,7 +208,7 @@ impl Running {
         // Снимки ложатся туда же, где логи: и то и другое — про последний запуск.
         let script = capture::Script::from_env(
             ctx.config.log_path().parent().unwrap_or(std::path::Path::new(".")),
-        );
+        )?;
 
         Ok(Self {
             window,
@@ -390,6 +393,40 @@ impl Running {
         ));
     }
 
+    /// Курсор сценария — сразу, а не коалесцированно.
+    ///
+    /// Коалесценция заведена под поток движений от окна (40–125 в секунду), а
+    /// сценарий движет курсор считаное число раз. Отложи мы его до следующего
+    /// кадра — слипшиеся в один кадр `move` и `click` дали бы нажатие по
+    /// прежней точке: iced берёт её из последнего движения.
+    fn move_cursor(&mut self, at: (f32, f32)) {
+        self.cursor_pos = at;
+        self.cursor_dirty = false;
+        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::CursorMoved(
+            app::CursorMovedEvent { x: at.0, y: at.1 },
+        ));
+    }
+
+    /// Клавиша целиком: код, порождённый ею текст и состояние.
+    fn publish_key(&self, code: u32, text: String, pressed: bool) {
+        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Key(
+            app::KeyEvent { key_code: code, pressed, text, modifiers: 0 },
+        ));
+    }
+
+    /// Набор текста: по знаку за нажатие, туда, где стоит каретка.
+    ///
+    /// Физический код у набранного свой и заведомо не совпадающий ни с одной
+    /// клавишей: раскладка к этому времени уже применена, и рендереру нужен
+    /// текст, а не то, чем его набрали (см. ui-service/keyboard.rs).
+    fn publish_typing(&self, text: &str) {
+        const TYPED: u32 = u32::MAX;
+        for symbol in text.chars() {
+            self.publish_key(TYPED, symbol.to_string(), true);
+            self.publish_key(TYPED, String::new(), false);
+        }
+    }
+
     /// Отыгрывает шаги отладочного сценария, чей срок настал. Идёт после
     /// показа кадра: снимок обязан застать уже отрисованное состояние, а не
     /// то, что было до render-опов этого кадра.
@@ -404,10 +441,7 @@ impl Running {
         let due = script.due();
         for action in due {
             match action {
-                capture::Action::Move { x, y } => {
-                    self.cursor_pos = (x, y);
-                    self.cursor_dirty = true;
-                }
+                capture::Action::Move { x, y } => self.move_cursor((x, y)),
                 capture::Action::Click => {
                     self.publish_button(true);
                     self.publish_button(false);
@@ -434,6 +468,11 @@ impl Running {
                     }
                 }
                 capture::Action::Patience { limit } => self.patience = limit,
+                capture::Action::Type { text } => self.publish_typing(&text),
+                capture::Action::Key { code, .. } => {
+                    self.publish_key(code, String::new(), true);
+                    self.publish_key(code, String::new(), false);
+                }
                 capture::Action::Tap { address } => self.await_widget(address, true, false, true),
                 capture::Action::Await { address, gone } => self.await_widget(address, false, gone, true),
                 capture::Action::Assert { address, gone } => self.await_widget(address, false, gone, false),
@@ -501,11 +540,27 @@ impl Running {
                 return;
             }
 
-            let enough = match waiting.address.ordinal {
-                0 => place.found == 1,
-                n => place.found >= n,
+            // «Есть» и «нет» — не отрицания друг друга: безномерный адрес
+            // считается найденным ровно у одного, а пропавшим — у нуля.
+            // Иначе два одинаковых на экране сошлись бы и как «не нашёлся», и
+            // как «пропал».
+            let sated = match (waiting.gone, waiting.address.ordinal) {
+                (false, 0) => place.found == 1,
+                (false, n) => place.found >= n,
+                (true, 0) => place.found == 0,
+                (true, n) => place.found < n,
             };
-            if enough != waiting.gone {
+            if sated {
+                // Место годно, только если в него можно попасть курсором:
+                // вырожденный прямоугольник или уехавший за окно дал бы
+                // нажатие мимо, а в лог — бодрое «нажат».
+                if waiting.tap && !self.reachable(&place) {
+                    self.fail(format!(
+                        "«{}»: место {}×{} в точке {}×{} — курсором туда не попасть",
+                        waiting.address, place.width, place.height, place.x, place.y
+                    ));
+                    return;
+                }
                 if waiting.tap {
                     self.tap_at(&place);
                 }
@@ -556,14 +611,24 @@ impl Running {
     /// берёт точку нажатия из последнего движения, а коалесцированный `move`
     /// раннера уехал бы только следующим кадром — то есть уже после клика.
     fn tap_at(&mut self, place: &veldmap_host_core::places::Place) {
-        let at = (place.x + place.width / 2.0, place.y + place.height / 2.0);
-        self.cursor_pos = at;
-        self.cursor_dirty = false;
-        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::CursorMoved(
-            app::CursorMovedEvent { x: at.0, y: at.1 },
-        ));
+        self.move_cursor((place.x + place.width / 2.0, place.y + place.height / 2.0));
         self.publish_button(true);
         self.publish_button(false);
+    }
+
+    /// Оборвали ли прогон раньше, чем сценарий кончился.
+    fn unfinished(&self) -> bool {
+        self.script.as_ref().is_some_and(|script| script.unfinished()) || self.awaiting.is_some()
+    }
+
+    /// Достанет ли курсор до середины названного места.
+    fn reachable(&self, place: &veldmap_host_core::places::Place) -> bool {
+        let (width, height) = self.hw.size;
+        let (x, y) = (place.x + place.width / 2.0, place.y + place.height / 2.0);
+        place.width > 0.0
+            && place.height > 0.0
+            && (0.0..width as f32).contains(&x)
+            && (0.0..height as f32).contains(&y)
     }
 
     /// Сценарий не сошёлся с экраном: досматривать нечего, а прогон обязан
@@ -597,6 +662,7 @@ impl ApplicationHandler for App<'_> {
             }
             Err(e) => {
                 log::error!(target: "render", "Раннер не запустился: {:#}", e);
+                self.broken = true;
                 event_loop.exit();
             }
         }
@@ -732,13 +798,23 @@ fn main() -> anyhow::Result<()> {
         owner_name,
         win_cfg,
         running: None,
+        broken: false,
     };
     event_loop.run_app(&mut app)?;
 
-    // Несошедшийся сценарий обязан быть виден снаружи: прогон запускают из
-    // скрипта, и «прошло» там читают по коду возврата, а не по логу.
-    if app.running.is_some_and(|running| running.failed) {
-        anyhow::bail!("сценарий не сошёлся с тем, что на экране — см. runtime/logs/host.log");
+    // Прогон обязан кончиться так, как написано в сценарии, и всякий другой
+    // конец — отказ: снаружи «прошло» читают по коду возврата, а не по логу,
+    // и молчаливый ноль объявил бы непроверенное проверенным.
+    if app.broken {
+        anyhow::bail!("раннер не запустился — см. runtime/logs/host.log");
+    }
+    if let Some(running) = &app.running {
+        if running.failed {
+            anyhow::bail!("сценарий не сошёлся с тем, что на экране — см. runtime/logs/host.log");
+        }
+        if running.unfinished() {
+            anyhow::bail!("прогон оборван раньше конца сценария — см. runtime/logs/host.log");
+        }
     }
     Ok(())
 }
