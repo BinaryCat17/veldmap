@@ -44,6 +44,11 @@ pub struct State {
     /// (см. download.rs). Запись живёт от нажатия «скачать» до терминального
     /// события — включая окно ожидания подписи, когда задачи ещё нет.
     pub downloads: HashMap<String, Download>,
+    /// Почему сорвалась последняя попытка, по имени записи. Живёт здесь, а не
+    /// в сидкаре: причина — про попытку, а не про файл, и переживать
+    /// перезапуск ей незачем. Перечитывание каталога переживает: обход диска
+    /// про отказы ничего не знает и молча стёр бы их все.
+    pub troubles: HashMap<String, String>,
 
     /// Ожидание fs/on_list — гасит устаревший ответ. Запрос здесь всегда
     /// один: обходов диска ровно столько, сколько нужно, чтобы состояние было
@@ -121,6 +126,7 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
         queued_sidecars: HashMap::new(),
         deferred_opens: Vec::new(),
         downloads: HashMap::new(),
+        troubles: HashMap::new(),
         pending_list: veldsdk::Correlator::new(),
         list_again: false,
         pending_roots: veldsdk::Latest::new(),

@@ -44,6 +44,10 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
         return;
     }
 
+    // Причина прошлого срыва — про прошлую попытку, и новая её снимает: пока
+    // она идёт, говорить о ней нечего, а сорвётся — скажет своё.
+    state.troubles.remove(&name);
+
     // Сидкар — сразу, до подписи: даже если приложение упадёт на первом байте,
     // на диске уже будет известно, откуда файл, и запись о намерении не
     // пропадёт. Из прежнего сидкара переносим то, что о записи известно, но
@@ -101,6 +105,7 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
 
     if !signed.error.is_empty() {
         veldsdk::log::warn!(target: "handlers", "подпись для {} не удалась: {}", name, signed.error);
+        state.troubles.insert(name, format!("подпись не удалась: {}", signed.error));
         // Задачи ещё нет — терминального события платформы не будет, снимаем
         // с учёта сами, иначе запись навсегда останется «качается».
         finish(state, &correlation_id);
@@ -200,10 +205,13 @@ pub fn on_fs_download_progress(state: &mut State, event: FsDownloadProgress) {
 /// хост, — но приходит он тем же топиком, поэтому и разбирать здесь нечего.
 pub fn on_fs_download_result(state: &mut State, response: FsDownloadResponse) {
     let correlation_id = veldsdk::correlation();
+    // Убитая закачка приезжает сюда пустым ответом (его за неё публикует
+    // хост), так что непустая ошибка — это именно срыв, а не наша отмена.
     if !response.error.is_empty() {
         let name = state.downloads.get(&correlation_id).map(|d| d.name.clone());
         if let Some(name) = name {
             veldsdk::log::warn!(target: "handlers", "закачка {} не удалась: {}", name, response.error);
+            state.troubles.insert(name, response.error.clone());
         }
     }
     finish(state, &correlation_id);

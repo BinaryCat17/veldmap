@@ -468,8 +468,12 @@ impl Running {
                     }
                 }
                 capture::Action::Patience { limit } => self.patience = limit,
-                capture::Action::Type { text } => self.publish_typing(&text),
-                capture::Action::Key { code, .. } => {
+                capture::Action::Type { text } => {
+                    log::info!(target: "render", "Сценарий: набрано «{}»", text);
+                    self.publish_typing(&text);
+                }
+                capture::Action::Key { code, name } => {
+                    log::info!(target: "render", "Сценарий: клавиша {}", name);
                     self.publish_key(code, String::new(), true);
                     self.publish_key(code, String::new(), false);
                 }

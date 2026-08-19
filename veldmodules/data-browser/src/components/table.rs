@@ -509,13 +509,26 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
             .into(),
             Column::Status => {
                 let (dot, label, label_color) = status_look(&row_data.status);
-                row![
+                let cell = row![
                     theme::dot(dot),
                     text::<Msg>(label).size(theme::TEXT_SMALL).color(label_color).single_line(),
                 ]
                 .spacing(6.0)
-                .align_items(Alignment::Center)
-                .into()
+                .align_items(Alignment::Center);
+                // Причина срыва длиннее колонки, а срезанная на полуслове она
+                // не объясняет ничего. Целиком её показывает подсказка —
+                // единственное место в строке, чья ширина не задана колонкой.
+                match &row_data.status {
+                    RowStatus::Paused { trouble, .. } if !trouble.is_empty() => tooltip(
+                        cell,
+                        trouble.clone(),
+                        TooltipPosition::TooltipTop,
+                    )
+                    .style(theme::panel())
+                    .text_size(theme::TEXT_SMALL)
+                    .into(),
+                    _ => cell.into(),
+                }
             }
             Column::Progress => progress_cell(&row_data.status),
             Column::Actions => actions(view, row_data, context),
@@ -643,7 +656,15 @@ fn status_look(status: &RowStatus) -> (Color, String, Color) {
             if *total > 0 { format::progress(*done, *total) } else { "скачивается".to_string() },
             theme::ACCENT_TEXT,
         ),
-        RowStatus::Paused { done, total } => (
+        // Сорвавшаяся закачка говорит своим голосом: «прервано» — это про
+        // остановленную человеком, и молчать о причине там, где он её не
+        // выбирал, значит предложить ему нажать «Продолжить» вслепую.
+        RowStatus::Paused { trouble, .. } if !trouble.is_empty() => (
+            theme::DANGER,
+            trouble.clone(),
+            theme::DANGER,
+        ),
+        RowStatus::Paused { done, total, .. } => (
             theme::WARN,
             if *total > 0 { format::progress(*done, *total) } else { "прервано".to_string() },
             theme::WARN_TEXT,

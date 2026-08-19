@@ -347,6 +347,8 @@ pub fn delete_data(state: &mut State, name: &str) {
 pub fn delete_entry(state: &mut State, name: &str) {
     state.origins.remove(name);
     state.queued_sidecars.remove(name);
+    // Причина срыва уходит вместе с записью: она про эту запись, а не про имя.
+    state.troubles.remove(name);
     // Удаление сидкара — с учётом, как и удаление данных: не удалившийся
     // `.origin` остаётся сиротой, и ближайший же листинг воскрешает по нему
     // запись о намерении. Молчаливый отказ здесь означает строку в
@@ -409,6 +411,13 @@ fn entries(state: &State) -> Vec<LibraryEntry> {
             name: name.to_string(),
             done,
             total,
+            // Причина — только у стоящей записи: у идущей её сняло начало
+            // попытки, а у доведённой она означала бы, что сорвалось то, что
+            // дошло.
+            trouble: match status {
+                LibraryStatus::LibPaused => state.troubles.get(name).cloned().unwrap_or_default(),
+                _ => String::new(),
+            },
             status: status as i32,
             product: state.product_of(name).unwrap_or_default().to_string(),
             siblings: state.siblings_of(name),

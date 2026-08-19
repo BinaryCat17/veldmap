@@ -16,7 +16,12 @@ pub enum RowStatus {
     Remote,
     Downloading { done: u64, total: u64 },
     /// Начато, но не доведено. `done: 0` — закачка сорвалась до первых байт.
-    Paused { done: u64, total: u64 },
+    ///
+    /// `trouble` — почему сорвалась последняя попытка; пусто — её остановил
+    /// человек. Стои́т запись в обоих случаях одинаково и продолжается
+    /// одинаково, поэтому это не отдельное состояние, а причина при нём:
+    /// разница только в том, знает ли человек, почему она стои́т.
+    Paused { done: u64, total: u64, trouble: String },
     Complete,
     /// Папка, часть содержимого которой уже на диске. Сколько там файлов
     /// всего, каталог не говорит, поэтому сказано только скачанное.
@@ -28,7 +33,7 @@ impl RowStatus {
     /// загрузки в этой строке места нет.
     pub fn progress(&self) -> Option<(u64, u64)> {
         match self {
-            RowStatus::Downloading { done, total } | RowStatus::Paused { done, total } if *total > 0 => {
+            RowStatus::Downloading { done, total } | RowStatus::Paused { done, total, .. } if *total > 0 => {
                 Some((*done, *total))
             }
             _ => None,
@@ -406,7 +411,11 @@ impl Row {
     pub fn from_entry(entry: &LibraryEntry) -> Row {
         let status = match status_of(entry) {
             LibraryStatus::LibDownloading => RowStatus::Downloading { done: entry.done, total: entry.total },
-            LibraryStatus::LibPaused => RowStatus::Paused { done: entry.done, total: entry.total },
+            LibraryStatus::LibPaused => RowStatus::Paused {
+                done: entry.done,
+                total: entry.total,
+                trouble: entry.trouble.clone(),
+            },
             LibraryStatus::LibComplete => RowStatus::Complete,
         };
         Row {
@@ -528,7 +537,7 @@ fn snapshot(product: String, siblings: u32, files: Vec<Row>) -> Row {
         // Не доведён ни один — снимок оборван, а не «частично скачан»: зелёная
         // строка с нулём на диске обещает то, чего нет, и проходит отбор «на
         // диске» вместе с целыми.
-        (false, 0, _) => RowStatus::Paused { done: size, total: 0 },
+        (false, 0, _) => RowStatus::Paused { done: size, total: 0, trouble: String::new() },
         (false, done, _) => RowStatus::Partial { done },
     };
 
@@ -561,6 +570,7 @@ mod tests {
             status: status as i32,
             modified: 0,
             siblings: 0,
+            trouble: String::new(),
         }
     }
 
