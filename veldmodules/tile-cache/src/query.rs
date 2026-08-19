@@ -6,24 +6,11 @@
 //! терминальным QueryDone со списком промахов. Промах — не ошибка: за ним
 //! заказчик идёт к производителю (image-tiler).
 
-use veldsdk::graphics::TextureFormat;
 use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::FsReadRequest;
 
 use crate::module::{layout, store, State};
 use crate::proto::tile_cache::{QueryDone, QueryRequest, TileAddr, TileResult};
-
-/// Формат текстуры тайла. sRGB, потому что в тайле лежит готовое к показу
-/// содержимое: сэмплер потребителя отдаст линейные значения, и фильтрация
-/// дробных масштабов пройдёт в линейном пространстве.
-///
-/// Своя константа у каждого из двух поставщиков тайлов — общего крейта у них
-/// нет и быть не может (`image-tiler` зависит от `tile-cache`, обратная
-/// зависимость замкнула бы граф сборки), а факт этот объявлен там же, где и
-/// сам тайл: в комментарии к `TileResult` обоих контрактов. Расходиться им
-/// нельзя: тайлы из кэша и от производителя ложатся в один кадр, и разный
-/// формат дал бы там разную яркость.
-const TILE_FORMAT: TextureFormat = TextureFormat::TexRgba8UnormSrgb;
 
 /// Потолок числа тайлов в одном запросе. Экран — это десятки тайлов;
 /// тысячи означают ошибку в расчёте видимого у заказчика, и честнее отказать,
@@ -168,7 +155,7 @@ fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Re
     drop(file);
 
     let (width, height, rgba) = decode(&bytes).map_err(Miss::Broken)?;
-    let texture = veldsdk::graphics::upload_texture("тайл", width, height, TILE_FORMAT, &rgba, owner)
+    let texture = veldsdk::graphics::upload_texture("тайл", width, height, layout::TILE_FORMAT, &rgba, owner)
         .map_err(Miss::Broken)?;
     Ok(TileResult { level, x, y, texture: Some(texture), width, height })
 }

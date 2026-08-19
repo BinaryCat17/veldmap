@@ -25,24 +25,16 @@ use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use veldsdk::graphics::{self as gfx, TextureFormat};
+use veldsdk::graphics::{self as gfx};
+// Формат тайла — не наш: он общий с кэшем, и объявлен там, где его видят оба
+// (см. `layout.rs` в tile-cache). Своя копия здесь однажды разошлась бы с той.
+use veldmap_tile_cache_wrap::layout::TILE_FORMAT;
 
 use crate::proto::image_tiler::{
     Described, DescribeRequest, GeoTie, ProduceDone, ProduceProgress, ProduceRequest, TileResult,
 };
 use crate::proto::tile_cache::StoreTile;
 
-/// Формат текстуры тайла. sRGB, потому что в тайле лежит готовое к показу
-/// содержимое: сэмплер потребителя отдаст линейные значения, и фильтрация
-/// дробных масштабов пройдёт в линейном пространстве.
-///
-/// Своя константа у каждого из двух поставщиков тайлов — общего крейта у них
-/// нет и быть не может (`image-tiler` зависит от `tile-cache`, обратная
-/// зависимость замкнула бы граф сборки), а факт этот объявлен там же, где и
-/// сам тайл: в комментарии к `TileResult` обоих контрактов. Расходиться им
-/// нельзя: тайлы из кэша и от производителя ложатся в один кадр, и разный
-/// формат дал бы там разную яркость.
-const TILE_FORMAT: TextureFormat = TextureFormat::TexRgba8UnormSrgb;
 
 /// Шаг прогресса по прочитанному: чаще — шум, реже — «висит».
 const PROGRESS_STEP: u64 = 8 * 1024 * 1024;
