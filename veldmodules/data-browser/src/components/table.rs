@@ -335,7 +335,7 @@ pub fn header(view: ViewId, columns: &[Column], all: bool, compact: bool) -> Ele
             // раскрытым на ней, и подпись обязана сказать это — иначе она
             // обещает очертить всю выдачу, а очертит двадцать строк.
             Column::Check => hinted(
-                theme::row_check(all).on_press(Msg::In(view, ViewMsg::CheckShown(!all))),
+                theme::row_check(Some(all)).on_press(Msg::In(view, ViewMsg::CheckShown(!all))),
                 match all {
                     true => "Убрать контуры показанного",
                     false => "Очертить показанное на шаре",
@@ -947,20 +947,36 @@ fn twist(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
 }
 
 /// Коробочка отметки. Отмеченные снимки очерчены на шаре, и другого способа
-/// очертить их нет (см. handlers::outline) — поэтому она стоит только у
-/// снимка: у папки пути и у файла внутри снимка контура не бывает.
+/// очертить их нет (см. handlers::outline).
+///
+/// Стои́т она у каждого файла, а не только у того, что можно очертить: колонка
+/// без неё выглядит рваной, а «можно ли очертить» — свойство невидимое, и
+/// пустое место его не объясняет. Там, где очерчивать нечего, коробочка
+/// выключена: рычаг, который виден и ничего не делает, врёт ровно так же, как
+/// и его отсутствие, — а выключенный говорит правду и объясняет её подсказкой.
+///
+/// Нет её только у папки: в папку заходят, а контур бывает у снимка.
 ///
 /// С подсказкой, и это не украшение: коробочка — единственный рычаг, чьё
 /// действие происходит не здесь, а на другой вкладке. Без подписи она
 /// предлагает «отметить» неизвестно для чего.
 fn check(view: ViewId, row: &Row, context: Context<'_>) -> Element<Msg> {
+    // Именно папка пути, а не всё, во что можно зайти: снимок, лежащий
+    // каталогом (.SAFE, .SEN3), — тоже «папка» по укладке, но очерчивают
+    // как раз его.
+    if matches!(row.kind, RowKind::Folder) {
+        return theme::nothing();
+    }
     let key = row.snapshot_key();
     if !row.is_snapshot() || key.is_empty() {
-        return theme::nothing();
+        return hinted(
+            theme::row_check(None),
+            "Очертить нечем: файл скачан сам по себе, вне снимка, и контура у него нет",
+        );
     }
     let marked = context.listing.selected.contains(key);
     hinted(
-        theme::row_check(marked).on_press(Msg::In(view, ViewMsg::Check(key.to_string()))),
+        theme::row_check(Some(marked)).on_press(Msg::In(view, ViewMsg::Check(key.to_string()))),
         match marked {
             true => "Убрать контур с шара",
             false => "Очертить на шаре",

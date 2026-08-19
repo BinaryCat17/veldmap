@@ -322,10 +322,14 @@ pub fn row_button_icon<M>(glyph: &str, tone: IconTone) -> Container<M> {
 ///
 /// Занимает свою колонку целиком: та узкая (см. `table::CHECK`), и полей у неё
 /// нет — иначе от коробочки остались бы несколько точек, по которым не попасть.
-pub fn row_check<M>(marked: bool) -> Container<M> {
+/// Коробочка отметки. `None` — отмечать нечем: рисуется тем же знаком, но
+/// цветом линии, а не чернил. Разница нужна затем, что нажимается она не
+/// везде, а коробочка в полную силу обещает нажатие всюду, где стои́т.
+pub fn row_check<M>(marked: Option<bool>) -> Container<M> {
     let (glyph, color) = match marked {
-        true => (glyph::BOX_TICKED, ACCENT),
-        false => (glyph::BOX, INK_FAINT),
+        Some(true) => (glyph::BOX_TICKED, ACCENT),
+        Some(false) => (glyph::BOX, INK_FAINT),
+        None => (glyph::BOX, LINE_STRONG),
     };
     chrome_icon(icon::<M>(glyph).size(12.0).color(color))
         // Поля у́же обычных: колонка узкая, и четыре точки с каждой стороны
