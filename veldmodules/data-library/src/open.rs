@@ -101,8 +101,7 @@ fn fail(correlation_id: String, error: String) {
 /// деле, и открывать вместо неё пустое место значило бы соврать.
 pub fn on_reveal(state: &mut State, req: ItemRequest) {
     if req.name.is_empty() { return; }
-    let is_partial = state.entry_for(&req.name).is_some_and(|file| file.is_partial);
     crate::calls::app::on_reveal_path(&veldsdk::proto::app::RevealPath {
-        path: crate::module::storage::data_path(&req.name, is_partial),
+        path: crate::module::storage::data_path(&req.name, state.is_partial(&req.name)),
     });
 }

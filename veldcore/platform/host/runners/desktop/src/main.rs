@@ -733,6 +733,16 @@ impl ApplicationHandler for App<'_> {
                     },
                 ));
             }
+            // Окно переехало на экран с другим DPI. Обычно следом придёт и
+            // `Resized` — винит по умолчанию меняет размер окна на предложенный
+            // системой, — но обязан он этого не быть: масштаб сменился уже
+            // сейчас, а размер может и остаться прежним. Публикуем сами, мимо
+            // проверки на смену размера: она бы это и съела.
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let scale = (scale_factor as f32).max(r.ui_scale);
+                publish_window_resized(&r.app_pub, &r.hw.owner, r.hw.size.0, r.hw.size.1, scale, r.format_proto);
+                r.window.request_redraw();
+            }
             WindowEvent::ModifiersChanged(m) => {
                 r.key_modifiers = m.state();
             }

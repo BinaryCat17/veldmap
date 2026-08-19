@@ -143,6 +143,16 @@ impl State {
         self.snapshot.get(name)
     }
 
+    /// Лежат ли байты записи под `.part`. Ответ один на всех спрашивающих:
+    /// удаление и показ в файловом менеджере спрашивают одно и то же, и два
+    /// умолчания у одного вопроса однажды разъехались бы.
+    ///
+    /// Чего в снимке нет вовсе — это `.part`: единственное, что могло
+    /// остаться от закачки, сорвавшейся между обходами диска.
+    pub fn is_partial(&self, name: &str) -> bool {
+        self.entry_for(name).map_or(true, |file| file.is_partial)
+    }
+
     /// Идущая закачка записи вместе с её task_id (нужен для отмены).
     pub fn active_download(&self, name: &str) -> Option<(&str, &Download)> {
         self.downloads.iter()

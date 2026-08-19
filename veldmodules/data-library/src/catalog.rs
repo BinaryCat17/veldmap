@@ -1,6 +1,6 @@
 //! Снимок каталога и сидкары: чтение диска и вывод состояния библиотеки.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::module::{ReadPurpose, SidecarWrite, State};
 use crate::module::storage::{self, LocalFile, OriginSidecar};
@@ -9,6 +9,10 @@ use crate::proto::data_library::{
 };
 use crate::proto::data_provider::{ProductRoots, ProductRootsRequest};
 use veldsdk::proto::core::ResourceOpened;
+
+/// Потолок сидкара. Это json из пяти полей — сотни байт с запасом на длинный
+/// ключ провайдера; всё, что крупнее, под этим именем оказалось не от нас.
+const SIDECAR_CAP: u64 = 64 * 1024;
 use veldsdk::proto::fs::{FsDeleteRequest, FsListRequest, FsReadRequest, FsWriteRequest, FsWriteResult};
 
 /// «Перечитай каталог». Ответ придёт не отсюда, а из on_list_result: диск
@@ -90,7 +94,10 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
     // бы записью о намерении до конца сессии. Исключение — сидкары, чья запись
     // ещё в полёте: на диске их закономерно нет, и срезать их значило бы
     // потерять запись только что начатой закачки.
-    let on_disk: Vec<String> = response.entries.iter()
+    // Множеством, а не списком: подрезка ниже спрашивает его о каждом
+    // известном имени, и на библиотеке в тысячи записей линейный поиск по
+    // списку той же длины подвешивал бы модуль на каждом обходе диска.
+    let on_disk: HashSet<String> = response.entries.iter()
         .filter_map(|e| e.name.strip_suffix(storage::ORIGIN_SUFFIX))
         .map(str::to_string)
         .collect();
@@ -105,7 +112,7 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
         .collect();
     let downloading: Vec<&str> = state.downloads.values().map(|dl| dl.name.as_str()).collect();
     state.origins.retain(|name, _| {
-        on_disk.contains(name)
+        on_disk.contains(name.as_str())
             || in_flight.contains(&name.as_str())
             || downloading.contains(&name.as_str())
     });
@@ -223,6 +230,16 @@ pub fn on_snapshot(state: &mut State, request: SnapshotFiles) {
 pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened) {
     let Some(handle) = &opened.handle else { return };
 
+    // Сидкар — это десятки байт json, который пишем мы сами. Что-то большее
+    // под этим именем — не наш файл (обрезанная закачка, чужой мусор), и
+    // втягивать его целиком в линейную память инстанса нельзя: неправдоподобный
+    // размер уронил бы весь модуль, а с ним и список скачанного.
+    if handle.size > SIDECAR_CAP {
+        veldsdk::log::warn!(target: "handlers",
+            "сидкар {} размером {} байт — это не наш файл, пропускаем", name, handle.size);
+        return;
+    }
+
     // RAII-гард: регион освобождается при любом выходе ниже.
     let resource = veldsdk::OwnedResource::new(handle.clone());
     let Ok(bytes) = veldsdk::abi::resource_read(resource.id(), 0, handle.size) else { return };
@@ -334,10 +351,7 @@ pub fn on_write_result(state: &mut State, response: FsWriteResult) {
 /// Удаляет данные записи, оставляя сидкар: так перекачка сносит доведённый
 /// файл, не теряя того, откуда он взялся.
 pub fn delete_data(state: &mut State, name: &str) {
-    // Чего в снимке нет вовсе, удаляем как `.part`: это единственное, что
-    // могло остаться от закачки, сорвавшейся между листингами.
-    let is_partial = state.entry_for(name).map(|file| file.is_partial).unwrap_or(true);
-    let path = storage::data_path(name, is_partial);
+    let path = storage::data_path(name, state.is_partial(name));
     let correlation_id = state.pending_delete.begin(path.clone());
     crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
 }
