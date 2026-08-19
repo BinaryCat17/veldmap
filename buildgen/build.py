@@ -466,10 +466,11 @@ def test_rust_units():
     started = time.monotonic()
 
     run(["cargo", "test", "--release", "-q",
-         "-p", "veldsdk", "-p", "veldmap-host-core", "-p", "veldmap-host-network"],
+         "-p", "veldsdk", "-p", "veldmap-host-core", "-p", "veldmap-host-network",
+         "-p", "veldmap-host-gui"],
         cwd=os.path.join(PROJECT_ROOT, "veldcore"))
 
-    tested = ["veldsdk", "veldmap-host-core", "veldmap-host-network"]
+    tested = ["veldsdk", "veldmap-host-core", "veldmap-host-network", "veldmap-host-gui"]
     for module in discover_modules():
         if module["language"] != "rust":
             continue

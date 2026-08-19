@@ -104,7 +104,41 @@ struct Running {
     /// `event_loop` виден только обработчику, и завершаться посреди отрисовки
     /// нечестно — кадр надо дорисовать.
     exit_requested: bool,
+    /// Незакрытое ожидание сценария; `None` — сценарий идёт своим ходом.
+    awaiting: Option<Awaited>,
+    /// Номер последнего заданного вопроса. Ответ на прежний — не к нам: экран
+    /// за это время сменился, и место в нём уже не то.
+    asked: u64,
+    /// Предел ожидания для шагов сценария; меняется шагом `timeout`.
+    patience: std::time::Duration,
+    /// Сценарий не сошёлся с тем, что на экране. Прогон кончится отказом —
+    /// иначе провалившаяся проверка выглядела бы как успешный запуск.
+    failed: bool,
 }
+
+/// Шаг сценария, ждущий ответа рендерера: где на экране названный элемент.
+struct Awaited {
+    address: capture::Address,
+    /// Нажать, как только дождёмся.
+    tap: bool,
+    /// Ждём, что элемента не станет.
+    gone: bool,
+    /// Спрашивать ли снова. Нет — у шага один ответ, и не сошедшийся ответ
+    /// сразу валит прогон (`expect`/`absent`).
+    retry: bool,
+    /// Когда сдаваться.
+    until: std::time::Instant,
+    /// Вопрос в полёте; пока он есть, второго не задаём.
+    in_flight: Option<u64>,
+}
+
+/// Сколько ждём один ответ рендерера. Обход стои́т кадра, а кадр — вертикальной
+/// синхронизации; молчание дольше этого значит, что рисовать уже некому.
+const ANSWER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Предел ожидания по умолчанию: список каталога приезжает из сети, и
+/// пятнадцати секунд ему бывает мало.
+const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Running {
     async fn start(
@@ -191,6 +225,10 @@ impl Running {
             key_modifiers: winit::keyboard::ModifiersState::empty(),
             script,
             exit_requested: false,
+            awaiting: None,
+            asked: 0,
+            patience: PATIENCE,
+            failed: false,
         })
     }
 
@@ -356,6 +394,12 @@ impl Running {
     /// показа кадра: снимок обязан застать уже отрисованное состояние, а не
     /// то, что было до render-опов этого кадра.
     fn play_script(&mut self) {
+        // Незакрытое ожидание идёт первым и один занимает кадр: часы сценария
+        // на это время стоят, и следующим шагам всё равно не время.
+        if self.awaiting.is_some() {
+            self.settle();
+            return;
+        }
         let Some(script) = &mut self.script else { return };
         let due = script.due();
         for action in due {
@@ -389,9 +433,145 @@ impl Running {
                         Err(e) => log::error!(target: "render", "Снимок '{}' не сделан: {:#}", path.display(), e),
                     }
                 }
+                capture::Action::Patience { limit } => self.patience = limit,
+                capture::Action::Tap { address } => self.await_widget(address, true, false, true),
+                capture::Action::Await { address, gone } => self.await_widget(address, false, gone, true),
+                capture::Action::Assert { address, gone } => self.await_widget(address, false, gone, false),
                 capture::Action::Exit => self.exit_requested = true,
             }
         }
+    }
+
+    /// Заводит ожидание: спрашивает рендерера, где элемент, и останавливает
+    /// часы сценария до ответа.
+    fn await_widget(&mut self, address: capture::Address, tap: bool, gone: bool, retry: bool) {
+        if let Some(script) = &mut self.script {
+            script.hold();
+        }
+        // Срок у переспрашивающего — терпение сценария, у однократного — время
+        // на один вопрос-ответ: он спрашивает про то, что видно сейчас, и
+        // ждать ему нечего, кроме самого ответа.
+        let limit = match retry {
+            true => self.patience,
+            false => ANSWER,
+        };
+        let in_flight = Some(self.ask(&address));
+        self.awaiting = Some(Awaited {
+            address,
+            tap,
+            gone,
+            retry,
+            until: std::time::Instant::now() + limit,
+            in_flight,
+        });
+    }
+
+    /// Спрашивает рендерера, где на экране элемент, и возвращает номер вопроса.
+    fn ask(&mut self, address: &capture::Address) -> u64 {
+        self.asked += 1;
+        app_bus::emit::on_locate_widget(&self.app_pub, &app::LocateWidget {
+            plugin_id: self.hw.owner.clone(),
+            request: self.asked,
+            method: address.method.clone(),
+            value: address.value.clone(),
+            text: address.text.clone(),
+            ordinal: address.ordinal,
+        });
+        self.asked
+    }
+
+    /// Двигает незакрытое ожидание: забирает ответ, решает, дождались ли, и
+    /// либо продолжает сценарий, либо валит прогон.
+    fn settle(&mut self) {
+        let answer = self.ctx.places.take(&self.hw.owner);
+        let Some(mut waiting) = self.awaiting.take() else { return };
+
+        // Ответ на позапрошлый вопрос отбрасываем молча: экран с тех пор
+        // сменился, и место в нём уже не то.
+        if let Some(place) = answer.filter(|place| Some(place.request) == waiting.in_flight) {
+            waiting.in_flight = None;
+
+            // Несколько подошедших под безномерный адрес — ошибка сценария, а
+            // не ожидания: ждать, пока лишние исчезнут, бессмысленно.
+            if !waiting.gone && waiting.address.ordinal == 0 && place.found > 1 {
+                self.fail(format!(
+                    "«{}»: подошло {} — назовите номером, который из них нужен",
+                    waiting.address, place.found
+                ));
+                return;
+            }
+
+            let enough = match waiting.address.ordinal {
+                0 => place.found == 1,
+                n => place.found >= n,
+            };
+            if enough != waiting.gone {
+                if waiting.tap {
+                    self.tap_at(&place);
+                }
+                log::info!(target: "render", "Сценарий: «{}» — {}",
+                    waiting.address,
+                    match (waiting.gone, waiting.tap) {
+                        (true, _) => "пропал",
+                        (_, true) => "нажат",
+                        _ => "на экране",
+                    });
+                if let Some(script) = &mut self.script {
+                    script.resume();
+                }
+                return;
+            }
+
+            // Ответ пришёл и не сошёлся. Переспрашивающий подождёт ещё, а
+            // однократному это и есть приговор.
+            if !waiting.retry {
+                self.fail(format!(
+                    "«{}»: {}",
+                    waiting.address,
+                    match waiting.gone {
+                        true => format!("всё ещё на экране ({})", place.found),
+                        false => "на экране нет".to_string(),
+                    }
+                ));
+                return;
+            }
+        }
+
+        if std::time::Instant::now() >= waiting.until {
+            self.fail(match waiting.in_flight {
+                Some(_) => format!("«{}»: рендерер не ответил", waiting.address),
+                None => format!("«{}»: не дождались", waiting.address),
+            });
+            return;
+        }
+        if waiting.in_flight.is_none() {
+            waiting.in_flight = Some(self.ask(&waiting.address));
+        }
+        self.awaiting = Some(waiting);
+    }
+
+    /// Нажать в середину видимой части элемента.
+    ///
+    /// Курсор переезжает по-настоящему и отдельным событием до нажатия: iced
+    /// берёт точку нажатия из последнего движения, а коалесцированный `move`
+    /// раннера уехал бы только следующим кадром — то есть уже после клика.
+    fn tap_at(&mut self, place: &veldmap_host_core::places::Place) {
+        let at = (place.x + place.width / 2.0, place.y + place.height / 2.0);
+        self.cursor_pos = at;
+        self.cursor_dirty = false;
+        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::CursorMoved(
+            app::CursorMovedEvent { x: at.0, y: at.1 },
+        ));
+        self.publish_button(true);
+        self.publish_button(false);
+    }
+
+    /// Сценарий не сошёлся с экраном: досматривать нечего, а прогон обязан
+    /// кончиться отказом.
+    fn fail(&mut self, why: String) {
+        log::error!(target: "render", "Сценарий не сошёлся: {}", why);
+        self.failed = true;
+        self.exit_requested = true;
     }
 }
 
@@ -546,12 +726,19 @@ fn main() -> anyhow::Result<()> {
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    event_loop.run_app(&mut App {
+    let mut app = App {
         runtime: &runtime,
         host_config,
         owner_name,
         win_cfg,
         running: None,
-    })?;
+    };
+    event_loop.run_app(&mut app)?;
+
+    // Несошедшийся сценарий обязан быть виден снаружи: прогон запускают из
+    // скрипта, и «прошло» там читают по коду возврата, а не по логу.
+    if app.running.is_some_and(|running| running.failed) {
+        anyhow::bail!("сценарий не сошёлся с тем, что на экране — см. runtime/logs/host.log");
+    }
     Ok(())
 }

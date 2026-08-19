@@ -53,7 +53,7 @@ def main():
     if not os.path.exists(binary_path):
         print(f"Binary not found: {binary_path}")
         print("Please run build first: python3 build.py")
-        return
+        return 1
     
     try:
         # Запускаем процесс напрямую (без cargo)
@@ -64,9 +64,12 @@ def main():
             stdout=None,  # stdout в консоль
             stderr=subprocess.STDOUT  # stderr тоже в консоль
         )
-        process.wait()
+        # Код возврата хоста — наш собственный: по нему прогон по сценарию
+        # отличает «сошлось» от «не сошлось», и глотать его нельзя.
+        return process.wait()
     except KeyboardInterrupt:
         print("\nShutting down.")
+        return 130
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

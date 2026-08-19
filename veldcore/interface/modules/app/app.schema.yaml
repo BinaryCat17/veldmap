@@ -17,9 +17,18 @@ interface:
       type: app/SetSurface
     on_reveal_path:
       type: app/RevealPath
+    # Ответ на обход разметки. Принимает его модуль app и кладёт в очередь
+    # хоста — забирает оттуда кадровый цикл раннера, как и поверхность окна:
+    # спрашивал он, и ждёт ответа тоже он.
+    on_widget_located:
+      type: app/WidgetLocated
   outputs:
     on_ui_event:
       type: app/UIEvent
     on_window_resized:
       type: app/WindowResized
       targeted: true
+    # Вопрос рендереру: где на экране элемент, названный не пикселями. Идёт
+    # широковещательно — хост не знает, кто рисует, и адресовать ему некого.
+    on_locate_widget:
+      type: app/LocateWidget

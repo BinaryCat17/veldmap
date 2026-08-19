@@ -68,6 +68,11 @@ pub struct PluginUiState {
     /// держала бы прокрутку намертво (см. `Scrollable.scroll_to`).
     pub aimed: HashMap<String, u64>,
 
+    /// Незакрытый вопрос платформы «где на экране этот элемент». Отвечается в
+    /// том же кадре, в котором пришёл, и снимается ответом: обход стои́т
+    /// раскладки, а раскладка бывает только внутри кадра (см. locate.rs).
+    pub pending_locate: Option<veldsdk::proto::app::LocateWidget>,
+
     /// Пойманное iced'ом за этот кадр; рассылается сразу после рендера
     /// (см. handlers::render_plugin_if_needed).
     pub pending_messages: Vec<UiMessage>,
@@ -140,6 +145,7 @@ impl PluginUiState {
             monitor_fps: 60,
             frames: crate::module::frames::FrameMeter::new(),
             aimed: HashMap::new(),
+            pending_locate: None,
             pending_messages: Vec::new(),
             surface_handle: None,
             surface_format: 0,

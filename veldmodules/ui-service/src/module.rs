@@ -10,6 +10,7 @@ mod drag;
 mod graphics;
 mod frames;
 mod keyboard;
+mod locate;
 mod pointer;
 mod popover;
 mod viewport;
@@ -28,4 +29,4 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 pub use handlers::{handle_set_view as on_set_view, handle_set_surface as on_set_surface};
 
 // -- Platform subscriptions --
-pub use handlers::handle_ui_event as on_ui_event;
+pub use handlers::{handle_locate_widget as on_locate_widget, handle_ui_event as on_ui_event};

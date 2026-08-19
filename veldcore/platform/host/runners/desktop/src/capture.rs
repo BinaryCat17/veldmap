@@ -8,6 +8,12 @@
 //! Включается переменной `VELDMAP_SCRIPT` с путём к файлу сценария; без неё
 //! ничего отсюда не работает и обычный запуск об этом модуле не знает.
 //!
+//! Элементы сценарий называет не пикселями, а тем же, чем их называет
+//! разметка: обработчиком нажимаемой коробки или частью видимой надписи. Где
+//! это на экране, знает рендерер — он и отвечает (см. `app/on_locate_widget`).
+//! Пиксельные шаги остались для того, у чего имени нет вовсе: шара, канвы
+//! просмотра, границы между панелями.
+//!
 //! ```text
 //! # <мс от старта окна> <действие> [аргументы]
 //! 1500 move 640 300
@@ -15,7 +21,10 @@
 //! 1700 press          # нажать и держать — дальше move тащит
 //! 1800 release
 //! 1900 shot browse
-//! 2000 exit
+//! 2000 wait text:на диске     # дождаться надписи; часы сценария стоят
+//! 2200 tap preview_product:eodata/Sentinel-1/S1A_IW.SAFE
+//! 2400 expect text:открывается
+//! 2600 exit
 //! ```
 
 use std::collections::VecDeque;
@@ -41,8 +50,95 @@ pub enum Action {
     /// Снимок кадра. Путь собран при разборе сценария: каталог знает он, а не
     /// кадровый цикл.
     Shot { path: PathBuf },
+    /// Дождаться элемента и нажать в середину его видимой части.
+    Tap { address: Address },
+    /// Дождаться, пока элемент появится (или пропадёт). Часы сценария на это
+    /// время стоят: ожидание не должно съедать время у следующих шагов.
+    Await { address: Address, gone: bool },
+    /// Элемент обязан быть (или не быть) прямо сейчас. Тем и отличается от
+    /// ожидания: спрашивает один раз и не даёт второго шанса.
+    Assert { address: Address, gone: bool },
+    /// Предел ожидания для последующих шагов.
+    Patience { limit: Duration },
     /// Закрыть окно — конец прогона.
     Exit,
+}
+
+impl Action {
+    /// Ждёт ли шаг ответа рендерера. Такой шаг останавливает часы сценария, и
+    /// выдавать шаги дальше него нельзя: их время ещё не наступило.
+    fn waits(&self) -> bool {
+        matches!(self, Action::Tap { .. } | Action::Await { .. } | Action::Assert { .. })
+    }
+}
+
+/// Чем сценарий называет элемент, когда не называет пикселями.
+///
+/// Ключ обработчика в адрес не входит: им разметка называет вкладку-адресата,
+/// а не элемент, и от запуска к запуску он свой. Различает соседей нагрузка —
+/// ключ снимка, имя записи, значение пункта меню.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Address {
+    /// Имя метода обработчика; пусто — ищем по надписи.
+    pub method: String,
+    /// Нагрузка обработчика.
+    pub value: String,
+    /// Часть видимой надписи.
+    pub text: String,
+    /// Который по счёту из подошедших, считая с единицы, в порядке обхода
+    /// разметки. 0 — «подойти должен ровно один».
+    pub ordinal: u32,
+}
+
+impl std::fmt::Display for Address {
+    /// Тем же видом, каким его написали в сценарии: строка едет в лог и в
+    /// отказ, и читать её будет тот, кто сценарий писал.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.method.is_empty() {
+            true => write!(f, "text:{}", self.text)?,
+            false => {
+                write!(f, "{}", self.method)?;
+                if !self.value.is_empty() {
+                    write!(f, ":{}", self.value)?;
+                }
+            }
+        }
+        match self.ordinal {
+            0 => Ok(()),
+            n => write!(f, "#{n}"),
+        }
+    }
+}
+
+/// Адрес: `метод[:нагрузка][#номер]` либо `text:<часть надписи>[#номер]`.
+fn parse_address(rest: &str) -> Option<Address> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    // Номер отделяется, только когда за решёткой одни цифры: нагрузкой бывает
+    // и путь, и ключ меню, и решётка в них не запрещена.
+    let (body, ordinal) = match rest.rsplit_once('#') {
+        Some((body, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => {
+            (body, tail.parse().ok()?)
+        }
+        _ => (rest, 0),
+    };
+    let sought = match body.split_once(':') {
+        // Надпись — весь остаток вместе с двоеточиями: она и есть то, что
+        // человек видит на экране.
+        Some(("text", said)) => Address { text: said.trim().to_string(), ordinal, ..Address::default() },
+        // Нагрузка тоже забирается целиком: в ключе снимка двоеточий хватает.
+        Some((method, value)) => Address {
+            method: method.to_string(),
+            value: value.to_string(),
+            ordinal,
+            ..Address::default()
+        },
+        None => Address { method: body.to_string(), ordinal, ..Address::default() },
+    };
+    let named = !sought.method.is_empty() || !sought.text.is_empty();
+    named.then_some(sought)
 }
 
 /// Разобранный сценарий: очередь шагов и отсчёт времени от первого кадра.
@@ -53,6 +149,10 @@ pub struct Script {
     /// между чтением конфига и первым кадром лежит вся инициализация GPU и
     /// загрузка плагинов, и время сценария уехало бы на неё целиком.
     started: Option<Instant>,
+    /// С какой минуты сценарий чего-то ждёт; `None` — не ждёт.
+    held: Option<Instant>,
+    /// Сколько всего простояли в ожиданиях.
+    paused: Duration,
 }
 
 impl Script {
@@ -78,7 +178,7 @@ impl Script {
 
         let mut steps = Vec::new();
         for (number, line) in text.lines().enumerate() {
-            let line = line.split('#').next().unwrap_or("").trim();
+            let line = strip_comment(line).trim();
             if line.is_empty() {
                 continue;
             }
@@ -93,26 +193,69 @@ impl Script {
 
         steps.sort_by_key(|(at, _)| *at);
         log::info!(target: "render", "Сценарий '{}': {} шагов, снимки в {}", path, steps.len(), logs.display());
-        Some(Self { steps: steps.into(), started: None })
+        Some(Self { steps: steps.into(), started: None, held: None, paused: Duration::ZERO })
+    }
+
+    /// Сценарий чего-то ждёт: часы стоят, пока не дождётся.
+    ///
+    /// Времена в файле значат «столько после предыдущего шага», и ожидание,
+    /// съевшее их у следующих, отыграло бы остаток сценария разом.
+    pub fn hold(&mut self) {
+        self.held.get_or_insert_with(Instant::now);
+    }
+
+    /// Дождались — часы пошли дальше с того же места.
+    pub fn resume(&mut self) {
+        if let Some(since) = self.held.take() {
+            self.paused += since.elapsed();
+        }
     }
 
     /// Шаги, чей срок настал к этому кадру, в порядке сценария.
     pub fn due(&mut self) -> Vec<Action> {
-        let elapsed = self.started.get_or_insert_with(Instant::now).elapsed();
+        let started = *self.started.get_or_insert_with(Instant::now);
+        if self.held.is_some() {
+            return Vec::new();
+        }
+        let elapsed = started.elapsed().saturating_sub(self.paused);
         let mut ready = Vec::new();
         while self.steps.front().is_some_and(|(at, _)| *at <= elapsed) {
             let (_, action) = self.steps.pop_front().expect("front проверен условием");
+            // Шаг, ждущий ответа, обрывает выдачу: часы после него встанут, и
+            // созревшее вместе с ним — это созревшее «до», а не «вместо».
+            let waits = action.waits();
             ready.push(action);
+            if waits {
+                break;
+            }
         }
         ready
     }
 }
 
+/// Комментарий — решётка, начинающая слово. Решётка внутри слова остаётся
+/// адресу: ею он называет, который из подошедших нужен (`tab_select#2`).
+fn strip_comment(line: &str) -> &str {
+    let comment = line.char_indices().find(|(at, ch)| {
+        *ch == '#' && (*at == 0 || line[..*at].ends_with(char::is_whitespace))
+    });
+    match comment {
+        Some((at, _)) => &line[..at],
+        None => line,
+    }
+}
+
 /// `<мс> <действие> [аргументы]`.
+///
+/// Адрес элемента забирает остаток строки целиком: в надписи бывают пробелы, и
+/// по словам её не разобрать.
 fn parse_step(line: &str, logs: &Path) -> Option<(Duration, Action)> {
     let mut words = line.split_whitespace();
     let at = Duration::from_millis(words.next()?.parse().ok()?);
-    let action = match words.next()? {
+    let verb = words.next()?;
+    let tail = line.split_once(verb).map(|(_, tail)| tail.trim()).unwrap_or_default();
+
+    let action = match verb {
         "move" => Action::Move { x: words.next()?.parse().ok()?, y: words.next()?.parse().ok()? },
         "click" => Action::Click,
         "press" => Action::Button { pressed: true },
@@ -122,6 +265,12 @@ fn parse_step(line: &str, logs: &Path) -> Option<(Duration, Action)> {
             dy: words.next()?.parse().ok()?,
         },
         "shot" => Action::Shot { path: logs.join(format!("{}.png", words.next()?)) },
+        "tap" => return Some((at, Action::Tap { address: parse_address(tail)? })),
+        "wait" => return Some((at, Action::Await { address: parse_address(tail)?, gone: false })),
+        "gone" => return Some((at, Action::Await { address: parse_address(tail)?, gone: true })),
+        "expect" => return Some((at, Action::Assert { address: parse_address(tail)?, gone: false })),
+        "absent" => return Some((at, Action::Assert { address: parse_address(tail)?, gone: true })),
+        "timeout" => Action::Patience { limit: Duration::from_millis(words.next()?.parse().ok()?) },
         "exit" => Action::Exit,
         _ => return None,
     };
@@ -259,4 +408,113 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::Resul
     encoder.set_depth(png::BitDepth::Eight);
     encoder.write_header()?.write_image_data(rgba)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_keeps_the_colons_of_its_payload() {
+        let address = parse_address("preview_product:eodata/Sentinel-1/S1A:IW.SAFE")
+            .expect("адрес разобран");
+        assert_eq!(address.method, "preview_product");
+        assert_eq!(address.value, "eodata/Sentinel-1/S1A:IW.SAFE");
+        assert_eq!(address.ordinal, 0);
+    }
+
+    #[test]
+    fn a_method_alone_is_an_address() {
+        let address = parse_address("run_search").expect("адрес разобран");
+        assert_eq!(address.method, "run_search");
+        assert!(address.value.is_empty());
+    }
+
+    #[test]
+    fn digits_after_the_hash_say_which_one() {
+        let address = parse_address("tab_select#2").expect("адрес разобран");
+        assert_eq!(address.method, "tab_select");
+        assert_eq!(address.ordinal, 2);
+    }
+
+    #[test]
+    fn a_hash_inside_the_payload_is_not_a_number() {
+        let address = parse_address("download:S1A_IW#GRDH").expect("адрес разобран");
+        assert_eq!(address.value, "S1A_IW#GRDH");
+        assert_eq!(address.ordinal, 0);
+    }
+
+    #[test]
+    fn a_label_is_addressed_by_a_part_of_it() {
+        let address = parse_address("text:Папка пуста").expect("адрес разобран");
+        assert!(address.method.is_empty());
+        assert_eq!(address.text, "Папка пуста");
+    }
+
+    #[test]
+    fn an_address_without_a_name_is_no_address() {
+        assert!(parse_address("").is_none());
+        assert!(parse_address(":полтора").is_none());
+        assert!(parse_address("text:").is_none());
+    }
+
+    #[test]
+    fn an_address_reads_back_the_way_it_was_written() {
+        for written in ["run_search", "tab_select#2", "text:Папка пуста", "download:S1A#3"] {
+            let address = parse_address(written).expect("адрес разобран");
+            assert_eq!(address.to_string(), written);
+        }
+    }
+
+    /// Комментарий отделяется пробелом, а номер в адресе — нет: иначе решётка
+    /// съедала бы у сценария половину адреса вместе с номером.
+    #[test]
+    fn a_comment_does_not_eat_the_ordinal() {
+        assert_eq!(strip_comment("2000 tap tab_select#2 # вторая").trim(), "2000 tap tab_select#2");
+        assert_eq!(strip_comment("# только заметка").trim(), "");
+        assert_eq!(strip_comment("2000 tap tab_select#2").trim(), "2000 tap tab_select#2");
+    }
+
+    #[test]
+    fn a_label_with_spaces_survives_the_step() {
+        let logs = Path::new("/tmp");
+        let (at, action) = parse_step("2500 wait text:Под отбор ничего не подошло", logs)
+            .expect("шаг разобран");
+        assert_eq!(at, Duration::from_millis(2500));
+        match action {
+            Action::Await { address, gone } => {
+                assert!(!gone);
+                assert_eq!(address.text, "Под отбор ничего не подошло");
+            }
+            _ => panic!("ожидался шаг ожидания"),
+        }
+    }
+
+    /// Часы сценария стоят, пока он ждёт: иначе первое же долгое ожидание
+    /// сделало бы все последующие времена просроченными, и остаток сценария
+    /// отыгрался бы одним кадром.
+    #[test]
+    fn the_clock_stops_while_the_scenario_waits() {
+        let mut script = Script {
+            steps: VecDeque::from(vec![
+                (Duration::ZERO, Action::Click),
+                (Duration::from_millis(40), Action::Exit),
+            ]),
+            started: None,
+            held: None,
+            paused: Duration::ZERO,
+        };
+
+        assert_eq!(script.due().len(), 1, "первый шаг созрел сразу");
+
+        script.hold();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(script.due().is_empty(), "пока ждём, шаги не зреют");
+
+        script.resume();
+        assert!(script.due().is_empty(), "простой не засчитан сценарию");
+
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(script.due().len(), 1, "после простоя время идёт своим ходом");
+    }
 }

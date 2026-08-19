@@ -105,6 +105,25 @@ pub fn handle_set_surface(state: &mut State, req: veldsdk::proto::core::SurfaceD
     render_plugin_if_needed(state, &plugin_id);
 }
 
+/// Платформа спрашивает, где на экране элемент, названный не пикселями.
+///
+/// Ответ уезжает не отсюда, а из кадра: назвать место можно только по
+/// раскладке, а раскладку iced считает при отрисовке. Здесь вопрос только
+/// запоминается — и с этой минуты разметка собирается с именами.
+pub fn handle_locate_widget(state: &mut State, req: app_proto::LocateWidget) {
+    let plugin_id = req.plugin_id.clone();
+    let Some(plugin) = state.plugins.get_mut(&plugin_id) else {
+        veldsdk::log::warn!(target: "handlers", "обход разметки '{}': такого экрана нет", plugin_id);
+        return;
+    };
+    // Имена появляются со следующей сборки разметки — то есть с той, которую
+    // сейчас и вызовем.
+    crate::module::locate::start_naming();
+    plugin.pending_locate = Some(req);
+    plugin.needs_redrawing = true;
+    render_plugin_if_needed(state, &plugin_id);
+}
+
 pub fn handle_ui_event(state: &mut State, event_proto: app_proto::UiEvent) {
     // app/ui_event — broadcast: адресат назван в данных. Наши — только события
     // модуля с делегированной поверхностью: без неё render_plugin не зовётся,
@@ -359,6 +378,10 @@ fn render_plugin(plugin: &mut PluginUiState, renderer: &mut GpuRenderer, plugin_
     // нарисуется область уже там, куда её навели.
     aim_scrollables(plugin, &mut ui, renderer);
 
+    // Ответ на обход — после ввода и наводки: спрашивают про то, что видно
+    // сейчас, а не про то, что было до этого кадра.
+    answer_locate(plugin, &mut ui, renderer, plugin_id, viewport.logical_size());
+
     veldsdk::log::trace!(target: "render", "Drawing UI");
     ui.draw(renderer, &Theme::Dark, &iced_core::renderer::Style::default(), cursor_at(at));
 
@@ -457,6 +480,50 @@ fn sooner(kept: &mut Option<std::time::Instant>, asked: Option<std::time::Instan
 /// глаз сам. Область, ушедшая из разметки, — тоже: переключили вкладку, и,
 /// вернувшись на неё, к строке надо привести заново — состояние прокрутки за
 /// это время пересборки не пережило.
+/// Отвечает на незакрытый вопрос «где этот элемент», если он есть.
+///
+/// Место называется в физических пикселях окна — в тех же, в которых сценарий
+/// двигает курсор: масштаб знаем мы, а раннеру перевести их обратно нечем.
+fn answer_locate(
+    plugin: &mut PluginUiState,
+    ui: &mut UserInterface<'_, UiMessage, Theme, GpuRenderer>,
+    renderer: &GpuRenderer,
+    plugin_id: &str,
+    window: Size,
+) {
+    use crate::module::locate::{Search, Sought};
+
+    let Some(req) = plugin.pending_locate.take() else { return };
+    // Спрошено либо про обработчик, либо про надпись: пустой метод и значит
+    // «ищем по надписи», третьего в вопросе нет.
+    let sought = match req.method.is_empty() {
+        true => Sought::Said(req.text.clone()),
+        false => Sought::Named(iced_core::widget::Id::from(
+            crate::module::locate::name(&req.method, &req.value),
+        )),
+    };
+    let mut search = Search::new(sought, req.ordinal, window);
+    ui.operate(renderer, &mut search);
+
+    let sf = plugin.scale_factor;
+    let place = search.place().unwrap_or(iced_core::Rectangle::with_size(Size::ZERO));
+    crate::calls::app::on_widget_located(&app_proto::WidgetLocated {
+        plugin_id: plugin_id.to_string(),
+        request: req.request,
+        found: search.found(),
+        x: place.x * sf,
+        y: place.y * sf,
+        width: place.width * sf,
+        height: place.height * sf,
+    });
+    veldsdk::log::debug!(target: "render", "обход {}: подошло {}",
+        match req.method.is_empty() {
+            true => format!("надписи '{}'", req.text),
+            false => format!("'{}' с нагрузкой '{}'", req.method, req.value),
+        },
+        search.found());
+}
+
 fn aim_scrollables(plugin: &mut PluginUiState, ui: &mut UserInterface<'_, UiMessage, Theme, GpuRenderer>, renderer: &GpuRenderer) {
     let mut asked: Vec<(String, Option<ScrollTo>)> = Vec::new();
     collect_aims(plugin.layout.root.as_ref(), &mut asked);

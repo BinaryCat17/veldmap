@@ -139,6 +139,9 @@ pub struct HostContext {
     /// Живёт в контексте, а не в State модуля, именно потому, что у неё два
     /// потребителя по разные стороны шины.
     pub surfaces: Arc<crate::surfaces::SurfaceQueue>,
+    /// Найденные места элементов: пишет модуль app, дренирует кадровый цикл
+    /// раннера. Живёт здесь по той же причине, что и поверхности.
+    pub places: Arc<crate::places::PlaceQueue>,
     pub config: Arc<crate::config::HostConfig>,
     /// Паблишер шины для emit-стабов. В базовом контексте — хост (id 0);
     /// каждый нативный сервис получает клон контекста со своей идентичностью
@@ -172,6 +175,7 @@ pub async fn init_core_services(
     let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), surface_format));
     let tasks = Arc::new(crate::tasks::TaskRegistry::new());
     let surfaces = Arc::new(crate::surfaces::SurfaceQueue::new());
+    let places = Arc::new(crate::places::PlaceQueue::new());
 
     // Диспетчер ведёт учёт операций в полёте, поэтому реестр задач создаётся
     // до него и разделяется с контекстом: из него же убивает ABI.
@@ -184,6 +188,7 @@ pub async fn init_core_services(
         graphics,
         tasks,
         surfaces,
+        places,
         config,
         publisher: dispatcher,
     }))

@@ -8,9 +8,9 @@
 //! раннеров — winit'а тут нет.
 
 use std::sync::Arc;
-use veldmap_host_util::bindings::proto::app::{RevealPath, SetSurface};
+use veldmap_host_util::bindings::proto::app::{RevealPath, SetSurface, WidgetLocated};
 use veldmap_host_util::path::{is_path_safe, resolve_path};
-use veldmap_host_util::{Caller, HostContext, Surfaces};
+use veldmap_host_util::{Caller, HostContext, Place, Surfaces};
 
 pub struct State {
     surfaces: Surfaces,
@@ -31,6 +31,22 @@ pub fn on_set_surface(state: &State, req: SetSurface, caller: Caller) {
         return;
     };
     state.surfaces.attach(&req.plugin_id, surface.id, caller.instance);
+}
+
+/// Рендерер обошёл разметку и назвал место элемента.
+///
+/// Модуль ответ не разбирает: спрашивал раннер — он же и разбирает, сняв
+/// ответ с очереди в кадровом цикле. Здесь ответ только перекладывается с шины
+/// в очередь, ровно как поверхность окна.
+pub fn on_widget_located(state: &State, req: WidgetLocated, _caller: Caller) {
+    state.ctx.places.answer(&req.plugin_id, Place {
+        request: req.request,
+        found: req.found,
+        x: req.x,
+        y: req.y,
+        width: req.width,
+        height: req.height,
+    });
 }
 
 /// Показать путь в файловом менеджере системы.

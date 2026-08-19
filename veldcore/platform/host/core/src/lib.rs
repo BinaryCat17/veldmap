@@ -13,6 +13,7 @@ pub mod abi;
 pub mod dispatcher;
 pub mod logging;
 pub mod tasks;
+pub mod places;
 pub mod surfaces;
 
 // Protobuf-типы платформенных контрактов — из сгенерированного

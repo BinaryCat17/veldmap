@@ -263,6 +263,17 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
                 return carried(c, cont.into());
             };
 
+            // Имя коробки — то, чем её адресует прогон по сценарию: обход
+            // разметки сверяет `Id` на равенство (см. locate.rs). Имя стои́т
+            // строки на кнопку в кадр, поэтому появляется оно только после
+            // первого вопроса — обычный запуск за обход не платит.
+            if crate::module::locate::naming()
+                && let Some(handler) = &interaction.on_press
+                && !handler.method.is_empty()
+            {
+                cont = cont.id(crate::module::locate::name(&handler.method, &handler.value));
+            }
+
             // Нажимаемая — та же коробка внутри кнопки iced: отступ,
             // выравнивание и обрезка остаются у коробки (у кнопки их либо нет,
             // либо они беднее), а кнопке достаётся отклик и фон. Размер стоит
