@@ -1,0 +1,19 @@
+# Деление панелей: перенести вкладку вниз и свести обратно.
+#
+# Сперва заводим вторую вкладку: кнопка «ещё» есть у вкладки лишь тогда, когда
+# ей есть что предложить, а одну-единственную ни перенести, ни свести.
+# Что панелей стало две, видно по второму «плюсу»: он свой у каждой полосы.
+100 timeout 10000
+500 wait tab_menu
+700 absent tab_menu#2
+900 tap tab_menu
+1300 tap new_tab:globe
+2000 wait tab_close#2
+2200 tap tab_options#2
+2600 tap tab_move:below
+3200 wait tab_menu#2
+3400 shot uitest-panes
+3600 tap tab_options#1
+4000 tap tab_collapse
+4600 absent tab_menu#2
+4800 exit

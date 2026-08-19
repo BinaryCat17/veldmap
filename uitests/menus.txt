@@ -1,0 +1,13 @@
+# Чипы отбора: меню открывается, пункт нажимается, меню закрывается.
+#
+# Данных с диска не нужно: полоса отбора есть в списке всегда, даже пока он
+# едет из сети.
+100 timeout 10000
+500 wait open_menu:sorting
+700 absent sort:name
+900 tap open_menu:sorting
+1300 wait sort:name
+1500 shot uitest-menus
+1700 tap sort:name
+2300 absent sort:name
+2500 exit
