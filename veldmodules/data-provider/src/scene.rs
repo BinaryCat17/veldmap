@@ -346,9 +346,26 @@ struct Slice {
     second: i64,
 }
 
-/// Слайсы, которые каталог назвал по номеру.
+/// Слайсы съёмок: названные каталогом по номеру, а где он не назвал ни одного
+/// — размеченные по времени.
+///
+/// Второе нужно затем, что номера слайса каталог сообщает не всему архиву, и
+/// бывает дататейк, где его нет ни у одной части (живой пример — съёмка 191698
+/// за 5 марта 2019). Прикладывать такие части не к чему, и ключ падал на
+/// «дататейк с секундой», а секунды у сырья, комплексного и обработанного
+/// расходятся на две-четыре — одна съёмка разъезжалась по строкам ровно тем,
+/// что [`acquisition`] и предотвращает.
+///
+/// Окно разметки то же, что и у прикладывания: части одного слайса расходятся
+/// началом на четыре секунды, а сами слайсы стоя́т друг от друга на двадцать
+/// пять и больше.
+///
+/// Делить так позволительно только потому, что непустой дататейк бывает у
+/// одной миссии — Sentinel-1: остальным каталог его не называет вовсе (у
+/// Sentinel-2 на его месте `tileId`). Будь он общим у множества плиток, они
+/// слились бы в одну строку.
 fn slices(products: &[(Facts, DataProduct)]) -> Vec<Slice> {
-    products
+    let mut named: Vec<Slice> = products
         .iter()
         .filter(|(facts, _)| !facts.slice.is_empty() && !facts.datatake.is_empty())
         .filter_map(|(facts, _)| {
@@ -358,7 +375,31 @@ fn slices(products: &[(Facts, DataProduct)]) -> Vec<Slice> {
                 second: facts.second,
             })
         })
-        .collect()
+        .collect();
+
+    // Части дататейков, где номера слайса нет ни у кого. По возрастанию
+    // времени, чтобы разметка не зависела от порядка выдачи каталога.
+    let mut nameless: Vec<&Facts> = products
+        .iter()
+        .map(|(facts, _)| facts)
+        .filter(|facts| !facts.datatake.is_empty() && facts.slice.is_empty())
+        .filter(|facts| !named.iter().any(|slice| slice.datatake == facts.datatake))
+        .collect();
+    nameless.sort_by(|a, b| (&a.datatake, a.second).cmp(&(&b.datatake, b.second)));
+
+    for facts in nameless {
+        let beside = named.iter().any(|slice| {
+            slice.datatake == facts.datatake && (slice.second - facts.second).abs() <= BESIDE_A_SLICE_S
+        });
+        if !beside {
+            named.push(Slice {
+                datatake: facts.datatake.clone(),
+                key: format!("около слайса|{}|{}|{}", facts.platform, facts.datatake, facts.second),
+                second: facts.second,
+            });
+        }
+    }
+    named
 }
 
 /// Ключ слайса, рядом с которым снята эта часть. `None` — номер слайса у неё
@@ -904,21 +945,30 @@ mod tests {
         assert_eq!(scenes.len(), 1, "одна секунда на двоих — один ключ");
         assert_eq!(scenes[0].parts.len(), 2);
 
-        // А вот чем это держится — только совпадением секунд, и это записанное
-        // в README ограничение, а не желаемое: разойдись начала (у сырья,
-        // комплексного и обработанного они расходятся на две-четыре секунды),
-        // и одна съёмка покажется несколькими строками. Приложить их не к
-        // чему: слайсов, рядом с которыми они сняты, у этого дататейка нет.
-        let later = Facts {
-            second: slc.second + 4,
-            ..Facts {
-                datatake: "191698".to_string(),
-                slice: String::new(),
-                ..facts("IW_RAW__0S", 0, 1_500_000_000)
-            }
+        // И держится это не совпадением секунд: у сырья, комплексного и
+        // обработанного они расходятся на две-четыре, и по секунде такая
+        // съёмка разъехалась бы по строкам. Дататейк без номеров слайса
+        // размечается по времени тем же окном, что и прикладывание.
+        let nameless = |kind: &str, level: u32, second: i64| Facts {
+            datatake: "191698".to_string(),
+            slice: String::new(),
+            second,
+            ..facts(kind, level, 1_500_000_000)
         };
-        let apart = group(vec![(slc, product("slc")), (later, product("raw"))]);
-        assert_eq!(apart.len(), 2, "секунда в ключе разводит части одной съёмки");
+        let together = group(vec![
+            (nameless("IW_SLC__1S", 1, 1_786_000_000), product("slc")),
+            (nameless("IW_RAW__0S", 0, 1_786_000_004), product("raw")),
+        ]);
+        assert_eq!(together.len(), 1, "четыре секунды — это одна съёмка");
+        assert_eq!(together[0].parts.len(), 2);
+
+        // А соседний слайс того же дататейка — уже другая съёмка: слайсы стоя́т
+        // друг от друга на двадцать пять секунд и больше.
+        let apart = group(vec![
+            (nameless("IW_SLC__1S", 1, 1_786_000_000), product("slc")),
+            (nameless("IW_SLC__1S", 1, 1_786_000_030), product("next")),
+        ]);
+        assert_eq!(apart.len(), 2, "разные слайсы одного дататейка — разные съёмки");
     }
 
     /// Уровень, не названный каталогом, не делает продукт снимком. Служебная
