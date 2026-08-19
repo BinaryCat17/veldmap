@@ -16,6 +16,11 @@ pub const PART_SUFFIX: &str = ".part";
 /// Суффикс сидкара с происхождением файла.
 pub const ORIGIN_SUFFIX: &str = ".origin";
 
+/// Хвост, которым файловая система метит своё временное при атомарной записи
+/// (`<путь>.<uuid>.tmp`, см. `fs::write_atomically`). Данными оно не является
+/// ни секунды, и в каталог библиотеки попадать ему нечего.
+const TMP_SUFFIX: &str = ".tmp";
+
 pub fn file_path(name: &str) -> String {
     format!("{}/{}", DATA_DIR, name)
 }
@@ -120,6 +125,13 @@ impl LocalFile {
     /// `None` — это сидкар, а не файл: он описывает запись, а не является ею.
     pub fn from_entry(name: &str, size: u64, modified: i64) -> Option<(String, Self)> {
         if name.ends_with(ORIGIN_SUFFIX) {
+            return None;
+        }
+        // Временное файловой системы: атомарная запись кладёт
+        // `<путь>.<uuid>.tmp` рядом с целью, и листинг, попавший на неё,
+        // вернул бы её наравне с данными — мусорной строкой в «Скачанном»,
+        // да ещё и с частичным размером.
+        if name.ends_with(TMP_SUFFIX) {
             return None;
         }
         let is_partial = name.ends_with(PART_SUFFIX);

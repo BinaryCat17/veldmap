@@ -63,6 +63,10 @@ pub struct State {
     pub pending_reads: veldsdk::Correlator<ReadPurpose>,
     /// Ожидание fs/on_write сидкара.
     pub pending_sidecar_writes: veldsdk::Correlator<SidecarWrite>,
+    /// Сидкары, ждущие, пока допишется предыдущий той же записи. По имени, а
+    /// не очередью: сидкар пишется целиком, и промежуточные состояния диску не
+    /// нужны — ждёт всегда последнее (см. `catalog::write_sidecar`).
+    pub queued_sidecars: HashMap<String, OriginSidecar>,
     /// Ожидание fs/on_delete — контекст: путь удаляемого файла.
     pub pending_delete: veldsdk::Correlator<String>,
 }
@@ -110,6 +114,7 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
     let state = State {
         snapshot: HashMap::new(),
         origins: HashMap::new(),
+        queued_sidecars: HashMap::new(),
         downloads: HashMap::new(),
         pending_list: veldsdk::Correlator::new(),
         list_again: false,

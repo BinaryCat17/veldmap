@@ -46,19 +46,64 @@ const PROGRESS_STEP: u64 = 8 * 1024 * 1024;
 #[derive(serde::Deserialize, Clone)]
 pub struct Config {}
 
-/// Состояния между вызовами нет: запрос обслуживается целиком в обработчике —
-/// на этом стоит и `cancellable: true` в схеме (см. заголовок модуля).
-pub struct State;
-
-pub fn hook_init(_config: Config) -> anyhow::Result<State> {
-    Ok(State)
+/// Разобранный источник, оставленный до следующего запроса.
+///
+/// Запрос обслуживается целиком в обработчике, и состояния, от которого
+/// зависел бы ответ, здесь по-прежнему нет: это memo, а не память. Убийство
+/// посреди прохода его теряет вместе с инстансом, и следующий запрос просто
+/// разберёт файл заново — ответ от этого не меняется, меняется только цена.
+///
+/// Цена и есть причина. `describe` и `produce` приходят парой на один и тот же
+/// ресурс, а разбор — это распаковка всей плоскости: у гранулы OLCI это восемь
+/// миллионов отсчётов, и без memo они распаковываются дважды на один показ.
+/// Файл при этом читается один раз и без него (блоки держит носитель), а
+/// платится именно распаковка и пробы величин.
+///
+/// Один слот: пара «описали — произвели» идёт подряд, а держать два разбора
+/// сразу значит держать две плоскости, и лимит памяти инстанса этого не
+/// переживёт. Чужой разбор отпускается ДО того, как начнётся новый.
+struct Parsed {
+    resource: u64,
+    info: adapters::Info,
 }
 
-pub fn on_describe(_state: &mut State, req: DescribeRequest) {
+pub struct State {
+    parsed: Option<Parsed>,
+}
+
+pub fn hook_init(_config: Config) -> anyhow::Result<State> {
+    Ok(State { parsed: None })
+}
+
+/// Разбор источника — из memo, если это тот же ресурс, иначе заново.
+///
+/// Отдаётся ссылкой, а не значением: за одним описанием идёт столько проходов,
+/// сколько у источника ступеней (у тайлового TIFF это четыре-пять), и разбор,
+/// расходуемый первым же из них, экономил бы ровно один.
+fn parsed<'a>(
+    state: &'a mut State,
+    resource_id: u64,
+    size: u64,
+    bytes: &Rc<Cell<u64>>,
+) -> Result<&'a adapters::Info, String> {
+    if state.parsed.as_ref().is_none_or(|kept| kept.resource != resource_id) {
+        // Чужой разбор отпускается здесь, до нового: две плоскости разом лимит
+        // памяти инстанса не переживёт.
+        state.parsed = None;
+        veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт)", resource_id, size);
+        let info = adapters::describe(resource_id, size, bytes)?;
+        state.parsed = Some(Parsed { resource: resource_id, info });
+    } else {
+        veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
+    }
+    Ok(&state.parsed.as_ref().expect("разбор только что положен").info)
+}
+
+pub fn on_describe(state: &mut State, req: DescribeRequest) {
     let correlation = veldsdk::correlation();
     let label = if req.label.is_empty() { correlation.clone() } else { req.label.clone() };
 
-    let described = match describe(&req) {
+    let described = match describe(state, &req) {
         Ok(described) => described,
         Err(error) => {
             veldsdk::log::warn!(target: "handlers", "{}: {}", label, error);
@@ -68,10 +113,13 @@ pub fn on_describe(_state: &mut State, req: DescribeRequest) {
     crate::emit::on_described(&described, &correlation);
 }
 
-fn describe(req: &DescribeRequest) -> Result<Described, String> {
+fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, String> {
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
     let fingerprint = fingerprint::fingerprint(resource.id, resource.size)?;
-    let mut info = adapters::describe(resource.id, resource.size, &Rc::new(Cell::new(0)))?;
+    // Привязка приезжает из соседнего файла и в memo не идёт: она свойство
+    // пары «растр и его координаты», а memo знает только про растр.
+    let mut ties = Vec::new();
+    let info = parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)))?;
 
     // Координаты из соседнего файла — только когда в самом растре их нет: то,
     // что записано в нём, знает о своей раскладке точнее любого соседа.
@@ -88,7 +136,7 @@ fn describe(req: &DescribeRequest) -> Result<Described, String> {
             info.width,
             info.height,
         ) {
-            Ok(ties) => info.ties = ties,
+            Ok(found) => ties = found,
             Err(error) => veldsdk::log::warn!(target: "decode", "файл координат: {}", error),
         }
     }
@@ -104,19 +152,20 @@ fn describe(req: &DescribeRequest) -> Result<Described, String> {
         ties: info
             .ties
             .iter()
+            .chain(ties.iter())
             .map(|tie| GeoTie { px: tie.px, py: tie.py, lat: tie.lat, lon: tie.lon })
             .collect(),
         error: String::new(),
     })
 }
 
-pub fn on_produce(_state: &mut State, req: ProduceRequest) {
+pub fn on_produce(state: &mut State, req: ProduceRequest) {
     // Корреляция запроса — она же имя операции у платформы: ею заказчик её
     // и убьёт, если тайлы перестанут быть нужны.
     let correlation = veldsdk::correlation();
     let label = if req.label.is_empty() { correlation.clone() } else { req.label.clone() };
 
-    let error = match produce(&req, &correlation) {
+    let error = match produce(state, &req, &correlation) {
         Ok(()) => String::new(),
         Err(error) => {
             veldsdk::log::warn!(target: "handlers", "{}: {}", label, error);
@@ -126,7 +175,7 @@ pub fn on_produce(_state: &mut State, req: ProduceRequest) {
     crate::emit::on_produce_done(&ProduceDone { error }, &correlation);
 }
 
-fn produce(req: &ProduceRequest, correlation: &str) -> Result<(), String> {
+fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result<(), String> {
     // Владелец будущих текстур — тот, кто прислал запрос: без имени
     // передавать их некому.
     let owner = veldsdk::resource::requester("image-tiler/on_produce")?;
@@ -134,7 +183,7 @@ fn produce(req: &ProduceRequest, correlation: &str) -> Result<(), String> {
 
     let bytes = Rc::new(Cell::new(0u64));
     let fingerprint = fingerprint::fingerprint(resource.id, resource.size)?;
-    let info = adapters::describe(resource.id, resource.size, &bytes)?;
+    let info = parsed(state, resource.id, resource.size, &bytes)?;
 
     let levels = pyramid::level_count(info.width, info.height);
     if req.level >= levels {

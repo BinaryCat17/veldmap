@@ -535,9 +535,12 @@ fn convert_widget(widget: &proto::Widget) -> Element<'static, UiMessage, Theme, 
         Some(proto::widget::Type::Space(s)) => {
             Space::new().width(convert_length(&s.width)).height(convert_length(&s.height)).into()
         }
-        // Виджет без ветки конвертации молча стал бы пустой колонкой, поэтому
-        // сюда попадает только `type: None` — сообщение без содержимого.
-        _ => column([]).into(),
+        // Только «содержимого нет»: виджет без ветки конвертации молча стал бы
+        // пустой колонкой, и дыру в разметке пришлось бы искать глазами.
+        // Поэтому перечислением, а не `_`: о новом роде виджета скажет
+        // компилятор — тем же правилом, что и обход наводок в
+        // `handlers::collect_aims`.
+        None => column([]).into(),
     }
 }
 

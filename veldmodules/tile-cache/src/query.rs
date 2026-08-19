@@ -117,8 +117,20 @@ pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     match serve(&query.owner, query.level, read.x, read.y, &opened) {
         Ok(tile) => crate::emit::on_tile(&tile, &read.query),
         Err(miss) => {
-            veldsdk::log::debug!(target: "handlers",
-                "{}: тайл {}:{}:{} — промах: {}", query.label, query.level, read.x, read.y, miss);
+            // Промах и отказ выглядят одинаково для заказчика — он просто
+            // пойдёт к производителю, — но в журнале их разводить надо.
+            // «Файла нет» — обычный ход дела; всё прочее (не разобрался,
+            // текстура не выделилась) производитель не лечит: он перепишет
+            // годный файл, заказчик спросит снова, и отказ повторится — с той
+            // разницей, что каждый круг стои́т полного прохода по источнику.
+            let missing = miss.contains("не открыт") || miss.contains("не найден");
+            match missing {
+                true => veldsdk::log::debug!(target: "handlers",
+                    "{}: тайл {}:{}:{} — промах: {}", query.label, query.level, read.x, read.y, miss),
+                false => veldsdk::log::warn!(target: "handlers",
+                    "{}: тайл {}:{}:{} есть, но не отдался: {}",
+                    query.label, query.level, read.x, read.y, miss),
+            }
             query.misses.push((read.x, read.y));
         }
     }

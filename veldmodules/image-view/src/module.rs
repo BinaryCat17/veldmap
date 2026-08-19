@@ -142,7 +142,16 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
 
     let view = state.views.get_mut(&msg.view).expect("вид только что был");
     match gpu::Target::create(texture.id, surface.width, surface.height) {
-        Ok(target) => view.target = Some(target),
+        Ok(target) => {
+            view.target = Some(target);
+            // Место под рендер есть — значит прежний отказ пережит. Снимать
+            // его надо здесь, а не только на новом показе: делегирование
+            // повторяется на каждое изменение размера, а вот сам показ —
+            // нет. Оставленный, отказ выкидывает канву из разметки у
+            // заказчика, а без канвы не придёт и следующее делегирование:
+            // вкладка становится мёртвой навсегда (см. `refuse`).
+            view.error = None;
+        }
         Err(error) => {
             refuse(state, &msg.view, format!("не собрался view таргета: {:#}", error));
             return;
@@ -500,9 +509,20 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         let quads = view::quads(view, tiles, cap);
         let target = view.target.as_ref().expect("место проверено выше");
         match gpu::render(device, target, &mut view.vertices, &quads) {
-            Ok(()) => view.drawn = Some(stamp),
+            Ok(()) => {
+                view.drawn = Some(stamp);
+                view.trouble = None;
+            }
             Err(error) => {
                 veldsdk::log::error!(target: "render", "{}: кадр не записан: {:#}", view.label, error);
+                // Именно `trouble`, а не `error`: прошлый кадр на экране
+                // остался, и стирать его нечем — сказать надо, что он
+                // застыл. И отметиться нарисованным: без этого попытка
+                // повторяется каждым кадровым тиком, то есть шестьдесят раз
+                // в секунду пишет в журнал и жжёт кадр впустую, а причина у
+                // неё та же самая.
+                view.drawn = Some(stamp);
+                view.trouble = Some(format!("кадр не записан: {}", error));
             }
         }
     }

@@ -92,11 +92,20 @@ fn ingest(state: &mut State, response: veldsdk::proto::fs::FsListResult) {
         .filter_map(|e| e.name.strip_suffix(storage::ORIGIN_SUFFIX))
         .map(str::to_string)
         .collect();
+    // Держится не только то, что уже на диске. Запись сидкара идёт своим
+    // заданием файловой системы, листинг — своим, и порядка между ними нет:
+    // листинг, ушедший раньше записи, сидкара не видит, а ответ его вполне
+    // приходит позже. Поэтому в живых остаются ещё и имена, чей сидкар в
+    // полёте, и имена идущих закачек — у них происхождение тем более наше.
     let in_flight: Vec<&str> = state.pending_sidecar_writes.values()
         .map(|w| w.name.as_str())
+        .chain(state.queued_sidecars.keys().map(String::as_str))
         .collect();
+    let downloading: Vec<&str> = state.downloads.values().map(|dl| dl.name.as_str()).collect();
     state.origins.retain(|name, _| {
-        on_disk.contains(name) || in_flight.contains(&name.as_str())
+        on_disk.contains(name)
+            || in_flight.contains(&name.as_str())
+            || downloading.contains(&name.as_str())
     });
 
     // Дочитываем то, чего ещё нет в памяти. Сидкар — единственное, что
@@ -232,6 +241,19 @@ pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened)
 pub fn write_sidecar(state: &mut State, name: &str, sidecar: OriginSidecar) {
     state.origins.insert(name.to_string(), sidecar.clone());
 
+    // Две записи одного сидкара разом — не редкость, а обычный конец закачки:
+    // последний файл снимка пишет своё происхождение по `on_download`, а
+    // следом весь снимок дописывает `siblings`. Отданные в файловую систему
+    // вместе, они идут двумя независимыми заданиями, и переименование побеждает
+    // то, которое кончилось последним, — то есть на диске может остаться
+    // первая, а в памяти вторая. Поэтому вторая ждёт ответа на первую; ждёт
+    // только последняя из них — сидкар пишется целиком, и промежуточные
+    // состояния диску не нужны.
+    if state.pending_sidecar_writes.values().any(|write| write.name == name) {
+        state.queued_sidecars.insert(name.to_string(), sidecar);
+        return;
+    }
+
     let Ok(json) = serde_json::to_vec(&sidecar) else { return };
     let Some(region_id) = veldsdk::abi::resource_alloc_cpu(json.len() as u64) else { return };
     // Во владельца — сразу после выделения: сорвись запись, регион освободит
@@ -265,6 +287,12 @@ pub fn on_write_result(state: &mut State, response: FsWriteResult) {
     if !response.error.is_empty() {
         veldsdk::log::warn!(target: "handlers", "сидкар не сохранён: {}", response.error);
     }
+    // Место освободилось — пишем то, что ждало своей очереди (см.
+    // [`write_sidecar`]). Ждущий сидкар свежее записанного: он и есть то, что
+    // должно остаться на диске.
+    if let Some(waiting) = state.queued_sidecars.remove(&write.name) {
+        write_sidecar(state, &write.name, waiting);
+    }
 }
 
 /// Удаляет данные записи, оставляя сидкар: так перекачка сносит доведённый
@@ -282,11 +310,14 @@ pub fn delete_data(state: &mut State, name: &str) {
 /// сиротой и файл воскрес бы записью о намерении.
 pub fn delete_entry(state: &mut State, name: &str) {
     state.origins.remove(name);
-    // Сидкар удаляем без учёта: ответ на него никого не интересует — судьбу
-    // записи решает удаление самих данных.
-    crate::calls::fs::on_delete(&FsDeleteRequest {
-        path: storage::origin_path(name),
-    }, "");
+    state.queued_sidecars.remove(name);
+    // Удаление сидкара — с учётом, как и удаление данных: не удалившийся
+    // `.origin` остаётся сиротой, и ближайший же листинг воскрешает по нему
+    // запись о намерении. Молчаливый отказ здесь означает строку в
+    // «Скачанном», которая не уходит никогда, и причину, которой нигде нет.
+    let path = storage::origin_path(name);
+    let correlation_id = state.pending_delete.begin(path.clone());
+    crate::calls::fs::on_delete(&FsDeleteRequest { path }, &correlation_id);
     delete_data(state, name);
 }
 
