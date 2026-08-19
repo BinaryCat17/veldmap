@@ -1,15 +1,20 @@
-//! Контуры на шаре: что отмечено в списках, то и очерчено.
+//! Выбор в списках и контуры, которые из него следуют.
 //!
 //! Здесь проходит граница данных и представления. Провайдер отдаёт снимок с
 //! его геометрией и ничего не знает о том, что её кто-то рисует; глобус
 //! принимает ломаные и ничего не знает о снимках. Свести одно с другим может
 //! только тот, у кого на экране и список, и шар, — то есть мы.
 //!
-//! Источник у контуров ровно один — пакетное выделение: шар очерчивает то, что
-//! отметили, а не то, что нашлось. Отмечают в любом списке — в выдаче поиска, в
-//! сетевом каталоге, в скачанном, — и набор сводится из всех сразу: шар один, а
-//! списков сколько угодно, и «контуры этой вкладки» на вопрос «что на шаре» не
-//! отвечает.
+//! Выбирают строку, чтобы что-то с ней сделать: удалить, скачать, положить на
+//! шар. Контур — следствие, а не смысл выбора: очерчивается то выбранное, за
+//! чем стои́т снимок (`Chosen::Snapshot`), а файл сам по себе выбирается
+//! наравне со всеми, и геометрии у него нет вовсе.
+//!
+//! Источник у контуров при этом ровно один — тот самый выбор: шар очерчивает
+//! то, что выбрали, а не то, что нашлось. Выбирают в любом списке — в выдаче
+//! поиска, в сетевом каталоге, в скачанном, — и набор сводится из всех сразу:
+//! шар один, а списков сколько угодно, и «контуры этой вкладки» на вопрос «что
+//! на шаре» не отвечает.
 //!
 //! Геометрия при этом под рукой не у всех: у найденного продукт с контуром уже
 //! есть, а у строки каталога или файла на диске — один ключ, и продукт по нему
@@ -21,32 +26,78 @@ use std::collections::HashSet;
 use crate::module::components::{arrange, rows};
 use crate::module::footprint;
 use crate::module::state::globe::Outlined;
+use crate::module::components::Row;
+use crate::module::state::listing::Chosen;
 use crate::module::state::{Highlight, Locate, Located, State, ViewId, ViewKind};
 use crate::proto::data_provider::{DataProduct, LocateRequest, LocateResponse};
 use crate::proto::globe::{GeoPoint, Outline, Outlines};
 
-/// Отметить снимок в списке или снять отметку.
+/// Выбрать строку в списке или снять выбор.
 pub fn toggle(state: &mut State, view: ViewId, key: String) {
     retry(state, &key);
+    let what = chosen_by_key(state, view, &key);
     let Some(listing) = state.listing_mut(view) else { return };
-    listing.select(key);
+    listing.select(key, what);
     refresh(state);
 }
 
-/// Отметить, если ещё не отмечен. В отличие от [`toggle`] — не переключатель:
-/// зовёт это показ снимка на шаре, а его просят у отмеченного и у
-/// неотмеченного одинаково, и снять отметку вторым нажатием было бы ответом не
-/// на тот вопрос.
+/// Что стои́т за строкой — род её выбора.
 ///
-/// Вид без списка (полоса шара, «На просмотре») отмечать нечем — там и нечего:
-/// снимок туда попал уже отмеченным.
-pub fn mark(state: &mut State, view: ViewId, key: &str) {
-    retry(state, key);
-    let Some(listing) = state.listing_mut(view) else { return };
-    if !listing.selected.insert(key.to_string()) {
-        return;
+/// Ключи файла снимаются со строки здесь, а не в момент действия: выбор
+/// переживает переход в другую папку, и к тому времени строки на экране может
+/// не быть вовсе.
+fn chosen(row: &Row) -> Chosen {
+    match row.is_snapshot() {
+        true => Chosen::Snapshot,
+        false => Chosen::File {
+            identifier: row.snapshot_key().to_string(),
+            product: row.product.clone(),
+            name: row.name.clone(),
+        },
     }
+}
+
+/// То же по ключу: строку под ним ищем среди показанных — там же, где её и
+/// нажали.
+///
+/// Не нашлась — считаем снимком. Род по одному ключу не восстановить, а
+/// ключи, приходящие сюда не от строки, — это ключи продуктов: показ на шаре
+/// зовут ключом продукта, и список под ним бывает уже пересобран рассылкой
+/// библиотеки, пока нажатие ехало.
+fn chosen_by_key(state: &State, view: ViewId, key: &str) -> Chosen {
+    let rows = rows::of(state, view);
+    let Some(listing) = state.get(view).and_then(ViewKind::listing) else {
+        return Chosen::Snapshot;
+    };
+    match arrange::arrange(&rows, listing).marks().find(|row| row.choice_key() == key) {
+        Some(row) => chosen(row),
+        None => Chosen::Snapshot,
+    }
+}
+
+/// Выбрать, если ещё не выбран. В отличие от [`toggle`] — не переключатель:
+/// зовёт это показ снимка на шаре, а его просят у выбранного и у невыбранного
+/// одинаково, и снять выбор вторым нажатием было бы ответом не на тот вопрос.
+///
+/// `true` — выбор поставили мы. По нему показ и узнаёт, убирать ли за собой:
+/// стоявший до нас сделан рукой, и он не наш (см. `Locate::Overlay`).
+///
+/// Род берётся со строки той же меркой, что и у коробочки: показ на шаре
+/// просят и у файла — пункт меню стои́т как раз у не-снимков, — и записанный
+/// снимком, такой файл получил бы чужие пакетные кнопки.
+///
+/// Вид без списка (полоса шара, «На просмотре») выбирать нечем — там и нечего:
+/// снимок туда попал уже выбранным.
+pub fn mark(state: &mut State, view: ViewId, key: &str) -> bool {
+    retry(state, key);
+    let what = chosen_by_key(state, view, key);
+    let Some(listing) = state.listing_mut(view) else { return false };
+    if listing.selected.contains_key(key) {
+        return false;
+    }
+    listing.selected.insert(key.to_string(), what);
     refresh(state);
+    true
 }
 
 /// Отметить заново — это и переспросить: сорвавшийся ход к каталогу метку не
@@ -67,28 +118,34 @@ fn retry(state: &mut State, key: &str) {
 pub fn mark_shown(state: &mut State, view: ViewId, on: bool) {
     let rows = rows::of(state, view);
     let Some(listing) = state.get(view).and_then(ViewKind::listing) else { return };
-    let keys: Vec<String> =
-        arrange::arrange(&rows, listing).marks().map(str::to_string).collect();
+    let picked: Vec<(String, Chosen)> = arrange::arrange(&rows, listing)
+        .marks()
+        .map(|row| (row.choice_key().to_string(), chosen(row)))
+        .collect();
 
     if on {
-        for key in &keys {
+        for (key, _) in &picked {
             retry(state, key);
         }
     }
     let Some(listing) = state.listing_mut(view) else { return };
-    for key in keys {
+    for (key, what) in picked {
         match on {
-            true => listing.selected.insert(key),
-            false => listing.selected.remove(&key),
-        };
+            true => {
+                listing.selected.insert(key, what);
+            }
+            false => {
+                listing.selected.remove(&key);
+            }
+        }
     }
     refresh(state);
 }
 
-/// Снять все отметки этого списка — кнопка в заголовке.
+/// Снять весь выбор этого списка — кнопка в заголовке.
 ///
-/// Все, а не показанные: отметка переживает переход в другую папку — шар
-/// держит её, пока не снимут, — и «снять видимое» оставило бы контуры, убрать
+/// Весь, а не показанный: выбор переживает переход в другую папку — шар держит
+/// контуры, пока их не снимут, — и «снять видимое» оставило бы контуры, убрать
 /// которые стало бы нечем.
 pub fn unmark_all(state: &mut State, view: ViewId) {
     let Some(listing) = state.listing_mut(view) else { return };
@@ -101,10 +158,10 @@ pub fn unmark_all(state: &mut State, view: ViewId) {
 
 /// Убрать один контур — из списка «На просмотре», где он стоит своей строкой.
 ///
-/// Отметка снимается во всех списках сразу: контур один, а отмечен снимок мог
-/// быть и в каталоге, и в выдаче, и оставшаяся отметка вернула бы его тут же.
+/// Выбор снимается во всех списках сразу: контур один, а выбран снимок мог
+/// быть и в каталоге, и в выдаче, и оставшийся выбор вернул бы его тут же.
 pub fn drop_one(state: &mut State, key: &str) {
-    if !state.clear_mark(key) {
+    if !state.clear_outline_mark(key) {
         return;
     }
     refresh(state);
@@ -164,14 +221,17 @@ fn select(state: &mut State, key: Option<String>) {
     send(state);
 }
 
-/// Снять контуры с шара — то есть снять отметки во всех списках: контур живёт
-/// отметкой, и убрать его иначе нечем.
+/// Снять контуры с шара — то есть снять выбор со снимков во всех списках:
+/// контур живёт выбором, и убрать его иначе нечем.
+///
+/// Со снимков, а не со всего выбранного: файл сам по себе на шаре не лежал
+/// никогда (см. [`State::clear_outlined`]).
 pub fn clear(state: &mut State) {
-    // Следов у очерченного три — отметки в списках, набор контуров и лента на
-    // шаре, — и снимаются они вместе. Уйти по первому же «отметок не было»
-    // нельзя: лента переживает отметку, снятую руками, и строка осталась бы
+    // Следов у очерченного три — выбор в списках, набор контуров и лента на
+    // шаре, — и снимаются они вместе. Уйти по первому же «выбрано не было»
+    // нельзя: лента переживает выбор, снятый руками, и строка осталась бы
     // подсвеченной как лежащая на шаре, которого на ней уже нет.
-    let unmarked = state.clear_selection();
+    let unmarked = state.clear_outlined();
     let unpicked = state.deselect();
     let outlined = !state.outlined.is_empty();
     state.outlined.clear();
@@ -245,7 +305,13 @@ pub fn refresh(state: &mut State) {
         let mut seen: HashSet<&str> = HashSet::new();
         for view in state.views() {
             let Some(listing) = view.kind.listing() else { continue };
-            for key in &listing.selected {
+            for (key, what) in &listing.selected {
+                // Очерчивается снимок: у файла самого по себе геометрии нет, и
+                // спрашивать её у каталога незачем — ход по сети на каждый
+                // выбранный файл не принёс бы ничего.
+                if *what != Chosen::Snapshot {
+                    continue;
+                }
                 if !seen.insert(key.as_str()) {
                     continue;
                 }
@@ -401,6 +467,92 @@ mod tests {
 
         browse::reveal(&mut state, view, elsewhere);
         assert_eq!(state.picked_key(), "", "лента на шаре пережила переход к другой строке");
+    }
+
+    /// Род выбора снимается со строки, а не назначается умолчанием.
+    ///
+    /// Снимок и файл сам по себе выбираются одной коробочкой, а делают с ними
+    /// разное: снимок разворачивают в файлы и очерчивают, файл адресуют его
+    /// собственными ключами. Записанный не тем родом, он получит чужие
+    /// пакетные кнопки и лишний ход в каталог.
+    #[test]
+    fn the_checkbox_remembers_what_the_row_was() {
+        use crate::proto::data_library::{LibraryEntry, LibraryStatus};
+
+        let lib = |name: &str, product: &str, identifier: &str| LibraryEntry {
+            name: name.to_string(),
+            identifier: identifier.to_string(),
+            product: product.to_string(),
+            done: 1,
+            total: 1,
+            status: LibraryStatus::LibComplete as i32,
+            modified: 0,
+            siblings: 1,
+            trouble: String::new(),
+        };
+
+        let mut state = state();
+        state.library.entries = vec![
+            lib("B1.TIF", "eodata/store/S2B_X.SAFE", "eodata/store/S2B_X.SAFE/B1.TIF"),
+            lib("dem.tif", "", "eodata/dem/dem.tif"),
+        ];
+        let pane = state.focused();
+        let view = state.open_in(pane, ViewKind::Downloaded(Default::default()));
+
+        toggle(&mut state, view, "eodata/store/S2B_X.SAFE".to_string());
+        toggle(&mut state, view, "eodata/dem/dem.tif".to_string());
+
+        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
+        assert!(
+            matches!(listing.selected.get("eodata/store/S2B_X.SAFE"), Some(Chosen::Snapshot)),
+            "снимок записан не снимком"
+        );
+        match listing.selected.get("eodata/dem/dem.tif") {
+            Some(Chosen::File { identifier, name, .. }) => {
+                assert_eq!(identifier, "eodata/dem/dem.tif", "ключ файла нужен закачке");
+                assert_eq!(name, "dem.tif", "имя записи нужно удалению");
+            }
+            _ => panic!("файл записан не файлом"),
+        }
+
+        // Второе нажатие той же коробочкой снимает выбор.
+        toggle(&mut state, view, "eodata/dem/dem.tif".to_string());
+        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
+        assert!(!listing.selected.contains_key("eodata/dem/dem.tif"));
+    }
+
+    /// Выбранный файл сам по себе контура не даёт и в каталог за ним не ходят.
+    ///
+    /// Геометрии у него нет вовсе, а ход по сети на каждый выбранный файл не
+    /// принёс бы ничего: пакетом их выбирают десятками, чтобы удалить.
+    #[test]
+    fn a_chosen_file_neither_draws_nor_asks() {
+        let mut state = state();
+        let pane = state.focused();
+        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
+        let listing = state.listing_mut(view).expect("список");
+        listing.selected.insert(
+            "eodata/lone/dem.tif".to_string(),
+            Chosen::File {
+                identifier: "eodata/lone/dem.tif".to_string(),
+                product: String::new(),
+                name: "dem.tif".to_string(),
+            },
+        );
+
+        refresh(&mut state);
+        assert!(state.outlined.is_empty(), "у файла нашёлся контур");
+        assert!(state.located.is_empty(), "за файлом сходили в каталог");
+
+        // А за снимком — сходили: геометрию его знает каталог, и другого места
+        // взять её нет.
+        let listing = state.listing_mut(view).expect("список");
+        listing.selected.insert("eodata/store/A.SAFE".to_string(), Chosen::Snapshot);
+        refresh(&mut state);
+        assert!(
+            matches!(state.located.get("eodata/store/A.SAFE"), Some(Located::Asking)),
+            "за снимком в каталог не пошли"
+        );
     }
 
     /// Слой без контура остаётся выбранным. Контур у снимка бывает не всегда —

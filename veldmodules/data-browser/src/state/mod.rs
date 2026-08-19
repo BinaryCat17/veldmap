@@ -29,7 +29,12 @@ pub enum Locate {
     /// Положить снимок на шар — нажали значок глобуса в строке. Ключ тот же,
     /// что у контура: показать снимок — это и очертить его, и один ход к
     /// каталогу отвечает обоим (см. `handlers::overlay::on_show_pressed`).
-    Overlay(String),
+    ///
+    /// `ours` — выбор под этим ключом поставил показ, а не человек. Отличать
+    /// их надо: каталог отвечает корнем продукта, показ переносит своё туда же
+    /// и убирает за собой, — а выбор, сделанный рукой ради пакетного действия,
+    /// убирать не его дело.
+    Overlay { key: String, ours: bool },
     /// Геометрия отмеченного снимка: очертить его. Ключ — тот, которым он
     /// отмечен в списке; он же ключ кэша (см. `State::located`).
     Outline(String),
@@ -617,7 +622,20 @@ impl State {
         let mut cleared = false;
         for view in &mut self.views {
             if let Some(listing) = view.kind.listing_mut() {
-                cleared |= listing.selected.remove(key);
+                cleared |= listing.selected.remove(key).is_some();
+            }
+        }
+        cleared
+    }
+
+    /// Снять выбор со снимка — только со снимка. Тем же ключом бывает выбран
+    /// файл сам по себе, и убирающий контур до него дела не имеет.
+    pub fn clear_outline_mark(&mut self, key: &str) -> bool {
+        let mut cleared = false;
+        for view in &mut self.views {
+            if let Some(listing) = view.kind.listing_mut() {
+                let snapshot = listing.selected.get(key) == Some(&listing::Chosen::Snapshot);
+                cleared |= snapshot && listing.selected.remove(key).is_some();
             }
         }
         cleared
@@ -628,21 +646,26 @@ impl State {
     /// отметку снимают одним нажатием, и убить его нечем.
     pub fn marked(&self, key: &str) -> bool {
         self.views().iter().any(|view| {
-            view.kind.listing().is_some_and(|listing| listing.selected.contains(key))
+            view.kind.listing().is_some_and(|listing| listing.selected.contains_key(key))
         })
     }
 
-    /// Снять пакетное выделение во всех списках сразу. `true` — было что
+    /// Снять с шара всё очерченное — во всех списках сразу. `true` — было что
     /// снимать.
     ///
     /// По всем, а не по активному: контуры на шаре собраны из всех списков, и
-    /// снять их значит снять отметки везде (см. handlers::outline::clear).
-    pub fn clear_selection(&mut self) -> bool {
+    /// снять их значит снять выбор снимков везде (см. handlers::outline::clear).
+    ///
+    /// Снимков, а не всего выбранного: файл сам по себе на шар не попадал
+    /// никогда, а набран бывает ради пакетного удаления — кнопка про шар
+    /// выбросила бы вместе с контурами чужую работу.
+    pub fn clear_outlined(&mut self) -> bool {
         let mut cleared = false;
         for view in &mut self.views {
             if let Some(listing) = view.kind.listing_mut() {
-                cleared |= !listing.selected.is_empty();
-                listing.selected.clear();
+                let before = listing.selected.len();
+                listing.selected.retain(|_, what| *what != listing::Chosen::Snapshot);
+                cleared |= listing.selected.len() != before;
             }
         }
         cleared
@@ -735,8 +758,21 @@ impl State {
     /// вопрос «что на шаре» поэтому не отвечает, и заголовок списка считает по
     /// нарисованному (см. `list_screen`).
     pub fn outlined_in(&self, listing: &listing::ListingState) -> usize {
-        self.outlined.iter().filter(|outlined| listing.selected.contains(&outlined.key)).count()
+        self.outlined.iter().filter(|outlined| listing.selected.contains_key(&outlined.key)).count()
     }
+}
+
+/// Поддаётся ли выбранное пакетному действию — по ответу на действие.
+///
+/// Считает его сам обработчик (`handlers::library::batch`), тем же перебором,
+/// каким потом и действует: числа эти решают, показывать ли кнопку, и второй
+/// ответ на вопрос «что будет сделано» однажды разошёлся бы с первым — кнопка
+/// обещала бы действие и не совершала его.
+pub struct Batch {
+    /// Есть ли что удалять — хоть одна запись библиотеки.
+    pub deletable: bool,
+    /// Есть ли что ставить в закачку.
+    pub fetchable: bool,
 }
 
 pub mod search;

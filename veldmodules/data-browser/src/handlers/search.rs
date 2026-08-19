@@ -141,7 +141,7 @@ fn survivors(state: &mut State, view: ViewId) {
     };
 
     if let Some(listing) = state.listing_mut(view) {
-        listing.selected.retain(|key| alive.contains(key));
+        listing.selected.retain(|key, _| alive.contains(key));
     }
     super::overlay::keep_only(state, view, |identifier| alive.contains(identifier));
     super::outline::refresh(state);

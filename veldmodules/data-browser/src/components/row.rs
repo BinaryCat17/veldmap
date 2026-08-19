@@ -357,6 +357,32 @@ impl Row {
             || (!self.product.is_empty() && self.product == self.snapshot_key())
     }
 
+    /// Ключ, которым строку выбирают коробочкой. У снимка это его ключ у
+    /// провайдера — тот самый, которым он очерчивается на шаре, — у остального
+    /// собственный ключ строки.
+    ///
+    /// Написано здесь одно на всех, кто спрашивает про выбор: коробочка строки,
+    /// коробочка шапки и обработчик выбора. Две копии этого правила однажды
+    /// сочли бы одну строку за две — отмеченную и неотмеченную сразу.
+    pub fn choice_key(&self) -> &str {
+        match self.is_snapshot() {
+            true => self.snapshot_key(),
+            false => self.key(),
+        }
+    }
+
+    /// Можно ли выбрать эту строку.
+    ///
+    /// Папку пути — нельзя: в неё заходят, а выбирают то, что лежит в каталоге
+    /// или на диске. Снимок, лежащий каталогом (.SAFE, .SEN3), папкой в этом
+    /// смысле не считается — выбирают как раз его.
+    ///
+    /// Безымянную — тоже нельзя: ключ выбора и есть то, чем его потом
+    /// адресуют, и пустым адресовать нечего.
+    pub fn choosable(&self) -> bool {
+        !matches!(self.kind, RowKind::Folder) && !self.choice_key().is_empty()
+    }
+
     /// Есть ли что раскрыть под этой строкой: упаковки снимка, его файлы или
     /// содержимое папки. У папки каталога оно ещё не приехало — раскрытие его
     /// и спросит.
@@ -610,6 +636,82 @@ mod tests {
             entry.siblings = files;
         }
         entries
+    }
+
+    /// Одиночный файл выбирается наравне со снимком.
+    ///
+    /// Коробочка — это выбор строки, а не показ контура: пакетом удаляют как
+    /// раз такие файлы, а контура у них не бывает вовсе.
+    #[test]
+    fn a_lone_file_is_chosen_just_like_a_snapshot() {
+        let mut entries =
+            walked(1, vec![entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete, 10)]);
+        let mut lone = entry("dem.tif", "", LibraryStatus::LibComplete, 7);
+        lone.identifier = "eodata/dem/dem.tif".to_string();
+        entries.push(lone);
+        let rows = downloaded_rows(&LibraryState { entries });
+
+        let (snapshot, lone) = (&rows[0], &rows[1]);
+        assert!(snapshot.choosable(), "снимок выбирается");
+        assert!(lone.choosable(), "файл вне снимка тоже выбирается");
+        assert!(!lone.is_snapshot(), "снимком он при этом не притворяется");
+        assert_eq!(lone.choice_key(), "eodata/dem/dem.tif", "файл адресуется своим ключом");
+    }
+
+    /// Ключ выбора снимка — тот же, которым его очерчивают, и там, где
+    /// собственный ключ строки с ним расходится, выбор обязан идти за ключом
+    /// снимка: иначе один снимок стал бы двумя — выбранным и очерченным
+    /// порознь.
+    ///
+    /// Расходятся они в двух местах: строка сетевого каталога приезжает со
+    /// слэшем на конце, а у снимка с несколькими упаковками собственный ключ
+    /// — ключ сцены (см. [`Row::key`]).
+    #[test]
+    fn a_snapshot_is_chosen_by_the_key_it_is_outlined_by() {
+        let listed = Row::container_row(
+            "eodata/store/S2B_X.SAFE/".to_string(),
+            "S2B_X.SAFE".to_string(),
+            RowStatus::Remote,
+            RowKind::Product { folder: true },
+        );
+        assert_eq!(listed.choice_key(), listed.snapshot_key());
+        assert_ne!(listed.choice_key(), listed.key(), "слэш листинга в ключ выбора не идёт");
+
+        let parted = Row {
+            group: Some("сцена".to_string()),
+            ..Row::container_row(
+                "eodata/store/S2B_X.SAFE".to_string(),
+                "S2B_X.SAFE".to_string(),
+                RowStatus::Remote,
+                RowKind::Product { folder: false },
+            )
+        };
+        assert_eq!(parted.choice_key(), parted.snapshot_key());
+        assert_ne!(parted.choice_key(), parted.key(), "ключ сцены в ключ выбора не идёт");
+    }
+
+    /// Папку пути не выбирают: в неё заходят. А снимок, лежащий каталогом, —
+    /// выбирают, хотя зайти в него тоже можно: «папка» у него про укладку, а
+    /// не про род. Безымянную строку не выбирают тоже: ключ выбора и есть то,
+    /// чем её потом адресуют.
+    #[test]
+    fn a_path_folder_is_not_chosen_but_a_snapshot_folder_is() {
+        let folder = Row::container_row(
+            "eodata/store/".to_string(),
+            "store".to_string(),
+            RowStatus::Remote,
+            RowKind::Folder,
+        );
+        let snapshot = Row::container_row(
+            "eodata/store/S2B_X.SAFE".to_string(),
+            "S2B_X.SAFE".to_string(),
+            RowStatus::Remote,
+            RowKind::Product { folder: true },
+        );
+
+        assert!(!folder.choosable());
+        assert!(snapshot.choosable());
+        assert!(!Row::default().choosable(), "адресовать безымянную строку нечем");
     }
 
     /// Файлы одного снимка сходятся в одну строку, а то, что снимку не

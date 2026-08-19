@@ -140,6 +140,8 @@ fn on_view_message(state: &mut State, view: crate::module::state::ViewId, messag
         ViewMsg::Check(key) => handlers::outline::toggle(state, view, key),
         ViewMsg::CheckShown(on) => handlers::outline::mark_shown(state, view, on),
         ViewMsg::CheckClear => handlers::outline::unmark_all(state, view),
+        ViewMsg::CheckDownload => handlers::library::on_download_selected(state, view),
+        ViewMsg::CheckDelete => handlers::library::on_delete_selected(state, view),
         ViewMsg::SearchQuery(query) => handlers::search::on_query(state, view, query),
         ViewMsg::SearchMission(mission) => handlers::search::on_mission(state, view, mission),
         ViewMsg::SearchPeriod(period) => handlers::search::on_period(state, view, period),
@@ -201,9 +203,9 @@ pub fn on_locate_result(
         // Один ход к каталогу отвечает обоим: показать снимок — это и очертить
         // его (см. `overlay::on_show_pressed`), и второй такой же запрос ради
         // той же геометрии был бы лишним.
-        state::Locate::Overlay(key) => {
+        state::Locate::Overlay { key, ours } => {
             handlers::outline::located(state, key.clone(), response.clone());
-            handlers::overlay::on_located(state, &key, response);
+            handlers::overlay::on_located(state, &key, ours, response);
         }
     }
 }

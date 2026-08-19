@@ -23,6 +23,7 @@ pub fn view(state: &State, view: ViewId, search: &SearchState) -> Element<Msg> {
             title: "Поиск снимков",
             picked: state.picked_key(),
             outlined: state.outlined_in(&search.listing),
+            batch: crate::module::handlers::library::batch(state, view),
             subtitle: subtitle(search, rows.len()),
             path: None,
             // Пока ответа нет, «ничего не нашлось» — неправда: ещё ищем.

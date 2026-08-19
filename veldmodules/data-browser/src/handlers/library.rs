@@ -9,7 +9,8 @@ use crate::proto::data_library::{
 };
 use crate::proto::data_provider::{ListPathRequest, ListPathResponse};
 
-use crate::module::state::{Listing, State};
+use crate::module::state::listing::Chosen;
+use crate::module::state::{Batch, Listing, State, ViewId, ViewKind};
 use crate::module::state::library::status_of;
 use crate::proto::data_library::LibraryStatus;
 
@@ -181,6 +182,171 @@ pub fn on_delete_snapshot(state: &mut State, product: String) {
     }
 }
 
+/// Скачать всё выбранное в списке.
+///
+/// Не то же, что нажать «скачать» у каждой строки: там это переключатель и
+/// второе нажатие ставит закачку на паузу (см. [`on_download_pressed`]), а
+/// пакетное действие названо одним словом и делать обязано одно.
+pub fn on_download_selected(state: &mut State, view: ViewId) {
+    for what in fetches(state, view) {
+        match what {
+            Fetch::Snapshot(product) => on_download_snapshot(state, product),
+            Fetch::File { identifier, product } => {
+                crate::calls::data_library::on_download(&DownloadRequest { identifier, product });
+            }
+        }
+    }
+}
+
+/// Что уедет закачке за одно пакетное нажатие.
+///
+/// Снимок и файл разведены родом, а не парой полей: снимка библиотека не знает
+/// вовсе — сперва у провайдера спрашивают, из чего он состоит (см.
+/// [`on_download_snapshot`]), — а файл уходит закачке прямо.
+#[derive(PartialEq, Eq, Debug)]
+pub enum Fetch {
+    Snapshot(String),
+    File { identifier: String, product: String },
+}
+
+/// Имеет ли смысл качать эту строку — и чем.
+///
+/// Файл разбирается точно: доведённый и уже идущий пропускаются, оборванный
+/// докачивается. Снимок — только целиком доведённый, потому что чего в нём
+/// недостаёт, знает провайдер, а не мы: пока снимок не обойдён, у библиотеки
+/// нет и списка его файлов. Отсюда и `files == 0` — необойдённый качать есть
+/// зачем, и это самый частый случай: снимок из сетевого каталога.
+fn fetch_of(state: &State, key: &str, what: &Chosen) -> Option<Fetch> {
+    match what {
+        Chosen::Snapshot => {
+            let (done, files) = state.library.snapshot(key);
+            (files == 0 || done < files as usize).then(|| Fetch::Snapshot(key.to_string()))
+        }
+        Chosen::File { identifier, product, .. } => {
+            if identifier.is_empty() {
+                return None;
+            }
+            let busy = state.library.by_identifier(identifier).is_some_and(|entry| {
+                matches!(
+                    status_of(entry),
+                    LibraryStatus::LibDownloading | LibraryStatus::LibComplete
+                )
+            });
+            (!busy).then(|| Fetch::File {
+                identifier: identifier.clone(),
+                product: product.clone(),
+            })
+        }
+    }
+}
+
+/// Что из выбранного имеет смысл качать. Дальше остаются одни запросы.
+fn fetches(state: &State, view: ViewId) -> Vec<Fetch> {
+    selection(state, view)
+        .iter()
+        .filter_map(|(key, what)| fetch_of(state, key, what))
+        .collect()
+}
+
+/// Имена записей библиотеки, которыми обернётся удаление этой строки.
+///
+/// Снимок разворачивается в свои файлы (см. [`files_of`]) — библиотека ведёт
+/// учёт файлам и о снимках не знает. Файл называет себя сам, но имя
+/// спрашивается у библиотеки, а не берётся из выбора: файл могли скачать уже
+/// после того, как его выбрали, — тогда запись появилась, а в выборе имени
+/// нет. Запомненное в выборе остаётся на случай, когда записи под этим ключом
+/// у библиотеки нет вовсе.
+fn deletions_of(state: &State, key: &str, what: &Chosen) -> Vec<String> {
+    match what {
+        Chosen::Snapshot => files_of(state, key, |_| true),
+        Chosen::File { identifier, name, .. } => {
+            let named = match state.library.by_identifier(identifier) {
+                Some(entry) => entry.name.clone(),
+                None => name.clone(),
+            };
+            // Пустое имя до библиотеки не доезжает: удалять нечего, а запрос
+            // без имени она разберёт отказом.
+            match named.is_empty() {
+                true => Vec::new(),
+                false => vec![named],
+            }
+        }
+    }
+}
+
+/// Выбросить всё выбранное — и с диска, и из очереди закачек.
+///
+/// Выбор снимается с того, что действительно ушло удалению, и только с
+/// файлов: строки за удалённым файлом в «Скачанном» больше нет, и оставшаяся
+/// отметка считалась бы в заголовке до конца сеанса. Снимок остаётся выбранным
+/// — удалены его файлы с диска, а сам он живёт в каталоге, и контур его на
+/// шаре по-прежнему верен.
+pub fn on_delete_selected(state: &mut State, view: ViewId) {
+    let (names, gone) = deletions(state, view);
+    for name in names {
+        crate::calls::data_library::on_delete(&ItemRequest { name });
+    }
+
+    let Some(listing) = state.listing_mut(view) else { return };
+    for key in gone {
+        listing.selected.remove(&key);
+    }
+}
+
+/// Что уйдёт удалению за одно пакетное нажатие: имена записей библиотеки и
+/// ключи выбора, которые после этого перестанут на что-либо указывать.
+///
+/// Двумя списками из одного перебора, а не двумя переборами: разойдись они,
+/// выбор снимался бы не с того, что удалили.
+fn deletions(state: &State, view: ViewId) -> (Vec<String>, Vec<String>) {
+    let mut names: Vec<String> = Vec::new();
+    let mut gone: Vec<String> = Vec::new();
+    for (key, what) in selection(state, view) {
+        let asked = deletions_of(state, &key, &what);
+        if what != Chosen::Snapshot && !asked.is_empty() {
+            gone.push(key);
+        }
+        names.extend(asked);
+    }
+    // Выбрать можно и снимок, и отдельный его файл, а удалить запись дважды
+    // значит вторым запросом промахнуться по уже несуществующему.
+    names.sort();
+    names.dedup();
+    (names, gone)
+}
+
+/// Есть ли что делать пакетным кнопкам. Тем же разбором, каким потом пойдёт и
+/// само действие ([`deletions_of`], [`fetch_of`]): по этим ответам решают,
+/// показывать ли кнопку, и второй ответ на вопрос «что будет сделано» однажды
+/// разошёлся бы с первым — кнопка обещала бы действие и не совершала его.
+///
+/// Ответом «да/нет», а не числом: числа нигде не показываются, а спрашивают об
+/// этом на каждый кадр разметки — перебор обрывается на первом же выбранном,
+/// которому есть что сделать.
+pub fn batch(state: &State, view: ViewId) -> Batch {
+    let picked = selection(state, view);
+    Batch {
+        deletable: picked.iter().any(|(key, what)| !deletions_of(state, key, what).is_empty()),
+        fetchable: picked.iter().any(|(key, what)| fetch_of(state, key, what).is_some()),
+    }
+}
+
+/// Выбранное в списке — копией: следом идут запросы к библиотеке, а они трогают
+/// то же состояние.
+///
+/// В порядке ключей, а не множества: порядок множества случаен, и один и тот же
+/// выбор давал бы то запросы в одном порядке, то в другом, — а по этому же
+/// перебору считаются и числа заголовка.
+fn selection(state: &State, view: ViewId) -> Vec<(String, Chosen)> {
+    let Some(listing) = state.get(view).and_then(ViewKind::listing) else {
+        return Vec::new();
+    };
+    let mut picked: Vec<(String, Chosen)> =
+        listing.selected.iter().map(|(key, what)| (key.clone(), what.clone())).collect();
+    picked.sort_by(|left, right| left.0.cmp(&right.0));
+    picked
+}
+
 /// Имена записей снимка — то, чем библиотека адресует его файлы. Правило «что
 /// считать файлом этого снимка» написано здесь одно на всех: разворачивают
 /// снимок и пауза, и удаление, а два обхода её записей однажды разошлись бы —
@@ -242,4 +408,236 @@ fn measure_speed(state: &mut State) {
         return;
     }
     state.measured = Some((now, done));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::state::{BrowseState, ViewKind};
+
+    fn state() -> State {
+        State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние")
+    }
+
+    fn entry(name: &str, product: &str, status: LibraryStatus) -> LibraryEntry {
+        LibraryEntry {
+            name: name.to_string(),
+            identifier: format!("eodata/{}/{}", product, name),
+            product: product.to_string(),
+            done: 10,
+            total: 10,
+            status: status as i32,
+            modified: 0,
+            siblings: 0,
+            trouble: String::new(),
+        }
+    }
+
+    /// Список с выбором: вид, его строки и то, что в нём отмечено.
+    fn chose(picked: Vec<(&str, Chosen)>, entries: Vec<LibraryEntry>) -> (State, ViewId) {
+        let mut state = state();
+        state.library.entries = entries;
+        let pane = state.focused();
+        let view = state.open_in(pane, ViewKind::Browse(BrowseState::default()));
+        let listing = state.listing_mut(view).expect("список");
+        for (key, what) in picked {
+            listing.selected.insert(key.to_string(), what);
+        }
+        (state, view)
+    }
+
+    fn file(identifier: &str, name: &str) -> Chosen {
+        Chosen::File {
+            identifier: identifier.to_string(),
+            product: String::new(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Выбранный снимок разворачивается в свои файлы — и только в свои; его же
+    /// файл, выбранный отдельно, второго запроса не добавляет.
+    ///
+    /// Библиотека ведёт учёт файлам и о снимках не знает, поэтому разворот
+    /// здесь единственный способ удалить снимок. Второй запрос по тому же
+    /// имени промахнулся бы по уже несуществующему, а чужой файл рядом
+    /// проверяет, что отбор идёт равенством `product`, а не префиксом.
+    #[test]
+    fn a_snapshot_unfolds_into_its_own_files_and_only_once() {
+        let (state, view) = chose(
+            vec![
+                ("S2B_X.SAFE", Chosen::Snapshot),
+                ("eodata/S2B_X.SAFE/B1.TIF", file("eodata/S2B_X.SAFE/B1.TIF", "B1.TIF")),
+            ],
+            vec![
+                entry("B1.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete),
+                entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete),
+                entry("C1.TIF", "S2B_Y.SAFE", LibraryStatus::LibComplete),
+            ],
+        );
+
+        assert_eq!(
+            deletions(&state, view).0,
+            vec!["B1.TIF".to_string(), "B2.TIF".to_string()],
+            "оба файла снимка по разу, чужой не тронут"
+        );
+    }
+
+    /// Файл, скачанный уже после того, как его выбрали, всё равно удаляется:
+    /// имя записи спрашивается у библиотеки, а запомненное в выборе остаётся на
+    /// случай, когда записи под этим ключом у неё нет вовсе.
+    #[test]
+    fn a_file_downloaded_after_it_was_chosen_is_still_deleted() {
+        let (state, view) = chose(
+            vec![("eodata/lone/dem.tif", file("eodata/lone/dem.tif", ""))],
+            vec![entry("dem.tif", "lone", LibraryStatus::LibComplete)],
+        );
+
+        assert_eq!(deletions(&state, view).0, vec!["dem.tif".to_string()]);
+    }
+
+    /// Выбранного нет на диске вовсе — удалять нечего, и пустое имя до
+    /// библиотеки не доезжает: запрос без имени она разобрала бы отказом.
+    #[test]
+    fn nothing_on_disk_means_nothing_to_delete() {
+        let (state, view) = chose(
+            vec![("eodata/lone/dem.tif", file("eodata/lone/dem.tif", ""))],
+            Vec::new(),
+        );
+
+        assert!(deletions(&state, view).0.is_empty());
+    }
+
+    /// Доведённое пакетное «скачать» обходит: у строки то же нажатие — это
+    /// переключатель и остановило бы идущее, а пакетное действие названо одним
+    /// словом и делает одно.
+    #[test]
+    fn what_is_already_here_is_not_fetched_again() {
+        let (state, view) = chose(
+            vec![
+                ("eodata/lone/done.tif", file("eodata/lone/done.tif", "done.tif")),
+                ("eodata/lone/going.tif", file("eodata/lone/going.tif", "going.tif")),
+                ("eodata/lone/new.tif", file("eodata/lone/new.tif", "")),
+            ],
+            vec![
+                entry("done.tif", "lone", LibraryStatus::LibComplete),
+                entry("going.tif", "lone", LibraryStatus::LibDownloading),
+            ],
+        );
+
+        assert_eq!(
+            fetches(&state, view),
+            vec![Fetch::File {
+                identifier: "eodata/lone/new.tif".to_string(),
+                product: String::new(),
+            }]
+        );
+    }
+
+    /// Снимок, обойдённый и доведённый целиком, качать незачем; обойдённый
+    /// наполовину — есть зачем, а чего в нём недостаёт, скажет провайдер.
+    #[test]
+    fn a_whole_snapshot_is_not_fetched_again() {
+        let whole = |files: u32, done: LibraryStatus| {
+            let mut one = entry("B1.TIF", "S2B_X.SAFE", done);
+            one.siblings = files;
+            let mut two = entry("B2.TIF", "S2B_X.SAFE", LibraryStatus::LibComplete);
+            two.siblings = files;
+            vec![one, two]
+        };
+
+        let (state, view) =
+            chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], whole(2, LibraryStatus::LibComplete));
+        assert!(fetches(&state, view).is_empty(), "снимок уже целиком на диске");
+
+        let (state, view) =
+            chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], whole(3, LibraryStatus::LibComplete));
+        assert_eq!(
+            fetches(&state, view),
+            vec![Fetch::Snapshot("S2B_X.SAFE".to_string())],
+            "в снимке три файла, а на диске два"
+        );
+    }
+
+    /// Запись без ключа провайдера удаляется по запомненному имени и в закачку
+    /// не ставится: качать её неоткуда, а на диске она есть.
+    #[test]
+    fn a_file_without_a_provider_key_is_deleted_but_not_fetched() {
+        let (state, view) = chose(
+            vec![("dem.tif", Chosen::File {
+                identifier: String::new(),
+                product: String::new(),
+                name: "dem.tif".to_string(),
+            })],
+            Vec::new(),
+        );
+
+        assert_eq!(deletions(&state, view).0, vec!["dem.tif".to_string()]);
+        assert!(fetches(&state, view).is_empty(), "закачка без ключа никуда не поедет");
+    }
+
+    /// Оборванная закачка пакетом продолжается: остановленное — это то, что
+    /// человек и хотел бы дотянуть, а `.part` докачивается с места обрыва.
+    #[test]
+    fn an_interrupted_file_is_picked_up_again() {
+        let (state, view) = chose(
+            vec![("eodata/lone/half.tif", file("eodata/lone/half.tif", "half.tif"))],
+            vec![entry("half.tif", "lone", LibraryStatus::LibPaused)],
+        );
+
+        assert_eq!(
+            fetches(&state, view),
+            vec![Fetch::File {
+                identifier: "eodata/lone/half.tif".to_string(),
+                product: String::new(),
+            }]
+        );
+    }
+
+    /// Снимок, который ни разу не обходили, качать есть зачем — и это самый
+    /// частый случай: снимок из сетевого каталога, где на диске нет ничего.
+    /// Из чего он состоит, скажет провайдер.
+    #[test]
+    fn a_snapshot_never_walked_is_worth_fetching() {
+        let (state, view) = chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], Vec::new());
+
+        assert_eq!(fetches(&state, view), vec![Fetch::Snapshot("S2B_X.SAFE".to_string())]);
+    }
+
+    /// Кнопка стои́т ровно тогда, когда ей есть что сделать, и отвечает на это
+    /// тем же разбором, каким пойдёт действие.
+    #[test]
+    fn the_buttons_answer_for_what_the_action_will_do() {
+        // Скачанный файл: удалять есть что, качать нечего.
+        let (state, view) = chose(
+            vec![("eodata/lone/done.tif", file("eodata/lone/done.tif", "done.tif"))],
+            vec![entry("done.tif", "lone", LibraryStatus::LibComplete)],
+        );
+        let can = batch(&state, view);
+        assert!(can.deletable && !can.fetchable);
+
+        // Снимок из каталога, которого на диске нет: наоборот.
+        let (state, view) = chose(vec![("S2B_X.SAFE", Chosen::Snapshot)], Vec::new());
+        let can = batch(&state, view);
+        assert!(!can.deletable && can.fetchable);
+    }
+
+    /// Удалённый файл уходит и из выбора: строки за ним больше нет, и оставшаяся
+    /// отметка считалась бы в заголовке до конца сеанса. Снимок остаётся: с
+    /// диска ушли его файлы, а сам он живёт в каталоге, и контур его верен.
+    #[test]
+    fn deleting_drops_the_file_from_the_choice_and_keeps_the_snapshot() {
+        let (mut state, view) = chose(
+            vec![
+                ("S2B_X.SAFE", Chosen::Snapshot),
+                ("eodata/lone/dem.tif", file("eodata/lone/dem.tif", "dem.tif")),
+            ],
+            vec![entry("dem.tif", "lone", LibraryStatus::LibComplete)],
+        );
+
+        on_delete_selected(&mut state, view);
+
+        let listing = state.get(view).and_then(ViewKind::listing).expect("список");
+        assert!(listing.selected.contains_key("S2B_X.SAFE"), "снимок ушёл из выбора");
+        assert!(!listing.selected.contains_key("eodata/lone/dem.tif"), "файл остался в выборе");
+    }
 }

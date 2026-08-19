@@ -62,24 +62,25 @@ impl Arranged<'_> {
         })
     }
 
-    /// Ключи снимков, показанных на этой странице, — ровно то, на что действует
-    /// коробочка в шапке.
+    /// Строки этой страницы, которые можно выбрать, — ровно то, на что
+    /// действует коробочка в шапке.
     ///
     /// Страница, а не весь отбор: коробочка стои́т над видимым, и отмечать ею
     /// сотню строк, которых на экране нет, значило бы заодно спросить у
     /// каталога сотню продуктов — по одному на контур.
-    pub fn marks(&self) -> impl Iterator<Item = &str> {
-        self.shown()
-            .filter(|row| row.is_snapshot())
-            .map(Row::snapshot_key)
-            .filter(|key| !key.is_empty())
+    ///
+    /// Строками, а не ключами: за выбором стои́т ещё и род строки (снимок или
+    /// файл сам по себе), и восстанавливать его по одному ключу было бы нечем.
+    pub fn marks(&self) -> impl Iterator<Item = &Row> {
+        self.shown().filter(|row| row.choosable())
     }
 
     /// Отмечено ли всё, что видно. Отмечать нечего — не отмечено: коробочка
     /// тогда предлагает отметить, а нажатие ничего не меняет.
     pub fn all_marked(&self, listing: &ListingState) -> bool {
         let mut marks = self.marks().peekable();
-        marks.peek().is_some() && marks.all(|key| listing.selected.contains(key))
+        marks.peek().is_some()
+            && marks.all(|row| listing.selected.contains_key(row.choice_key()))
     }
 }
 
@@ -251,7 +252,7 @@ fn segments(folder: &str, grouping: Grouping) -> Vec<&str> {
 mod tests {
     use super::*;
     use crate::module::components::{RowKind, RowStatus};
-    use crate::module::state::listing::Sorting;
+    use crate::module::state::listing::{Chosen, Sorting};
 
     fn folder(key: &str, children: Vec<Row>) -> Row {
         Row {
@@ -263,6 +264,15 @@ mod tests {
                 RowKind::Folder,
             )
         }
+    }
+
+    fn file(key: &str) -> Row {
+        Row::container_row(
+            key.to_string(),
+            key.to_string(),
+            RowStatus::Complete,
+            RowKind::File,
+        )
     }
 
     fn snapshot(key: &str) -> Row {
@@ -337,16 +347,38 @@ mod tests {
         let mut listing = ListingState::default();
         assert!(!arrange(&rows, &listing).all_marked(&listing), "пока не отмечено ничего");
 
-        listing.selected.insert("p/a".to_string());
+        listing.selected.insert("p/a".to_string(), Chosen::Snapshot);
         assert!(!arrange(&rows, &listing).all_marked(&listing), "отмечен один из двух");
 
-        listing.selected.insert("p/b".to_string());
+        listing.selected.insert("p/b".to_string(), Chosen::Snapshot);
         assert!(arrange(&rows, &listing).all_marked(&listing), "папка в счёт не идёт");
 
         // Отбор сузил список до одного снимка — и он отмечен.
         let mut narrowed = ListingState { query: "a".to_string(), ..Default::default() };
-        narrowed.selected.insert("p/a".to_string());
+        narrowed.selected.insert("p/a".to_string(), Chosen::Snapshot);
         assert!(arrange(&rows, &narrowed).all_marked(&narrowed));
+    }
+
+    /// Коробочка в шапке считает всё выбираемое, а не одни снимки: выбирают
+    /// строку, и файл сам по себе выбирается наравне со снимком — иначе
+    /// «отметить всё» оставляло бы половину списка невыбранной.
+    #[test]
+    fn the_header_box_counts_files_too() {
+        let rows = vec![snapshot("p/a"), file("p/dem.tif"), folder("p/c/", Vec::new())];
+        let mut listing = ListingState::default();
+
+        listing.selected.insert("p/a".to_string(), Chosen::Snapshot);
+        assert!(!arrange(&rows, &listing).all_marked(&listing), "файл ещё не выбран");
+
+        listing.selected.insert(
+            "p/dem.tif".to_string(),
+            Chosen::File {
+                identifier: "p/dem.tif".to_string(),
+                product: String::new(),
+                name: "dem.tif".to_string(),
+            },
+        );
+        assert!(arrange(&rows, &listing).all_marked(&listing), "папка в счёт не идёт");
     }
 
     /// Отмечать нечего — коробочка не держится нажатой: иначе она обещала бы,
@@ -368,10 +400,12 @@ mod tests {
         let mut listing = ListingState::default();
         listing.expanded.insert("p/day/".to_string());
 
-        assert_eq!(arrange(&rows, &listing).marks().collect::<Vec<_>>(), vec!["p/day/one"]);
+        let arranged = arrange(&rows, &listing);
+        let shown: Vec<&str> = arranged.marks().map(Row::choice_key).collect();
+        assert_eq!(shown, vec!["p/day/one"]);
         assert!(!arrange(&rows, &listing).all_marked(&listing));
 
-        listing.selected.insert("p/day/one".to_string());
+        listing.selected.insert("p/day/one".to_string(), Chosen::Snapshot);
         assert!(arrange(&rows, &listing).all_marked(&listing));
     }
 

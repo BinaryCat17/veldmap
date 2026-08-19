@@ -88,8 +88,9 @@ pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     // обоим: и наложению, и контуру. Ответ помечается ожидаемым до отметки,
     // иначе сборка контуров послала бы за тем же продуктом второй запрос.
     state.located.insert(identifier.clone(), Located::Asking);
-    super::outline::mark(state, view, &identifier);
-    let correlation = state.locates.begin(Locate::Overlay(identifier.clone()));
+    let ours = super::outline::mark(state, view, &identifier);
+    let correlation =
+        state.locates.begin(Locate::Overlay { key: identifier.clone(), ours });
     crate::calls::data_provider::on_locate(&LocateRequest { identifier }, &correlation);
 }
 
@@ -117,7 +118,7 @@ pub fn focus(state: &mut State, key: &str) -> bool {
 /// бы два ключа на один снимок, — а отметку переносим туда же: оставшись на
 /// ключе строки, она развела бы один снимок на слой и «только контур» в списке
 /// «На просмотре».
-pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
+pub fn on_located(state: &mut State, key: &str, ours: bool, response: LocateResponse) {
     // Пока ход к каталогу шёл, показа могли и расхотеть: отметку сняли, вкладку
     // закрыли, «снять с шара» нажали. Убить запрос в полёте нечем — он ответит
     // всё равно, — поэтому спрашиваем здесь, всё ли ещё его ждут. Иначе
@@ -134,7 +135,11 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
     };
 
     if key != product.identifier {
-        state.clear_mark(key);
+        // Убираем только своё: под тем же ключом человек мог выбрать файл
+        // коробочкой ради пакетного действия, и показ ему не хозяин.
+        if ours {
+            state.clear_mark(key);
+        }
         state.located.remove(key);
     }
     // Продукт кладётся в кэш под своим ключом — тем, которым он теперь и

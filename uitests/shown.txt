@@ -1,15 +1,31 @@
 # «На просмотре»: очерченный снимок виден во вкладке слоёв и убирается оттуда.
-100 timeout 15000
+#
+# Список сужается фильтром, и это не украшение: коробочка стои́т у всякой
+# строки, включая файлы сами по себе, а очерчивается только снимок — без
+# сужения первая коробочка списка попала бы в файл, и очерчивать было бы
+# нечего. `SAFE` — упаковка снимков Sentinel-1 и -2, и отбор по ней оставляет
+# в списке одни снимки; имя снимка сюда не вписано нарочно — оно у каждого
+# своё.
+#
+# Выбирается ровно одна строка: закрывающий `absent outline_remove` требует,
+# чтобы после снятия не осталось ни одного контура.
+#
+# Нужно: хотя бы один скачанный снимок .SAFE в runtime/data и сеть —
+# геометрию контура знает каталог, и другого места взять её нет.
+100 timeout 20000
 500 wait tab_menu
 700 tap tab_menu
 1100 tap new_tab:downloaded
-1900 wait check_shown
-2100 tap check#1
-2800 wait text:на шаре
-3000 tap tab_menu
-3400 tap new_tab:shown
-4200 wait outline_remove
-4400 shot uitest-shown
-4600 tap outline_remove
-5300 absent outline_remove
-5500 exit
+1900 wait query
+2100 tap query
+2400 type SAFE
+3400 wait check#1
+3600 tap check#1
+4300 wait text:на шаре
+4500 tap tab_menu
+4900 tap new_tab:shown
+5700 wait outline_remove
+5900 shot uitest-shown
+6100 tap outline_remove
+6800 absent outline_remove
+7000 exit

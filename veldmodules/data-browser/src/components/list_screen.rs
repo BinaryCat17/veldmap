@@ -10,7 +10,7 @@ use crate::proto::ui_service::{
     ScrollDirection, ScrollTo,
 };
 use crate::module::components::{arrange, controls, format, table, Row};
-use crate::module::state::ViewId;
+use crate::module::state::{Batch, ViewId};
 use crate::module::state::listing::{ListingState, Menu};
 use crate::module::{theme, Msg, ViewMsg};
 
@@ -35,10 +35,13 @@ pub struct Screen<'a> {
     /// Один на все списки: выбирают на шаре, а видно это должно быть везде, где
     /// этот снимок стоит строкой (см. `table::Context::picked`).
     pub picked: &'a str,
-    /// Сколько отмеченного здесь очерчено на шаре. Считает его состояние
-    /// модуля (`State::outlined_in`), а не сам список: отметка — намерение, а
+    /// Сколько выбранного здесь очерчено на шаре. Считает его состояние
+    /// модуля (`State::outlined_in`), а не сам список: выбор — намерение, а
     /// контур — то, что из него вышло, и совпадают они не всегда.
     pub outlined: usize,
+    /// Есть ли что делать пакетным кнопкам (`handlers::library::batch`).
+    /// Этим и решается, показывать ли их.
+    pub batch: Batch,
     /// Раскрытое меню этого списка (см. `table::Context::menu`).
     pub menu: Option<&'a Menu>,
     /// Строка, к которой привёл переход в эту вкладку; пусто — переход был не
@@ -144,19 +147,19 @@ pub fn view(
     };
     let table::Fit { columns, name: name_width, compact } = table::fit(width, optional);
 
-    // Сколько снимков этого списка очерчено на шаре — и чем это снять. Без
-    // такой подписи коробочки говорят только «отмечено», а отмечено-то ради
-    // контура (см. handlers::outline).
+    // Что выбрано и что с этим можно сделать.
     //
-    // Считается по нарисованному, а не по отмеченному: у снимка без геометрии
-    // контура не бывает вовсе, а пока продукт спрашивают у каталога — ещё нет,
-    // и «1 на шаре» над пустым шаром было бы неправдой.
+    // Контур считается по нарисованному, а не по выбранному: у снимка без
+    // геометрии его не бывает вовсе, а пока продукт спрашивают у каталога — ещё
+    // нет, и «1 на шаре» над пустым шаром было бы неправдой. Названо оно
+    // отдельно от выбора по той же причине: выбирают строку, а очерчивается
+    // снимок, и сводить два числа в одно значило бы обещать контур файлу.
     let mut trailing: Vec<Element<Msg>> = Vec::new();
     if !listing.selected.is_empty() {
-        let marked = listing.selected.len();
-        let counts = match screen.outlined == marked {
-            true => format!("{} на шаре", marked),
-            false => format!("{} на шаре из {}", screen.outlined, marked),
+        let chosen = listing.selected.len();
+        let counts = match screen.outlined {
+            0 => format!("{} выбрано", chosen),
+            outlined => format!("{} выбрано, {} на шаре", chosen, outlined),
         };
         trailing.push(
             text::<Msg>(counts)
@@ -165,10 +168,36 @@ pub fn view(
                 .single_line()
                 .into(),
         );
-        trailing.push(
-            theme::bar_button("Снять отметки")
-                .on_press(Msg::In(view, ViewMsg::CheckClear))
-                .into(),
+        // Значками, а не подписями: панель делят пополам как раз затем, чтобы
+        // рядом стоял шар, и три подписи подряд в оставшуюся половину не
+        // помещаются — правый край срезает их вместе с действием. Что значок
+        // делает, говорит подсказка, теми же словами.
+        let mut act = |glyph: &'static str, tone: theme::IconTone, hint: &str, msg: ViewMsg| {
+            trailing.push(table::icon_button(glyph, tone, hint, Msg::In(view, msg)));
+        };
+        // Кнопка стои́т, только когда ей есть что сделать: выбрать можно и то,
+        // чего нет на диске, и то, что уже целиком скачано.
+        if screen.batch.fetchable {
+            act(
+                theme::glyph::DOWNLOAD,
+                theme::IconTone::Rest,
+                "Скачать выбранное",
+                ViewMsg::CheckDownload,
+            );
+        }
+        if screen.batch.deletable {
+            act(
+                theme::glyph::TRASH,
+                theme::IconTone::Danger,
+                "Удалить выбранное",
+                ViewMsg::CheckDelete,
+            );
+        }
+        act(
+            theme::glyph::BOX,
+            theme::IconTone::Rest,
+            "Снять выбор",
+            ViewMsg::CheckClear,
         );
     }
     let heading = heading(screen.title, screen.subtitle, trailing);
