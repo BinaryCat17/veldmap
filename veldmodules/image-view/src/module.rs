@@ -164,9 +164,12 @@ pub fn on_canvas(state: &mut State, msg: Canvas) {
 /// «смотреть не на что» и **убирает канву из разметки**; а без канвы к нам не
 /// придёт и следующее делегирование места — то есть вкладка остаётся мёртвой
 /// до закрытия, даже когда отказ был мгновенным (текстуру успели сменить,
-/// пока событие шло к нам). Жалоба (`trouble`) оставляет канву на месте:
-/// делегирование повторяется на каждое изменение размера области, и первое же
-/// удачное собирает место заново и жалобу снимает.
+/// пока событие шло к нам). Жалоба оставляет канву на месте.
+///
+/// Само по себе это места ещё не возвращает: выделяет его владелец разметки, а
+/// спрашивают его только сменой размера, которой тут не было. Поэтому о нужде
+/// сказано отдельным полем — `ViewState.needs_place`, — и по нему владелец
+/// выдаёт место заново (см. `report`).
 ///
 /// Приговор остаётся для того, что делегированием не лечится: источник не
 /// открылся или не описался — там и правда смотреть не на что.
@@ -208,6 +211,9 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     view.fetch.reset();
     view.error = None;
     view.trouble = None;
+    // И жалоба на застрявший кадр: она про прошлый снимок, а показывают уже
+    // другой — вид в этой вкладке переиспользуется, а не заводится заново.
+    view.stuck = None;
     view.read_bytes = 0;
     view.total_bytes = resource.size;
     view.camera = None;
@@ -350,7 +356,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     // кадра значило бы стереть картинку из-за осечки, которая пройдёт сама.
     if !msg.error.is_empty() {
         view.fetch.forget_asked(&ctx.cells);
-        view.trouble = Some(msg.error);
+        view.trouble = Some(format!("неполно: {}", msg.error));
         report(state, &ctx.view);
         return;
     }
@@ -452,7 +458,7 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
             // выше уже нарисованы, и заменить их причиной значило бы стереть
             // готовую картинку из-за одного оборванного чтения.
             veldsdk::log::warn!(target: "handlers", "{}: производство: {}", view.label, msg.error);
-            view.trouble = Some(msg.error);
+            view.trouble = Some(format!("неполно: {}", msg.error));
         }
     }
 
@@ -533,7 +539,7 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
                 // раз в секунду пишет в журнал и жжёт кадр впустую, а причина у
                 // неё та же самая.
                 view.drawn = Some(stamp);
-                view.stuck = Some(format!("кадр не записан: {}", error));
+                view.stuck = Some(format!("кадр застыл: {}", error));
                 complained.push(key.clone());
             }
         }
@@ -672,10 +678,16 @@ fn report(state: &State, key: &str) {
         total_bytes: view.total_bytes,
         busy: view.busy(&state.passes, want.as_ref()),
         error: view.error.clone().unwrap_or_default(),
+        // Жалоба одна на провод, а поводов два: застрявший кадр важнее
+        // неполноты — неполный кадр хотя бы рисуется. Обе приезжают уже
+        // сказанными словами: подписать их заново некому, заказчик о разнице
+        // не знает (см. `View::stuck`).
         trouble: view.stuck.clone().or_else(|| view.trouble.clone()).unwrap_or_default(),
         // Место не собралось — значит выдать его заново может только владелец
-        // разметки: сами мы его не выделяем (см. `complain`).
-        needs_place: view.target.is_none() && view.shown.is_some(),
+        // разметки: сами мы его не выделяем (см. `complain`). Приговорённому
+        // виду место не нужно: канвы для него в разметке всё равно нет, и
+        // текстура под неё выделилась бы впустую.
+        needs_place: view.target.is_none() && view.shown.is_some() && view.error.is_none(),
     };
     crate::emit::on_view_state(&current);
 }

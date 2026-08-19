@@ -322,23 +322,30 @@ pub fn on_view_state(state: &mut State, view_state: ViewState) {
     // Канва говорит, что места под кадр у неё нет. Выдать его заново может
     // только владелец разметки — то есть мы, — и никто нас об этом больше не
     // попросит: `on_resized` приезжает лишь на смену размера, а размер не
-    // менялся. Забываем прежнее место, и следующее же событие области выдаст
-    // новое (см. `on_resized`).
+    // менялся. Поэтому выдаём прямо здесь.
     //
     // Без этого канва оставалась бы пустой до тех пор, пока человек не потянет
     // границу панели, — а причина отказа бывает мгновенной: текстуру сменили,
     // пока событие шло.
+    //
     // Одна попытка на жалобу: мгновенный отказ лечится первой же, а
     // устойчивый (не хватило видеопамяти) не лечится повтором вовсе — и без
-    // счёта мы с канвой гоняли бы текстуры по кругу (см. `replaced`).
+    // счёта мы с канвой гоняли бы текстуры по кругу (см. `replaced`). Счёт
+    // взводится там же, где попытка и делается: жалоба без выданного места
+    // (его ещё ни разу не выдавали) попытки не тратит.
     let retry = view_state.needs_place && !preview.replaced;
-    preview.replaced = view_state.needs_place;
+    if !view_state.needs_place {
+        preview.replaced = false;
+    }
     let size = preview.surface.as_ref().map(|place| (place.width, place.height));
     let label = preview.label.clone();
     preview.view_state = Some(view_state);
     if let (true, Some((width, height))) = (retry, size) {
         veldsdk::log::info!(target: "handlers",
             "превью '{}': место под кадр не собралось — выдаём заново", label);
+        if let Some(preview) = state.preview_mut(view) {
+            preview.replaced = true;
+        }
         place(state, view, width, height);
     }
 }

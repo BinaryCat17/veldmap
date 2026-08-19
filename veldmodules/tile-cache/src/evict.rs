@@ -139,15 +139,17 @@ pub fn on_list_result(state: &mut State, result: FsListResult) {
 /// Конец обхода: посчитать, выбрать жертв, разослать удаления.
 fn settle(state: &mut State, sweep: Sweep) {
     let total: u64 = sweep.sources.iter().map(|s| s.bytes).sum();
+    let within = within(total, state.limit_bytes);
     let doomed = victims(sweep.sources, total, state.limit_bytes, &state.touched);
     if doomed.is_empty() {
-        match total <= state.limit_bytes {
+        match within {
             true => veldsdk::log::debug!(target: "handlers",
                 "кэш в бюджете: {} из {} байт", total, state.limit_bytes),
             // Бюджет перебран, а вытеснять нечего: всё, что лежит, трогали в
-            // этом окне. Молчать об этом нельзя — кэш растёт сверх бюджета, и
-            // причина у этого одна и понятная.
-            false => veldsdk::log::info!(target: "handlers",
+            // этом окне. Сказать надо — кэш при этом растёт сверх бюджета, —
+            // но в журнал разбора: состояние держится, пока идёт показ, и в
+            // консоли повторялось бы каждым обходом.
+            false => veldsdk::log::debug!(target: "handlers",
                 "кэш перебрал бюджет ({} из {} байт), но все источники в работе — вытеснять нечего",
                 total, state.limit_bytes),
         }
@@ -168,6 +170,13 @@ fn settle(state: &mut State, sweep: Sweep) {
     }
 }
 
+/// Умещается ли занятое в бюджет. Одной функцией на оба спрашивающих —
+/// решение о вытеснении и строку о нём: разойдясь, они рассказывали бы о
+/// кэше разное.
+fn within(total: u64, limit: u64) -> bool {
+    total <= limit
+}
+
 /// Решение вытеснения: старейшие источники, пока не станет свободно.
 /// Чистая функция — правило закреплено тестом, а не прогонами.
 ///
@@ -182,7 +191,7 @@ fn victims(
     limit: u64,
     alive: &std::collections::HashSet<String>,
 ) -> Vec<Source> {
-    if total <= limit {
+    if within(total, limit) {
         return Vec::new();
     }
     let target = limit - limit / HEADROOM_DIVISOR;

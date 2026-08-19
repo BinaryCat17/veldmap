@@ -128,8 +128,11 @@ fn progress_line(preview: &PreviewState) -> Option<String> {
     // Причина — от канвы, а сколько её показать, решаем мы: в полосе она
     // соседствует со свойствами и, не будучи укорочена, вытолкнула бы их.
     // Целиком она всегда в логе.
+    // Как есть: причина приезжает уже сказанной словами («кадр застыл: …»,
+    // «производство: …»), и своя приставка тут только врала бы — застывший
+    // кадр не «неполный».
     if !view.trouble.is_empty() {
-        return Some(format!("неполно — {}", format::ellipsize(&view.trouble, 60)));
+        return Some(format::ellipsize(&view.trouble, 66));
     }
     if !view.busy {
         return None;

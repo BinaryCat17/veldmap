@@ -60,8 +60,6 @@ pub fn on_open(state: &mut State, req: OpenRequest) {
     if entry.is_partial {
         return fail(reply_to, format!("'{}' скачан не полностью", req.name));
     }
-
-    let _ = entry;
     read_file(state, req.name, owner, reply_to);
 }
 

@@ -197,42 +197,40 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     let fingerprint = fingerprint::fingerprint(resource.id, resource.size)?;
     let info = parsed(state, resource.id, resource.size, &bytes)?;
 
-    let levels = pyramid::level_count(info.width, info.height);
-    if req.level >= levels {
-        return Err(format!("уровня {} нет: у растра их {}", req.level, levels));
-    }
-    let grid_w = pyramid::grid(pyramid::level_size(info.width, req.level));
-    let grid_h = pyramid::grid(pyramid::level_size(info.height, req.level));
-    let mut wants = BTreeSet::new();
-    for tile in &req.tiles {
-        if tile.x >= grid_w || tile.y >= grid_h {
-            return Err(format!(
-                "тайла {}:{} нет: сетка уровня {} — {}×{}",
-                tile.x, tile.y, req.level, grid_w, grid_h
-            ));
-        }
-        wants.insert((tile.x, tile.y));
-    }
-    let ordered: Vec<(u32, u32)> = wants.iter().copied().collect();
     let single_pass = matches!(info.reach(), crate::proto::image_tiler::Reach::Pyramid);
+    // Заказ проверяется отдельной функцией, а не по месту: у проверок свои
+    // выходы, и уйти по любому из них, не отпустив разбор, значит оставить
+    // висеть отсчёты величины — ровно то, от чего memo и освобождают ниже.
+    let planned = plan(info, req);
 
-    let mut sink = Sink {
-        correlation,
-        owner,
-        fingerprint,
-        want_level: req.level,
-        wants,
-        want_total: ordered.len() as u32,
-        done: 0,
-        bytes: bytes.clone(),
-        total_bytes: resource.size,
-        reported: 0,
-    };
-    let outcome = {
-        let mut emit = |level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]| {
-            sink.emit(level, tx, ty, w, h, rgba)
-        };
-        adapters::produce(resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit)
+    let mut sink = None;
+    let outcome = match planned {
+        Err(why) => Err(why),
+        Ok(wants) => {
+            let ordered: Vec<(u32, u32)> = wants.iter().copied().collect();
+            let mut ready = Sink {
+                correlation,
+                owner,
+                fingerprint,
+                want_level: req.level,
+                wants,
+                want_total: ordered.len() as u32,
+                done: 0,
+                bytes: bytes.clone(),
+                total_bytes: resource.size,
+                reported: 0,
+            };
+            let outcome = {
+                let mut emit = |level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]| {
+                    ready.emit(level, tx, ty, w, h, rgba)
+                };
+                adapters::produce(
+                    resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit,
+                )
+            };
+            sink = Some(ready);
+            outcome
+        }
     };
     // Разбор, из которого проход строит всю пирамиду разом, после него не
     // нужен: второго прохода по такому источнику не будет, пока не спросят
@@ -251,10 +249,36 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
 
     // Проход кончился, а запрошенное не всё отдано — это ошибка адаптера,
     // и молчать о ней значит показать заказчику дыру без причины.
-    if !sink.wants.is_empty() {
+    if let Some(sink) = sink
+        && !sink.wants.is_empty()
+    {
         return Err(format!("адаптер не произвёл {} из запрошенных тайлов", sink.wants.len()));
     }
     Ok(())
+}
+
+/// Какие ячейки заказаны — с проверкой, что такие вообще бывают.
+///
+/// Чистой функцией над описанием и запросом: правило «уровень есть, ячейка в
+/// его сетке» не зависит ни от источника, ни от состояния модуля.
+fn plan(info: &adapters::Info, req: &ProduceRequest) -> Result<BTreeSet<(u32, u32)>, String> {
+    let levels = pyramid::level_count(info.width, info.height);
+    if req.level >= levels {
+        return Err(format!("уровня {} нет: у растра их {}", req.level, levels));
+    }
+    let grid_w = pyramid::grid(pyramid::level_size(info.width, req.level));
+    let grid_h = pyramid::grid(pyramid::level_size(info.height, req.level));
+    let mut wants = BTreeSet::new();
+    for tile in &req.tiles {
+        if tile.x >= grid_w || tile.y >= grid_h {
+            return Err(format!(
+                "тайла {}:{} нет: сетка уровня {} — {}×{}",
+                tile.x, tile.y, req.level, grid_w, grid_h
+            ));
+        }
+        wants.insert((tile.x, tile.y));
+    }
+    Ok(wants)
 }
 
 /// Приёмник произведённых тайлов: каждый уезжает в кэш, запрошенные — ещё и
