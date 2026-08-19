@@ -1,0 +1,16 @@
+# Отметка снимка кладёт его контур на шар, снятие — убирает.
+#
+# Считает очерченное сам экран списка: «N на шаре» в заголовке. Данных нужен
+# хотя бы один снимок в runtime/data — коробочка отметки есть только у них.
+100 timeout 15000
+500 wait tab_menu
+700 tap tab_menu
+1100 tap new_tab:downloaded
+1900 wait check_shown
+2100 absent text:на шаре
+2300 tap check#1
+3000 wait text:на шаре
+3200 shot uitest-outline
+3400 tap check#1
+4100 absent text:на шаре
+4300 exit

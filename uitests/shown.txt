@@ -1,0 +1,15 @@
+# «На просмотре»: очерченный снимок виден во вкладке слоёв и убирается оттуда.
+100 timeout 15000
+500 wait tab_menu
+700 tap tab_menu
+1100 tap new_tab:downloaded
+1900 wait check_shown
+2100 tap check#1
+2800 wait text:на шаре
+3000 tap tab_menu
+3400 tap new_tab:shown
+4200 wait outline_remove
+4400 shot uitest-shown
+4600 tap outline_remove
+5300 absent outline_remove
+5500 exit
