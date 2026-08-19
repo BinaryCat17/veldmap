@@ -249,6 +249,10 @@ where
         renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
+        // Своё место панель объявляет прежде, чем пустить обход внутрь: в
+        // разметке её нет, и снаружи о ней не знает никто, а нажать под ней
+        // нельзя — щелчок мимо панели закрывает её, а не жмёт лежащее под ней.
+        operation.custom(None, layout.bounds(), &mut crate::module::locate::Covered);
         self.panel.as_widget_mut().operate(self.tree, layout, renderer, operation);
     }
 }

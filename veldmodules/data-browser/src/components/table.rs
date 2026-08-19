@@ -667,7 +667,7 @@ fn status_look(status: &RowStatus) -> (Color, String, Color) {
         RowStatus::Paused { trouble, .. } if !trouble.is_empty() => (
             theme::DANGER,
             trouble.clone(),
-            theme::DANGER,
+            theme::DANGER_TEXT,
         ),
         RowStatus::Paused { done, total, .. } => (
             theme::WARN,
@@ -679,7 +679,7 @@ fn status_look(status: &RowStatus) -> (Color, String, Color) {
         RowStatus::Partial { trouble, .. } if !trouble.is_empty() => (
             theme::DANGER,
             trouble.clone(),
-            theme::DANGER,
+            theme::DANGER_TEXT,
         ),
         RowStatus::Partial { done, .. } => (theme::ACCENT, format!("{} на диске", done), theme::ACCENT_TEXT),
     }

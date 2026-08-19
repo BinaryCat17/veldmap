@@ -88,6 +88,7 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
         done,
         total,
         delete_when_done: false,
+        loading: false,
     });
 
     crate::calls::data_provider::on_sign(&SignRequest {
@@ -117,6 +118,10 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
         path: storage::file_path(&name),
         headers: signed.headers,
     }, &correlation_id);
+    // С этой минуты конец закачки объявляет платформа, а не мы.
+    if let Some(dl) = state.downloads.get_mut(&correlation_id) {
+        dl.loading = true;
+    }
 }
 
 /// Пауза: `.part` остаётся на диске ровно там, где его бросил обрыв, и
@@ -129,12 +134,17 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
 /// сохранением и остановка с выбрасыванием — разные вещи, и топика на них
 /// два, а не один с двумя смыслами.
 pub fn on_pause(state: &mut State, req: ItemRequest) {
-    let Some((task_id, _)) = state.active_download(&req.name) else { return };
-    let task_id = task_id.to_string();
-    // Убивать бывает нечего: закачка ещё ждёт подписи, и задачи у платформы
-    // нет. Терминального события тогда не будет, снимаем запись сами — иначе
-    // пришедшая подпись запустила бы «поставленную на паузу» закачку.
-    if !crate::cancel::network::on_fs_download(&task_id) {
+    let Some((task_id, dl)) = state.active_download(&req.name) else { return };
+    let (task_id, loading) = (task_id.to_string(), dl.loading);
+    crate::cancel::network::on_fs_download(&task_id);
+    // Снимаем запись сами только до того, как запрос ушёл в сеть: задачи у
+    // платформы ещё нет, терминального события не будет, а пришедшая подпись
+    // запустила бы «поставленную на паузу» закачку.
+    //
+    // После — не снимаем никогда, даже когда убивать оказалось нечего: значит
+    // закачка кончилась сама и её ответ уже в пути. Сняв запись здесь, мы
+    // отняли бы у него имя записи, и причина срыва пропала бы вместе с ним.
+    if !loading {
         finish(state, &task_id);
     }
 }
@@ -150,12 +160,15 @@ pub fn on_delete(state: &mut State, req: ItemRequest) {
     // уже дропнут вместе с дескриптором.
     if let Some((task_id, _)) = state.active_download(&req.name) {
         let task_id = task_id.to_string();
+        let mut loading = false;
         if let Some(dl) = state.downloads.get_mut(&task_id) {
             dl.delete_when_done = true;
+            loading = dl.loading;
         }
-        // Убивать было нечего — закачка ещё ждёт подписи (см. on_pause).
-        // Отложенное удаление срабатывает здесь же: finish читает флаг.
-        if !crate::cancel::network::on_fs_download(&task_id) {
+        crate::cancel::network::on_fs_download(&task_id);
+        // До сети конец объявляем мы сами (см. on_pause); отложенное удаление
+        // срабатывает здесь же — finish читает флаг.
+        if !loading {
             finish(state, &task_id);
         }
         return;

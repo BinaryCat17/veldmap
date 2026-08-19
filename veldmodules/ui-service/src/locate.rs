@@ -84,6 +84,14 @@ pub fn spelling(method: &str, value: &str) -> String {
     }
 }
 
+/// Метка, которой всплывающая панель объявляет обходу своё место.
+///
+/// Панель не занимает места в разметке — её показывает оверлей, — и обход
+/// увидел бы под ней то, что нажать нельзя: щелчок мимо панели её закрывает, а
+/// не жмёт лежащее под ней (см. `popover.rs`). Объявляет она себя сама, до
+/// спуска внутрь, потому что снаружи о ней не знает никто.
+pub struct Covered;
+
 /// Кем назвали искомое.
 pub enum Sought {
     /// Именем нажимаемой коробки.
@@ -117,8 +125,10 @@ pub struct Search {
     /// войдут его дети. Пусто — виджет промолчал (наши обёртки так и делают),
     /// и дети остаются в кадре родителя.
     entering: Option<Frame>,
-    found: u32,
-    place: Option<Rectangle>,
+    /// Места подошедших, в порядке обхода. Списком, а не счётом: накрывшая их
+    /// панель объявляется уже после того, как они найдены, и снять из-под неё
+    /// можно только то, что помнишь.
+    matched: Vec<Rectangle>,
 }
 
 impl Search {
@@ -138,8 +148,7 @@ impl Search {
             ordinal,
             frames: vec![Frame { clip: Some(Rectangle::with_size(window)), offset: Vector::ZERO }],
             entering: None,
-            found: 0,
-            place: None,
+            matched: Vec::new(),
         }
     }
 
@@ -150,12 +159,13 @@ impl Search {
 
     /// Сколько элементов подошло под вопрос.
     pub fn found(&self) -> u32 {
-        self.found
+        self.matched.len() as u32
     }
 
     /// Место названного — в точках раскладки. `None` — столько их не набралось.
     pub fn place(&self) -> Option<Rectangle> {
-        self.place
+        let which = self.ordinal.max(1) as usize;
+        self.matched.get(which - 1).copied()
     }
 
     fn frame(&self) -> Frame {
@@ -170,13 +180,9 @@ impl Search {
         (bounds - frame.offset).intersection(&frame.clip?)
     }
 
-    /// Подошёл ещё один. Место запоминается у того, кого спросили: названного
-    /// номером — у него, безномерного — у первого.
-    fn matched(&mut self, seen: Rectangle) {
-        self.found += 1;
-        if self.found == self.ordinal.max(1) {
-            self.place = Some(seen);
-        }
+    /// Подошёл ещё один.
+    fn hit(&mut self, seen: Rectangle) {
+        self.matched.push(seen);
     }
 }
 
@@ -195,7 +201,7 @@ impl Operation for Search {
         if let (Sought::Named(name), Some(id), Some(seen)) = (&self.sought, id, seen)
             && id == name
         {
-            self.matched(seen);
+            self.hit(seen);
         }
     }
 
@@ -227,8 +233,19 @@ impl Operation for Search {
         if let (Sought::Named(name), Some(id), Some(seen)) = (&self.sought, id, self.visible(bounds))
             && id == name
         {
-            self.matched(seen);
+            self.hit(seen);
         }
+    }
+
+    fn custom(&mut self, _id: Option<&Id>, bounds: Rectangle, state: &mut dyn std::any::Any) {
+        if !state.is::<Covered>() {
+            return;
+        }
+        // Найденное под панелью снимается: нажать его нельзя, пока она открыта,
+        // и назвать его найденным значило бы пообещать сценарию невыполнимое.
+        // Панель объявляется до спуска внутрь себя, поэтому её собственные
+        // пункты, найденные ниже, под этот отбор уже не попадают.
+        self.matched.retain(|seen| !bounds.contains(seen.center()));
     }
 
     fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
@@ -236,7 +253,7 @@ impl Operation for Search {
             && text.contains(said.as_str())
             && let Some(seen) = self.visible(bounds)
         {
-            self.matched(seen);
+            self.hit(seen);
         }
     }
 }

@@ -121,6 +121,10 @@ const ACCENT_LINE: Color = Color::rgb8(0xC3, 0xD6, 0xB4);
 pub const WARN: Color = Color::rgb8(0xC4, 0x79, 0x1F);
 pub const WARN_TEXT: Color = Color::rgb8(0x8A, 0x62, 0x15);
 pub const DANGER: Color = Color::rgb8(0xB4, 0x50, 0x3C);
+/// Подпись отказа: тот же кирпич, но читаемый как текст — как `ACCENT_TEXT`
+/// для готового и `WARN_TEXT` для прерванного. Кружок и подпись рядом, и
+/// набранная цветом кружка подпись выцветает на светлом фоне.
+pub const DANGER_TEXT: Color = Color::rgb8(0x8C, 0x3E, 0x2F);
 /// Дорожка полосы загрузки — под любым её цветом.
 const TRACK: Color = Color::rgb8(0xE7, 0xDF, 0xCB);
 
