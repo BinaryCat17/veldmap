@@ -67,7 +67,7 @@ def play(path: str, name: str) -> tuple[str, float]:
             # шар и канва просмотра именами не адресуются, и обход их не
             # видит, — так что дошедший до конца сценарий скажет «сошёлся»
             # над пустым местом. Отказ здесь и есть единственный след.
-            outcome = "ПУСТОЙ КАДР"
+            outcome = "ОТКАЗ ВИДЕОКАРТЫ"
     except subprocess.TimeoutExpired:
         # Отличается от «не сошёлся» намеренно: сценарий, дошедший до своего
         # конца, кончается сам, а упёршийся в предел — это зависшее
@@ -88,7 +88,12 @@ def gpu_refused() -> bool:
     if not os.path.exists(HOST_LOG):
         return False
     with open(HOST_LOG, encoding="utf-8", errors="replace") as log:
-        return "Validation Error" in log.read()
+        # По приставке, а не по словам самого отказа: их три рода — проверка,
+        # нехватка памяти и внутренняя ошибка, — и печатает их всех один
+        # обработчик (`veldcore/platform/host/core/src/setup.rs`). Ловля по
+        # «Validation Error» пропустила бы нехватку памяти, которая называет
+        # себя иначе.
+        return "wgpu: " in log.read()
 
 
 def keep_log(name: str) -> None:

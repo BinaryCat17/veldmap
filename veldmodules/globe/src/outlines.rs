@@ -177,12 +177,13 @@ impl Outlines {
     ///
     /// Потолка густоты у веера, в отличие от варп-сетки наложений, нет, и
     /// заводить его не под что. И по радиусу, и вдоль кольца шаг один и тот же
-    /// ([`max_edge_deg`]), так что вершин выходит `360·sin θ·θ / шаг²`: у полосы
-    /// Sentinel-5P — самой широкой из приезжающих сюда, 2600 км, то есть 23° —
-    /// это сорок пять тысяч вершин и полтора мегабайта. У кольца, дотянувшегося
-    /// до [`FILL_REACH`], вышло бы четыреста тысяч и пятнадцать мегабайт, но
+    /// ([`max_edge_deg`]), так что вершин выходит `360·sin θ·θ / шаг²`, где θ —
+    /// **радиус** кольца. У полосы Sentinel-5P, самой широкой из приезжающих
+    /// сюда (2600 км поперёк, то есть радиус около двенадцати градусов), это
+    /// двенадцать тысяч вершин и полмегабайта. У кольца, дотянувшегося до
+    /// [`FILL_REACH`], вышло бы четыреста тысяч и пятнадцать мегабайт — но
     /// такому кольцу надо быть девятнадцать тысяч километров поперёк, а что
-    /// шире — веером не заливается вовсе, отсекаясь выше.
+    /// шире, веером не заливается вовсе, отсекаясь выше.
     ///
     /// Появись такой снимок — лечится это тем же приёмом, что у наложений:
     /// потолок долей, а остаток провала — подъёмом.
@@ -297,6 +298,41 @@ mod tests {
         Outline {
             points: points.iter().map(|&(lat, lon)| GeoPoint { lat, lon }).collect(),
             style: OutlineStyle::OutlinePlain as i32,
+        }
+    }
+
+    /// Лента везёт соседей смещениями, и смещения эти — настоящие: `next`
+    /// смотрит к следующей вершине по обходу, `prev` к предыдущей, и одно
+    /// обратно другому. Перепутай их местами — и на экране не изменится ничего
+    /// (обе стороны ленты симметричны, излом отражается целиком), а направление
+    /// звена станет обратным. Тестов на саму ленту не было вовсе.
+    #[test]
+    fn a_ribbon_carries_true_offsets_to_its_neighbours() {
+        let built =
+            Outlines::build(&[styled(&[(0.0, 0.0), (0.0, 1.0), (1.0, 0.5)], OutlineStyle::OutlineSelected)]);
+        // На каждый узел кольца — пара вершин, левый край и правый.
+        let count = built.ribbon.len() / 2;
+        assert!(count >= 3, "кольцо из {} узлов", count);
+
+        let apart = |a: geodesy::World, b: geodesy::World| {
+            f64::from((glam::Vec3::from(a) - glam::Vec3::from(b)).length()) * geodesy::SEMI_MAJOR_M
+        };
+        let at = |node: usize| {
+            let vertex = built.ribbon[node * 2];
+            (vertex.position, vertex.position_low)
+        };
+        for index in 0..count {
+            let ahead = (index + 1) % count;
+            let step = geodesy::offset(at(ahead), at(index));
+            let span = f64::from(glam::Vec3::from(step).length()) * geodesy::SEMI_MAJOR_M;
+            assert!(span > 1.0, "узел {}: звено в {} м — проверять нечего", index, span);
+
+            assert!(apart(built.ribbon[index * 2].next, step) < 1e-3, "узел {}: next", index);
+            // Обратный ход у соседа — то же звено, взятое назад.
+            let back = geodesy::offset(at(index), at(ahead));
+            assert!(apart(built.ribbon[ahead * 2].prev, back) < 1e-3, "узел {}: prev", ahead);
+            // И обе копии узла везут одно и то же: в стороны их разводит шейдер.
+            assert_eq!(built.ribbon[index * 2].next, built.ribbon[index * 2 + 1].next);
         }
     }
 

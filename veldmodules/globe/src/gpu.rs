@@ -399,6 +399,24 @@ impl Target {
     }
 }
 
+/// Что уезжает в шейдер о камере.
+///
+/// Отдельно от отрисовки, потому что иначе непроверяемо: обеих половин глаза
+/// глазом не увидеть — обнули младшую, и картинка останется той же, только
+/// вершины пойдут шагом в метр (см. `geodesy::parts`).
+fn camera_uniform(camera: &Camera, aspect: f32, size: (u32, u32)) -> CameraUniform {
+    let (eye, eye_low) = camera.eye_parts();
+    CameraUniform {
+        view_proj: camera.view_projection(aspect),
+        eye,
+        _pad: 0.0,
+        eye_low,
+        _pad2: 0.0,
+        viewport: [size.0.max(1) as f32, size.1.max(1) as f32],
+        _pad3: [0.0, 0.0],
+    }
+}
+
 /// Кадр: обновить камеру и записать отрисовку.
 ///
 /// Исполнит записанное кадровый цикл хоста — здесь работа только ставится в
@@ -409,16 +427,7 @@ pub fn render(
     camera: &Camera,
     overlays: &OverlayBatch,
 ) -> anyhow::Result<()> {
-    let (eye, eye_low) = camera.eye_parts();
-    let uniform = CameraUniform {
-        view_proj: camera.view_projection(target.aspect()),
-        eye,
-        _pad: 0.0,
-        eye_low,
-        _pad2: 0.0,
-        viewport: [target.width.max(1) as f32, target.height.max(1) as f32],
-        _pad3: [0.0, 0.0],
-    };
+    let uniform = camera_uniform(camera, target.aspect(), (target.width, target.height));
     resource_write(device.camera.id(), 0, gfx::bytes_of(std::slice::from_ref(&uniform)))?;
 
     let mut recorder = RenderRecorder::new();
@@ -549,3 +558,31 @@ fn pipeline(
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Глаз доезжает до шейдера обеими половинами — теми самыми, что назвала
+    /// камера. Обнули младшую по дороге, и вычитание в шейдере схлопнется в
+    /// одинарную точность: картинка останется той же, только вершины пойдут
+    /// шагом в метр, а сценарии этого не замечают.
+    #[test]
+    fn the_uniform_carries_both_halves_of_the_eye() {
+        let camera = Camera::default();
+        let uniform = camera_uniform(&camera, 16.0 / 9.0, (1920, 1080));
+        let (eye, eye_low) = camera.eye_parts();
+
+        assert_eq!(uniform.eye, eye);
+        assert_eq!(uniform.eye_low, eye_low, "младшая половина по дороге потерялась");
+        assert_ne!(eye_low, [0.0; 3], "младшая половина пуста — проверять было бы нечего");
+    }
+
+    /// Размер кадра не бывает нулевым: им лента делит, считая свою ширину в
+    /// долях отсечения.
+    #[test]
+    fn an_empty_target_still_has_a_viewport() {
+        let uniform = camera_uniform(&Camera::default(), 1.0, (0, 0));
+        assert_eq!(uniform.viewport, [1.0, 1.0]);
+    }
+}
