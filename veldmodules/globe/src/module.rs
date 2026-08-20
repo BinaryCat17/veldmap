@@ -1173,8 +1173,9 @@ fn upload_outlines(state: &mut State) {
     // Числа полезны ровно при разборе «почему их не видно»: контуры бывают
     // мелкими (клетка Sentinel-2 — около градуса) и бывают за горизонтом, и
     // отличить это от «не доехали» больше нечем.
-    veldsdk::log::debug!(target: "render", "контуры: {} колец, {} вершин линий, {} вершин лент",
-        outlines.len(), built.vertices.len(), built.ribbon.len());
+    veldsdk::log::debug!(target: "render",
+        "контуры: {} колец, {} вершин линий, {} вершин ленты, {} вершин штриховки",
+        outlines.len(), built.vertices.len(), built.ribbon.len(), built.hatch.len());
     if let Err(error) = device.set_outlines(&built) {
         veldsdk::log::error!(target: "render", "контуры не залиты: {:#}", error);
     }

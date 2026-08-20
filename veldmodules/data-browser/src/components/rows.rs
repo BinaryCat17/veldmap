@@ -43,8 +43,8 @@ pub fn of(state: &State, view: ViewId) -> Vec<Row> {
 /// Проставить признак шара строкам «Скачанного» и всему, что под ними.
 fn mark_globe(state: &State, rows: &mut [Row]) {
     for row in rows {
-        row.globe = onto_globe(state, row.snapshot_key());
-        row.outlined = outlined(state, row.snapshot_key());
+        row.globe = onto_globe(state, row.product_key());
+        row.outlined = outlined(state, row.product_key());
         mark_globe(state, &mut row.children);
     }
 }
@@ -261,8 +261,18 @@ fn from_key(
     // Оба состояния шара — здесь, потому что здесь собираются строки и каталога,
     // и выдачи поиска: снимок в них один и тот же, и два ответа на эти вопросы
     // однажды разошлись бы.
-    let globe = onto_globe(state, bare(&identifier));
-    let outlined = outlined(state, bare(&identifier));
+    //
+    // Спрашиваются они снимком строки, а не самой строкой: на шаре лежит
+    // снимок, и файл внутри него отвечает о нём, а не о себе (см.
+    // [`Row::product_key`]). Своей полосы файлу это не даёт — её рисуют только
+    // снимкам, — зато пункт меню, кладущий снимок на шар, знает, лежит ли он
+    // там уже.
+    let snapshot = match product.is_empty() {
+        false => bare(&product),
+        true => bare(&identifier),
+    };
+    let globe = onto_globe(state, snapshot);
+    let outlined = outlined(state, snapshot);
     if kind.is_folder() {
         // Два разных вопроса о папке, и второй задаётся только снимку. Сколько
         // её содержимого на диске, видно по ключам записей — это и всё, что

@@ -956,27 +956,34 @@ mod tests {
     /// снять его потом было бы нечем.
     #[test]
     fn a_file_speaks_for_the_snapshot_it_belongs_to() {
-        let mut file = Row::from_entry(&entry(
-            "GRANULE/B01.jp2",
-            "eodata/store/S2B_X.SAFE",
-            LibraryStatus::LibComplete,
-            5,
-        ));
+        let snapshot = "eodata/store/S2B_X.SAFE";
+        let mut file = Row {
+            identifier: format!("{}/GRANULE/B01.jp2", snapshot),
+            product: snapshot.to_string(),
+            ..Default::default()
+        };
         assert!(!file.is_snapshot(), "файл снимком не притворяется");
-        assert_eq!(file.product_key(), "eodata/store/S2B_X.SAFE");
+        assert_eq!(file.product_key(), snapshot);
         assert_ne!(file.product_key(), file.snapshot_key(), "файл позвал бы сам себя");
 
-        // Снимок отвечает за себя сам, чем бы его ни звали.
-        let snapshot = Row::container_row(
-            "eodata/store/S2B_X.SAFE/".to_string(),
-            "S2B_X.SAFE".to_string(),
-            RowStatus::Remote,
-            RowKind::Product { folder: true },
-        );
-        assert_eq!(snapshot.product_key(), snapshot.snapshot_key());
+        // Снимок отвечает за себя сам — и тогда, когда каталог назвал его
+        // продуктом, и тогда, когда о продукте промолчал. Слэш листинга в счёт
+        // не идёт ни там, ни там: ключ у снимка один.
+        let listed = Row {
+            product: snapshot.to_string(),
+            ..Row::container_row(
+                format!("{}/", snapshot),
+                "S2B_X.SAFE".to_string(),
+                RowStatus::Remote,
+                RowKind::Product { folder: true },
+            )
+        };
+        assert!(listed.is_snapshot());
+        assert_eq!(listed.product_key(), snapshot);
+        assert_eq!(listed.product_key(), listed.snapshot_key());
 
         // Провайдер промолчал о снимке — записью и остаётся: звать её больше
-        // нечем.
+        // нечем. Так приходит одиночный объект вне продуктов.
         file.product = String::new();
         assert_eq!(file.product_key(), file.snapshot_key());
     }

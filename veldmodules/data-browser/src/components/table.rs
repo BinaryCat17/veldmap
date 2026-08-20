@@ -552,8 +552,12 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     // Место под полосу занято, пока снимок на шаре, — а не пока по нему идёт
     // работа. Иначе строка подпрыгивает на три точки ровно в тот миг, когда
     // добыча кончилась, то есть на каждом слое и на глазах.
+    // Полоса — снимку, а не всякому, кто о нём знает: о шаре отвечает и файл
+    // внутри снимка (см. `rows::from_key`), но нажимали-то значок у снимка, и
+    // видно должно быть там же.
     let onto_globe = row_data.globe.pace();
-    let height = theme::ROW_HEIGHT - if row_data.globe.any() { ONTO_GLOBE } else { 0.0 };
+    let strip = row_data.globe.any() && row_data.is_snapshot();
+    let height = theme::ROW_HEIGHT - if strip { ONTO_GLOBE } else { 0.0 };
     let cells = cells.height(Length::Fixed(height));
 
     // Вся строка — кнопка: нажатие на неё делает то же, что её главная кнопка,
@@ -583,7 +587,7 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
         // дрогнула. Что снимок на шаре, говорит зажжённый значок.
         Pace::Idle => None,
     };
-    if row_data.globe.any() {
+    if strip {
         lines.push(match bar {
             Some((color, share)) => {
                 // Подпись у полосы своя, а не только у значка в правом краю
@@ -1130,14 +1134,20 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     // этот пункт стоит значком в самой строке и здесь не повторяется.
     //
     // Кладётся при этом снимок, а не файл: ни контура, ни растра у отдельного
-    // файла не бывает. Отсюда и ключ, и подпись — она называет то, что
-    // появится, а горит ли оно уже, видно строкой выше: файлы стоят под своим
-    // снимком, и значок шара стои́т у него.
-    if !row.identifier.is_empty() && !row.is_snapshot() && !row.product_key().is_empty() {
-        items.push(Item::new(
-            "Показать снимок на шаре",
-            Msg::In(view, ViewMsg::GlobeToggle(row.product_key().to_string())),
-        ));
+    // файла не бывает. Отсюда и ключ, и подпись: она называет то, что случится
+    // по нажатию, а знает это строка потому же, почему знает значок снимка, —
+    // о шаре она отвечает снимком, которому принадлежит (см.
+    // `rows::from_key`).
+    //
+    // Папке пути этот пункт не достаётся: снимка за ней нет, и каталог на её
+    // имя отвечает «нет такого продукта» — предлагать это значит обещать
+    // отказ.
+    if !row.identifier.is_empty() && !row.is_snapshot() && !matches!(row.kind, RowKind::Folder) {
+        let label = match row.globe.any() {
+            true => "Снять снимок с шара",
+            false => "Показать снимок на шаре",
+        };
+        items.push(Item::new(label, Msg::In(view, ViewMsg::GlobeToggle(row.product_key().to_string()))));
     }
     // Показывать папку, которая и так открыта, незачем: пункт вёл бы туда,
     // где пользователь уже стоит.

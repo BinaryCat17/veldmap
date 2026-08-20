@@ -411,7 +411,7 @@ fn drawn(state: &State) -> Vec<Outline> {
     for key in under_way(state) {
         // Очерченный по просьбе второй раз не рисуется: контур у снимка один,
         // и две ломаные по одному месту сложились бы в одну лишнюю линию.
-        // Просьба при этом старше: она пережила бы приезд снимка, а штрих —
+        // Просьба при этом старше: она переживёт приезд снимка, а штриховка —
         // нет.
         if state.outlined.iter().any(|outlined| outlined.key == key) {
             continue;
@@ -450,6 +450,10 @@ fn under_way(state: &State) -> Vec<String> {
     state
         .overlays
         .iter()
+        // Скрытый не штрихуется: «скрыт» — это «не рисуется», и заштрихованное
+        // место спорило бы с глазом, которым его спрятали. Полосе под строкой
+        // это не мешает: работа по нему идёт, и о ней там сказано честно.
+        .filter(|overlay| !overlay.hidden)
         .map(|overlay| overlay.identifier.clone())
         // Просьба под ключом заведённого слоя не бывает — её снимает тот же
         // ответ, что слой заводит, — но держится это правилом в соседнем
@@ -492,14 +496,14 @@ mod tests {
         }
     }
 
-    /// Снимок, который на шар только едет, очерчен штрихом — и перестаёт быть
-    /// очерченным, как только доехал.
+    /// У снимка, который на шар только едет, заштриховано занятое им место — и
+    /// перестаёт быть заштрихованным, как только он доехал.
     ///
     /// Без этого нажатие на значок глобуса не отвечает ничем: между просьбой и
     /// первой картинкой лежат десятки секунд, и всё это время на шаре не видно
     /// даже места, куда снимок ляжет.
     #[test]
-    fn a_snapshot_on_its_way_is_outlined_with_a_hatch() {
+    fn a_snapshot_on_its_way_has_its_place_hatched() {
         use crate::proto::data_provider::DataProduct;
         let key = "eodata/store/A.SAFE";
         let product = DataProduct {
@@ -517,7 +521,7 @@ mod tests {
         let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
         assert_eq!(styles, vec![OutlineStyle::OutlinePending as i32]);
 
-        // Наложение завелось, растров ещё нет — штрих тот же.
+        // Наложение завелось, растров ещё нет — штриховка та же.
         state.showing.remove(key);
         crate::module::handlers::overlay::show(&mut state, &product, None);
         let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
@@ -535,7 +539,21 @@ mod tests {
             };
         }
         let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
-        assert_eq!(styles, vec![OutlineStyle::OutlinePending as i32], "штрих снят раньше картинки");
+        assert_eq!(
+            styles,
+            vec![OutlineStyle::OutlinePending as i32],
+            "штриховка снята раньше картинки"
+        );
+
+        // Скрытый не штрихуется: «скрыт» — это «не рисуется», и место,
+        // заштрихованное вопреки глазу, спорило бы с ним.
+        if let Some(overlay) = state.overlays.first_mut() {
+            overlay.hidden = true;
+        }
+        assert!(drawn(&state).is_empty(), "скрытый слой заштриховал своё место");
+        if let Some(overlay) = state.overlays.first_mut() {
+            overlay.hidden = false;
+        }
 
         // Растр описан — по нему уже есть что нарисовать, и место держать
         // больше нечем: снимок виден сам, хотя добыча ещё идёт.
@@ -546,11 +564,13 @@ mod tests {
                 ..Default::default()
             };
         }
-        assert!(drawn(&state).is_empty(), "штрих пережил приезд картинки");
+        assert!(drawn(&state).is_empty(), "штриховка пережила приезд картинки");
     }
 
     /// Очерченный по просьбе рисуется один раз, даже когда он же едет на шар:
     /// контур у снимка один, и вторая ломаная по тому же месту — лишняя линия.
+    /// Заливки у него при этом не будет: просьба старше, она переживёт приезд
+    /// снимка, а штриховка — нет.
     #[test]
     fn an_asked_outline_is_not_doubled_by_the_hatch() {
         let key = "eodata/store/A.SAFE";
@@ -569,7 +589,7 @@ mod tests {
         let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
         assert_eq!(styles, vec![OutlineStyle::OutlinePlain as i32], "контур нарисован дважды");
 
-        // Выбранный — лентой, и штрих её не подменяет.
+        // Выбранный — лентой, и штриховка её не подменяет.
         state.highlight =
             Some(Highlight { key: key.to_string(), view: None, on_globe: true });
         let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
