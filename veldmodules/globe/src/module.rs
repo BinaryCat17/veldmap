@@ -254,11 +254,10 @@ pub fn on_camera(state: &mut State, command: crate::proto::globe::CameraCommand)
 /// же: кадра нет — значит нет и точки кадра, про которую спрашивают.
 pub fn on_probe(state: &mut State, probe: crate::proto::globe::Probe) {
     let at = state.target.as_ref().and_then(|target| {
-        let (eye, direction) = state.camera.ray(probe.x, probe.y, target.aspect());
-        geodesy::intersect(eye, direction).map(|point| {
-            let (lat, lon) = geodesy::surface_at(point);
-            crate::proto::globe::GeoPoint { lat, lon }
-        })
+        state
+            .camera
+            .probe(probe.x, probe.y, target.aspect())
+            .map(|(lat, lon)| crate::proto::globe::GeoPoint { lat, lon })
     });
 
     crate::emit::on_probed(
@@ -368,6 +367,12 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             // Растры те же — трогать нечего, кроме показа: слайдер
             // прозрачности и «скрыть» шлют тот же набор, и переоткрывать под
             // них ресурсы значило бы платить за движение ползунка декодом.
+            //
+            // Рамка из сообщения при этом отбрасывается, и намеренно: слой
+            // мог уже привязаться самим растром, а контур каталога — младше
+            // (см. `overlay::Binding`). Поправленный каталогом контур доедет
+            // только со сменой ресурсов, то есть новым наложением; для тех же
+            // растров он и не изменится.
             let overlay = &mut state.overlays[index];
             let was = overlay.hidden;
             overlay.opacity = opacity;
@@ -399,15 +404,19 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
 
     let label = if incoming.label.is_empty() { incoming.key.clone() } else { incoming.label };
 
-    // Привязка: точная рамка UTM либо заявленная аппроксимация квадом.
-    let frame = if let Some(utm) = incoming.utm {
-        overlay::Frame::Utm {
-            zone: projection::Zone { number: utm.zone, south: utm.south },
-            x0: utm.x0,
-            y0: utm.y0,
-            x1: utm.x1,
-            y1: utm.y1,
-        }
+    // Привязка: точная рамка UTM либо заявленная аппроксимация квадом. Ранг
+    // едет вместе с рамкой — по её виду его не узнать (см. `overlay::Binding`).
+    let (frame, binding) = if let Some(utm) = incoming.utm {
+        (
+            overlay::Frame::utm(
+                projection::Zone { number: utm.zone, south: utm.south },
+                utm.x0,
+                utm.y0,
+                utm.x1,
+                utm.y1,
+            ),
+            overlay::Binding::Named,
+        )
     } else if incoming.quad.len() == 4 {
         let points = [
             (incoming.quad[0].lat, incoming.quad[0].lon),
@@ -415,10 +424,11 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             (incoming.quad[2].lat, incoming.quad[2].lon),
             (incoming.quad[3].lat, incoming.quad[3].lon),
         ];
-        match incoming.rough {
+        let frame = match incoming.rough {
             true => overlay::Frame::rough(points),
             false => overlay::Frame::quad(points),
-        }
+        };
+        (frame, overlay::Binding::Catalogue)
     } else {
         release_rasters(incoming.rasters);
         return refuse(state, incoming.key, &label, "снимку негде лежать: привязки нет");
@@ -482,12 +492,12 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         key: incoming.key,
         label,
         frame,
+        binding,
         rasters,
         sources: incoming_ids,
         opacity,
         hidden,
         error: String::new(),
-        trouble: None,
         progress: overlay::Progress::default(),
     });
 }
@@ -589,7 +599,7 @@ pub fn on_described(state: &mut State, msg: Described) {
         // каталога, и повёрнутый снимок на шаре ничем другим не объясняется.
         if matches!(overlay.frame, overlay::Frame::Quad(_)) {
             veldsdk::log::warn!(target: "handlers",
-                "{}: привязки в растрах нет — снимок ложится по контуру каталога, порядок его вершин обходу растра не обязан совпадать",
+                "{}: привязка из растров не взята — снимок ложится по контуру каталога, порядок его вершин обходу растра не обязан совпадать (причина — строкой выше)",
                 overlay.label);
         }
         // А вот описаться не вышло ни одному — тогда слою нечем лечь вовсе, и
@@ -613,10 +623,10 @@ pub fn on_described(state: &mut State, msg: Described) {
             // Габарит сложного контура привязкой не является (см.
             // `Frame::Rough`), и растянуть по нему снимок было бы неправдой.
             veldsdk::log::warn!(target: "handlers",
-                "{}: контур каталога сложнее четырёхугольника, а привязки в растре нет",
+                "{}: контур каталога сложнее четырёхугольника, а привязка из растра не взята",
                 overlay.label);
             overlay.error =
-                "привязки нет: в растре нет опорных точек, а контур каталога сложнее \
+                "привязки нет: из растра её взять не удалось, а контур каталога сложнее \
                  четырёхугольника"
                     .to_string();
         }
@@ -638,25 +648,18 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     // теперь не придёт никогда, а по пустой подписи «ещё едет» от «не будет»
     // не отличить. Причина уезжает подписью рядом с полосой хода.
     let meta = match tiles::describe(&msg) {
-        Ok(meta) => {
-            // Описалось — сказать больше не о чем: пустая подпись и означает
-            // «сказать нечего». Оставленная от прошлого захода, она обещала бы
-            // «резче не станет» тому растру, который как раз открылся.
-            overlay.trouble = None;
-            meta
-        }
+        Ok(meta) => meta,
         Err(error) => {
             veldsdk::log::warn!(target: "handlers", "{}: описание растра: {}", label, error);
-            // Причин бывает две — по одной на растр, — и вторая не отменяет
-            // первую: слой живёт, пока жив хоть один, и сказать надо про оба.
+            // Причина живёт у своего растра: их два, и вторая не отменяет
+            // первую — слой живёт, пока жив хоть один, и сказать надо про оба.
             let said = match role {
                 Role::Detailed => format!("подробный растр не открылся: {}", error),
                 Role::Preview => format!("превью не открылось: {}", error),
             };
-            overlay.trouble = Some(match overlay.trouble.take() {
-                Some(before) if before != said => format!("{}; {}", before, said),
-                _ => said,
-            });
+            if let Some(raster) = overlay.raster_mut(role) {
+                raster.trouble = Some(said);
+            }
             return;
         }
     };
@@ -678,16 +681,23 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
 
     let Some(raster) = overlay.raster_mut(role) else { return };
     raster.meta = Some(meta);
+    // Описался — своей жалобы у него больше нет. Чужую он не трогает: причина
+    // соседа от его успеха никуда не делась.
+    raster.trouble = None;
 
     // Привязка из самого растра главнее всего, что сказал о снимке каталог: там
-    // сказано, где он, а здесь — каким пикселем куда. Приехавшая первой и
-    // остаётся: у обоих растров наложения она об одном и том же снимке.
-    if !matches!(overlay.frame, overlay::Frame::Grid(_)) && !ties.is_empty() {
+    // сказано, где он, а здесь — каким пикселем куда. Кто кого перебивает,
+    // решает род привязки, а не порядок описания (см. `overlay::Binding`).
+    if !ties.is_empty() {
+        if overlay.binding >= overlay::Binding::Lattice {
+            return;
+        }
         match overlay::Grid::new(&ties) {
             Some(grid) => {
                 veldsdk::log::info!(target: "handlers",
                     "{}: привязка сеткой из {} узлов", label, ties.len());
                 overlay.frame = overlay::Frame::Grid(grid);
+                overlay.binding = overlay::Binding::Lattice;
             }
             // Точки есть, а решётки не вышло — молчать об этом нельзя: снимок
             // ляжет по контуру каталога, то есть, скорее всего, повёрнутым, и
@@ -696,6 +706,40 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
                 "{}: {} опорных точек не сложились в решётку — привязка остаётся по контуру",
                 label, ties.len()),
         }
+        return;
+    }
+
+    // Растр лежит в проекции. Код системы толкуется здесь, а не в тайлере:
+    // ряды Крюгера в дереве одни (`projection.rs`), и вторая их копия сошлась
+    // бы с первой на глаз и разошлась на числах.
+    let Some(found) = msg.placement else { return };
+    if overlay.binding >= overlay::Binding::Projected {
+        return;
+    }
+    // Поле в поле, а не по порядку: имена здесь и там одни и те же, и
+    // перепутанная пара видна прямо в строке (см. `overlay::Placement`).
+    match overlay::Frame::from_placement(&overlay::Placement {
+        epsg: found.epsg,
+        x_per_i: found.x_per_i,
+        x_per_j: found.x_per_j,
+        x0: found.x0,
+        y_per_i: found.y_per_i,
+        y_per_j: found.y_per_j,
+        y0: found.y0,
+        width: msg.width,
+        height: msg.height,
+    }) {
+        Ok(frame) => {
+            veldsdk::log::info!(target: "handlers",
+                "{}: привязка проекцией EPSG:{}", label, found.epsg);
+            overlay.frame = frame;
+            overlay.binding = overlay::Binding::Projected;
+        }
+        // Система названа, а перевести её нечем. Сказать об этом надо кодом: по
+        // «привязки нет» неумение от молчания файла не отличить, и разбирать
+        // такую жалобу будет не по чему.
+        Err(why) => veldsdk::log::warn!(target: "handlers",
+            "{}: растр привязан к {} — привязка остаётся по контуру", label, why),
     }
 }
 
@@ -1138,7 +1182,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
                 working: overlay.busy(&state.passes, mine.map(|(.., wanted)| wanted), live),
                 share: overlay.progress.share,
                 error: overlay.error.clone(),
-                trouble: overlay.trouble.clone().unwrap_or_default(),
+                trouble: overlay.trouble(),
                 step: overlay.progress.step,
                 steps: overlay.progress.steps,
                 blank: overlay.blank(),

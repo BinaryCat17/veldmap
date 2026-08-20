@@ -31,7 +31,8 @@ use veldsdk::graphics as gfx;
 use veldmap_tile_cache_wrap::tile::TILE_FORMAT;
 
 use crate::proto::image_tiler::{
-    Described, DescribeRequest, GeoTie, ProduceDone, ProduceProgress, ProduceRequest, TileResult,
+    Described, DescribeRequest, GeoTie, Placement, ProduceDone, ProduceProgress, ProduceRequest,
+    TileResult,
 };
 use crate::proto::tile_cache::StoreTile;
 
@@ -131,6 +132,7 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
     // остаётся без привязки — и что с ним тогда делать, решает заказчик: у
     // него есть контур каталога, а у нас нет ничего.
     if info.ties.is_empty()
+        && info.placement.is_none()
         && let Some(coordinates) = req.geolocation.as_ref()
     {
         match adapters::netcdf::geolocation(
@@ -158,6 +160,15 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
             .chain(ties.iter())
             .map(|tie| GeoTie { px: tie.px, py: tie.py, lat: tie.lat, lon: tie.lon })
             .collect(),
+        placement: info.placement.as_ref().map(|found| Placement {
+            epsg: found.epsg,
+            x_per_i: found.affine[0],
+            x_per_j: found.affine[1],
+            x0: found.affine[2],
+            y_per_i: found.affine[3],
+            y_per_j: found.affine[4],
+            y0: found.affine[5],
+        }),
         error: String::new(),
     })
 }

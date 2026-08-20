@@ -43,6 +43,21 @@ const ECCENTRICITY: f64 = {
 };
 
 impl Zone {
+    /// Зона по коду EPSG: 326zz — северная, 327zz — южная, zz от 1 до 60.
+    ///
+    /// `None` — код не называет зону UTM, и выдумывать её не из чего. Границы
+    /// проверяются, а не выводятся делением: 32600 и 32700 зонами не являются
+    /// вовсе, а 32661 и 32761 — это полярная стереографическая, а не «зона
+    /// 61», и принятая за неё она положила бы снимок за тысячи километров.
+    pub fn from_epsg(code: u32) -> Option<Self> {
+        let (base, south) = match code {
+            32601..=32660 => (32600, false),
+            32701..=32760 => (32700, true),
+            _ => return None,
+        };
+        Some(Self { number: code - base, south })
+    }
+
     /// Осевой меридиан зоны, градусы.
     pub fn central_meridian_deg(&self) -> f64 {
         f64::from(self.number) * 6.0 - 183.0
@@ -136,6 +151,35 @@ pub fn to_geodetic(zone: Zone, easting: f64, northing: f64) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Код EPSG называет зону только в двух своих полосах, и границы у них
+    /// точные: соседние коды — не «зона ноль» и не «зона шестьдесят один», а
+    /// совсем другие системы, и принятые за UTM они увезли бы снимок за
+    /// тысячи километров.
+    #[test]
+    fn epsg_names_a_zone_only_inside_its_two_bands() {
+        assert_eq!(Zone::from_epsg(32601), Some(Zone { number: 1, south: false }));
+        assert_eq!(Zone::from_epsg(32660), Some(Zone { number: 60, south: false }));
+        assert_eq!(Zone::from_epsg(32701), Some(Zone { number: 1, south: true }));
+        assert_eq!(Zone::from_epsg(32760), Some(Zone { number: 60, south: true }));
+
+        assert_eq!(Zone::from_epsg(32600), None, "полоса начинается с первой зоны");
+        assert_eq!(Zone::from_epsg(32700), None, "полоса начинается с первой зоны");
+        assert_eq!(Zone::from_epsg(32661), None, "это полярная стереографическая");
+        assert_eq!(Zone::from_epsg(32761), None, "это полярная стереографическая");
+        assert_eq!(Zone::from_epsg(4326), None, "градусы вообще не зона");
+        assert_eq!(Zone::from_epsg(3031), None, "антарктическая полярная — не зона");
+    }
+
+    /// Разобранный код и осевой меридиан обязаны сходиться: 32638 — это зона
+    /// 38, а её меридиан 45° в.д. Порознь они разошлись бы молча.
+    #[test]
+    fn the_parsed_code_and_the_meridian_agree() {
+        let zone = Zone::from_epsg(32638).expect("38 северная");
+        assert_eq!(zone.number, 38);
+        assert!(!zone.south);
+        assert!((zone.central_meridian_deg() - 45.0).abs() < 1e-12);
+    }
 
     /// Прямая и обратная сходятся по всей зоне — на этом стоит варп-сетка:
     /// её узлы считаются обратной, а привязка растра задана прямой.

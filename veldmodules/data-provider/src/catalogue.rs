@@ -372,10 +372,10 @@ fn rings(geometry: Geometry) -> Vec<Ring> {
     // Наружу все формы приходят одним видом — списком ломаных: полигон это
     // замкнутая ломаная, а разница между «через шов разрезано на два» и «две
     // ломаные» рисующему не важна.
-    let lines: Vec<Vec<[f64; 2]>> = match geometry.kind.as_str() {
+    let lines: Vec<Vec<Vertex>> = match geometry.kind.as_str() {
         // Снимок через 180-й меридиан каталог отдаёт разрезанным, и тогда
         // полигонов несколько.
-        "MultiPolygon" => serde_json::from_value::<Vec<Vec<Vec<[f64; 2]>>>>(geometry.coordinates)
+        "MultiPolygon" => serde_json::from_value::<Vec<Vec<Vec<Vertex>>>>(geometry.coordinates)
             .map(|polygons| polygons.into_iter().flatten().collect())
             .unwrap_or_default(),
         "Polygon" | "MultiLineString" => {
@@ -389,14 +389,37 @@ fn rings(geometry: Geometry) -> Vec<Ring> {
 
     lines
         .into_iter()
-        .map(|line| Ring {
-            // В GeoJSON координаты идут долготой вперёд.
-            points: closed(line)
-                .iter()
-                .map(|&[lon, lat]| GeoPoint { lat, lon })
-                .collect(),
+        .filter_map(|line| {
+            let points: Vec<GeoPoint> = line.iter().filter_map(place).collect();
+            // Кольцо уходит целиком либо не уходит вовсе. Выброшенная поодиночке
+            // негодная вершина меняет фигуру молча: у снимка о четырёх углах
+            // остаётся три, и на шар он ложится не квадом привязки, а грубым
+            // габаритом. Отброшенное целиком, кольцо попадает в счёт
+            // неразобранной геометрии и говорит о себе строкой в логе
+            // (см. [`parse`]).
+            (points.len() == line.len()).then(|| Ring { points: closed(points) })
         })
         .collect()
+}
+
+/// Вершина GeoJSON. Списком, а не парой: RFC 7946 разрешает третью координату,
+/// и пара отвергла бы такую вершину разбором — а вместе с ней и всю геометрию
+/// продукта, потому что разбор кончается `unwrap_or_default`. Снимок ушёл бы из
+/// выдачи вспомогательными данными (см. [`parse`]) из-за числа, которое здесь
+/// и не нужно.
+type Vertex = Vec<f64>;
+
+/// Место вершины. В GeoJSON координаты идут долготой вперёд, а высота, если её
+/// записали, отбрасывается: контур лежит на поверхности, и высоты у него нет
+/// нигде дальше по течению.
+///
+/// Вершина короче пары места не называет, и молча подставленный ноль увёл бы
+/// контур в Гвинейский залив. Что делать с таким кольцом, решает [`rings`].
+fn place(vertex: &Vertex) -> Option<GeoPoint> {
+    match vertex.as_slice() {
+        [lon, lat, ..] => Some(GeoPoint { lat: *lat, lon: *lon }),
+        _ => None,
+    }
 }
 
 /// Кольцо без замыкающей вершины: в GeoJSON последняя точка повторяет первую,
@@ -404,11 +427,18 @@ fn rings(geometry: Geometry) -> Vec<Ring> {
 /// вершину она перекашивает всё, что выводится из набора точек, — середину
 /// контура в первую очередь: у прямоугольника, повторившего южный угол, центр
 /// уезжает к югу.
-fn closed(ring: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
-    match ring.as_slice() {
-        [first, .., last] if first == last => ring[..ring.len() - 1].to_vec(),
-        _ => ring,
+///
+/// Сравниваются места, а не записи вершин: замкнутость — это про то, где
+/// вершина лежит. Кольцо, у которого концы записаны с разной высотой, замкнуто
+/// не меньше остальных, а сравнение записей объявило бы его разомкнутым, и
+/// лишняя вершина поехала бы дальше.
+fn closed(mut ring: Vec<GeoPoint>) -> Vec<GeoPoint> {
+    if let [first, .., last] = ring.as_slice() {
+        if first == last {
+            ring.pop();
+        }
     }
+    ring
 }
 
 #[derive(serde::Deserialize)]
@@ -523,6 +553,62 @@ mod tests {
 
         // Точка контуром не становится: рисовать по ней нечего.
         assert!(rings(line("Point", serde_json::json!([1.0, 2.0]))).is_empty());
+    }
+
+    /// Третья координата вершины законна по RFC 7946, и кольцо с ней остаётся
+    /// кольцом: отвергнутая разбором, она унесла бы с собой всю геометрию
+    /// продукта, а с ней и сам продукт — бесконтурное сведение считает
+    /// вспомогательными данными.
+    #[test]
+    fn a_vertex_may_carry_a_height() {
+        let raised = Geometry {
+            kind: "Polygon".to_string(),
+            coordinates: serde_json::json!([[
+                [0.0, 0.0, 137.0],
+                [1.0, 0.0, 140.0],
+                [1.0, 1.0, 152.0],
+                [0.0, 0.0, 137.0]
+            ]]),
+        };
+        let ring = rings(raised);
+        assert_eq!(ring.len(), 1, "кольцо потерялось вместе с высотой");
+        assert_eq!(ring[0].points.len(), 3, "замыкающая вершина не отброшена");
+        assert_eq!((ring[0].points[0].lat, ring[0].points[0].lon), (0.0, 0.0));
+        // Несимметричная вершина: у симметричных перестановку широты с
+        // долготой не увидеть.
+        assert_eq!((ring[0].points[1].lat, ring[0].points[1].lon), (0.0, 1.0));
+        assert_eq!((ring[0].points[2].lat, ring[0].points[2].lon), (1.0, 1.0));
+    }
+
+    /// А вершина короче пары уносит с собой всё кольцо: место по ней не
+    /// назвать, а выброшенная поодиночке она молча подменила бы фигуру. Ушедшее
+    /// целиком кольцо каталог посчитает неразобранной геометрией и скажет об
+    /// этом вслух (см. [`parse`]).
+    #[test]
+    fn a_vertex_shorter_than_a_pair_takes_the_ring_with_it() {
+        let broken = Geometry {
+            kind: "LineString".to_string(),
+            coordinates: serde_json::json!([[10.0], [11.0, 1.0]]),
+        };
+        assert!(rings(broken).is_empty());
+    }
+
+    /// Замкнутость — про место вершины, а не про её запись: кольцо, у которого
+    /// концы названы с разной высотой, замкнуто, и замыкающая вершина у него
+    /// отбрасывается наравне с остальными.
+    #[test]
+    fn a_ring_closes_by_place_and_not_by_record() {
+        let mixed = Geometry {
+            kind: "Polygon".to_string(),
+            coordinates: serde_json::json!([[
+                [0.0, 0.0],
+                [1.0, 0.0, 140.0],
+                [1.0, 1.0],
+                [0.0, 0.0, 137.0]
+            ]]),
+        };
+        let ring = rings(mixed);
+        assert_eq!(ring[0].points.len(), 3, "замыкание не распознано");
     }
 
     /// Запрос без единого условия — «всё подряд»: пустой фильтр не уходит

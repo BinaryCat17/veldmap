@@ -24,7 +24,7 @@ use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::{self, TILE};
 use super::super::resample::{resample_window, Window};
 use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples};
-use super::{Info, Kind, Tie};
+use super::{Info, Kind, Placement, Tie};
 
 /// Сигнатуры BigTIFF: у него в заголовке стоит версия 43 вместо 42, и по этому
 /// числу его и узнают. Смотрится она здесь, рядом с JP2 и NetCDF, потому что
@@ -80,7 +80,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     ensure_chunky(&mut decoder)?;
     ensure_readable(&mut decoder)?;
     let tiled = decoder.get_tag_unsigned::<u32>(Tag::TileWidth).is_ok();
-    let ties = ties(&mut decoder, width, height);
+    let (ties, placement) = georef(&mut decoder, width, height);
 
     let mut overviews = Vec::new();
     let mut index = 0;
@@ -100,7 +100,14 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         overviews.push(Overview { image: index, width: w, height: h });
     }
 
-    Ok(Info { width, height, kind: Kind::Tiff(Layout { tiled, overviews }), finest: 0, ties })
+    Ok(Info {
+        width,
+        height,
+        kind: Kind::Tiff(Layout { tiled, overviews }),
+        finest: 0,
+        ties,
+        placement,
+    })
 }
 
 /// Копия ли это картинки, ужатая, — по тегу NewSubfileType.
@@ -116,30 +123,153 @@ fn is_overview(subfile_type: u32) -> bool {
     subfile_type & REDUCED != 0 && subfile_type & MASK == 0
 }
 
-/// Сетка геопривязки GeoTIFF — опорные точки в градусах. Пусто, если файл
-/// привязан к проекции, а не к градусам: перевести её мог бы только тот, кто
-/// знает саму проекцию, а тайлер знает про растр и не знает про Землю.
+/// Геопривязка GeoTIFF: узлы в градусах либо привязка к проекции. Одно из
+/// двух, потому что и записана в файле она одна — градусы или метры системы, —
+/// а смешать их значило бы соврать числами, а не промолчать.
 ///
-/// Три вида привязки, и все сводятся к одному: решётка точек (ModelTiepoint по
-/// шесть чисел — пиксель, потом место) — как есть; одна точка с шагом пикселя
-/// (ModelPixelScale) и матрица (ModelTransformation) — четырьмя углами, потому
-/// что оба задают одно преобразование на весь растр, а линейное между углами
-/// восстанавливается точно.
+/// Градусы разбирает [`geo_ties`], проекцию — [`geo_placement`]; здесь только
+/// чтение тегов и то, о чём надо сказать вслух.
 ///
 /// Декодер после возврата стоит на том же образе: наводки здесь нет.
-fn ties<R: Read + Seek>(decoder: &mut Decoder<R>, width: u32, height: u32) -> Vec<Tie> {
+fn georef<R: Read + Seek>(
+    decoder: &mut Decoder<R>,
+    width: u32,
+    height: u32,
+) -> (Vec<Tie>, Option<Placement>) {
     let keys = decoder.get_tag_u16_vec(Tag::GeoKeyDirectoryTag).unwrap_or_default();
     let points = decoder.get_tag_f64_vec(Tag::ModelTiepointTag).unwrap_or_default();
     let scale = decoder.get_tag_f64_vec(Tag::ModelPixelScaleTag).unwrap_or_default();
     // Матрицу крейт тегом не знает: у него перечислены только ходовые. Номер
     // из спецификации GeoTIFF — ModelTransformationTag.
     let matrix = decoder.get_tag_f64_vec(Tag::Unknown(34264)).unwrap_or_default();
-    geo_ties(&keys, &points, &scale, &matrix, width, height)
+
+    if let Some(code) = foreign_datum(&keys) {
+        veldsdk::log::warn!(target: "decode",
+            "растр объявляет датум EPSG:{}, а привязка уедет как WGS84: расхождение порядка сотни метров",
+            code);
+    }
+    let placement = geo_placement(&keys, &points, &scale, &matrix);
+    let ties = geo_ties(&keys, &points, &scale, &matrix, width, height);
+    // Сказать надо именно здесь: дальше по течению «в файле не сказано» и
+    // «сказано, да не прочиталось» выглядят одинаково — пустой привязкой, — и
+    // объяснить по такой пустоте нечего.
+    //
+    // Условие — по тегам привязки, а не по модели координат: молчаливых исходов
+    // столько же у геоцентрики (1024 = 3) и у user-defined, сколько у проекции,
+    // и названный род оставил бы их всех без объяснения.
+    let carries = !points.is_empty() || !scale.is_empty() || !matrix.is_empty();
+    if carries && ties.is_empty() && placement.is_none() {
+        veldsdk::log::warn!(target: "decode",
+            "растр несёт привязку, а взять её не удалось: модель {:?}, система {:?}, опорных точек {}",
+            geokey(&keys, 1024), geokey(&keys, 3072), points.len() / 6);
+    }
+    (ties, placement)
 }
 
-/// Разбор геотегов — отдельно от чтения, потому что проверяется он ими же:
-/// файла с решёткой в тестах нет, а правила «градусы или проекция», «шесть
-/// чисел на узел» и «шаг по Y идёт на юг» есть.
+/// Значение простого геоключа: ключи лежат четвёрками после заголовка из
+/// четырёх же чисел, и у простого (место 0) значение — четвёртое в четвёрке.
+fn geokey(keys: &[u16], id: u16) -> Option<u16> {
+    keys.get(4..)
+        .unwrap_or_default()
+        .chunks_exact(4)
+        .find(|entry| entry[0] == id && entry[1] == 0)
+        .map(|entry| entry[3])
+}
+
+/// Сдвиг узла, если координата названа для середины пикселя, а не для его угла
+/// (GTRasterTypeGeoKey, 1025). Наружу узел уезжает долей растра, где ноль —
+/// край, и такой узел приходится сдвигать на полпикселя. Умолчание
+/// спецификации — угол, и тогда сдвига нет.
+///
+/// Полпикселя — это не мелочь у растров, которыми меряют: у Copernicus DSM шаг
+/// секундный, и половина его — пятнадцать метров на местности.
+fn half_pixel(keys: &[u16]) -> f64 {
+    if geokey(keys, 1025) == Some(2) { 0.5 } else { 0.0 }
+}
+
+/// Датум, объявленный файлом, — если он не WGS84 (GeographicTypeGeoKey, 2048).
+///
+/// Спрашивают об этом затем, что дальше по течению места для датума нет: и
+/// узлы, и рамка объявлены в WGS84, так что файл на Пулково-42 (EPSG:4284)
+/// уехал бы туда молча — а это сотня метров в средней полосе. Числа отсюда не
+/// правятся: перевод между датумами — ещё одна геодезия, и заводить её ради
+/// одной строки нельзя. Строка и есть весь ответ.
+///
+/// Молчание файла и `user-defined` — не чужой датум, а отсутствие ответа:
+/// сказать о них нечего.
+fn foreign_datum(keys: &[u16]) -> Option<u16> {
+    const WGS84: [u16; 2] = [4326, 4979];
+    const UNSAID: [u16; 2] = [0, 32767];
+    geokey(keys, 2048).filter(|code| !WGS84.contains(code) && !UNSAID.contains(code))
+}
+
+/// Годен ли шаг пикселя: обе стороны — настоящие числа и ненулевые. Нулевая
+/// сложила бы растр в линию, а такая привязка снаружи неотличима от настоящей —
+/// её нечем поймать ни по числу узлов, ни по их порядку.
+///
+/// Не-число проверяется отдельно, потому что сравнение с нулём его пропускает:
+/// `NaN != 0` истинно.
+fn usable_step(scale: &[f64]) -> bool {
+    matches!(scale.get(..2), Some([x, y]) if x.is_finite() && y.is_finite() && *x != 0.0 && *y != 0.0)
+}
+
+/// Привязка растра, лежащего в проекции: код EPSG и линейное преобразование
+/// пикселя в метры системы.
+///
+/// `None` — файл лежит в градусах (тогда его читает [`geo_ties`]), система не
+/// названа, названа непонятным кодом либо преобразование вырождено.
+///
+/// Решётка опорных точек означает здесь отказ, а не привязку по первому узлу:
+/// решётка описывает нелинейную раскладку — тем она и решётка, — и шестёркой
+/// чисел не выражается. Взятая по одному узлу, она врала бы тем сильнее, чем
+/// дальше от него.
+///
+/// Обрезанный тег опорной точки (меньше шести чисел) сюда не попадает вовсе и
+/// уходит в матричную ветку — а не имея матрицы, кончается отказом. Читать
+/// половину узла и достраивать вторую было бы догадкой, а не чтением.
+fn geo_placement(
+    keys: &[u16],
+    points: &[f64],
+    scale: &[f64],
+    matrix: &[f64],
+) -> Option<Placement> {
+    // GTModelTypeGeoKey (1024): 1 — метры проекции.
+    if geokey(keys, 1024) != Some(1) || points.len() > 6 {
+        return None;
+    }
+    // ProjectedCSTypeGeoKey (3072). Ноль и user-defined кодом не являются:
+    // параметры такой системы лежат отдельными ключами, и собрать её из них —
+    // это уже разбор проекций, а не чтение растра.
+    let epsg = match geokey(keys, 3072) {
+        Some(code) if code != 0 && code != 32767 => u32::from(code),
+        _ => return None,
+    };
+
+    let half = half_pixel(keys);
+    let affine = match (points.get(..6), usable_step(scale)) {
+        // Шаг по Y положителен, а строки растра идут на юг — отсюда минус.
+        (Some(tie), true) => [
+            scale[0],
+            0.0,
+            tie[3] - (tie[0] + half) * scale[0],
+            0.0,
+            -scale[1],
+            tie[4] + (tie[1] + half) * scale[1],
+        ],
+        _ => affine_from_matrix(matrix, half)?,
+    };
+    // Опорная точка проверяется вместе со всем остальным: шаг мог быть годен, а
+    // место названо не числом, и такая рамка доехала бы до глобуса целой с виду.
+    affine.iter().all(|value| value.is_finite()).then_some(Placement { epsg, affine })
+}
+
+/// Опорные точки растра, лежащего в градусах. Пусто, если файл привязан к
+/// проекции: перевести её мог бы только тот, кто знает саму проекцию, а тайлер
+/// знает про растр и не знает про Землю (см. [`geo_placement`]).
+///
+/// Разбор геотегов отделён от чтения, потому что проверяется он ими же: файла
+/// с решёткой в тестах нет, а правила «градусы или проекция», «шесть чисел на
+/// узел» и «шаг по Y идёт на юг» есть.
 fn geo_ties(
     keys: &[u16],
     points: &[f64],
@@ -148,31 +278,28 @@ fn geo_ties(
     width: u32,
     height: u32,
 ) -> Vec<Tie> {
-    // GTModelTypeGeoKey (1024): 2 — градусы. Ключи лежат четвёрками после
-    // заголовка из четырёх же чисел; значение простого ключа (место 0) —
-    // четвёртое в четвёрке.
-    let geographic = keys
-        .get(4..)
-        .unwrap_or_default()
-        .chunks_exact(4)
-        .any(|key| key[0] == 1024 && key[1] == 0 && key[3] == 2);
-    if !geographic {
+    // GTModelTypeGeoKey (1024): 2 — градусы.
+    if geokey(keys, 1024) != Some(2) {
         return Vec::new();
     }
+    let half = half_pixel(keys);
 
     let point = |px: f64, py: f64, lon: f64, lat: f64| Tie { px, py, lat, lon };
     // Узел — шесть чисел: пиксель (i, j, k) и место (x, y, z).
     if points.len() > 6 {
-        return points.chunks_exact(6).map(|tie| point(tie[0], tie[1], tie[3], tie[4])).collect();
+        return points
+            .chunks_exact(6)
+            .map(|tie| point(tie[0] + half, tie[1] + half, tie[3], tie[4]))
+            .collect();
     }
 
     // Одна точка с шагом пикселя: растр лежит в градусах ровным
     // прямоугольником, и хватает его углов.
-    let (Some(tie), true) = (points.get(..6), scale.len() >= 2) else {
-        return corners_from_matrix(matrix, width, height);
+    let (Some(tie), true) = (points.get(..6), usable_step(scale)) else {
+        return corners_from_matrix(matrix, half, width, height);
     };
     // Шаг по Y положителен, а строки растра идут на юг — отсюда минус.
-    let (x, y) = (tie[3] - tie[0] * scale[0], tie[4] + tie[1] * scale[1]);
+    let (x, y) = (tie[3] - (tie[0] + half) * scale[0], tie[4] + (tie[1] + half) * scale[1]);
     let (right, bottom) = (f64::from(width), f64::from(height));
     vec![
         point(0.0, 0.0, x, y),
@@ -182,28 +309,46 @@ fn geo_ties(
     ]
 }
 
-/// Углы растра, привязанного матрицей (ModelTransformationTag).
+/// Аффинное преобразование из матрицы привязки (ModelTransformationTag).
 ///
 /// Матрица — четыре строки по четыре числа, и место пикселя (i, j) даёт первая
 /// пара строк: `x = a·i + b·j + d`, `y = e·i + f·j + h`. Такая привязка стои́т
 /// вместо пары «точка + шаг» и тем от неё отличается, что растр может лежать
 /// повёрнутым: у пары шаг задан по осям, повернуть его нечем.
 ///
+/// `None` — вырожденная матрица (нулевая строка, единичная заглушка). Привязкой
+/// она не является: все четыре угла сошлись бы в точку, и растр лёг бы в ничто.
+///
+/// Полпикселя середины уходит в свободный член, а не снимается с довода на
+/// каждом обращении: наружу отсюда уезжает одно преобразование, и второй
+/// конвенции у него быть не должно.
+fn affine_from_matrix(matrix: &[f64], half: f64) -> Option<[f64; 6]> {
+    let a = matrix.get(..8)?;
+    if !a.iter().all(|value| value.is_finite()) || a[0] * a[5] - a[1] * a[4] == 0.0 {
+        return None;
+    }
+    Some([
+        a[0],
+        a[1],
+        a[3] - (a[0] + a[1]) * half,
+        a[4],
+        a[5],
+        a[7] - (a[4] + a[5]) * half,
+    ])
+}
+
+/// Углы растра, привязанного матрицей, — в градусах.
+///
 /// Углов хватает и повёрнутому: преобразование линейное, а между четырьмя
 /// узлами решётка и восстанавливает линейное точно.
-fn corners_from_matrix(matrix: &[f64], width: u32, height: u32) -> Vec<Tie> {
-    let Some(a) = matrix.get(..8) else { return Vec::new() };
+fn corners_from_matrix(matrix: &[f64], half: f64, width: u32, height: u32) -> Vec<Tie> {
+    let Some(a) = affine_from_matrix(matrix, half) else { return Vec::new() };
     let (right, bottom) = (f64::from(width), f64::from(height));
-    // Вырожденная матрица (нулевая строка, единичная заглушка) привязкой не
-    // является: все четыре угла сошлись бы в точку, и растр лёг бы в ничто.
-    if a[0] * a[5] - a[1] * a[4] == 0.0 {
-        return Vec::new();
-    }
     let place = |px: f64, py: f64| Tie {
         px,
         py,
-        lon: a[0] * px + a[1] * py + a[3],
-        lat: a[4] * px + a[5] * py + a[7],
+        lon: a[0] * px + a[1] * py + a[2],
+        lat: a[3] * px + a[4] * py + a[5],
     };
     vec![place(0.0, 0.0), place(right, 0.0), place(0.0, bottom), place(right, bottom)]
 }
@@ -610,6 +755,12 @@ mod tests {
         vec![1, 1, 0, 1, 1024, 0, 1, model]
     }
 
+    /// Тот же каталог, но с GTRasterTypeGeoKey: 1 — координата названа для
+    /// угла пикселя, 2 — для его середины.
+    fn geokeys_raster(model: u16, raster: u16) -> Vec<u16> {
+        vec![1, 1, 0, 2, 1024, 0, 1, model, 1025, 0, 1, raster]
+    }
+
     /// Решётка узлов проходит как есть: пиксель берётся из первых двух чисел
     /// шестёрки, место — из четвёртого и пятого. Порядок узлов — файла: им и
     /// сказано, каким пикселем куда лёг растр.
@@ -638,6 +789,86 @@ mod tests {
         assert_eq!((ties[0].lon, ties[0].lat), (10.0, 50.0));
         assert_eq!((ties[1].lon, ties[1].lat), (60.0, 50.0), "правый край восточнее");
         assert_eq!((ties[2].lon, ties[2].lat), (10.0, 0.0), "нижний край южнее");
+    }
+
+    /// Координата, названная для середины пикселя, сдвигает узел на его
+    /// половину: наружу узел уезжает долей растра, где ноль — край. Так
+    /// привязан Copernicus DSM, и половина его секундного шага — пятнадцать
+    /// метров на местности.
+    ///
+    /// Сдвигается при этом весь растр, а не растягивается: размах между
+    /// краями остаётся тем же.
+    #[test]
+    fn a_point_raster_shifts_the_node_by_half_a_pixel() {
+        let points = vec![0.0, 0.0, 0.0, 13.0, 1.0, 0.0];
+        let step = [1.0 / 3600.0, 1.0 / 3600.0, 0.0];
+        let corner = geo_ties(&geokeys_raster(2, 1), &points, &step, &[], 3600, 3600);
+        let middle = geo_ties(&geokeys_raster(2, 2), &points, &step, &[], 3600, 3600);
+
+        assert_eq!((corner[0].lon, corner[0].lat), (13.0, 1.0), "угол назван как есть");
+        let half = 0.5 / 3600.0;
+        assert!((middle[0].lon - (13.0 - half)).abs() < 1e-12, "{}", middle[0].lon);
+        assert!((middle[0].lat - (1.0 + half)).abs() < 1e-12, "{}", middle[0].lat);
+        assert!(
+            ((middle[1].lon - middle[0].lon) - (corner[1].lon - corner[0].lon)).abs() < 1e-12,
+            "растр растянулся вместо сдвига по долготе"
+        );
+        assert!(
+            ((middle[2].lat - middle[0].lat) - (corner[2].lat - corner[0].lat)).abs() < 1e-12,
+            "растр растянулся вместо сдвига по широте"
+        );
+    }
+
+    /// Один и тот же растр, названный парой «точка + шаг» и равной ей матрицей,
+    /// ложится одинаково — и с серединой пикселя тоже. Ветки разные, и сдвиг в
+    /// них берётся с разных концов: у пары — с начала отсчёта, у матрицы — с
+    /// довода. Разойдись они, и один и тот же файл лежал бы по-разному в
+    /// зависимости от того, каким тегом его привязали.
+    #[test]
+    fn the_matrix_and_the_step_place_a_point_raster_alike() {
+        let (dx, dy) = (1.0 / 3600.0, 1.0 / 3600.0);
+        let points = vec![0.0, 0.0, 0.0, 13.0, 1.0, 0.0];
+        let matrix = vec![dx, 0.0, 0.0, 13.0, 0.0, -dy, 0.0, 1.0];
+        let keys = geokeys_raster(2, 2);
+
+        let by_step = geo_ties(&keys, &points, &[dx, dy, 0.0], &[], 3600, 3600);
+        let by_matrix = geo_ties(&keys, &[], &[], &matrix, 3600, 3600);
+
+        assert_eq!(by_step.len(), by_matrix.len());
+        for (step, matrix) in by_step.iter().zip(&by_matrix) {
+            assert!((step.lon - matrix.lon).abs() < 1e-12, "{} против {}", step.lon, matrix.lon);
+            assert!((step.lat - matrix.lat).abs() < 1e-12, "{} против {}", step.lat, matrix.lat);
+        }
+        // И это не совпадение двух нулей: сдвиг в обеих ветках произошёл.
+        let corner = geo_ties(&geokeys_raster(2, 1), &[], &[], &matrix, 3600, 3600);
+        assert!((corner[0].lon - by_matrix[0].lon).abs() > dy / 4.0);
+    }
+
+    /// Решётка узлов сдвигается той же половиной пикселя: у неё пиксель назван
+    /// теми же координатами, что и у остальных, и оставленная без сдвига она
+    /// разошлась бы с ними на растре, привязанном обоими способами разом.
+    #[test]
+    fn a_tiepoint_lattice_shifts_by_half_a_pixel_too() {
+        let points = vec![
+            0.0, 0.0, 0.0, 2.707, 73.395, 0.0, //
+            529.0, 0.0, 0.0, 2.096, 73.470, 0.0,
+        ];
+        let ties = geo_ties(&geokeys_raster(2, 2), &points, &[], &[], 10572, 9993);
+        assert_eq!((ties[0].px, ties[0].py), (0.5, 0.5));
+        assert_eq!((ties[1].px, ties[1].py), (529.5, 0.5));
+        // Место узла при этом не трогают: сдвинулся пиксель, а не координата.
+        assert_eq!((ties[0].lat, ties[0].lon), (73.395, 2.707));
+    }
+
+    /// Умолчание спецификации — угол: файл без GTRasterTypeGeoKey читается так
+    /// же, как файл, объявивший угол прямо.
+    #[test]
+    fn a_raster_without_the_key_is_placed_by_its_corner() {
+        let points = vec![0.0, 0.0, 0.0, 13.0, 1.0, 0.0];
+        let step = [1.0 / 3600.0, 1.0 / 3600.0, 0.0];
+        let silent = geo_ties(&geokeys(2), &points, &step, &[], 3600, 3600);
+        let said = geo_ties(&geokeys_raster(2, 1), &points, &step, &[], 3600, 3600);
+        assert_eq!((silent[0].lon, silent[0].lat), (said[0].lon, said[0].lat));
     }
 
     /// Копией считается уменьшенная картинка, но не уменьшенная маска: GDAL
@@ -697,14 +928,283 @@ mod tests {
         assert!(geo_ties(&geokeys(2), &[], &[], &[1.0, 0.0, 0.0], 100, 200).is_empty());
     }
 
-    /// Привязка к проекции — не наше дело: перевести её в градусы может только
-    /// тот, кто знает саму проекцию, а тайлер про Землю не знает ничего.
+    /// Привязка к проекции узлами в градусах не притворяется: перевести её мог
+    /// бы только знающий саму проекцию, а тайлер про Землю не знает ничего.
+    /// Уезжает она отдельным полем (см. [`geo_placement`]).
     #[test]
     fn projected_files_yield_nothing() {
         let points = vec![0.0, 0.0, 0.0, 600_000.0, 7_800_000.0, 0.0];
         assert!(geo_ties(&geokeys(1), &points, &[10.0, 10.0, 0.0], &[], 10, 10).is_empty());
         // Как и файл вовсе без геотегов.
         assert!(geo_ties(&[], &points, &[10.0, 10.0, 0.0], &[], 10, 10).is_empty());
+    }
+
+    /// Каталог ключей проекционного растра: модель — метры, плюс код системы.
+    fn projected_keys(epsg: u16) -> Vec<u16> {
+        vec![1, 1, 0, 2, 1024, 0, 1, 1, 3072, 0, 1, epsg]
+    }
+
+    /// Он же с GTRasterTypeGeoKey: 1 — координата названа для угла пикселя,
+    /// 2 — для его середины.
+    fn projected_keys_raster(epsg: u16, raster: u16) -> Vec<u16> {
+        vec![1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, raster, 3072, 0, 1, epsg]
+    }
+
+    /// Растр в проекции отдаётся кодом системы и преобразованием: пиксель (0,0)
+    /// ложится ровно в опорную точку, шаг идёт по осям, а узлов в градусах у
+    /// такого файла нет вовсе.
+    ///
+    /// Числа — с настоящего файла Landsat-5 (`LT51780121988065ESA00_B1.TIF`,
+    /// зона 38 северная, шаг 30 м): ровно тот случай, ради которого поле и
+    /// заведено.
+    #[test]
+    fn a_projected_raster_reports_its_system_and_transform() {
+        let points = vec![0.0, 0.0, 0.0, 499_536.218_75, 7_693_329.5, 0.0];
+        let found = geo_placement(&projected_keys(32638), &points, &[30.0, 30.0, 0.0], &[])
+            .expect("привязка к зоне 38");
+
+        assert_eq!(found.epsg, 32638);
+        assert_eq!((found.affine[2], found.affine[5]), (499_536.218_75, 7_693_329.5));
+        assert_eq!(found.affine[0], 30.0, "шаг на восток");
+        // Шаг по Y положителен, а строки растра идут на юг.
+        assert_eq!(found.affine[4], -30.0, "шаг на юг");
+        assert_eq!((found.affine[1], found.affine[3]), (0.0, 0.0), "поворота у пары «точка+шаг» нет");
+
+        assert!(
+            geo_ties(&projected_keys(32638), &points, &[30.0, 30.0, 0.0], &[], 7956, 7740)
+                .is_empty(),
+            "метры зоны не должны уехать узлами в градусах"
+        );
+    }
+
+    /// Опорная точка не обязана стоять в углу растра, а шаг — быть квадратным.
+    /// На настоящем файле этого не видно: у Landsat опора в (0,0) и шаг 30×30, и
+    /// на таких числах перепутанные оси неотличимы друг от друга.
+    #[test]
+    fn a_tiepoint_off_the_corner_places_the_whole_raster() {
+        let points = vec![100.0, 200.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
+        let found = geo_placement(&projected_keys(32638), &points, &[30.0, 15.0, 0.0], &[])
+            .expect("привязка");
+
+        assert_eq!(found.affine[0], 30.0, "шаг на восток");
+        assert_eq!(found.affine[4], -15.0, "шаг на юг — свой, а не тот же");
+        // Пиксель (0,0) стои́т на сто шагов западнее опоры и на двести севернее.
+        assert_eq!(found.affine[2], 500_000.0 - 100.0 * 30.0);
+        assert_eq!(found.affine[5], 7_000_000.0 + 200.0 * 15.0);
+    }
+
+    /// То же в градусной ветке: обе привязки называют опору одинаково, и
+    /// разойтись в этом им нельзя — два растра одного снимка легли бы врозь.
+    #[test]
+    fn a_degree_tiepoint_off_the_corner_places_the_whole_raster() {
+        let points = vec![100.0, 200.0, 0.0, 13.0, 50.0, 0.0];
+        let ties = geo_ties(&geokeys(2), &points, &[0.5, 0.25, 0.0], &[], 10, 20);
+        assert_eq!(ties[0].lon, 13.0 - 100.0 * 0.5, "сто шагов западнее опоры");
+        assert_eq!(ties[0].lat, 50.0 + 200.0 * 0.25, "двести шагов севернее");
+    }
+
+    /// Полпикселя у повёрнутой матрицы снимается по обеим осям сразу: у растра
+    /// по осям второй член нулевой, и выброшенный, он там не виден вовсе.
+    #[test]
+    fn the_half_pixel_of_a_rotated_matrix_takes_both_axes() {
+        let matrix = vec![
+            0.0, 30.0, 0.0, 500_000.0, //
+            30.0, 0.0, 0.0, 7_000_000.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let found =
+            geo_placement(&projected_keys_raster(32638, 2), &[], &[], &matrix).expect("поворот");
+        assert_eq!(found.affine[2], 500_000.0 - 15.0, "полшага по второму члену");
+        assert_eq!(found.affine[5], 7_000_000.0 - 15.0, "и по нему же в другой строке");
+    }
+
+    /// Матрица со сложенными строками вырождена, хотя ни один её член не ноль:
+    /// растр складывается в линию. Держится это знаком в определителе — при
+    /// сложении вместо вычитания такая привязка проехала бы насквозь.
+    #[test]
+    fn a_shear_that_collapses_the_raster_is_no_binding() {
+        let shear = vec![
+            30.0, 30.0, 0.0, 500_000.0, //
+            30.0, 30.0, 0.0, 7_000_000.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        assert!(geo_placement(&projected_keys(32638), &[], &[], &shear).is_none());
+        assert!(geo_ties(&geokeys(2), &[], &[], &shear, 10, 10).is_empty());
+    }
+
+    /// Не-число привязкой не является ни в одной ветке и ни в одном теге.
+    /// Сравнение с нулём его не ловит — `NaN != 0` истинно, — а доехав до рамки,
+    /// оно даёт слой, который не выберет уровень пирамиды никогда.
+    #[test]
+    fn a_transform_of_not_a_number_binds_nothing() {
+        let points = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
+        let sick_step = [f64::NAN, 30.0, 0.0];
+        assert!(geo_placement(&projected_keys(32638), &points, &sick_step, &[]).is_none(), "шаг");
+        assert!(geo_ties(&geokeys(2), &points, &sick_step, &[], 10, 10).is_empty(), "он же в градусах");
+
+        // Шаг годен, а место названо не числом: рамка вышла бы целой с виду.
+        let sick_tie = vec![0.0, 0.0, 0.0, f64::NAN, 7_000_000.0, 0.0];
+        assert!(
+            geo_placement(&projected_keys(32638), &sick_tie, &[30.0, 30.0, 0.0], &[]).is_none(),
+            "опорная точка"
+        );
+
+        let sick_matrix = vec![
+            30.0, 0.0, 0.0, f64::NAN, //
+            0.0, -30.0, 0.0, 7_000_000.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        assert!(geo_placement(&projected_keys(32638), &[], &[], &sick_matrix).is_none(), "матрица");
+    }
+
+    /// Градусный файл проекцией не притворяется — и наоборот. Ветки
+    /// взаимоисключимы: одна из них обязана промолчать на числах другой, иначе
+    /// метры зоны уехали бы широтой.
+    #[test]
+    fn the_two_bindings_do_not_answer_for_each_other() {
+        let points = vec![0.0, 0.0, 0.0, 13.0, 1.0, 0.0];
+        let step = [1.0 / 3600.0, 1.0 / 3600.0, 0.0];
+
+        assert!(geo_placement(&geokeys(2), &points, &step, &[]).is_none(), "градусы — не проекция");
+        assert!(!geo_ties(&geokeys(2), &points, &step, &[], 3600, 3600).is_empty());
+
+        let metres = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
+        let keys = projected_keys(32638);
+        assert!(geo_ties(&keys, &metres, &[30.0, 30.0, 0.0], &[], 10, 10).is_empty(),
+            "проекция — не градусы");
+        assert!(geo_placement(&keys, &metres, &[30.0, 30.0, 0.0], &[]).is_some());
+    }
+
+    /// Полпикселя середины снимается у проекции так же, как у градусной ветки:
+    /// начало преобразования уезжает на полшага в ту же сторону. Разойдись эти
+    /// две конвенции — и два растра одного снимка легли бы со сдвигом друг
+    /// относительно друга.
+    #[test]
+    fn the_half_pixel_moves_both_bindings_the_same_way() {
+        let points = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
+        let step = [30.0, 30.0, 0.0];
+
+        let corner = geo_placement(&projected_keys_raster(32638, 1), &points, &step, &[])
+            .expect("угол пикселя");
+        let middle = geo_placement(&projected_keys_raster(32638, 2), &points, &step, &[])
+            .expect("середина пикселя");
+
+        assert_eq!((corner.affine[2], corner.affine[5]), (500_000.0, 7_000_000.0));
+        assert_eq!(middle.affine[2] - corner.affine[2], -15.0, "на полшага на запад");
+        assert_eq!(middle.affine[5] - corner.affine[5], 15.0, "на полшага на север");
+
+        // Та же пара для градусной ветки: знаки обязаны совпасть.
+        let degrees = [1.0 / 3600.0, 1.0 / 3600.0, 0.0];
+        let node = vec![0.0, 0.0, 0.0, 13.0, 1.0, 0.0];
+        let by_corner = geo_ties(&geokeys_raster(2, 1), &node, &degrees, &[], 10, 10);
+        let by_middle = geo_ties(&geokeys_raster(2, 2), &node, &degrees, &[], 10, 10);
+        assert!(by_middle[0].lon < by_corner[0].lon, "на полшага на запад");
+        assert!(by_middle[0].lat > by_corner[0].lat, "на полшага на север");
+    }
+
+    /// Матрица и пара «точка + шаг» задают одно преобразование и обязаны дать
+    /// одинаковое аффинное — на одних и тех же числах. Порознь эти две ветки
+    /// разошлись бы знаком по Y и никто бы этого не заметил.
+    #[test]
+    fn the_matrix_and_the_step_describe_one_projection() {
+        let step = 30.0;
+        let points = vec![0.0, 0.0, 0.0, 499_536.0, 7_693_329.0, 0.0];
+        let matrix = vec![
+            step, 0.0, 0.0, 499_536.0, //
+            0.0, -step, 0.0, 7_693_329.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let keys = projected_keys_raster(32638, 2);
+        let by_step = geo_placement(&keys, &points, &[step, step, 0.0], &[]).expect("шагом");
+        let by_matrix = geo_placement(&keys, &[], &[], &matrix).expect("матрицей");
+        assert_eq!(by_step.affine, by_matrix.affine);
+    }
+
+    /// Повёрнутая матрица доезжает поворотом, а не своей диагональю: у растра,
+    /// снятого не по осям зоны, внедиагональные члены и есть вся привязка.
+    #[test]
+    fn a_rotated_matrix_keeps_its_rotation() {
+        // Поворот на 90°: восток растра идёт на север зоны.
+        let matrix = vec![
+            0.0, 30.0, 0.0, 500_000.0, //
+            30.0, 0.0, 0.0, 7_000_000.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let found = geo_placement(&projected_keys(32638), &[], &[], &matrix).expect("поворот");
+        assert_eq!((found.affine[0], found.affine[1]), (0.0, 30.0));
+        assert_eq!((found.affine[3], found.affine[4]), (30.0, 0.0));
+    }
+
+    /// Система, названная непонятно, — это не система. Ноль и user-defined
+    /// кодом не являются: параметры такой проекции лежат отдельными ключами, и
+    /// собрать её из них значило бы разбирать проекции, а не читать растр.
+    #[test]
+    fn a_system_without_a_code_is_no_system() {
+        let points = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
+        let step = [30.0, 30.0, 0.0];
+        let bare = vec![1, 1, 0, 1, 1024, 0, 1, 1];
+
+        assert!(geo_placement(&bare, &points, &step, &[]).is_none(), "кода нет вовсе");
+        assert!(geo_placement(&projected_keys(32767), &points, &step, &[]).is_none(), "user-defined");
+        assert!(geo_placement(&projected_keys(0), &points, &step, &[]).is_none(), "ноль");
+    }
+
+    /// Решётка опорных точек в метрах зоны — это отказ, а не привязка по
+    /// первому узлу: решётка описывает нелинейную раскладку, и шестёркой чисел
+    /// она не выражается. Взятая по одному узлу, она врала бы тем сильнее, чем
+    /// дальше от него.
+    #[test]
+    fn a_projected_lattice_is_refused_not_flattened() {
+        let points = vec![
+            0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0, //
+            100.0, 0.0, 0.0, 503_000.0, 7_000_100.0, 0.0,
+        ];
+        assert!(geo_placement(&projected_keys(32638), &points, &[30.0, 30.0, 0.0], &[]).is_none());
+    }
+
+    /// Вырожденное преобразование привязкой не является — ни в одной ветке и ни
+    /// в одной модели координат: растр сложился бы в линию или в точку, а
+    /// снаружи такая рамка неотличима от настоящей.
+    #[test]
+    fn a_degenerate_transform_binds_nothing() {
+        let points = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
+        let flat = vec![
+            30.0, 0.0, 0.0, 500_000.0, //
+            0.0, 0.0, 0.0, 7_000_000.0, //
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        for step in [[0.0, 30.0, 0.0], [30.0, 0.0, 0.0]] {
+            assert!(geo_placement(&projected_keys(32638), &points, &step, &[]).is_none(), "шаг");
+            assert!(
+                geo_ties(&geokeys(2), &points, &step, &[], 10, 10).is_empty(),
+                "тот же нулевой шаг в градусах"
+            );
+        }
+        assert!(geo_placement(&projected_keys(32638), &[], &[], &flat).is_none(), "матрица");
+        assert!(geo_ties(&geokeys(2), &[], &[], &flat, 10, 10).is_empty(), "она же в градусах");
+    }
+
+    /// Чужой датум называется вслух: места для него дальше по течению нет — и
+    /// узлы, и рамка объявлены в WGS84, — так что файл на Пулково-42 уехал бы
+    /// туда молча, а это сотня метров в средней полосе.
+    ///
+    /// Молчание файла и user-defined чужим датумом не являются: сказать о них
+    /// нечего, и строка о них была бы шумом в каждом логе.
+    #[test]
+    fn a_foreign_datum_is_named_aloud() {
+        let with = |code: u16| vec![1, 1, 0, 2, 1024, 0, 1, 2, 2048, 0, 1, code];
+        assert_eq!(foreign_datum(&with(4284)), Some(4284), "Пулково-42");
+        assert_eq!(foreign_datum(&with(4258)), Some(4258), "ETRS89");
+        assert_eq!(foreign_datum(&with(4326)), None, "он и есть WGS84");
+        assert_eq!(foreign_datum(&with(4979)), None, "он же, трёхмерный");
+        assert_eq!(foreign_datum(&with(32767)), None, "user-defined — не ответ");
+        assert_eq!(foreign_datum(&geokeys(2)), None, "ключа нет вовсе");
     }
 
     /// Цветовая модель разбирается один раз и отвечает обоим спрашивающим — и
