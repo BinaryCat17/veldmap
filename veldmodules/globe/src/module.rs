@@ -409,7 +409,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
     let (frame, binding) = if let Some(utm) = incoming.utm {
         (
             overlay::Frame::utm(
-                projection::Zone { number: utm.zone, south: utm.south },
+                projection::System::utm(utm.zone, utm.south),
                 utm.x0,
                 utm.y0,
                 utm.x1,

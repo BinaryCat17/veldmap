@@ -81,7 +81,7 @@ pub enum Frame {
     ///
     /// `x = a[0]·fx + a[1]·fy + a[2]`, `y = a[3]·fx + a[4]·fy + a[5]`, где
     /// `fx`, `fy` — доли растра.
-    Projected { zone: projection::Zone, affine: [f64; 6] },
+    Projected { system: projection::System, affine: [f64; 6] },
     /// Четырёхугольник футпринта по обходу растра: UL, UR, LR, LL. Долготы
     /// развёрнуты в непрерывную ветвь заранее (см. [`Frame::quad`]).
     ///
@@ -111,9 +111,9 @@ impl Frame {
     /// же её удобно называть в проверках. Внутри она то же аффинное
     /// преобразование, что у привязки из файла: одна дорога до градусов, а не
     /// две похожие.
-    pub fn utm(zone: projection::Zone, x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
+    pub fn utm(system: projection::System, x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
         // Доля растра идёт вниз, а северная координата — вверх: отсюда минус.
-        Self::Projected { zone, affine: [x1 - x0, 0.0, x0, 0.0, -(y1 - y0), y1] }
+        Self::Projected { system, affine: [x1 - x0, 0.0, x0, 0.0, -(y1 - y0), y1] }
     }
 
     /// Рамка из привязки, прочитанной в самом растре: та названа в пикселях, а
@@ -129,11 +129,11 @@ impl Frame {
     /// неумение от молчания файла не отличить, и разбирать жалобу будет не по
     /// чему.
     pub fn from_placement(said: &Placement) -> Result<Self, String> {
-        let zone = projection::Zone::from_epsg(said.epsg)
-            .ok_or_else(|| format!("EPSG:{}, а переводится только UTM", said.epsg))?;
+        let system = projection::System::from_epsg(said.epsg)
+            .ok_or_else(|| format!("EPSG:{}, а такой системы мы не знаем", said.epsg))?;
         let affine =
             [said.x_per_i, said.x_per_j, said.x0, said.y_per_i, said.y_per_j, said.y0];
-        let frame = Self::placed(zone, affine, said.width, said.height);
+        let frame = Self::placed(system, affine, said.width, said.height);
         // Рамка без протяжённости ломает выбор уровня насмерть (см.
         // [`Frame::ground_m_per_px`]), а контур каталога от неё ещё цел.
         // Сюда доезжает и то, чего тайлер не отдаёт: `NaN` в шестёрке.
@@ -144,7 +144,7 @@ impl Frame {
     }
 
     fn placed(
-        zone: projection::Zone,
+        system: projection::System,
         affine: [f64; 6],
         width: u32,
         height: u32,
@@ -153,7 +153,7 @@ impl Frame {
         // положили бы неквадратный снимок с перекосом.
         let (across, down) = (f64::from(width), f64::from(height));
         Self::Projected {
-            zone,
+            system,
             affine: [
                 affine[0] * across,
                 affine[1] * down,
@@ -182,7 +182,7 @@ impl Frame {
     /// Доля растра (0..1 слева направо и сверху вниз) → широта и долгота.
     pub fn geodetic(&self, fx: f64, fy: f64) -> (f64, f64) {
         match self {
-            Self::Projected { zone, affine } => {
+            Self::Projected { system, affine } => {
                 let x = affine[0] * fx + affine[1] * fy + affine[2];
                 let y = affine[3] * fx + affine[4] * fy + affine[5];
                 // Разворачивать долготу здесь нечем и незачем: обратная
@@ -191,7 +191,7 @@ impl Frame {
                 // получает долготу больше 180° вместо скачка к −180°. Своего
                 // разворота узел и не смог бы сделать — он считается сам по
                 // себе и соседа не видит (ср. [`Grid::unwind`]).
-                projection::to_geodetic(*zone, x, y)
+                system.to_geodetic(x, y)
             }
             // Между углами футпринта нет ничего, кроме поверхности, — значит и
             // идти между ними надо по ней, дугой: у гранулы Sentinel-1 прямая в
@@ -1025,7 +1025,7 @@ mod tests {
             label: "снимок".into(),
             // Рамка T40WFC: 109.8 км на всю ширину растра.
             frame: Frame::utm(
-                projection::Zone { number: 40, south: false },
+                projection::System::utm(40, false),
                 600_000.0,
                 7_690_200.0,
                 709_800.0,
@@ -1274,7 +1274,7 @@ mod tests {
     /// растра идёт вниз.
     #[test]
     fn the_edges_and_the_affine_name_one_frame() {
-        let zone = projection::Zone { number: 40, south: false };
+        let zone = projection::System::utm(40, false);
         let (x0, y0, x1, y1) = (600_000.0, 7_690_200.0, 709_800.0, 7_800_000.0);
         let frame = Frame::utm(zone, x0, y0, x1, y1);
 
@@ -1285,7 +1285,7 @@ mod tests {
             (1.0, 1.0, x1, y0),
             (0.5, 0.5, (x0 + x1) / 2.0, (y0 + y1) / 2.0),
         ] {
-            assert_eq!(frame.geodetic(fx, fy), projection::to_geodetic(zone, x, y), "{} {}", fx, fy);
+            assert_eq!(frame.geodetic(fx, fy), zone.to_geodetic(x, y), "{} {}", fx, fy);
         }
     }
 
@@ -1298,15 +1298,14 @@ mod tests {
     /// не даёт им спрятаться за нулём.
     #[test]
     fn a_placement_in_pixels_becomes_a_frame_in_fractions() {
-        let zone = projection::Zone { number: 38, south: false };
+        let zone = projection::System::utm(38, false);
         let (width, height) = (7956u32, 7740u32);
         // Шаг 30 м с небольшим перекосом: внедиагональные члены не нулевые.
         let affine = [30.0, 2.0, 499_536.0, -1.0, -30.0, 7_693_329.0];
         let frame = Frame::placed(zone, affine, width, height);
 
         let at = |i: f64, j: f64| {
-            projection::to_geodetic(
-                zone,
+            zone.to_geodetic(
                 affine[0] * i + affine[1] * j + affine[2],
                 affine[3] * i + affine[4] * j + affine[5],
             )
@@ -1322,11 +1321,11 @@ mod tests {
     /// привязка. Выброшенные, они положили бы снимок ровно, но не туда.
     #[test]
     fn a_rotated_binding_turns_the_raster() {
-        let zone = projection::Zone { number: 38, south: false };
+        let zone = projection::System::utm(38, false);
         // Восток растра идёт на север зоны: сто километров вбок — это сто
         // километров вверх.
         let turned =
-            Frame::Projected { zone, affine: [0.0, 0.0, 500_000.0, 100_000.0, 0.0, 7_000_000.0] };
+            Frame::Projected { system: zone, affine: [0.0, 0.0, 500_000.0, 100_000.0, 0.0, 7_000_000.0] };
         let (lat_left, _) = turned.geodetic(0.0, 0.0);
         let (lat_right, lon_right) = turned.geodetic(1.0, 0.0);
 
@@ -1341,14 +1340,14 @@ mod tests {
     /// пирамиды мимо.
     #[test]
     fn a_rotated_binding_reports_its_whole_width() {
-        let zone = projection::Zone { number: 38, south: false };
+        let zone = projection::System::utm(38, false);
         let side = 100_000.0;
         let straight =
-            Frame::Projected { zone, affine: [side, 0.0, 500_000.0, 0.0, -side, 7_000_000.0] };
+            Frame::Projected { system: zone, affine: [side, 0.0, 500_000.0, 0.0, -side, 7_000_000.0] };
         // Тот же квадрат, повёрнутый на сорок пять градусов.
         let leg = side * std::f64::consts::FRAC_1_SQRT_2;
         let diagonal =
-            Frame::Projected { zone, affine: [leg, leg, 500_000.0, leg, -leg, 7_000_000.0] };
+            Frame::Projected { system: zone, affine: [leg, leg, 500_000.0, leg, -leg, 7_000_000.0] };
 
         let (straight, diagonal) = (
             straight.ground_m_per_px(1000).expect("прямой"),
@@ -1362,7 +1361,7 @@ mod tests {
         // гипотенузу. Спрошено про ширину, поэтому взяться она обязана из
         // столбца `fx`, а перекошенная рамка это и показывает.
         let skewed = Frame::Projected {
-            zone,
+            system: zone,
             affine: [300_000.0, 40_000.0, 500_000.0, 30_000.0, -200_000.0, 7_000_000.0],
         };
         let want = 300_000.0f64.hypot(30_000.0) / 1000.0;
@@ -1390,7 +1389,7 @@ mod tests {
         };
 
         let frame = Frame::from_placement(&said(32638, 30.0)).expect("зона 38");
-        let zone = projection::Zone { number: 38, south: false };
+        let zone = projection::System::utm(38, false);
         let affine = [30.0, 0.0, 499_536.0, 0.0, -30.0, 7_693_329.0];
         for (fx, fy) in [(0.0, 0.0), (1.0, 1.0), (0.3, 0.7)] {
             assert_eq!(
@@ -1423,7 +1422,7 @@ mod tests {
     /// снимок растянуло бы через всю Землю.
     #[test]
     fn a_frame_at_the_seam_stays_in_one_branch() {
-        let zone = projection::Zone { number: 60, south: false };
+        let zone = projection::System::utm(60, false);
         // Осевой меридиан зоны 60 — 177°, и её восточный край лежит за стыком:
         // рамка от осевого меридиана до предельного для UTM отступа его
         // пересекает.
@@ -1448,7 +1447,7 @@ mod tests {
         assert!(point.ground_m_per_px(100).is_none());
         assert!(!point.measurable());
 
-        let zone = projection::Zone { number: 33, south: false };
+        let zone = projection::System::utm(33, false);
         let backwards = Frame::utm(zone, 700_000.0, 0.0, 600_000.0, 100_000.0);
         let forwards = Frame::utm(zone, 600_000.0, 0.0, 700_000.0, 100_000.0);
         assert_eq!(backwards.ground_m_per_px(100), forwards.ground_m_per_px(100));
@@ -1459,7 +1458,7 @@ mod tests {
         // отсекает само — `NaN > 0` ложно, — а бесконечность проходит насквозь и
         // даёт метры на пиксель, которых не бывает.
         let boundless = |x: f64| Frame::Projected {
-            zone,
+            system: zone,
             affine: [x, 0.0, 0.0, 0.0, -100_000.0, 100_000.0],
         };
         assert!(boundless(f64::INFINITY).ground_m_per_px(100).is_none(), "бесконечность");
@@ -1526,8 +1525,8 @@ mod tests {
     fn utm_frame_corners_roundtrip() {
         let overlay = overlay(vec![]);
         let (lat_nw, lon_nw) = overlay.frame.geodetic(0.0, 0.0);
-        let zone = projection::Zone { number: 40, south: false };
-        let (e, n) = projection::from_geodetic(zone, lat_nw, lon_nw);
+        let zone = projection::System::utm(40, false);
+        let (e, n) = zone.from_geodetic(lat_nw, lon_nw);
         assert!((e - 600_000.0).abs() < 1e-6 && (n - 7_800_000.0).abs() < 1e-6);
         let (lat_se, _) = overlay.frame.geodetic(1.0, 1.0);
         assert!(lat_se < lat_nw);
