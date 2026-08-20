@@ -54,12 +54,20 @@ fn mark_globe(state: &State, rows: &mut [Row]) {
 /// Спрашивается по ключу снимка, а не по ключу строки: строка каталога знает
 /// папку со слэшем на конце, а наложение помнит продукт без него.
 ///
-/// Единственное место, где строка встречается с набором наложений: и значок, и
-/// полоса хода спрашивают об одном и том же, а два ответа на это однажды
-/// разошлись бы.
-fn onto_globe(state: &State, key: &str) -> OnGlobe {
+/// Единственное место, где ключ снимка встречается с набором наложений. Кроме
+/// значка и полосы хода спрашивает его и штриховой контур на шаре (см.
+/// `handlers::outline::send`): вопрос у всех троих один — «что с этим снимком
+/// на шаре сейчас», — а три ответа на него разошлись бы молча.
+pub fn onto_globe(state: &State, key: &str) -> OnGlobe {
     let Some(overlay) = state.overlays.iter().find(|overlay| overlay.identifier == key) else {
-        return OnGlobe::Off;
+        // Наложения ещё нет, но показ уже просят: продукт по ключу
+        // восстанавливает каталог, и ход к нему сетевой. Молчать эти секунды
+        // нельзя — нажатие выглядело бы пропавшим, а второе нажатие по тому же
+        // значку как раз и снимает просьбу.
+        return match state.showing.contains(key) {
+            true => OnGlobe::Asked,
+            false => OnGlobe::Off,
+        };
     };
     match overlay.on_globe() {
         false => OnGlobe::Assembling,
@@ -264,14 +272,29 @@ fn from_key(
         //
         // Спрашивается оно снимком, а не ключом строки: ключ папки приезжает со
         // слэшем на конце, а записи библиотеки помнят снимок без него.
-        let stored = state.library.count_under(&folder_path(&identifier));
+        let under = state.library.under(&folder_path(&identifier));
         let (done, files) = state.library.snapshot(&product);
         let whole = files > 0 && done as u32 == files;
-        let status = match (whole, stored) {
-            (true, _) => RowStatus::Complete,
-            (false, 0) => RowStatus::Remote,
-            // Папка каталога: у неё нет своих закачек, и стоять ей не по чему.
-            (false, done) => RowStatus::Partial { done, trouble: String::new() },
+        // Пока хоть один файл едет, едет весь снимок — то же правило, что у
+        // сложенной строки «Скачанного» (см. `row::snapshot`). Без него
+        // качающийся снимок стои́т с зелёным «3 на диске» и без полосы: два
+        // разных ответа на один вопрос, и разошлись бы они молча.
+        //
+        // Снимок, а не всякая папка: у папки пути своей закачки нет, и качается
+        // в ней не она, а лежащий внутри снимок. Сказанное о ней «скачивается»
+        // отняло бы у неё счёт файлов на диске — единственное, что о папке
+        // вообще можно сказать, — и ничего не дало бы взамен: размера у неё
+        // тоже нет, и полосе не из чего взяться.
+        let downloading = under.active && kind.is_product();
+        let status = match (whole, downloading, under.files) {
+            (true, ..) => RowStatus::Complete,
+            // Всего байт — то, что о размере сказал каталог: сама библиотека
+            // знает только уже скачанное, а без знаменателя полосе не из чего
+            // взяться.
+            (false, true, _) => RowStatus::Downloading { done: under.bytes, total: size },
+            (false, false, 0) => RowStatus::Remote,
+            // Стоять папке не по чему: своих закачек у неё нет.
+            (false, false, done) => RowStatus::Partial { done, trouble: String::new() },
         };
         let row = Row::container_row(identifier, title, status, kind);
         return Row { size, date, product, globe, outlined, ..row };
@@ -382,5 +405,59 @@ mod tests {
         );
 
         assert_eq!(row.outlined, OnOutline::Drawn, "строка каталога не знает про контур");
+    }
+
+    /// Пока хоть один файл снимка едет, едет весь снимок — и строка каталога
+    /// говорит это тем же словом, что и сложенная строка «Скачанного».
+    ///
+    /// Без этого правила качающийся .SAFE стои́т зелёным «2 на диске» и без
+    /// полосы: закачки у него по файлам, а строка о файлах не знает.
+    #[test]
+    fn a_catalogue_snapshot_says_it_is_downloading() {
+        use crate::proto::data_library::{LibraryEntry, LibraryStatus};
+        let file = |name: &str, status: LibraryStatus, done: u64| LibraryEntry {
+            name: name.to_string(),
+            identifier: format!("{}/{}", KEY, name),
+            product: KEY.to_string(),
+            done,
+            total: done,
+            status: status as i32,
+            modified: 0,
+            siblings: 0,
+            trouble: String::new(),
+        };
+        let row = |state: &State| {
+            from_key(
+                state,
+                format!("{}/", KEY),
+                "A.SAFE".to_string(),
+                // Размер снимка сказал каталог — из него и берётся знаменатель
+                // полосы: библиотека знает только уже скачанное.
+                1000,
+                0,
+                RowKind::Product { folder: true },
+                KEY.to_string(),
+            )
+        };
+
+        let mut state = state();
+        state.library.entries =
+            vec![file("B1.TIF", LibraryStatus::LibComplete, 10), file("B2.TIF", LibraryStatus::LibDownloading, 5)];
+        match row(&state).status {
+            RowStatus::Downloading { done, total } => {
+                assert_eq!((done, total), (15, 1000), "полосе нечем считаться");
+            }
+            _ => panic!("качающийся снимок назван не тем"),
+        }
+
+        // Закачка стала — снова счёт файлов на диске: стоять папке не по чему,
+        // и «скачивается» было бы про то, чего уже нет.
+        state.library.entries =
+            vec![file("B1.TIF", LibraryStatus::LibComplete, 10), file("B2.TIF", LibraryStatus::LibPaused, 5)];
+        assert!(matches!(row(&state).status, RowStatus::Partial { done: 2, .. }));
+
+        // Ничего не заводили — снимок в хранилище.
+        state.library.entries = Vec::new();
+        assert!(matches!(row(&state).status, RowStatus::Remote));
     }
 }

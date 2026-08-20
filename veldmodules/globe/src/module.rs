@@ -1072,7 +1072,9 @@ fn build_patches(state: &mut State) {
 ///
 /// Пустой `wanted` — считать не по чему (места под кадр нет, слой скрыт или
 /// растр ещё описывают): тогда о слое рассказывается то, что посчитал последний
-/// живой кадр, а работа объявляется стоящей.
+/// живой кадр. Работа при этом стоящей не объявляется: описание идёт и без
+/// кадра, и оно же — самая долгая часть пути растра по сети (см.
+/// `Overlay::busy`).
 ///
 /// Уезжает только изменившийся набор — топик объявлен снимком, и повтор
 /// отсекает его стаб (см. schema.yaml).
@@ -1114,8 +1116,9 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
         .overlays
         .iter()
         .map(|overlay| {
-            // Слой, которому не дают считать (скрыт, места под кадр нет),
-            // работой не занят по определению — потому и `live`. Всё
+            // Слою, которому не дают считать (скрыт, места под кадр нет),
+            // добывать нечего — потому и `live`. Описание в этот счёт не
+            // идёт: оно кадра не спрашивает (см. `Overlay::busy`). Всё
             // остальное решает общее правило (`tiles::working`): оно и есть
             // «путь не пройден», а не «что-то в полёте».
             //
@@ -1132,13 +1135,13 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
                 key: overlay.key.clone(),
                 ready: overlay.progress.ready,
                 total: overlay.progress.total,
-                working: live
-                    && overlay.busy(&state.passes, mine.map(|(.., wanted)| wanted)),
+                working: overlay.busy(&state.passes, mine.map(|(.., wanted)| wanted), live),
                 share: overlay.progress.share,
                 error: overlay.error.clone(),
                 trouble: overlay.trouble.clone().unwrap_or_default(),
                 step: overlay.progress.step,
                 steps: overlay.progress.steps,
+                blank: overlay.blank(),
             }
         })
         // Отвергнутые — теми же строками: наложения у нас нет, а сказать о нём
@@ -1153,6 +1156,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             trouble: String::new(),
             step: 0,
             steps: 0,
+            blank: false,
         }))
         .collect();
 
@@ -1169,8 +1173,8 @@ fn upload_outlines(state: &mut State) {
     // Числа полезны ровно при разборе «почему их не видно»: контуры бывают
     // мелкими (клетка Sentinel-2 — около градуса) и бывают за горизонтом, и
     // отличить это от «не доехали» больше нечем.
-    veldsdk::log::debug!(target: "render", "контуры: {} колец, {} вершин",
-        outlines.len(), built.vertices.len());
+    veldsdk::log::debug!(target: "render", "контуры: {} колец, {} вершин линий, {} вершин лент",
+        outlines.len(), built.vertices.len(), built.ribbon.len());
     if let Err(error) = device.set_outlines(&built) {
         veldsdk::log::error!(target: "render", "контуры не залиты: {:#}", error);
     }

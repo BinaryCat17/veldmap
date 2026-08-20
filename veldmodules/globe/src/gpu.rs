@@ -30,7 +30,7 @@ const DEPTH_FORMAT: TextureFormat = TextureFormat::TexDepth32Float;
 /// `struct Camera` в globe.wgsl: матрица по столбцам, за ней позиция глаза,
 /// выровненная на 16 байт, и размер кадра в пикселях.
 ///
-/// Размер кадра нужен ленте выбранного контура: её ширина экранная, и перевести
+/// Размер кадра нужен лентам контуров: их ширина экранная, и перевести
 /// пиксели в доли отсечения можно только зная, сколько их в кадре
 /// (см. `vs_ribbon`).
 #[repr(C)]
@@ -43,8 +43,8 @@ struct CameraUniform {
     _pad2: [f32; 2],
 }
 
-/// Вершина ленты выбранного контура: точка поверхности с нормалью, её соседи по
-/// обходу и сторона, в которую эту копию вершины отводит шейдер.
+/// Вершина ленты контура: точка поверхности с нормалью, её соседи по обходу и
+/// то, куда и насколько эту копию вершины отводит шейдер.
 ///
 /// Соседи здесь потому, что направление ленты считается на экране, а не в мире:
 /// в мире оно у одного и того же звена разное на разном приближении.
@@ -55,7 +55,9 @@ pub struct RibbonVertex {
     pub normal: World,
     pub prev: World,
     pub next: World,
-    /// −1 — левый край ленты, +1 — правый.
+    /// Полуширина ленты в пикселях кадра со знаком: минус — левый край, плюс
+    /// — правый. Число, а не сторона: лент две, и различает их как раз ширина
+    /// (см. `outlines::Outlines::build`).
     pub side: f32,
 }
 
@@ -125,8 +127,13 @@ pub struct Device {
     outline: PipelineId,
     /// Он же вполсилы — им рисуются невыбранные, пока выбран один.
     dimmed: PipelineId,
-    /// Лента выбранного: своя вершина, своя вершинная функция.
+    /// Лента выделенного: своя вершина и своя вершинная функция — не та, что у
+    /// линий.
     ribbon: PipelineId,
+    /// Она же штриховая — ею помечено место снимка, который на шар ещё едет.
+    /// Отличается от `ribbon` одним фрагментным шейдером: вершинная функция,
+    /// геометрия и буферы у них общие.
+    ribbon_pending: PipelineId,
     /// Наложения: варп-сетки с текстурой тайла-носителя.
     overlay: PipelineId,
     overlay_layout: BindGroupLayoutId,
@@ -140,10 +147,13 @@ pub struct Device {
     outline_vertices: GrowingBuffer,
     outline_indices: GrowingBuffer,
     outline_lines: std::ops::Range<u32>,
-    /// Лента выбранного — своя пара: вершина у неё другая.
+    /// Ленты — своя пара буферов: вершина у них другая. Оба вида лежат в ней
+    /// вместе и различаются отрезком индексов: рисующий их шейдер разный, а
+    /// вершина одна и та же.
     ribbon_vertices: GrowingBuffer,
     ribbon_indices: GrowingBuffer,
-    ribbon_range: std::ops::Range<u32>,
+    ribbon_selected: std::ops::Range<u32>,
+    ribbon_pending_range: std::ops::Range<u32>,
 }
 
 impl Device {
@@ -187,37 +197,44 @@ impl Device {
             PrimitiveTopology::TopologyLineList, false, CompareFunction::CmpLessEqual,
         )?;
         // Лента: треугольники вместо линий и своя вершина, а глубина как у
-        // линий — она лежит на той же высоте и о ней же говорит.
-        let ribbon = gfx::create_render_pipeline(CreateRenderPipeline {
-            shader_id: shader.id(),
-            label: "Globe Ribbon".into(),
-            vertex_entry: "vs_ribbon".into(),
-            fragment_entry: "fs_ribbon".into(),
-            target_format: format,
-            vertex_layouts: vec![VertexBufferLayout {
-                array_stride: std::mem::size_of::<RibbonVertex>() as u64,
-                step_mode: StepMode::StepVertex as i32,
-                // Как поля RibbonVertex, смещения выводятся.
-                attributes: gfx::packed_attributes(&[
-                    VertexFormat::VtxFloat32x3,
-                    VertexFormat::VtxFloat32x3,
-                    VertexFormat::VtxFloat32x3,
-                    VertexFormat::VtxFloat32x3,
-                    VertexFormat::VtxFloat32,
-                ]),
-            }],
-            bind_group_layout_ids: vec![camera_layout.id()],
-            primitive_topology: PrimitiveTopology::TopologyTriangleList as i32,
-            // Лента отводится в стороны на экране, и какая её сторона окажется
-            // лицевой — зависит от того, с какой стороны на неё смотрят.
-            cull_mode: CullMode::None as i32,
-            depth_stencil: Some(DepthStencilState {
-                format: DEPTH_FORMAT as i32,
-                depth_write_enabled: false,
-                depth_compare: CompareFunction::CmpLessEqual as i32,
-            }),
-            ..Default::default()
-        })?;
+        // линий — она лежит на той же высоте и о ней же говорит. Видов её два,
+        // и различает их один фрагментный шейдер: остальное — вершина,
+        // топология, отсечение и глубина — у них общее, поэтому собираются они
+        // одним описанием с подменой этой строки.
+        let ribbon_pipeline = |label: &str, fragment: &str| {
+            gfx::create_render_pipeline(CreateRenderPipeline {
+                shader_id: shader.id(),
+                label: label.into(),
+                vertex_entry: "vs_ribbon".into(),
+                fragment_entry: fragment.into(),
+                target_format: format,
+                vertex_layouts: vec![VertexBufferLayout {
+                    array_stride: std::mem::size_of::<RibbonVertex>() as u64,
+                    step_mode: StepMode::StepVertex as i32,
+                    // Как поля RibbonVertex, смещения выводятся.
+                    attributes: gfx::packed_attributes(&[
+                        VertexFormat::VtxFloat32x3,
+                        VertexFormat::VtxFloat32x3,
+                        VertexFormat::VtxFloat32x3,
+                        VertexFormat::VtxFloat32x3,
+                        VertexFormat::VtxFloat32,
+                    ]),
+                }],
+                bind_group_layout_ids: vec![camera_layout.id()],
+                primitive_topology: PrimitiveTopology::TopologyTriangleList as i32,
+                // Лента отводится в стороны на экране, и какая её сторона окажется
+                // лицевой — зависит от того, с какой стороны на неё смотрят.
+                cull_mode: CullMode::None as i32,
+                depth_stencil: Some(DepthStencilState {
+                    format: DEPTH_FORMAT as i32,
+                    depth_write_enabled: false,
+                    depth_compare: CompareFunction::CmpLessEqual as i32,
+                }),
+                ..Default::default()
+            })
+        };
+        let ribbon = ribbon_pipeline("Globe Ribbon", "fs_ribbon")?;
+        let ribbon_pending = ribbon_pipeline("Globe Ribbon Pending", "fs_ribbon_pending")?;
 
         // Наложения: своя вершина (точка + UV) и привязка тайла, глубина как у
         // сетки — лежат на поверхности, спор за неё решает порядок отрисовки.
@@ -268,6 +285,7 @@ impl Device {
             outline,
             dimmed,
             ribbon,
+            ribbon_pending,
             overlay,
             overlay_layout,
             overlay_sampler,
@@ -287,19 +305,29 @@ impl Device {
             ribbon_indices: GrowingBuffer::new(
                 buffer_usage::INDEX, "индексы ленты", INITIAL_OUTLINE_BUFFER,
             ),
-            ribbon_range: 0..0,
+            ribbon_selected: 0..0,
+            ribbon_pending_range: 0..0,
         })
     }
 
     /// Заливает контуры в буферы. Набор заменяется целиком — таким он и
     /// приходит (см. `Outlines` в types.proto).
+    ///
+    /// Отрезки гасятся первым делом: не залившийся буфер оставляет за собой
+    /// новый размер при старом содержимом, и оставшийся от прошлого набора
+    /// отрезок рисовал бы по нему что придётся. Отказ здесь только логируется,
+    /// кадр после него пишется дальше — и пустой набор в нём честнее мусора.
     pub fn set_outlines(&mut self, outlines: &Outlines) -> anyhow::Result<()> {
+        self.outline_lines = 0..0;
+        self.ribbon_selected = 0..0;
+        self.ribbon_pending_range = 0..0;
         self.outline_vertices.write(&outlines.vertices)?;
         self.outline_indices.write(&outlines.indices)?;
         self.outline_lines = 0..outlines.indices.len() as u32;
         self.ribbon_vertices.write(&outlines.ribbon)?;
         self.ribbon_indices.write(&outlines.ribbon_indices)?;
-        self.ribbon_range = 0..outlines.ribbon_indices.len() as u32;
+        self.ribbon_selected = outlines.selected.clone();
+        self.ribbon_pending_range = outlines.pending.clone();
         Ok(())
     }
 
@@ -400,8 +428,8 @@ pub fn render(
 
     // Контуры последними: они поверх сетки. Глубину линии не пишут, поэтому
     // между собой они разбираются только очередью записи, и решает её порядок
-    // здесь: лента выбранного пишется после линий и потому видна поверх
-    // накрывших его соседей.
+    // здесь: ленты пишутся после линий и потому видны поверх накрывших их
+    // соседей.
     if !device.outline_lines.is_empty()
         && let (Some(vertices), Some(indices)) =
             (device.outline_vertices.id(), device.outline_indices.id())
@@ -409,9 +437,11 @@ pub fn render(
         recorder.set_vertex_buffer(0, vertices, 0, device.outline_vertices.filled());
         recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, device.outline_indices.filled());
 
-        // Пока выбран один контур, остальные рисуются вполсилы: лента и так
-        // заметна, но приглушённые соседи не спорят с ней за взгляд.
-        let plain = match device.ribbon_range.is_empty() {
+        // Пока выделен один контур, остальные рисуются вполсилы: лента и так
+        // заметна, но приглушённые соседи не спорят с ней за взгляд. Штриховая
+        // лента едущего в этот счёт не идёт: она никого не выделяет, а метит
+        // место — приглушать из-за неё весь шар не за что.
+        let plain = match device.ribbon_selected.is_empty() {
             true => &device.outline,
             false => &device.dimmed,
         };
@@ -420,15 +450,30 @@ pub fn render(
         recorder.draw_indexed(device.outline_lines.clone(), 0, 0..1);
     }
 
-    if !device.ribbon_range.is_empty()
-        && let (Some(vertices), Some(indices)) =
-            (device.ribbon_vertices.id(), device.ribbon_indices.id())
+    // Обе ленты — из одной пары буферов, двумя отрезками индексов. Едущий
+    // рисуется первым: выделенный старше, и накрыть его штрихом было бы
+    // сказать «этот снимок ещё едет» про тот, о котором говорит полоса.
+    if let (Some(vertices), Some(indices)) =
+        (device.ribbon_vertices.id(), device.ribbon_indices.id())
     {
-        recorder.set_vertex_buffer(0, vertices, 0, device.ribbon_vertices.filled());
-        recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, device.ribbon_indices.filled());
-        recorder.set_pipeline(&device.ribbon);
-        recorder.set_bind_group(0, &device.camera_bind_group);
-        recorder.draw_indexed(device.ribbon_range.clone(), 0, 0..1);
+        let ribbons = [
+            (&device.ribbon_pending, &device.ribbon_pending_range),
+            (&device.ribbon, &device.ribbon_selected),
+        ];
+        if ribbons.iter().any(|(_, range)| !range.is_empty()) {
+            recorder.set_vertex_buffer(0, vertices, 0, device.ribbon_vertices.filled());
+            recorder.set_index_buffer(
+                indices, IndexFormat::IdxUint32, 0, device.ribbon_indices.filled(),
+            );
+        }
+        for (pipeline, range) in ribbons {
+            if range.is_empty() {
+                continue;
+            }
+            recorder.set_pipeline(pipeline);
+            recorder.set_bind_group(0, &device.camera_bind_group);
+            recorder.draw_indexed(range.clone(), 0, 0..1);
+        }
     }
 
     recorder.submit_with_depth(&target.view, &target.depth_view)

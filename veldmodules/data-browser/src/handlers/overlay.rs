@@ -55,33 +55,51 @@ fn role_for_globe(role: crate::proto::data_provider::ImageryRole) -> OverlayRole
     }
 }
 
-/// «На глобус» из строки списка — любой: у найденного продукт с контуром уже
-/// под рукой, у строки каталога или загрузок есть только ключ, и продукт по
-/// нему восстанавливает провайдер (см. его on_locate).
+/// «На глобус» из строки списка — и обратно: тот же значок снимает то, что
+/// положил.
+///
+/// Переключателем, а не односторонним показом, и ровно по той же механике, что
+/// у значка контура: снимок либо на шаре, либо нет — вопрос один, и отвечать на
+/// него нажатием туда и кнопкой в другом списке обратно значило бы завести
+/// одному состоянию два рычага в разных местах.
+///
+/// Камеру это не двигает. Наводка — отдельное намерение и отдельная кнопка
+/// (`Msg::OutlineFocus`): «покажи здесь» и «отвези меня туда» — разные просьбы,
+/// и сведённые в одну они отбирают друг у друга ответ — положить второй снимок
+/// рядом с первым становится нельзя, не улетев к нему.
 ///
 /// Ключ приходит уже без завершающего слэша листинга: приводит его к виду
 /// продукта сама строка (см. `Row::snapshot_key`), и второе такое правило
 /// разошлось бы с первым.
 ///
-/// Показ выбора не ставит: это разные намерения. Выбирают, чтобы что-то с
-/// набранным сделать — очертить, удалить, скачать, — а показывают, чтобы
-/// посмотреть, и живёт показанное своим списком («На просмотре»). Ставя заодно
-/// коробочку, показ клал бы снимок в состав следующего пакетного действия,
-/// которого никто не просил.
-pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
-    // Меню строки закрываем сами: показ уводит с этого экрана, а открытым оно
-    // осталось бы до возвращения.
+/// Показ выбора коробочкой не ставит: это разные намерения. Выбирают, чтобы
+/// что-то с набранным сделать — очертить, удалить, скачать, — а показывают,
+/// чтобы посмотреть, и живёт показанное своим списком («На просмотре»). Ставя
+/// заодно коробочку, показ клал бы снимок в состав следующего пакетного
+/// действия, которого никто не просил.
+pub fn on_toggle_pressed(state: &mut State, view: ViewId, identifier: String) {
+    // Меню строки закрываем сами: нажатое в нём сделано, а открытым оно
+    // осталось бы висеть над списком.
     state.close_menus();
+    // Уже на шаре или туда едет — значит просят снять. Скрытый в этот счёт
+    // идёт наравне с видимым: он остаётся слоем, и значок в строке горит у
+    // него так же.
+    if state.overlays.iter().any(|overlay| overlay.identifier == identifier) {
+        remove(state, &identifier);
+        return;
+    }
+    // Ход к каталогу за продуктом убить нечем — он ответит всё равно, — но
+    // расхотеть показ можно: ответ спросит, всё ли ещё его ждут (см.
+    // [`on_located`]).
+    if state.showing.remove(&identifier) {
+        veldsdk::log::info!(target: "handlers", "показ '{}' отменён до ответа каталога", identifier);
+        send_set(state);
+        return;
+    }
     // Сперва выдача: там у продукта есть всё, что нужно, и ходить за ним в
     // каталог второй раз незачем.
     if super::search::show(state, view, &identifier) {
-        super::outline::focus(state, &identifier);
-        return;
-    }
-    // Уже на шаре, но не из выдачи — значит просят посмотреть на него, а не
-    // положить туда ещё раз. Спрашивать ради этого каталог нечего: куда
-    // смотреть, посчитано в момент показа.
-    if focus(state, &identifier) {
+        super::nav::on_new_globe(state);
         return;
     }
     // Продукт придётся восстанавливать у провайдера — и один ход отвечает
@@ -95,22 +113,11 @@ pub fn on_show_pressed(state: &mut State, view: ViewId, identifier: String) {
     state.showing.insert(identifier.clone());
     let correlation = state.locates.begin(Locate::Overlay(identifier.clone()));
     crate::calls::data_provider::on_locate(&LocateRequest { identifier }, &correlation);
-}
-
-/// Вернуть слой на шар, навести на него камеру и выделить. `false` — такого
-/// слоя нет.
-///
-/// Скрытый при этом возвращается на шар: значок глобуса в строке списка просят
-/// у того, чего не видно, и молча навести камеру на пустое место — это ответить
-/// не на тот вопрос. В списке слоёв кнопка другая (`Msg::OutlineFocus`): там
-/// показом заведует соседний глаз, и трогать его за спиной нечему.
-pub fn focus(state: &mut State, key: &str) -> bool {
-    if !state.overlays.iter().any(|overlay| overlay.identifier == key) {
-        return false;
-    }
-    set_hidden(state, key, false);
-    super::outline::focus(state, key);
-    true
+    // Просьба уже видна — значком в строке и полосой под ней (см.
+    // `rows::onto_globe`), — а место снимка на шаре покажет штриховой контур,
+    // если геометрия под рукой.
+    send_set(state);
+    super::nav::on_new_globe(state);
 }
 
 /// Продукт восстановлен по ключу — показываем, как показывали бы из поиска.
@@ -123,8 +130,8 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
     // Пока ход к каталогу шёл, показа могли и расхотеть — «снять с шара» за
     // эти секунды нажать успевают. Убить запрос в полёте нечем, он ответит
     // всё равно, поэтому спрашиваем здесь, всё ли ещё его ждут. Иначе
-    // приложение через несколько секунд после отмены само прыгает на вкладку
-    // глобуса, уводит камеру и кладёт снимок, которого не просили.
+    // приложение через несколько секунд после отмены само кладёт на шар
+    // снимок, которого не просили.
     //
     // Закрытая вкладка показа не отменяет: слой лежит в состоянии модуля и
     // живёт своим списком, а не тем, из которого его позвали.
@@ -135,6 +142,9 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
     let Some(product) = response.product else {
         veldsdk::log::warn!(target: "handlers", "показать на шаре не вышло: {}", response.error);
         state.notice = Some(format!("Показать на шаре не вышло: {}", response.error));
+        // Просьбы больше нет — значит нет и штрихового контура, которым было
+        // помечено место (см. [`send_set`]).
+        send_set(state);
         return;
     };
 
@@ -150,11 +160,10 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
     // послала бы в каталог второй запрос за тем же самым.
     state.located.insert(product.identifier.clone(), Located::Found(product.clone()));
     show(state, &product, None);
-    super::outline::focus(state, &product.identifier);
 }
 
-/// Положить продукт на шар. Уже лежащий не кладётся заново: наводка камеры
-/// своё дело сделала, а пересборка стоила бы переоткрытия растров.
+/// Положить продукт на шар. Уже лежащий не кладётся заново: пересборка стоила
+/// бы переоткрытия растров, а на шаре он и так есть.
 ///
 /// Новый слой встаёт поверх прежних — концом набора, потому что его и просили
 /// показать.
@@ -163,6 +172,10 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
 /// восстановленного по ключу, его нет (см. `OverlayState::source`).
 pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
     if state.overlays.iter().any(|overlay| overlay.identifier == product.identifier) {
+        // Класть нечего, а сказать есть о чём: сюда приходят и с ответом
+        // каталога, снявшим просьбу (см. [`on_located`]), — а просьба помечена
+        // на шаре штрихом, и снять эту пометку больше некому.
+        send_set(state);
         return;
     }
 
@@ -182,6 +195,10 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
     crate::calls::data_provider::on_imagery(&ImageryRequest {
         identifier: product.identifier.clone(),
     }, &correlation);
+    // Набор наложений сам по себе не изменился — собирающийся в него не
+    // попадает, — но изменилось то, что на шаре видно: место снимка помечается
+    // штриховым контуром, пока картинки нет (см. [`send_set`]).
+    send_set(state);
 }
 
 /// Убрать одно наложение: ресурсы отпустить, набор переслать.
@@ -191,6 +208,9 @@ pub fn remove(state: &mut State, key: &str) {
     };
     let overlay = state.overlays.remove(index);
     abandon(state, overlay);
+    // Снятый слой мог быть тем, что обведён лентой: без него ленте не на чем
+    // держаться (см. `outline::forget_gone`).
+    super::outline::forget_gone(state);
     send_set(state);
 }
 
@@ -222,6 +242,7 @@ pub fn clear_all(state: &mut State) {
     for overlay in std::mem::take(&mut state.overlays) {
         abandon(state, overlay);
     }
+    super::outline::forget_gone(state);
     send_set(state);
 }
 
@@ -300,6 +321,7 @@ fn retain(state: &mut State, keep: impl Fn(&OverlayState) -> bool) {
     if let Some(said) = said {
         state.notice = Some(said);
     }
+    super::outline::forget_gone(state);
     send_set(state);
 }
 
@@ -549,6 +571,12 @@ fn finish(state: &mut State, key: &str) {
 
     overlay.utm = assembly.utm;
     overlay.rasters = rasters;
+    // Работа не кончилась, а началась: глобус получит растры и примется их
+    // описывать — по сети это десятки секунд. Своего слова о ходе у нас нет и
+    // не будет, его скажет он же (`on_overlay_progress`), но до первого его
+    // слова проходит кадр, и оставленный на этот кадр покой гасил бы и полосу
+    // под строкой, и штрих на шаре — на глазах и без причины.
+    overlay.progress = Progress { working: true, blank: true, ..Progress::default() };
     send_set(state);
 }
 
@@ -556,7 +584,11 @@ fn finish(state: &mut State, key: &str) {
 /// наложения — отсюда и одна точка вызова на каждое изменение.
 ///
 /// Собирающиеся в набор не попадают: наложение без растров глобус принять не
-/// может, и слать его значило бы просить снять то, чего он ещё не видел.
+/// может, и слать его значило бы просить снять то, чего он ещё не видел. Зато
+/// именно они и есть та половина набора, которая на шаре видна контуром: место
+/// едущего снимка помечено штрихом, пока картинки нет, — поэтому отсюда же
+/// уезжает и набор контуров (см. `outline::send`). Два набора, но одно
+/// изменение: собирающееся наложение меняет ровно то, что видно на шаре.
 fn send_set(state: &State) {
     let overlays = state
         .overlays
@@ -582,25 +614,38 @@ fn send_set(state: &State) {
         .collect();
 
     crate::calls::globe::on_overlay(&Overlays { overlays });
+    super::outline::send(state);
 }
 
 /// Ход добычи тайлов от глобуса: набор целиком, тем же правилом, что и сам
 /// набор наложений, — о чьём ключе не сказано, у того ничего и не добывают.
 ///
-/// Ничего, кроме записи в состояние: числа приезжают готовыми, а показывает их
-/// список слоёв и строка того списка, из которого снимок родом.
+/// Числа приезжают готовыми, и показывает их список слоёв и строка того списка,
+/// из которого снимок родом. Но одно из них меняет и сам шар: пока по слою
+/// нечего нарисовать, его место помечено штриховым контуром, и снять эту
+/// пометку может только пришедшее отсюда «уже есть что» (см. `Progress::blank`).
+/// Поэтому набор контуров пересылается здесь же.
 pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::OverlaysProgress) {
     for overlay in &mut state.overlays {
-        let said = msg.overlays.iter().find(|progress| progress.key == overlay.identifier);
-        overlay.trouble = said.map_or(String::new(), |progress| progress.trouble.clone());
-        overlay.progress = said.map_or(Progress::default(), |progress| Progress {
-            ready: progress.ready,
-            total: progress.total,
-            share: progress.share,
-            working: progress.working,
-            step: progress.step,
-            steps: progress.steps,
-        });
+        // О чём не сказано, того не трогаем. Молчание здесь значит не «работа
+        // кончилась», а «глобус про этот слой ещё не знает»: он отчитывается
+        // обо всех, что у него есть, — и слой, только что отданный ему
+        // (`finish`), первые кадры в его наборе не значится. Стёртое молчанием
+        // гасило бы и полосу, и штрих ровно на эти кадры.
+        let Some(said) = msg.overlays.iter().find(|progress| progress.key == overlay.identifier)
+        else {
+            continue;
+        };
+        overlay.trouble = said.trouble.clone();
+        overlay.progress = Progress {
+            ready: said.ready,
+            total: said.total,
+            share: said.share,
+            working: said.working,
+            step: said.step,
+            steps: said.steps,
+            blank: said.blank,
+        };
     }
 
     // Слой, которому нечем лечь, убираем тем же путём и с тем же словом, что и
@@ -619,6 +664,11 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
         let label = overlay.label.clone();
         give_up(state, &key, &label, why);
     }
+
+    // Набор наложений от хода не меняется — меняется то, что на шаре видно
+    // помимо них. Неизменившийся набор до шины не доходит, поэтому платы за
+    // «на всякий случай» здесь нет.
+    super::outline::send(state);
 }
 
 /// Запасная привязка по контуру каталога и то, насколько ей можно верить.
@@ -689,6 +739,42 @@ mod tests {
 
     fn shot(footprint: Vec<Ring>) -> DataProduct {
         DataProduct { footprint, ..Default::default() }
+    }
+
+    /// Значок кладёт снимок на шар и им же снимает — в обоих положениях, в
+    /// каких показ бывает: пока продукт восстанавливают по ключу и когда слой
+    /// уже заведён. Без второго нажатия снять слой можно было бы только из
+    /// другого списка, то есть одному состоянию досталось бы два рычага в
+    /// разных местах.
+    #[test]
+    fn показ_снимается_тем_же_значком() {
+        let key = "eodata/store/A.SAFE";
+        let mut state =
+            State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
+        let pane = state.focused();
+        let view = state.open_in(
+            pane,
+            crate::module::state::ViewKind::Browse(crate::module::state::BrowseState::default()),
+        );
+
+        // Продукта под рукой нет — ушёл вопрос к каталогу, и просьба записана.
+        on_toggle_pressed(&mut state, view, key.to_string());
+        assert!(state.showing.contains(key), "просьба не записана");
+
+        // Второе нажатие снимает её, не дожидаясь ответа.
+        on_toggle_pressed(&mut state, view, key.to_string());
+        assert!(!state.showing.contains(key), "просьбу нечем отменить");
+
+        // Слой уже заведён — второе нажатие убирает его.
+        let product = DataProduct {
+            identifier: key.to_string(),
+            footprint: vec![ring(&[(10.0, 10.0), (10.0, 20.0), (20.0, 20.0), (20.0, 10.0)])],
+            ..Default::default()
+        };
+        show(&mut state, &product, None);
+        assert_eq!(state.overlays.len(), 1);
+        on_toggle_pressed(&mut state, view, key.to_string());
+        assert!(state.overlays.is_empty(), "лежащий слой нечем снять");
     }
 
     /// Обычный четырёхугольник остаётся привязкой-догадкой: по нему растр и

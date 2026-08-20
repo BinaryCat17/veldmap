@@ -166,7 +166,7 @@ fn on_view_message(state: &mut State, view: crate::module::state::ViewId, messag
         ViewMsg::PreviewZoom(direction) => handlers::preview::on_zoom_step(state, view, direction),
         ViewMsg::GlobeResized(size) => handlers::globe::on_resized(state, view, size),
         ViewMsg::GlobePointer(event) => handlers::globe::on_pointer(state, view, event),
-        ViewMsg::GlobeShow(identifier) => handlers::overlay::on_show_pressed(state, view, identifier),
+        ViewMsg::GlobeToggle(identifier) => handlers::overlay::on_toggle_pressed(state, view, identifier),
     }
 }
 
@@ -202,7 +202,7 @@ pub fn on_locate_result(
     match asked {
         state::Locate::Outline(key) => handlers::outline::located(state, key, response),
         // Один ход к каталогу отвечает обоим: показать снимок — это и очертить
-        // его (см. `overlay::on_show_pressed`), и второй такой же запрос ради
+        // его (см. `overlay::on_toggle_pressed`), и второй такой же запрос ради
         // той же геометрии был бы лишним.
         state::Locate::Overlay(key) => {
             handlers::outline::located(state, key.clone(), response.clone());

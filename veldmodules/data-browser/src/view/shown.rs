@@ -243,9 +243,9 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
             Msg::OverlayHidden(key.clone(), !overlay.hidden),
         ),
         table::icon_button(
-            theme::glyph::GLOBE,
+            theme::glyph::FOCUS,
             theme::IconTone::Rest,
-            "Навести и выделить",
+            "Навести камеру и выделить",
             Msg::OutlineFocus(key.clone()),
         ),
         table::icon_button(
@@ -293,18 +293,19 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, width: f32) -> Elem
     // те же самые: слои и контуры лежат в одном списке друг под другом, и
     // одинаково подписанное действие обязано быть одним и тем же. Разводит их
     // первый значок — то, чего у соседней строки нет: контур кладут растром, а
-    // слою прятать.
+    // слою прятать. Знак «положить растром» тот же, каким это действие названо
+    // в строке списка (см. `table::quick`), — одно действие, один знак.
     let buttons = vec![
-        table::icon_button(
-            theme::glyph::LAYERS,
-            theme::IconTone::Rest,
-            "Положить растром",
-            Msg::In(view, ViewMsg::GlobeShow(key.clone())),
-        ),
         table::icon_button(
             theme::glyph::GLOBE,
             theme::IconTone::Rest,
-            "Навести и выделить",
+            "Положить растром",
+            Msg::In(view, ViewMsg::GlobeToggle(key.clone())),
+        ),
+        table::icon_button(
+            theme::glyph::FOCUS,
+            theme::IconTone::Rest,
+            "Навести камеру и выделить",
             Msg::OutlineFocus(key.clone()),
         ),
         table::icon_button(

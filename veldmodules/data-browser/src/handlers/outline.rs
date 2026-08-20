@@ -26,9 +26,10 @@ use crate::module::footprint;
 use crate::module::state::globe::Outlined;
 use crate::module::components::Row;
 use crate::module::state::listing::Chosen;
+use crate::module::state::overlay::Pace;
 use crate::module::state::{Highlight, Locate, Located, State, ViewId, ViewKind};
 use crate::proto::data_provider::{DataProduct, LocateRequest, LocateResponse};
-use crate::proto::globe::{GeoPoint, Outline, Outlines};
+use crate::proto::globe::{GeoPoint, Outline, OutlineStyle, Outlines};
 
 /// Выбрать строку в списке или снять выбор.
 ///
@@ -325,17 +326,30 @@ pub fn refresh(state: &mut State) {
     }
 
     state.outlined = wanted;
-    // Выбранный контур мог уйти вместе с отметкой — ленте не на чем держаться.
-    // Лежащий растром при этом выбранным остаётся: он и без ленты назван
-    // полосой под шаром, а гасить выбор снимка, который на шаре виден, значило
-    // бы отвечать «ни на что не смотрим», глядя прямо на него.
-    let gone = !state.picked_key().is_empty()
-        && !state.outlined.iter().any(|outlined| outlined.key == state.picked_key())
-        && !state.overlays.iter().any(|overlay| overlay.identifier == state.picked_key());
-    if gone {
+    forget_gone(state);
+    send(state);
+}
+
+/// Погасить ленту, если снимка, который она обводит, на шаре больше нет.
+///
+/// Выбранным остаётся всё, что на шаре хоть как-то есть: контур — им лента и
+/// держится, слой — он и без ленты назван полосой под шаром, и гасить выбор
+/// снимка, который на шаре виден, значило бы отвечать «ни на что не смотрим»,
+/// глядя прямо на него. Пропало и то, и другое — выбирать больше нечего.
+///
+/// Зовётся отовсюду, откуда снимок с шара уходит: снятая отметка, снятый слой,
+/// сменившаяся выдача. Второе такое правило по месту разошлось бы с этим, и
+/// строка осталась бы подсвеченной как лежащая на шаре, которого на ней нет.
+pub fn forget_gone(state: &mut State) {
+    let picked = state.picked_key();
+    if picked.is_empty() {
+        return;
+    }
+    let outlined = state.outlined.iter().any(|outlined| outlined.key == picked);
+    let laid = state.overlays.iter().any(|overlay| overlay.identifier == picked);
+    if !outlined && !laid {
         state.deselect();
     }
-    send(state);
 }
 
 /// Что известно про геометрию очерчиваемого снимка.
@@ -375,26 +389,75 @@ fn product<'a>(state: &'a State, key: &str) -> Known<'a> {
 }
 
 /// Отправить глобусу весь набор. Единственный способ сказать ему про контуры —
-/// отсюда и одна точка вызова на каждое изменение.
-fn send(state: &State) {
-    let picked = state.picked_key();
-    let outlines = state
-        .outlined
-        .iter()
-        .flat_map(|outlined| {
-            let selected = picked == outlined.key;
-            outlined.rings.iter().map(move |ring| Outline {
-                points: ring
-                    .points
-                    .iter()
-                    .map(|point| GeoPoint { lat: point.lat, lon: point.lon })
-                    .collect(),
-                selected,
-            })
-        })
-        .collect();
+/// отсюда и одна точка вызова на каждое изменение, своё и чужое: набор
+/// наложений меняет этот тоже (см. `overlay::send_set`).
+pub fn send(state: &State) {
+    crate::calls::globe::on_outlines(&Outlines { outlines: drawn(state) });
+}
 
-    crate::calls::globe::on_outlines(&Outlines { outlines });
+/// Из чего складывается набор: очерченное по просьбе и место того, что на шар
+/// ещё едет. Отдельно от отправки, потому что это единственное, что здесь
+/// можно проверить, не заводя шины.
+fn drawn(state: &State) -> Vec<Outline> {
+    let picked = state.picked_key();
+    let mut outlines: Vec<Outline> = Vec::new();
+    for outlined in &state.outlined {
+        let style = match picked == outlined.key {
+            true => OutlineStyle::OutlineSelected,
+            false => OutlineStyle::OutlinePlain,
+        };
+        rings(&mut outlines, &outlined.rings, style);
+    }
+    for key in under_way(state) {
+        // Очерченный по просьбе второй раз не рисуется: контур у снимка один,
+        // и две ломаные по одному месту сложились бы в одну лишнюю линию.
+        // Просьба при этом старше: она пережила бы приезд снимка, а штрих —
+        // нет.
+        if state.outlined.iter().any(|outlined| outlined.key == key) {
+            continue;
+        }
+        let Known::Have(found) = product(state, &key) else { continue };
+        rings(&mut outlines, &found.footprint, OutlineStyle::OutlinePending);
+    }
+    outlines
+}
+
+/// Кольца одной геометрии — контурами названного вида.
+fn rings(outlines: &mut Vec<Outline>, geometry: &[crate::proto::data_provider::Ring], style: OutlineStyle) {
+    outlines.extend(geometry.iter().map(|ring| Outline {
+        points: ring.points.iter().map(|point| GeoPoint { lat: point.lat, lon: point.lon }).collect(),
+        style: style as i32,
+    }));
+}
+
+/// Снимки, которые на шар только едут: показ попросили, а картинки ещё нет.
+///
+/// Их место и помечается штриховым контуром. Без него нажатие на значок глобуса
+/// не отвечает ничем: между просьбой и первой картинкой лежат десятки секунд —
+/// ход к каталогу, открытие растров, описание по сети, — и всё это время на
+/// шаре не появляется ровно ничего.
+///
+/// Двумя источниками, потому что просьба живёт в двух положениях: пока
+/// восстанавливают продукт по ключу ([`State::showing`]) и пока наложение уже
+/// заведено. А кончается штрих не с ними, а с первой картинкой, и спрашивается
+/// это одним общим правилом ([`rows::onto_globe`]) — тем же, которым полоса под
+/// строкой выбирает между долей и «идёт, а доли нет». Вопрос у них один:
+/// видно ли уже хоть что-нибудь. Своего ответа здесь быть не может — он
+/// разошёлся бы с полосой, и снимок стоял бы очерченным поверх собственной
+/// картинки.
+fn under_way(state: &State) -> Vec<String> {
+    let laid = |key: &String| state.overlays.iter().any(|overlay| &overlay.identifier == key);
+    state
+        .overlays
+        .iter()
+        .map(|overlay| overlay.identifier.clone())
+        // Просьба под ключом заведённого слоя не бывает — её снимает тот же
+        // ответ, что слой заводит, — но держится это правилом в соседнем
+        // обработчике, а два одинаковых кольца по одному месту сложились бы в
+        // лишнюю линию.
+        .chain(state.showing.iter().filter(|key| !laid(key)).cloned())
+        .filter(|key| matches!(rows::onto_globe(state, key).pace(), Pace::Unknown))
+        .collect()
 }
 
 /// Насколько снимок велик — угловой радиус его контура. Без геометрии он
@@ -427,6 +490,90 @@ mod tests {
                     .collect(),
             }],
         }
+    }
+
+    /// Снимок, который на шар только едет, очерчен штрихом — и перестаёт быть
+    /// очерченным, как только доехал.
+    ///
+    /// Без этого нажатие на значок глобуса не отвечает ничем: между просьбой и
+    /// первой картинкой лежат десятки секунд, и всё это время на шаре не видно
+    /// даже места, куда снимок ляжет.
+    #[test]
+    fn a_snapshot_on_its_way_is_outlined_with_a_hatch() {
+        use crate::proto::data_provider::DataProduct;
+        let key = "eodata/store/A.SAFE";
+        let product = DataProduct {
+            identifier: key.to_string(),
+            footprint: square(key).rings,
+            ..Default::default()
+        };
+
+        let mut state = state();
+        state.located.insert(key.to_string(), Located::Found(product.clone()));
+        assert!(drawn(&state).is_empty(), "неспрошенное на шаре не рисуется");
+
+        // Продукт восстанавливают по ключу — картинки нет, а место уже видно.
+        state.showing.insert(key.to_string());
+        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
+        assert_eq!(styles, vec![OutlineStyle::OutlinePending as i32]);
+
+        // Наложение завелось, растров ещё нет — штрих тот же.
+        state.showing.remove(key);
+        crate::module::handlers::overlay::show(&mut state, &product, None);
+        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
+        assert_eq!(styles, vec![OutlineStyle::OutlinePending as i32]);
+
+        // Растры уехали глобусу, но он их ещё описывает — видно по-прежнему
+        // ничего, и штрих на месте. Это и есть самая долгая часть пути: у
+        // растра по сети она длится десятки секунд.
+        if let Some(overlay) = state.overlays.first_mut() {
+            overlay.rasters = vec![Default::default()];
+            overlay.progress = crate::module::state::overlay::Progress {
+                working: true,
+                blank: true,
+                ..Default::default()
+            };
+        }
+        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
+        assert_eq!(styles, vec![OutlineStyle::OutlinePending as i32], "штрих снят раньше картинки");
+
+        // Растр описан — по нему уже есть что нарисовать, и место держать
+        // больше нечем: снимок виден сам, хотя добыча ещё идёт.
+        if let Some(overlay) = state.overlays.first_mut() {
+            overlay.progress = crate::module::state::overlay::Progress {
+                working: true,
+                blank: false,
+                ..Default::default()
+            };
+        }
+        assert!(drawn(&state).is_empty(), "штрих пережил приезд картинки");
+    }
+
+    /// Очерченный по просьбе рисуется один раз, даже когда он же едет на шар:
+    /// контур у снимка один, и вторая ломаная по тому же месту — лишняя линия.
+    #[test]
+    fn an_asked_outline_is_not_doubled_by_the_hatch() {
+        let key = "eodata/store/A.SAFE";
+        let mut state = state();
+        state.outlined = vec![square(key)];
+        state.showing.insert(key.to_string());
+        state.located.insert(
+            key.to_string(),
+            Located::Found(crate::proto::data_provider::DataProduct {
+                identifier: key.to_string(),
+                footprint: square(key).rings,
+                ..Default::default()
+            }),
+        );
+
+        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
+        assert_eq!(styles, vec![OutlineStyle::OutlinePlain as i32], "контур нарисован дважды");
+
+        // Выбранный — лентой, и штрих её не подменяет.
+        state.highlight =
+            Some(Highlight { key: key.to_string(), view: None, on_globe: true });
+        let styles: Vec<i32> = drawn(&state).iter().map(|outline| outline.style).collect();
+        assert_eq!(styles, vec![OutlineStyle::OutlineSelected as i32]);
     }
 
     /// Подсвечена на экране одна строка, и владелец у подсветки один: щелчок по

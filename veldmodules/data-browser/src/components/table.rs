@@ -12,6 +12,7 @@ use crate::proto::ui_service::{
 };
 use crate::module::components::{arrange::Line, format, OnGlobe, OnOutline, Row, RowKind, RowStatus};
 use crate::module::state::listing::{ListingState, Menu};
+use crate::module::state::overlay::Pace;
 use crate::module::state::ViewId;
 use crate::module::{theme, Msg, ViewMsg};
 
@@ -551,7 +552,7 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     // Место под полосу занято, пока снимок на шаре, — а не пока по нему идёт
     // работа. Иначе строка подпрыгивает на три точки ровно в тот миг, когда
     // добыча кончилась, то есть на каждом слое и на глазах.
-    let onto_globe = row_data.globe.share();
+    let onto_globe = row_data.globe.pace();
     let height = theme::ROW_HEIGHT - if row_data.globe.any() { ONTO_GLOBE } else { 0.0 };
     let cells = cells.height(Length::Fixed(height));
 
@@ -571,32 +572,41 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
 
     let mut lines: Vec<Element<Msg>> =
         vec![line.width(Length::Fill).height(Length::Fixed(height)).into()];
-    match (row_data.globe.any(), onto_globe) {
-        (true, Some(share)) => lines.push(
-            // Подпись у полосы своя, а не только у значка в правом краю строки:
-            // смотрят-то на полосу, и без подписи она — доля неизвестно чего.
-            tooltip(
-                progress_bar::<Msg>(0.0..=1.0, share)
-                    .style(theme::progress(theme::ACCENT))
-                    .width(Length::Fill)
-                    .height(Length::Fixed(ONTO_GLOBE)),
-                match row_data.globe.said() {
-                    Some(said) => format!("Набирается пирамида — {}", said),
-                    None => "Кладётся на глобус".to_string(),
-                },
-                TooltipPosition::TooltipTop,
-            )
-            .style(theme::panel())
-            .text_size(theme::TEXT_SMALL)
-            .padding(6.0)
-            .into(),
-        ),
+    // Доли ещё нет, а работа идёт — полоса заливается целиком, но вполсилы:
+    // пустая дорожка в три точки на этом месте не говорит ничего, а начинается
+    // ею как раз самое долгое, что бывает со снимком, — описание растра по
+    // сети, десятки секунд.
+    let bar = match onto_globe {
+        Pace::Share(share) => Some((theme::ACCENT, share)),
+        Pace::Unknown => Some((theme::ACCENT_HALF, 1.0)),
         // Добыча кончилась, а место остаётся за ней: пустым, чтобы строка не
         // дрогнула. Что снимок на шаре, говорит зажжённый значок.
-        (true, None) => lines.push(
-            veld_ui_service_wrap::space::<Msg>(Length::Fill, Length::Fixed(ONTO_GLOBE)).into(),
-        ),
-        (false, _) => {}
+        Pace::Idle => None,
+    };
+    if row_data.globe.any() {
+        lines.push(match bar {
+            Some((color, share)) => {
+                // Подпись у полосы своя, а не только у значка в правом краю
+                // строки: смотрят-то на полосу, и без подписи она — доля
+                // неизвестно чего.
+                tooltip(
+                    progress_bar::<Msg>(0.0..=1.0, share)
+                        .style(theme::progress(color))
+                        .width(Length::Fill)
+                        .height(Length::Fixed(ONTO_GLOBE)),
+                    match row_data.globe.said() {
+                        Some(said) => format!("Набирается пирамида — {}", said),
+                        None => "Кладётся на глобус".to_string(),
+                    },
+                    TooltipPosition::TooltipTop,
+                )
+                .style(theme::panel())
+                .text_size(theme::TEXT_SMALL)
+                .padding(6.0)
+                .into()
+            }
+            None => veld_ui_service_wrap::space::<Msg>(Length::Fill, Length::Fixed(ONTO_GLOBE)).into(),
+        });
     }
     lines.push(theme::hairline(theme::LINE_ROW));
 
@@ -742,6 +752,15 @@ fn primary(view: ViewId, row: &Row) -> Option<Primary> {
     let local = || (!row.name.is_empty()).then(|| row.name.clone());
 
     Some(match &row.status {
+        // Папка спрашивается первой, чем бы она ни была занята: её ключ —
+        // общий префикс, а не объект, и послать его в закачку значит попросить
+        // скачать папку одним куском. Пауза и продолжение у неё свои и стоят
+        // пунктами меню — там они названы снимком, а не файлом.
+        _ if row.kind.is_folder() => Primary::transition(
+            theme::glyph::ENTER,
+            "Перейти",
+            Msg::In(view, ViewMsg::Enter(remote()?)),
+        ),
         RowStatus::Downloading { .. } => {
             Primary::new(theme::glyph::PAUSE, "Пауза", Msg::Download(remote()?, row.product.clone()))
         }
@@ -749,11 +768,6 @@ fn primary(view: ViewId, row: &Row) -> Option<Primary> {
             theme::glyph::PLAY,
             "Продолжить",
             Msg::Download(remote()?, row.product.clone()),
-        ),
-        _ if row.kind.is_folder() => Primary::transition(
-            theme::glyph::ENTER,
-            "Перейти",
-            Msg::In(view, ViewMsg::Enter(remote()?)),
         ),
         RowStatus::Remote => Primary::new(
             theme::glyph::DOWNLOAD,
@@ -780,17 +794,22 @@ fn actions(view: ViewId, entry: &Row, context: Context<'_>) -> Element<Msg> {
     };
     let mut buttons: Vec<Element<Msg>> = shown
         .into_iter()
-        .map(|Quick { glyph, hint, message, tone, .. }| icon_button(glyph, tone, &hint, message))
+        .map(|Quick { glyph, hint, message, tone, .. }| match message {
+            Some(message) => icon_button(glyph, tone, &hint, message),
+            None => hinted(theme::row_button_icon(glyph, tone), &hint),
+        })
         .collect();
 
     let mut items = menu_items(view, entry, context.here);
     if context.compact {
         // Пунктами — впереди прочего: это главные действия строки, значками
-        // они и стояли.
+        // они и стояли. Выключенный значок пунктом не становится: значок хотя
+        // бы держит своё место в ряду и объясняется подсказкой, а пункт меню,
+        // который ничего не делает, не делает и этого.
         let moved: Vec<super::menu::Item> = quick(view, entry)
             .into_iter()
-            .map(|Quick { glyph, label, message, .. }| {
-                super::menu::Item::new(label, message).glyph(glyph)
+            .filter_map(|Quick { glyph, label, message, .. }| {
+                Some(super::menu::Item::new(label, message?).glyph(glyph))
             })
             .collect();
         items.splice(0..0, moved);
@@ -833,15 +852,24 @@ struct Quick {
     /// и предлагает непонятно что. Доводом конструктора, а не умолчанием:
     /// забытая подпись дала бы безымянный пункт, и компилятор бы промолчал.
     label: &'static str,
-    message: Msg,
-    /// Горит ли он. Умолчание — покой: состояние есть у значков контура и
-    /// шара, остальные о мире ничего не рассказывают.
+    /// Что пошлёт нажатие. `None` — послать нечего: значок стои́т выключенным
+    /// и в меню тесноты не уезжает. Так стои́т наводка у снимка, которого на
+    /// шаре нет вовсе: пропасть ей нельзя — соседние значки съехали бы на её
+    /// место при каждом нажатии, — а обещать нажатие она не вправе.
+    message: Option<Msg>,
+    /// Каким лицом стои́т. Умолчание — покой: состояние есть у значков контура
+    /// и шара, а у наводки — только «есть куда навести» и «некуда».
     tone: theme::IconTone,
 }
 
 impl Quick {
     fn new(glyph: &'static str, label: &'static str, hint: String, message: Msg) -> Self {
-        Self { glyph, hint, label, message, tone: theme::IconTone::Rest }
+        Self { glyph, hint, label, message: Some(message), tone: theme::IconTone::Rest }
+    }
+
+    /// Значок без нажатия: делать нечего, а место за ним остаётся.
+    fn idle(glyph: &'static str, label: &'static str, hint: String) -> Self {
+        Self { glyph, hint, label, message: None, tone: theme::IconTone::Idle }
     }
 
     fn tone(self, tone: theme::IconTone) -> Self {
@@ -849,18 +877,25 @@ impl Quick {
     }
 }
 
-/// Быстрые значки строки — только те два, что кладут снимок на шар: контур и
-/// растр.
+/// Быстрые значки строки — только те три, что про шар: контур, растр и
+/// наводка.
+///
+/// Первые два — переключатели, и механика у них одна: нажали — снимок на шаре,
+/// нажали ещё раз — снят. Двух правил здесь быть не может: вопрос у них один
+/// («лежит ли этот снимок на шаре»), разница только в подробности, с какой он
+/// там лежит. Камеру ни один из них не двигает — это третье намерение, и стои́т
+/// оно третьим значком: «покажи здесь» и «отвези меня туда» сведённые в одно
+/// нажатие отбирают друг у друга ответ.
 ///
 /// Всё остальное — скачать, приостановить, открыть, посмотреть — стои́т
 /// пунктами меню (см. [`menu_items`]). Строка узкая, панель делят пополам, и
-/// пятый значок подряд отнимал бы место у имени; а из двух оставшихся каждый
-/// говорит о своём состоянии цветом, чего пункт меню не умеет.
+/// значок сверх этих отнимал бы место у имени; а каждый из трёх говорит о
+/// своём состоянии цветом, чего пункт меню не умеет.
 ///
 /// Перехода вглубь среди них нет: внутрь ведёт нажатие на саму
 /// строку, и стрелка рядом с ней говорила бы то же самое второй раз.
 ///
-/// Оба — только у снимка: ни контура, ни растра у папки пути и у файла внутри
+/// Все — только у снимка: ни контура, ни растра у папки пути и у файла внутри
 /// снимка не бывает, а кнопка, которой нечего сделать, врёт о том, что строка
 /// умеет.
 fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
@@ -900,18 +935,18 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
     // (см. `Row::viewable`): значок над сырьём уровня 0 или над архивом обещает
     // то, чего не бывает.
     if row.viewable {
-        // Значок горит, когда снимок лежит на шаре растром. Подпись при этом
-        // называет то, что случится по нажатию, а не то, что есть: у лежащего
-        // это переход к нему, а не второе наложение.
+        // Значок горит, когда снимок лежит на шаре растром. Подпись называет
+        // то, что случится по нажатию: у лежащего это снятие, а не второе
+        // наложение. Скрытый снят наравне с видимым — он остаётся слоем, и
+        // прячет его свой глаз в списке «На просмотре».
         let (tone, hint) = match row.globe {
             OnGlobe::Off => (theme::IconTone::Rest, "Показать на шаре"),
-            OnGlobe::Assembling => (theme::IconTone::Half, "Кладётся на глобус…"),
+            OnGlobe::Asked => (theme::IconTone::Half, "Отменить показ — спрашиваем каталог…"),
+            OnGlobe::Assembling => (theme::IconTone::Half, "Отменить показ — кладётся на глобус…"),
             OnGlobe::Laid { hidden: true, .. } => {
-                (theme::IconTone::Half, "На шаре, скрыт — показать и навести")
+                (theme::IconTone::Half, "Снять с шара — сейчас лежит скрытым")
             }
-            OnGlobe::Laid { hidden: false, .. } => {
-                (theme::IconTone::Lit, "На шаре — навести и выделить")
-            }
+            OnGlobe::Laid { hidden: false, .. } => (theme::IconTone::Lit, "Снять с шара"),
         };
         // Полосу под строкой рисует ход добычи, и объяснить её больше негде:
         // подписи у полосы нет, а без неё она — доля неизвестно чего.
@@ -924,11 +959,32 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
                 theme::glyph::GLOBE,
                 "Показать на шаре",
                 hint,
-                Msg::In(view, ViewMsg::GlobeShow(key)),
+                Msg::In(view, ViewMsg::GlobeToggle(key.clone())),
             )
             .tone(tone),
         );
     }
+
+    // Наводка. Своё нажатие, а не довесок к показу: положить второй снимок
+    // рядом с первым, не улетая к нему, иначе было бы нельзя. Наводить при
+    // этом можно только на то, у чего есть место на шаре, — нарисованный
+    // контур или заведённый слой. Одной просьбы показать мало: пока каталог не
+    // ответил, о снимке не известно даже того, где он, и нажатие увело бы
+    // взгляд к шару, на котором ничего не изменилось.
+    let aimable = matches!(row.outlined, OnOutline::Drawn) || row.globe.laid();
+    quick.push(match aimable {
+        true => Quick::new(
+            theme::glyph::FOCUS,
+            "Навести камеру",
+            "Навести камеру и выделить".to_string(),
+            Msg::OutlineFocus(key),
+        ),
+        false => Quick::idle(
+            theme::glyph::FOCUS,
+            "Навести камеру",
+            "Наводить не на что: снимка на шаре нет".to_string(),
+        ),
+    });
     quick
 }
 
@@ -1075,7 +1131,7 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     if !row.identifier.is_empty() && !row.is_snapshot() {
         items.push(Item::new(
             "Показать на шаре",
-            Msg::In(view, ViewMsg::GlobeShow(row.snapshot_key().to_string())),
+            Msg::In(view, ViewMsg::GlobeToggle(row.snapshot_key().to_string())),
         ));
     }
     // Показывать папку, которая и так открыта, незачем: пункт вёл бы туда,
@@ -1126,10 +1182,16 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     // качается: файлов у него под три десятка, и жать паузу на каждом значит
     // просить пользователя сделать за нас то, что мы же и сложили. Предлагается
     // только пока есть что останавливать.
-    if row.folded
-        && !row.product.is_empty()
-        && row.children.iter().any(|file| matches!(file.status, RowStatus::Downloading { .. }))
-    {
+    //
+    // Идёт ли по снимку закачка, сложенная строка видит по своим файлам, а
+    // строка каталога — по себе самой: файлов под ней не приезжало, и о них
+    // она знает ровно то, что сказала библиотека про свой префикс (см.
+    // `rows::from_key`).
+    let downloading = match row.folded {
+        true => row.children.iter().any(|file| matches!(file.status, RowStatus::Downloading { .. })),
+        false => row.kind.is_folder() && matches!(row.status, RowStatus::Downloading { .. }),
+    };
+    if downloading && !row.product.is_empty() {
         items.push(Item::new("Приостановить снимок", Msg::PauseSnapshot(row.product.clone())));
     }
     // У сложенной строки своего имени нет — она и не запись, а снимок.
@@ -1169,18 +1231,19 @@ mod tests {
         }
     }
 
-    /// В строке стоят ровно два значка, и оба про шар: контур и растр.
+    /// В строке стоят ровно три значка, и все три про шар: контур, растр и
+    /// наводка.
     ///
     /// Остальное уехало пунктами меню, и вернувшийся значок отнял бы место у
-    /// имени. У не-снимка нет и этих двух: ни контура, ни растра у файла и у
-    /// папки пути не бывает.
+    /// имени. У не-снимка нет и этих трёх: ни контура, ни растра, ни своего
+    /// места на шаре у файла и у папки пути не бывает.
     #[test]
-    fn the_row_offers_only_the_two_globe_icons() {
+    fn the_row_offers_only_the_three_globe_icons() {
         let (_state, view) = state_view();
 
         let icons = quick(view, &snapshot(OnOutline::Off));
         let glyphs: Vec<&str> = icons.iter().map(|q| q.glyph).collect();
-        assert_eq!(glyphs, vec![theme::glyph::OUTLINE, theme::glyph::GLOBE]);
+        assert_eq!(glyphs, vec![theme::glyph::OUTLINE, theme::glyph::GLOBE, theme::glyph::FOCUS]);
         // В тесноте значок становится пунктом меню и обязан называть действие.
         assert!(icons.iter().all(|q| !q.label.is_empty()), "безымянный пункт меню");
 
@@ -1191,6 +1254,49 @@ mod tests {
             RowKind::File,
         );
         assert!(quick(view, &file).is_empty(), "у файла шара не бывает");
+    }
+
+    /// Показ и контур — переключатели с одной механикой: нажатие кладёт,
+    /// второе снимает. Наводка к ним не примешана — это третье нажатие, и
+    /// нажать его можно только тогда, когда снимок на шаре есть.
+    #[test]
+    fn the_globe_icons_toggle_and_the_aim_stands_apart() {
+        let (_state, view) = state_view();
+        let quick_of = |row: &Row| quick(view, row);
+
+        let idle = quick_of(&snapshot(OnOutline::Off));
+        assert!(matches!(idle[0].message, Some(Msg::OutlineToggle(_))), "контур — переключатель");
+        assert!(
+            matches!(idle[1].message, Some(Msg::In(_, ViewMsg::GlobeToggle(_)))),
+            "растр — тоже переключатель"
+        );
+        assert!(idle[2].message.is_none(), "наводить не на что, и нажатия нет");
+        assert_eq!(idle[2].tone, theme::IconTone::Idle);
+
+        // Очерченному наводка есть на что: контур на шаре нарисован.
+        let drawn = quick_of(&snapshot(OnOutline::Drawn));
+        assert!(matches!(drawn[2].message, Some(Msg::OutlineFocus(_))));
+
+        // И лежащему растром — тоже, даже если контура ему никто не просил.
+        let laid = Row {
+            globe: OnGlobe::Laid { hidden: false, progress: Default::default() },
+            ..snapshot(OnOutline::Off)
+        };
+        assert!(matches!(quick_of(&laid)[2].message, Some(Msg::OutlineFocus(_))));
+
+        // Слой ещё собирается — рамка у него уже посчитана, наводить есть на
+        // что.
+        let assembling = Row { globe: OnGlobe::Assembling, ..snapshot(OnOutline::Off) };
+        assert!(matches!(quick_of(&assembling)[2].message, Some(Msg::OutlineFocus(_))));
+
+        // А одной просьбы мало: пока каталог не ответил, о снимке не известно
+        // даже того, где он.
+        let asked = Row { globe: OnGlobe::Asked, ..snapshot(OnOutline::Off) };
+        assert!(quick_of(&asked)[2].message.is_none(), "наводка обещает несуществующее место");
+        // Значок шара при этом горит вполсилы и снимает просьбу: нажатие
+        // принято, и отменяется оно тем же значком.
+        assert_eq!(quick_of(&asked)[1].tone, theme::IconTone::Half);
+        assert!(matches!(quick_of(&asked)[1].message, Some(Msg::In(_, ViewMsg::GlobeToggle(_)))));
     }
 
     /// Зелёным горит сделанное, вполсилы — начатое и несбывшееся, покоем —

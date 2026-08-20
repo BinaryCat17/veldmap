@@ -36,13 +36,27 @@ impl LibraryState {
             .map(|entry| entry.name.as_str())
     }
 
-    /// Сколько записей лежит под этим путём каталога. Так папка сетевого
-    /// каталога узнаёт, есть ли у неё что-то на диске: своего ответа на это у
-    /// каталога нет, а у библиотеки есть — в ключе каждой записи стоит путь,
-    /// откуда её скачали.
-    pub fn count_under(&self, prefix: &str) -> usize {
-        if prefix.is_empty() { return 0; }
-        self.entries.iter().filter(|entry| entry.identifier.starts_with(prefix)).count()
+    /// Что лежит под этим путём каталога и делается ли там что-нибудь. Так
+    /// папка сетевого каталога узнаёт о себе всё, что вообще можно узнать:
+    /// своего ответа на это у каталога нет, а у библиотеки есть — в ключе
+    /// каждой записи стоит путь, откуда её скачали.
+    ///
+    /// Одним проходом и одним ответом, потому что спрашивают их вместе: строка
+    /// папки говорит либо «столько-то на диске», либо «скачивается», и выбор
+    /// между этими двумя словами и есть весь вопрос.
+    pub fn under(&self, prefix: &str) -> Under {
+        if prefix.is_empty() {
+            return Under::default();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| entry.identifier.starts_with(prefix))
+            .fold(Under::default(), |under, entry| Under {
+                files: under.files + 1,
+                bytes: under.bytes + entry.done,
+                active: under.active
+                    || status_of(entry) == LibraryStatus::LibDownloading,
+            })
     }
 
     /// Полнота снимка: сколько его файлов доведено и сколько их в снимке
@@ -81,6 +95,21 @@ impl LibraryState {
                 (count + 1, done + entry.done, total + entry.total)
             })
     }
+}
+
+/// Что библиотека знает про содержимое одной папки каталога.
+#[derive(Default, Clone, Copy)]
+pub struct Under {
+    /// Сколько её записей заведено — считая недокачанные: место они уже
+    /// занимают.
+    pub files: usize,
+    /// Сколько байт из них лежит на диске.
+    pub bytes: u64,
+    /// Хоть один файл едет прямо сейчас. Пока это так, едет весь снимок — тем
+    /// же правилом, по которому о себе говорит сложенная строка «Скачанного»
+    /// (см. `components::row::snapshot`): сумма по частям была бы правдой о
+    /// файлах, а не о снимке.
+    pub active: bool,
 }
 
 /// Статус записи как enum, а не как сырой i32 из protobuf.

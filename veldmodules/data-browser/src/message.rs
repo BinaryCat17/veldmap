@@ -455,9 +455,15 @@ messages! {
         GlobeResized(sub ViewportSize) = "globe_resized";
         /// Указатель над областью, в тех же пикселях.
         GlobePointer(sub PointerEvent) = "globe_pointer";
-        /// Положить снимок на шар — по ключу провайдера. Нагрузка своя: приходит
-        /// не от области, а из строки списка.
-        GlobeShow(val String) = "globe_show";
+        /// Положить снимок на шар растром — или снять его оттуда. По ключу
+        /// провайдера; нагрузка своя — приходит не от области, а из строки
+        /// списка.
+        ///
+        /// Переключателем, и тем же именем, что у контура (`outline_toggle`):
+        /// вопрос у них один — лежит ли снимок на шаре, — и разной механикой
+        /// они читались бы как два разных рода действия. Камеры это не
+        /// касается: наводит `outline_focus`.
+        GlobeToggle(val String) = "globe_toggle";
     }
 }
 
@@ -644,7 +650,7 @@ mod tests {
             Msg::In(id(), ViewMsg::PreviewProduct("снимок.SAFE".into())),
             Msg::In(id(), ViewMsg::PreviewFit),
             Msg::In(id(), ViewMsg::PreviewZoom(1.0)),
-            Msg::In(id(), ViewMsg::GlobeShow("продукт".into())),
+            Msg::In(id(), ViewMsg::GlobeToggle("продукт".into())),
         ];
         messages.extend(NewTab::ALL.iter().map(|kind| Msg::NewTab(pane(), *kind)));
         messages.extend(NewTab::KINDS.iter().map(|kind| Msg::In(id(), ViewMsg::Fill(*kind))));
