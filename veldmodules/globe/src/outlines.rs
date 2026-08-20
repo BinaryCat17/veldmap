@@ -134,11 +134,17 @@ impl Outlines {
         let base = self.ribbon.len() as u32;
         let count = ring.len();
         for (index, vertex) in ring.iter().enumerate() {
-            let prev = ring[(index + count - 1) % count].position;
-            let next = ring[(index + 1) % count].position;
+            let here = (vertex.position, vertex.position_low);
+            let at = |node: &Vertex| (node.position, node.position_low);
+            // Смещениями, а не местами соседей: старшие половины у соседних
+            // вершин контура совпадают, и разность, взятая в шейдере, дала бы
+            // ноль там, где до соседа полсотни метров.
+            let prev = geodesy::offset(at(&ring[(index + count - 1) % count]), here);
+            let next = geodesy::offset(at(&ring[(index + 1) % count]), here);
             for side in [-1.0, 1.0] {
                 self.ribbon.push(RibbonVertex {
                     position: vertex.position,
+                    position_low: vertex.position_low,
                     normal: vertex.normal,
                     prev,
                     next,

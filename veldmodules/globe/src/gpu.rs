@@ -27,8 +27,13 @@ use crate::module::outlines::Outlines;
 const DEPTH_FORMAT: TextureFormat = TextureFormat::TexDepth32Float;
 
 /// То, что уезжает в шейдер каждый кадр. Раскладка обязана совпадать со
-/// `struct Camera` в globe.wgsl: матрица по столбцам, за ней позиция глаза,
-/// выровненная на 16 байт, и размер кадра в пикселях.
+/// `struct Camera` в globe.wgsl: матрица по столбцам, за ней позиция глаза
+/// половинами, каждая выровненная на 16 байт, и размер кадра в пикселях.
+///
+/// Матрица **без переноса**: глаз стои́т в начале координат, а вычитают его в
+/// шейдере, из позиции вершины. Иначе перенос — число порядка единицы — сам
+/// уезжал бы сюда в `f32`, и вершина, сколь угодно точная, теряла бы всё в
+/// умножении на него (см. `geodesy::parts`).
 ///
 /// Размер кадра нужен лентам контуров: их ширина экранная, и перевести
 /// пиксели в доли отсечения можно только зная, сколько их в кадре
@@ -39,8 +44,10 @@ struct CameraUniform {
     view_proj: Mat4,
     eye: World,
     _pad: f32,
+    eye_low: World,
+    _pad2: f32,
     viewport: [f32; 2],
-    _pad2: [f32; 2],
+    _pad3: [f32; 2],
 }
 
 /// Вершина ленты выделенного контура: точка поверхности с нормалью, её соседи
@@ -52,7 +59,11 @@ struct CameraUniform {
 #[derive(Clone, Copy)]
 pub struct RibbonVertex {
     pub position: World,
+    pub position_low: World,
     pub normal: World,
+    /// Смещения к соседям, а не их позиции: у соседних вершин контура старшие
+    /// половины совпадают, и разность их, посчитанная в шейдере, дала бы ноль
+    /// там, где до соседа полсотни метров (см. `geodesy::offset`).
     pub prev: World,
     pub next: World,
     /// −1 — левый край ленты, +1 — правый.
@@ -78,6 +89,7 @@ const INITIAL_OVERLAY_BUFFER: u64 = 256 * 1024;
 #[derive(Clone, Copy)]
 pub struct OverlayVertex {
     pub position: World,
+    pub position_low: World,
     pub uv: [f32; 2],
     pub alpha: f32,
 }
@@ -222,6 +234,7 @@ impl Device {
                     VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32x3,
+                    VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32,
                 ]),
             }],
@@ -260,6 +273,7 @@ impl Device {
                 array_stride: std::mem::size_of::<OverlayVertex>() as u64,
                 step_mode: StepMode::StepVertex as i32,
                 attributes: gfx::packed_attributes(&[
+                    VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32x2,
                     VertexFormat::VtxFloat32,
@@ -395,12 +409,15 @@ pub fn render(
     camera: &Camera,
     overlays: &OverlayBatch,
 ) -> anyhow::Result<()> {
+    let (eye, eye_low) = camera.eye_parts();
     let uniform = CameraUniform {
         view_proj: camera.view_projection(target.aspect()),
-        eye: camera.eye(),
+        eye,
         _pad: 0.0,
+        eye_low,
+        _pad2: 0.0,
         viewport: [target.width.max(1) as f32, target.height.max(1) as f32],
-        _pad2: [0.0, 0.0],
+        _pad3: [0.0, 0.0],
     };
     resource_write(device.camera.id(), 0, gfx::bytes_of(std::slice::from_ref(&uniform)))?;
 
@@ -512,6 +529,7 @@ fn pipeline(
             step_mode: StepMode::StepVertex as i32,
             // Позиция и нормаль — как поля Vertex, смещения выводятся.
             attributes: gfx::packed_attributes(&[
+                VertexFormat::VtxFloat32x3,
                 VertexFormat::VtxFloat32x3,
                 VertexFormat::VtxFloat32x3,
             ]),

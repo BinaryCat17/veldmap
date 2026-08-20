@@ -61,6 +61,13 @@ def play(path: str, name: str) -> tuple[str, float]:
             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
         )
         outcome = "сошёлся" if done.returncode == 0 else "НЕ СОШЁЛСЯ"
+        if outcome == "сошёлся" and gpu_refused():
+            # Сценарий дошёл до конца и проверки сошлись — а видеокарта при
+            # этом отказалась от того, чем рисуют. Разметку это не трогает:
+            # шар и канва просмотра именами не адресуются, и обход их не
+            # видит, — так что дошедший до конца сценарий скажет «сошёлся»
+            # над пустым местом. Отказ здесь и есть единственный след.
+            outcome = "ПУСТОЙ КАДР"
     except subprocess.TimeoutExpired:
         # Отличается от «не сошёлся» намеренно: сценарий, дошедший до своего
         # конца, кончается сам, а упёршийся в предел — это зависшее
@@ -68,6 +75,20 @@ def play(path: str, name: str) -> tuple[str, float]:
         outcome = "ЗАВИС"
     keep_log(name)
     return outcome, time.monotonic() - started
+
+
+def gpu_refused() -> bool:
+    """Отказала ли видеокарта чему-нибудь за этот запуск.
+
+    Ищется в логе, а не спрашивается у сценария: шейдер, не собравшийся, и
+    раскладка вершин, не сошедшаяся с ним, не роняют приложение — окно живёт,
+    разметка отвечает, а рисуется пустое место. Ни один шаг сценария такого не
+    замечает: у шара и канвы просмотра имён нет.
+    """
+    if not os.path.exists(HOST_LOG):
+        return False
+    with open(HOST_LOG, encoding="utf-8", errors="replace") as log:
+        return "Validation Error" in log.read()
 
 
 def keep_log(name: str) -> None:

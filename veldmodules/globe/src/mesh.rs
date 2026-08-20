@@ -17,7 +17,11 @@ use crate::module::geodesy::{self, Geodetic, World};
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Vertex {
+    /// Старшая половина точки мира; младшая — рядом. Порознь потому, что одним
+    /// `f32` точка поверхности хранится с шагом в восемьдесят сантиметров
+    /// (см. [`geodesy::parts`]).
     pub position: World,
+    pub position_low: World,
     pub normal: World,
 }
 
@@ -140,10 +144,8 @@ impl Mesh {
 /// Узел поверхности. Общий с контурами: у них та же вершина и та же раскладка
 /// буфера — разное только время жизни (см. `outlines`).
 pub fn vertex(point: Geodetic) -> Vertex {
-    Vertex {
-        position: geodesy::position(point),
-        normal: geodesy::normal(point.lat_deg, point.lon_deg),
-    }
+    let (position, position_low) = geodesy::parts(geodesy::world(point));
+    Vertex { position, position_low, normal: geodesy::normal(point.lat_deg, point.lon_deg) }
 }
 
 /// Поверхность: ряды по широте от полюса к полюсу, в каждом — узлы по долготе.

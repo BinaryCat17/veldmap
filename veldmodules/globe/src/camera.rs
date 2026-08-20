@@ -306,8 +306,18 @@ impl Camera {
         1.0 + self.height_m / geodesy::SEMI_MAJOR_M
     }
 
+    /// Где стои́т глаз — одним числом, грубо. Этого довольно отбору видимого: он
+    /// решает, попадает ли ячейка в кадр, и восемь десятых метра такого решения
+    /// не меняют. Тому, что рисуется, нужны обе половины ([`Camera::eye_parts`]).
     pub fn eye(&self) -> geodesy::World {
-        geodesy::position(self.geodetic())
+        self.eye_parts().0
+    }
+
+    /// Где стои́т глаз — половинами, как и всё, что рисуется. Вычитается он из
+    /// вершины уже в шейдере, и одной половиной эта разность потеряла бы всю
+    /// подробность (см. [`geodesy::parts`]).
+    pub fn eye_parts(&self) -> (geodesy::World, geodesy::World) {
+        geodesy::parts(geodesy::world(self.geodetic()))
     }
 
     /// Метров поверхности на пиксель кадра по вертикали — мера выбора уровня
@@ -359,6 +369,10 @@ impl Camera {
     /// Плоскости отсечения выводятся из высоты, а не заданы числами: на близком
     /// подлёте фиксированная ближняя плоскость съедает почти всю точность
     /// глубины, а на отлёте дальняя обрезала бы Землю.
+    /// Матрица здесь **без переноса**: глаз стои́т в начале координат, а
+    /// вычитают его из вершины в шейдере. Иначе перенос — число порядка
+    /// единицы — сам уезжал бы на видеокарту в `f32`, и вершина, сколь угодно
+    /// точная, теряла бы восемь десятых метра в умножении на него.
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
         let near = geodesy::metres(self.height_m) * 0.5;
         // Дальний край эллипсоида не дальше, чем |eye| + большая полуось.
@@ -366,7 +380,7 @@ impl Camera {
         // Перспектива с диапазоном глубины 0..1 — тем, который ждёт wgpu (в
         // отличие от -1..1 у OpenGL); у glam это `_rh`, а не `_rh_gl`.
         Mat4::perspective_rh((FOV_Y_DEG as f32).to_radians(), aspect.max(0.01), near, far)
-            * look_at(geodesy::world(self.geodetic()), self.basis())
+            * turn_to(self.basis())
     }
 
     /// Оси кадра: вправо, вверх и вперёд. Одни на всех, кому нужна ориентация
@@ -428,8 +442,13 @@ fn orientation(at: DVec3, up: DVec3) -> DQuat {
 /// Отдаёт четвёрку как есть, не деля на w: делить можно только при w > 0, а
 /// что делать с точкой за камерой, решает спрашивающий (см.
 /// `overlay::on_screen`).
-pub fn project(view_proj: &Mat4, point: geodesy::World) -> Vec4 {
-    *view_proj * Vec3::from(point).extend(1.0)
+/// Точка мира в координатах отсечения.
+///
+/// Глаз вычитается здесь, а не сидит в матрице: матрица вида его переноса не
+/// несёт (см. [`Camera::view_projection`]). Половин тут не надо — отбор видимого
+/// решает попадание в кадр, и метр на этом решении не сказывается.
+pub fn project(view_proj: &Mat4, point: geodesy::World, eye: geodesy::World) -> Vec4 {
+    *view_proj * (Vec3::from(point) - Vec3::from(eye)).extend(1.0)
 }
 
 /// Высота, с которой видно круг такого углового радиуса, — обратное к
@@ -457,14 +476,15 @@ fn height_for(radius_deg: f64) -> f64 {
 /// Оси кадра ложатся строками, а не столбцами: матрица вида переводит мир в
 /// систему камеры, то есть обращает её ориентацию, а обратное к повороту —
 /// это его транспонирование.
-fn look_at(eye: DVec3, (side, up, forward): (DVec3, DVec3, DVec3)) -> Mat4 {
+/// Поворот кадра — без переноса: мир приезжает в шейдер уже отсчитанным от
+/// глаза, и переносить его некуда (см. [`Camera::view_projection`]).
+fn turn_to((side, up, forward): (DVec3, DVec3, DVec3)) -> Mat4 {
     let rotation = DMat3::from_cols(side, up, -forward).transpose();
-    let shift = -(rotation * eye);
     DMat4::from_cols(
         rotation.x_axis.extend(0.0),
         rotation.y_axis.extend(0.0),
         rotation.z_axis.extend(0.0),
-        shift.extend(1.0),
+        DVec3::ZERO.extend(1.0),
     )
     .as_mat4()
 }
@@ -504,7 +524,7 @@ mod tests {
                     lon_deg,
                     height_m: mesh::SURFACE_LIFT_M,
                 });
-                let clip = project(&view_proj, drawn);
+                let clip = project(&view_proj, drawn, camera.eye());
                 let back = (
                     (clip.x / clip.w + 1.0) * 0.5,
                     (1.0 - clip.y / clip.w) * 0.5,

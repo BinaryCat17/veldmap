@@ -14,17 +14,35 @@
 // экран линейным же, то есть заметно темнее макета.
 
 struct Camera {
+    /// Без переноса: глаз стои́т в начале координат, а вычитают его ниже, из
+    /// самой вершины. Перенос — число порядка единицы, и приехав сюда в f32, он
+    /// съедал бы восемь десятых метра у любой, сколь угодно точной вершины.
     view_proj: mat4x4<f32>,
+    /// Глаз половинами — старшая и младшая (см. geodesy::parts в globe).
     eye: vec3<f32>,
     _pad: f32,
+    eye_low: vec3<f32>,
+    _pad2: f32,
     /// Размер кадра в пикселях — им лента выделенного контура меряет свою
     /// ширину (см. vs_ribbon). Штриховке он не нужен: она считает по
     /// координате фрагмента, а та уже в пикселях.
     viewport: vec2<f32>,
-    _pad2: vec2<f32>,
+    _pad3: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+// Вершина, отсчитанная от глаза. Обе точки приходят половинами, и вычитаются
+// они по половинам порознь: разность старших у близких чисел одного порядка в
+// f32 **точна**, поэтому она сокращается без потерь, а младшие доносят
+// подробность. Оттого шаг координаты идёт от расстояния до глаза, а не от
+// радиуса Земли: на километре это доли микрона вместо восьмидесяти сантиметров.
+//
+// Порядок скобок здесь несущий: сложи сперва старшую с младшей — и подробность
+// сгорит в первом же сложении, ещё до вычитания.
+fn relative(high: vec3<f32>, low: vec3<f32>) -> vec3<f32> {
+    return (high - camera.eye) + (low - camera.eye_low);
+}
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -33,10 +51,15 @@ struct VsOut {
 };
 
 @vertex
-fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> VsOut {
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) position_low: vec3<f32>,
+    @location(2) normal: vec3<f32>,
+) -> VsOut {
     var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.world = position;
+    let here = relative(position, position_low);
+    out.clip = camera.view_proj * vec4<f32>(here, 1.0);
+    out.world = here;
     out.normal = normal;
     return out;
 }
@@ -45,7 +68,9 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> 
 // силуэта. Обоим фрагментным шейдерам нужна одна и та же величина, и означает
 // она у них одно и то же — близость к краю.
 fn facing(in: VsOut) -> f32 {
-    let view = normalize(camera.eye - in.world);
+    // Глаз стои́т в нуле, а мир отсчитан от него — значит взгляд это и есть
+    // сама вершина, взятая назад.
+    let view = normalize(-in.world);
     return clamp(dot(normalize(in.normal), view), 0.0, 1.0);
 }
 
@@ -133,18 +158,23 @@ fn along(tail: vec2<f32>, head: vec2<f32>) -> vec2<f32> {
 @vertex
 fn vs_ribbon(
     @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) prev: vec3<f32>,
-    @location(3) next: vec3<f32>,
-    @location(4) side: f32,
+    @location(1) position_low: vec3<f32>,
+    @location(2) normal: vec3<f32>,
+    @location(3) prev: vec3<f32>,
+    @location(4) next: vec3<f32>,
+    @location(5) side: f32,
 ) -> VsOut {
     var out: VsOut;
-    out.world = position;
+    let at_eye = relative(position, position_low);
+    out.world = at_eye;
     out.normal = normal;
 
-    let clip = camera.view_proj * vec4<f32>(position, 1.0);
-    let clip_prev = camera.view_proj * vec4<f32>(prev, 1.0);
-    let clip_next = camera.view_proj * vec4<f32>(next, 1.0);
+    // Соседи приходят смещениями от этой вершины, а не своими местами: их
+    // старшие половины совпадают с её собственной, и разность, взятая здесь,
+    // дала бы ноль там, где до соседа полсотни метров.
+    let clip = camera.view_proj * vec4<f32>(at_eye, 1.0);
+    let clip_prev = camera.view_proj * vec4<f32>(at_eye + prev, 1.0);
+    let clip_next = camera.view_proj * vec4<f32>(at_eye + next, 1.0);
     out.clip = clip;
     // Вершина или её сосед за камерой: делить на такое w нельзя, а звено всё
     // равно не видно — оставляем полосу схлопнутой в линию.
@@ -219,11 +249,12 @@ struct OverlayVsOut {
 @vertex
 fn vs_overlay(
     @location(0) position: vec3<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) alpha: f32,
+    @location(1) position_low: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) alpha: f32,
 ) -> OverlayVsOut {
     var out: OverlayVsOut;
-    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
+    out.clip = camera.view_proj * vec4<f32>(relative(position, position_low), 1.0);
     out.uv = uv;
     out.alpha = alpha;
     return out;

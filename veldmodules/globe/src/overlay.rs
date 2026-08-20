@@ -863,7 +863,7 @@ impl Overlay {
                 geodesy::position(Geodetic { lat_deg: lat, lon_deg: lon, height_m: mesh::SURFACE_LIFT_M });
             faces |= faces_eye(point, look.eye);
 
-            let clip = camera::project(&look.view_proj, point);
+            let clip = camera::project(&look.view_proj, point, look.eye);
             // Точка за камерой: делить на такое w нельзя, а ячейка при этом
             // заведомо близко — считаем её видимой и не гадаем.
             //
@@ -972,11 +972,11 @@ fn patch(
             let fx = (cell[0] + (cell[2] - cell[0]) * tx) / f64::from(meta.width);
             let fy = (cell[1] + (cell[3] - cell[1]) * ty) / f64::from(meta.height);
             let (lat, lon) = frame.geodetic(fx, fy);
-            let position =
-                geodesy::position(Geodetic { lat_deg: lat, lon_deg: lon, height_m });
+            let (position, position_low) =
+                geodesy::parts(geodesy::world(Geodetic { lat_deg: lat, lon_deg: lon, height_m }));
             let u = uv[0] + (uv[2] - uv[0]) * tx as f32;
             let v = uv[1] + (uv[3] - uv[1]) * ty as f32;
-            nodes.push(OverlayVertex { position, uv: [u, v], alpha });
+            nodes.push(OverlayVertex { position, position_low, uv: [u, v], alpha });
         }
     }
 
