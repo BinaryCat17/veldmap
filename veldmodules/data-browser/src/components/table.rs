@@ -1128,10 +1128,15 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     // продукт с контуром уже под рукой, у строки каталога или скачанного его
     // восстанавливает провайдер по ключу (см. handlers::overlay). У снимка
     // этот пункт стоит значком в самой строке и здесь не повторяется.
-    if !row.identifier.is_empty() && !row.is_snapshot() {
+    //
+    // Кладётся при этом снимок, а не файл: ни контура, ни растра у отдельного
+    // файла не бывает. Отсюда и ключ, и подпись — она называет то, что
+    // появится, а горит ли оно уже, видно строкой выше: файлы стоят под своим
+    // снимком, и значок шара стои́т у него.
+    if !row.identifier.is_empty() && !row.is_snapshot() && !row.product_key().is_empty() {
         items.push(Item::new(
-            "Показать на шаре",
-            Msg::In(view, ViewMsg::GlobeToggle(row.snapshot_key().to_string())),
+            "Показать снимок на шаре",
+            Msg::In(view, ViewMsg::GlobeToggle(row.product_key().to_string())),
         ));
     }
     // Показывать папку, которая и так открыта, незачем: пункт вёл бы туда,

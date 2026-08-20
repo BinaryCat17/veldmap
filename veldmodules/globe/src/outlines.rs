@@ -5,14 +5,18 @@
 //! Отдельный буфер нужен не формату, а времени жизни: Земля строится раз, а
 //! контуры меняются с каждым ответом на поиск.
 //!
-//! Лентой рисуются два контура из трёх: линия в пайплайне всегда в пиксель
-//! шириной, а выделить один контур среди полусотни соседних — или показать
-//! место снимка, который ещё едет, — нужно так, чтобы это было видно. Ширина у
-//! ленты экранная, а не мировая: в мире она зависела бы от приближения — на
-//! отлёте расплывалась бы в пятно, вблизи истончалась в ту же линию. Разводит
-//! края поэтому вершинный шейдер (`vs_ribbon` в globe.wgsl), а здесь лежит то,
-//! чего он сам знать не может: соседи вершины по обходу и полуширина той
-//! ленты, которой этот контур рисуется.
+//! Выделенный контур — не линия, а лента: линия в пайплайне всегда в пиксель
+//! шириной, а выделить один контур среди полусотни соседних нужно так, чтобы
+//! это было видно. Ширина у ленты экранная, а не мировая: в мире она зависела
+//! бы от приближения — на отлёте расплывалась бы в пятно, вблизи истончалась в
+//! ту же линию. Раздаёт её поэтому вершинный шейдер (`vs_ribbon` в globe.wgsl),
+//! а здесь лежит то, чего он сам знать не может: соседи вершины по обходу.
+//!
+//! У снимка, который на шар только едет, заштрихована вся занятая им область:
+//! контур говорит, где он ляжет, а штриховка — сколько места займёт. Строится
+//! она здесь же и из того же кольца — веером к его середине.
+
+use glam::DVec3;
 
 use crate::module::geodesy::{self, Geodetic};
 use crate::module::gpu::RibbonVertex;
@@ -30,37 +34,31 @@ const HEIGHT_M: f64 = mesh::GRID_HEIGHT_M;
 /// высоты, на которой контур висит.
 const MAX_EDGE_DEG: f64 = 1.0;
 
-/// Полуширина ленты выделенного контура в пикселях кадра.
-const SELECTED_HALF_PX: f32 = 2.5;
-/// Полуширина ленты едущего на шар. Тоньше выделенной, и не только ради
-/// приличия: выделен снимок один, а едущих бывает несколько, и спорить с
-/// выделенным за взгляд им незачем — от обычной линии их отличает штрих
-/// (см. `fs_ribbon_pending`).
+/// Насколько далеко от середины кольца может лежать его край, чтобы веер
+/// заливки был построим. Косинусом, а не градусами: сравнивается он с
+/// произведением направлений, и переводить одно в другое ради сравнения
+/// незачем.
 ///
-/// Снизу она ограничена шагом штриха, и это не вкус. Штрих кладётся косыми
-/// полосами по кадру, поэтому поперёк ленты, идущей ровно вдоль них, набегает
-/// её ширина, умноженная на корень из двух. Не перекрой этот отрезок половину
-/// шага — лента такого направления уляжется целиком в выброшенную половину и
-/// пропадёт с шара. Порог поэтому `2 * PENDING_HALF_PX * sqrt(2) > HATCH_PX /
-/// 2`, и держит его тест (`the_hatch_step_fits_inside_the_pending_ribbon`), а
-/// не это правило: `HATCH_PX` живёт в шейдере, и переписанный сюда числом он
-/// разошёлся бы с настоящим молча.
-const PENDING_HALF_PX: f32 = 2.0;
+/// Дальше четверти оборота середины у кольца нет вовсе: точки расходятся на
+/// пол-Земли, и веер из любой из них пошёл бы поверх обратной стороны. Так
+/// записан пояс климатической сетки — от −180 до 180, — и заливать его нечем;
+/// контур при этом остаётся, а он и есть главное.
+const FILL_REACH: f64 = 0.087;
 
 pub struct Outlines {
-    /// Просто очерченные — линиями.
+    /// Сами контуры — линиями. Едущий на шар очерчен ими же: от обычного его
+    /// отличает не линия, а штриховка внутри неё.
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
-    /// Оба вида лент — одной парой буферов: вершина у них общая, и различает
-    /// их только фрагментный шейдер, то есть отрезок индексов, которым их
-    /// рисуют.
+    /// Выделенный — лентой, своей парой буферов: у неё своя вершина и свой
+    /// пайплайн, и делить их с линиями было бы нечем.
     pub ribbon: Vec<RibbonVertex>,
     pub ribbon_indices: Vec<u32>,
-    /// Отрезок индексов ленты выделенного и отрезок ленты едущего. Порядок
-    /// здесь не вкусовой: отрезки идут подряд, и разделить их можно только
-    /// тем, что первый собран целиком раньше второго.
-    pub selected: std::ops::Range<u32>,
-    pub pending: std::ops::Range<u32>,
+    /// Заштрихованные области едущих на шар. Вершина у них та же, что у линий
+    /// и у Земли, — точка поверхности с нормалью, — а пара буферов своя:
+    /// рисуются они треугольниками, а не линиями.
+    pub hatch: Vec<Vertex>,
+    pub hatch_indices: Vec<u32>,
 }
 
 impl Outlines {
@@ -70,32 +68,30 @@ impl Outlines {
             indices: Vec::new(),
             ribbon: Vec::new(),
             ribbon_indices: Vec::new(),
-            selected: 0..0,
-            pending: 0..0,
+            hatch: Vec::new(),
+            hatch_indices: Vec::new(),
         };
 
-        // Уплотнение одно на все три вида: лента и линия обводят один и тот же
-        // контур, и разойдись они хоть на вершину — выделенный снимок
-        // обводился бы не там, где стоял до выделения. Считается оно один раз
-        // и здесь: дальше контуры разбираются по видам тремя проходами, а
-        // уплотнять один и тот же контур трижды незачем.
-        let rings: Vec<(OutlineStyle, Vec<Vertex>)> = outlines
-            .iter()
-            .map(|outline| (outline.style(), ring(outline)))
-            .filter(|(_, ring)| ring.len() >= 3)
-            .collect();
-
-        for (_, ring) in rings.iter().filter(|(style, _)| *style == OutlineStyle::OutlinePlain) {
-            built.line(ring);
+        for outline in outlines {
+            // Уплотнение одно на все три вида: лента, линия и штриховка
+            // обводят один и тот же контур, и разойдись они хоть на вершину —
+            // выделенный снимок обводился бы не там, где стоял до выделения, а
+            // штриховка вылезла бы за собственный край.
+            let ring = ring(outline);
+            if ring.len() < 3 {
+                continue;
+            }
+            match outline.style() {
+                OutlineStyle::OutlineSelected => built.ribbon(&ring),
+                OutlineStyle::OutlinePlain => built.line(&ring),
+                // Едущий очерчен обычной линией, а внутри неё заштрихован:
+                // сказать надо не «этот снимок особенный», а «место занято».
+                OutlineStyle::OutlinePending => {
+                    built.line(&ring);
+                    built.fill(&ring);
+                }
+            }
         }
-        for (_, ring) in rings.iter().filter(|(style, _)| *style == OutlineStyle::OutlineSelected) {
-            built.ribbon(ring, SELECTED_HALF_PX);
-        }
-        built.selected = 0..built.ribbon_indices.len() as u32;
-        for (_, ring) in rings.iter().filter(|(style, _)| *style == OutlineStyle::OutlinePending) {
-            built.ribbon(ring, PENDING_HALF_PX);
-        }
-        built.pending = built.selected.end..built.ribbon_indices.len() as u32;
 
         built
     }
@@ -115,17 +111,15 @@ impl Outlines {
     /// Замкнутая лента: на каждую вершину по паре — левый край и правый, — а на
     /// каждое звено четырёхугольник из двух треугольников.
     ///
-    /// В стороны вершины разводит шейдер, здесь они лежат одна в другой: в
-    /// какую сторону смотрит край ленты, видно только там, где известен размер
-    /// кадра. Отсюда едет одно — на сколько разводить (`half` — полуширина в
-    /// пикселях кадра).
-    fn ribbon(&mut self, ring: &[Vertex], half: f32) {
+    /// В стороны вершины разводит шейдер, здесь они лежат одна в другой: на
+    /// сколько разводить, известно только там, где известен размер кадра.
+    fn ribbon(&mut self, ring: &[Vertex]) {
         let base = self.ribbon.len() as u32;
         let count = ring.len();
         for (index, vertex) in ring.iter().enumerate() {
             let prev = ring[(index + count - 1) % count].position;
             let next = ring[(index + 1) % count].position;
-            for side in [-half, half] {
+            for side in [-1.0, 1.0] {
                 self.ribbon.push(RibbonVertex {
                     position: vertex.position,
                     normal: vertex.normal,
@@ -143,6 +137,76 @@ impl Outlines {
                 .extend_from_slice(&[here, here + 1, ahead, ahead, here + 1, ahead + 1]);
         }
     }
+    /// Заливка области, которую занимает снимок, — веер от середины кольца к
+    /// его краю.
+    ///
+    /// Веером, а не разбором на уши: контуры снимков — четырёхугольники и
+    /// полосы съёмки, то есть выпуклые, и у выпуклого кольца веер из его
+    /// середины и есть точное разбиение. У вогнутого он вылезет за край, и на
+    /// штриховке это читается как чуть более широкая кромка, а не как ошибка;
+    /// разбор на уши стоил бы вдесятеро дороже ради случая, которого у съёмок
+    /// не бывает.
+    ///
+    /// По радиусу веер разбит так же мелко, как уплотнено само кольцо, и по той
+    /// же причине (см. [`MAX_EDGE_DEG`]): треугольник от середины до края — это
+    /// хорда, и на градусах дуги она уходит под поверхность, где её съедает
+    /// тест глубины.
+    ///
+    /// Ничего не рисуется, если середины у кольца нет: см. [`FILL_REACH`].
+    fn fill(&mut self, ring: &[Vertex]) {
+        let direction = |vertex: &Vertex| glam::Vec3::from(vertex.normal).as_dvec3();
+        let Some(centre) = ring.iter().map(direction).sum::<DVec3>().try_normalize() else {
+            return;
+        };
+        // Насколько далеко край — по самой дальней вершине. Им же меряется и
+        // разбиение по радиусу, и построимость самого веера.
+        let reach = ring.iter().map(direction).map(|point| centre.dot(point)).fold(1.0, f64::min);
+        if reach < FILL_REACH {
+            return;
+        }
+        let steps = (reach.clamp(-1.0, 1.0).acos().to_degrees() / MAX_EDGE_DEG).ceil().max(1.0) as u32;
+
+        // Середина — одна вершина на весь веер: от неё расходится первое
+        // кольцо треугольников, а дальше идут четырёхугольники между соседними
+        // кольцами.
+        let base = self.hatch.len() as u32;
+        self.hatch.push(surface(centre));
+        for step in 1..=steps {
+            let part = f64::from(step) / f64::from(steps);
+            for point in ring.iter().map(direction) {
+                // Направления, а не точки: середина отсчёта — центр Земли, и
+                // выправленное направление снова ложится на поверхность.
+                // Долей пути по хорде, а не по дуге: шаг мелкий, а неровность
+                // расстановки узлов заливке безразлична. Выродиться хорда не
+                // может — противоположных точек в кольце нет (см. [`FILL_REACH`]).
+                self.hatch.push(surface(centre.lerp(point, part).normalize()));
+            }
+        }
+
+        let count = ring.len() as u32;
+        let ring_at = |step: u32| base + 1 + (step - 1) * count;
+        for index in 0..count {
+            let (here, ahead) = (ring_at(1) + index, ring_at(1) + (index + 1) % count);
+            self.hatch_indices.extend_from_slice(&[base, here, ahead]);
+        }
+        for step in 1..steps {
+            let (inner, outer) = (ring_at(step), ring_at(step + 1));
+            for index in 0..count {
+                let ahead = (index + 1) % count;
+                self.hatch_indices.extend_from_slice(&[
+                    inner + index, outer + index, inner + ahead,
+                    inner + ahead, outer + index, outer + ahead,
+                ]);
+            }
+        }
+    }
+}
+
+/// Точка поверхности по направлению из центра Земли — на той же высоте, что и
+/// контуры.
+fn surface(direction: DVec3) -> Vertex {
+    let (lat_deg, lon_deg) = geodesy::angles(direction);
+    mesh::vertex(Geodetic { lat_deg, lon_deg, height_m: HEIGHT_M })
 }
 
 /// Вершины замкнутого контура, уплотнённые до [`MAX_EDGE_DEG`]. Пусто —
@@ -200,70 +264,111 @@ mod tests {
         Outline { style: style as i32, ..outline(points) }
     }
 
-    /// Три вида разъезжаются по своим буферам, а отрезки лент — по своим
-    /// концам: рисуются они разными пайплайнами, и слипшиеся отрезки означали
-    /// бы штрих на выделенном либо сплошную ленту на едущем.
+    /// Три вида разъезжаются по своим буферам: рисуются они разными
+    /// пайплайнами, и слипшиеся буферы означали бы ленту вокруг обычного
+    /// контура либо штриховку без края.
+    ///
+    /// Едущий на шар при этом рисуется дважды — линией и штриховкой: линия
+    /// говорит, где он ляжет, штриховка — сколько места займёт.
     #[test]
     fn each_style_goes_to_its_own_draw() {
         let square = [(10.0, 10.0), (10.0, 12.0), (12.0, 12.0), (12.0, 10.0)];
-        let built = Outlines::build(&[
-            outline(&square),
-            styled(&square, OutlineStyle::OutlineSelected),
-            styled(&square, OutlineStyle::OutlinePending),
-        ]);
 
-        assert!(!built.indices.is_empty(), "очерченный рисуется линиями");
-        assert!(!built.selected.is_empty(), "выделенный рисуется лентой");
-        assert_eq!(built.selected.end, built.pending.start, "отрезки идут подряд");
-        assert_eq!(built.pending.end, built.ribbon_indices.len() as u32);
-        assert_eq!(
-            built.selected.len(),
-            built.pending.len(),
-            "контур один и тот же — и лент из него выходит поровну"
-        );
+        let plain = Outlines::build(&[outline(&square)]);
+        assert!(!plain.indices.is_empty(), "очерченный рисуется линиями");
+        assert!(plain.ribbon_indices.is_empty() && plain.hatch_indices.is_empty());
 
-        // Толщину ленте задаёт вершина, и у двух видов она разная: одинаковая
-        // означала бы, что штрих — единственное, чем они различаются.
-        let width = |range: &std::ops::Range<u32>| {
-            let vertex = built.ribbon_indices[range.start as usize] as usize;
-            built.ribbon[vertex].side.abs()
-        };
-        assert!(width(&built.selected) > width(&built.pending));
+        let selected = Outlines::build(&[styled(&square, OutlineStyle::OutlineSelected)]);
+        assert!(!selected.ribbon_indices.is_empty(), "выделенный рисуется лентой");
+        assert!(selected.indices.is_empty() && selected.hatch_indices.is_empty());
+
+        let pending = Outlines::build(&[styled(&square, OutlineStyle::OutlinePending)]);
+        assert_eq!(pending.indices, plain.indices, "едущий очерчен той же линией");
+        assert!(!pending.hatch_indices.is_empty(), "область не заштрихована");
+        assert!(pending.ribbon_indices.is_empty(), "едущий не выделяют лентой");
     }
 
-    /// Ширина штриховой ленты и шаг самого штриха связаны, а живут в разных
-    /// файлах: полуширина здесь, шаг — в шейдере. Сойтись они обязаны
-    /// механически, поэтому шаг читается из самого шейдера, а не переписан
-    /// сюда числом: переписанное разошлось бы с настоящим молча, и лента,
-    /// идущая вдоль штриха, пропала бы с шара целиком.
+    /// Заливка лежит на поверхности, а не режет её хордой: соседние узлы веера
+    /// расходятся не дальше, чем вершины самого контура.
+    ///
+    /// Ради этого веер и разбит по радиусу. Треугольник от середины кольца до
+    /// его края — это хорда через десятки градусов дуги, и середина такой
+    /// хорды уходит под поверхность на сотню километров, где её съедает тест
+    /// глубины: от области осталась бы одна кромка.
     #[test]
-    fn the_hatch_step_fits_inside_the_pending_ribbon() {
-        let shader = include_str!("globe.wgsl");
-        let step: f32 = shader
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("const HATCH_PX: f32 = "))
-            .and_then(|tail| tail.trim_end_matches(';').parse().ok())
-            .expect("в шейдере нет шага штриховки");
+    fn the_filled_area_follows_the_surface() {
+        // Двадцать градусов поперёк — обычная гранула, и хорда через неё
+        // проседает почти на сотню километров.
+        let wide = [(0.0, 0.0), (0.0, 20.0), (20.0, 20.0), (20.0, 0.0)];
+        let built = Outlines::build(&[styled(&wide, OutlineStyle::OutlinePending)]);
 
-        // Полосы штриха идут под 45°, поэтому поперёк ленты, лежащей вдоль
-        // них, набегает её ширина, умноженная на корень из двух. Перекрыть
-        // этот отрезок обязан половину шага — ровно ту, что выброшена.
-        let across = PENDING_HALF_PX * 2.0 * std::f32::consts::SQRT_2;
+        let between = |left: u32, right: u32| {
+            let ends = [left, right].map(|index| {
+                let (lat, lon) = angles_of(&built.hatch[index as usize]);
+                geodesy::unit(lat, lon)
+            });
+            ends[0].dot(ends[1]).clamp(-1.0, 1.0).acos().to_degrees()
+        };
+        let mut widest = 0.0f64;
+        for triangle in built.hatch_indices.chunks(3) {
+            widest = widest
+                .max(between(triangle[0], triangle[1]))
+                .max(between(triangle[1], triangle[2]))
+                .max(between(triangle[2], triangle[0]));
+        }
+
+        // Меряется не сам шаг, а то, ради чего он выбран: середина хорды в
+        // столько-то градусов проседает под поверхность на `1 − cos(θ/2)`
+        // (радиус Земли здесь — единица), и просесть глубже, чем контур поднят,
+        // ей нельзя — там её съест тест глубины.
+        let sag = 1.0 - (widest.to_radians() / 2.0).cos();
+        let lift = f64::from(geodesy::metres(HEIGHT_M));
         assert!(
-            across > step * 0.5,
-            "лента укладывается в выброшенную половину ({} против {}): вдоль штриха она пропадёт",
-            across,
-            step * 0.5
+            sag < lift,
+            "ячейка в {} градусов проседает на {} при выносе {}",
+            widest,
+            sag,
+            lift
         );
+    }
+
+    /// Кольцу, разошедшемуся на пол-Земли, середины нет вовсе: веер из любой
+    /// точки пошёл бы поверх обратной стороны. Такое кольцо остаётся одним
+    /// контуром — он и есть главное, а заливка при нём необязательна.
+    #[test]
+    fn a_ring_around_the_earth_gets_no_fill() {
+        let band = outline(&[
+            (-70.0125, -180.0125),
+            (70.0125, -180.0125),
+            (70.0125, 179.9875),
+            (-70.0125, 179.9875),
+        ]);
+        let built = Outlines::build(&[Outline {
+            style: OutlineStyle::OutlinePending as i32,
+            ..band
+        }]);
+        assert!(!built.indices.is_empty(), "контур пропал вместе с заливкой");
+        assert!(built.hatch_indices.is_empty(), "веер построен поверх обратной стороны");
+    }
+
+    /// А шапка вокруг полюса Землю по долготе тоже обходит — и заливается:
+    /// середина у неё есть, и это сам полюс.
+    #[test]
+    fn a_polar_cap_is_filled_all_the_same() {
+        let cap: Vec<(f64, f64)> =
+            (0..12).map(|step| (85.0, f64::from(step) * 30.0 - 180.0)).collect();
+        let built = Outlines::build(&[styled(&cap, OutlineStyle::OutlinePending)]);
+        assert!(!built.hatch_indices.is_empty(), "шапка осталась незалитой");
     }
 
     /// Контур, которого нет: двумя точками замкнутой ломаной не выйдет, и ни
-    /// одна лента с ним не заводится.
+    /// линии, ни заливки с ним не заводится.
     #[test]
     fn a_degenerate_outline_draws_nothing() {
-        let built = Outlines::build(&[styled(&[(10.0, 10.0), (10.0, 12.0)], OutlineStyle::OutlinePending)]);
-        assert!(built.ribbon_indices.is_empty());
-        assert!(built.pending.is_empty());
+        let built =
+            Outlines::build(&[styled(&[(10.0, 10.0), (10.0, 12.0)], OutlineStyle::OutlinePending)]);
+        assert!(built.indices.is_empty());
+        assert!(built.hatch_indices.is_empty());
     }
 
     /// Пара углов вершины — по её нормали: она единичная, и выводит из неё

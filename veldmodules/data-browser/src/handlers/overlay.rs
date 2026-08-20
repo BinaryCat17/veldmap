@@ -114,8 +114,8 @@ pub fn on_toggle_pressed(state: &mut State, view: ViewId, identifier: String) {
     let correlation = state.locates.begin(Locate::Overlay(identifier.clone()));
     crate::calls::data_provider::on_locate(&LocateRequest { identifier }, &correlation);
     // Просьба уже видна — значком в строке и полосой под ней (см.
-    // `rows::onto_globe`), — а место снимка на шаре покажет штриховой контур,
-    // если геометрия под рукой.
+    // `rows::onto_globe`), — а место снимка на шаре покажет штриховка, если
+    // геометрия под рукой.
     send_set(state);
     super::nav::on_new_globe(state);
 }
@@ -142,8 +142,7 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
     let Some(product) = response.product else {
         veldsdk::log::warn!(target: "handlers", "показать на шаре не вышло: {}", response.error);
         state.notice = Some(format!("Показать на шаре не вышло: {}", response.error));
-        // Просьбы больше нет — значит нет и штрихового контура, которым было
-        // помечено место (см. [`send_set`]).
+        // Просьбы больше нет — значит нечего и штриховать (см. [`send_set`]).
         send_set(state);
         return;
     };
@@ -174,7 +173,7 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
     if state.overlays.iter().any(|overlay| overlay.identifier == product.identifier) {
         // Класть нечего, а сказать есть о чём: сюда приходят и с ответом
         // каталога, снявшим просьбу (см. [`on_located`]), — а просьба помечена
-        // на шаре штрихом, и снять эту пометку больше некому.
+        // на шаре штриховкой, и снять её больше некому.
         send_set(state);
         return;
     }
@@ -197,7 +196,7 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
     }, &correlation);
     // Набор наложений сам по себе не изменился — собирающийся в него не
     // попадает, — но изменилось то, что на шаре видно: место снимка помечается
-    // штриховым контуром, пока картинки нет (см. [`send_set`]).
+    // штриховкой, пока картинки нет (см. [`send_set`]).
     send_set(state);
 }
 
@@ -622,8 +621,8 @@ fn send_set(state: &State) {
 ///
 /// Числа приезжают готовыми, и показывает их список слоёв и строка того списка,
 /// из которого снимок родом. Но одно из них меняет и сам шар: пока по слою
-/// нечего нарисовать, его место помечено штриховым контуром, и снять эту
-/// пометку может только пришедшее отсюда «уже есть что» (см. `Progress::blank`).
+/// нечего нарисовать, его место заштриховано, и снять штриховку может только
+/// пришедшее отсюда «уже есть что» (см. `Progress::blank`).
 /// Поэтому набор контуров пересылается здесь же.
 pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::OverlaysProgress) {
     for overlay in &mut state.overlays {
