@@ -493,6 +493,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         label,
         frame,
         binding,
+        binding_trouble: None,
         rasters,
         sources: incoming_ids,
         opacity,
@@ -689,24 +690,38 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     // сказано, где он, а здесь — каким пикселем куда. Кто кого перебивает,
     // решает род привязки, а не порядок описания (см. `overlay::Binding`).
     if !ties.is_empty() {
-        if overlay.binding >= overlay::Binding::Lattice {
-            return;
-        }
         match overlay::Grid::new(&ties) {
             Some(grid) => {
+                // Решётка в четыре узла описывает то же линейное, что и
+                // проекция файла, и старше её не становится (см.
+                // `overlay::Binding::Lattice`).
+                let rank = match grid.is_dense() {
+                    true => overlay::Binding::Lattice,
+                    false => overlay::Binding::Projected,
+                };
+                if overlay.binding >= rank {
+                    return;
+                }
                 veldsdk::log::info!(target: "handlers",
                     "{}: привязка сеткой из {} узлов", label, ties.len());
                 overlay.frame = overlay::Frame::Grid(grid);
-                overlay.binding = overlay::Binding::Lattice;
+                overlay.binding = rank;
+                overlay.binding_trouble = None;
+                return;
             }
             // Точки есть, а решётки не вышло — молчать об этом нельзя: снимок
-            // ляжет по контуру каталога, то есть, скорее всего, повёрнутым, и
-            // причина этого не видна больше нигде.
-            None => veldsdk::log::warn!(target: "handlers",
-                "{}: {} опорных точек не сложились в решётку — привязка остаётся по контуру",
-                label, ties.len()),
+            // ляжет по контуру каталога, то есть, скорее всего, повёрнутым.
+            //
+            // И выйти отсюда нельзя тоже: файл несёт и опорные точки, и
+            // проекцию, и не сложившиеся точки не отменяют вторую. Дальше по
+            // тексту её и пробуют.
+            None => {
+                let said = format!("{} опорных точек не сложились в решётку", ties.len());
+                veldsdk::log::warn!(target: "handlers",
+                    "{}: {} — привязка остаётся по контуру", label, said);
+                overlay.binding_trouble = Some(said);
+            }
         }
-        return;
     }
 
     // Растр лежит в проекции. Код системы толкуется здесь, а не в тайлере:
@@ -734,12 +749,19 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
                 "{}: привязка проекцией EPSG:{}", label, found.epsg);
             overlay.frame = frame;
             overlay.binding = overlay::Binding::Projected;
+            overlay.binding_trouble = None;
         }
         // Система названа, а перевести её нечем. Сказать об этом надо кодом: по
         // «привязки нет» неумение от молчания файла не отличить, и разбирать
         // такую жалобу будет не по чему.
-        Err(why) => veldsdk::log::warn!(target: "handlers",
-            "{}: растр привязан к {} — привязка остаётся по контуру", label, why),
+        //
+        // И сказать надо не только в лог: снимок ляжет по контуру каталога, то
+        // есть, скорее всего, повёрнутым, а смотрящий на шар про лог не знает.
+        Err(why) => {
+            veldsdk::log::warn!(target: "handlers",
+                "{}: растр привязан к {} — привязка остаётся по контуру", label, why);
+            overlay.binding_trouble = Some(format!("привязка не взята: {}", why));
+        }
     }
 }
 
