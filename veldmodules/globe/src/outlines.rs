@@ -94,18 +94,31 @@ impl Outlines {
             // обводят один и тот же контур, и разойдись они хоть на вершину —
             // выделенный снимок обводился бы не там, где стоял до выделения, а
             // штриховка вылезла бы за собственный край.
-            let ring = ring(outline);
-            if ring.len() < 3 {
-                continue;
-            }
-            match outline.style() {
-                OutlineStyle::OutlineSelected => built.ribbon(&ring),
-                OutlineStyle::OutlinePlain => built.line(&ring),
-                // Едущий очерчен обычной линией, а внутри неё заштрихован:
-                // сказать надо не «этот снимок особенный», а «место занято».
-                OutlineStyle::OutlinePending => {
-                    built.line(&ring);
-                    built.fill(&ring);
+            let loops = ring(outline);
+            // Заливка — только там, где рисуется одна петля. Две петли — это
+            // пояс, а у пояса середины нет: веер из любой точки пошёл бы
+            // поверх того, чего пояс как раз и не покрывает (см.
+            // [`FILL_REACH`]). По петле порознь его звать тем более нельзя —
+            // параллель сама по себе кольцо вокруг полюса, и веер заштриховал
+            // бы шапку вместо пояса.
+            //
+            // Считается по дожившим до отрисовки: у прямоугольника, упёршегося
+            // в полюс, вторая петля вырождена в точку, а первая — честная
+            // шапка, и заливать её надо.
+            let drawn: Vec<&Vec<Vertex>> = loops.iter().filter(|run| run.len() >= 3).collect();
+            let whole = drawn.len() == 1;
+            for ring in drawn {
+                match outline.style() {
+                    OutlineStyle::OutlineSelected => built.ribbon(ring),
+                    OutlineStyle::OutlinePlain => built.line(ring),
+                    // Едущий очерчен обычной линией, а внутри неё заштрихован:
+                    // сказать надо не «этот снимок особенный», а «место занято».
+                    OutlineStyle::OutlinePending => {
+                        built.line(ring);
+                        if whole {
+                            built.fill(ring);
+                        }
+                    }
                 }
             }
         }
@@ -249,9 +262,14 @@ fn surface(direction: DVec3) -> Vertex {
     mesh::vertex(Geodetic { lat_deg, lon_deg, height_m: height_m() })
 }
 
-/// Вершины замкнутого контура, уплотнённые до [`max_edge_deg`]. Пусто —
-/// очерчивать нечего: двумя точками замкнутой линии не выйдет.
-fn ring(outline: &Outline) -> Vec<Vertex> {
+/// Петли контура, уплотнённые до [`max_edge_deg`]. Пусто — очерчивать нечего:
+/// двумя точками замкнутой линии не выйдет.
+///
+/// Петля обычно одна: контур снимка — четырёхугольник или полоса съёмки.
+/// Больше их у контура, записанного прямоугольником поперёк всей Земли: боковых
+/// краёв у него не существует вовсе, они взялись от способа записи
+/// (см. [`seam_cuts`]).
+fn ring(outline: &Outline) -> Vec<Vec<Vertex>> {
     // Замыкание кладём мы сами, поэтому повторённую последнюю точку
     // отбрасываем: иначе замыкающее ребро выродилось бы в точку.
     let points = match outline.points.as_slice() {
@@ -264,12 +282,99 @@ fn ring(outline: &Outline) -> Vec<Vertex> {
         return Vec::new();
     }
 
-    let mut ring = Vec::new();
-    for (index, point) in points.iter().enumerate() {
-        let next = &points[(index + 1) % points.len()];
-        edge(&mut ring, (point.lat, point.lon), (next.lat, next.lon));
+    let at = |index: usize| {
+        let point = &points[index % points.len()];
+        (point.lat, point.lon)
+    };
+    let places: Vec<(f64, f64)> = (0..points.len()).map(at).collect();
+    let sweeps: Vec<f64> =
+        (0..points.len()).map(|index| geodesy::sweep(at(index), at(index + 1))).collect();
+    let cuts = seam_cuts(&places, &sweeps);
+
+    // Обход начинается сразу после разреза: пробег, начатый с середины,
+    // распался бы на два — начало кольца попало бы в одну петлю, а его
+    // продолжение в другую.
+    let start = cuts.first().map_or(0, |cut| cut + 1);
+    let (mut loops, mut ring) = (Vec::new(), Vec::new());
+    for step in 0..points.len() {
+        let index = (start + step) % points.len();
+        if cuts.contains(&index) {
+            // Пустой пробег — два разреза подряд: так выходит у контура с
+            // повторённой угловой вершиной, и петли за ним нет.
+            if !ring.is_empty() {
+                loops.push(std::mem::take(&mut ring));
+            }
+            continue;
+        }
+        edge(&mut ring, at(index), at(index + 1));
     }
-    ring
+    if !ring.is_empty() {
+        loops.push(ring);
+    }
+    loops
+}
+
+/// Рёбра-разрезы: те, что не ведут контур, а только переходят с одного его
+/// края на другой.
+///
+/// У пояса, обошедшего Землю, боковых краёв нет: прямоугольник записан
+/// четырьмя углами, и его боковые рёбра — одна и та же линия шара, пройденная
+/// вверх и вниз. Долготы они не несут, и по этому их и узнают.
+///
+/// Одного нуля мало: нулевое ребро бывает и настоящим краем. Спрашивают
+/// пробеги между нулями, и спрашивают о двух вещах.
+///
+/// **Замкнулся ли пробег сам.** Шов — это переход с края на край, а значит
+/// то, что он соединяет, и без него одно и то же место шара. Не сошлись концы
+/// — нули здесь настоящие рёбра, и выбросить их значило бы стянуть петлю
+/// хордой через нетронутое.
+///
+/// **Обошёл ли он Землю** ([`geodesy::FULL_CIRCLE_DEG`]). У глобальной сетки,
+/// не сомкнувшейся на десять градусов, боковые рёбра тоже стоя́т по меридиану,
+/// а пробеги дают ±350° — резать нечего. У пояса из четырёх вершин они дают
+/// ±360°. Пробег с нулевым размахом (вроде отростка «туда и обратно») в счёт
+/// не идёт вовсе: круга он не обходит, но и мешать соседям не должен.
+///
+/// От числа вершин признак не зависит, а вот от того, где они стоя́т, —
+/// зависит: `sweep` разворачивает каждое ребро к ближней ветви, и сумма
+/// сохраняется, только пока ни одно из них не длиннее полукруга. Пояс,
+/// записанный четвертями, режется; он же, разбитый пополам, — уже нет.
+fn seam_cuts(places: &[(f64, f64)], sweeps: &[f64]) -> Vec<usize> {
+    let cuts: Vec<usize> =
+        (0..sweeps.len()).filter(|index| sweeps[*index] == 0.0).collect();
+    if cuts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut carried = false;
+    for pair in 0..cuts.len() {
+        let (from, to) = (cuts[pair], cuts[(pair + 1) % cuts.len()]);
+        // До самого разреза, но не включая его: пробег, захвативший своё же
+        // ребро, замкнулся бы тождественно и спрашивать о нём было бы нечего.
+        let run: Vec<usize> = (1..sweeps.len())
+            .map(|step| (from + step) % sweeps.len())
+            .take_while(|index| *index != to)
+            .collect();
+        let Some((&first, &last)) = run.first().zip(run.last()) else {
+            continue;
+        };
+        let (opens, closes) = (places[first], places[(last + 1) % places.len()]);
+        if opens.0 != closes.0 || (opens.1 - closes.1).rem_euclid(360.0) != 0.0 {
+            return Vec::new();
+        }
+        let span: f64 = run.iter().map(|index| sweeps[*index]).sum();
+        match span.abs() >= geodesy::FULL_CIRCLE_DEG {
+            true => carried = true,
+            // Отросток: сам себя прошёл туда и обратно. Круга не обошёл, но и
+            // против разреза не голосует.
+            false if span == 0.0 => continue,
+            false => return Vec::new(),
+        }
+    }
+    match carried {
+        true => cuts,
+        false => Vec::new(),
+    }
 }
 
 /// Ребро от одной вершины до другой, уплотнённое до [`max_edge_deg`].
@@ -477,15 +582,230 @@ mod tests {
             (70.0125, 179.9875),
             (-70.0125, 179.9875),
         ]);
-        let ring = ring(&band);
+        let loops = ring(&band);
+        assert_eq!(loops.len(), 2, "пояс — это две параллели, и петель у него две");
+
+        let ring = loops.concat();
         let lons: Vec<f64> = ring.iter().map(|v| angles_of(v).1).collect();
         let east = lons.iter().filter(|lon| **lon > 60.0).count();
         let west = lons.iter().filter(|lon| **lon < -60.0).count();
         assert!(east > 30 && west > 30, "контур собрался в меридиан: {} восточных, {} западных", east, west);
 
-        // Меридианы при этом остаются меридианами и доходят до обоих краёв.
-        let lats: Vec<f64> = ring.iter().map(|v| angles_of(v).0).collect();
-        assert!(lats.iter().any(|lat| *lat > 69.0) && lats.iter().any(|lat| *lat < -69.0));
+        // А вершин на шве не осталось ни одной: боковых краёв у пояса нет, они
+        // записаны только потому, что прямоугольник записан четырьмя углами.
+        // Проверяется широтами, а не долготами: шов — это меридиан, и на нём
+        // лежат все широты между параллелями.
+        let stray = ring
+            .iter()
+            .map(|v| angles_of(v).0)
+            .filter(|lat| (-69.0..=69.0).contains(lat))
+            .count();
+        assert_eq!(stray, 0, "на шве осталось {} вершин", stray);
+
+        // И каждая петля — целая параллель: своя широта и весь круг долгот.
+        for run in &loops {
+            let lats: Vec<f64> = run.iter().map(|v| angles_of(v).0).collect();
+            let spread = lats.iter().fold(f64::MIN, |a, b| a.max(*b))
+                - lats.iter().fold(f64::MAX, |a, b| a.min(*b));
+            assert!(spread < 0.1, "петля гуляет по широте на {}°", spread);
+            let angles: Vec<(f64, f64)> = run.iter().map(angles_of).collect();
+            assert!(geodesy::encircles(&angles), "петля не обошла Землю");
+        }
+    }
+
+    /// Пояс режется одинаково, сколькими бы вершинами его ни записали.
+    ///
+    /// Тот же пояс, у которого параллели разбиты на четверти: полного круга нет
+    /// теперь ни в одном ребре, и признак «ребро в круг» на нём бы отказал. А
+    /// пробег между разрезами круг обходит по-прежнему — сумма от дробления не
+    /// меняется. Ровно эту независимость от записи держит у щелчка
+    /// `footprint::covers_a_band_written_with_extra_vertices`.
+    #[test]
+    fn a_band_is_cut_the_same_however_densely_it_is_written() {
+        let dense = outline(&[
+            (-70.0125, -180.0125),
+            (70.0125, -180.0125),
+            (70.0125, -90.0),
+            (70.0125, 0.0),
+            (70.0125, 90.0),
+            (70.0125, 179.9875),
+            (-70.0125, 179.9875),
+            (-70.0125, 90.0),
+            (-70.0125, 0.0),
+            (-70.0125, -90.0),
+        ]);
+        let loops = ring(&dense);
+        assert_eq!(loops.len(), 2, "гуще записанный пояс не разрезан");
+        let stray = loops
+            .concat()
+            .iter()
+            .map(|v| angles_of(v).0)
+            .filter(|lat| (-69.0..=69.0).contains(lat))
+            .count();
+        assert_eq!(stray, 0, "на шве осталось {} вершин", stray);
+    }
+
+    /// А поясу с прорезью боковые рёбра — настоящий край, и резать их нельзя.
+    ///
+    /// Сетка, не сомкнувшаяся на десять градусов, Землю по долготе всё ещё
+    /// обходит — меридиана, свободного от неё, нет. Но пробег круга не
+    /// набирает, и выброшенные края замкнули бы каждую петлю хордой прямо
+    /// через прорезь, то есть через то, чего в снимке нет.
+    #[test]
+    fn a_band_with_a_gap_keeps_its_edges() {
+        let mut points = vec![(-70.0, 10.0), (70.0, 10.0)];
+        for lon in [90.0, 170.0, -110.0, -30.0, 0.0] {
+            points.push((70.0, lon));
+        }
+        points.push((-70.0, 0.0));
+        for lon in [-30.0, -110.0, 170.0, 90.0] {
+            points.push((-70.0, lon));
+        }
+        let gapped = outline(&points);
+
+        let ring = ring(&gapped);
+        assert_eq!(ring.len(), 1, "настоящий край выброшен как шов");
+        let angles: Vec<(f64, f64)> = ring.concat().iter().map(angles_of).collect();
+        assert!(geodesy::encircles(&angles), "проверять было бы нечего: круга нет");
+    }
+
+    /// Пояс режется одинаково, с какой бы вершины поставщик его ни начал.
+    ///
+    /// Обход начинается сразу после разреза, а не с головы списка: начатый с
+    /// середины пробег распался бы надвое — его начало попало бы в одну петлю,
+    /// а продолжение в другую, и параллель нарисовалась бы двумя дугами с
+    /// хордой между ними.
+    #[test]
+    fn a_band_is_cut_the_same_wherever_its_list_begins() {
+        let corners = [
+            (-70.0125, -180.0125),
+            (70.0125, -180.0125),
+            (70.0125, -90.0),
+            (70.0125, 0.0),
+            (70.0125, 90.0),
+            (70.0125, 179.9875),
+            (-70.0125, 179.9875),
+            (-70.0125, 90.0),
+            (-70.0125, 0.0),
+            (-70.0125, -90.0),
+        ];
+        for turn in 0..corners.len() {
+            let mut points = corners.to_vec();
+            points.rotate_left(turn);
+            let loops = ring(&outline(&points));
+            assert_eq!(loops.len(), 2, "начав с {}-й вершины, получили {} петель", turn, loops.len());
+        }
+    }
+
+    /// Пробег, не вернувшийся в ту же точку шара, разрезом не считается.
+    ///
+    /// Шов — это переход с края на край, то есть то, что он соединяет, и без
+    /// него одно место. Кольцо, обошедшее Землю по параллели и спустившееся на
+    /// десять градусов, тоже имеет ребро без долготы — но это его настоящий
+    /// край, и выброшенный, он стянул бы петлю хордой через нетронутое.
+    #[test]
+    fn a_run_that_does_not_close_is_no_seam() {
+        let dented = outline(&[(70.0, 0.0), (70.0, 120.0), (70.0, -120.0), (60.0, -120.0)]);
+        let loops = ring(&dented);
+        assert_eq!(loops.len(), 1, "настоящий край выброшен как шов");
+
+        // Ребро в десять градусов стои́т по меридиану −120°, и вершины на нём
+        // лежат только у него: соседнее ребро уходит от той же точки на восток.
+        let standing = loops
+            .concat()
+            .iter()
+            .map(angles_of)
+            .filter(|(lat, lon)| (60.5..69.5).contains(lat) && (lon + 120.0).abs() < 1e-6)
+            .count();
+        assert!(standing > 20, "ребро в десять градусов пропало: вершин {}", standing);
+    }
+
+    /// Повторённая угловая вершина ничего не меняет: между двумя разрезами
+    /// подряд петли нет, и пустой пробег не мешает соседям.
+    #[test]
+    fn a_repeated_corner_does_not_split_the_band() {
+        let doubled = outline(&[
+            (-70.0125, -180.0125),
+            (70.0125, -180.0125),
+            (70.0125, -180.0125),
+            (70.0125, 179.9875),
+            (-70.0125, 179.9875),
+        ]);
+        let loops = ring(&doubled);
+        assert_eq!(loops.len(), 2, "повторённый угол сбил разрез");
+        let stray = loops
+            .concat()
+            .iter()
+            .map(|v| angles_of(v).0)
+            .filter(|lat| (-69.0..=69.0).contains(lat))
+            .count();
+        assert_eq!(stray, 0, "на шве осталось {} вершин", stray);
+    }
+
+    /// Заливки нет и у неразрезанного кольца, разошедшегося на пол-Земли.
+    ///
+    /// Пояс с прорезью петлёй остаётся одной — резать у него нечего, — а
+    /// середины у него всё равно нет: веер из любой точки пошёл бы поверх
+    /// обратной стороны. Держит это [`FILL_REACH`], и держать больше некому:
+    /// у сомкнувшегося пояса до него дело не доходит, там раньше отвечают
+    /// петли.
+    #[test]
+    fn a_gapped_band_is_whole_and_still_gets_no_fill() {
+        let mut points = vec![(-70.0, 10.0), (70.0, 10.0)];
+        for lon in [90.0, 170.0, -110.0, -30.0, 0.0] {
+            points.push((70.0, lon));
+        }
+        points.push((-70.0, 0.0));
+        for lon in [-30.0, -110.0, 170.0, 90.0] {
+            points.push((-70.0, lon));
+        }
+        let gapped = outline(&points);
+        assert_eq!(ring(&gapped).len(), 1, "проверять было бы нечего: кольцо разрезано");
+
+        let built =
+            Outlines::build(&[Outline { style: OutlineStyle::OutlinePending as i32, ..gapped }]);
+        assert!(!built.indices.is_empty(), "контур пропал");
+        assert!(built.hatch_indices.is_empty(), "веер построен поверх обратной стороны");
+    }
+
+    /// А честная шапка заливается, даже когда записана прямоугольником до
+    /// полюса: вторая петля у неё вырождена в точку, рисуется одна, и середина
+    /// у этой одной есть.
+    #[test]
+    fn a_cap_written_to_the_pole_keeps_its_fill() {
+        let polar = outline(&[
+            (60.0, -180.0125),
+            (90.0, -180.0125),
+            (90.0, 179.9875),
+            (60.0, 179.9875),
+        ]);
+        let built =
+            Outlines::build(&[Outline { style: OutlineStyle::OutlinePending as i32, ..polar }]);
+        assert!(!built.hatch_indices.is_empty(), "шапка осталась незалитой");
+    }
+
+    /// Петля, выродившаяся в точку, не рисуется.
+    ///
+    /// У прямоугольника, упёршегося в полюс, верхняя параллель — сама точка:
+    /// круг долгот там сходится в ноль дуги. Разрез такую петлю рождает
+    /// законно, а рисовать её нечем — двумя вершинами замкнутой линии не
+    /// выйдет.
+    #[test]
+    fn a_loop_shrunk_to_a_point_draws_nothing() {
+        let polar = outline(&[
+            (60.0, -180.0125),
+            (90.0, -180.0125),
+            (90.0, 179.9875),
+            (60.0, 179.9875),
+        ]);
+        let loops = ring(&polar);
+        assert_eq!(loops.len(), 2, "полюс не отрезан от параллели");
+        assert!(loops.iter().any(|run| run.len() < 3), "вырожденной петли нет");
+
+        let built = Outlines::build(&[Outline { style: OutlineStyle::OutlinePlain as i32, ..polar }]);
+        let lats: Vec<f64> = built.vertices.iter().map(angles_of).map(|(lat, _)| lat).collect();
+        assert!(!lats.is_empty(), "контур пропал целиком");
+        assert!(lats.iter().all(|lat| *lat < 89.0), "вырожденная петля нарисована");
     }
 
     /// А коробка поперёк шва — не круг, и обводится она короткой стороной:
@@ -499,7 +819,9 @@ mod tests {
             (60.0, -170.0),
             (60.0, 170.0),
         ]);
-        let ring = ring(&box_);
+        let loops = ring(&box_);
+        assert_eq!(loops.len(), 1, "обычная коробка разрезана");
+        let ring = loops.concat();
         // Ни одна вершина не уходит за пределы снятого: 170°…190° (то же, что
         // 170°…−170°), а середина Земли остаётся нетронутой.
         let inside = |lon: f64| !(-160.0..=160.0).contains(&lon);
@@ -525,7 +847,9 @@ mod tests {
     #[test]
     fn a_swath_edge_still_follows_the_arc() {
         let swath = outline(&[(73.0, 10.0), (73.4, 30.0), (72.0, 31.0), (71.6, 11.0)]);
-        let ring = ring(&swath);
+        let loops = ring(&swath);
+        assert_eq!(loops.len(), 1, "полоса съёмки разрезана");
+        let ring = loops.concat();
         let north = ring
             .iter()
             .map(angles_of)
