@@ -21,6 +21,16 @@ use crate::memory::DataBacking;
 
 pub type ResourceId = u64;
 
+/// Хост под своим именем. Модульные инстансы нумеруются с единицы
+/// (см. `Dispatcher::alloc_instance_id`), так что ноль ничей — им хост и
+/// назвался бы, заговори он с реестром от себя.
+///
+/// Сегодня не говорит: ресурсы упавшего он забирает по владельцу, минуя
+/// аренду, а поверхность кадрового цикла берёт без спроса. Ветка держится на
+/// будущее — и потому держится в одном месте: разойдись правило по вызывающим,
+/// оживший однажды ноль открыл бы не то и не там.
+pub const HOST_ID: u32 = 0;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     Read,
@@ -40,21 +50,27 @@ impl Lease {
         Self { owner_id, readers: Vec::new(), writers: Vec::new() }
     }
 
+    /// Распоряжается ли этим ресурсом — то есть вправе ли раздавать права и
+    /// передавать владение. Владелец и хост, больше никто: пишущий сосед пишет
+    /// и освобождает, но раздать полученное дальше не может.
+    pub fn owned_by(&self, module_id: u32) -> bool {
+        self.owner_id == module_id || module_id == HOST_ID
+    }
+
     pub fn can_read(&self, module_id: u32) -> bool {
-        self.owner_id == module_id
-            || module_id == 0
+        self.owned_by(module_id)
             || self.readers.contains(&module_id)
             || self.writers.contains(&module_id)
     }
 
-    /// Владелец и хост (id 0) пишут всегда — это и есть владение. Остальные —
-    /// только по выданному гранту.
+    /// Владелец и хост пишут всегда — это и есть владение. Остальные — только
+    /// по выданному гранту.
     ///
     /// Срока у права нет: аренды с TTL в платформе не существует. По этому же
     /// праву пускает `veld_resource_free` (см. abi.rs), поэтому любое условие,
     /// временно закрывающее запись, закрыло бы владельцу и освобождение.
     pub fn can_write(&self, module_id: u32) -> bool {
-        self.owner_id == module_id || module_id == 0 || self.writers.contains(&module_id)
+        self.owned_by(module_id) || self.writers.contains(&module_id)
     }
 
     pub fn add_reader(&mut self, module_id: u32) {
@@ -69,6 +85,17 @@ impl Lease {
         }
     }
 
+    /// Передать владение целиком: новый владелец и чистые списки.
+    ///
+    /// Чистые — потому что гранты выданы прежним владельцем и держатся на его
+    /// слове. Уцелей они, и отданный ресурс пришёл бы к новому хозяину с
+    /// чужими читателями, которых он не звал и снять не может: раздаёт права
+    /// только владелец, а этих раздал не он.
+    pub fn transfer_to(&mut self, module_id: u32) {
+        self.owner_id = module_id;
+        self.readers.clear();
+        self.writers.clear();
+    }
 }
 
 /// Непрозрачный GPU-объект: адресуется по id, но байтового диапазона за ним
@@ -204,5 +231,157 @@ impl ResourceRegistry {
 impl Default for ResourceRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOST: u32 = 0;
+    const OWNER: u32 = 7;
+    const OTHER: u32 = 9;
+
+    /// Владение — это и есть право: владельцу открыто всё без гранта.
+    #[test]
+    fn the_owner_needs_no_grant() {
+        let lease = Lease::new(OWNER);
+        assert!(lease.can_read(OWNER));
+        assert!(lease.can_write(OWNER));
+    }
+
+    /// Ноль открывает всё, и это единственная ветка аренды без вызывающих.
+    ///
+    /// Инстансы нумеруются с единицы, а хост в реестр от своего имени не
+    /// ходит: ресурсы упавшего он забирает по владельцу, минуя аренду
+    /// ([`ResourceRegistry::free_owned_by`]), а поверхность кадрового цикла
+    /// берёт без спроса. Ветка держится на будущее — и держится именно
+    /// тестом: попав однажды в число живых, она станет дырой размером с весь
+    /// реестр, и заметить её будет негде.
+    #[test]
+    fn zero_is_the_host_and_opens_everything() {
+        let lease = Lease::new(OWNER);
+        assert!(lease.owned_by(HOST));
+        assert!(lease.can_read(HOST));
+        assert!(lease.can_write(HOST));
+    }
+
+    /// Распоряжаться может только владелец: пишущему сосед не начальник.
+    ///
+    /// Этим же предикатом спрашивают право раздавать гранты и передавать
+    /// владение (`lease_op` в abi.rs). Ответь он «да» пишущему, и грант на
+    /// запись стал бы полным владением — получивший раздал бы его дальше.
+    #[test]
+    fn a_writer_does_not_own_what_it_writes() {
+        let mut lease = Lease::new(OWNER);
+        lease.add_writer(OTHER);
+        assert!(lease.can_write(OTHER));
+        assert!(!lease.owned_by(OTHER));
+    }
+
+    /// Чужому без гранта не открыто ничего.
+    #[test]
+    fn a_stranger_gets_nothing() {
+        let lease = Lease::new(OWNER);
+        assert!(!lease.can_read(OTHER));
+        assert!(!lease.can_write(OTHER));
+    }
+
+    /// Право писать включает чтение, обратное неверно.
+    ///
+    /// Несимметрично это потому, что вопросы разные: читателю показывают
+    /// готовое, а пишущему отдают ресурс в руки — по этому же праву он его и
+    /// освободит (см. `veld_resource_free` в abi.rs). Дай мы то же самое за
+    /// грант на чтение, и всякий, кому показали снимок, мог бы его снести.
+    ///
+    /// Раздать права дальше пишущий при этом не может: `lease_op` пускает
+    /// только владельца.
+    #[test]
+    fn writing_implies_reading_but_not_the_other_way() {
+        let mut reader = Lease::new(OWNER);
+        reader.add_reader(OTHER);
+        assert!(reader.can_read(OTHER));
+        assert!(!reader.can_write(OTHER));
+
+        let mut writer = Lease::new(OWNER);
+        writer.add_writer(OTHER);
+        assert!(writer.can_write(OTHER));
+        assert!(writer.can_read(OTHER));
+    }
+
+    /// Повторная выдача не копит записей, а владельцу грант не выдаётся вовсе.
+    ///
+    /// Список проверяется перебором на каждый вопрос о праве, поэтому расти
+    /// ему нельзя; владельцу же грант не нужен по построению, и запись о нём
+    /// означала бы, что право у него откуда-то извне.
+    #[test]
+    fn granting_twice_adds_one_entry_and_never_to_the_owner() {
+        let mut lease = Lease::new(OWNER);
+        for _ in 0..3 {
+            lease.add_reader(OTHER);
+            lease.add_writer(OTHER);
+            lease.add_reader(OWNER);
+            lease.add_writer(OWNER);
+        }
+        assert_eq!(lease.readers, vec![OTHER]);
+        assert_eq!(lease.writers, vec![OTHER]);
+    }
+
+    /// Передача владения уносит все прежние гранты.
+    ///
+    /// Иначе отданный ресурс пришёл бы к новому хозяину с читателями, которых
+    /// он не звал и снять не может: раздаёт права только владелец, а этих
+    /// раздал не он.
+    #[test]
+    fn a_transfer_carries_no_old_grants() {
+        let mut lease = Lease::new(OWNER);
+        lease.add_reader(OTHER);
+        lease.add_writer(OTHER);
+
+        lease.transfer_to(OTHER);
+
+        assert_eq!(lease.owner_id, OTHER);
+        assert!(lease.readers.is_empty() && lease.writers.is_empty());
+        // Прежний владелец теперь чужой — и права у него ровно чужие.
+        assert!(!lease.can_read(OWNER));
+        assert!(!lease.can_write(OWNER));
+    }
+
+    /// Реестр спрашивает у аренды то же самое и тем же родом права.
+    ///
+    /// Перепутанные местами ветви `Access` — отказ, который ничего не запретит:
+    /// читающему откроется запись. Ни одна проверка аренды этого не заметит,
+    /// потому что сама аренда останется верной.
+    #[test]
+    fn the_registry_asks_the_lease_the_same_question() {
+        let registry = ResourceRegistry::new();
+        let id = registry.register(
+            ResourcePayload::Data(crate::memory::DataBacking::Cpu(Vec::new())),
+            OWNER,
+        );
+        registry.update_lease(id, |lease| lease.add_reader(OTHER));
+
+        assert!(registry.check_access(id, OTHER, Access::Read));
+        assert!(!registry.check_access(id, OTHER, Access::Write));
+        assert!(registry.check_access(id, OWNER, Access::Write));
+    }
+
+    /// Несуществующий ресурс отказывает всем — в том числе хосту.
+    ///
+    /// Отказом, а не молчанием: по нему `veld_resource_free` и `lease_op`
+    /// понимают, что дело не выгорело, — а вот **почему**, из него не видно.
+    /// «Не твой» и «такого нет» отвечаются одинаково, и различают их
+    /// переспросом через [`ResourceRegistry::update_lease`] (см. abi.rs).
+    #[test]
+    fn a_missing_resource_refuses_everyone() {
+        let registry = ResourceRegistry::new();
+        for who in [OWNER, HOST, OTHER] {
+            assert!(!registry.check_access(404, who, Access::Read));
+            assert!(!registry.check_access(404, who, Access::Write));
+        }
+        // Тот самый переспрос: замыкание не звалось, значит ресурса нет.
+        let mut found = false;
+        assert!(!registry.update_lease(404, |_| found = true));
+        assert!(!found);
     }
 }

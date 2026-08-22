@@ -88,22 +88,34 @@ where
 }
 
 pub mod path {
-    /// Проверяет, что относительный путь не выходит за пределы рабочей
-    /// директории: запрещает абсолютные пути и компоненты `..`.
+    use std::path::{Component, Path, PathBuf};
+
+    /// Путь из запроса модуля, не выходящий за пределы рабочего каталога.
+    ///
+    /// Спрашивается не «абсолютный ли он», а «состоит ли он только из обычных
+    /// сегментов» — и это не придирка к формулировке. «Абсолютный» понятие
+    /// платформенное: под Windows абсолютным считается лишь путь с префиксом
+    /// диска, поэтому `/etc/passwd` там абсолютным **не** считается, а вот
+    /// присоединённый к рабочему каталогу — обрезает его до корня и уезжает за
+    /// пределы. Перечень разрешённого таких дыр не оставляет: корень, префикс
+    /// диска и `..` отсекаются одинаково на всякой системе.
+    ///
+    /// `.` пропускается: смысла пути он не меняет, а запрет на него сделал бы
+    /// негодным честный `./data` из конфига.
     pub fn is_path_safe(path: &str) -> bool {
-        let path_obj = std::path::Path::new(path);
-        if path_obj.is_absolute() { return false; }
-        for component in path_obj.components() {
-            if matches!(component, std::path::Component::ParentDir) { return false; }
-        }
-        true
+        Path::new(path)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
     }
 
-    /// Резолвит путь из запроса модуля: относительный — от runtime_dir
-    /// хоста (каталог runtime/), абсолютный возвращается как есть.
-    pub fn resolve_path(ctx: &crate::HostContext, path: &str) -> std::path::PathBuf {
-        let path_obj = std::path::Path::new(path);
-        if path_obj.is_absolute() { path_obj.to_path_buf() } else { ctx.config.runtime_dir.join(path_obj) }
+    /// Путь из запроса модуля — от рабочего каталога хоста (`runtime/`).
+    ///
+    /// Присоединяется без разбора, потому что разбирать нечего: сюда доходит
+    /// только то, что прошло [`is_path_safe`], а он оставляет одни обычные
+    /// сегменты. Присоединение корня заменило бы рабочий каталог целиком —
+    /// потому корень туда и не пускают.
+    pub fn resolve_path(ctx: &crate::HostContext, path: &str) -> PathBuf {
+        ctx.config.runtime_dir.join(path)
     }
 }
 
@@ -136,5 +148,61 @@ pub mod wire {
         S: AsyncNativeService + 'static,
     {
         ctx.dispatcher.subscribe_named(service.clone(), name, topics);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path::is_path_safe;
+
+    /// Обычные относительные пути проходят — иначе не работало бы ничего.
+    #[test]
+    fn plain_relative_paths_pass() {
+        assert!(is_path_safe("data/dem/source/S2A.SAFE/MTD.xml"));
+        assert!(is_path_safe("./config/core.json"));
+        assert!(is_path_safe("state"));
+    }
+
+    /// Выход вверх закрыт, где бы он ни стоял.
+    #[test]
+    fn walking_up_is_refused() {
+        assert!(!is_path_safe(".."));
+        assert!(!is_path_safe("../secrets"));
+        assert!(!is_path_safe("data/../../secrets"));
+        assert!(!is_path_safe("data/.."));
+    }
+
+    /// Корень закрыт — и это та половина, которой не хватало.
+    ///
+    /// Под Windows `/etc/passwd` не считается абсолютным путём: абсолютным там
+    /// называется путь с префиксом диска. Спроси мы «абсолютный ли», такой путь
+    /// прошёл бы проверку, а присоединённый к рабочему каталогу — обрезал бы
+    /// его до корня тома и уехал за пределы. Перечень разрешённых сегментов
+    /// закрывает это одинаково на всякой системе, и здесь это и закреплено.
+    #[test]
+    fn rooted_paths_are_refused_on_every_platform() {
+        assert!(!is_path_safe("/etc/passwd"));
+        assert!(!is_path_safe("/"));
+    }
+
+    /// Префикс диска — компонент только там, где он бывает.
+    ///
+    /// Под Windows это `Prefix`, и перечень разрешённого его не пускает. На
+    /// прочих системах `C:\Windows` — один обычный сегмент, и вреда в нём нет:
+    /// присоединённый, он даёт файл с таким именем внутри рабочего каталога.
+    /// Ответ поэтому разный, и ждать одинакового было бы неправдой.
+    #[test]
+    fn a_drive_prefix_is_a_component_only_where_it_exists() {
+        assert_eq!(is_path_safe(r"C:\Windows\System32"), !cfg!(windows));
+        assert_eq!(is_path_safe(r"\\server\share"), !cfg!(windows));
+    }
+
+    /// Пустой путь — не отказ: у него нет ни одного запрещённого компонента,
+    /// а присоединённый он даёт сам рабочий каталог. Годен ли тот для
+    /// запрошенного действия, решает файловая система: удалить каталог
+    /// `remove_file` не даст, прочитать его как файл — тоже.
+    #[test]
+    fn an_empty_path_has_nothing_to_refuse() {
+        assert!(is_path_safe(""));
     }
 }

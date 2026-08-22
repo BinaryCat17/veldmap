@@ -21,7 +21,7 @@ impl Surfaces {
     /// Хост (id 0) не проверяется — у него нет модульной идентичности.
     /// Отказ логируется и игнорируется: шина fire-and-forget, отвечать некому.
     pub fn attach(&self, plugin_id: &str, texture_id: u64, requestor_id: u32) {
-        if requestor_id != 0 {
+        if requestor_id != veldmap_host_core::registry::HOST_ID {
             if self.ctx.dispatcher.instance_of(plugin_id) != Some(requestor_id) {
                 log::warn!(target: "surfaces",
                     "set_surface отклонён: заказчик {} не владеет окном '{}'",

@@ -324,8 +324,6 @@ impl Sink<'_> {
             level,
             x: tx,
             y: ty,
-            width: w,
-            height: h,
             qoi: encoded,
         });
 

@@ -125,13 +125,9 @@ impl Actor for WasmActor {
         // за убитого уже опубликовал хост, и исполненный сейчас запрос
         // прислал бы заказчику второй конец той же операции (нативная
         // сторона это окно закрывает так же — см. util::Tasks::spawn).
-        // Учтённая операция запоминается: упади модуль посреди неё, за него
-        // придётся договорить конец (см. ниже) — из конверта корреляция к тому
-        // времени уже уедет.
-        let accounted = ev.accounted.then(|| ev.correlation.clone());
-        if ev.accounted {
+        if let Some(terminal) = ev.accounted {
             let doom = crate::tasks::Doom::new(self.sentence.clone());
-            if !self.tasks.arm(&ev.correlation, move |victim| victim.doomed = Some(doom)) {
+            if !self.tasks.arm(&ev.correlation, terminal, move |victim| victim.doomed = Some(doom)) {
                 return;
             }
         }
@@ -157,35 +153,48 @@ impl Actor for WasmActor {
         // здесь: она уже на учёте, а исполнить её больше нечем.
         let Ok(handle_event) = self.module.instance.get_typed_func::<(), i32>(&mut self.module.store, "handle_event") else {
             log::error!("Модуль '{}' не отвечает: экспорта handle_event нет", self.spec.name);
-            self.answer_for_lost(accounted);
+            self.answer_for_lost();
             return;
         };
         if let Err(trap) = handle_event.call_async(&mut self.module.store, ()).await {
-            let killed = self.sentence.struck();
             self.revive(trap).await;
-            // За убитого терминальный ответ уже договорил диспетчер
-            // (`Dispatcher::kill`); за упавшего отвечать некому — его больше нет.
-            if !killed {
-                self.answer_for_lost(accounted);
-            }
+            // И после убийства тоже: снятую операцию диспетчер уже договорил и
+            // с учёта снял (`Dispatcher::kill`), но инстанс убийство уносит
+            // целиком — состояние у него одно на все обмены, и начатые сверх
+            // убитого доводить теперь некому.
+            self.answer_for_lost();
         }
     }
 }
 
 impl WasmActor {
-    /// Договорить конец учтённой операции за исполнителя, которого больше нет.
+    /// Договорить концы всех обменов, которые исполнял инстанс, которого
+    /// больше нет.
     ///
-    /// Терминальный ответ приходит всегда — иначе заказчик ждёт вечно, а
-    /// запись об операции живёт до конца процесса. Зовётся из каждого пути,
-    /// где доставка кончилась, не дойдя до модуля: и из трапа, и из «инстанса
-    /// нет вовсе». `None` — операция не учтённая, договаривать нечего.
-    fn answer_for_lost(&self, accounted: Option<String>) {
-        let Some(task) = accounted else { return };
-        let Some(topic) = self.tasks.abandon(&task) else { return };
-        log::warn!(target: "tasks",
-            "Модуль '{}' не довёл операцию {}, отвечаем за неё топиком {}",
-            self.spec.name, task, topic);
-        self.dispatcher.publish_from(&topic, Vec::new(), 0, &task, "");
+    /// Терминальный ответ приходит всегда — иначе заказчик ждёт вечно, а запись
+    /// об операции живёт до конца процесса. Зовётся из каждого пути, где
+    /// инстанс потерян: и из трапа, и из убийства, и из «экспорта нет вовсе».
+    ///
+    /// Всех начатых, а не одного того, на котором упали. Инстанс уносится
+    /// целиком, и вместе с состоянием пропадает всё, чем модуль помнил
+    /// незакрытые обмены. Отвечать только за идущую доставку было бы достаточно
+    /// лишь у модуля, который всякий запрос доводит в одном обработчике;
+    /// асинхронный — спросил и отвечает уже в обработчике чужого ответа —
+    /// оставил бы своих заказчиков ждать молча.
+    ///
+    /// Именно начатых: непочатая очередь смерть инстанса переживает, и
+    /// поднявшийся ответит на неё сам (см. `TaskRegistry::abandon_by`).
+    ///
+    /// Уже снятое с учёта сюда не попадает по построению (`abandon_by` берёт
+    /// живые записи), поэтому второго конца одной операции здесь взяться
+    /// неоткуда.
+    fn answer_for_lost(&self) {
+        for (task, terminal) in self.tasks.abandon_by(&self.spec.name) {
+            log::warn!(target: "tasks",
+                "Модуль '{}' не довёл операцию {}, отвечаем за неё топиком {}",
+                self.spec.name, task, terminal);
+            self.dispatcher.publish_from(terminal, Vec::new(), 0, &task, "");
+        }
     }
 
     /// Поднимает инстанс заново после трапа.

@@ -8,7 +8,7 @@ interface:
     # `snapshot`. Отпечаток при этом свой у каждого клиента: помнит его стаб в
     # его собственном крейте.
     on_set_view:
-      type: ui_service/SetViewRequest
+      type: module/SetViewRequest
       snapshot: true
     # Делегирование места под рендер — платформенный обряд, а не наш: тем же
     # сообщением его получает любой чужой рендерер (см. core.SurfaceDelegated).

@@ -18,8 +18,8 @@ impl Tasks {
     }
 
     /// Запускает фоновую работу и отдаёт платформе то, чем её снять.
-    /// Работа по неучтённому топику (`!caller.accounted`) просто выполняется
-    /// до конца: убивать её некому и нечем.
+    /// Работа по неучтённому топику (`caller.accounted` пуст) просто
+    /// выполняется до конца: убивать её некому и нечем.
     ///
     /// Итог уезжает заказчику терминальным ответом самого исполнителя — он же
     /// снимает операцию с учёта. У убитой такого ответа нет, и за неё отвечает
@@ -33,15 +33,13 @@ impl Tasks {
         let id = caller.correlation.clone();
         let join = tokio::spawn(async move { let _ = make(id).await; });
 
-        if !caller.accounted {
-            return;
-        }
+        let Some(terminal) = caller.accounted else { return };
         // Учёт открыт — значит запись была на момент публикации запроса, и её
         // отсутствие сейчас означает ровно одно: операцию успели убить в окне
         // между публикацией и этим моментом. Тогда abort'им сами, чтобы работа
         // не пережила собственное убийство.
         let abort = join.abort_handle();
-        if !self.ctx.tasks.arm(&caller.correlation, |victim| victim.abort = Some(abort)) {
+        if !self.ctx.tasks.arm(&caller.correlation, terminal, |victim| victim.abort = Some(abort)) {
             join.abort();
         }
     }

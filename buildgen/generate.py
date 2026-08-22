@@ -271,7 +271,13 @@ def intermediate_replies_of(schema: dict) -> set[str]:
 
 
 def flow_entries(svc_name: str, schema: dict) -> tuple[list[dict], list[str]]:
-    """Отменяемые запросы сервиса в виде записей для таблицы потока хоста.
+    """Обмены сервиса в виде записей для таблицы потока хоста.
+
+    Запись заводится на КАЖДЫЙ вход, у которого объявлен терминальный ответ, а
+    не только на отменяемый. Учёт нужен им всем, и нужен для разного: убить
+    операцию можно только объявленную отменяемой, а договорить её конец за
+    упавшего исполнителя надо всегда — иначе заказчик ждёт ответа, которого не
+    будет, до конца процесса.
 
     Отменяемость объявляет исполнитель у себя во входе: только он знает, что
     работа бывает достаточно долгой, чтобы её имело смысл убивать. Заказчику
@@ -282,18 +288,18 @@ def flow_entries(svc_name: str, schema: dict) -> tuple[list[dict], list[str]]:
     terminal, errors = terminal_reply_of(schema)
     entries = []
     for name, entry in inputs.items():
-        if not (entry or {}).get("cancellable"):
-            continue
+        cancellable = bool((entry or {}).get("cancellable"))
         if name not in terminal:
-            # Про неоднозначный терминальный ответ уже сказано выше — второй
-            # раз о том же, да ещё и другими словами, только путает.
-            if name not in requests:
+            if cancellable and name not in requests:
+                # Про неоднозначный терминальный ответ уже сказано выше — второй
+                # раз о том же, да ещё и другими словами, только путает.
                 errors.append(f"interface.inputs.{name}: `cancellable: true` требует ответа "
                               f"(`replies_to`) — иначе учёт операции некому закрыть")
             continue
         entries.append({
-            "request":  f"{svc_name}/{name}",
-            "terminal": f"{svc_name}/{terminal[name]}",
+            "request":     f"{svc_name}/{name}",
+            "terminal":    f"{svc_name}/{terminal[name]}",
+            "cancellable": cancellable,
         })
     return entries, errors
 
@@ -470,6 +476,20 @@ def validate_service_schema(schema: dict, universe: dict,
                 err(where, f"type '{type_str}' uses 'module/' but this module has no types.proto")
                 return None
             alias = own_alias
+        elif alias == own_alias and where.startswith("interface."):
+            # Свой пакет пишется только как 'module/'. Развёрнутое имя значит то
+            # же самое — ниже оно и сходится в один alias, — но читающему схему
+            # даёт два написания вместо одного, и различить по ним свой тип от
+            # чужого уже нельзя: 'ui_service/X' и 'globe/X' выглядят одинаково,
+            # а требуют разного (второй — объявленной зависимости).
+            #
+            # Только о собственном интерфейсе: тем же `check` проверяются типы,
+            # взятые из схемы зависимости (см. cross_check), а там 'module/'
+            # значит её пакет, не наш. Совпасть с нашим тот alias может при
+            # взаимной зависимости — и совет 'пишите module/' был бы там прямо
+            # вредным.
+            err(where, f"type '{type_str}' names this module's own package; "
+                       f"write 'module/{tname}'")
         info = universe.get(alias)
         if info is None:
             err(where, f"unknown proto package '{alias}' in '{type_str}' "
@@ -680,9 +700,8 @@ def generate_host_bindings(args, script_dir: str):
         "proto_packages": proto_packages,
         "proto_dir_rel":  proto_dir_rel,
         "services":       services,
-        # Таблицы ищутся бинарным поиском — обе отсортированы по ключу.
-        "cancellable":    sorted(flow, key=lambda e: e["request"]),
-        "terminal":       sorted(e["terminal"] for e in flow),
+        # Таблица ищется бинарным поиском — отсортирована по запросу.
+        "flow":           sorted(flow, key=lambda e: e["request"]),
     }
 
     env = Environment(loader=FileSystemLoader(os.path.join(script_dir, "templates")))
@@ -913,7 +932,8 @@ def main():
             # только считывается: заказчик получает стаб убийства ровно на те
             # вызовы, которые исполнитель разрешил убивать.
             dep_cancellable = {e["request"].split("/", 1)[1]
-                               for e in flow_entries(dep_name, dep_schemas[dep_name])[0]}
+                               for e in flow_entries(dep_name, dep_schemas[dep_name])[0]
+                               if e["cancellable"]}
             dep_calls.append({
                 "service": dep_name,
                 "snake": dep_name.replace("-", "_"),

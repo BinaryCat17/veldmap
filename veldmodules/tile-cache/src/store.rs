@@ -24,13 +24,13 @@ pub fn on_store(state: &mut State, tile: StoreTile) {
         veldsdk::log::warn!(target: "handlers", "store с негодным ключом: '{}'", tile.fingerprint);
         return;
     }
-    if tile.width == 0 || tile.height == 0
-        || tile.width > layout::MAX_TILE_SIDE || tile.height > layout::MAX_TILE_SIDE
-        || tile.qoi.is_empty() || tile.qoi.len() > layout::MAX_TILE_BYTES
-    {
+    // Проверяется то, что ляжет на диск, — байты. Размеры спрашивать здесь
+    // не у кого и незачем: несёт их сам кодек, и разбирает их чтение
+    // (`query::decode`), где они и отвечают за свою правдоподобность.
+    if tile.qoi.is_empty() || tile.qoi.len() > layout::MAX_TILE_BYTES {
         veldsdk::log::warn!(target: "handlers",
-            "store {}:{}:{}:{} отвергнут: {}×{}, {} байт",
-            tile.fingerprint, tile.level, tile.x, tile.y, tile.width, tile.height, tile.qoi.len());
+            "store {}:{}:{}:{} отвергнут: {} байт",
+            tile.fingerprint, tile.level, tile.x, tile.y, tile.qoi.len());
         return;
     }
 

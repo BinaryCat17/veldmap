@@ -593,22 +593,28 @@ fn send_set(state: &State) {
         .overlays
         .iter()
         .filter(|overlay| overlay.on_globe())
-        .map(|overlay| Overlay {
-            key: overlay.identifier.clone(),
-            label: overlay.label.clone(),
-            utm: overlay.utm.clone(),
-            // Квад — запасная привязка; при рамке он глобусу не нужен.
-            quad: match overlay.utm.is_none() {
-                true => overlay
-                    .quad
-                    .map(|points| points.map(|(lat, lon)| GeoPoint { lat, lon }).to_vec())
-                    .unwrap_or_default(),
-                false => Vec::new(),
-            },
-            rough: overlay.rough,
-            rasters: overlay.rasters.clone(),
-            opacity: Some(overlay.opacity),
-            hidden: overlay.hidden,
+        .map(|overlay| {
+            // Квад — запасная привязка; при рамке он глобусу не нужен. Признак
+            // его габаритности решается тем же ходом и не иначе: сказанный при
+            // пустом кваде, он говорил бы о четырёхугольнике, которого в
+            // сообщении нет.
+            let (quad, rough) = match (overlay.utm.is_some(), overlay.quad) {
+                (false, Some(points)) => (
+                    points.map(|(lat, lon)| GeoPoint { lat, lon }).to_vec(),
+                    overlay.rough,
+                ),
+                _ => (Vec::new(), false),
+            };
+            Overlay {
+                key: overlay.identifier.clone(),
+                label: overlay.label.clone(),
+                utm: overlay.utm.clone(),
+                quad,
+                rough,
+                rasters: overlay.rasters.clone(),
+                opacity: Some(overlay.opacity),
+                hidden: overlay.hidden,
+            }
         })
         .collect();
 

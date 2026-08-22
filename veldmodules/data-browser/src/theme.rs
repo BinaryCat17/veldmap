@@ -11,8 +11,8 @@
 
 use crate::proto::ui_service::{
     Border, Background, Color, Padding, ProgressBarStyle, Scrollbar, Shadow,
-    SliderStyle, TextInputStyle, WidgetStyle, Container, Element, Length, container, icon, space,
-    text,
+    SliderStyle, TextInputStyle, WidgetStyle, Wrapping, Container, Element, Length, container,
+    icon, space, text,
 };
 
 // --- Глифы ---
@@ -265,13 +265,24 @@ pub fn spacer<M>() -> Container<M> {
 /// Место, где показывать нечего, и короткая фраза почему. Одна роль на все
 /// пустые состояния: они говорят об одном и том же и обязаны выглядеть
 /// одинаково — иначе пустой список и пустая половина читаются как разные беды.
+///
+/// Сюда же уходят и отказы: причина — та же короткая фраза вместо содержимого.
+/// А приезжает она откуда угодно, и пробелов в ней может не оказаться вовсе —
+/// путь, ссылка, ключ. Поэтому перенос по буквам: умолчание рвёт строку только
+/// по пробелам, и такая причина вышла бы за отведённое место (см. `Wrapping` в
+/// types.proto).
 pub fn empty<M>(what: &str) -> Container<M> {
-    container(text::<M>(what.to_string()).size(TEXT_BODY).color(INK_DIM))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x()
-        .center_y()
-        .padding(Padding::new(20.0))
+    container(
+        text::<M>(what.to_string())
+            .size(TEXT_BODY)
+            .color(INK_DIM)
+            .wrapping(Wrapping::WrapWordOrGlyph),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .center_x()
+    .center_y()
+    .padding(Padding::new(20.0))
 }
 
 /// Значок строки списка. Размер здесь и назначается: строка одна и та же в
@@ -481,8 +492,11 @@ pub fn control_box() -> WidgetStyle {
     face(SURFACE, INK_DIM, outline(LINE, RADIUS))
 }
 
-/// Всплывающая панель: меню и выпадающие списки. Тень отделяет её от того, над
-/// чем она висит, — без неё панель читается как часть страницы.
+/// Всплывающая панель: меню, выпадающие списки и подсказки значков. Тень
+/// отделяет её от того, над чем она висит, — без неё панель читается как часть
+/// страницы. Подсказка здесь не по недосмотру: висит она так же и отделяться
+/// обязана тем же, иначе два всплывающих над одним списком читались бы как
+/// вещи разного рода.
 pub fn panel() -> WidgetStyle {
     WidgetStyle {
         shadow: Some(Shadow { color: Color::rgb8(0x50, 0x42, 0x28).with_alpha(0.18), offset: (0.0, 8.0), blur: 24.0 }),

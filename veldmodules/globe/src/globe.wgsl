@@ -196,7 +196,7 @@ fn vs_ribbon(
     } else {
         miter = miter / len;
     }
-    let stretch = min(1.0 / max(dot(miter, n_ahead), 1.0 / MITER_LIMIT), MITER_LIMIT);
+    let stretch = 1.0 / max(dot(miter, n_ahead), 1.0 / MITER_LIMIT);
 
     let offset = miter * side * RIBBON_PX * 0.5 * stretch;
     // Обратно в отсечение: экранные пиксели — это доли кадра, умноженные на w.

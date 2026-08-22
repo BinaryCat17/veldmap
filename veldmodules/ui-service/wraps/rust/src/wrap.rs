@@ -6,6 +6,12 @@
 
 pub use super::proto::*;
 
+// Единственный экземпляр типографики, общий с самим ui-service: файл включается
+// и сюда, и в crate::module (см. заголовок typography.rs). Наружу имена шрифтов
+// уезжают адресом `style::FONT_*` — он у клиента один и остаётся прежним.
+#[path = "../../../src/typography.rs"]
+mod typography;
+
 pub mod style;
 pub mod widgets;
 pub mod render;

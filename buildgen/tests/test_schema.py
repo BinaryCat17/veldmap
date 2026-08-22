@@ -124,26 +124,41 @@ def test_topic_without_a_pair_is_not_intermediate(gen):
          "interface": {"outputs": {"on_state": {"type": "fs/FsReadResult"}}}}) == set()
 
 
-# ── Отменяемость и таблица потока ────────────────────────────────────────────
+# ── Таблица потока и отменяемость ────────────────────────────────────────────
 #
-# `cancellable` объявляет исполнитель, а хост по нему открывает учёт. Учёт,
-# который нечем закрыть, — незакрываемая задача, поэтому пара обязательна.
+# Учёт открывается на каждом запросе с объявленным ответом: им держится обещание
+# «терминальный ответ приходит всегда» — упавший посреди работы исполнитель
+# иначе оставил бы заказчика ждать вечно. `cancellable` — свойство записи, а не
+# повод её завести: убить можно только объявленное отменяемым. Учёт, который
+# нечем закрыть, — незакрываемая задача, поэтому пара «запрос/ответ»
+# обязательна.
 
-def test_cancellable_request_yields_fully_qualified_topics(gen):
+def test_a_request_yields_fully_qualified_topics(gen):
     # Таблица уезжает в хост как есть: в ней топики вида `<сервис>/<имя>`,
     # потому что диспетчер сравнивает именно их.
     schema = schema_with({"on_done": reply("on_work")}, cancellable=True,
                          name="worker")
     entries, errors = gen.flow_entries("worker", schema)
     assert errors == []
-    assert entries == [{"request":  "worker/on_work",
-                        "terminal": "worker/on_done"}]
+    assert entries == [{"request":     "worker/on_work",
+                        "terminal":    "worker/on_done",
+                        "cancellable": True}]
 
 
-def test_non_cancellable_request_is_not_accounted(gen):
-    # Учёт заводится только на объявленно долгую работу: у остальных операций
-    # нечего убивать, и запись о них была бы мусором.
+def test_a_plain_request_is_accounted_but_not_killable(gen):
+    # Учёт нужен и неотменяемому: убивать у него нечего, а договорить конец за
+    # упавшего исполнителя надо — заказчик ждёт ответа одинаково.
     entries, errors = gen.flow_entries("fs", schema_with({"on_done": reply("on_work")}))
+    assert errors == []
+    assert entries == [{"request":     "fs/on_work",
+                        "terminal":    "fs/on_done",
+                        "cancellable": False}]
+
+
+def test_a_topic_without_a_reply_stays_out_of_the_table(gen):
+    # Учёту не на чем держаться: закрыть его нечем, и запись висела бы вечно.
+    # Так живут рассылки состояния и события — у них корреспондента нет вовсе.
+    entries, errors = gen.flow_entries("svc", schema_with({}))
     assert errors == []
     assert entries == []
 
@@ -218,6 +233,60 @@ def test_replies_to_must_name_an_existing_input(core_errors):
         "outputs": {"on_read_result": {"type": "core/ResourceOpened",
                                        "replies_to": "on_raed"}}}})
     assert any("is not one of this service's interface.inputs" in e for e in errors), errors
+
+
+def test_own_package_must_be_written_as_module(gen, tmp_path):
+    # Своё имя пакета кодоген разворачивает в тот же alias, что и `module/`, —
+    # два написания одного значат, что читающий схему обязан знать оба. Хуже
+    # того, развёрнутое неотличимо от чужого, а чужое требует объявленной
+    # зависимости: одно и то же на вид, разное по правилам.
+    uni = make_universe(core=(("ResourceOpened",), "core"),
+                        mine=(("Thing",), "svc"))
+    module_dir = tmp_path / "svc"
+    module_dir.mkdir()
+    (module_dir / "types.proto").write_text("package veldmap.mine;\n")
+
+    spelled = {"name": "svc", "interface": {"inputs": {"on_x": {"type": "mine/Thing"}}}}
+    errors, _ = gen.validate_module_schema(spelled, str(module_dir), PROTO_DIR, uni)
+    assert any("names this module's own package" in e for e in errors), errors
+
+    short = {"name": "svc", "interface": {"inputs": {"on_x": {"type": "module/Thing"}}}}
+    errors, resolved = gen.validate_module_schema(short, str(module_dir), PROTO_DIR, uni)
+    assert errors == [], errors
+    assert resolved["inputs"]["on_x"] == "mine/Thing"
+
+
+def test_the_own_package_rule_spares_a_dependency_schema(gen, tmp_path):
+    # Тем же `check` проверяются типы, взятые из схемы зависимости, а там
+    # `module/` значит её пакет. При взаимной зависимости чужой alias совпадёт с
+    # нашим — и правило, сработав, посоветовало бы написать в чужой схеме
+    # `module/`, то есть указать не на тот пакет.
+    uni = make_universe(core=(("ResourceOpened",), "core"),
+                        alpha=(("Thing",), "alpha"),
+                        beta=(("Other",), "beta"))
+    for name, package in (("alpha", "alpha"), ("beta", "beta")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "types.proto").write_text(f"package veldmap.{package};\n")
+
+    # beta называет пакет alpha развёрнуто — ей это можно, alpha объявлен у неё
+    # в зависимостях; для alpha же это имя своего пакета.
+    (tmp_path / "beta" / "schema.yaml").write_text(
+        "name: beta\n"
+        "interface:\n"
+        "  inputs:\n"
+        "    on_x:\n"
+        "      type: alpha/Thing\n"
+        "dependencies:\n"
+        "  alpha:\n"
+        "    calls: []\n")
+
+    schema = {"name": "alpha",
+              "interface": {"outputs": {"on_ready": {"type": "module/Thing"}}},
+              "dependencies": {"beta": {"calls": ["on_x"]}}}
+    errors, resolved = gen.validate_module_schema(
+        schema, str(tmp_path / "alpha"), PROTO_DIR, uni)
+    assert errors == [], errors
+    assert resolved["calls"][("beta", "on_x")] == "alpha/Thing"
 
 
 def test_foreign_module_type_requires_a_declared_dependency(gen, tmp_path):

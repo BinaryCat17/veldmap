@@ -5,9 +5,11 @@
 генератор, а изменившийся контракт, и увидеть его надо в момент правки схемы,
 а не в рантайме.
 """
+import argparse
+
 import pytest
 
-from conftest import PROTO_DIR
+from conftest import BUILDGEN_DIR, PROTO_DIR
 
 
 def module_schemas(real_schemas):
@@ -42,13 +44,17 @@ def test_every_schema_has_an_unambiguous_terminal(gen, real_schemas):
     assert failures == {}
 
 
-def test_accounted_operations_are_exactly_the_declared_ones(gen, real_schemas):
-    """Что именно хост учитывает как задачу.
+def test_killable_operations_are_exactly_the_declared_ones(gen, real_schemas):
+    """Что именно хост позволяет убить.
 
     Список короткий намеренно: отменяемым объявляет себя тот, кому нечего
     терять при убийстве (у image-tiler состояния между вызовами нет вовсе).
     Новая строка здесь — это новая убиваемая операция, и появиться она должна
     осознанно.
+
+    Учёт при этом заводится и на остальных запросах — им держится терминальный
+    ответ за упавшего, — но убить их нельзя, и стаба убийства заказчику не
+    достаётся (см. `test_every_answered_request_is_accounted`).
     """
     flow = []
     for name, _, schema, _ in real_schemas:
@@ -56,11 +62,57 @@ def test_accounted_operations_are_exactly_the_declared_ones(gen, real_schemas):
         assert errors == [], f"{name}: {errors}"
         flow.extend(entries)
 
-    assert sorted((e["request"], e["terminal"]) for e in flow) == [
+    assert sorted((e["request"], e["terminal"]) for e in flow if e["cancellable"]) == [
         ("image-tiler/on_produce", "image-tiler/on_produce_done"),
         ("network/on_fs_download", "network/on_fs_download_result"),
         ("network/on_http",        "network/on_http_result"),
     ]
+
+
+def test_every_answered_request_is_accounted(gen, real_schemas):
+    """Учёт покрывает всякий запрос, у которого объявлен ответ.
+
+    На этом и держится обещание «терминальный ответ приходит всегда»: упади
+    исполнитель посреди работы — конец операции договорит хост, а договорить он
+    может только учтённое. Пропусти таблица хоть один такой запрос, и его
+    заказчик после трапа ждал бы ответа до конца процесса.
+
+    Считается по схемам, а не по списку: список устарел бы на первом же новом
+    топике, а правило — нет.
+    """
+    for name, _, schema, _ in real_schemas:
+        accounted = {e["request"] for e in gen.flow_entries(schema.get("name"), schema)[0]}
+        answered = {f"{schema.get('name')}/{request}"
+                    for request in gen.terminal_reply_of(schema)[0]}
+        assert answered == accounted, f"{name}: без учёта остались {answered - accounted}"
+
+
+def test_the_flow_table_reaches_the_host(gen, real_schemas, tmp_path):
+    """Учёт держится на таблице, которую видит ХОСТ.
+
+    Тесты выше спрашивают `flow_entries` — то, что считает валидатор. Между ним
+    и хостом лежат ещё два места, где запись может потеряться молча: отбор при
+    сборке `template_data` и цикл в шаблоне. Ослабей любое из них, и сборка
+    пройдёт зелёной, схемы сойдутся, а заказчик после трапа исполнителя будет
+    ждать ответа до конца процесса — то есть ровно тот класс ошибки, ради
+    которого тесты buildgen и заведены.
+
+    Поэтому здесь генерация зовётся целиком и проверяется отрисованное.
+    """
+    args = argparse.Namespace(host_bindings=str(tmp_path), proto_dir=PROTO_DIR, package=None)
+    gen.generate_host_bindings(args, BUILDGEN_DIR)
+
+    rendered = (tmp_path / "src" / "lib.rs").read_text(encoding="utf-8")
+    at = rendered.index("pub const FLOW")
+    table = rendered[at:rendered.index("];", at)]
+
+    for name, _, schema, _ in real_schemas:
+        service = schema.get("name")
+        killable = {e["request"] for e in gen.flow_entries(service, schema)[0] if e["cancellable"]}
+        for request, terminal in gen.terminal_reply_of(schema)[0].items():
+            topic = f"{service}/{request}"
+            row = f'("{topic}", "{service}/{terminal}", {str(topic in killable).lower()})'
+            assert row in table, f"{name}: в таблице хоста нет строки {row}"
 
 
 def test_download_progress_is_not_terminal(gen, real_schemas):

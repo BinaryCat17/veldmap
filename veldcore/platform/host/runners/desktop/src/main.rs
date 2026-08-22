@@ -25,9 +25,9 @@ use veldmap_host_bindings::app as app_bus;
 struct HostWindow {
     owner: String,
     size: (u32, u32),
-    /// Композитируемая поверхность: (texture_id, bind group для блита).
+    /// Композитируемая поверхность: bind group для блита.
     /// None до первого set_surface — окно рисует фоновый цвет.
-    surface: Option<(u64, wgpu::BindGroup)>,
+    surface: Option<wgpu::BindGroup>,
 }
 
 /// Публикация UI-события в нейтральный топик app/on_ui_event.
@@ -266,14 +266,7 @@ impl Running {
             ));
         }
 
-        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Frame(app::FrameEvent {
-            dt,
-            // По запросу у окна, а не константой: окно могли перенести на
-            // другой экран, а поле контракта не должно врать на 144 Гц.
-            monitor_fps: self.window.current_monitor()
-                .and_then(|monitor| monitor.refresh_rate_millihertz())
-                .map_or(60, |mhz| (mhz + 500) / 1000),
-        }));
+        publish_ui_event(&self.app_pub, &self.hw.owner, app::ui_event::Event::Frame(app::FrameEvent { dt }));
 
         // Атомарный свап поверхности, если владелец приаттачил новую.
         // Права проверены на входе (модуль app + фасад Surfaces);
@@ -283,7 +276,7 @@ impl Running {
                 Some((texture, _, _, _)) => {
                     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                     let bind_group = self.compositor.create_bind_group(&self.device, &view);
-                    self.hw.surface = Some((texture_id, bind_group));
+                    self.hw.surface = Some(bind_group);
                     log::debug!(target: "render", "К окну '{}' подключена поверхность: текстура {}", self.hw.owner, texture_id);
                 }
                 None => log::warn!(target: "render", "set_surface для '{}' назвал неизвестную текстуру {}", self.hw.owner, texture_id),
@@ -363,7 +356,7 @@ impl Running {
                 depth_stencil_attachment: None,
                 ..Default::default()
             });
-            if let Some((_, bind_group)) = &self.hw.surface {
+            if let Some(bind_group) = &self.hw.surface {
                 self.compositor.blit_ui(&mut rp, bind_group);
             }
         }
@@ -467,7 +460,7 @@ impl Running {
                         device: &self.device,
                         queue: &queue,
                         compositor: &self.compositor,
-                        surface: self.hw.surface.as_ref().map(|(_, bind_group)| bind_group),
+                        surface: self.hw.surface.as_ref(),
                         size: self.hw.size,
                         format: self.surface_config.format,
                     };

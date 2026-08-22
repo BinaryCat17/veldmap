@@ -210,14 +210,15 @@ impl GraphicsDevice {
                             }
                             keep_views.push((e.binding, view));
                         }
-                        _ => {
-                            if let Some((tex, _, _, _)) = self.get_texture_info(*tvid, owner_id) {
-                                let v = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor::default()));
-                                keep_views.push((e.binding, v));
-                            } else {
-                                return Err(anyhow::anyhow!("TextureView {} not found or access denied", tvid));
-                            }
-                        }
+                        // Текстура вместо вида отклоняется, а не заводит вид на
+                        // лету: поле контракта — `texture_view_id`, вид заводит
+                        // тот, кто им пользуется, и владельцем становится он же.
+                        // Заведи его хост здесь, и получился бы ресурс, о
+                        // котором реестр не знает, — живущий одной ссылкой из
+                        // bind group и не подчиняющийся общему владению.
+                        _ => return Err(anyhow::anyhow!(
+                            "TextureView {} не найден, недоступен или это не вид", tvid
+                        )),
                     }
                 }
                 Some(proto::bind_group_entry::Resource::SamplerId(sid)) => {

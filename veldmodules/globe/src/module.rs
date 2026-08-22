@@ -232,7 +232,9 @@ pub fn on_camera(state: &mut State, command: crate::proto::globe::CameraCommand)
     use crate::proto::globe::camera_command::Command;
     match command.command {
         Some(Command::Orbit(orbit)) => state.camera.orbit(orbit.dx, orbit.dy),
-        Some(Command::Zoom(zoom)) => state.camera.zoom(zoom.delta),
+        Some(Command::Zoom(zoom)) => {
+            state.camera.zoom_at(zoom.delta, zoom.hold_x, zoom.hold_y)
+        }
         // Наводка без точки — это наводка в никуда: молча смотреть в центр
         // координат хуже, чем не двигаться вовсе.
         Some(Command::Focus(focus)) => match focus.at {
@@ -769,7 +771,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
 pub fn on_tile(state: &mut State, msg: CachedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.peek(&correlation) else {
-        return tiles::discard(msg.texture);
+        return tiles::release(msg.texture);
     };
     let (key, role, fingerprint) = (ctx.key.clone(), ctx.role, ctx.fingerprint.clone());
     accept_tile(state, &key, role, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -779,7 +781,7 @@ pub fn on_tile(state: &mut State, msg: CachedTile) {
 pub fn on_produced(state: &mut State, msg: ProducedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.peek(&correlation) else {
-        return tiles::discard(msg.texture);
+        return tiles::release(msg.texture);
     };
     let (key, role, fingerprint) = (ctx.key.clone(), ctx.role, ctx.fingerprint.clone());
     accept_tile(state, &key, role, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -1034,7 +1036,7 @@ fn accept_tile(
         // Устройства нет — рисовать нечем и класть некуда; ячейка при этом ни в
         // чём не виновата и спросится заново, когда место под кадр появится.
         None => {
-            tiles::discard(texture);
+            tiles::release(texture);
             true
         }
     };
@@ -1140,7 +1142,7 @@ fn build_patches(state: &mut State) {
 /// растр ещё описывают): тогда о слое рассказывается то, что посчитал последний
 /// живой кадр. Работа при этом стоящей не объявляется: описание идёт и без
 /// кадра, и оно же — самая долгая часть пути растра по сети (см.
-/// `Overlay::busy`).
+/// `Overlay::working`).
 ///
 /// Уезжает только изменившийся набор — топик объявлен снимком, и повтор
 /// отсекает его стаб (см. schema.yaml).
@@ -1184,7 +1186,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
         .map(|overlay| {
             // Слою, которому не дают считать (скрыт, места под кадр нет),
             // добывать нечего — потому и `live`. Описание в этот счёт не
-            // идёт: оно кадра не спрашивает (см. `Overlay::busy`). Всё
+            // идёт: оно кадра не спрашивает (см. `Overlay::working`). Всё
             // остальное решает общее правило (`tiles::working`): оно и есть
             // «путь не пройден», а не «что-то в полёте».
             //
@@ -1201,7 +1203,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
                 key: overlay.key.clone(),
                 ready: overlay.progress.ready,
                 total: overlay.progress.total,
-                working: overlay.busy(&state.passes, mine.map(|(.., wanted)| wanted), live),
+                working: overlay.working(&state.passes, mine.map(|(.., wanted)| wanted), live),
                 share: overlay.progress.share,
                 error: overlay.error.clone(),
                 trouble: overlay.trouble(),

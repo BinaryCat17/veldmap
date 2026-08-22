@@ -10,6 +10,11 @@
 //! только отсюда, а во что превращается сдвиг — знает только та, у кого
 //! камера (ровно то же разделение, что у глобуса).
 //!
+//! Единицы при этом другие, чем у глобуса, и это не оплошность: наружу уходят
+//! пиксели канвы и готовый множитель, а не щелчки. Множитель — потому что тем
+//! же полем правят и кнопки `±` тулбара, а договорись мы «в щелчках», тулбару
+//! пришлось бы знать шаг колеса, к которому он отношения не имеет.
+//!
 //! «Чей это ответ» и «актуален ли он» — два разных вопроса: на первый
 //! отвечает таблица маршрутов `State::previews`, на второй — `Latest` внутри
 //! вида. Вкладку могли закрыть, пока ответ шёл, и тогда ответ наш, а
@@ -26,6 +31,9 @@ use veldsdk::proto::core::ResourceOpened;
 /// Во сколько раз шаг колеса меняет масштаб. Щелчок приезжает долями с
 /// инерцией, так что итоговое приближение — плавная степень этого числа.
 const ZOOM_PER_CLICK: f64 = 1.25;
+// Тот же щелчок приближает и шар — обратной величиной, потому что там множится
+// высота, а не масштаб (`globe::camera::ZOOM_PER_STEP`). Сведены проверкой
+// `buildgen/tests/test_wheel_step.py`: колесо одно, и шаг у него один.
 
 /// Шаг кнопок ± в тулбаре.
 const ZOOM_STEP: f32 = 1.5;
@@ -102,13 +110,32 @@ pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool 
     };
 
     let identifier = raster.identifier.clone();
+
+    // Чем открывать растр, решается тем же правилом, что у строки списка и у
+    // наложения на шаре (`LibraryState::local_name`): скачанное открывает
+    // библиотека, потому что файл под рукой. Спрашивается это здесь, а не на
+    // нажатии: нажимают на снимок, а на диске лежит не он, а растр внутри
+    // него, и называет растр только этот ответ.
+    let local = state.library.local_name(&identifier).map(str::to_string);
+
+    let Some(preview) = state.preview_mut(view) else { return true };
     preview.label = identifier.clone();
+    // Запись библиотеки помнится и здесь: по ней вкладка, восстановленная из
+    // раскладки, откроется с диска сразу, не повторяя хода к провайдеру.
+    preview.entry = local.clone();
     let correlation_id = preview.begin();
     state.previews.insert(correlation_id.clone(), view);
-    crate::calls::data_provider::on_open(
-        &crate::proto::data_provider::OpenRequest { identifier },
-        &correlation_id,
-    );
+
+    match local {
+        Some(name) => crate::calls::data_library::on_open(
+            &crate::proto::data_library::OpenRequest { name },
+            &correlation_id,
+        ),
+        None => crate::calls::data_provider::on_open(
+            &crate::proto::data_provider::OpenRequest { identifier },
+            &correlation_id,
+        ),
+    }
     true
 }
 

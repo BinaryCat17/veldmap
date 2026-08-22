@@ -45,10 +45,10 @@ const TILE_BYTES: u64 = (pyramid::TILE as u64) * (pyramid::TILE as u64) * 4;
 /// она молча дала бы шару и канве разные пределы.
 pub const DEFAULT_VRAM_BUDGET_MB: u64 = 256;
 
-/// Как назвать цену прохода в логе. Здесь, а не у каждого потребителя своей
-/// строкой: факт один, и разойдясь в его названии, два лога читались бы как
-/// про разные вещи.
-pub fn reach_note(reach: Reach) -> &'static str {
+/// Как назвать цену прохода в логе. Наружу уезжает не она, а `Meta::note`,
+/// куда она и вложена: потребителям нужна строка про источник целиком, а
+/// собранная порознь, она читалась бы у двоих по-разному.
+pub(crate) fn reach_note(reach: Reach) -> &'static str {
     match reach {
         Reach::Exact => "произвольный доступ",
         Reach::Pyramid => "проход строит пирамиду целиком",
@@ -59,7 +59,12 @@ pub fn reach_note(reach: Reach) -> &'static str {
 /// Ресурс освободить, если он приехал. Приехавшая текстура уже наша, чей бы
 /// ответ её ни привёз, и не принять её значит потерять видеопамять до конца
 /// процесса.
-pub fn discard(texture: Option<ResourceHandle>) {
+///
+/// Именно `release`, как у [`veldsdk::resource::release`], которому она и
+/// передаёт: `discard` в SDK ресурс намеренно **не** трогает — так отвечают на
+/// чужой ответ, — и одно слово на два обратных смысла звало бы освободить
+/// чужое.
+pub fn release(texture: Option<ResourceHandle>) {
     if let Some(handle) = texture {
         veldsdk::resource::release(handle);
     }
@@ -107,15 +112,11 @@ pub fn describe(msg: &crate::proto::Described) -> Result<Meta, String> {
     if msg.width == 0 || msg.height == 0 || msg.levels == 0 {
         return Err("источник описан пустым".to_string());
     }
-    // Арифметика ячеек считается общим pyramid.rs — потребитель и
-    // производитель обязаны быть собраны под одну сторону тайла.
-    if msg.tile != pyramid::TILE {
-        return Err(format!(
-            "сторона тайла {} у производителя против {} у потребителя",
-            msg.tile,
-            pyramid::TILE
-        ));
-    }
+    // Сторону тайла здесь не сверяют, и `msg.tile` не читают: арифметику ячеек
+    // обе стороны считают одним `pyramid.rs` — производитель своим, потребитель
+    // тем же файлом через `#[path]` в wrap.rs, — так что разойтись эти два
+    // числа в одной сборке не могут.
+
     // Отпечаток — ключ и в видеопамяти, и на диске. Пустой сложил бы под одним
     // ключом тайлы разных источников, а производитель его таким не отдаёт:
     // проверка на границе, где кончается его слово и начинается наш учёт.
@@ -237,7 +238,7 @@ impl Store {
     /// размеры и отказ графики освобождают приехавшее прямо здесь. Текстура
     /// уже наша, чей бы ответ её ни привёз, и вернуть её наверх «на всякий
     /// случай» значит завести второе место, где о ней надо помнить.
-    pub fn accept(
+    pub(crate) fn accept(
         &mut self,
         fingerprint: &str,
         addr: Addr,
@@ -250,7 +251,7 @@ impl Store {
             return Err("в ответе нет текстуры".to_string());
         };
         if width == 0 || height == 0 {
-            discard(Some(texture));
+            release(Some(texture));
             return Err(format!("тайл {}×{}", width, height));
         }
         let texture = veldsdk::OwnedResource::new(texture);
@@ -310,7 +311,7 @@ impl Store {
         Some((addr, tiles.get(&addr)?))
     }
 
-    pub fn contains(&self, fingerprint: &str, addr: Addr) -> bool {
+    pub(crate) fn contains(&self, fingerprint: &str, addr: Addr) -> bool {
         self.sources.get(fingerprint).is_some_and(|tiles| tiles.contains_key(&addr))
     }
 
@@ -431,7 +432,7 @@ pub struct Want {
 impl Want {
     /// Путь к цели не пройден: за этой ступенью пойдёт следующая, и пойдёт
     /// сама — без единого движения камеры.
-    pub fn climbing(&self) -> bool {
+    pub(crate) fn climbing(&self) -> bool {
         self.climbed + 1 < self.steps
     }
 }
@@ -606,14 +607,14 @@ impl Fetch {
 
     /// Спрошено и ещё не приехало: кэш ищет, производитель читает — работа идёт.
     /// Пусто — либо всё нужное уже есть, либо просить нечего.
-    pub fn waiting(&self) -> bool {
+    pub(crate) fn waiting(&self) -> bool {
         !self.inflight.is_empty()
     }
 
     /// Ячейка, которой не будет: проход, в который её отдали, сорвался.
     /// Спрашивают об этом те, кто выбирает ступень: без этого она встала бы на
     /// непроизводимой ячейке навсегда.
-    pub fn hopeless(&self, addr: Addr) -> bool {
+    pub(crate) fn hopeless(&self, addr: Addr) -> bool {
         self.failed.contains(&addr)
     }
 
@@ -808,7 +809,7 @@ impl<K> Default for Passes<K> {
 
 impl<K: PartialEq> Passes<K> {
     /// По источнику идёт проход — спрашивать по нему нечего до его конца.
-    pub fn going(&self, fingerprint: &str) -> bool {
+    pub(crate) fn going(&self, fingerprint: &str) -> bool {
         self.by_source.contains_key(fingerprint)
     }
 
@@ -929,11 +930,6 @@ mod tests {
 
         let failed = crate::proto::Described { error: "нет доступа".into(), ..described() };
         assert!(!ok(failed), "отказ производителя");
-
-        // Сторона тайла — общая константа pyramid.rs; разойдясь с
-        // производителем, потребитель считал бы ячейки по чужой сетке.
-        let other_tile = crate::proto::Described { tile: pyramid::TILE * 2, ..described() };
-        assert!(!ok(other_tile));
 
         // Отпечаток — ключ и в видеопамяти, и на диске: пустой сложил бы под
         // одним ключом тайлы разных источников.

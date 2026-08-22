@@ -31,13 +31,7 @@ pub fn view(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg>
     // причина отказа — единственное, что тут можно сообщить. Неполный кадр
     // сюда не относится — он живой, и говорит о себе полоса внизу.
     let body: Element<Msg> = match preview.failure() {
-        Some(error) => container(text::<Msg>(error.to_string()).size(theme::TEXT_BODY).color(theme::INK_DIM))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
-            .padding(Padding::new(20.0))
-            .into(),
+        Some(error) => theme::empty(error).into(),
         None => canvas(view, preview),
     };
 
@@ -134,7 +128,7 @@ fn progress_line(preview: &PreviewState) -> Option<String> {
     if !view.trouble.is_empty() {
         return Some(format::ellipsize(&view.trouble, 66));
     }
-    if !view.busy {
+    if !view.working {
         return None;
     }
     if view.read_bytes > 0 && view.total_bytes > 0 {

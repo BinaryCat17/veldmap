@@ -4,11 +4,7 @@ use iced_widget::{column, row, text, button, container, scrollable, progress_bar
 use iced_core::{Element, Theme, Length, Color, alignment, Size, Font, font::Family};
 use std::collections::HashMap;
 use std::sync::Mutex;
-
-/// Размер текста, когда разметка его не назвала (или назвала негодным).
-/// Число протокола, а не файла: билдер wrap-крейта пишет его же по умолчанию
-/// (widgets.rs), и всё, что рендерит текст, берёт умолчание отсюда.
-pub const DEFAULT_TEXT_SIZE: f32 = 16.0;
+use crate::module::typography::DEFAULT_TEXT_SIZE;
 
 /// Сработавший виджет по дороге к владельцу разметки — само сообщение шины:
 /// типа-двойника с теми же полями у него нет, набор видов нагрузки объявлен
@@ -18,8 +14,10 @@ pub type UiMessage = proto::UiEventResponse;
 impl proto::UiEventResponse {
     /// Сообщение, чью нагрузку назвала сама разметка.
     ///
-    /// Пустое имя метода означает «обработчика нет»: такие сюда доходят
-    /// (виджет объявлен без реакции), и отсеивает их отправка.
+    /// Пустое имя метода означает «обработчика нет»: виджет объявлен без
+    /// реакции. Такие сюда доходят, и отсеиваются они дважды: конвертер заводит
+    /// реакцию только при непустом имени, а отправка (`dispatch_event`) ещё раз
+    /// проверяет пустое уже у собранного события.
     pub fn declared(handler: &proto::Handler) -> Self {
         Self::text(handler.method.clone(), handler.key.clone(), handler.value.clone())
     }

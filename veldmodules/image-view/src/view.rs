@@ -98,7 +98,7 @@ impl View {
     /// Показ идёт: описание в пути либо по пирамиде ещё есть работа. Второе
     /// считает общее правило (`tiles::working`) — то же, по которому отвечает
     /// на этот вопрос наложение на шаре.
-    pub fn busy<K: PartialEq>(&self, passes: &Passes<K>, want: Option<&tiles::Want>) -> bool {
+    pub fn working<K: PartialEq>(&self, passes: &Passes<K>, want: Option<&tiles::Want>) -> bool {
         self.describe.is_pending()
             || self.meta().is_some_and(|meta| {
                 tiles::working(&self.fetch, passes, &meta.fingerprint, want)

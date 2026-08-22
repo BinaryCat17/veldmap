@@ -8,6 +8,7 @@ use iced_core::{Point, Event};
 use iced_runtime::user_interface;
 use crate::module::renderer::GpuRenderer;
 use crate::module::converter::UiMessage;
+use crate::module::typography::{FONT_ICONS, FONT_MONO, FONT_UI};
 
 /// С чего начинаются буферы геометрии. Дальше они растут под кадр, поэтому это
 /// не потолок, а «столько понадобится точно»: обычный экран разметки
@@ -103,18 +104,15 @@ impl State {
     pub fn new() -> Self {
         Self {
             plugins: HashMap::new(),
-            // Имена шрифтов — контракт с клиентами разметки; для них они
-            // объявлены константами в veld-ui-service-wrap (style::FONT_*).
-            //
-            // У одного имени бывает несколько файлов: начертания — это разные
-            // лица одного семейства, и выбирает между ними уже вес текста
-            // (Text.weight). Без своего файла вес подменяется ближайшим.
-            renderer: GpuRenderer::new("UI", vec![
-                ("UI", include_bytes!("../../../runtime/assets/AlegreyaSans-Regular.ttf")),
-                ("UI", include_bytes!("../../../runtime/assets/AlegreyaSans-Medium.ttf")),
-                ("UI", include_bytes!("../../../runtime/assets/AlegreyaSans-Bold.ttf")),
-                ("Mono", include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
-                ("Icons", include_bytes!("../../../runtime/assets/SymbolsNerdFontMono-Regular.ttf")),
+            // Под какими именами класть файлы — сказано в typography.rs; тем же
+            // файлом эти имена видит и клиент разметки, так что литералов здесь
+            // нет и разойтись двум сторонам негде.
+            renderer: GpuRenderer::new(FONT_UI, vec![
+                (FONT_UI, include_bytes!("../../../runtime/assets/AlegreyaSans-Regular.ttf")),
+                (FONT_UI, include_bytes!("../../../runtime/assets/AlegreyaSans-Medium.ttf")),
+                (FONT_UI, include_bytes!("../../../runtime/assets/AlegreyaSans-Bold.ttf")),
+                (FONT_MONO, include_bytes!("../../../runtime/assets/JetBrainsMono.ttf")),
+                (FONT_ICONS, include_bytes!("../../../runtime/assets/SymbolsNerdFontMono-Regular.ttf")),
             ]),
         }
     }

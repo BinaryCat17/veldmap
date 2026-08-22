@@ -51,7 +51,7 @@ pub fn get(url: &str, headers: &HashMap<String, String>, range: Option<(u64, u64
     if let Some((from, to)) = range {
         builder = builder.header("Range", match to {
             0 => format!("bytes={}-", from),
-            to => format!("bytes={}-{}", from, to.saturating_sub(1)),
+            to => format!("bytes={}-{}", from, to - 1),
         });
     }
     builder

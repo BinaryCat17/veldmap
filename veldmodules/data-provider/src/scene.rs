@@ -277,9 +277,9 @@ pub fn about(products: Vec<(Facts, DataProduct)>, asked: &str) -> Option<DataPro
         scene.identifier == asked || scene.parts.iter().any(|part| part.identifier == asked)
     })?;
 
-    // Тип показываемой части берётся из неё самой, а не из снимка: снимок —
-    // это она и есть, но заполняет ей тип сведение (см. [`group`]), и спрашивать
-    // о ней надо там, где ответ заведомо есть.
+    // Тип берётся у показываемой части. У самого снимка он тот же — снимком
+    // названа она и есть, — но найти её всё равно приходится: ниже по ней же
+    // решается, разворачивать ли набор.
     let shown = scene.parts.iter().find(|part| part.shown).map(|part| part.product_type.clone());
     let same_quantity = shown.is_some_and(|shown| quantity(&kind) == quantity(&shown));
     if scene.identifier == asked || level == Some(0) || same_quantity {

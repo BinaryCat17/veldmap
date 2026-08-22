@@ -14,6 +14,8 @@ mod locate;
 mod pointer;
 mod popover;
 mod viewport;
+// Общий с wrap-крейтом файл: он включает его через `#[path]` (см. его шапку).
+mod typography;
 
 /// Настраивать сервису нечего: всё, что ему нужно знать о месте под рендер,
 /// приезжает вместе с самим местом (`core.SurfaceDelegated`).

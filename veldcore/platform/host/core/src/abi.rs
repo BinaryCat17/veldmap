@@ -192,11 +192,7 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // Lease-операции адресуются по имени сервиса — модули нигде не оперируют
     // числовыми instance id. Право менять lease имеет только владелец (или хост).
     // grant_write — делегирование: так владелец окна назначает рендерера текстуры.
-    lease_op(linker, "veld_resource_transfer", |lease, target| {
-        lease.owner_id = target;
-        lease.readers.clear();
-        lease.writers.clear();
-    })?;
+    lease_op(linker, "veld_resource_transfer", |lease, target| lease.transfer_to(target))?;
     lease_op(linker, "veld_resource_grant_read", |lease, target| lease.add_reader(target))?;
     lease_op(linker, "veld_resource_grant_write", |lease, target| lease.add_writer(target))?;
 
@@ -308,7 +304,7 @@ fn lease_op(
         let mut ok = false;
         registry.update_lease(region_id, |lease| {
             found = true;
-            if lease.owner_id == owner_id || owner_id == 0 {
+            if lease.owned_by(owner_id) {
                 apply(lease, target);
                 ok = true;
             }

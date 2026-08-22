@@ -69,6 +69,25 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Mode 3.0 = Shadow: пятно по форме виджета, мягкое по краю.
+    //
+    // Форма здесь — сам виджет, а квад больше него: `local_pos` выходит за
+    // форму со всех сторон — слева и сверху в минус, справа и снизу за её
+    // размер, — и расстояние там считается тем же кодом. Ширину спада везёт
+    // поле рамки: у тени рамки нет.
+    if (in.mode > 2.5) {
+        let dist = sd_rounded_box(in.local_pos, in.rect_size, in.radius);
+        // Спад — половина размытия в каждую сторону от края, то есть всего оно
+        // и есть: заявленная плотность набирается на `blur/2` внутрь, а наружу
+        // на столько же сходит на нет. Растяни спад на весь `blur` в обе
+        // стороны — и тень отдала бы половину того, что у неё просили.
+        //
+        // На нуле спад берёт производную: делить на ноль нельзя, а жёсткая тень
+        // со смещением — законный запрос.
+        let ramp = max(in.border_width * 0.5, fwidth(dist));
+        return vec4<f32>(in.color.rgb, in.color.a * (1.0 - smoothstep(-ramp, ramp, dist)));
+    }
+
     // Mode 2.0 = External Image
     if (in.mode > 1.5) {
         let tex_sample = textureSample(t_diffuse, s_diffuse, in.tex_coords);

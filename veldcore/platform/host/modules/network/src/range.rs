@@ -56,7 +56,7 @@ const POOL_LIMIT: u64 = 256 * 1024 * 1024;
 /// один пробный запрос, ограниченный таймаутами клиента (см. http::client),
 /// и отменять в нём нечего. Долгая часть — чтение, а оно идёт через ABI
 /// памяти, вне системы задач; корреляция запроса достаётся задаче того,
-/// кто ресурс потом читает (например, декодирования в image-loader).
+/// кто ресурс потом читает (например, разбора заголовка в image-tiler).
 pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
     let Caller { instance, correlation, .. } = caller;
     let blocks = state.blocks.clone();

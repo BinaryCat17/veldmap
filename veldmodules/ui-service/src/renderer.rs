@@ -74,8 +74,8 @@ fn shape_text(
     let mut line_height = text.line_height.to_absolute(Pixels(size)).0;
 
     if size <= 0.0 {
-        veldsdk::log::error!(target: "handlers", "Cosmic-text {}: invalid font size: {}. Resetting to {}", origin, size, crate::module::converter::DEFAULT_TEXT_SIZE);
-        size = crate::module::converter::DEFAULT_TEXT_SIZE;
+        veldsdk::log::error!(target: "handlers", "Cosmic-text {}: invalid font size: {}. Resetting to {}", origin, size, crate::module::typography::DEFAULT_TEXT_SIZE);
+        size = crate::module::typography::DEFAULT_TEXT_SIZE;
     }
     if line_height <= 0.0 {
         veldsdk::log::error!(target: "handlers", "Cosmic-text {}: invalid line height: {}. Resetting to {}", origin, line_height, size * 1.2);
@@ -203,6 +203,7 @@ fn resolve_family(
 const MODE_GLYPH: f32 = 0.0;
 const MODE_SDF: f32 = 1.0;
 const MODE_IMAGE: f32 = 2.0;
+const MODE_SHADOW: f32 = 3.0;
 
 /// Зазор вокруг глифа в атласе. Сэмплер на границе берёт соседний тексель, и
 /// без зазора в глиф затекает сосед; тем же отступом начинается первая строка.
@@ -418,7 +419,13 @@ impl GpuRenderer {
 
     pub fn add_quad(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32, border_width: f32, border_color: [f32; 4]) {
         self.push_quad_data(rect, color, uv, radius, mode, border_width, border_color);
+        self.commit_quad();
+    }
 
+    /// Только что положенный квад — в прогон: к идущему, если он идёт, иначе
+    /// новым. Одним местом на всех, кто кладёт квад: разойдись эти два счёта,
+    /// и прогон рисовал бы не свои индексы.
+    fn commit_quad(&mut self) {
         match self.draw_commands.last_mut() {
             Some(DrawCmd::Quads { count }) => *count += 6,
             _ => self.draw_commands.push(DrawCmd::Quads { count: 6 }),
@@ -426,6 +433,17 @@ impl GpuRenderer {
     }
 
     fn push_quad_data(&mut self, rect: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32, border_width: f32, border_color: [f32; 4]) {
+        let shape = [0.0, 0.0, rect[2], rect[3]];
+        self.push_quad_shaped(rect, shape, color, uv, radius, mode, border_width, border_color);
+    }
+
+    /// То же, но форма, которую считает шейдер, задана отдельно от квада.
+    ///
+    /// `shape` — прямоугольник в локальных координатах квада (`x, y, w, h`): по
+    /// нему шейдер меряет расстояние, а квад только даёт место, где рисовать. У
+    /// всех, кроме тени, они совпадают; у тени квад больше виджета, потому что
+    /// размытие уходит за его границы.
+    fn push_quad_shaped(&mut self, rect: [f32; 4], shape: [f32; 4], color: [f32; 4], uv: [f32; 4], radius: f32, mode: f32, border_width: f32, border_color: [f32; 4]) {
         let transformed = self.transform_rect(rect);
         let x = transformed[0];
         let y = transformed[1];
@@ -443,8 +461,11 @@ impl GpuRenderer {
             pos: [px, py],
             color,
             uv: [u, v],
-            local_pos: [lx, ly],
-            rect_size: [rw, rh],
+            // Локальные координаты — от начала формы, а не квада: за её
+            // границами они уходят в минус, и расстояние там считается тем же
+            // кодом (см. `sd_rounded_box`).
+            local_pos: [lx - shape[0], ly - shape[1]],
+            rect_size: [shape[2], shape[3]],
             radius,
             mode,
             border_width,
@@ -463,6 +484,56 @@ impl GpuRenderer {
         self.indices.push(base);
         self.indices.push(base + 2);
         self.indices.push(base + 3);
+    }
+
+    /// Тень под виджетом: пятно его же формы, смещённое и размытое по краю.
+    ///
+    /// Своим квадом, и квад этот больше виджета: наружу тень сходит на нет за
+    /// `blur/2` от края формы, а нарисовать её можно только внутри квада.
+    /// Раздут он вдвое от нужного — на целый `blur`: половина уходит в запас,
+    /// зато число раздутия и число спада не приходится держать согласованными
+    /// в двух файлах сразу.
+    ///
+    /// Форма при этом остаётся формой виджета — её и передаём отдельно
+    /// (см. [`Self::push_quad_shaped`]), иначе тень повторяла бы очертания
+    /// раздутого прямоугольника, а не того, под чем она лежит.
+    ///
+    /// Размытие едет в поле рамки: у тени рамки нет, а заводить ради неё
+    /// десятый атрибут вершины значило бы менять раскладку — цену, которую
+    /// платят все квады кадра ради одного.
+    ///
+    /// Ножницы предка тень обрезают наравне с виджетом, и это верно: вылезшая
+    /// из-под обрезающей коробки тень нарисовалась бы поверх соседа. Панели
+    /// меню это не мешает — она рисуется поверх всей разметки, вне чужих
+    /// ножниц (см. `popover.rs`).
+    fn add_shadow(&mut self, bounds: iced_core::Rectangle, radius: f32, shadow: iced_core::Shadow) {
+        // Ни размытия, ни смещения — тени нет. Ноль альфы сюда же: считать и
+        // класть в буфер невидимый квад незачем.
+        let blur = shadow.blur_radius.max(0.0);
+        let (dx, dy) = (shadow.offset.x, shadow.offset.y);
+        if shadow.color.a <= 0.0 || (blur <= 0.0 && dx == 0.0 && dy == 0.0) {
+            return;
+        }
+
+        self.push_quad_shaped(
+            [
+                bounds.x + dx - blur,
+                bounds.y + dy - blur,
+                bounds.width + blur * 2.0,
+                bounds.height + blur * 2.0,
+            ],
+            // Виджет внутри раздутого квада стои́т ровно на `blur` от его края,
+            // и смещение тут ни при чём: оно двигает квад вместе с формой, а
+            // не форму внутри квада.
+            [blur, blur, bounds.width, bounds.height],
+            shadow.color.into_linear(),
+            [0.0; 4],
+            radius,
+            MODE_SHADOW,
+            blur,
+            [0.0; 4],
+        );
+        self.commit_quad();
     }
 
     /// Чужая текстура во весь отведённый прямоугольник: UV 0..1 — целиком,
@@ -506,6 +577,10 @@ impl iced_widget::core::renderer::Renderer for GpuRenderer {
 
         let bw = quad.border.width;
         let border_color = quad.border.color.into_linear();
+
+        // Тень — до виджета и своим квадом: она лежит под ним и вылезает за его
+        // границы, а квад виджета за них не выходит.
+        self.add_shadow(quad.bounds, radius, quad.shadow);
 
         // Фон и рамка — одним прямоугольником: и то, и другое считает шейдер
         // по расстоянию до скруглённой границы, второй проход ему не нужен.
@@ -698,7 +773,7 @@ impl Default for RealParagraph {
             config: iced_core::Text {
                 content: (),
                 bounds: Size::INFINITE,
-                size: Pixels(crate::module::converter::DEFAULT_TEXT_SIZE),
+                size: Pixels(crate::module::typography::DEFAULT_TEXT_SIZE),
                 line_height: LineHeight::default(),
                 font: Font::DEFAULT,
                 align_x: iced_core::text::Alignment::Default,
@@ -970,7 +1045,7 @@ impl iced_core::text::Renderer for GpuRenderer {
         Font::DEFAULT
     }
     fn default_size(&self) -> Pixels {
-        Pixels(crate::module::converter::DEFAULT_TEXT_SIZE)
+        Pixels(crate::module::typography::DEFAULT_TEXT_SIZE)
     }
 
     fn fill_paragraph(

@@ -53,6 +53,11 @@ def play(path: str, name: str) -> tuple[str, float]:
     """Один сценарий: чем он кончился."""
     env = os.environ.copy()
     env["VELDMAP_SCRIPT"] = path
+    # Лог прошлого сценария убираем сами: хост перезаписывает его на старте, а
+    # не дойдя до этого места (не разобранный конфиг, не поднявшееся окно), он
+    # оставил бы на диске чужой — и отказ из него приписался бы этому прогону.
+    if os.path.exists(HOST_LOG):
+        os.remove(HOST_LOG)
     started = time.monotonic()
     try:
         done = subprocess.run(
@@ -60,40 +65,97 @@ def play(path: str, name: str) -> tuple[str, float]:
             cwd=PROJECT_ROOT, env=env, timeout=LIMIT_SECONDS,
             stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
         )
-        outcome = "сошёлся" if done.returncode == 0 else "НЕ СОШЁЛСЯ"
-        if outcome == "сошёлся" and gpu_refused():
-            # Сценарий дошёл до конца и проверки сошлись — а видеокарта при
-            # этом отказалась от того, чем рисуют. Разметку это не трогает:
-            # шар и канва просмотра именами не адресуются, и обход их не
-            # видит, — так что дошедший до конца сценарий скажет «сошёлся»
-            # над пустым местом. Отказ здесь и есть единственный след.
-            outcome = "ОТКАЗ ВИДЕОКАРТЫ"
+        result = outcome(done.returncode, host_log())
     except subprocess.TimeoutExpired:
         # Отличается от «не сошёлся» намеренно: сценарий, дошедший до своего
         # конца, кончается сам, а упёршийся в предел — это зависшее
         # приложение, и искать его причину надо не в сценарии.
-        outcome = "ЗАВИС"
+        #
+        # Лог смотрится и здесь, и нужнее всего он как раз здесь: шаги
+        # отыгрываются по кадрам, поэтому вставший кадровый цикл держит и часы
+        # сценария — свой предел ожидания не срабатывает, и прогон доезжает
+        # досюда. Ответ при этом в логе уже лежит.
+        result = " + ".join(["ЗАВИС"] + unseen(host_log()))
     keep_log(name)
-    return outcome, time.monotonic() - started
+    return result, time.monotonic() - started
 
 
-def gpu_refused() -> bool:
+# Слова, которыми хост пишет о том, чего сценарий не видит. Здесь, а не по
+# месту: печатает их Rust, ищет их прогон, и сойтись они обязаны механически —
+# см. buildgen/tests/test_uitests_outcomes.py.
+GPU_NEEDLE = "wgpu: "
+TRAP_NEEDLE = "поймал трап"
+
+
+def host_log() -> str:
+    """Лог последнего запуска целиком.
+
+    Пусто — лога нет: хост не дошёл до его открытия. Отдельным исходом это не
+    называется, потому что не бывает тихим — не поднявшийся хост возвращает
+    ненулевой код, и прогон объявит отказ и без лога. Чужого лога здесь не
+    бывает: прошлый убран перед запуском (см. `play`).
+    """
+    if not os.path.exists(HOST_LOG):
+        return ""
+    with open(HOST_LOG, encoding="utf-8", errors="replace") as log:
+        return log.read()
+
+
+def outcome(returncode: int, log: str) -> str:
+    """Чем кончился прогон: код возврата плюс то, чего сценарий не видит.
+
+    Лог смотрится при любом коде возврата, а найденное в нём дополняет вердикт,
+    а не подменяет: провалившийся сценарий с отказом под ним — это два факта, и
+    нужны оба. Почему так и почему порядок отказов постоянный — в CLAUDE.md,
+    раздел про прогон по сценарию.
+    """
+    found = unseen(log)
+    if returncode == 0:
+        return " + ".join(found) if found else "сошёлся"
+    return " + ".join(["НЕ СОШЁЛСЯ"] + found)
+
+
+def unseen(log: str) -> list[str]:
+    """Отказы, которых сценарий не заметил, — в порядке, названном у `outcome`."""
+    return [name for name, seen in (("ОТКАЗ ВИДЕОКАРТЫ", gpu_refused(log)),
+                                    ("ТРАП МОДУЛЯ", module_trapped(log))) if seen]
+
+
+def gpu_refused(log: str) -> bool:
     """Отказала ли видеокарта чему-нибудь за этот запуск.
 
     Ищется в логе, а не спрашивается у сценария: шейдер, не собравшийся, и
     раскладка вершин, не сошедшаяся с ним, не роняют приложение — окно живёт,
     разметка отвечает, а рисуется пустое место. Ни один шаг сценария такого не
     замечает: у шара и канвы просмотра имён нет.
+
+    По приставке, а не по словам самого отказа: их три рода — проверка,
+    нехватка памяти и внутренняя ошибка, — и печатает их всех один обработчик
+    (`veldcore/platform/host/core/src/setup.rs`). Ловля по «Validation Error»
+    пропустила бы нехватку памяти, которая называет себя иначе.
     """
-    if not os.path.exists(HOST_LOG):
-        return False
-    with open(HOST_LOG, encoding="utf-8", errors="replace") as log:
-        # По приставке, а не по словам самого отказа: их три рода — проверка,
-        # нехватка памяти и внутренняя ошибка, — и печатает их всех один
-        # обработчик (`veldcore/platform/host/core/src/setup.rs`). Ловля по
-        # «Validation Error» пропустила бы нехватку памяти, которая называет
-        # себя иначе.
-        return "wgpu: " in log.read()
+    return GPU_NEEDLE in log
+
+
+def module_trapped(log: str) -> bool:
+    """Падал ли за этот запуск какой-нибудь модуль.
+
+    Тот же род незаметности, что у видеокарты, и потому та же ловля. Трап
+    отравляет Store безвозвратно, поэтому хост собирает инстанс заново и
+    прогоняет init — состояние модуля теряется целиком, как при отключении
+    электричества. Приложение при этом живёт, и упавший модуль отвечает
+    дальше — просто с чистого листа.
+
+    Заказчик потерянного обработчика остаётся ждать ответа, которого уже не
+    будет: терминальный ответ за упавшего хост договаривает только там, где
+    завёл учёт, то есть у отменяемых запросов
+    (`plugins.rs::answer_for_lost`).
+
+    Ищется падение, а не всякий подъём инстанса: снятого посреди обработчика
+    хост поднимает тем же ходом, и говорит он об этом `info` — это норма, а не
+    отказ (`plugins.rs::revive`).
+    """
+    return TRAP_NEEDLE in log
 
 
 def keep_log(name: str) -> None:
@@ -130,10 +192,10 @@ def main() -> int:
             if os.path.exists(WINDOW_STATE):
                 os.remove(WINDOW_STATE)
             print(f"  {name}: ", end="", flush=True)
-            outcome, spent = play(path, name)
-            print(f"{outcome} — {spent:.1f}s")
-            if outcome != "сошёлся":
-                failed.append(f"{name} ({outcome.lower()})")
+            result, spent = play(path, name)
+            print(f"{result} — {spent:.1f}s")
+            if result != "сошёлся":
+                failed.append(f"{name} ({result.lower()})")
     finally:
         if stashed is not None:
             os.makedirs(os.path.dirname(WINDOW_STATE), exist_ok=True)

@@ -170,9 +170,18 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
     let Some(dl) = state.downloads.get(&correlation_id) else { return };
     let name = dl.name.clone();
 
-    if !signed.error.is_empty() {
-        veldsdk::log::warn!(target: "handlers", "подпись для {} не удалась: {}", name, signed.error);
-        state.troubles.insert(name, format!("подпись не удалась: {}", signed.error));
+    // Пустой адрес при пустой причине — не удача: так выглядит ответ, который
+    // договорил за исполнителя хост, не дождавшись его самого (см. README про
+    // терминальный ответ). Приняв его за подпись, мы послали бы закачку в
+    // пустоту и сказали бы человеку про сеть там, где дело в упавшем модуле.
+    let refusal = match (signed.error.is_empty(), signed.url.is_empty()) {
+        (false, _) => Some(signed.error.clone()),
+        (true, true) => Some("провайдер не ответил".to_string()),
+        (true, false) => None,
+    };
+    if let Some(why) = refusal {
+        veldsdk::log::warn!(target: "handlers", "подпись для {} не удалась: {}", name, why);
+        state.troubles.insert(name, format!("подпись не удалась: {}", why));
         // Задачи ещё нет — терминального события платформы не будет, снимаем
         // с учёта сами, иначе запись навсегда останется «качается».
         finish(state, &correlation_id);

@@ -1,6 +1,6 @@
-//! Удаление файла (топик fs/delete): результат — событием delete_result.
-//! Используется data-browser для явного удаления недокачанных (.part)
-//! файлов с экрана Downloaded.
+//! Удаление файла (топик fs/on_delete): результат — событием on_delete_result.
+//! Спрашивают о нём двое: data-library — записи каталога и их сидкары,
+//! tile-cache — вытесненные тайлы.
 
 use super::State;
 use veldmap_host_util::bindings::fs as bus;
@@ -26,8 +26,8 @@ pub fn on_delete(state: &State, req: FsDeleteRequest, caller: Caller) {
                 FsDeleteResult { error: String::new() }
             }
             // Удалять то, чего нет — не ошибка: цель вызова достигнута.
-            // Нужно для строк-намерений в data-browser (.origin без данных
-            // на диске, см. handlers::nav) и для sidecar'ов у файлов,
+            // Нужно для строк-намерений в data-library (.origin без данных
+            // на диске, см. catalog.rs) и для sidecar'ов у файлов,
             // скачанных до его появления. Проверяем kind, а не текст ошибки:
             // сборка кросс-компилируется под Windows, где текст другой.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {

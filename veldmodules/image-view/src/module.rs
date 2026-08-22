@@ -248,8 +248,7 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
 /// Конец вида: всё его — прочь. Тайлы в хранилище общие и остаются до
 /// вытеснения: та же вкладка, открытая заново, начнёт с них.
 pub fn on_close(state: &mut State, msg: CloseView) {
-    let Some(mut view) = state.views.remove(&msg.view) else { return };
-    view.fetch.reset();
+    let Some(view) = state.views.remove(&msg.view) else { return };
     if let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) {
         release_pass(state, &fingerprint, &msg.view);
     }
@@ -323,7 +322,7 @@ pub fn on_described(state: &mut State, msg: Described) {
 pub fn on_tile(state: &mut State, msg: CachedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_query.peek(&correlation) else {
-        return tiles::discard(msg.texture);
+        return tiles::release(msg.texture);
     };
     let (view_key, fingerprint) = (ctx.view.clone(), ctx.fingerprint.clone());
     accept_tile(state, &view_key, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -333,7 +332,7 @@ pub fn on_tile(state: &mut State, msg: CachedTile) {
 pub fn on_produced(state: &mut State, msg: ProducedTile) {
     let correlation = veldsdk::correlation();
     let Some(ctx) = state.pending_produce.peek(&correlation) else {
-        return tiles::discard(msg.texture);
+        return tiles::release(msg.texture);
     };
     let (view_key, fingerprint) = (ctx.view.clone(), ctx.fingerprint.clone());
     accept_tile(state, &view_key, &fingerprint, (msg.level, msg.x, msg.y), msg.texture, msg.width, msg.height);
@@ -637,10 +636,12 @@ fn accept_tile(
         Some(device) => state.tiles.land(fingerprint, addr, texture, width, height, |view| {
             device.tile_bind_group(view)
         }),
-        // Устройства нет — рисовать нечем и класть некуда; ячейка при этом ни в
-        // чём не виновата и спросится заново, когда место под канву появится.
+        // Устройства нет — значит канвы не было ни разу: заведённое однажды,
+        // оно переживает и отзыв места (`on_canvas` чистит только `target`).
+        // Тайлов до первой канвы не спрашивают, так что ветка эта — на ответ,
+        // приехавший раньше, чем канва завелась.
         None => {
-            tiles::discard(texture);
+            tiles::release(texture);
             true
         }
     };
@@ -676,7 +677,7 @@ fn report(state: &State, key: &str) {
         scale: view.camera.map_or(0.0, |camera| camera.scale),
         read_bytes: view.read_bytes,
         total_bytes: view.total_bytes,
-        busy: view.busy(&state.passes, want.as_ref()),
+        working: view.working(&state.passes, want.as_ref()),
         error: view.error.clone().unwrap_or_default(),
         // Жалоба одна на провод, а поводов два: застрявший кадр важнее
         // неполноты — неполный кадр хотя бы рисуется. Обе приезжают уже

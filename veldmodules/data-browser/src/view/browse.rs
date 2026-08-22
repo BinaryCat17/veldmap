@@ -13,7 +13,9 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
     let rows: Vec<Row> = rows::browse(state, browse);
 
     let subtitle = match &browse.error {
-        Some(error) => error.clone(),
+        // Причина отказа стои́т посреди пустого списка, а не здесь: там ей есть
+        // где поместиться целиком, а считать в отказе нечего.
+        Some(_) => String::new(),
         None if browse.request.is_pending() => "загружается…".to_string(),
         // Снимки считаются отдельно от папок: в списке они и выглядят иначе, а
         // «шесть папок» там, где четыре из них — снимки, не сообщает главного.
@@ -41,7 +43,14 @@ pub fn view(state: &State, view: ViewId, browse: &BrowseState) -> Element<Msg> {
             batch: crate::module::handlers::library::batch(state, view),
             subtitle,
             path: Some(&browse.current_path),
-            empty: if browse.request.is_pending() { "Загружается…" } else { "Папка пуста" },
+            // «Папка пуста» после отказа — неправда: пуста она или нет, мы так
+            // и не узнали. Причина отказа и есть то единственное, что тут можно
+            // сказать.
+            empty: match (&browse.error, browse.request.is_pending()) {
+                (Some(error), _) => error.as_str(),
+                (None, true) => "Загружается…",
+                (None, false) => "Папка пуста",
+            },
             controls: None,
             rows,
             menu: state.menu_in(view),

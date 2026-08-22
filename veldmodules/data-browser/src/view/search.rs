@@ -25,10 +25,13 @@ pub fn view(state: &State, view: ViewId, search: &SearchState) -> Element<Msg> {
             batch: crate::module::handlers::library::batch(state, view),
             subtitle: subtitle(search, rows.len()),
             path: None,
-            // Пока ответа нет, «ничего не нашлось» — неправда: ещё ищем.
-            empty: match search.request.is_pending() {
-                true => "Спрашиваем каталог…",
-                false => "Ничего не нашлось — попробуйте другую миссию или часть имени",
+            // Пока ответа нет, «ничего не нашлось» — неправда: ещё ищем. После
+            // отказа — неправда вдвойне: искать не выходило вовсе, и совет
+            // сменить миссию посылает чинить не то.
+            empty: match (&search.error, search.request.is_pending()) {
+                (Some(error), _) => error.as_str(),
+                (None, true) => "Спрашиваем каталог…",
+                (None, false) => "Ничего не нашлось — попробуйте другую миссию или часть имени",
             },
             controls: Some(bar(view, search, state.menu_in(view), state.pane_width(view))),
             rows,
@@ -44,8 +47,10 @@ pub fn view(state: &State, view: ViewId, search: &SearchState) -> Element<Msg> {
 /// диапазоном, потому что своей колонки у неё нет, а разброс по выдаче — то
 /// единственное, что о ней стоит сказать одной строкой.
 fn subtitle(search: &SearchState, found: usize) -> String {
-    if let Some(error) = &search.error {
-        return error.clone();
+    // Причина отказа стои́т посреди пустой выдачи, а не здесь: там ей есть где
+    // поместиться целиком, а считать в отказе нечего.
+    if search.error.is_some() {
+        return String::new();
     }
     if search.request.is_pending() {
         return "идёт поиск…".to_string();

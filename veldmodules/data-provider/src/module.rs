@@ -17,7 +17,11 @@ pub struct Config {
 }
 
 pub struct State {
-    pub identity: Identity,
+    /// Чем подписываются запросы к хранилищу. `None` — ключей нет: конфиг
+    /// оставил их пустыми, потому что `.env` не завели (см. `cdse::NO_KEYS`).
+    /// Именно `Option`, а не пустые ключи внутри подписи: подписать ими можно,
+    /// и разница видна только на той стороне, кодом 403.
+    pub identity: Option<Identity>,
     /// Запросы, ожидающие HTTP-ответа: id генерируется, когда мы зовём network,
     /// и снимается в on_http_result.
     pub pending_http: veldsdk::Correlator<Pending>,

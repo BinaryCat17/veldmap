@@ -46,17 +46,33 @@ fn ask(
 /// Страница обхода поддерева продукта. Страниц бывает несколько, и все они —
 /// одно ожидание: найденные ключи копятся в нём, пока хранилище не отдаст
 /// последнюю (см. `Asked::Imagery`).
+///
+/// Отказ возвращается, а не отвечается здесь: страницу просят двое — вход и
+/// продолжение обхода, — и ответить заказчику обязан каждый из них, иначе тот
+/// останется ждать ответа, которого не будет.
 fn imagery_page(
     state: &mut State,
     correlation_id: String,
     identifier: String,
     keys: Vec<String>,
     token: &str,
-) {
+) -> Result<(), String> {
     let path = format!("{}/", identifier.trim_end_matches('/'));
-    let listing = s3::listing_deep(&state.identity, &path, token);
+    let listing = {
+        let Some(identity) = state.identity.as_ref() else { return Err(NO_KEYS.to_string()) };
+        s3::listing_deep(identity, &path, token)
+    };
     let what = Asked::Imagery { identifier, keys };
     ask(state, correlation_id, listing.url, listing.headers, what);
+    Ok(())
+}
+
+/// Отказ в растрах — одной формой на все места, где он случается.
+fn refuse_imagery(correlation_id: &str, error: String) {
+    crate::emit::on_imagery_result(
+        &ImageryResponse { error, ..Default::default() },
+        correlation_id,
+    );
 }
 
 /// Ответ на `on_locate` — собирается он только здесь.
@@ -69,14 +85,38 @@ fn answer(correlation_id: &str, product: Option<DataProduct>, error: String, ans
     crate::emit::on_locate_result(&LocateResponse { product, error, answered }, correlation_id);
 }
 
+/// Чем отвечает всякий ход в хранилище, когда ключей нет.
+///
+/// Своим отказом, а не кодом от S3: подписанный пустыми ключами запрос уходит и
+/// возвращается 403, а по нему не отличить «ключей нет вовсе» от «ключи не те»
+/// и от «объект чужой». Человек при этом видит одно и то же слово в трёх разных
+/// бедах, и первая из них лечится строчкой в файле.
+pub const NO_KEYS: &str = "ключей Copernicus нет: скопируйте .env.example в \
+    .env и впишите COPERNICUS_ACCESS_KEY и COPERNICUS_ACCESS_SECRET";
+
 pub fn module_init(config: Config) -> anyhow::Result<State> {
-    let credentials = aws_credential_types::Credentials::new(
-        config.access_key, 
-        config.secret_key, 
-        None, None, "veldmap"
-    );
-    let identity = Identity::new(credentials, None);
-    
+    // Пустые ключи — не отказ загрузки, и модуль поднимается без них: каталог
+    // снимков открытый, поиск и наводка по нему работают. Отказывает только
+    // хранилище — листинг, растры, подпись, открытие, — и говорит об этом
+    // каждый такой ход своим ответом.
+    // Обрамляющие пробелы срезаются, и не только ради проверки: ключ из одного
+    // пробела подписью не станет, а ключ с пробелом на конце станет — негодной.
+    // S3 на обе беды отвечает одинаково, кодом 403, так что различить их можно
+    // только здесь.
+    let access = config.access_key.trim();
+    let secret = config.secret_key.trim();
+    let identity = (!access.is_empty() && !secret.is_empty()).then(|| {
+        let credentials = aws_credential_types::Credentials::new(
+            access.to_string(),
+            secret.to_string(),
+            None, None, "veldmap"
+        );
+        Identity::new(credentials, None)
+    });
+    if identity.is_none() {
+        log::warn!(target: "handlers", "{}", NO_KEYS);
+    }
+
     Ok(State {
         identity,
         pending_http: veldsdk::Correlator::new(),
@@ -93,6 +133,17 @@ pub fn on_open(state: &mut State, request: crate::proto::data_provider::OpenRequ
     // Корреляция заказчика проходит насквозь: тем же id мы спрашиваем network
     // и тем же отвечаем ему — второго учёта эта передача не требует.
     let correlation_id = veldsdk::correlation();
+    // Ключи спрашиваются раньше заказчика: подписать нечем, и заводить учёт
+    // открытия, которое не состоится, незачем.
+    let Some(identity) = state.identity.as_ref() else {
+        crate::emit::on_open_result(
+            &veldsdk::resource::opened(Err(NO_KEYS.to_string())),
+            &correlation_id,
+        );
+        return;
+    };
+    let object = s3::object(identity, &request.identifier);
+
     let owner = match veldsdk::resource::requester("data-provider/on_open") {
         Ok(owner) => owner,
         Err(e) => {
@@ -100,8 +151,6 @@ pub fn on_open(state: &mut State, request: crate::proto::data_provider::OpenRequ
             return;
         }
     };
-
-    let object = s3::object(&state.identity, &request.identifier);
     state.opening.insert(correlation_id.clone(), owner);
 
     crate::calls::network::on_open(&veldsdk::proto::network::RemoteOpenRequest {
@@ -138,14 +187,16 @@ pub fn on_search(state: &mut State, request: SearchRequest) {
 /// нет: закачку ведёт тот, кто её попросил, он же её владелец у платформы
 /// и он же её отменяет.
 pub fn on_sign(state: &mut State, req: SignRequest) {
-    let signed = if req.identifier.is_empty() {
-        SignedUrl {
+    let signed = match (req.identifier.is_empty(), state.identity.as_ref()) {
+        (true, _) => SignedUrl {
             error: "пустой identifier: подписывать нечего".to_string(),
             ..Default::default()
+        },
+        (false, None) => SignedUrl { error: NO_KEYS.to_string(), ..Default::default() },
+        (false, Some(identity)) => {
+            let object = s3::object(identity, &req.identifier);
+            SignedUrl { url: object.url, headers: object.headers, error: String::new() }
         }
-    } else {
-        let object = s3::object(&state.identity, &req.identifier);
-        SignedUrl { url: object.url, headers: object.headers, error: String::new() }
     };
     crate::emit::on_signed(&signed, &veldsdk::correlation());
 }
@@ -184,7 +235,11 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
 
     log::info!(target: "handlers",
         "Растры продукта: {}/", request.identifier.trim_end_matches('/'));
-    imagery_page(state, veldsdk::correlation(), request.identifier, Vec::new(), "");
+    let correlation_id = veldsdk::correlation();
+    if let Err(error) = imagery_page(state, correlation_id.clone(), request.identifier, Vec::new(), "")
+    {
+        refuse_imagery(&correlation_id, error);
+    }
 }
 
 /// Растр в том виде, в каком его понимает контракт: роль здесь и роль в
@@ -296,12 +351,19 @@ pub fn on_list_path(
     state: &mut State,
     request: ListPathRequest
 ) {
+    let Some(identity) = state.identity.as_ref() else {
+        crate::emit::on_list_path_result(&ListPathResponse {
+            error: NO_KEYS.to_string(),
+            ..Default::default()
+        }, &veldsdk::correlation());
+        return;
+    };
     // Разделитель — это и есть вся разница между уровнем и поддеревом: с ним
     // хранилище отвечает папками как общими префиксами, без него разворачивает
     // все ключи под путём.
     let listing = match request.recursive {
-        true => s3::listing_deep(&state.identity, &request.path, &request.token),
-        false => s3::listing(&state.identity, &request.path, &request.token),
+        true => s3::listing_deep(identity, &request.path, &request.token),
+        false => s3::listing(identity, &request.path, &request.token),
     };
     log::info!(target: "handlers", "Листинг S3: {}", listing.url);
 
@@ -401,13 +463,15 @@ pub fn on_http_result(
                     // Страница не последняя — тем же ожиданием за следующей;
                     // заказчику отвечать рано.
                     if !listing.next_token.is_empty() {
-                        imagery_page(
+                        if let Err(error) = imagery_page(
                             state,
-                            pending.correlation_id,
+                            pending.correlation_id.clone(),
                             identifier,
                             keys,
                             &listing.next_token,
-                        );
+                        ) {
+                            refuse_imagery(&pending.correlation_id, error);
+                        }
                         return;
                     }
                     // Обход кончился. Манифест спрашивается только там, где
@@ -417,10 +481,18 @@ pub fn on_http_result(
                     // подписанный запрос на сотни килобайт, а у OLCI полного
                     // разрешения и на полтора мегабайта.
                     let known = imagery::scan(&keys, &[]);
+                    // Ключи здесь заведомо есть: без них не состоялся бы и сам
+                    // обход. Ложной эта клауза не бывает, и стои́т она вместо
+                    // `unwrap` не для надёжности, а по цене промаха: `unwrap`
+                    // уронил бы модуль трапом, а трап уносит его состояние
+                    // целиком — ради того, чего не случается. Не сложись
+                    // цепочка, ответ соберётся по именам файлов, как и без
+                    // манифеста вообще (о чём сказано ниже).
                     if known.guessed
                         && let Some(manifest) = manifest::key(&identifier, &keys)
+                        && let Some(identity) = state.identity.as_ref()
                     {
-                        let object = s3::object(&state.identity, manifest);
+                        let object = s3::object(identity, manifest);
                         let what = Asked::Manifest { identifier, keys };
                         ask(
                             state,
@@ -438,10 +510,7 @@ pub fn on_http_result(
                 }
                 Err(error) => {
                     log::warn!(target: "handlers", "Растры '{}' не нашлись: {}", identifier, error);
-                    crate::emit::on_imagery_result(&ImageryResponse {
-                        error,
-                        ..Default::default()
-                    }, &pending.correlation_id);
+                    refuse_imagery(&pending.correlation_id, error);
                 }
             }
         }
@@ -569,5 +638,45 @@ pub fn on_http_result(
             };
             answer(&pending.correlation_id, Some(product), String::new(), true);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(access: &str, secret: &str) -> Config {
+        Config { access_key: access.to_string(), secret_key: secret.to_string() }
+    }
+
+    /// Подпись собирается только из двух непустых ключей.
+    ///
+    /// Проверяется здесь не арифметика, а само решение: половина ключей — это
+    /// те же 403 от хранилища, что и полное их отсутствие, и собранная из
+    /// половины подпись увела бы человека искать беду в правах доступа. Хост, не
+    /// найдя переменной, подставляет пустую строку и говорит об этом в stderr —
+    /// но не в `host.log`: конфиг читается раньше, чем поднимается лог. Так что
+    /// отличить «не завели `.env`» от «завели наполовину» больше негде.
+    #[test]
+    fn a_signature_needs_both_keys() {
+        assert!(module_init(config("AK", "SK")).unwrap().identity.is_some());
+
+        for (access, secret) in [("", ""), ("AK", ""), ("", "SK"), (" ", "SK"), ("AK", "\t")] {
+            assert!(
+                module_init(config(access, secret)).unwrap().identity.is_none(),
+                "'{}'/'{}' подписью быть не может",
+                access, secret
+            );
+        }
+
+        // Обрамляющие пробелы срезаются до самой подписи, а не только до
+        // проверки: подписанный ими запрос вернул бы те же 403.
+        let state = module_init(config(" AK\n", "\tSK ")).unwrap();
+        let identity = state.identity.expect("ключи есть");
+        let credentials = identity
+            .data::<aws_credential_types::Credentials>()
+            .expect("подпись собрана из ключей");
+        assert_eq!(credentials.access_key_id(), "AK");
+        assert_eq!(credentials.secret_access_key(), "SK");
     }
 }

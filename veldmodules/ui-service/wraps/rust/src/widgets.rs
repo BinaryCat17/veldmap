@@ -179,10 +179,9 @@ macro_rules! parent {
     )+ };
 }
 
-/// Размер текста по умолчанию — то же число, что `DEFAULT_TEXT_SIZE` у
-/// конвертера ui-service: это умолчание протокола, а не билдера, но крейты
-/// разные, и разделить константу им негде.
-const DEFAULT_TEXT_SIZE: f32 = 16.0;
+/// Умолчание протокола, а не билдера: этим же числом ui-service чинит кегль,
+/// присланный негодным. Одно на обоих — общим файлом (см. `typography.rs`).
+use super::typography::DEFAULT_TEXT_SIZE;
 
 sizing!(Column, Row, Text, Container, Scrollable, ProgressBar, Image, Viewport);
 padded!(Column, Row, Container);
@@ -329,8 +328,9 @@ impl<M> Text<M> {
         self.widget.wrapping = wrapping as i32;
         self
     }
-    /// Логическое имя шрифта, как оно было зарегистрировано в `GpuRenderer::new`
-    /// на стороне ui-service (например "Icons"). Пусто — используется дефолтный шрифт.
+    /// Логическое имя шрифта — одно из `style::FONT_*`. Пусто — дефолтный.
+    /// Литералом не называть: имена объявлены в одном месте, и под ними же
+    /// ui-service кладёт файлы шрифтов (см. `style::FONT_UI`).
     pub fn font_family(mut self, name: impl Into<String>) -> Self {
         self.widget.font_family = name.into();
         self
