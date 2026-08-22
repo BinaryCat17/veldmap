@@ -607,8 +607,12 @@ pub fn on_http_result(
             // каталогу лишний.
             match scene::acquisition(&facts).is_some() {
                 true => {
-                    let url =
-                        catalogue::siblings(&facts.platform, &facts.tile, product.acquired);
+                    let url = catalogue::siblings(
+                        &facts.platform,
+                        &facts.tile,
+                        &facts.datatake,
+                        product.acquired,
+                    );
                     ask(state, pending.correlation_id, url, HashMap::new(),
                         Asked::Siblings { facts, found: product });
                 }
@@ -626,6 +630,15 @@ pub fn on_http_result(
             // раскрывается по-разному в зависимости от того, откуда о ней
             // спросили.
             let others = from_catalogue(&response, catalogue::parse).unwrap_or_default();
+            // Упор в потолок выдачи — не отказ, а тихая потеря: порядка мы не
+            // задаём, и срезано будет случайное, в том числе та часть, ради
+            // которой ход и делался. Сказать об этом больше некому: заказчику
+            // приедет снимок, просто не тот.
+            if others.len() >= catalogue::siblings_top(&facts.datatake) as usize {
+                log::warn!(target: "handlers",
+                    "соседей '{}' пришло {} — потолок выдачи; часть съёмки могла не доехать",
+                    found.name, others.len());
+            }
             let same = scene::same_scene(&facts, &found.name, others);
             let product = match scene::about(same, &found.identifier) {
                 Some(scene) => {

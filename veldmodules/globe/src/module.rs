@@ -122,7 +122,12 @@ pub struct State {
     /// пересчитывает ни того, ни другого.
     epoch: u64,
     /// При чём выборы проверялись в прошлый раз.
-    checked: Option<(Camera, u64, u64)>,
+    ///
+    /// Взгляд целиком, а не камера: он считается и по камере, и по месту под
+    /// кадр (`looking`), так что смена размера области меняет выбор уровня
+    /// ничуть не меньше, чем движение камеры. Камерой одной ворота этого не
+    /// заметили бы.
+    checked: Option<(overlay::Look, u64, u64)>,
     pending_describe: veldsdk::Correlator<(String, Role)>,
     pending_query: veldsdk::Correlator<QueryCtx>,
     pending_produce: veldsdk::Correlator<ProduceCtx>,
@@ -193,6 +198,10 @@ pub fn on_set_surface(state: &mut State, req: SurfaceDelegated) {
                 // лежат на диске и вернутся за миллисекунды.
                 state.tiles = Store::new_like(&state.tiles);
                 state.built = None;
+                // Поколение опустевшего хранилища начинается заново, то есть
+                // перестаёт расти. Прежний ключ ворот с тем же числом внутри
+                // объявил бы пересчёт лишним над пустым местом.
+                state.checked = None;
                 state.device = Some(device);
             }
             Err(error) => {
@@ -1047,15 +1056,24 @@ fn accept_tile(
     {
         match landed {
             true => raster.fetch.arrived(addr),
-            false => raster.fetch.rejected(addr),
+            false => {
+                // Безнадёжная ячейка перестаёт держать ступень
+                // (`Fetch::hopeless`) и больше не спрашивается, то есть ход
+                // добычи меняется. Поколение хранилища об этом не скажет:
+                // непринятый тайл в него не лёг и счётчика не сдвинул.
+                raster.fetch.rejected(addr);
+                state.epoch += 1;
+            }
         }
     }
 }
 
 /// Пересборка варп-патчей, когда изменилось то, из чего они собраны: состав
 /// наложений, их выборы (растр и уровень) или поколение хранилища тайлов.
-/// Камера сюда не входит: мир патчей от неё не зависит, взгляд двигает только
-/// uniform.
+///
+/// Взгляд входит сюда, но не в саму геометрию: вершины патча лежат по привязке
+/// и от того, откуда смотрят, не зависят — взгляд двигает только uniform. Зато
+/// им отбираются ячейки и берётся уровень, а это и есть выбор.
 fn build_patches(state: &mut State) {
     let Some(look) = looking(state) else {
         // Места под кадр нет — считать по нему нечего, а сказать есть о чём:
@@ -1067,9 +1085,9 @@ fn build_patches(state: &mut State) {
         return;
     };
 
-    // Пока камера, хранилище и состав наложений прежние, прежние и выборы —
+    // Пока взгляд, хранилище и состав наложений прежние, прежние и выборы —
     // холостой тик не строит даже списка для сравнения.
-    let now = (state.camera, state.tiles.generation, state.epoch);
+    let now = (look, state.tiles.generation, state.epoch);
     if state.checked == Some(now) {
         return;
     }

@@ -86,19 +86,44 @@ pub fn search(request: &SearchRequest, floor: i64) -> String {
 /// Адрес запроса упаковок той же съёмки — второй ход после [`locate`].
 ///
 /// Спрашивается временем съёмки, а не именем: имена упаковок расходятся хвостом
-/// (контрольная сумма упаковки у каждой своя), а время начала у них общее.
-/// Окно в секунду по обе стороны — не допуск, а единственный способ спросить
-/// вообще: у продуктов время идёт с долями секунды, а спрашивать мы умеем
-/// только целыми (см. `time::format`), и точное равенство не совпало бы ни с
-/// чем. Лишнее из ответа отсеет сравнение ключей съёмки — оно в
+/// (контрольная сумма упаковки у каждой своя).
+///
+/// Ширина окна идёт за правилом сведения (`scene::acquisition`), потому что
+/// спросить у́же, чем сводишь, значит не увидеть в ответе того, кого собирался
+/// приложить.
+///
+/// Секунда по обе стороны — там, где дататейка нет. У всех таких правил секунда
+/// съёмки стои́т внутри самого ключа, то есть части одной съёмки заведомо
+/// начинаются в одно и то же мгновение; хватило бы и точного равенства, да
+/// спросить им нечем — у продуктов время идёт с долями секунды, а спрашивать мы
+/// умеем только целыми (см. `time::format`).
+///
+/// Десять секунд — там, где дататейк есть. Такие части нарезаны порознь и
+/// начинаются в разное время: сырьё на четыре секунды раньше обработанного,
+/// комплексное на полторы, — а правило «по слайсу» времени не ограничивает
+/// вовсе. Своей границы у него нет, и берётся она у соседнего правила
+/// (`scene::BESIDE_A_SLICE_S`), которое той же десяткой прикладывает к слайсу
+/// части без номера: измеренный разброс она накрывает с запасом и до соседнего
+/// слайса, стоящего в двадцати пяти секундах, не дотягивается.
+///
+/// Дататейк, а не номер слайса: номера каталог называет не всем частям
+/// (`IW_OCN__2S` его не имеет вовсе), а прикладываются они всё тем же окном.
+/// Спрашивай мы по номеру, одна и та же съёмка раскрывалась бы по-разному в
+/// зависимости от того, про какую её часть спросили.
+///
+/// Лишнее из ответа отсеет сравнение ключей съёмки — оно в
 /// `cdse::on_http_result`, и оно точное (`scene::acquisition`).
 ///
 /// Коллекция в фильтре не для отбора, а ради индекса: без неё каталог сортирует
 /// весь архив — см. [`FRESH_DAYS`].
-pub fn siblings(mission: &str, tile: &str, acquired: i64) -> String {
+pub fn siblings(mission: &str, tile: &str, datatake: &str, acquired: i64) -> String {
+    let window = match datatake.is_empty() {
+        true => 1,
+        false => scene::BESIDE_A_SLICE_S,
+    };
     let mut terms = vec![
-        format!("ContentDate/Start ge {}", super::time::format(acquired - 1)),
-        format!("ContentDate/Start le {}", super::time::format(acquired + 1)),
+        format!("ContentDate/Start ge {}", super::time::format(acquired - window)),
+        format!("ContentDate/Start le {}", super::time::format(acquired + window)),
     ];
     if !mission.is_empty() {
         terms.push(format!("Collection/Name eq {}", literal(mission)));
@@ -113,8 +138,27 @@ pub fn siblings(mission: &str, tile: &str, acquired: i64) -> String {
             literal(tile)
         ));
     }
-    // Упаковок у одной съёмки единицы: тридцать — потолок с запасом.
-    address(&terms.join(" and "), None, 30)
+    address(&terms.join(" and "), None, siblings_top(datatake))
+}
+
+/// Потолок выдачи у запроса соседей.
+///
+/// Идёт за окном и в той же мере: у съёмки с дататейком окно вдесятеро шире,
+/// вдесятеро выше и потолок, — иначе запас плотности, с которым жил секундный
+/// запрос, срезался бы вместе с расширением. Упереться в потолок здесь значит
+/// потерять нужную часть по жребию: порядка выдачи мы не задаём.
+///
+/// Нижняя мера — не «частей у съёмки единицы»: их бывают десятки. У Sentinel-5P
+/// в одну секунду ложится десяток газов, у клеток одного пролёта Sentinel-1 RTC
+/// секунда общая на весь пролёт.
+///
+/// Отдельной величиной затем, что упор в потолок надо заметить, а заметить его
+/// может только тот, кто знает, где потолок (`cdse::on_http_result`).
+pub fn siblings_top(datatake: &str) -> u32 {
+    match datatake.is_empty() {
+        true => 30,
+        false => 300,
+    }
 }
 
 /// Адрес запроса одного продукта по точному имени — обратный ход поиска: имя
@@ -511,7 +555,7 @@ mod tests {
     fn every_request_carries_attributes_and_a_limit() {
         let requests = [
             search(&SearchRequest { limit: 10, ..Default::default() }, 0),
-            siblings("SENTINEL-1", "", 0),
+            siblings("SENTINEL-1", "", "", 0),
             locate("S2B_MSIL1C"),
         ];
         for url in &requests {
@@ -618,18 +662,84 @@ mod tests {
         assert_eq!(param(&search(&SearchRequest::default(), 0), "$filter"), None);
     }
 
-    /// Окно упаковок — секунда по обе стороны от съёмки: спрашивать точным
-    /// временем нечем, целые секунды с долями у продуктов не совпадут.
+    /// Окно упаковок одной плитки — секунда по обе стороны от съёмки:
+    /// начинаются они разом, спрашивать точным временем нечем, а целые секунды
+    /// с долями у продуктов не совпадут.
     #[test]
     fn siblings_ask_a_window_of_one_second() {
         let acquired = time::parse("2024-05-04T08:23:58.000Z");
         assert_eq!(
-            param(&siblings("SENTINEL-1", "", acquired), "$filter").as_deref(),
+            param(&siblings("SENTINEL-1", "", "", acquired), "$filter").as_deref(),
             Some(
                 "ContentDate/Start ge 2024-05-04T08:23:57.000Z and \
                  ContentDate/Start le 2024-05-04T08:23:59.000Z and \
                  Collection/Name eq 'SENTINEL-1'"
             )
+        );
+    }
+
+    /// Нарезанную съёмку спрашивают тем же окном, каким её части сводятся в
+    /// снимок, и не шире.
+    ///
+    /// Разойдись эти двое — и часть, которой снимок обязан показаться, не
+    /// попала бы в ответ каталога вовсе: прикладывать было бы нечего, а отказа
+    /// никто бы не увидел. Верхний край держится не для красоты: дотянись окно
+    /// до соседнего слайса, и его части съели бы потолок выдачи, из которого
+    /// нужная вылетела бы по жребию.
+    #[test]
+    fn siblings_ask_as_wide_as_the_scene_is_gathered() {
+        // Соседние слайсы стоя́т друг от друга на двадцать пять секунд и
+        // больше — см. `scene::BESIDE_A_SLICE_S`.
+        const NEXT_SLICE_S: i64 = 25;
+        let acquired = time::parse("2024-05-04T08:23:58.000Z");
+        let filter = param(&siblings("SENTINEL-1", "", "191698", acquired), "$filter")
+            .expect("фильтр собран");
+
+        let bound = |edge: &str| {
+            let at = filter.find(edge).expect("граница окна") + edge.len();
+            time::parse(&filter[at..at + "2024-05-04T08:23:58.000Z".len()])
+        };
+        // Сырьё начинается на четыре секунды раньше обработанного — то же
+        // число, на котором стои́т `scene::one_slice_is_one_scene_however_its_parts_start`.
+        // Названо здесь отдельно затем, что мерка сведения обязана накрывать
+        // не только себя, но и этот, измеренный по живому каталогу, край.
+        let spread = scene::BESIDE_A_SLICE_S.max(4);
+        for (edge, low, high) in [
+            ("ContentDate/Start ge ", acquired - NEXT_SLICE_S + 1, acquired - spread),
+            ("ContentDate/Start le ", acquired + spread, acquired + NEXT_SLICE_S - 1),
+        ] {
+            let at = bound(edge);
+            assert!(
+                at >= low && at <= high,
+                "граница «{}» вышла из [{}, {}]: {}",
+                edge.trim_end(),
+                time::format(low),
+                time::format(high),
+                filter
+            );
+        }
+    }
+
+    /// Потолок выдачи идёт за окном. Отстань он — и расширенное окно набрало бы
+    /// в ответ соседей плотнее, чем потолок пускает, а срезает он случайных:
+    /// порядка у этого запроса нет.
+    #[test]
+    fn the_siblings_ceiling_follows_the_window() {
+        let acquired = time::parse("2024-05-04T08:23:58.000Z");
+        let narrow = param(&siblings("SENTINEL-2", "", "", acquired), "$top")
+            .expect("потолок назван");
+        let wide = param(&siblings("SENTINEL-1", "", "191698", acquired), "$top")
+            .expect("потолок назван");
+        let narrow = narrow.parse::<i64>().expect("число");
+        assert_eq!(narrow, siblings_top("") as i64);
+        // Десятки, а не единицы: у Sentinel-5P в одну секунду ложится десяток
+        // газов, у клеток одного пролёта RTC секунда общая на весь пролёт.
+        assert!(narrow >= 30, "узкому окну потолка не хватит и на одну съёмку: {}", narrow);
+        assert!(
+            wide.parse::<i64>().expect("число") >= narrow * scene::BESIDE_A_SLICE_S,
+            "окно шире вдесятеро, а потолок — нет: {} против {}",
+            wide,
+            narrow
         );
     }
 
@@ -639,13 +749,13 @@ mod tests {
     #[test]
     fn siblings_narrow_down_to_the_tile_when_it_is_known() {
         let acquired = time::parse("2026-08-18T01:21:12.000Z");
-        let filter = param(&siblings("SENTINEL-2", "55SBD", acquired), "$filter")
+        let filter = param(&siblings("SENTINEL-2", "55SBD", "", acquired), "$filter")
             .expect("фильтр собран");
         assert!(filter.contains("Collection/Name eq 'SENTINEL-2'"), "{}", filter);
         assert!(filter.contains("a/Name eq 'tileId'"), "{}", filter);
         assert!(filter.contains("a/OData.CSC.StringAttribute/Value eq '55SBD'"), "{}", filter);
         // Плитки нет — нет и терма: у радара её не бывает вовсе.
-        let without = param(&siblings("SENTINEL-1", "", acquired), "$filter").expect("фильтр");
+        let without = param(&siblings("SENTINEL-1", "", "", acquired), "$filter").expect("фильтр");
         assert!(!without.contains("tileId"), "{}", without);
     }
 
