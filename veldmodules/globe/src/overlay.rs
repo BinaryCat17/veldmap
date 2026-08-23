@@ -28,6 +28,7 @@ use super::camera;
 use super::geodesy::{self, Geodetic, World};
 use super::gpu::OverlayVertex;
 use super::mesh;
+use super::perf::Toll;
 use super::projection;
 
 /// На сколько сегментов бьётся сторона ячейки варп-сетки — меньше этого не
@@ -765,7 +766,7 @@ impl Overlay {
     /// Ответ один на обоих спрашивающих — на запрос тайлов и на сборку
     /// патчей: заказанный уровень обязан быть тем же, который рисуют, а
     /// видимость ячейки — тем же, по чему её просили.
-    pub fn wanted(&self, look: &Look, cap_tiles: u64, store: &Store) -> Vec<Wanted> {
+    pub fn wanted(&self, look: &Look, cap_tiles: u64, store: &Store, toll: &Toll) -> Vec<Wanted> {
         if self.binding_pending() {
             return Vec::new();
         }
@@ -783,14 +784,14 @@ impl Overlay {
             return Vec::new();
         }
         if let Some((raster, meta)) = described(Role::Preview) {
-            wanted.push(self.at_level(raster, meta, look, cap_tiles, store));
+            wanted.push(self.at_level(raster, meta, look, cap_tiles, store, toll));
             if self.frame.ground_m_per_px(meta.width).is_some_and(|mpp| look.mpp >= mpp) {
                 // Родного разрешения превью хватает — подробный не нужен.
                 return wanted;
             }
         }
         if let Some((raster, meta)) = described(Role::Detailed) {
-            wanted.push(self.at_level(raster, meta, look, cap_tiles, store));
+            wanted.push(self.at_level(raster, meta, look, cap_tiles, store, toll));
         }
         wanted
     }
@@ -809,6 +810,7 @@ impl Overlay {
         look: &Look,
         cap_tiles: u64,
         store: &Store,
+        toll: &Toll,
     ) -> Wanted {
         let want = tiles::want(
             self.sharpest(meta, look),
@@ -819,7 +821,7 @@ impl Overlay {
             store,
             &raster.fetch,
             &meta.fingerprint,
-            |level| self.visible(meta, level, look),
+            |level| self.visible(meta, level, look, toll),
         );
         Wanted {
             choice: Choice { role: raster.role, fingerprint: meta.fingerprint.clone(), level: want.level },
@@ -842,7 +844,11 @@ impl Overlay {
     }
 
     /// Ячейки уровня, попавшие в кадр.
-    fn visible(&self, meta: &Meta, level: u32, look: &Look) -> Vec<Addr> {
+    ///
+    /// Обойдённое отмечается в `toll`: сколько ячеек проверено и сколько из них
+    /// оказалось видно. Одним сложением на уровень, а не приростом на ячейку —
+    /// проверяются они все до одной, и число это известно заранее.
+    fn visible(&self, meta: &Meta, level: u32, look: &Look, toll: &Toll) -> Vec<Addr> {
         let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
         let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
         let mut cells = Vec::new();
@@ -853,6 +859,7 @@ impl Overlay {
                 }
             }
         }
+        toll.level(u64::from(grid_w) * u64::from(grid_h), cells.len() as u64);
         cells
     }
 
@@ -1436,11 +1443,11 @@ mod tests {
             raster(Role::Detailed, Some(meta(10980, 10980))), // 10 м/px
         ]);
         // Далеко: экранный пиксель — километр; превью одно.
-        let far = overlay.wanted(&look_at(&overlay, 1000.0), u64::MAX, &store());
+        let far = overlay.wanted(&look_at(&overlay, 1000.0), u64::MAX, &store(), &Toll::default());
         assert_eq!(far.len(), 1);
         assert_eq!(far[0].choice.role, Role::Preview);
         // Экран мельче превью: база остаётся, подробный ложится поверх.
-        let near = overlay.wanted(&look_at(&overlay, 40.0), u64::MAX, &store());
+        let near = overlay.wanted(&look_at(&overlay, 40.0), u64::MAX, &store(), &Toll::default());
         assert_eq!(near.len(), 2);
         assert_eq!(near[0].choice.role, Role::Preview);
         assert_eq!(near[1].choice.role, Role::Detailed);
@@ -1466,10 +1473,10 @@ mod tests {
     fn tile_cap_coarsens_target() {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
         let look = look_at(&overlay, 5.0);
-        assert_eq!(overlay.visible(&meta(10980, 10980), 2, &look).len(), 36, "видно все ячейки");
+        assert_eq!(overlay.visible(&meta(10980, 10980), 2, &look, &Toll::default()).len(), 36, "видно все ячейки");
         // Цель видна через длину лестницы: от вершины (пятый уровень) до неё
         // включительно — четыре ступени, то есть цель вторая.
-        assert_eq!(overlay.wanted(&look, 100, &store())[0].want.steps, 4);
+        assert_eq!(overlay.wanted(&look, 100, &store(), &Toll::default())[0].want.steps, 4);
     }
 
     /// Пустое хранилище — и просят вершину пирамиды, а не целевой уровень:
@@ -1478,7 +1485,7 @@ mod tests {
     #[test]
     fn empty_store_asks_for_the_top_of_the_pyramid() {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
-        let wanted = overlay.wanted(&look_at(&overlay, 5.0), u64::MAX, &store());
+        let wanted = overlay.wanted(&look_at(&overlay, 5.0), u64::MAX, &store(), &Toll::default());
         assert_eq!(wanted[0].choice.level, meta(10980, 10980).levels - 1);
         assert_eq!(wanted[0].want.cells.len(), 1, "вершина — один тайл");
     }
@@ -1493,14 +1500,14 @@ mod tests {
         camera.focus(-lat, lon + 180.0, 1.0);
         camera.advance(10.0);
         let look = Look { view_proj: camera.view_projection(1.0), eye: camera.eye(), mpp: 5.0 };
-        assert!(overlay.wanted(&look, u64::MAX, &store())[0].want.cells.is_empty());
+        assert!(overlay.wanted(&look, u64::MAX, &store(), &Toll::default())[0].want.cells.is_empty());
     }
 
     /// Без описанных растров выбирать не из чего.
     #[test]
     fn no_meta_no_choices() {
         let overlay = overlay(vec![raster(Role::Preview, None)]);
-        assert!(overlay.wanted(&look_at(&overlay, 100.0), u64::MAX, &store()).is_empty());
+        assert!(overlay.wanted(&look_at(&overlay, 100.0), u64::MAX, &store(), &Toll::default()).is_empty());
     }
 
     fn tie(fx: f64, fy: f64, lat: f64, lon: f64) -> Tie {

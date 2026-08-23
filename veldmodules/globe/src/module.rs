@@ -16,9 +16,11 @@ pub mod gpu;
 pub mod mesh;
 pub mod outlines;
 pub mod overlay;
+pub mod perf;
 pub mod projection;
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use camera::Camera;
 use gpu::{Device, Target};
@@ -131,6 +133,9 @@ pub struct State {
     pending_describe: veldsdk::Correlator<(String, Role)>,
     pending_query: veldsdk::Correlator<QueryCtx>,
     pending_produce: veldsdk::Correlator<ProduceCtx>,
+    /// Чего стоит пересчёт желаемого: сколько занимает обход сетки и сколько
+    /// ячеек он проверил впустую. Считается это только здесь.
+    perf: perf::Meter,
 }
 
 /// То, из чего собран кадр. Совпало с нынешним — рисовать нечего.
@@ -162,6 +167,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         pending_describe: veldsdk::Correlator::new(),
         pending_query: veldsdk::Correlator::new(),
         pending_produce: veldsdk::Correlator::new(),
+        perf: perf::Meter::default(),
     })
 }
 
@@ -234,7 +240,7 @@ pub fn on_set_surface(state: &mut State, req: SurfaceDelegated) {
             state.target = None;
         }
     }
-    want_tiles(state);
+    want_tiles(state, perf::Pass::Set);
 }
 
 pub fn on_camera(state: &mut State, command: crate::proto::globe::CameraCommand) {
@@ -257,7 +263,7 @@ pub fn on_camera(state: &mut State, command: crate::proto::globe::CameraCommand)
     // Наводке этого мало: она только назначает цель, а камера доедет за
     // полсекунды, и спрошенное отсюда описывает место, откуда она вылетела.
     // Досматривает за ней кадровый тик (см. [`on_ui_event`]).
-    want_tiles(state);
+    want_tiles(state, perf::Pass::Camera);
 }
 
 /// Что под указателем. Отвечаем всегда: «мимо Земли» — такой же ответ, как
@@ -320,7 +326,7 @@ pub fn on_overlay(state: &mut State, msg: crate::proto::globe::Overlays) {
     });
 
     state.epoch += 1;
-    want_tiles(state);
+    want_tiles(state, perf::Pass::Set);
 }
 
 /// Потолок аппетита одного уровня. Правило общее с канвой и живёт у бюджета
@@ -645,7 +651,7 @@ pub fn on_described(state: &mut State, msg: Described) {
     }
 
     state.epoch += 1;
-    want_tiles(state);
+    want_tiles(state, perf::Pass::Set);
 }
 
 fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
@@ -808,12 +814,13 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     // всё это время ждёт. Уехавшее не теряется: оно переспросится, когда
     // вернётся в кадр (так же считает канва).
     let cap = cap_tiles(state);
+    let (toll, began) = (perf::Toll::default(), Instant::now());
     let desired: HashSet<Addr> = looking(state)
         .and_then(|look| {
             let overlay = state.overlays.iter().find(|o| o.key == ctx.key)?;
             Some(
                 overlay
-                    .wanted(&look, cap, &state.tiles)
+                    .wanted(&look, cap, &state.tiles, &toll)
                     .into_iter()
                     .filter(|wanted| wanted.choice.role == ctx.role)
                     .flat_map(|wanted| wanted.want.cells)
@@ -821,6 +828,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             )
         })
         .unwrap_or_default();
+    state.perf.pass(perf::Pass::Answer, &toll, began.elapsed(), Instant::now());
 
     let Some((label, produce_list, resource)) = ({
         let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
@@ -870,7 +878,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         // иначе добыча встанет до ближайшего движения камеры (см.
         // `Missed::Closed`).
         state.epoch += 1;
-        want_tiles(state);
+        want_tiles(state, perf::Pass::Fetch);
         return;
     };
 
@@ -945,13 +953,17 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     // Эпоха двигается и здесь: конец прохода видно только по ней — тайлов он
     // может не принести вовсе, а ход добычи о нём сказать обязан.
     state.epoch += 1;
-    want_tiles(state);
+    want_tiles(state, perf::Pass::Fetch);
 }
 
 /// Пересчёт нужного всем наложениям: выбор растра и уровня под взгляд, запрос
 /// недостающего у кэша. Производство одного растра единственно: пока оно идёт,
 /// новые запросы по нему откладываются; уровень сменился — оно убивается.
-fn want_tiles(state: &mut State) {
+///
+/// Повод приходит доводом: зовущих мест много, стоят они одинаково, а значат
+/// разное (см. `perf::Pass`). Считать их одним числом значит не уметь сказать,
+/// чем всплеск вызван.
+fn want_tiles(state: &mut State, from: perf::Pass) {
     let Some(look) = looking(state) else { return };
     let cap = cap_tiles(state);
 
@@ -963,17 +975,24 @@ fn want_tiles(state: &mut State) {
         .filter(|overlay| !overlay.hidden)
         .map(|overlay| overlay.key.clone())
         .collect();
+    // Замер копится по всем наложениям и записывается одним проходом: сборка
+    // патчей считает их разом, и записанные здесь поштучно они дали бы по
+    // проходу на слой против одного у неё — на том же самом счёте.
+    let (toll, mut spent) = (perf::Toll::default(), Duration::ZERO);
     for key in keys {
+        let began = Instant::now();
         let wanted = state
             .overlays
             .iter()
             .find(|o| o.key == key)
-            .map(|overlay| overlay.wanted(&look, cap, &state.tiles))
+            .map(|overlay| overlay.wanted(&look, cap, &state.tiles, &toll))
             .unwrap_or_default();
+        spent += began.elapsed();
         for wanted in wanted {
             want_overlay(state, &key, wanted);
         }
     }
+    state.perf.pass(from, &toll, spent, Instant::now());
 }
 
 /// Взгляд, которым меряется желаемое. `None` — места под кадр ещё нет, и
@@ -1101,18 +1120,23 @@ fn build_patches(state: &mut State) {
     //
     // Порядок списка — порядок отрисовки, а он и есть порядок набора: скрытые
     // из него выпадают целиком.
+    let (toll, began) = (perf::Toll::default(), Instant::now());
     let wanted: Vec<(String, f32, overlay::Wanted)> = state
         .overlays
         .iter()
         .filter(|overlay| !overlay.hidden)
         .flat_map(|overlay| {
             overlay
-                .wanted(&look, cap, &state.tiles)
+                .wanted(&look, cap, &state.tiles, &toll)
                 .into_iter()
                 .map(|wanted| (overlay.key.clone(), overlay.opacity, wanted))
                 .collect::<Vec<_>>()
         })
         .collect();
+    // Замер записывается здесь, а не концом функции: ниже лежит выход по
+    // совпавшему `built`, и записанный после него проход терялся бы как раз в
+    // самом частом случае — когда обход посчитан, а выбор не изменился.
+    state.perf.pass(perf::Pass::Patches, &toll, began.elapsed(), Instant::now());
     // Ход добычи считается здесь же, из того же списка: спрашивают его о том
     // же самом — что нужно наложению прямо сейчас, — и посчитанный отдельно он
     // разошёлся бы с рисуемым на глазах у смотрящего в список.
@@ -1273,6 +1297,15 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
     let Some(app_proto::ui_event::Event::Frame(frame)) = event.event else {
         return;
     };
+    // Отчёт измерителя — здесь, до всего остального: ниже функция кончается
+    // тремя выходами (нет устройства, кадр совпал с нарисованным, отказ
+    // записи), и поставленный за любым из них счётчик считал бы не кадры, а
+    // подмножество кадров. Выше ставить нельзя тоже: в этот топик едут и
+    // движения курсора, и прокрутка, и они завысили бы счёт ровно во время
+    // жеста, то есть там, где на него и смотрят.
+    if let Some(report) = state.perf.frame(Instant::now()) {
+        veldsdk::log::debug!(target: "perf", "{}", report);
+    }
     // Наводка на снимок едет, а не прыгает, и ведёт её тик: сама она только
     // назначает цель (см. `Camera::focus`). Подвинувшаяся камера видна ниже
     // сравнением с нарисованным кадром — отдельного «перерисовать» не нужно, а
@@ -1281,7 +1314,7 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
     // Тем же движением, что и при жесте, — там `want_tiles` зовётся на каждое
     // событие, и здесь на каждый кадр перелёта.
     if state.camera.advance(frame.dt) {
-        want_tiles(state);
+        want_tiles(state, perf::Pass::Camera);
     }
     // Патчи наложений — до сравнения кадра: пришедшие тайлы и смена уровня
     // видны как их пересборка, и она же двигает счётчик в [`Frame`].
