@@ -290,8 +290,8 @@ pub fn parse(body: &[u8]) -> anyhow::Result<Vec<(Facts, DataProduct)>> {
             let mut product = product(raw);
             // Уровень обработки знает только каталог, а список читаемых
             // форматов — только `imagery`: здесь они и встречаются.
-            product.viewable =
-                super::imagery::showable(&product.identifier, product.folder, facts.level);
+            product.unviewable =
+                super::imagery::unviewable(&product.identifier, product.folder, facts.level);
             // «Снимок это или вспомогательные данные» решает контур, и контур
             // тут один — тот, что вышел кольцами. Присутствие поля в ответе
             // каталога тем же самым не является, и цена ошибки здесь не
@@ -396,9 +396,9 @@ fn product(product: Product) -> DataProduct {
         cloud_cover: attribute("cloudCover").and_then(|value| value.as_f64()),
         folder,
         // Части проставляет сведение снимков — оно одно видит соседей, —
-        // а `viewable` требует уровня обработки и ставится в [`parse`].
+        // а причина отказа требует уровня обработки и ставится в [`parse`].
         parts: Vec::new(),
-        viewable: false,
+        unviewable: String::new(),
     }
 }
 
@@ -536,6 +536,33 @@ struct Attribute {
 mod tests {
     use super::super::time;
     use super::*;
+
+    /// Разбор ответа проставляет причину отказа каждому продукту.
+    ///
+    /// Уровень обработки знает только каталог, а список читаемых форматов —
+    /// только `imagery`, и встречаются они ровно здесь. Пропущенная встреча
+    /// компилятору незаметна, а стои́т дорого: продукт уедет с пустой причиной,
+    /// то есть с обещанием положить на шар сырьё уровня 0, в котором
+    /// изображения нет вовсе.
+    #[test]
+    fn parsing_tells_every_product_why_the_globe_is_out() {
+        let body = br#"{"value":[
+            {"Name":"S1C_IW_RAW__0SDV_20260101.SAFE",
+             "S3Path":"/eodata/Sentinel-1/S1C_IW_RAW__0SDV_20260101.SAFE",
+             "Attributes":[{"Name":"processingLevel","Value":"LEVEL0"}]},
+            {"Name":"S2A_OPER_GIP_R2EQOG_B03.TGZ",
+             "S3Path":"/eodata/AUX/S2A_OPER_GIP_R2EQOG_B03.TGZ",
+             "Attributes":[{"Name":"processingLevel","Value":"LEVEL1C"}]},
+            {"Name":"S2C_MSIL2A_T40WFC.SAFE",
+             "S3Path":"/eodata/Sentinel-2/S2C_MSIL2A_T40WFC.SAFE",
+             "Attributes":[{"Name":"processingLevel","Value":"LEVEL2A"}]}
+        ]}"#;
+        let parsed = parse(body).expect("ответ каталога разобран");
+        let said: Vec<&str> = parsed.iter().map(|(_, p)| p.unviewable.as_str()).collect();
+        assert!(said[0].contains("уровня 0"), "сырьё уехало без причины: {:?}", said[0]);
+        assert!(said[1].contains(".tgz"), "архив уехал без причины: {:?}", said[1]);
+        assert!(said[2].is_empty(), "снимку отказали: {:?}", said[2]);
+    }
 
     /// Значение одного параметра запроса — уже раскодированное, каким его
     /// прочтёт каталог.

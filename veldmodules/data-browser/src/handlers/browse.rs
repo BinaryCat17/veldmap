@@ -312,6 +312,6 @@ fn item(entry: ListEntry) -> BrowseItem {
         identifier: entry.key,
         size: entry.size,
         modified: entry.modified,
-        viewable: entry.viewable,
+        unviewable: entry.unviewable,
     }
 }

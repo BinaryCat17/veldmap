@@ -124,7 +124,7 @@ pub fn search(state: &State, view: &SearchState) -> Vec<Row> {
             let kind = RowKind::Product { folder: product.folder };
             let mut row = Row {
                 product_type: product.product_type.clone(),
-                viewable: product.viewable,
+                unviewable: product.unviewable.clone(),
                 ..from_key(
                     state,
                     product.identifier.clone(),
@@ -188,7 +188,7 @@ fn parted(
                     true => "показана".to_string(),
                     false => "часть".to_string(),
                 },
-                viewable: part.viewable,
+                unviewable: part.unviewable.clone(),
                 ..from_key(
                     state,
                     part.identifier.clone(),
@@ -225,7 +225,7 @@ fn entries(
                 (false, false) => RowKind::File,
             };
             let mut row = Row {
-                viewable: item.viewable,
+                unviewable: item.unviewable.clone(),
                 ..from_key(
                     state,
                     item.identifier.clone(),

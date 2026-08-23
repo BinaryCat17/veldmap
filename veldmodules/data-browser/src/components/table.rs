@@ -935,10 +935,13 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
         .tone(tone),
     );
 
-    // `viewable` — не «покажется наверняка», а «есть смысл предлагать»
-    // (см. `Row::viewable`): значок над сырьём уровня 0 или над архивом обещает
-    // то, чего не бывает.
-    if row.viewable {
+    // Пустая причина — не «покажется наверняка», а «есть смысл предлагать»
+    // (см. `Row::unviewable`): значок над сырьём уровня 0 или над архивом
+    // обещает то, чего не бывает. Названная причина гасит значок, а не убирает
+    // его: место остаётся, и подсказка говорит, чем именно нельзя, — тем же
+    // способом, что и наводка ниже. В тесноте этого не видно: выключенный
+    // значок пунктом меню не становится (см. `actions`).
+    if row.unviewable.is_empty() {
         // Значок горит, когда снимок лежит на шаре растром. Подпись называет
         // то, что случится по нажатию: у лежащего это снятие, а не второе
         // наложение. Скрытый снят наравне с видимым — он остаётся слоем, и
@@ -967,6 +970,12 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
             )
             .tone(tone),
         );
+    } else {
+        quick.push(Quick::idle(
+            theme::glyph::GLOBE,
+            "Показать на шаре",
+            format!("На шар не положить — {}", row.unviewable),
+        ));
     }
 
     // Наводка. Своё нажатие, а не довесок к показу: положить второй снимок
@@ -1122,7 +1131,7 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
     // глаз и тот же смысл, и два таких пункта подряд читались бы как два
     // разных действия.
     let opens = matches!(row.status, RowStatus::Complete) && !row.kind.is_folder();
-    if row.is_snapshot() && row.viewable && !key.is_empty() && !opens {
+    if row.is_snapshot() && row.unviewable.is_empty() && !key.is_empty() && !opens {
         items.push(
             Item::new("Смотреть снимок", Msg::In(view, ViewMsg::PreviewProduct(key.clone())))
                 .glyph(theme::glyph::EYE),
@@ -1271,6 +1280,42 @@ mod tests {
         assert!(quick(view, &file).is_empty(), "у файла шара не бывает");
     }
 
+    /// Отказ показать снимок называется, а не гасит значок молча.
+    ///
+    /// Убранный значок оставляет смотрящего гадать, чего строке не хватает, и
+    /// объяснить это потом отказом поздно — нажать-то нечего. Поэтому место за
+    /// значком остаётся, а причина едет подсказкой: ровно так же объясняет себя
+    /// наводка на снимок, которого на шаре нет. Проверяется широкий ряд: в
+    /// тесноте значков нет ни у кого, и объяснения там нет тоже.
+    #[test]
+    fn a_refused_snapshot_keeps_its_place_and_says_why() {
+        let (_state, view) = state_view();
+        let refused = Row {
+            unviewable: "продукт лежит одним файлом .tgz, а наложить можно растр — TIFF"
+                .to_string(),
+            ..snapshot(OnOutline::Off)
+        };
+
+        let icons = quick(view, &refused);
+        let glyphs: Vec<&str> = icons.iter().map(|q| q.glyph).collect();
+        assert_eq!(
+            glyphs,
+            vec![theme::glyph::OUTLINE, theme::glyph::GLOBE, theme::glyph::FOCUS],
+            "значок пропал вместо того, чтобы погаснуть"
+        );
+        assert!(icons[1].message.is_none(), "отказавший значок нажимается");
+        assert_eq!(icons[1].tone, theme::IconTone::Idle);
+        assert!(icons[1].hint.contains(".tgz"), "подсказка не назвала причины: {}", icons[1].hint);
+
+        // А без причины он остаётся нажимаемым — иначе показать не вышло бы
+        // ничего и никогда.
+        let allowed = quick(view, &snapshot(OnOutline::Off));
+        assert!(
+            matches!(allowed[1].message, Some(Msg::In(_, ViewMsg::GlobeToggle(_)))),
+            "значок без причины перестал нажиматься"
+        );
+    }
+
     /// Показ и контур — переключатели с одной механикой: нажатие кладёт,
     /// второе снимает. Наводка к ним не примешана — это третье нажатие, и
     /// нажать его можно только тогда, когда снимок на шаре есть.
@@ -1356,6 +1401,17 @@ mod tests {
         // способ его увидеть, и он остаётся.
         let items = named(&snapshot(OnOutline::Off));
         assert!(items.contains(&"Смотреть снимок".to_string()));
+
+        // Тому, о чём провайдер сказал «нельзя», не предлагают и просмотр:
+        // вопрос у обоих один — есть ли в продукте изображение.
+        let refused = Row {
+            unviewable: "это сырьё уровня 0".to_string(),
+            ..snapshot(OnOutline::Off)
+        };
+        assert!(
+            !named(&refused).contains(&"Смотреть снимок".to_string()),
+            "смотреть предложили там, где смотреть нечего"
+        );
     }
 
     /// Колонки отметки и раскрытия появляются только там, где им есть что

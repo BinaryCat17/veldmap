@@ -509,7 +509,7 @@ pub fn group(products: Vec<(Facts, DataProduct)>) -> Vec<DataProduct> {
                         size: product.size,
                         folder: product.folder,
                         shown: at == 0,
-                        viewable: product.viewable,
+                        unviewable: product.unviewable.clone(),
                     })
                     .collect(),
             };

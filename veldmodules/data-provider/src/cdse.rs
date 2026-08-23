@@ -424,18 +424,26 @@ pub fn on_http_result(
                             // На шар кладут снимок; уровня обработки листинг не
                             // знает — его сообщает только каталог.
                             let itself = product == entry.identifier.trim_end_matches('/');
-                            let viewable = itself
-                                && imagery::showable(
+                            let unviewable = match itself {
+                                true => imagery::unviewable(
                                     &entry.identifier,
                                     entry.identifier.ends_with('/'),
                                     None,
-                                );
+                                ),
+                                // Причина эта до смотрящего не доходит и дойти не
+                                // может: у записи, которая снимком не оказалась,
+                                // значков нет вовсе. Названа она затем, что поле
+                                // отвечает «почему нельзя», и пустота в нём значила
+                                // бы «можно» — неправду, которую однажды прочтут.
+                                false => "на шар кладут снимок целиком, а эта запись им не является"
+                                    .to_string(),
+                            };
                             ListEntry {
                                 product,
                                 key: entry.identifier,
                                 size: entry.size,
                                 modified: entry.modified,
-                                viewable,
+                                unviewable,
                             }
                         })
                         .collect(),
