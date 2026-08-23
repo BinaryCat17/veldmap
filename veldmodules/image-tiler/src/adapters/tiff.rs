@@ -452,12 +452,25 @@ pub fn produce_direct<R: Read + Seek>(
 }
 
 /// Источник для уровня: самая мелкая копия, которой хватает на его ширину.
+///
+/// Хватает — с точностью до округления. Сторону уровня считают округлением
+/// вверх (`pyramid::level_size`), а копии в файле записаны делением вниз, и
+/// у нечётной стороны эти два счёта расходятся ровно на пиксель: у растра
+/// 25437 уровню 1 нужно 12719, а его же копия в файле — 12718. Требовать
+/// копию не у́же уровня значит отвергнуть её и взять вдвое крупнее, то есть
+/// прочитать вчетверо больше пикселей на каждый тайл. Пиксель разницы
+/// ужимается тем же дробным окном, что и всякое неточное отношение сторон
+/// (см. `window` в `produce_direct`).
+///
+/// Больше пикселя допуск не нужен и вреден: копия грубее уровня — это уже
+/// растягивание, а не ужатие.
+///
 /// Базовый IFD подходит всегда — уровень не бывает крупнее родного
 /// разрешения, поэтому выбор не бывает пустым.
 fn pick_source(info: &Info, layout: &Layout, level_width: u32) -> (usize, u32, u32) {
     let mut best = (0usize, info.width, info.height);
     for overview in &layout.overviews {
-        if overview.width >= level_width && overview.width < best.1 {
+        if overview.width + 1 >= level_width && overview.width < best.1 {
             best = (overview.image, overview.width, overview.height);
         }
     }
@@ -749,6 +762,84 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Растр без копий — под ним `pick_source` смотрит только на размеры.
+    fn bare(width: u32, height: u32) -> Info {
+        Info::plain(width, height, Kind::Tiff(Layout { tiled: true, overviews: Vec::new() }))
+    }
+
+    /// Копии, записанные делением стороны пополам вниз, — так их пишет GDAL.
+    fn halved_down(width: u32, height: u32, count: usize) -> Layout {
+        let (mut w, mut h) = (width, height);
+        let overviews = (1..=count)
+            .map(|image| {
+                w /= 2;
+                h /= 2;
+                Overview { image, width: w, height: h }
+            })
+            .collect();
+        Layout { tiled: true, overviews }
+    }
+
+    /// Копия годится своему уровню, хотя на пиксель у́же его. Проверять надо
+    /// на нечётной стороне: у чётной оба счёта совпадают, и правило на ней не
+    /// проверяется вовсе.
+    ///
+    /// Это и есть та пара, которая обязана сойтись механически: уровень
+    /// считает `pyramid::level_size` округлением вверх, копии в файле — GDAL
+    /// делением вниз. Разойдясь, они стоят чтения вчетверо большей копии на
+    /// каждом уровне, кроме нулевого.
+    #[test]
+    fn копия_годится_своему_уровню_у_нечётной_стороны() {
+        // Sentinel-1 GRDH: 25437×16729, шесть IFD.
+        let (width, height) = (25437u32, 16729u32);
+        let layout = halved_down(width, height, 5);
+        let info = bare(width, height);
+
+        for level in 1..=5usize {
+            let level_width = pyramid::level_size(width, level as u32);
+            let (image, chosen, _) = pick_source(&info, &layout, level_width);
+            assert_eq!(
+                image, level,
+                "уровню {} ({} px) досталась копия {} px вместо своей",
+                level, level_width, chosen
+            );
+        }
+    }
+
+    /// Нулевому уровню копий не бывает: он и есть родное разрешение.
+    #[test]
+    fn нулевой_уровень_читается_из_базового_ifd() {
+        let (width, height) = (25437u32, 16729u32);
+        let (image, chosen, _) = pick_source(&bare(width, height), &halved_down(width, height, 5), width);
+        assert_eq!((image, chosen), (0, width));
+    }
+
+    /// Годных копий у уровня бывает несколько, и берётся самая мелкая — она
+    /// дешевле всех по чтению. Порядок в файле при этом ничего не решает:
+    /// копии перечислены в порядке обнаружения, а не по размеру.
+    #[test]
+    fn из_годных_копий_берётся_самая_мелкая() {
+        let layout = Layout {
+            tiled: true,
+            overviews: vec![
+                Overview { image: 3, width: 800, height: 800 },
+                Overview { image: 1, width: 3200, height: 3200 },
+                Overview { image: 2, width: 1600, height: 1600 },
+            ],
+        };
+        let (image, chosen, _) = pick_source(&bare(6400, 6400), &layout, 800);
+        assert_eq!((image, chosen), (3, 800), "годная мельче — та, что ровно под уровень");
+    }
+
+    /// Копия грубее уровня больше, чем на округление, не годится: тайл
+    /// собрался бы растягиванием, а не ужатием.
+    #[test]
+    fn копия_грубее_уровня_не_годится() {
+        let layout = Layout { tiled: true, overviews: vec![Overview { image: 1, width: 400, height: 400 }] };
+        let (image, chosen, _) = pick_source(&bare(1000, 1000), &layout, 500);
+        assert_eq!((image, chosen), (0, 1000), "уровню в 500 копия в 400 не годится");
+    }
 
     /// Заголовок каталога геоключей: версия, ревизия и число ключей.
     fn geokeys(model: u16) -> Vec<u16> {
