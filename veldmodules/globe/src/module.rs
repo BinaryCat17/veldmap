@@ -11,6 +11,7 @@
 //! которых приходят широта с долготой снаружи (см. `geodesy`).
 
 pub mod camera;
+pub mod cull;
 pub mod geodesy;
 pub mod gpu;
 pub mod mesh;
@@ -608,6 +609,7 @@ pub fn on_described(state: &mut State, msg: Described) {
     }
 
     describe_settled(state, &key, role, msg);
+    rebuild_bounds(state, &key);
 
     // Описания кончились — время сказать о том, что видно только сейчас.
     if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == key)
@@ -652,6 +654,34 @@ pub fn on_described(state: &mut State, msg: Described) {
 
     state.epoch += 1;
     want_tiles(state, perf::Pass::Set);
+}
+
+/// Пересчитать шары ячеек у всех растров слоя.
+///
+/// У всех, а не у описавшегося: шары строятся по привязке, а привязка
+/// принадлежит слою и меняется описанием любого из растров — решётка опорных
+/// точек старше проекции и вытесняет её (см. `Binding`). Оставленные шары
+/// превью тогда описывали бы отменённую геометрию, и ячейки терялись бы молча
+/// у той самой базы, которую видно первой.
+///
+/// Место одно на все ветви `describe_settled` — она вся кончается простыми
+/// `return`, и любой из них приводит сюда.
+fn rebuild_bounds(state: &mut State, key: &str) {
+    let Some(at) = state.overlays.iter().position(|o| o.key == key) else { return };
+    // Считается всё до единой мутации: шары зависят от слоя и от растра, а оба
+    // спрашиваются по ссылке, и разделить эти два заимствования иначе нечем.
+    let overlay = &state.overlays[at];
+    let built: Vec<Vec<Vec<cull::Ball>>> = overlay
+        .rasters
+        .iter()
+        .map(|raster| match &raster.meta {
+            Some(meta) => overlay.bounds(meta),
+            None => Vec::new(),
+        })
+        .collect();
+    for (raster, bounds) in state.overlays[at].rasters.iter_mut().zip(built) {
+        raster.bounds = bounds;
+    }
 }
 
 fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {

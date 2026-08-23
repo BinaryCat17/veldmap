@@ -27,6 +27,7 @@ use veldsdk::graphics::BindGroupId;
 use super::camera;
 use super::geodesy::{self, Geodetic, World};
 use super::gpu::OverlayVertex;
+use super::cull;
 use super::mesh;
 use super::perf::Toll;
 use super::projection;
@@ -471,6 +472,12 @@ pub struct Raster {
     /// Что уже спрошено, что производится и чего больше не просить — общий
     /// учёт потребителя тайлов (см. `veldmap_image_tiler_wrap::tiles`).
     pub fetch: Fetch,
+    /// Шары ячеек по уровням, от нулевого к вершине (см. [`Overlay::bounds`]).
+    ///
+    /// Строятся по привязке и размерам растра, а от взгляда не зависят вовсе,
+    /// поэтому считаются раз на описание, а не на кадр. Пусто — описания ещё не
+    /// было: тогда отсева нет и всякая ячейка идёт к точному тесту.
+    pub bounds: Vec<Vec<cull::Ball>>,
     /// Ход идущего прохода производителя: прочитано байт источника из скольки.
     /// Нулевой знаменатель — прохода нет.
     ///
@@ -487,6 +494,7 @@ impl Raster {
             resource,
             geolocation: None,
             meta: None,
+            bounds: Vec::new(),
             trouble: None,
             describe: veldsdk::Latest::default(),
             fetch: Fetch::default(),
@@ -821,7 +829,7 @@ impl Overlay {
             store,
             &raster.fetch,
             &meta.fingerprint,
-            |level| self.visible(meta, level, look, toll),
+            |level| self.visible(meta, &raster.bounds, level, look, toll),
         );
         Wanted {
             choice: Choice { role: raster.role, fingerprint: meta.fingerprint.clone(), level: want.level },
@@ -843,17 +851,117 @@ impl Overlay {
         }
     }
 
+    /// Шары, накрывающие ячейки растра, — по одному набору на уровень, от
+    /// нулевого к вершине.
+    ///
+    /// Ими отсекают ячейку до точного теста: шар против кадра стоит трёх
+    /// десятков сложений, а девять проб — шестисот трансцендентных вызовов
+    /// (см. [`crate::cull`]).
+    ///
+    /// Каждый уровень пробуется своими девятью точками, а не выводится из
+    /// уровня ниже. Слиянием четвёрок вышло бы дешевле и точнее, но точнее
+    /// здесь и есть поломка: точный тест прощает ячейке отвёрнутость на радиус
+    /// покрытия ЕЁ сетки проб, а он у каждой ступени свой и вдвое длиннее, чем
+    /// у ступени ниже. Слитый шар нёс бы запас нулевого уровня и оказывался бы
+    /// строже судьи, которому обязан не перечить, — то есть отвергал бы
+    /// видимое, и молча.
+    pub fn bounds(&self, meta: &Meta) -> Vec<Vec<cull::Ball>> {
+        (0..meta.levels)
+            .map(|level| {
+                let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
+                let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
+                (0..grid_h)
+                    .flat_map(|y| (0..grid_w).map(move |x| (x, y)))
+                    .map(|(x, y)| self.ball(meta, level, x, y))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Шар одной ячейки: по тем же девяти пробам, что берёт
+    /// [`Self::on_screen`], с запасом на непроверенное между ними.
+    ///
+    /// Запас берётся у [`covering_radius_deg`] — той же мерки, которой
+    /// [`faces_cap`] прощает ячейке отвёрнутость всех девяти проб. И это не
+    /// удобство, а необходимость: шар обязан не отвергать того, что признал
+    /// точный тест, а точный тест признаёт ровно на этот запас дальше своих
+    /// проб. Заведи здесь вторую мерку — и разошлись бы они молча, ячейками,
+    /// пропавшими у самого лимба.
+    ///
+    /// Дуга, а не хорда: дуга длиннее, то есть щедрее, а щедрость здесь и
+    /// нужна. Мерка эта не строго верхняя — её недоборы перечислены там, где
+    /// она живёт, — но недоборы эти общие у обоих спрашивающих, и разойтись от
+    /// них ответы не могут.
+    ///
+    /// Сверх запаса добавляется подъём: рисуется ячейка не на общем выносе, а
+    /// на своём (`mesh::lift_m`), и у грубо поделённой он выше пробы на
+    /// километры. Шар обязан накрывать нарисованное, а не задуманное.
+    fn ball(&self, meta: &Meta, level: u32, x: u32, y: u32) -> cull::Ball {
+        let (points, seen) = self.probes(meta, level, x, y);
+        // Размах берётся у тех же проб, а не считается заново: `span_deg`
+        // спрашивает привязку о тех же девяти точках, и второй ход по ней стоил
+        // бы дороже всего остального здесь вместе взятого.
+        let span = span_of(&seen);
+        let lifted = mesh::lift_m(span / f64::from(segments_for(span)) * std::f64::consts::SQRT_2)
+            - mesh::SURFACE_LIFT_M;
+        let reach = covering_radius_deg(&seen).to_radians() * mesh::drawn_radius();
+        cull::Ball::over(&points).widened(reach as f32 + geodesy::metres(lifted))
+    }
+
+    /// Девять проб ячейки: точки мира и их широты с долготами.
+    ///
+    /// Одним местом на всех, кому они нужны, — точному тесту, шару и тому, что
+    /// меряет радиус покрытия. Посчитанные порознь, они разошлись бы молча, а
+    /// обратный ход привязки в них и есть самое дорогое.
+    fn probes(&self, meta: &Meta, level: u32, x: u32, y: u32) -> ([World; 9], [(f64, f64); 9]) {
+        let cell = pyramid::cell_image_rect(x, y, level, meta.width, meta.height);
+        let along = |from: f64, to: f64, at: usize| from + (to - from) * (at as f64) / 2.0;
+        let mut points = [[0.0f32; 3]; 9];
+        let mut seen = [(0.0f64, 0.0f64); 9];
+        for at in 0..9 {
+            let (px, py) = (along(cell[0], cell[2], at % 3), along(cell[1], cell[3], at / 3));
+            let (lat, lon) = self
+                .frame
+                .geodetic(px / f64::from(meta.width), py / f64::from(meta.height));
+            seen[at] = (lat, lon);
+            points[at] = geodesy::position(Geodetic {
+                lat_deg: lat,
+                lon_deg: lon,
+                height_m: mesh::SURFACE_LIFT_M,
+            });
+        }
+        (points, seen)
+    }
+
     /// Ячейки уровня, попавшие в кадр.
     ///
     /// Обойдённое отмечается в `toll`: сколько ячеек проверено и сколько из них
     /// оказалось видно. Одним сложением на уровень, а не приростом на ячейку —
     /// проверяются они все до одной, и число это известно заранее.
-    fn visible(&self, meta: &Meta, level: u32, look: &Look, toll: &Toll) -> Vec<Addr> {
+    fn visible(
+        &self,
+        meta: &Meta,
+        bounds: &[Vec<cull::Ball>],
+        level: u32,
+        look: &Look,
+        toll: &Toll,
+    ) -> Vec<Addr> {
         let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
         let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
+        let frame = cull::Frame::new(&look.view_proj, look.eye);
+        let balls = bounds.get(level as usize);
         let mut cells = Vec::new();
         for y in 0..grid_h {
             for x in 0..grid_w {
+                // Грубый отсев перед точным тестом: шар отвечает «не видно» за
+                // десяток наносекунд, а девять проб — за двенадцать микросекунд.
+                // Шары могут не быть построены (описания ещё не было) — тогда
+                // отсева нет, и спрашивается только точный тест.
+                if let Some(ball) = balls.and_then(|balls| balls.get((y * grid_w + x) as usize))
+                    && !frame.admits(ball)
+                {
+                    continue;
+                }
                 if self.on_screen(meta, level, x, y, look) {
                     cells.push((level, x, y));
                 }
@@ -885,28 +993,15 @@ impl Overlay {
     /// девятку запас не изменит, и платят за него лишь ячейки, которые иначе
     /// были бы отброшены.
     fn on_screen(&self, meta: &Meta, level: u32, x: u32, y: u32, look: &Look) -> bool {
-        let cell = pyramid::cell_image_rect(x, y, level, meta.width, meta.height);
-        let along = |from: f64, to: f64, at: usize| from + (to - from) * (at as f64) / 2.0;
-        let points = (0..9).map(|at| {
-            (along(cell[0], cell[2], at % 3), along(cell[1], cell[3], at / 3))
-        });
+        // Пробы берутся общим местом ([`Self::probes`]) — тем же, которым
+        // строится шар: обратный ход привязки здесь самое дорогое, а две его
+        // копии разошлись бы молча, и шар начал бы отвергать признанное здесь.
+        let (world, seen) = self.probes(meta, level, x, y);
 
         let (mut low, mut high) = ([f32::MAX; 2], [f32::MIN; 2]);
         let mut faces = false;
-        // Обе девятки складываются на месте: за отвёрнутой их спрашивают
-        // второй раз, и считать их заново значило бы удвоить самое дорогое —
-        // обратный ход привязки.
-        let mut seen = [(0.0f64, 0.0f64); 9];
-        let mut world = [[0.0f32; 3]; 9];
-        for (at, (px, py)) in points.enumerate() {
-            let (lat, lon) = self
-                .frame
-                .geodetic(px / f64::from(meta.width), py / f64::from(meta.height));
-            let point =
-                geodesy::position(Geodetic { lat_deg: lat, lon_deg: lon, height_m: mesh::SURFACE_LIFT_M });
+        for point in world {
             faces |= faces_eye(point, look.eye);
-            seen[at] = (lat, lon);
-            world[at] = point;
 
             let clip = camera::project(&look.view_proj, point, look.eye);
             // Точка за камерой: делить на такое w нельзя, а ячейка при этом
@@ -1156,6 +1251,21 @@ fn segments_for(span_deg: f64) -> u32 {
 /// он выходит вдвое у́же, чем есть. Поднятая по такой мерке ячейка ныряет под
 /// тело Земли на километры, и снимок во всю Землю снова виден клочками у самых
 /// узлов сетки — ровно то, ради чего густота и считается.
+/// Тот же размах, но по уже посчитанным пробам.
+///
+/// Порядок проб тот же, что у [`Overlay::probes`]: доля по X — младшая, то есть
+/// ряд `r` занимает места `3r..3r+3`.
+fn span_of(seen: &[(f64, f64); 9]) -> f64 {
+    let mut span: f64 = 0.0;
+    for row in 0..3 {
+        span = span.max(arc_deg(seen[row * 3], seen[row * 3 + 2]));
+    }
+    for col in 0..3 {
+        span = span.max(arc_deg(seen[col], seen[6 + col]));
+    }
+    span
+}
+
 fn span_deg(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> f64 {
     let at = |x: f64, y: f64| frame.geodetic(x / f64::from(meta.width), y / f64::from(meta.height));
     let xs = [cell[0], (cell[0] + cell[2]) * 0.5, cell[2]];
@@ -1433,6 +1543,135 @@ mod tests {
         Look { view_proj: camera.view_projection(1.0), eye: camera.eye(), mpp }
     }
 
+    /// Грубый отсев не отвергает того, что видит точный тест.
+    ///
+    /// Это всё требование к шарам, и проверяется оно там, где может сломаться:
+    /// у лимба. Пока снимок в середине кадра, все пробы обращены к глазу,
+    /// запас не работает вовсе и проверять нечего — а вот уехавший за край
+    /// Земли слой судят как раз запасом (`faces_cap`), и шар обязан дотянуться
+    /// туда же.
+    ///
+    /// Обратное неверно и не проверяется: шар обязан быть щедрее, иначе он не
+    /// был бы осторожным.
+    #[test]
+    fn the_coarse_refusal_never_overrules_the_exact_answer() {
+        let whole = Overlay {
+            frame: Frame::quad([(85.0, -180.0), (85.0, 180.0), (-85.0, 180.0), (-85.0, -180.0)]),
+            ..overlay(vec![raster(Role::Detailed, Some(meta(43200, 21600)))])
+        };
+        let cases = [(whole, meta(43200, 21600)), (overlay(vec![raster(
+            Role::Detailed, Some(meta(10980, 10980)))]), meta(10980, 10980))];
+        let mut seen = 0;
+        for (overlay, meta) in &cases {
+            let bounds = overlay.bounds(meta);
+            assert_eq!(bounds.len(), meta.levels as usize, "уровней в таблице столько же");
+            // Камеру водят вокруг Земли, а не наводят на снимок: за лимбом и
+            // живёт единственная ветвь, где запас что-то решает.
+            for lat in [-70.0, -20.0, 0.0, 35.0, 80.0] {
+                for lon in [-150.0, -60.0, 0.0, 70.0, 160.0] {
+                    for radius_deg in [1.0, 15.0, 60.0] {
+                        let mut camera = crate::module::camera::Camera::default();
+                        camera.focus(lat, lon, radius_deg);
+                        camera.advance(10.0);
+                        let look = Look {
+                            view_proj: camera.view_projection(1.5),
+                            eye: camera.eye(),
+                            mpp: 10.0,
+                        };
+                        let frame = cull::Frame::new(&look.view_proj, look.eye);
+                        // Нулевой уровень пропускается: ячеек у него тысячи, а
+                        // ломается не он — запас на нём и построен.
+                        for level in 1..meta.levels {
+                            let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
+                            let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
+                            for y in 0..grid_h {
+                                for x in 0..grid_w {
+                                    if !overlay.on_screen(meta, level, x, y, &look) {
+                                        continue;
+                                    }
+                                    seen += 1;
+                                    let ball = &bounds[level as usize][(y * grid_w + x) as usize];
+                                    assert!(
+                                        frame.admits(ball),
+                                        "ячейка {}/{},{} видна точным тестом, а шаром отвергнута \
+                                         при взгляде {},{} на {}°",
+                                        level, x, y, lat, lon, radius_deg
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(seen > 500, "видимых ячеек в выборке слишком мало: {}", seen);
+    }
+
+    /// Шар прощает ячейке ровно столько же, сколько прощает точный тест.
+    ///
+    /// Точный тест признаёт ячейку видимой на радиус покрытия дальше своих проб
+    /// (`faces_cap`), и шар обязан дотягиваться туда же. Мерка у них одна
+    /// (`covering_radius_deg`), и тест держит именно это: две мерки одного и
+    /// того же разошлись бы молча — ячейками, пропавшими у самого лимба, где
+    /// запас и работает.
+    #[test]
+    fn the_ball_forgives_the_cell_as_much_as_the_exact_test_does() {
+        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
+        let meta = meta(10980, 10980);
+        for level in 0..meta.levels {
+            let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
+            let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
+            for (x, y) in [(0, 0), (grid_w / 2, grid_h / 2), (grid_w - 1, grid_h - 1)] {
+                let ball = overlay.ball(&meta, level, x, y);
+                let (points, seen) = overlay.probes(&meta, level, x, y);
+                let tight = cull::Ball::over(&points);
+                let forgiven = f64::from(ball.radius - tight.radius);
+                let owed = covering_radius_deg(&seen).to_radians() * mesh::drawn_radius();
+                assert!(
+                    forgiven >= owed * 0.999,
+                    "шар прощает {} при {} у точного теста: {}/{},{}",
+                    forgiven, owed, level, x, y
+                );
+            }
+        }
+    }
+
+    /// Шар накрывает не задуманное, а нарисованное.
+    ///
+    /// Ячейка рисуется не на общем выносе, а на своём: грубо поделённая
+    /// поднимается над эллипсоидом, чтобы не нырять под него серединами
+    /// треугольников (`mesh::lift_m`). У верхней ступени растра во всю Землю
+    /// это километры, и шар, построенный по пробам на общем выносе, прошёл бы
+    /// под нарисованной ячейкой.
+    #[test]
+    fn the_ball_covers_what_is_drawn_and_not_what_was_meant() {
+        let whole = Overlay {
+            frame: Frame::quad([(85.0, -180.0), (85.0, 180.0), (-85.0, 180.0), (-85.0, -180.0)]),
+            ..overlay(vec![raster(Role::Detailed, Some(meta(43200, 21600)))])
+        };
+        let meta = meta(43200, 21600);
+        let top = meta.levels - 1;
+        let cell = pyramid::cell_image_rect(0, 0, top, meta.width, meta.height);
+        let span = span_deg(&whole.frame, &meta, cell);
+        let lifted = mesh::lift_m(span / f64::from(segments_for(span)) * std::f64::consts::SQRT_2);
+        assert!(lifted > mesh::SURFACE_LIFT_M * 10.0, "ступень легла на общий вынос: {}", lifted);
+
+        let ball = whole.ball(&meta, top, 0, 0);
+        let (points, seen) = whole.probes(&meta, top, 0, 0);
+        let tight = cull::Ball::over(&points);
+        // Подъём выделяется из запаса, а не складывается с ним: рядом с
+        // покрытием ячейки в пол-Земли он теряется в допуске, и проверка
+        // прошла бы, даже не будь его вовсе.
+        let reach = covering_radius_deg(&seen).to_radians() * mesh::drawn_radius();
+        let raised = f64::from(ball.radius - tight.radius) - reach;
+        let owed = f64::from(geodesy::metres(lifted - mesh::SURFACE_LIFT_M));
+        assert!(
+            raised >= owed * 0.99,
+            "шар не дотянулся до нарисованного: поднят на {}, а рисуется на {}",
+            raised, owed
+        );
+    }
+
     /// Выбор растров: далеко хватает превью одного; ближе его родного
     /// разрешения подробный добавляется ПОВЕРХ превью — база рисуется всегда,
     /// чтобы снимок был виден, пока подробные тайлы едут.
@@ -1473,7 +1712,7 @@ mod tests {
     fn tile_cap_coarsens_target() {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
         let look = look_at(&overlay, 5.0);
-        assert_eq!(overlay.visible(&meta(10980, 10980), 2, &look, &Toll::default()).len(), 36, "видно все ячейки");
+        assert_eq!(overlay.visible(&meta(10980, 10980), &[], 2, &look, &Toll::default()).len(), 36, "видно все ячейки");
         // Цель видна через длину лестницы: от вершины (пятый уровень) до неё
         // включительно — четыре ступени, то есть цель вторая.
         assert_eq!(overlay.wanted(&look, 100, &store(), &Toll::default())[0].want.steps, 4);
