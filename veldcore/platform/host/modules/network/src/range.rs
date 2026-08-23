@@ -30,6 +30,14 @@ const BLOCK: u64 = 512 * 1024;
 /// чтобы не платить задержкой запроса за каждый блок (см. [`Readahead`]).
 const READAHEAD: u64 = 8 * 1024 * 1024;
 
+/// Через сколько проводных байт ресурс отчитывается о чтении.
+///
+/// Отчёт по набранному объёму, а не при закрытии: ресурс наложения живёт,
+/// пока слой на шаре, и `Drop` у него не наступает весь сеанс — то есть
+/// именно у крупного и долгого спросить сегодня нечего. Порог, а не часы,
+/// потому что мерится здесь провод, а он идёт байтами.
+const REPORT_STEP: u64 = 4 * 1024 * 1024;
+
 /// Сколько раз пробовать один и тот же запрос, прежде чем признать чтение
 /// сорвавшимся.
 ///
@@ -66,7 +74,13 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
         let result = match HttpRange::open(&req.url, req.headers, blocks) {
             Ok(source) => {
                 let len = source.len();
-                let id = ctx.memory.alloc_range(Arc::new(source), instance);
+                let source = Arc::new(source);
+                let id = ctx.memory.alloc_range(source.clone(), instance);
+                // Носитель узнаёт свой номер только здесь: заводит его реестр
+                // ресурсов, а до него носитель уже существует. Без номера его
+                // строки не сшить со строками тех, кто его читает, — те знают
+                // ресурс только по нему.
+                source.answers_to(id);
                 log::info!(target: "network", "Открыт удалённый ресурс {} ({} байт): {}", id, len, req.url);
                 opened_handle(id, len)
             }
@@ -98,20 +112,47 @@ struct HttpRange {
     /// Сколько байт реально ушло по проводу. Смысл оконного чтения в том,
     /// чтобы это была доля файла, а не он весь, — но доля зависит от формата
     /// (тайловый TIFF с пирамидой читается кусками, PNG приходится прочесть
-    /// целиком). Поэтому не утверждение в комментарии, а счётчик: итог
-    /// пишется в лог при закрытии ресурса.
+    /// целиком). Поэтому не утверждение в комментарии, а счётчик.
+    ///
+    /// Считает доставленное: байты оборвавшейся попытки и повторов сюда не
+    /// идут, так что на рвущемся канале провод дороже этого числа.
     fetched: std::sync::atomic::AtomicU64,
+    /// Сколько диапазонов доставлено. Вместе с `fetched` это средняя длина
+    /// запроса, а она и есть ответ на то, включился разгон или нет: без него
+    /// всякий запрос ровно в блок (см. [`Readahead`]).
+    ///
+    /// Походов в сеть было не меньше: сорвавшийся диапазон переспрашивается до
+    /// `ATTEMPTS` раз, и все попытки, кроме последней, сюда не идут.
+    requests: std::sync::atomic::AtomicU64,
+    /// Номер ресурса в реестре — тот же, каким его зовут читатели. Заводится
+    /// реестром уже после носителя, поэтому не поле, а ячейка (см.
+    /// [`HttpRange::answers_to`]).
+    id: std::sync::atomic::AtomicU64,
+    /// Попаданий в пул: чтений, которым блок нашёлся готовым. Считает не
+    /// блоки, а обращения — окно читателя (256 КиБ) вдвое мельче блока,
+    /// поэтому один блок отдаётся дважды.
+    hits: std::sync::atomic::AtomicU64,
+    /// Блоков этого ресурса привезено — вместе с упреждающими, которых никто
+    /// не спрашивал. Больше, чем блоков у файла, значит одно: пул вытеснил
+    /// уже привезённое, и оно приехало снова.
+    blocks_in: std::sync::atomic::AtomicU64,
+    /// Сколько порогов `REPORT_STEP` уже отчитано, считая нулевой. Ноль
+    /// значит «ни одного», поэтому первый же поход в сеть отчитывается — у
+    /// ресурса мельче порога это единственная строка, которая о нём будет до
+    /// закрытия.
+    reported: std::sync::atomic::AtomicU64,
 }
 
 /// Ресурс закрыт (гость освободил его через veld_resource_free) — блоки прочь,
 /// итог по трафику в лог.
 impl Drop for HttpRange {
     fn drop(&mut self) {
-        self.blocks.release(self.owner);
         let fetched = self.fetched.load(std::sync::atomic::Ordering::Relaxed);
         let share = if self.len > 0 { fetched * 100 / self.len } else { 0 };
         log::info!(target: "network", "Закрыт удалённый ресурс: прочитано {} из {} байт ({}%): {}",
                    fetched, self.len, share, self.url);
+        self.report(true);
+        self.blocks.release(self.owner);
     }
 }
 
@@ -132,6 +173,10 @@ pub struct Blocks {
     /// нельзя переиспользовать: закрытый ресурс и открытый следом за ним —
     /// разные файлы с разными смещениями.
     next_owner: std::sync::atomic::AtomicU64,
+    /// Сколько блоков вытеснено потолком за сеанс. Свойство пула, а не
+    /// ресурса: вытесняют друг друга все открытые вместе, и разделить это по
+    /// ресурсам нечем. Ноль здесь значит, что потолка хватает всем.
+    evicted: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -155,6 +200,11 @@ impl Blocks {
         self.pool.lock().unwrap().blocks.get(&(owner, index)).cloned()
     }
 
+    /// Сколько блоков пул вытеснил за сеанс.
+    fn evicted(&self) -> u64 {
+        self.evicted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Кладёт блок, вытесняя старые. Если блок уже есть (два читателя
     /// запросили его одновременно), возвращается лежащий: учёт байт должен
     /// совпадать с содержимым, иначе потолок поплывёт.
@@ -167,6 +217,7 @@ impl Blocks {
             let Some(oldest) = pool.order.pop_front() else { break };
             if let Some(dropped) = pool.blocks.remove(&oldest) {
                 pool.bytes -= dropped.len() as u64;
+                self.evicted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         pool.bytes += data.len() as u64;
@@ -226,6 +277,18 @@ impl Readahead {
         self.run = run;
         run
     }
+}
+
+/// Пора ли отчитываться о чтении: пороги `REPORT_STEP` считаются от нуля, и
+/// нулевой — тоже порог, поэтому первый же доставленный диапазон даёт строку.
+///
+/// Отдельной функцией, а не условием внутри отчёта: всё правило — это она, и
+/// проверяется оно без сети. `fetch_max`, а не обмен: читателей у ресурса
+/// бывает несколько (см. `Blocks::insert`), и отставший вернул бы счёт назад,
+/// заставив отчитаться о том же пороге снова.
+fn due(fetched: u64, reported: &std::sync::atomic::AtomicU64) -> bool {
+    let passed = fetched / REPORT_STEP + 1;
+    passed > reported.fetch_max(passed, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Чем кончилась одна попытка сходить в сеть.
@@ -349,7 +412,65 @@ impl HttpRange {
             blocks,
             readahead: Mutex::new(Readahead::default()),
             fetched: std::sync::atomic::AtomicU64::new(0),
+            requests: std::sync::atomic::AtomicU64::new(0),
+            hits: std::sync::atomic::AtomicU64::new(0),
+            blocks_in: std::sync::atomic::AtomicU64::new(0),
+            id: std::sync::atomic::AtomicU64::new(0),
+            reported: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Носителю сообщают его номер в реестре: до этого он о себе знает только
+    /// адрес, а читатели зовут его номером.
+    fn answers_to(&self, id: u64) {
+        self.id.store(id, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Как ресурс зовётся в логе: номер в реестре и хвост адреса. Номер —
+    /// потому что имя не различает (квиклук у каждого продукта CDSE зовётся
+    /// `quick-look.png`) и потому что этим же номером ресурс зовут открытие и
+    /// читатели; хвост — потому что по одному номеру не догадаться. Целиком
+    /// адрес длиной со строку подписи и в строку отчёта не лезет.
+    fn name(&self) -> String {
+        let path = self.url.split('?').next().unwrap_or(&self.url);
+        let tail = path.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path);
+        format!("ресурс {} ({})", self.id.load(std::sync::atomic::Ordering::Relaxed), tail)
+    }
+
+    /// Строка о чтении ресурса: по порогу `REPORT_STEP` и обязательно на
+    /// закрытии, иначе у долгого чтения не было бы итога.
+    ///
+    /// Отвечает на три вопроса: сколько байт ресурса доставлено, какой длины
+    /// запросы (то есть разогналось ли упреждающее чтение) и не перечитывает
+    /// ли ресурс сам себя из-за потолка пула — последнее видно по тому, что
+    /// привезённых блоков больше, чем их у файла.
+    ///
+    /// Первая строка ресурса приходит после первого же запроса, и длина
+    /// запроса в ней всегда одна: разгон начинается с блока (см.
+    /// [`Readahead`]). Читать её надо как «чтение началось», а не как итог.
+    fn report(&self, closing: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let fetched = self.fetched.load(Relaxed);
+        if !closing && !due(fetched, &self.reported) {
+            return;
+        }
+        let (requests, hits) = (self.requests.load(Relaxed), self.hits.load(Relaxed));
+        let (blocks_in, blocks) = (self.blocks_in.load(Relaxed), self.len.div_ceil(BLOCK));
+        let share = if self.len > 0 { fetched * 100 / self.len } else { 0 };
+        let per_request = match requests {
+            0 => 0,
+            _ => fetched / requests / 1024,
+        };
+        // Мегабайты дробью, а не целыми: у квиклука на 270 КБ целое давало бы
+        // «0 из 0», а он и есть тот случай, ради которого отчёт идёт с первого
+        // же запроса.
+        let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+        log::debug!(target: "network::perf",
+                    "{}{}: доставлено {:.1} из {:.1} МиБ ({}%), запросов {} по {} КиБ, \
+                     попаданий {}; блоков привезено {} из {}, вытеснено пулом {}",
+                    self.name(), if closing { ", закрыт" } else { "" },
+                    mib(fetched), mib(self.len), share, requests, per_request, hits,
+                    blocks_in, blocks, self.blocks.evicted());
     }
 
     /// Блок из кэша или из сети. Промах тянет не один блок, а столько, сколько
@@ -357,6 +478,7 @@ impl HttpRange {
     /// сколько в нём байт (см. [`Readahead`]).
     fn block(&self, index: u64) -> anyhow::Result<Arc<[u8]>> {
         if let Some(data) = self.blocks.get(self.owner, index) {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(data);
         }
         let run = self.readahead.lock().unwrap().plan(index, self.len.div_ceil(BLOCK));
@@ -404,6 +526,7 @@ impl HttpRange {
             },
         )?;
         self.fetched.fetch_add(data.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        self.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Пришедшее раскладывается по блокам целиком: упреждающая часть за это
         // и заплачена, а выбросить её значило бы перечитать её же следующим
@@ -411,10 +534,14 @@ impl HttpRange {
         let mut wanted = None;
         for (step, chunk) in data.chunks(BLOCK as usize).enumerate() {
             let stored = self.blocks.insert(self.owner, index + step as u64, Arc::from(chunk));
+            self.blocks_in.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if step == 0 {
                 wanted = Some(stored);
             }
         }
+        // После раскладки, а не до неё: иначе счёт блоков отстаёт от того
+        // самого запроса, о котором отчитываются.
+        self.report(false);
         wanted.ok_or_else(|| anyhow::anyhow!("чтение диапазона {}..{}: пустой ответ", from, to))
     }
 }
@@ -508,6 +635,26 @@ mod tests {
         Arc::from(vec![0u8; BLOCK as usize])
     }
 
+    /// Первый доставленный диапазон отчитывается всегда, дальше — раз на
+    /// порог. Первая строка нужна отдельным правилом: у ресурса мельче порога
+    /// других не будет до самого закрытия, а закрытия у наложения не бывает.
+    #[test]
+    fn первый_диапазон_отчитывается_дальше_раз_на_порог() {
+        let reported = std::sync::atomic::AtomicU64::new(0);
+
+        assert!(due(0, &reported), "первый диапазон, даже пустой");
+        assert!(!due(1, &reported), "тот же порог молчит");
+        assert!(!due(REPORT_STEP - 1, &reported), "и до самого края");
+        assert!(due(REPORT_STEP, &reported), "порог перейдён");
+        assert!(!due(REPORT_STEP + 1, &reported));
+        assert!(due(REPORT_STEP * 3, &reported), "через два порога — одна строка, не две");
+
+        // Отставший читатель порог не откатывает: иначе следующий же
+        // догнавший отчитался бы о том, о чём уже отчитались.
+        assert!(!due(REPORT_STEP * 2, &reported), "отставший молчит");
+        assert!(!due(REPORT_STEP * 3, &reported), "и порог за собой не сбросил");
+    }
+
     /// Потолок общий: сколько бы ресурсов ни было открыто, вместе они держат
     /// не больше, чем один. Ради этого пул и заведён — прежний потолок «на
     /// ресурс» умножался на их число.
@@ -559,6 +706,32 @@ mod tests {
         assert_eq!(pool.pool.lock().unwrap().bytes, BLOCK, "осталось место одного блока");
         assert!(pool.get(leaving, 0).is_none());
         assert!(pool.get(staying, 0).is_some(), "чужие блоки не тронуты");
+    }
+
+    /// Вытеснения считаются, и считается только они. Число это единственное,
+    /// по чему видно, что потолка не хватает: выброшенный блок перечитывается
+    /// молча, а по одному объёму чтения перечитывание от чтения не отличить.
+    /// Закрытие ресурса вытеснением не является — блоки уносит он сам, а не
+    /// давление на потолок.
+    #[test]
+    fn evictions_are_counted_and_closing_is_not_one() {
+        let pool = Blocks::default();
+        let owner = pool.claim();
+        let fits = POOL_LIMIT / BLOCK;
+
+        for index in 0..fits {
+            pool.insert(owner, index, block());
+        }
+        assert_eq!(pool.evicted(), 0, "пока помещается — вытеснять нечего");
+
+        pool.insert(owner, fits, block());
+        assert_eq!(pool.evicted(), 1, "лишний блок выбросил ровно один");
+
+        pool.insert(owner, fits, block());
+        assert_eq!(pool.evicted(), 1, "уже лежащий блок не выбрасывает никого");
+
+        pool.release(owner);
+        assert_eq!(pool.evicted(), 1, "закрытие ресурса — не вытеснение");
     }
 
     /// Ключ владения не переиспользуется: закрытый ресурс и открытый следом —

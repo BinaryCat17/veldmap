@@ -24,6 +24,7 @@ pub mod resample;
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
+use std::time::Instant;
 
 use veldsdk::graphics as gfx;
 // Формат тайла — не наш: он общий с кэшем и объявлен там, где его видят оба
@@ -107,10 +108,16 @@ pub fn on_describe(state: &mut State, req: DescribeRequest) {
     let correlation = veldsdk::correlation();
     let label = if req.label.is_empty() { correlation.clone() } else { req.label.clone() };
 
+    // Сорвавшееся описание раскладки по шагам не оставляет — она печатается в
+    // конце удавшегося. А сорваться оно может дорого: истёкшая подпись
+    // отказывает после трёх попыток с паузами, и молчаливым это ожидание
+    // выглядит так же, как удачное.
+    let began = Instant::now();
     let described = match describe(state, &req) {
         Ok(described) => described,
         Err(error) => {
-            veldsdk::log::warn!(target: "handlers", "{}: {}", label, error);
+            veldsdk::log::warn!(target: "handlers", "{}: {} (за {:.2} с)",
+                                label, error, began.elapsed().as_secs_f32());
             Described { error, ..Default::default() }
         }
     };
@@ -119,11 +126,14 @@ pub fn on_describe(state: &mut State, req: DescribeRequest) {
 
 fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, String> {
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
+    let began = Instant::now();
     let fingerprint = fingerprint::fingerprint(resource.id, resource.size)?;
+    let stamped = began.elapsed();
     // Привязка приезжает из соседнего файла и в memo не идёт: она свойство
     // пары «растр и его координаты», а memo знает только про растр.
     let mut ties = Vec::new();
     let info = parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)))?;
+    let read = began.elapsed();
 
     // Координаты из соседнего файла — только когда в самом растре их нет: то,
     // что записано в нём, знает о своей раскладке точнее любого соседа.
@@ -145,6 +155,23 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
             Err(error) => veldsdk::log::warn!(target: "decode", "файл координат: {}", error),
         }
     }
+
+    // Описание — самая долгая и самая молчаливая часть показа: прогресса у
+    // него нет вовсе (см. schema.yaml), а внутри лежит и отпечаток двумя
+    // концами файла, и разбор, и соседний файл координат.
+    //
+    // Секунды у отпечатка — это сеть, и разбор ими же и оплачен: голова файла
+    // нужна обоим, и после отпечатка она лежит в блочном кэше хоста. Читать
+    // «отпечаток 2,6 — разбор 0,0» как «разбор дёшев» нельзя.
+    //
+    // Только время: сколько уехало по проводу, отсюда не видно — счётчик
+    // `Metered` считает дальнюю достигнутую позицию, а не объём, и провод
+    // мерит хост (`network::perf`).
+    let total = began.elapsed();
+    veldsdk::log::debug!(target: "perf",
+        "описание ресурса {}: {:.2} с — отпечаток {:.2}, разбор {:.2}, координаты {:.2}",
+        resource.id, total.as_secs_f32(), stamped.as_secs_f32(),
+        (read - stamped).as_secs_f32(), (total - read).as_secs_f32());
 
     Ok(Described {
         fingerprint,
