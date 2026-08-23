@@ -33,8 +33,8 @@ use super::{Info, Kind, Placement, Tie};
 pub const BIG_MAGIC: [&[u8]; 2] = [b"II\x2b\x00", b"MM\x00\x2b"];
 
 /// Потолок области источника, читаемой ради одного тайла (в пикселях).
-/// При обычных для COG копиях-половинах область — до 1024², а больше 4096²
-/// означает дыру в цепочке копий на четыре уровня: честнее отказать, чем
+/// При обычных для COG копиях-половинах область — до 513², а больше 4096²
+/// означает дыру в цепочке копий на пять уровней: честнее отказать, чем
 /// молча прочитать пол-файла.
 const REGION_CAP: u64 = 4096 * 4096;
 
@@ -372,7 +372,7 @@ pub fn produce_direct<R: Read + Seek>(
 
     let lw = pyramid::level_size(info.width, level);
     let lh = pyramid::level_size(info.height, level);
-    let (image, sw, sh) = pick_source(info, layout, lw);
+    let (image, sw, sh) = pick_source(info, layout, lw, lh);
     decoder.seek_to_image(image).map_err(|e| format!("tiff: {}", e))?;
 
     // Копии могут быть раскложены иначе, чем базовый IFD, — проверяется та,
@@ -451,26 +451,47 @@ pub fn produce_direct<R: Read + Seek>(
     Ok(())
 }
 
-/// Источник для уровня: самая мелкая копия, которой хватает на его ширину.
+/// Источник для уровня: самая мелкая копия, которой хватает на обе его
+/// стороны.
 ///
 /// Хватает — с точностью до округления. Сторону уровня считают округлением
 /// вверх (`pyramid::level_size`), а копии в файле записаны делением вниз, и
 /// у нечётной стороны эти два счёта расходятся ровно на пиксель: у растра
 /// 25437 уровню 1 нужно 12719, а его же копия в файле — 12718. Требовать
 /// копию не у́же уровня значит отвергнуть её и взять вдвое крупнее, то есть
-/// прочитать вчетверо больше пикселей на каждый тайл. Пиксель разницы
-/// ужимается тем же дробным окном, что и всякое неточное отношение сторон
-/// (см. `window` в `produce_direct`).
+/// прочитать вчетверо больше пикселей на каждый тайл.
 ///
-/// Больше пикселя допуск не нужен и вреден: копия грубее уровня — это уже
-/// растягивание, а не ужатие.
+/// Прощёный пиксель — это дорисовка в один столбец на весь тайл
+/// (`resample_window` разворачивает окно шире, чем оно есть, с коэффициентом
+/// `сторона уровня / сторона копии`). Больше пикселя прощать нельзя: у
+/// короткой стороны пиксель — это уже разы, и растр 513×3 собирал бы уровень
+/// высотой 2 из копии высотой 1.
 ///
-/// Базовый IFD подходит всегда — уровень не бывает крупнее родного
-/// разрешения, поэтому выбор не бывает пустым.
-fn pick_source(info: &Info, layout: &Layout, level_width: u32) -> (usize, u32, u32) {
+/// Прощается только округление, поэтому обе стороны проверяются порознь, а
+/// копия мельче половины уровня не годится никогда. Второе условие и держит
+/// короткую сторону: у стороны в два пикселя «пиксель разницы» — это её
+/// половина, и такая копия не округлена, а потеряна. Сработать оно может
+/// только на стороне в один-два пикселя, потому что `2·(n−1) > n` при всяком
+/// `n` больше двух; заодно им же отсекается копия под нулевой уровень —
+/// округлять там нечего.
+fn pick_source(
+    info: &Info,
+    layout: &Layout,
+    level_width: u32,
+    level_height: u32,
+) -> (usize, u32, u32) {
+    // Вычитание из стороны уровня, а не прибавление к стороне копии: битый
+    // IFD с шириной у потолка u32 переполнил бы её вместе со сборкой.
+    let fits = |copy: u32, level: u32| {
+        copy >= level.saturating_sub(1) && u64::from(copy) * 2 > u64::from(level)
+    };
+
     let mut best = (0usize, info.width, info.height);
     for overview in &layout.overviews {
-        if overview.width + 1 >= level_width && overview.width < best.1 {
+        if fits(overview.width, level_width)
+            && fits(overview.height, level_height)
+            && overview.width < best.1
+        {
             best = (overview.image, overview.width, overview.height);
         }
     }
@@ -797,22 +818,62 @@ mod tests {
         let info = bare(width, height);
 
         for level in 1..=5usize {
-            let level_width = pyramid::level_size(width, level as u32);
-            let (image, chosen, _) = pick_source(&info, &layout, level_width);
+            let (lw, lh) = (
+                pyramid::level_size(width, level as u32),
+                pyramid::level_size(height, level as u32),
+            );
+            let (image, chosen, chosen_h) = pick_source(&info, &layout, lw, lh);
             assert_eq!(
-                image, level,
-                "уровню {} ({} px) досталась копия {} px вместо своей",
-                level, level_width, chosen
+                (image, chosen, chosen_h),
+                (level, lw - 1, lh - 1),
+                "уровню {} ({}×{}) досталась чужая копия",
+                level, lw, lh
             );
         }
     }
 
-    /// Нулевому уровню копий не бывает: он и есть родное разрешение.
+    /// Нулевому уровню копий не бывает: он и есть родное разрешение, и
+    /// прощать там нечего — округления не было.
     #[test]
     fn нулевой_уровень_читается_из_базового_ifd() {
         let (width, height) = (25437u32, 16729u32);
-        let (image, chosen, _) = pick_source(&bare(width, height), &halved_down(width, height, 5), width);
-        assert_eq!((image, chosen), (0, width));
+        let layout = halved_down(width, height, 5);
+        let found = pick_source(&bare(width, height), &layout, width, height);
+        assert_eq!(found, (0, width, height));
+
+        // Вырожденный случай той же ловушки: у растра в два пикселя копия
+        // ровно вдвое мельче, и абсолютный допуск пустил бы её под уровень 0.
+        let tiny = Layout { tiled: true, overviews: vec![Overview { image: 1, width: 1, height: 1 }] };
+        assert_eq!(pick_source(&bare(2, 2), &tiny, 2, 2), (0, 2, 2), "родному разрешению копий нет");
+    }
+
+    /// Допуск ровно в пиксель, а не «примерно». Копия у́же на два уже не
+    /// годится: прощается округление, а не близость.
+    #[test]
+    fn допуск_ровно_в_один_пиксель() {
+        let short = |w: u32| Layout {
+            tiled: true,
+            overviews: vec![Overview { image: 1, width: w, height: w }],
+        };
+        let info = bare(2000, 2000);
+        assert_eq!(pick_source(&info, &short(499), 500, 500).0, 1, "у́же на пиксель — своя");
+        assert_eq!(pick_source(&info, &short(498), 500, 500).0, 0, "у́же на два — чужая");
+    }
+
+    /// Стороны проверяются порознь: копия, годная по ширине, может не годиться
+    /// по высоте. У вытянутого растра пиксель короткой стороны — это разы, и
+    /// уровень собрался бы растягиванием вдвое.
+    #[test]
+    fn узкая_копия_не_годится_по_высоте() {
+        let info = bare(513, 3);
+        let layout = Layout { tiled: true, overviews: vec![Overview { image: 1, width: 256, height: 1 }] };
+        let (lw, lh) = (pyramid::level_size(513, 1), pyramid::level_size(3, 1));
+        assert_eq!((lw, lh), (257, 2));
+        assert_eq!(
+            pick_source(&info, &layout, lw, lh),
+            (0, 513, 3),
+            "копия высотой 1 под уровень высотой 2 не годится"
+        );
     }
 
     /// Годных копий у уровня бывает несколько, и берётся самая мелкая — она
@@ -828,8 +889,8 @@ mod tests {
                 Overview { image: 2, width: 1600, height: 1600 },
             ],
         };
-        let (image, chosen, _) = pick_source(&bare(6400, 6400), &layout, 800);
-        assert_eq!((image, chosen), (3, 800), "годная мельче — та, что ровно под уровень");
+        let found = pick_source(&bare(6400, 6400), &layout, 800, 800);
+        assert_eq!(found, (3, 800, 800), "годная мельче — та, что ровно под уровень");
     }
 
     /// Копия грубее уровня больше, чем на округление, не годится: тайл
@@ -837,8 +898,8 @@ mod tests {
     #[test]
     fn копия_грубее_уровня_не_годится() {
         let layout = Layout { tiled: true, overviews: vec![Overview { image: 1, width: 400, height: 400 }] };
-        let (image, chosen, _) = pick_source(&bare(1000, 1000), &layout, 500);
-        assert_eq!((image, chosen), (0, 1000), "уровню в 500 копия в 400 не годится");
+        let found = pick_source(&bare(1000, 1000), &layout, 500, 500);
+        assert_eq!(found, (0, 1000, 1000), "уровню в 500 копия в 400 не годится");
     }
 
     /// Заголовок каталога геоключей: версия, ревизия и число ключей.
