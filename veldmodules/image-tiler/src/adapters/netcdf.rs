@@ -266,7 +266,8 @@ pub fn geolocation(
     };
     let (lat_values, lon_values) = (read(lat)?, read(lon)?);
 
-    let seat = seating(raster, frame(&file), subsampling(&file), (width, height), (geo_w, geo_h))?;
+    let attrs = globals(&file);
+    let seat = seating(raster, frame(&attrs), subsampling(&attrs), (width, height), (geo_w, geo_h))?;
     let at = |row: u32, column: u32| -> Option<(f64, f64)> {
         let index = (row as usize) * (geo_w as usize) + (column as usize);
         Some((f64::from(*lat_values.get(index)?), f64::from(*lon_values.get(index)?)))
@@ -341,7 +342,7 @@ fn told(
         // Координаты NetCDF записаны в градусах и решёткой: проекции здесь не
         // бывает вовсе.
         placement: None,
-        frame: frame(file),
+        frame: frame(&globals(file)),
     })
 }
 
@@ -749,11 +750,16 @@ impl Seating {
     const SAME: Seating = Seating { step: (1.0, 1.0), origin: (0.0, 0.0) };
 }
 
-/// Отсчёт прибора из глобальных атрибутов файла. `None` — упаковка о нём не
+/// Глобальные атрибуты файла — те, что записаны у корневой группы. Ими
+/// Sentinel-3 говорит о решётке, на которой лежит всё содержимое.
+fn globals(file: &File) -> HashMap<String, AttrValue> {
+    file.root().attrs().unwrap_or_default()
+}
+
+/// Отсчёт прибора из глобальных атрибутов. `None` — упаковка о нём не
 /// говорит, и выводить его не из чего.
-fn frame(file: &File) -> Option<Frame> {
-    let attrs = file.root().attrs().ok()?;
-    let (across, along) = resolution(&text(&attrs, "resolution"))?;
+fn frame(attrs: &HashMap<String, AttrValue>) -> Option<Frame> {
+    let (across, along) = resolution(&text(attrs, "resolution"))?;
     Some(Frame {
         across_at: f64::from(number(attrs.get("track_offset")?)?),
         along_at: f64::from(number(attrs.get("start_offset")?)?),
@@ -764,42 +770,52 @@ fn frame(file: &File) -> Option<Frame> {
 
 /// Подвыборка опорной сетки — второй словарь, которым продукт называет ту же
 /// связь: сколько пикселей растра приходится на узел поперёк трека и вдоль.
-fn subsampling(file: &File) -> Option<(f64, f64)> {
-    let attrs = file.root().attrs().ok()?;
+fn subsampling(attrs: &HashMap<String, AttrValue>) -> Option<(f64, f64)> {
     let read = |name: &str| Some(f64::from(number(attrs.get(name)?)?));
     Some((read("ac_subsampling_factor")?, read("al_subsampling_factor")?))
 }
 
 /// `resolution` записан строкой: `[ 16000 1000 ]` — поперёк трека и вдоль него.
+///
+/// Число вынимается целиком и обязано разобраться целиком: дробное, показанное
+/// степенью, со знаком — всё это законные записи числа, а `1.2.3` не число
+/// вовсе. Резать строку по цифрам нельзя: `1.5` распалось бы на единицу и
+/// пятёрку, и обе прошли бы дальше как правдоподобные разрешения.
 fn resolution(said: &str) -> Option<(f64, f64)> {
     let mut numbers = said
-        .split(|sign: char| !sign.is_ascii_digit())
-        .filter_map(|word| word.parse::<f64>().ok());
-    let (across, along) = (numbers.next()?, numbers.next()?);
-    (across > 0.0 && along > 0.0).then_some((across, along))
+        .split(|sign: char| !matches!(sign, '0'..='9' | '.' | '-' | '+' | 'e' | 'E'))
+        .filter(|word| !word.is_empty())
+        .map(str::parse::<f64>);
+    let (across, along) = (numbers.next()?.ok()?, numbers.next()?.ok()?);
+    let sane = |side: f64| side.is_finite() && side > 0.0;
+    (sane(across) && sane(along)).then_some((across, along))
 }
 
 /// Как сетка `geo_w`×`geo_h` садится на растр `width`×`height`.
 ///
-/// Порядок правил обязателен, и первое стои́т первым не ради дешевизны.
+/// Порядок ответов — от прочитанного к выведенному, и он обязателен.
 ///
-/// **Сетка размером с растр садится отсчёт в отсчёт**, и спрашивать не о чем.
-/// Раньше атрибутов это потому, что `ac_subsampling_factor` описывает опорную
-/// сетку *продукта*, а не тот файл, в котором записан: у OLCI его несёт и
-/// поотсчётный `geo_coordinates.nc`. Спросив атрибут раньше размеров,
-/// поотсчётную сетку растянули бы в шестнадцать раз.
+/// **Отсчёт прибора, названный обоими файлами**, отвечает первым: шаг —
+/// отношение разрешений, начало — смещение растра минус смещение сетки, взятое
+/// тем же шагом. Так говорит о себе SLSTR, и только так его опорная решётка
+/// `tx` садится куда следует: она шире снимка с обеих сторон, и начало уезжает
+/// то на 26 столбцов влево (сетка `in`), то на 52 (полукилометровая `an`), то
+/// на 574 (косой обзор `fo`).
 ///
-/// **Разрежённая садится только по прочитанному**, и два словаря не
-/// смешиваются. SLSTR называет отсчёт прибора: шаг — отношение разрешений,
-/// начало — смещение растра минус смещение сетки, взятое тем же шагом. OLCI
-/// называет подвыборку: шаг — она сама, начало — ноль, и это обязано сойтись с
-/// размерами, потому что узлы стоят на краях растра.
+/// **Сетка размером с растр** садится отсчёт в отсчёт. Это вывод, а не
+/// прочитанное, и потому вторым ответом: отсчёт прибора, если он назван, знает
+/// точнее.
 ///
-/// **Не прочиталось — отказ.** Посадка, выведенная из одних размеров, молчит
-/// ровно там, где ошибается: решётка `tx` у SLSTR шире снимка с обеих сторон,
-/// её крайний узел приходится на столбец 2038 растра шириной 1500, и такой
-/// вывод растянул бы снимок поперёк трека в 1,38 раза. По контуру каталога он
-/// ляжет хотя бы примерно верно.
+/// **Подвыборка** — последней, и обязана сойтись с размерами.
+/// `ac_subsampling_factor` описывает опорную сетку *продукта*, а не тот файл, в
+/// котором записан: у OLCI его несёт и поотсчётный `geo_coordinates.nc`.
+/// Спрошенная раньше размеров, она растянула бы поотсчётную сетку в
+/// шестнадцать раз.
+///
+/// **Ничего не сказано — отказ.** Посадка, выведенная из одних размеров, молчит
+/// ровно там, где ошибается: крайний узел решётки `tx` приходится на столбец
+/// 2038 растра шириной 1500, и такой вывод растянул бы снимок поперёк трека в
+/// 1,38 раза. По контуру каталога он ляжет хотя бы примерно верно.
 fn seating(
     raster: Option<Frame>,
     grid: Option<Frame>,
@@ -807,9 +823,6 @@ fn seating(
     (width, height): (u32, u32),
     (geo_w, geo_h): (u32, u32),
 ) -> Result<Seating, String> {
-    if (geo_w, geo_h) == (width, height) {
-        return Ok(Seating::SAME);
-    }
     if let (Some(raster), Some(grid)) = (raster, grid) {
         let step = (grid.across / raster.across, grid.along / raster.along);
         return Ok(Seating {
@@ -819,6 +832,9 @@ fn seating(
                 raster.along_at - step.1 * grid.along_at,
             ),
         });
+    }
+    if (geo_w, geo_h) == (width, height) {
+        return Ok(Seating::SAME);
     }
     if let Some((across, along)) = subsampled {
         // Сойтись с размерами обязано с точностью до пикселя: разошедшееся
@@ -1172,6 +1188,10 @@ mod tests {
     fn a_subsampling_that_misses_the_sizes_is_refused() {
         let off = seating(None, None, Some((16.0, 1.0)), (1217, 15076), (130, 15076));
         assert!(off.is_err(), "77 узлов ожидалось, а сетка о 130");
+        // Допуск — пиксель, а не «примерно»: 77 узлов шагом 16 покрывают 1217
+        // столбцов, и растру шириной 1220 та же подвыборка уже не отвечает.
+        let near = seating(None, None, Some((16.0, 1.0)), (1220, 15076), (77, 15076));
+        assert!(near.is_err(), "разошлись на три столбца — это уже другая пара");
     }
 
     /// Разрежённая сетка без единого слова о том, чем она связана с растром,
@@ -1180,6 +1200,79 @@ mod tests {
     fn a_sparse_grid_that_says_nothing_about_itself_is_refused() {
         let mute = seating(None, None, None, (1500, 266), (130, 266));
         assert!(mute.is_err());
+    }
+
+    /// Полукилометровая сетка `an` и косой обзор `fo` — те случаи, где обе оси
+    /// и оба начала разные, и симметричная описка в них была бы видна.
+    ///
+    /// Числа настоящие — `S3A_SL_1_RBT____20260824T174507`: у `an` растр
+    /// 533×3000 при `track_offset` 1996, `start_offset` 7195 и разрешении 500 м
+    /// по обеим осям; у `fo` растр 266×900 при `track_offset` 450. Решётка `tx`
+    /// им обоим одна и та же.
+    #[test]
+    fn every_slstr_grid_seats_on_the_same_tie_lattice() {
+        let tie = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
+
+        let half_kilometre = Frame { across_at: 1996.0, along_at: 7195.0, across: 500.0, along: 500.0 };
+        let seat = seating(Some(half_kilometre), Some(tie), None, (3000, 533), (130, 266))
+            .expect("отсчёты названы обоими файлами");
+        assert_eq!(seat.step, (32.0, 2.0), "полукилометровому пикселю узел вдвое дороже");
+        assert_eq!(seat.origin, (-52.0, -1.0), "начало уезжает по обеим осям");
+
+        let oblique = Frame { across_at: 450.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
+        let seat = seating(Some(oblique), Some(tie), None, (900, 266), (130, 266))
+            .expect("отсчёты названы обоими файлами");
+        assert_eq!(seat.step, (16.0, 1.0));
+        assert_eq!(seat.origin, (-574.0, 0.0), "косой обзор смещён поперёк трека сильнее надирного");
+    }
+
+    /// Отсчёт прибора отвечает раньше размеров и раньше подвыборки: он
+    /// прочитан, а те выведены.
+    #[test]
+    fn the_instrument_frame_outranks_both_guesses() {
+        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
+        let shifted = Frame { across_at: 450.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
+
+        // Формы совпадают, а отсчёты — нет: садиться надо по отсчётам.
+        let seat = seating(Some(raster), Some(shifted), None, (1500, 266), (1500, 266))
+            .expect("отсчёты названы обоими файлами");
+        assert_eq!(seat.origin, (548.0, 0.0), "равенство форм отсчёта не отменяет");
+
+        // Подвыборка названа тоже, и она о другом — отсчёт главнее.
+        let seat = seating(Some(raster), Some(shifted), Some((4.0, 4.0)), (1500, 266), (1500, 266))
+            .expect("отсчёты названы обоими файлами");
+        assert_eq!(seat.step, (1.0, 1.0));
+        assert_eq!(seat.origin, (548.0, 0.0));
+    }
+
+    /// Отсчёт прибора и подвыборка читаются из глобальных атрибутов, и каждая
+    /// ось берётся из своего: перепутанные, они разъехались бы молча.
+    #[test]
+    fn the_global_attributes_are_read_axis_by_axis() {
+        let attrs: HashMap<String, AttrValue> = [
+            ("resolution".to_string(), AttrValue::String("[ 16000 1000 ]".to_string())),
+            ("track_offset".to_string(), AttrValue::I32(64)),
+            ("start_offset".to_string(), AttrValue::I32(3598)),
+            ("ac_subsampling_factor".to_string(), AttrValue::I32(16)),
+            ("al_subsampling_factor".to_string(), AttrValue::I32(1)),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            frame(&attrs),
+            Some(Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 })
+        );
+        assert_eq!(subsampling(&attrs), Some((16.0, 1.0)));
+
+        // Без единого из трёх отсчёта не выходит.
+        for missing in ["resolution", "track_offset", "start_offset"] {
+            let mut lean = attrs.clone();
+            lean.remove(missing);
+            assert_eq!(frame(&lean), None, "без '{}' отсчёт не собрать", missing);
+        }
+        let mut lean = attrs.clone();
+        lean.remove("al_subsampling_factor");
+        assert_eq!(subsampling(&lean), None, "подвыборка нужна по обеим осям");
     }
 
     /// Отсчёт прибора без пары бесполезен: одно смещение не говорит ни о шаге,
@@ -1200,6 +1293,12 @@ mod tests {
         assert_eq!(resolution("1000"), None, "одного числа мало");
         assert_eq!(resolution(""), None);
         assert_eq!(resolution("[ 0 1000 ]"), None, "нулевая ячейка — не разрешение");
+        // Число берётся целиком: разрезанное по цифрам, `1.5` дало бы единицу и
+        // пятёрку, и обе прошли бы дальше как правдоподобные разрешения.
+        assert_eq!(resolution("[ 1.5 2.5 ]"), Some((1.5, 2.5)));
+        assert_eq!(resolution("[ 1e3 2e3 ]"), Some((1000.0, 2000.0)));
+        assert_eq!(resolution("[ -1000 -1000 ]"), None, "знак не теряется");
+        assert_eq!(resolution("[ 1.2.3 1000 ]"), None, "не число — не разрешение");
     }
 
     /// Шаг выборки разводится со строкой: общий делитель у шага и ширины

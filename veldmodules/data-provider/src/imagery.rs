@@ -177,8 +177,13 @@ fn a_whole_picture(key: &str) -> bool {
 ///
 /// Ищется он среди соседей по каталогу и по имени — раскладку продукта знает
 /// только этот модуль. Порядок ответов — от точного к дешёвому:
-///  * `geodetic_<сетка>.nc` — координаты ровно той сетки, на которой записан
-///    растр (SLSTR держит их по одному файлу на сетку: `_in`, `_an`, `_fn`);
+///  * `geodetic_tx.nc` — опорная сетка съёмки, общая всем сеткам SLSTR: на
+///    порядок дешевле поотсчётной, а стои́т она в своём отсчёте прибора и
+///    садится на растр только через смещения, объявленные обоими файлами
+///    (см. `image-tiler::netcdf::seating`);
+///  * `geodetic_<сетка>.nc` — поотсчётные координаты той сетки, на которой
+///    записан растр (SLSTR держит их по одному файлу на сетку: `_in`, `_an`,
+///    `_fn`), — когда опорной в продукте нет;
 ///  * `tie_geo_coordinates.nc` — опорная сетка OLCI: у полного разрешения это
 ///    1,2 МБ против 50 МБ поотсчётного файла, а узлов в ней хватает с
 ///    запасом (привязка всё равно берётся решёткой);
@@ -196,6 +201,20 @@ pub fn geolocation(keys: &[String], raster: &str) -> Option<String> {
         let wanted = format!("{}/{}", folder, name);
         keys.iter().find(|key| key.as_str() == wanted).cloned()
     };
+    // Опорная сетка съёмки — первый ответ у всякой сетки SLSTR, и она же самый
+    // дешёвый: у гранулы `SL_2_LST` это 394 КБ против 2,2 МБ поотсчётного
+    // файла, а привязка всё равно берётся решёткой в двадцать один узел.
+    // Платится за это точностью: узлы `tx` стоят на номинальной решётке
+    // прибора и отходят от поотсчётных координат на полкилометра в среднем и
+    // на полтора в худшем — меньше пикселя километрового растра.
+    //
+    // Растру, записанному на самой опорной сетке (`met_tx.nc`), тот же файл и
+    // достаётся — своей сетки у него нет другой.
+    if grid_tag(raster).is_some()
+        && let Some(found) = sibling("geodetic_tx.nc")
+    {
+        return Some(found);
+    }
     if let Some(grid) = grid_tag(raster)
         && let Some(found) = sibling(&format!("geodetic_{}.nc", grid))
     {
@@ -646,10 +665,11 @@ mod tests {
         );
     }
 
-    /// У SLSTR сеток несколько, и координаты у каждой свои: растр сетки `in`
-    /// привязывается `geodetic_in.nc`, а не первым попавшимся файлом координат.
+    /// У SLSTR сеток несколько, и опорная общая им всем: растр сетки `in`
+    /// привязывается `geodetic_tx.nc` — на порядок более дешёвым, чем
+    /// поотсчётный `geodetic_in.nc`.
     #[test]
-    fn slstr_takes_the_coordinates_of_its_own_grid() {
+    fn slstr_takes_the_cheap_tie_grid_of_the_swath() {
         let slstr: Vec<String> = [
             "eodata/…/S3A_SL_2_LST.SEN3/LST_in.nc",
             "eodata/…/S3A_SL_2_LST.SEN3/geodetic_in.nc",
@@ -661,6 +681,25 @@ mod tests {
         .collect();
         assert_eq!(
             geolocation(&slstr, &slstr[0]),
+            Some("eodata/…/S3A_SL_2_LST.SEN3/geodetic_tx.nc".to_string())
+        );
+        // Растру самой опорной сетки достаётся тот же файл: своей сетки у него
+        // нет другой.
+        assert_eq!(
+            geolocation(&slstr, "eodata/…/S3A_SL_2_LST.SEN3/met_tx.nc"),
+            Some("eodata/…/S3A_SL_2_LST.SEN3/geodetic_tx.nc".to_string())
+        );
+        // Имя не сеточное — опорная сетка ему не достаётся: под правило
+        // подпадали бы и служебный `LST_ancillary_ds.nc`, и `chl_nn.nc` OLCI.
+        assert_eq!(
+            geolocation(&slstr, "eodata/…/S3A_SL_2_LST.SEN3/LST_ancillary_ds.nc"),
+            Some("eodata/…/S3A_SL_2_LST.SEN3/geo_coordinates.nc".to_string())
+        );
+        // Опорной в продукте нет — остаются поотсчётные координаты своей
+        // сетки, а не первый попавшийся файл координат.
+        let lean: Vec<String> = slstr.iter().filter(|key| !key.ends_with("geodetic_tx.nc")).cloned().collect();
+        assert_eq!(
+            geolocation(&lean, &lean[0]),
             Some("eodata/…/S3A_SL_2_LST.SEN3/geodetic_in.nc".to_string())
         );
         // Хвост из двух букв сеткой ещё не делает: так кончаются и служебный
