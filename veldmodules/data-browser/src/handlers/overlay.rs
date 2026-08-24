@@ -33,7 +33,7 @@ use crate::proto::data_provider::{
 use crate::proto::globe::{
     GeoPoint, Overlay, OverlayRaster, OverlayRole, Overlays, UtmFrame,
 };
-use veldsdk::proto::core::{ResourceHandle, ResourceOpened};
+use veldsdk::proto::core::ResourceOpened;
 
 /// Начиная с какого размаха долгот контур перестаёт быть четырёхугольником и
 /// становится поясом вокруг Земли. Полоса съёмки такой ширины не бывает: самая

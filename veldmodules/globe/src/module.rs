@@ -1044,7 +1044,7 @@ fn want_overlay(state: &mut State, key: &str, wanted: overlay::Wanted) {
     let label = overlay.label.clone();
 
     let owner = (key.to_string(), wanted.choice.role);
-    if let Some(correlation) = state.passes.stale(&fingerprint, &owner, wanted.choice.level) {
+    if let Some(correlation) = state.passes.stale(&fingerprint, &owner, &wanted.want) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
     let overlay = state.overlays.iter_mut().find(|o| o.key == key).expect("наложение только что было");

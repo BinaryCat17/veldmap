@@ -417,6 +417,13 @@ fn chain(cell: Addr, levels: u32) -> impl Iterator<Item = Addr> {
 pub struct Want {
     /// Ступень: её просят у кэша, ею же и рисуют.
     pub level: u32,
+    /// Уровень, ради которого лестница и строится, — самый подробный из
+    /// нужных под текущий взгляд.
+    ///
+    /// Отдельно от ступени, потому что смотрят цель, а ступень — способ до
+    /// неё дойти: по ней нельзя судить, устарел ли идущий проход (см.
+    /// [`Passes::stale`]).
+    pub target: u32,
     /// Ячейки ступени, попавшие в кадр.
     pub cells: Vec<Addr>,
     /// Ступеней в лестнице к цели, считая её саму, и сколько их позади.
@@ -514,6 +521,7 @@ pub fn want(
     );
     Want {
         level: ladder[climbed],
+        target,
         cells,
         steps: ladder.len() as u32,
         climbed: climbed as u32,
@@ -833,11 +841,16 @@ impl<K: PartialEq> Passes<K> {
     /// у заказчиков свой: соседняя вкладка того же снимка, отъехавшая на шаг,
     /// иначе выбрасывала бы чужое наполовину прочитанное чтение — и тут же
     /// заводила своё, которое так же выбросили бы в ответ.
-    pub fn stale(&mut self, fingerprint: &str, owner: &K, level: u32) -> Option<String> {
+    ///
+    /// Сравнивается с **целью**, а не со ступенью, и `Want` целиком берётся
+    /// ровно поэтому: ступень идёт от вершины к цели, и обнажившаяся на
+    /// грубой ступени ячейка объявляла бы устаревшим проход по самой цели —
+    /// то есть работу, которую только что и заказали.
+    pub fn stale(&mut self, fingerprint: &str, owner: &K, want: &Want) -> Option<String> {
         let stale = self
             .by_source
             .get(fingerprint)
-            .is_some_and(|pass| &pass.owner == owner && pass.level < level);
+            .is_some_and(|pass| &pass.owner == owner && pass.level < want.target);
         match stale {
             true => self.by_source.remove(fingerprint).map(|pass| pass.correlation),
             false => None,
@@ -904,6 +917,12 @@ mod tests {
         Passes::default()
     }
 
+    /// Желаемое одной целью и одной ступенью к ней: устаревание — про уровни,
+    /// ячейки в нём не участвуют.
+    fn want_at(target: u32, rung: u32) -> Want {
+        Want { level: rung, target, cells: Vec::new(), steps: 1, climbed: 0 }
+    }
+
     fn described() -> crate::proto::Described {
         crate::proto::Described {
             fingerprint: "fp".into(),
@@ -946,13 +965,13 @@ mod tests {
         let mut fetch = Fetch::default();
         let store = Store::new(u64::MAX);
 
-        let done = Want { level: 0, cells: Vec::new(), steps: 3, climbed: 2 };
+        let done = Want { level: 0, target: 0, cells: Vec::new(), steps: 3, climbed: 2 };
         assert!(!working(&fetch, &passes, "fp", Some(&done)), "путь пройден, ничего не идёт");
 
         // Ступень не последняя: следующая пойдёт сама, без движения камеры, —
         // и объявить работу конченой здесь значит сказать «загрузка кончилась»
         // посреди загрузки. Ни ячеек в полёте, ни прохода при этом нет.
-        let climbing = Want { level: 3, cells: Vec::new(), steps: 3, climbed: 0 };
+        let climbing = Want { level: 3, target: 0, cells: Vec::new(), steps: 3, climbed: 0 };
         assert!(working(&fetch, &passes, "fp", Some(&climbing)));
 
         // Ячейки в полёте — даже когда о пути сказать нечего.
@@ -1186,12 +1205,57 @@ mod tests {
 
         // Проход того же уровня — не устаревший; грубее нужного — тоже: его
         // тайлами ячейку нарисуют предком.
-        assert!(passes.stale("s", &"сосед", 2).is_none());
-        assert!(passes.stale("s", &"сосед", 1).is_none(), "проход грубее нужного ещё пригодится");
+        assert!(passes.stale("s", &"сосед", &want_at(2, 2)).is_none());
+        assert!(passes.stale("s", &"сосед", &want_at(1, 1)).is_none(), "проход грубее нужного ещё пригодится");
         // А подробнее нужного — устаревший: такими тайлами грубую ячейку не
         // нарисовать.
-        assert_eq!(passes.stale("s", &"сосед", 3).as_deref(), Some("c1"));
+        assert_eq!(passes.stale("s", &"сосед", &want_at(3, 3)).as_deref(), Some("c1"));
         assert!(!passes.going("s"));
+    }
+
+    /// Желаемое несёт цель отдельно от ступени, и цель — конец лестницы, а не
+    /// та ступень, на которой стои́т добыча.
+    ///
+    /// Пара, обязанная сойтись механически: лестницу строит `want`, а решает
+    /// по ней `stale`. Совпади эти два числа — и всякий откат на грубую
+    /// ступень объявлял бы устаревшим проход по цели.
+    #[test]
+    fn желаемое_помнит_цель_отдельно_от_ступени() {
+        let store = Store::new(1 << 30);
+        let fetch = Fetch::default();
+
+        // Пирамида в шесть уровней, экран просит второй, в памяти пусто —
+        // значит ступень встанет на вершине, а целью останется второй.
+        let want = want(2, 6, 0, u64::MAX, Reach::Exact, &store, &fetch, "s", |level| {
+            cells(level, 0..1, 0..1)
+        });
+
+        assert_eq!(want.target, 2, "цель — то, ради чего строилась лестница");
+        assert_eq!(want.level, 5, "ступень — вершина: ниже неё ещё ничего не добыто");
+        assert_eq!((want.climbed, want.steps), (0, 4), "лестница 5→4→3→2, пройдена нулевая");
+    }
+
+    /// Откат на грубую ступень проход по цели не отменяет.
+    ///
+    /// Лестница идёт от вершины к цели, и стои́т на ней ровно то, чего не
+    /// хватает: мелкое движение камеры обнажает одну ячейку наверху, ступень
+    /// отступает — а цель остаётся прежней, и идущий по ней проход всё так же
+    /// нужен. Сравнив с ней ступень, глобус сносил бы работу, которую сам же
+    /// только что и заказал: на снимке Sentinel-1 так пропали двенадцать
+    /// секунд чтения, не отдавшие ни одного тайла.
+    #[test]
+    fn откат_на_грубую_ступень_не_отменяет_проход_по_цели() {
+        let mut passes = passes();
+        passes.begin("s", "сосед", "c1".into(), 2);
+
+        assert!(
+            passes.stale("s", &"сосед", &want_at(2, 5)).is_none(),
+            "цель прежняя — проход по ней ещё нужен, какой бы ни была ступень"
+        );
+        assert!(passes.going("s"), "и он идёт дальше");
+
+        // А отъезд камеры — это смена самой цели, и вот он проход убивает.
+        assert_eq!(passes.stale("s", &"сосед", &want_at(3, 3)).as_deref(), Some("c1"));
     }
 
     /// Снимает проход только тот, кто его завёл: проход читает не «файл», а
@@ -1201,7 +1265,7 @@ mod tests {
         let mut passes = passes();
         passes.begin("s", "первый", "c1".into(), 0);
 
-        assert!(passes.stale("s", &"второй", 3).is_none(), "проход не его");
+        assert!(passes.stale("s", &"второй", &want_at(3, 3)).is_none(), "проход не его");
         assert!(passes.abandon("s", &"второй").is_none(), "и уносить его не второму");
         assert!(passes.going("s"));
         assert_eq!(passes.abandon("s", &"первый").as_deref(), Some("c1"));

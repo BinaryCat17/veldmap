@@ -577,7 +577,7 @@ fn want_tiles(state: &mut State, key: &str) {
     let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) else { return };
     let label = view.label.clone();
 
-    if let Some(correlation) = state.passes.stale(&fingerprint, &key.to_string(), want.level) {
+    if let Some(correlation) = state.passes.stale(&fingerprint, &key.to_string(), &want) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
     let view = state.views.get_mut(key).expect("вид только что был");
