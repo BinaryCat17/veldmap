@@ -107,6 +107,14 @@ impl Info {
         Self { width, height, kind, finest: 0, ties: Vec::new(), placement: None }
     }
 
+    /// Разбор тяжёлого вида — того, что держит при себе отсчёты величины.
+    /// Тестам, которые проверяют правила о весе разбора, а не о его
+    /// содержимом.
+    #[cfg(test)]
+    pub fn heavy(width: u32, height: u32) -> Self {
+        Self::plain(width, height, Kind::Netcdf(Box::new(netcdf::Source::hollow())))
+    }
+
     /// Разбор прочитал файл целиком и держит его отсчёты при себе.
     ///
     /// Так устроен только NetCDF: он читается не окнами, а целиком, и годность

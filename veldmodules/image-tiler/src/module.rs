@@ -56,20 +56,58 @@ pub struct Config {}
 /// Файл при этом читается один раз и без него (блоки держит носитель), а
 /// платится именно распаковка и пробы величин.
 ///
-/// Один слот: пара «описали — произвели» идёт подряд, а держать два разбора
-/// сразу значит держать две плоскости, и лимит памяти инстанса этого не
-/// переживёт. Чужой разбор отпускается ДО того, как начнётся новый.
+/// Слота два, по весу разбора. Тяжёлый — тот, что держит при себе отсчёты
+/// величины: у NetCDF это вся плоскость, до полугигабайта. Держать два таких
+/// разом лимит памяти инстанса не переживёт, поэтому тяжёлый один и
+/// отпускается ДО того, как начнётся новый разбор.
+///
+/// Лёгкий — заголовки и каталоги (TIFF, JPEG, PNG), и он тяжёлому не мешает.
+/// Порознь они затем, что у наложения растров два и приходят они парами
+/// вперемежку: описали квиклук, описали гранулу, произвели квиклук, произвели
+/// гранулу. Одним слотом квиклук вытеснял бы разбор гранулы ровно между её
+/// описанием и производством — и она разбиралась бы дважды, второй раз уже
+/// после того, как заказчик решил, что снимок вот-вот появится.
 struct Parsed {
     resource: u64,
     info: adapters::Info,
 }
 
 pub struct State {
-    parsed: Option<Parsed>,
+    heavy: Option<Parsed>,
+    light: Option<Parsed>,
 }
 
 pub fn hook_init(_config: Config) -> anyhow::Result<State> {
-    Ok(State { parsed: None })
+    Ok(State { heavy: None, light: None })
+}
+
+impl State {
+    /// Положить разбор в слот по его весу. Тяжёлый — тот, что держит при себе
+    /// отсчёты величины; лёгкий — заголовки. Своим слотом каждому затем, что
+    /// иначе дешёвый вытеснял бы дорогой.
+    fn keep(&mut self, kept: Parsed) {
+        match kept.info.read_whole() {
+            true => self.heavy = Some(kept),
+            false => self.light = Some(kept),
+        }
+    }
+
+    /// Отпустить то, чего нельзя держать вдвоём: отсчёты величины.
+    ///
+    /// Зовётся перед всяким новым разбором и после прохода, которому разбор
+    /// больше не понадобится. Лёгкий при этом остаётся — он стоит заголовков,
+    /// и вытеснять его незачем.
+    fn release_heavy(&mut self) {
+        self.heavy = None;
+    }
+
+    /// Разбор этого ресурса, если он лежит в каком-нибудь из слотов.
+    fn kept(&self, resource_id: u64) -> Option<&Parsed> {
+        [self.heavy.as_ref(), self.light.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|kept| kept.resource == resource_id)
+    }
 }
 
 /// Разбор источника — из memo, если это тот же ресурс, иначе заново.
@@ -83,17 +121,17 @@ fn parsed<'a>(
     size: u64,
     bytes: &Rc<Cell<u64>>,
 ) -> Result<&'a adapters::Info, String> {
-    if state.parsed.as_ref().is_none_or(|kept| kept.resource != resource_id) {
-        // Чужой разбор отпускается здесь, до нового: две плоскости разом лимит
+    if state.kept(resource_id).is_none() {
+        // Отпускается здесь, до нового разбора: две плоскости разом лимит
         // памяти инстанса не переживёт.
-        state.parsed = None;
+        state.release_heavy();
         veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт)", resource_id, size);
         let info = adapters::describe(resource_id, size, bytes)?;
-        state.parsed = Some(Parsed { resource: resource_id, info });
+        state.keep(Parsed { resource: resource_id, info });
     } else {
         veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
     }
-    let info = &state.parsed.as_ref().expect("разбор только что положен").info;
+    let info = &state.kept(resource_id).expect("разбор только что положен").info;
     // Прочитанное засчитывается и на готовом разборе — но только там, где
     // разбор и правда прочитал файл целиком (NetCDF). У прочих байты идут
     // проходом, и объявить их прочитанными значит показать заказчику «100 %»
@@ -101,7 +139,7 @@ fn parsed<'a>(
     if info.read_whole() {
         bytes.set(size);
     }
-    Ok(&state.parsed.as_ref().expect("разбор только что положен").info)
+    Ok(&state.kept(resource_id).expect("разбор только что положен").info)
 }
 
 pub fn on_describe(state: &mut State, req: DescribeRequest) {
@@ -272,7 +310,7 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     // обычный конец (оборвалось чтение по сети), и уйти по `?`, оставив
     // полгигабайта висеть, значит не сделать ровно того, ради чего это здесь.
     if single_pass {
-        state.parsed = None;
+        state.release_heavy();
     }
     outcome?;
 
@@ -425,6 +463,68 @@ impl Sink<'_> {
 mod tests {
     use super::*;
     use crate::proto::image_tiler::TileAddr;
+
+    fn keep(state: &mut State, resource: u64, info: adapters::Info) {
+        state.keep(Parsed { resource, info });
+    }
+
+    /// Лёгкий разбор не вытесняет тяжёлый. У наложения растров два, и приходят
+    /// они парами вперемежку: описали квиклук, описали гранулу, произвели
+    /// квиклук, произвели гранулу. Одним слотом квиклук выбрасывал бы разбор
+    /// гранулы ровно между её описанием и производством — и вся плоскость
+    /// разворачивалась бы второй раз, уже после того, как заказчик решил, что
+    /// снимок вот-вот появится.
+    #[test]
+    fn лёгкий_разбор_не_вытесняет_тяжёлый() {
+        let mut state = State { heavy: None, light: None };
+
+        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
+        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
+
+        assert!(state.kept(1).is_some(), "гранула на месте");
+        assert!(state.kept(2).is_some(), "и квиклук рядом");
+    }
+
+    /// Перед новым разбором отпускается тяжёлый, а лёгкий остаётся. Отпусти
+    /// мы не тот — квиклук пережил бы гранулу, а гранула разбиралась бы
+    /// заново, то есть ровно то, ради чего слоты и разведены.
+    #[test]
+    fn перед_разбором_отпускается_тяжёлый_а_лёгкий_остаётся() {
+        let mut state = State { heavy: None, light: None };
+        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
+        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
+
+        state.release_heavy();
+
+        assert!(state.kept(1).is_none(), "плоскость отпущена");
+        assert!(state.kept(2).is_some(), "заголовки остались");
+    }
+
+    /// А тяжёлый тяжёлый вытесняет: две плоскости разом лимит памяти инстанса
+    /// не переживёт, и это единственное, ради чего слот вообще ограничен.
+    #[test]
+    fn тяжёлый_разбор_вытесняет_тяжёлый() {
+        let mut state = State { heavy: None, light: None };
+
+        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
+        keep(&mut state, 2, adapters::Info::heavy(3000, 2404));
+
+        assert!(state.kept(1).is_none(), "первая плоскость отпущена");
+        assert!(state.kept(2).is_some());
+    }
+
+    /// И лёгкий лёгкий вытесняет тоже: держать их без счёта незачем, а разбор
+    /// заголовков стоит одного чтения головы файла.
+    #[test]
+    fn лёгкий_разбор_вытесняет_лёгкий() {
+        let mut state = State { heavy: None, light: None };
+
+        keep(&mut state, 1, adapters::Info::plain(64, 64, adapters::Kind::Png));
+        keep(&mut state, 2, adapters::Info::plain(64, 64, adapters::Kind::Png));
+
+        assert!(state.kept(1).is_none());
+        assert!(state.kept(2).is_some());
+    }
 
     fn asked(level: u32, tiles: &[(u32, u32)]) -> ProduceRequest {
         ProduceRequest {

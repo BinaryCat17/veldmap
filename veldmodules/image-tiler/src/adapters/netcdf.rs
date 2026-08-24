@@ -90,6 +90,16 @@ pub struct Source {
     said: String,
 }
 
+impl Source {
+    /// Источник без единого отсчёта — тестам, которым нужен вид разбора, а не
+    /// его содержимое. Отдельной дверцей затем, что нутро источника закрыто
+    /// намеренно: отсчёты сюда кладёт только разбор файла.
+    #[cfg(test)]
+    pub fn hollow() -> Self {
+        Self { values: Vec::new(), path: String::new(), fill: None, said: String::new() }
+    }
+}
+
 pub fn describe<R: Read + Seek>(mut reader: R, len: u64) -> Result<Info, String> {
     if len > FILE_CAP {
         return Err(format!(
