@@ -727,9 +727,16 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> Vec<Tie> {
 /// [`seating`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Frame {
-    /// Номер узла общей решётки, стоящего в первом столбце файла.
+    /// `track_offset` — столбец файла, в котором стои́т надир, то есть начало
+    /// отсчёта поперёк трека. Поперечная координата столбца `j` — это
+    /// `(j − track_offset) · across`.
     pub across_at: f64,
-    /// Номер узла, стоящего в первой строке.
+    /// `start_offset` — номер первой строки файла в сквозном счёте витка.
+    /// Отсчитывается он **от начала витка, а не от начала файла**, и потому
+    /// входит в координату с обратным знаком: продольная координата строки `i`
+    /// — это `(start_offset + i) · along`. Одинаковые с виду, два смещения
+    /// сложенные по одному правилу расходятся на целую ячейку — у
+    /// полукилометровой сетки SLSTR это километр вдоль трека.
     pub along_at: f64,
     /// Метры в ячейке поперёк трека.
     pub across: f64,
@@ -791,6 +798,24 @@ fn resolution(said: &str) -> Option<(f64, f64)> {
     (sane(across) && sane(along)).then_some((across, along))
 }
 
+/// Накрывает ли посаженная сетка растр — с точностью до ячейки.
+///
+/// Прочитанное тоже надо сверить с тем, что видно: атрибут бывает не про эту
+/// пару файлов. У OLCI, например, `resolution` одинаков и у поотсчётного, и у
+/// опорного файла — он свойство продукта, — и отношение разрешений дало бы
+/// шестнадцатикратно разрежённой сетке шаг единица. Такая сетка накрыла бы
+/// шестнадцатую долю снимка, и здесь это видно.
+///
+/// Допуск — ячейка: край сетки не обязан приходиться ровно на край растра, но
+/// не дотянуться до него больше чем на шаг он не может.
+fn covers(seat: Seating, (width, height): (u32, u32), (geo_w, geo_h): (u32, u32)) -> bool {
+    let axis = |step: f64, origin: f64, nodes: u32, side: u32| {
+        let last = origin + step * f64::from(nodes - 1);
+        step > 0.0 && origin <= step && last >= f64::from(side - 1) - step
+    };
+    axis(seat.step.0, seat.origin.0, geo_w, width) && axis(seat.step.1, seat.origin.1, geo_h, height)
+}
+
 /// Как сетка `geo_w`×`geo_h` садится на растр `width`×`height`.
 ///
 /// Порядок ответов — от прочитанного к выведенному, и он обязателен.
@@ -825,12 +850,20 @@ fn seating(
 ) -> Result<Seating, String> {
     if let (Some(raster), Some(grid)) = (raster, grid) {
         let step = (grid.across / raster.across, grid.along / raster.along);
-        return Ok(Seating {
+        let seat = Seating {
             step,
+            // Знаки разные, и это не описка: см. [`Frame::across_at`] и
+            // [`Frame::along_at`].
             origin: (
                 raster.across_at - step.0 * grid.across_at,
-                raster.along_at - step.1 * grid.along_at,
+                step.1 * grid.along_at - raster.along_at,
             ),
+        };
+        return covers(seat, (width, height), (geo_w, geo_h)).then_some(seat).ok_or_else(|| {
+            format!(
+                "сетка {}×{}, посаженная шагом {:.2}×{:.2} от {:+.1}×{:+.1}, не накрывает растр {}×{}",
+                geo_w, geo_h, seat.step.0, seat.step.1, seat.origin.0, seat.origin.1, width, height
+            )
         });
     }
     if (geo_w, geo_h) == (width, height) {
@@ -1217,7 +1250,11 @@ mod tests {
         let seat = seating(Some(half_kilometre), Some(tie), None, (3000, 533), (130, 266))
             .expect("отсчёты названы обоими файлами");
         assert_eq!(seat.step, (32.0, 2.0), "полукилометровому пикселю узел вдвое дороже");
-        assert_eq!(seat.origin, (-52.0, -1.0), "начало уезжает по обеим осям");
+        // Начало уезжает по обеим осям, и в разные стороны: смещения считаются
+        // от разного (см. `Frame`). Проверено сличением поотсчётных сеток `an`
+        // и `in` одной гранулы, без участия опорной: строка `in` отвечает
+        // строке `an` с номером `2·i + 1`, а не `2·i − 1`.
+        assert_eq!(seat.origin, (-52.0, 1.0), "поперёк влево, вдоль вправо");
 
         let oblique = Frame { across_at: 450.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
         let seat = seating(Some(oblique), Some(tie), None, (900, 266), (130, 266))
@@ -1226,23 +1263,41 @@ mod tests {
         assert_eq!(seat.origin, (-574.0, 0.0), "косой обзор смещён поперёк трека сильнее надирного");
     }
 
+    /// Прочитанное сверяется с видимым: посадка обязана накрыть растр.
+    ///
+    /// Атрибут бывает не про эту пару файлов. `resolution` у OLCI одинаков и у
+    /// поотсчётного, и у опорного файла — он свойство продукта, — и отношение
+    /// разрешений дало бы шестнадцатикратно разрежённой сетке шаг единица.
+    #[test]
+    fn a_seating_that_leaves_the_raster_uncovered_is_refused() {
+        let same = Frame { across_at: 0.0, along_at: 0.0, across: 1080.0, along: 1176.0 };
+        let short = seating(Some(same), Some(same), None, (1217, 15076), (77, 15076));
+        assert!(short.is_err(), "77 узлов шагом единица накрывают шестнадцатую долю снимка");
+
+        // Настоящая посадка растр накрывает — с запасом слева и справа.
+        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
+        let tie = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
+        assert!(seating(Some(raster), Some(tie), None, (1500, 266), (130, 266)).is_ok());
+    }
+
     /// Отсчёт прибора отвечает раньше размеров и раньше подвыборки: он
     /// прочитан, а те выведены.
     #[test]
     fn the_instrument_frame_outranks_both_guesses() {
         let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-        let shifted = Frame { across_at: 450.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
-
-        // Формы совпадают, а отсчёты — нет: садиться надо по отсчётам.
-        let seat = seating(Some(raster), Some(shifted), None, (1500, 266), (1500, 266))
-            .expect("отсчёты названы обоими файлами");
-        assert_eq!(seat.origin, (548.0, 0.0), "равенство форм отсчёта не отменяет");
+        let tie = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
 
         // Подвыборка названа тоже, и она о другом — отсчёт главнее.
-        let seat = seating(Some(raster), Some(shifted), Some((4.0, 4.0)), (1500, 266), (1500, 266))
+        let seat = seating(Some(raster), Some(tie), Some((4.0, 4.0)), (1500, 266), (130, 266))
             .expect("отсчёты названы обоими файлами");
-        assert_eq!(seat.step, (1.0, 1.0));
-        assert_eq!(seat.origin, (548.0, 0.0));
+        assert_eq!(seat.step, (16.0, 1.0), "шаг взят у отсчёта, а не у подвыборки");
+        assert_eq!(seat.origin, (-26.0, 0.0));
+
+        // Формы совпали, а отсчёты разошлись — это не сетка этого растра, и
+        // равенство форм её таковой не делает: отказ, а не посадка один в один.
+        let elsewhere = Frame { across_at: 450.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
+        let apart = seating(Some(raster), Some(elsewhere), None, (1500, 266), (1500, 266));
+        assert!(apart.is_err(), "сетка, съехавшая на 548 столбцов, растр не накрывает");
     }
 
     /// Отсчёт прибора и подвыборка читаются из глобальных атрибутов, и каждая
