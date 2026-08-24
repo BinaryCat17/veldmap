@@ -892,6 +892,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         let missed = raster.fetch.missed(
             &state.passes,
             &ctx.fingerprint,
+            &(ctx.key.clone(), ctx.role),
             &ctx.cells,
             msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
             |addr| desired.contains(&addr),
