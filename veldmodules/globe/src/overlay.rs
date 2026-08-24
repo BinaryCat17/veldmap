@@ -844,7 +844,8 @@ impl Overlay {
         if !self.frame.measurable() {
             return Vec::new();
         }
-        if let Some((raster, meta)) = described(Role::Preview) {
+        let base = described(Role::Preview);
+        if let Some((raster, meta)) = base {
             wanted.push(self.at_level(raster, meta, look, cap_tiles, store, toll));
             if self.frame.ground_m_per_px(meta.width).is_some_and(|mpp| look.mpp >= mpp) {
                 // Родного разрешения превью хватает — подробный не нужен.
@@ -852,6 +853,19 @@ impl Overlay {
             }
         }
         if let Some((raster, meta)) = described(Role::Detailed) {
+            // Подробный, который не подробнее базы, — не цель, а порча:
+            // рисуется он поверх, и приближение, дойдя до него, накрыло бы
+            // крупную картинку мелкой. Роль назначает провайдер по раскладке
+            // продукта, и у неузнанной раскладки подробным оказывается что
+            // придётся — здесь это ловится числом пикселей, единственным, что
+            // о растрах известно наверняка.
+            //
+            // Шириной, а не площадью: ширина и есть мерка разрешения по всему
+            // наложению — ею считается земля на пиксель и по ней выбирается
+            // уровень.
+            if base.is_some_and(|(_, first)| meta.width <= first.width) {
+                return wanted;
+            }
             wanted.push(self.at_level(raster, meta, look, cap_tiles, store, toll));
         }
         wanted
@@ -1743,6 +1757,56 @@ mod tests {
         assert_eq!(near.len(), 2);
         assert_eq!(near[0].choice.role, Role::Preview);
         assert_eq!(near[1].choice.role, Role::Detailed);
+    }
+
+    /// Подробный, который не подробнее превью, на шар не кладётся вовсе.
+    ///
+    /// Роль назначает провайдер по раскладке продукта, и у раскладки, которой
+    /// он не знает, подробным оказывается что придётся: у гранулы SLSTR это
+    /// килoметровый тепловой канал 1500 пикселей при цветном квиклуке в 2422.
+    /// Рисуется подробный поверх базы — значит приближение, дойдя до него,
+    /// накрыло бы крупную картинку мелкой, и снимок от приближения стал бы
+    /// хуже.
+    #[test]
+    fn detail_no_finer_than_the_preview_is_not_laid_at_all() {
+        let overlay = overlay(vec![
+            raster(Role::Preview, Some(meta(2422, 1940))),
+            raster(Role::Detailed, Some(meta(1500, 1202))),
+        ]);
+
+        // Экран мельче родного разрешения превью — то самое приближение, на
+        // котором подробный и добавлялся бы.
+        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
+
+        assert_eq!(near.len(), 1, "подробного в ответе нет");
+        assert_eq!(near[0].choice.role, Role::Preview);
+    }
+
+    /// Равный по ширине тоже не кладётся: накрыв базу собой, он не прибавит
+    /// ни пикселя, а стоить будет целой пирамиды.
+    #[test]
+    fn detail_as_wide_as_the_preview_is_not_laid_either() {
+        let overlay = overlay(vec![
+            raster(Role::Preview, Some(meta(2048, 2048))),
+            raster(Role::Detailed, Some(meta(2048, 2048))),
+        ]);
+
+        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
+
+        assert_eq!(near.len(), 1);
+        assert_eq!(near[0].choice.role, Role::Preview);
+    }
+
+    /// А без превью подробный кладётся, каким бы он ни был: сравнивать не с
+    /// чем, и другого растра у слоя нет.
+    #[test]
+    fn detail_without_a_preview_is_laid_whatever_it_is() {
+        let overlay = overlay(vec![raster(Role::Detailed, Some(meta(1500, 1202)))]);
+
+        let near = overlay.wanted(&look_at(&overlay, 1.0), u64::MAX, &store(), &Toll::default());
+
+        assert_eq!(near.len(), 1);
+        assert_eq!(near[0].choice.role, Role::Detailed);
     }
 
     /// Уровень под экранный пиксель: 40 м/px против 10 м/px родных дают
