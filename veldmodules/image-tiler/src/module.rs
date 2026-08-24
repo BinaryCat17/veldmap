@@ -186,6 +186,7 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
         match adapters::netcdf::geolocation(
             coordinates.id,
             coordinates.size,
+            info.frame,
             info.width,
             info.height,
         ) {

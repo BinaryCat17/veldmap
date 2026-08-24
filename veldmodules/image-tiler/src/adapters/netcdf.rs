@@ -176,16 +176,20 @@ pub fn describe<R: Read + Seek>(mut reader: R, len: u64) -> Result<Info, String>
 /// и `longitude` одной формы — по единицам, тем же правилом, что и внутри
 /// растра (см. [`northing`]).
 ///
-/// Координатная сетка бывает разрежена: у OLCI опорная сетка вчетверо у́же
-/// снимка по столбцам. Шаг выводится из самих размеров — крайние отсчёты
-/// сетки стоят на крайних пикселях растра, — и поотсчётный файл под то же
-/// правило даёт шаг единица. Второго источника этого числа (атрибут
-/// подвыборки) не спрашиваем: он есть не во всякой упаковке, а размеры есть
-/// всегда.
+/// Координатная сетка бывает разрежена: у OLCI опорная сетка вшестнадцатеро
+/// у́же снимка по столбцам, у SLSTR решётка `tx` вдобавок шире его с обеих
+/// сторон. Чем сетка связана с растром, спрашивается у файла — см.
+/// [`seating`]; не сказал — привязки не выйдет.
 ///
 /// Отказ — это «привязки не вышло», а не «растр плох»: снимок ляжет тем, что
 /// сказал о нём каталог.
-pub fn geolocation(resource_id: u64, len: u64, width: u32, height: u32) -> Result<Vec<Tie>, String> {
+pub fn geolocation(
+    resource_id: u64,
+    len: u64,
+    raster: Option<Frame>,
+    width: u32,
+    height: u32,
+) -> Result<Vec<Tie>, String> {
     if width < 2 || height < 2 {
         return Err(format!("растр {}×{} мельче узла привязки", width, height));
     }
@@ -262,22 +266,19 @@ pub fn geolocation(resource_id: u64, len: u64, width: u32, height: u32) -> Resul
     };
     let (lat_values, lon_values) = (read(lat)?, read(lon)?);
 
-    // Крайний отсчёт сетки стои́т на крайнем пикселе растра — отсюда и шаг.
-    let step = (
-        f64::from(width - 1) / f64::from(geo_w - 1),
-        f64::from(height - 1) / f64::from(geo_h - 1),
-    );
+    let seat = seating(raster, frame(&file), subsampling(&file), (width, height), (geo_w, geo_h))?;
     let at = |row: u32, column: u32| -> Option<(f64, f64)> {
         let index = (row as usize) * (geo_w as usize) + (column as usize);
         Some((f64::from(*lat_values.get(index)?), f64::from(*lon_values.get(index)?)))
     };
-    let ties = lattice(&nodes(geo_h), &nodes(geo_w), step, at);
+    let ties = lattice(&nodes(geo_h), &nodes(geo_w), seat, at);
     if ties.is_empty() {
         return Err(format!("узлы сетки {}×{} не годятся в привязку", geo_w, geo_h));
     }
     veldsdk::log::debug!(target: "decode",
-        "NetCDF привязка из соседнего файла: сетка {}×{} ('{}' и '{}'), шаг {:.2}×{:.2} пикселя, узлов {}",
-        geo_w, geo_h, lat.path, lon.path, step.0, step.1, ties.len());
+        "NetCDF привязка из соседнего файла: сетка {}×{} ('{}' и '{}'), шаг {:.2}×{:.2} пикселя от {:+.1}×{:+.1}, узлов {}",
+        geo_w, geo_h, lat.path, lon.path,
+        seat.step.0, seat.step.1, seat.origin.0, seat.origin.1, ties.len());
     Ok(ties)
 }
 
@@ -340,6 +341,7 @@ fn told(
         // Координаты NetCDF записаны в градусах и решёткой: проекции здесь не
         // бывает вовсе.
         placement: None,
+        frame: frame(file),
     })
 }
 
@@ -702,15 +704,141 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> Vec<Tie> {
             let index = (row as usize) * (width as usize) + (column as usize);
             Some((f64::from(*lat.get(index)?), f64::from(*lon.get(index)?)))
         };
-        return lattice(&rows, &columns, (1.0, 1.0), at);
+        return lattice(&rows, &columns, Seating::SAME, at);
     }
     if let Some((lat, lon)) = grid(items, chosen, file) {
         let at = |row: u32, column: u32| -> Option<(f64, f64)> {
             Some((*lat.get(row as usize)?, *lon.get(column as usize)?))
         };
-        return lattice(&rows, &columns, (1.0, 1.0), at);
+        return lattice(&rows, &columns, Seating::SAME, at);
     }
     Vec::new()
+}
+
+/// Отсчёт прибора, в котором записана решётка файла: с какого её узла файл
+/// начинается и сколько метров в ячейке.
+///
+/// Sentinel-3 объявляет это глобальными атрибутами: `track_offset` и
+/// `start_offset` — номера узлов общей решётки съёмки, попавшие в первый
+/// столбец и в первую строку файла, `resolution` — метры поперёк трека и вдоль
+/// него. Растр и его поотсчётные координаты стоят в одном отсчёте, а опорная
+/// сетка — в своём, и без этих чисел одно с другим не сходится (см.
+/// [`seating`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    /// Номер узла общей решётки, стоящего в первом столбце файла.
+    pub across_at: f64,
+    /// Номер узла, стоящего в первой строке.
+    pub along_at: f64,
+    /// Метры в ячейке поперёк трека.
+    pub across: f64,
+    /// Метры в ячейке вдоль трека.
+    pub along: f64,
+}
+
+/// Посадка координатной сетки на растр: сколько пикселей приходится на узел и
+/// на каком пикселе стои́т нулевой узел.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Seating {
+    step: (f64, f64),
+    origin: (f64, f64),
+}
+
+impl Seating {
+    /// Отсчёт в отсчёт: узел и есть пиксель.
+    const SAME: Seating = Seating { step: (1.0, 1.0), origin: (0.0, 0.0) };
+}
+
+/// Отсчёт прибора из глобальных атрибутов файла. `None` — упаковка о нём не
+/// говорит, и выводить его не из чего.
+fn frame(file: &File) -> Option<Frame> {
+    let attrs = file.root().attrs().ok()?;
+    let (across, along) = resolution(&text(&attrs, "resolution"))?;
+    Some(Frame {
+        across_at: f64::from(number(attrs.get("track_offset")?)?),
+        along_at: f64::from(number(attrs.get("start_offset")?)?),
+        across,
+        along,
+    })
+}
+
+/// Подвыборка опорной сетки — второй словарь, которым продукт называет ту же
+/// связь: сколько пикселей растра приходится на узел поперёк трека и вдоль.
+fn subsampling(file: &File) -> Option<(f64, f64)> {
+    let attrs = file.root().attrs().ok()?;
+    let read = |name: &str| Some(f64::from(number(attrs.get(name)?)?));
+    Some((read("ac_subsampling_factor")?, read("al_subsampling_factor")?))
+}
+
+/// `resolution` записан строкой: `[ 16000 1000 ]` — поперёк трека и вдоль него.
+fn resolution(said: &str) -> Option<(f64, f64)> {
+    let mut numbers = said
+        .split(|sign: char| !sign.is_ascii_digit())
+        .filter_map(|word| word.parse::<f64>().ok());
+    let (across, along) = (numbers.next()?, numbers.next()?);
+    (across > 0.0 && along > 0.0).then_some((across, along))
+}
+
+/// Как сетка `geo_w`×`geo_h` садится на растр `width`×`height`.
+///
+/// Порядок правил обязателен, и первое стои́т первым не ради дешевизны.
+///
+/// **Сетка размером с растр садится отсчёт в отсчёт**, и спрашивать не о чем.
+/// Раньше атрибутов это потому, что `ac_subsampling_factor` описывает опорную
+/// сетку *продукта*, а не тот файл, в котором записан: у OLCI его несёт и
+/// поотсчётный `geo_coordinates.nc`. Спросив атрибут раньше размеров,
+/// поотсчётную сетку растянули бы в шестнадцать раз.
+///
+/// **Разрежённая садится только по прочитанному**, и два словаря не
+/// смешиваются. SLSTR называет отсчёт прибора: шаг — отношение разрешений,
+/// начало — смещение растра минус смещение сетки, взятое тем же шагом. OLCI
+/// называет подвыборку: шаг — она сама, начало — ноль, и это обязано сойтись с
+/// размерами, потому что узлы стоят на краях растра.
+///
+/// **Не прочиталось — отказ.** Посадка, выведенная из одних размеров, молчит
+/// ровно там, где ошибается: решётка `tx` у SLSTR шире снимка с обеих сторон,
+/// её крайний узел приходится на столбец 2038 растра шириной 1500, и такой
+/// вывод растянул бы снимок поперёк трека в 1,38 раза. По контуру каталога он
+/// ляжет хотя бы примерно верно.
+fn seating(
+    raster: Option<Frame>,
+    grid: Option<Frame>,
+    subsampled: Option<(f64, f64)>,
+    (width, height): (u32, u32),
+    (geo_w, geo_h): (u32, u32),
+) -> Result<Seating, String> {
+    if (geo_w, geo_h) == (width, height) {
+        return Ok(Seating::SAME);
+    }
+    if let (Some(raster), Some(grid)) = (raster, grid) {
+        let step = (grid.across / raster.across, grid.along / raster.along);
+        return Ok(Seating {
+            step,
+            origin: (
+                raster.across_at - step.0 * grid.across_at,
+                raster.along_at - step.1 * grid.along_at,
+            ),
+        });
+    }
+    if let Some((across, along)) = subsampled {
+        // Сойтись с размерами обязано с точностью до пикселя: разошедшееся
+        // здесь значит, что подвыборка не про эту пару, и посадка вышла бы
+        // такой же молчаливой, как выведенная из размеров.
+        let spans = |step: f64, nodes: u32, side: u32| {
+            step > 0.0 && (f64::from(nodes - 1) * step - f64::from(side - 1)).abs() < 1.0
+        };
+        if spans(across, geo_w, width) && spans(along, geo_h, height) {
+            return Ok(Seating { step: (across, along), origin: (0.0, 0.0) });
+        }
+        return Err(format!(
+            "подвыборка {}×{} не сходится с сеткой {}×{} на растре {}×{}",
+            across, along, geo_w, geo_h, width, height
+        ));
+    }
+    Err(format!(
+        "сетка {}×{} реже растра {}×{}, а чем она с ним связана, файл не говорит",
+        geo_w, geo_h, width, height
+    ))
 }
 
 /// Узлы по одной оси: индексы отсчётов, на которых стоят опорные точки.
@@ -731,14 +859,11 @@ fn nodes(side: u32) -> Vec<u32> {
 /// Узел стои́т в середине отсчёта (+0.5): широта записана для центра пикселя, а
 /// не для его угла.
 ///
-/// `step` — сколько пикселей растра приходится на отсчёт координатной сетки по
-/// столбцам и по строкам. Единица — координаты записаны поотсчётно, отсчёт и
-/// есть пиксель; больше — координаты лежат на опорной сетке, разреженной в
-/// столько раз (см. [`geolocation`]).
+/// `seat` — как узлы сетки садятся на пиксели растра (см. [`seating`]).
 fn lattice(
     rows: &[u32],
     columns: &[u32],
-    step: (f64, f64),
+    seat: Seating,
     at: impl Fn(u32, u32) -> Option<(f64, f64)>,
 ) -> Vec<Tie> {
     let mut ties = Vec::with_capacity(rows.len() * columns.len());
@@ -755,8 +880,8 @@ fn lattice(
                 return Vec::new();
             }
             ties.push(Tie {
-                px: f64::from(column) * step.0 + 0.5,
-                py: f64::from(row) * step.1 + 0.5,
+                px: f64::from(column) * seat.step.0 + seat.origin.0 + 0.5,
+                py: f64::from(row) * seat.step.1 + seat.origin.1 + 0.5,
                 lat,
                 lon,
             });
@@ -955,13 +1080,13 @@ mod tests {
     fn a_single_broken_node_drops_the_whole_lattice() {
         let rows = [0u32, 1];
         let columns = [0u32, 1];
-        let whole = lattice(&rows, &columns, (1.0, 1.0), |row, column| {
+        let whole = lattice(&rows, &columns, Seating::SAME, |row, column| {
             Some((f64::from(row), f64::from(column)))
         });
         assert_eq!(whole.len(), 4);
         assert_eq!(whole[0].px, 0.5, "узел стои́т в середине отсчёта");
 
-        let holed = lattice(&rows, &columns, (1.0, 1.0), |row, column| match (row, column) {
+        let holed = lattice(&rows, &columns, Seating::SAME, |row, column| match (row, column) {
             (1, 1) => Some((f64::NAN, 0.0)),
             _ => Some((f64::from(row), f64::from(column))),
         });
@@ -970,18 +1095,111 @@ mod tests {
         // Широта за пределами шара — тоже дыра, только записанная числом:
         // так лежит незаполненный край полосы съёмки. И долгота тоже: у
         // решётки, проверенной лишь по широте, такая дыра проходила бы.
-        let filled = lattice(&rows, &columns, (1.0, 1.0), |_, _| Some((9.969_21e36, 0.0)));
+        let filled = lattice(&rows, &columns, Seating::SAME, |_, _| Some((9.969_21e36, 0.0)));
         assert!(filled.is_empty());
-        let eastless = lattice(&rows, &columns, (1.0, 1.0), |_, _| Some((0.0, 9.969_21e36)));
+        let eastless = lattice(&rows, &columns, Seating::SAME, |_, _| Some((0.0, 9.969_21e36)));
         assert!(eastless.is_empty());
 
         // Опорная сетка разрежена: отсчёт координат стои́т не на каждом пикселе,
         // и узел уезжает туда, куда указывает шаг.
-        let sparse = lattice(&rows, &columns, (64.0, 1.0), |row, column| {
+        let sparse = lattice(&rows, &columns, Seating { step: (64.0, 1.0), origin: (0.0, 0.0) }, |row, column| {
             Some((f64::from(row), f64::from(column)))
         });
         assert_eq!(sparse[1].px, 64.5, "второй столбец опорной сетки — 64-й пиксель");
         assert_eq!(sparse[1].py, 0.5);
+
+        // У посадки есть и начало: решётка `tx` SLSTR свисает за левый край
+        // растра, и её нулевой узел приходится на 26 пикселей левее нуля.
+        let shifted = lattice(
+            &rows,
+            &columns,
+            Seating { step: (16.0, 1.0), origin: (-26.0, 0.0) },
+            |row, column| Some((f64::from(row), f64::from(column))),
+        );
+        assert_eq!(shifted[0].px, -25.5, "нулевой узел стои́т левее растра");
+        assert_eq!(shifted[1].px, -9.5);
+        assert_eq!(shifted[1].py, 0.5, "по строкам начала нет — они совпадают отсчёт в отсчёт");
+    }
+
+    /// Отсчёт прибора у гранулы SLSTR: растр `in` и решётка `tx` стоят в
+    /// разных отсчётах, и сходятся они только через смещения.
+    ///
+    /// Числа настоящие — `S3A_SL_2_LST____20260824T174507`: растр 266×1500 при
+    /// `track_offset` 998 и разрешении 1000 м, решётка 266×130 при
+    /// `track_offset` 64 и разрешении 16000 м поперёк трека.
+    #[test]
+    fn the_slstr_tie_grid_sits_by_the_instrument_frame() {
+        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
+        let grid = Frame { across_at: 64.0, along_at: 3598.0, across: 16000.0, along: 1000.0 };
+        let seat = seating(Some(raster), Some(grid), None, (1500, 266), (130, 266))
+            .expect("отсчёты названы обоими файлами");
+        assert_eq!(seat.step, (16.0, 1.0), "шаг — отношение разрешений");
+        assert_eq!(seat.origin, (-26.0, 0.0), "нулевой узел свисает за левый край растра");
+        // Крайний узел приходится далеко за правый край — решётка шире снимка.
+        assert_eq!(129.0 * seat.step.0 + seat.origin.0, 2038.0);
+    }
+
+    /// Опорная сетка OLCI названа подвыборкой, и та обязана сойтись с
+    /// размерами: узлы стоят на краях растра.
+    ///
+    /// Числа настоящие — `S3A_OL_2_LRR____20260824T161836`: растр 15076×1217,
+    /// сетка 15076×77, `ac_subsampling_factor` 16, `al_subsampling_factor` 1.
+    #[test]
+    fn the_olci_tie_grid_sits_by_its_subsampling() {
+        let seat = seating(None, None, Some((16.0, 1.0)), (1217, 15076), (77, 15076))
+            .expect("подвыборка сходится с размерами");
+        assert_eq!(seat.step, (16.0, 1.0));
+        assert_eq!(seat.origin, (0.0, 0.0), "узел ноль стои́т на пикселе ноль");
+        assert_eq!(76.0 * seat.step.0 + seat.origin.0, 1216.0, "крайний узел — крайний столбец");
+    }
+
+    /// Сетка размером с растр садится отсчёт в отсчёт, и подвыборку у неё не
+    /// спрашивают. Правило это не про дешевизну: `ac_subsampling_factor`
+    /// описывает опорную сетку продукта, и поотсчётный `geo_coordinates.nc`
+    /// OLCI несёт его тоже. Спрошенный раньше размеров, он растянул бы
+    /// поотсчётную сетку в шестнадцать раз.
+    #[test]
+    fn a_grid_the_size_of_the_raster_ignores_the_subsampling_attribute() {
+        let seat = seating(None, None, Some((16.0, 1.0)), (1217, 15076), (1217, 15076))
+            .expect("сетка размером с растр садится всегда");
+        assert_eq!(seat, Seating::SAME);
+    }
+
+    /// Подвыборка, не сошедшаяся с размерами, — это подвыборка не про эту
+    /// пару. Посадка по ней вышла бы такой же молчаливой, как выведенная из
+    /// размеров, поэтому здесь отказ.
+    #[test]
+    fn a_subsampling_that_misses_the_sizes_is_refused() {
+        let off = seating(None, None, Some((16.0, 1.0)), (1217, 15076), (130, 15076));
+        assert!(off.is_err(), "77 узлов ожидалось, а сетка о 130");
+    }
+
+    /// Разрежённая сетка без единого слова о том, чем она связана с растром,
+    /// не садится вовсе: снимок ляжет по контуру каталога, а не мимо себя.
+    #[test]
+    fn a_sparse_grid_that_says_nothing_about_itself_is_refused() {
+        let mute = seating(None, None, None, (1500, 266), (130, 266));
+        assert!(mute.is_err());
+    }
+
+    /// Отсчёт прибора без пары бесполезен: одно смещение не говорит ни о шаге,
+    /// ни о начале.
+    #[test]
+    fn one_instrument_frame_without_the_other_is_not_enough() {
+        let raster = Frame { across_at: 998.0, along_at: 3598.0, across: 1000.0, along: 1000.0 };
+        assert!(seating(Some(raster), None, None, (1500, 266), (130, 266)).is_err());
+        assert!(seating(None, Some(raster), None, (1500, 266), (130, 266)).is_err());
+    }
+
+    /// `resolution` записан строкой в скобках, и читаются оба числа.
+    #[test]
+    fn the_resolution_attribute_is_read_out_of_its_brackets() {
+        assert_eq!(resolution("[ 16000 1000 ]"), Some((16000.0, 1000.0)));
+        assert_eq!(resolution("[ 1000 1000 ]"), Some((1000.0, 1000.0)));
+        assert_eq!(resolution("[ 1080 1176 ]"), Some((1080.0, 1176.0)));
+        assert_eq!(resolution("1000"), None, "одного числа мало");
+        assert_eq!(resolution(""), None);
+        assert_eq!(resolution("[ 0 1000 ]"), None, "нулевая ячейка — не разрешение");
     }
 
     /// Шаг выборки разводится со строкой: общий делитель у шага и ширины

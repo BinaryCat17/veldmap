@@ -52,6 +52,12 @@ pub struct Info {
     /// с [`Info::ties`]: узлы объявлены в градусах, и метрам зоны в них места
     /// нет (см. [`Placement`]).
     pub placement: Option<Placement>,
+    /// Отсчёт прибора, в котором записан сам растр. Нужен не ему, а
+    /// координатам из соседнего файла: сетка там стои́т в своём отсчёте, и
+    /// сойтись с растром они могут только через эту пару (см.
+    /// [`netcdf::geolocation`]). Заполняет один NetCDF — остальные о таком
+    /// не говорят.
+    pub frame: Option<netcdf::Frame>,
 }
 
 /// Узел сетки геопривязки: пиксель растра и его место на Земле, WGS84.
@@ -104,7 +110,7 @@ impl Info {
     /// описываются все форматы, кроме тех двух, что о своём месте на Земле
     /// говорят сами, — GeoTIFF и NetCDF.
     pub fn plain(width: u32, height: u32, kind: Kind) -> Self {
-        Self { width, height, kind, finest: 0, ties: Vec::new(), placement: None }
+        Self { width, height, kind, finest: 0, ties: Vec::new(), placement: None, frame: None }
     }
 
     /// Разбор тяжёлого вида — того, что держит при себе отсчёты величины.

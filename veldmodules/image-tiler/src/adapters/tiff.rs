@@ -113,6 +113,9 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         finest: 0,
         ties,
         placement,
+        // Отсчёт прибора объявляет один Sentinel-3 своими глобальными
+        // атрибутами; у GeoTIFF место записано самим растром.
+        frame: None,
     })
 }
 
