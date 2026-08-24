@@ -28,7 +28,7 @@ use veldsdk::graphics::{self as gfx, BindGroupId, TextureViewId};
 use veldsdk::proto::core::ResourceHandle;
 
 use super::pyramid;
-use crate::proto::Reach;
+pub use crate::proto::Reach;
 
 /// Адрес тайла в пирамиде: уровень, колонка, ряд. Тот же, каким его знают
 /// дисковый кэш и производитель.
@@ -642,6 +642,20 @@ impl Fetch {
         self.failed.clear();
         self.retried.clear();
         self.ordered.clear();
+        self.deferred.clear();
+    }
+
+    /// По источнику никто не идёт — отложенному больше нечего ждать.
+    ///
+    /// Спрашивают об этом там же, где выбирают ступень, и это единственная
+    /// точка отпускания: конец прохода для неё не годится. Конец приходит по
+    /// корреляции, а `Fetch` корреляций не знает — запоздавший конец прежнего
+    /// прохода отпустил бы откладывания нового, и штурм кэша вернулся бы до
+    /// конца этого нового.
+    pub fn resume(&mut self) {
+        for addr in std::mem::take(&mut self.deferred) {
+            self.inflight.remove(&addr);
+        }
     }
 
     /// Что спросить у кэша: желаемое без того, что уже лежит, уже спрошено или
@@ -684,23 +698,33 @@ impl Fetch {
     /// Всё, что в производство не пошло, снимается с ожидания: иначе следующий
     /// пересчёт сочтёт эти ячейки уже спрошенными и не переспросит никогда.
     ///
-    /// Кроме одного случая: пока идёт **наш** проход, по источнику всё равно
-    /// не спросишь ничего, и снятая ячейка спрашивалась бы у кэша заново на
-    /// каждом кадре — сотнями промахов об одном и том же. Такие откладываются
-    /// до конца прохода, и конец их же и отпустит ([`Fetch::produced`]).
-    /// Чужой проход так обслуживать нельзя: его конец наших ожиданий не
-    /// снимет, и отложенное зависло бы навсегда.
+    /// Кроме одного случая: пока идёт **наш** проход по источнику, который
+    /// отдаёт ровно заказанное ([`Reach::Exact`]), переспрашивать нечего —
+    /// нового в кэше не появится, а пересчёт желаемого идёт на каждом кадре,
+    /// и снятая ячейка уходила бы туда сотнями запросов об одном и том же.
+    /// Такие откладываются, пока проход идёт, и отпускает их
+    /// [`Fetch::resume`] — по отсутствию прохода, а не по его концу.
+    ///
+    /// У прочих источников проход кладёт в кэш больше, чем отдаёт заказчику:
+    /// пирамиду целиком либо ступень и всё грубее неё. А узнать, что тайл
+    /// лёг, можно только спросив — о своих пополнениях кэш не сообщает. Там
+    /// переспрашивание не холостое: это единственный способ увидеть
+    /// обнажившийся край раньше конца прохода.
+    ///
+    /// Чужой проход не откладывают никогда: его конец наших ожиданий не
+    /// снимет, и отложенное по нему зависло бы навсегда.
     pub fn missed<K: PartialEq>(
         &mut self,
         passes: &Passes<K>,
         fingerprint: &str,
         owner: &K,
+        reach: Reach,
         asked: &[Addr],
         misses: impl IntoIterator<Item = Addr>,
         still_wanted: impl Fn(Addr) -> bool,
     ) -> Missed {
         let going = passes.going(fingerprint);
-        let ours = passes.mine(fingerprint, owner);
+        let ours = passes.mine(fingerprint, owner) && matches!(reach, Reach::Exact);
         let mut produce = Vec::new();
         for addr in misses {
             // Не из этого запроса — про него мы ничего не знаем.
@@ -761,12 +785,6 @@ impl Fetch {
     /// прохода соседей.
     pub fn produced(&mut self, cells: &[Addr], failed: bool) {
         self.forget_asked(cells);
-        // Отложенное на время прохода отпускается любым его концом — удачным,
-        // сорвавшимся, убитым, — и безусловно: конец приходит всегда (за
-        // убитое отвечает хост), а невыпущенная ячейка не спросится больше
-        // никогда.
-        let deferred: Vec<Addr> = self.deferred.drain().collect();
-        self.forget_asked(&deferred);
         match failed {
             true => self.failed.extend(cells.iter().copied()),
             false => self.forgive(),
@@ -843,7 +861,7 @@ impl<K> Default for Passes<K> {
 
 impl<K: PartialEq> Passes<K> {
     /// По источнику идёт проход — спрашивать по нему нечего до его конца.
-    pub(crate) fn going(&self, fingerprint: &str) -> bool {
+    pub fn going(&self, fingerprint: &str) -> bool {
         self.by_source.contains_key(fingerprint)
     }
 
@@ -1253,7 +1271,7 @@ mod tests {
 
         let ask = fetch.ask(&store, "s", cells(2, 0..2, 0..1)).expect("кэш спрашивают всегда");
         passes.begin("s", "сосед", "c1".into(), 2);
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", &ask, ask.clone(), |_| true), Missed::Waiting));
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true), Missed::Waiting));
         // Чужой проход наших ожиданий не снимет — их снимаем сами, и они
         // спросятся заново.
         assert!(fetch.ask(&store, "s", cells(2, 0..2, 0..1)).is_some());
@@ -1369,10 +1387,10 @@ mod tests {
         let mut fetch = Fetch::default();
         let ask = fetch.ask(&store, "s", cells(0, 0..3, 0..1)).expect("запрос");
 
-        let produce = fetch.missed(&passes, "s", &"мы", &ask, ask.clone(), |addr| addr.1 == 0);
+        let produce = fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |addr| addr.1 == 0);
         assert!(matches!(produce, Missed::Produce(cells) if cells == vec![(0, 0, 0)]));
         // Чужой промах не наш: про него мы ничего не знаем.
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", &ask, [(0, 9, 9)], |_| true), Missed::Closed));
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, [(0, 9, 9)], |_| true), Missed::Closed));
 
         let again = fetch.ask(&store, "s", cells(0, 0..3, 0..1)).expect("отсеянные вернулись");
         assert_eq!(again, vec![(0, 1, 0), (0, 2, 0)]);
@@ -1388,17 +1406,17 @@ mod tests {
         let mut fetch = Fetch::default();
         let ask = fetch.ask(&store, "s", cells(0, 0..2, 0..1)).expect("запрос");
 
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", &ask, [], |_| true), Missed::Closed));
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, [], |_| true), Missed::Closed));
         passes.begin("s", "сосед", "c1".into(), 0);
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", &ask, ask.clone(), |_| true), Missed::Waiting));
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true), Missed::Waiting));
     }
 
     /// Пока идёт свой проход, промахи не переспрашиваются: по источнику всё
     /// равно ничего не произведут, а пересчёт желаемого идёт на каждом кадре —
     /// и снятая с ожидания ячейка уходила бы в кэш сотнями запросов об одном и
-    /// том же. Конец прохода их отпускает.
+    /// том же. Отпускает их отсутствие прохода, а не его конец.
     #[test]
-    fn промахи_своего_прохода_откладываются_до_его_конца() {
+    fn промахи_своего_прохода_откладываются_пока_он_идёт() {
         let store = Store::new(1 << 30);
         let mut fetch = Fetch::default();
         let mut passes = passes();
@@ -1407,22 +1425,45 @@ mod tests {
         let ask = fetch.ask(&store, "s", want.clone()).expect("первый заказ уходит");
         passes.begin("s", "мы", "c1".into(), 2);
         assert!(matches!(
-            fetch.missed(&passes, "s", &"мы", &ask, ask.clone(), |_| true),
+            fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true),
             Missed::Waiting
         ));
 
         assert!(fetch.ask(&store, "s", want.clone()).is_none(), "второй раз кэш не спрашивают");
         assert!(fetch.ask(&store, "s", want.clone()).is_none(), "и третий тоже");
 
-        // Проход кончился — отложенное отпущено, даже если он не принёс этих
-        // ячеек вовсе.
-        fetch.produced(&[], false);
+        fetch.resume();
         assert_eq!(fetch.ask(&store, "s", want.clone()), Some(want), "заказ уходит заново");
     }
 
-    /// Отпустив отложенное, список о нём забывает. Иначе следующий же конец
-    /// прохода снял бы с ожидания ячейку, которую к тому времени спросили
-    /// заново и честно ждут, — и её спросили бы у кэша дважды.
+    /// Отпускает отсутствие прохода, а не его конец: конец приходит по
+    /// корреляции, а `Fetch` их не знает — запоздавший конец прежнего прохода
+    /// отпустил бы откладывания нового.
+    #[test]
+    fn конец_прохода_отложенного_не_отпускает() {
+        let store = Store::new(1 << 30);
+        let mut fetch = Fetch::default();
+        let mut passes = passes();
+        let want = cells(2, 0..1, 0..1);
+
+        let ask = fetch.ask(&store, "s", want.clone()).expect("заказ");
+        passes.begin("s", "мы", "c1".into(), 2);
+        fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true);
+
+        // Ни удачный конец, ни сорвавшийся откладывания не трогают: пока
+        // проход идёт, ждать по-прежнему есть чего.
+        fetch.produced(&[], false);
+        assert!(fetch.ask(&store, "s", want.clone()).is_none(), "удачный конец — не повод");
+        fetch.produced(&[], true);
+        assert!(fetch.ask(&store, "s", want.clone()).is_none(), "и сорвавшийся тоже");
+
+        fetch.resume();
+        assert_eq!(fetch.ask(&store, "s", want.clone()), Some(want));
+    }
+
+    /// Отпустив отложенное, список о нём забывает: иначе следующее отпускание
+    /// сняло бы с ожидания ячейку, которую к тому времени спросили заново и
+    /// честно ждут, — и её спросили бы у кэша дважды.
     #[test]
     fn отпущенное_из_отложенных_вычёркивается() {
         let store = Store::new(1 << 30);
@@ -1432,13 +1473,54 @@ mod tests {
 
         let ask = fetch.ask(&store, "s", want.clone()).expect("первый заказ");
         passes.begin("s", "мы", "c1".into(), 2);
-        fetch.missed(&passes, "s", &"мы", &ask, ask.clone(), |_| true);
-        fetch.produced(&[], false);
+        fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true);
+        fetch.resume();
 
-        // Спрошено заново и честно ждёт ответа кэша.
         assert_eq!(fetch.ask(&store, "s", want.clone()), Some(want.clone()));
-        fetch.produced(&[], false);
+        fetch.resume();
         assert!(fetch.ask(&store, "s", want).is_none(), "ожидание живо, второй раз не спрашивают");
+    }
+
+    /// Источник, чей проход строит пирамиду целиком, переспрашивают и во
+    /// время своего прохода — и это не холостая работа. Проход кладёт в кэш
+    /// все уровни, а отдаёт заказчику только заказанную ступень; о том, что
+    /// тайл лёг, кэш не сообщает. Перестань спрашивать — и обнажившийся край
+    /// простоит грубым до конца прохода, хотя нужное уже лежит.
+    #[test]
+    fn пирамидный_источник_переспрашивают_и_во_время_своего_прохода() {
+        let store = Store::new(1 << 30);
+        let mut fetch = Fetch::default();
+        let mut passes = passes();
+        let want = cells(2, 0..1, 0..1);
+
+        let ask = fetch.ask(&store, "s", want.clone()).expect("заказ");
+        passes.begin("s", "мы", "c1".into(), 2);
+        assert!(matches!(
+            fetch.missed(&passes, "s", &"мы", Reach::Pyramid, &ask, ask.clone(), |_| true),
+            Missed::Waiting
+        ));
+
+        assert_eq!(fetch.ask(&store, "s", want.clone()), Some(want), "спрашиваем снова");
+    }
+
+    /// Смена источника уносит и откладывания: адреса ячеек у нового снимка те
+    /// же, и оставленное отпустило бы чужое ожидание.
+    #[test]
+    fn смена_источника_уносит_откладывания() {
+        let store = Store::new(1 << 30);
+        let mut fetch = Fetch::default();
+        let mut passes = passes();
+        let want = cells(2, 0..1, 0..1);
+
+        let ask = fetch.ask(&store, "s", want.clone()).expect("заказ");
+        passes.begin("s", "мы", "c1".into(), 2);
+        fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true);
+
+        fetch.reset();
+        // Новый источник, тот же адрес: заказ уходит и честно ждёт ответа.
+        assert_eq!(fetch.ask(&store, "иной", want.clone()), Some(want.clone()));
+        fetch.resume();
+        assert!(fetch.ask(&store, "иной", want).is_none(), "прежнее откладывание не отпускает нового");
     }
 
     /// Ждать можно только своего прохода. Чужой конец наших ожиданий не
@@ -1454,7 +1536,7 @@ mod tests {
         let ask = fetch.ask(&store, "s", want.clone()).expect("первый заказ уходит");
         passes.begin("s", "сосед", "c1".into(), 2);
         assert!(matches!(
-            fetch.missed(&passes, "s", &"мы", &ask, ask.clone(), |_| true),
+            fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true),
             Missed::Waiting
         ));
 

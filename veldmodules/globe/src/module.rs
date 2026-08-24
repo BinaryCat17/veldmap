@@ -889,10 +889,12 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             return;
         }
 
+        let reach = raster.meta.as_ref().map_or(tiles::Reach::Pyramid, |meta| meta.reach);
         let missed = raster.fetch.missed(
             &state.passes,
             &ctx.fingerprint,
             &(ctx.key.clone(), ctx.role),
+            reach,
             &ctx.cells,
             msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
             |addr| desired.contains(&addr),
@@ -1049,8 +1051,13 @@ fn want_overlay(state: &mut State, key: &str, wanted: overlay::Wanted) {
     if let Some(correlation) = state.passes.stale(&fingerprint, &owner, &wanted.want) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
+    let going = state.passes.going(&fingerprint);
     let overlay = state.overlays.iter_mut().find(|o| o.key == key).expect("наложение только что было");
     let raster = overlay.raster_mut(wanted.choice.role).expect("растр только что был");
+    // Прохода нет — отложенным на его время ячейкам ждать больше нечего.
+    if !going {
+        raster.fetch.resume();
+    }
     let Some(cells) = raster.fetch.ask(&state.tiles, &fingerprint, wanted.want.cells) else {
         return;
     };

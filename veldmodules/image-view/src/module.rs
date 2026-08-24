@@ -366,10 +366,12 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     let desired: HashSet<Addr> = view::wanted(view, &state.tiles, cap)
         .map(|want| want.cells.into_iter().collect())
         .unwrap_or_default();
+    let reach = view.meta().map_or(tiles::Reach::Pyramid, |meta| meta.reach);
     let missed = view.fetch.missed(
         &state.passes,
         &ctx.fingerprint,
         &ctx.view,
+        reach,
         &ctx.cells,
         msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
         |addr| desired.contains(&addr),
@@ -581,7 +583,12 @@ fn want_tiles(state: &mut State, key: &str) {
     if let Some(correlation) = state.passes.stale(&fingerprint, &key.to_string(), &want) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
+    let going = state.passes.going(&fingerprint);
     let view = state.views.get_mut(key).expect("вид только что был");
+    // Прохода нет — отложенным на его время ячейкам ждать больше нечего.
+    if !going {
+        view.fetch.resume();
+    }
     let Some(cells) = view.fetch.ask(&state.tiles, &fingerprint, want.cells) else { return };
 
     // Ход добычи видно только здесь: какая ступень понадобилась, сколько её
