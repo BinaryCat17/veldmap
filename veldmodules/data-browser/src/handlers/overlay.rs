@@ -495,26 +495,51 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     true
 }
 
-/// Все открытия этого наложения кончились — передать владение глобусу и
-/// переслать набор.
-/// Превью впереди подробного — в том порядке, в каком набор и уедет глобусу.
+/// Собранное — в пары «растр и его координаты», превью вперёд. Вторым ответом
+/// — координаты, которым растра не нашлось: наложению они не файл, а свойство
+/// растра, и отпускает их вызывающий, пока они ещё его.
 ///
-/// Порядок здесь не украшение, а цена показа. Глобус рассылает описания
-/// подряд по набору, а тайлер — один обработчик за раз: кто первый в списке,
-/// тот и держит остальных. Превью — это квиклук в сотни килобайт, подробный —
-/// гранула в мегабайты, и по сети между ними десятки секунд.
+/// Порядок здесь не украшение, а цена показа: глобус рассылает описания
+/// подряд по набору (`globe::module::adopt_overlay`), а тайлер описывает по
+/// одному, так что первый в списке держит остальных. Превью — квиклук в сотни
+/// килобайт, подробный — гранула в мегабайты, и по сети между ними десятки
+/// секунд. Провайдер кладёт превью первым, а теряется порядок посередине:
+/// открытия уходят разом, ответы сети приходят вразнобой, и собранное лежит в
+/// порядке их прихода.
 ///
-/// Сам порядок объявлен обеими сторонами провода: провайдер кладёт превью
-/// первым, глобус рисует набор в порядке списка (база внизу, цель поверх).
-/// Теряется он посередине — открытия уходят разом, а ответы сети приходят
-/// вразнобой, и собранное лежит в порядке их прихода.
+/// Первую картинку это приближает не всякому слою: у квадовой привязки
+/// глобус не рисует ничего, пока не описались оба растра
+/// (`overlay::binding_pending`), — там порядок решает только то, что раньше
+/// освободит очередь тайлера.
 ///
-/// Сортировка устойчивая: у двух растров одной роли порядок открытия — всё,
-/// чем они различаются.
-fn preview_first<A, B>(pairs: &mut [(OverlayRole, A, B)]) {
+/// Сортировка устойчивая, но опираться на это нельзя: координаты привязаны к
+/// первому растру своей роли, и второго такого набор не несёт (см.
+/// `imagery::scan` у провайдера — по одному растру на роль).
+fn paired<H>(
+    collected: Vec<(OverlayRole, Part, H)>,
+) -> (Vec<(OverlayRole, H, Option<H>)>, Vec<H>) {
+    let mut pairs: Vec<(OverlayRole, H, Option<H>)> = Vec::new();
+    let mut coordinates = Vec::new();
+    for (role, part, handle) in collected {
+        match part {
+            Part::Raster => pairs.push((role, handle, None)),
+            Part::Geolocation => coordinates.push((role, handle)),
+        }
+    }
     pairs.sort_by_key(|(role, ..)| *role as i32);
+
+    let mut orphans = Vec::new();
+    for (role, handle) in coordinates {
+        match pairs.iter_mut().find(|(other, ..)| *other == role) {
+            Some(pair) => pair.2 = Some(handle),
+            None => orphans.push(handle),
+        }
+    }
+    (pairs, orphans)
 }
 
+/// Все открытия этого наложения кончились — передать владение глобусу и
+/// переслать набор.
 fn finish(state: &mut State, key: &str) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
     let Some(assembly) = overlay.assembly.take() else { return };
@@ -524,28 +549,13 @@ fn finish(state: &mut State, key: &str) {
     // Порядок здесь не вкусовой: отпустить лишнее можно, только пока оно наше,
     // а после `hand_off` ресурс принадлежит глобусу — освобождение отклонит
     // хост, и о брошенном файле вспомнить будет некому.
-    let mut pairs: Vec<(OverlayRole, ResourceHandle, Option<ResourceHandle>)> = Vec::new();
-    let mut coordinates: Vec<(OverlayRole, ResourceHandle)> = Vec::new();
-    for (role, part, handle) in assembly.collected {
-        match part {
-            Part::Raster => pairs.push((role, handle, None)),
-            Part::Geolocation => coordinates.push((role, handle)),
-        }
+    let (pairs, orphans) = paired(assembly.collected);
+    // Координаты сами по себе наложению не файл, а свойство растра: растр не
+    // открылся — показывать по ним нечего.
+    for handle in orphans {
+        veldsdk::log::warn!(target: "handlers", "'{}': координаты без растра — отпускаем", label);
+        veldsdk::resource::release(handle);
     }
-    for (role, handle) in coordinates {
-        match pairs.iter_mut().find(|(other, ..)| *other == role) {
-            Some(pair) => pair.2 = Some(handle),
-            // Координаты сами по себе наложению не файл, а свойство растра:
-            // растр не открылся — показывать по ним нечего.
-            None => {
-                veldsdk::log::warn!(target: "handlers",
-                    "'{}': координаты без растра — отпускаем", label);
-                veldsdk::resource::release(handle);
-            }
-        }
-    }
-
-    preview_first(&mut pairs);
 
     // Передача владения — до сообщения: получив набор, глобус вправе сразу
     // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
@@ -767,35 +777,52 @@ mod tests {
     }
 
     /// Набор уезжает глобусу превью вперёд, каким бы ни был порядок ответов
-    /// сети. Тайлер описывает набор подряд и по одному, поэтому вставший
-    /// первым держит остальных: у гранулы, где подробный растр вернулся
-    /// раньше квиклука, картинка ждёт его целиком.
+    /// сети. Тайлер описывает набор по одному, поэтому вставший первым держит
+    /// остальных: у гранулы, где подробный растр вернулся раньше квиклука,
+    /// очередь занимали мегабайты вместо сотен килобайт.
     #[test]
     fn превью_уезжает_впереди_подробного() {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let mut pairs = vec![(detailed, "подробный", ()), (preview, "квиклук", ())];
+        let collected =
+            vec![(detailed, Part::Raster, "подробный"), (preview, Part::Raster, "квиклук")];
 
-        preview_first(&mut pairs);
+        let (pairs, orphans) = paired(collected);
 
-        let order: Vec<_> = pairs.iter().map(|(_, name, _)| *name).collect();
+        let order: Vec<_> = pairs.iter().map(|(_, raster, _)| *raster).collect();
         assert_eq!(order, ["квиклук", "подробный"]);
+        assert!(orphans.is_empty());
     }
 
-    /// У растров одной роли порядок открытия — единственное, чем они
-    /// различаются, и сортировка его не трогает.
+    /// Координаты достаются растру своей роли, а не соседней и не первому
+    /// попавшемуся: у Sentinel-3 подробный растр везёт свои широты отдельным
+    /// файлом, и перепутать их с превью значит уложить снимок мимо себя.
     #[test]
-    fn растры_одной_роли_остаются_в_порядке_открытия() {
-        let detailed = OverlayRole::OverlayDetailed;
-        let mut pairs = vec![
-            (detailed, "первый", ()),
-            (OverlayRole::OverlayPreview, "квиклук", ()),
-            (detailed, "второй", ()),
+    fn координаты_достаются_растру_своей_роли() {
+        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
+        let collected = vec![
+            (detailed, Part::Geolocation, "широты"),
+            (preview, Part::Raster, "квиклук"),
+            (detailed, Part::Raster, "подробный"),
         ];
 
-        preview_first(&mut pairs);
+        let (pairs, orphans) = paired(collected);
 
-        let order: Vec<_> = pairs.iter().map(|(_, name, _)| *name).collect();
-        assert_eq!(order, ["квиклук", "первый", "второй"]);
+        assert_eq!(pairs, vec![(preview, "квиклук", None), (detailed, "подробный", Some("широты"))]);
+        assert!(orphans.is_empty());
+    }
+
+    /// Координаты, чей растр не открылся, наложению не файл: их возвращают
+    /// вызывающему, пока они ещё его и есть чем их отпустить.
+    #[test]
+    fn координаты_без_своего_растра_возвращаются_отпустить() {
+        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
+        let collected =
+            vec![(detailed, Part::Geolocation, "широты"), (preview, Part::Raster, "квиклук")];
+
+        let (pairs, orphans) = paired(collected);
+
+        assert_eq!(pairs, vec![(preview, "квиклук", None)]);
+        assert_eq!(orphans, vec!["широты"]);
     }
 
     /// Значок кладёт снимок на шар и им же снимает — в обоих положениях, в
