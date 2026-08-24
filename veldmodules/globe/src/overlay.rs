@@ -569,6 +569,14 @@ pub struct Overlay {
     pub key: String,
     pub label: String,
     pub frame: Frame,
+    /// Сколько раз слой перекладывали на другую привязку.
+    ///
+    /// Счётчиком, а не сравнением рамок: рамка решает и геометрию патчей, и
+    /// видимость ячеек, а сторож пересборки сравнивает выбор растров — и
+    /// перекладка, не изменившая ни отпечатка, ни уровня, ни набора ячеек,
+    /// прошла бы мимо него. Снимок остался бы лежать по прежней привязке до
+    /// постороннего повода.
+    pub relaid: u64,
     /// Чем рамка получена. Рядом с ней, а не выводится из её вида: рамкой
     /// проекции приходит и раскладка MGRS из имени продукта, и привязка самого
     /// файла, — по варианту `Frame` их не различить (см. [`Binding`]).
@@ -639,7 +647,7 @@ pub struct Placement {
 /// разбора двух файлов, то есть ничего осмысленного. Правило «приехавшая первой
 /// и остаётся» годится, пока обе привязки одного рода — тогда они об одном и том
 /// же снимке, — и врёт, как только рода разные.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Binding {
     /// Контур каталога: он говорит, какой кусок Земли снят, а не каким пикселем
     /// куда, и порядок его вершин обходу растра не обязан совпадать.
@@ -686,11 +694,25 @@ pub struct Progress {
 }
 
 /// Что рисовать у наложения прямо сейчас: какой растр и каким уровнем.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Choice {
     pub role: Role,
     pub fingerprint: String,
     pub level: u32,
+}
+
+/// То, из чего собраны вершины наложения. Совпало у всех — пересобирать нечего.
+///
+/// Именованными полями, а не кортежем: забытое поле здесь не ошибка
+/// компилятора, а снимок, оставшийся лежать по прежней привязке или в прежнем
+/// месте кадра, — и заметить это можно только глазом.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Built {
+    key: String,
+    opacity: f32,
+    relaid: u64,
+    choice: Choice,
+    cells: Vec<tiles::Addr>,
 }
 
 /// Он же вместе с тем, что из него видно: ячейки выбранного уровня, попавшие в
@@ -895,6 +917,32 @@ impl Overlay {
     pub fn budgeted(&self) -> impl Iterator<Item = &Raster> {
         let eclipsed = self.detail_eclipsed();
         self.rasters.iter().filter(move |raster| !(eclipsed && raster.role == Role::Detailed))
+    }
+
+    /// Отпечаток нарисованного: всё, из чего собраны вершины этого наложения.
+    ///
+    /// По нему решают, пересобирать ли геометрию. Ячейки здесь не для полноты:
+    /// набор их меняет всякое движение камеры, а отпечаток растра с уровнем
+    /// при этом остаются прежними — и без них панорама по уже добытому
+    /// оставляла бы вершины от прежнего положения.
+    pub fn built(&self, wanted: &Wanted) -> Built {
+        Built {
+            key: self.key.clone(),
+            opacity: self.opacity,
+            relaid: self.relaid,
+            choice: wanted.choice.clone(),
+            cells: wanted.want.cells.clone(),
+        }
+    }
+
+    /// Переложить слой на другую привязку.
+    ///
+    /// Методом, а не присваиванием полей: рядом с рамкой обязан двинуться
+    /// счётчик перекладок, иначе пересборка геометрии её не заметит.
+    pub fn relay(&mut self, frame: Frame, binding: Binding) {
+        self.frame = frame;
+        self.binding = binding;
+        self.relaid += 1;
     }
 
     /// Ступень добычи под взгляд и видимые ячейки этой ступени.
@@ -1605,6 +1653,7 @@ mod tests {
                 709_800.0,
                 7_800_000.0,
             ),
+            relaid: 0,
             binding: Binding::Named,
             binding_trouble: None,
             rasters,
@@ -1821,6 +1870,56 @@ mod tests {
 
         assert_eq!(near.len(), 1);
         assert_eq!(near[0].choice.role, Role::Preview);
+    }
+
+    /// Отпечаток нарисованного замечает и смену привязки, и смену набора
+    /// ячеек. Ни то ни другое не видно по выбору растра: отпечаток растра,
+    /// роль и уровень при обоих остаются прежними, а вершины — другие.
+    #[test]
+    fn built_notices_a_relay_and_a_new_set_of_cells() {
+        let mut overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
+        let at = |overlay: &Overlay, cells: Vec<tiles::Addr>| {
+            overlay.built(&Wanted {
+                choice: Choice {
+                    role: Role::Detailed,
+                    fingerprint: "fp".into(),
+                    level: 2,
+                },
+                want: tiles::Want { level: 2, target: 2, cells, steps: 1, climbed: 0 },
+            })
+        };
+
+        // Камера сдвинулась: тот же растр, тот же уровень, другие ячейки.
+        assert_ne!(
+            at(&overlay, vec![(2, 0, 0)]),
+            at(&overlay, vec![(2, 1, 0)]),
+            "панорама по уже добытому — это другие вершины"
+        );
+
+        // Слой переложили: те же ячейки, другая привязка.
+        let before = at(&overlay, vec![(2, 0, 0)]);
+        overlay.relay(
+            Frame::quad([(60.0, 30.0), (60.0, 31.0), (59.0, 31.0), (59.0, 30.0)]),
+            Binding::Catalogue,
+        );
+        assert_ne!(before, at(&overlay, vec![(2, 0, 0)]), "переложенный слой рисуется заново");
+    }
+
+    /// Перекладка идёт одним действием: рамка, ранг и счётчик двигаются
+    /// вместе. Разъедься они — пересборка геометрии перекладку не заметила бы.
+    #[test]
+    fn relay_moves_the_frame_the_rank_and_the_counter_together() {
+        let mut overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
+        assert_eq!(overlay.relaid, 0);
+
+        overlay.relay(
+            Frame::quad([(60.0, 30.0), (60.0, 31.0), (59.0, 31.0), (59.0, 30.0)]),
+            Binding::Catalogue,
+        );
+
+        assert!(matches!(overlay.frame, Frame::Quad(_)));
+        assert_eq!(overlay.binding, Binding::Catalogue);
+        assert_eq!(overlay.relaid, 1);
     }
 
     /// Отвергнутый подробный не занимает бюджета видеопамяти. Занимай он его,

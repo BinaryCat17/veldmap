@@ -116,7 +116,7 @@ pub struct State {
     /// выборы растров и прозрачность слоёв (она запечена в вершинах). Разошлось
     /// с нынешним — пересборка (см. build_patches).
     batch: gpu::OverlayBatch,
-    built: Option<(u64, Vec<(String, f32, overlay::Choice)>)>,
+    built: Option<(u64, Vec<overlay::Built>)>,
     /// Сколько раз патчи пересобирались — их вклад в сравнение кадра.
     patches: u64,
     /// Смены состава наложений и хода добычи: принятие, описание, снятие, конец
@@ -510,6 +510,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         key: incoming.key,
         label,
         frame,
+        relaid: 0,
         binding,
         binding_trouble: None,
         rasters,
@@ -778,8 +779,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
                 }
                 veldsdk::log::info!(target: "handlers",
                     "{}: привязка сеткой из {} узлов", label, ties.len());
-                overlay.frame = overlay::Frame::Grid(grid);
-                overlay.binding = rank;
+                overlay.relay(overlay::Frame::Grid(grid), rank);
                 overlay.binding_trouble = None;
                 return;
             }
@@ -821,8 +821,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
         Ok(frame) => {
             veldsdk::log::info!(target: "handlers",
                 "{}: привязка проекцией EPSG:{}", label, found.epsg);
-            overlay.frame = frame;
-            overlay.binding = overlay::Binding::Projected;
+            overlay.relay(frame, overlay::Binding::Projected);
             overlay.binding_trouble = None;
         }
         // Система названа, а перевести её нечем. Сказать об этом надо кодом: по
@@ -1208,13 +1207,22 @@ fn build_patches(state: &mut State) {
     // разошёлся бы с рисуемым на глазах у смотрящего в список.
     report_progress(state, &wanted);
 
-    let stamp: Vec<(String, f32, overlay::Choice)> = wanted
+    // Всё, из чего собраны вершины: чей слой, какой прозрачности, по какой
+    // привязке, каким растром и уровнем — и какие именно ячейки. Ячейки в
+    // стороже не для полноты: набор их меняет всякое движение камеры, а
+    // отпечаток с уровнем при этом остаются прежними, и без них панорама по
+    // уже добытому оставляла бы геометрию от прежнего положения.
+    let stamp: Vec<overlay::Built> = wanted
         .iter()
-        .map(|(key, opacity, wanted)| (key.clone(), *opacity, wanted.choice.clone()))
+        .filter_map(|(key, _, wanted)| {
+            Some(state.overlays.iter().find(|o| &o.key == key)?.built(wanted))
+        })
         .collect();
-    if state.built.as_ref() == Some(&(state.tiles.generation, stamp.clone())) {
+    let fresh = (state.tiles.generation, stamp);
+    if state.built.as_ref() == Some(&fresh) {
         return;
     }
+    let (generation, stamp) = fresh;
 
     let mut vertices = Vec::new();
     let mut draws = Vec::new();
@@ -1227,7 +1235,7 @@ fn build_patches(state: &mut State) {
     match state.batch.fill(&vertices, draws) {
         Ok(()) => {
             state.patches += 1;
-            state.built = Some((state.tiles.generation, stamp));
+            state.built = Some((generation, stamp));
         }
         Err(error) => {
             veldsdk::log::error!(target: "render", "патчи наложений не залиты: {:#}", error);
