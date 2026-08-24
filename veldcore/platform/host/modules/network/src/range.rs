@@ -208,10 +208,15 @@ impl Blocks {
     /// Кладёт блок, вытесняя старые. Если блок уже есть (два читателя
     /// запросили его одновременно), возвращается лежащий: учёт байт должен
     /// совпадать с содержимым, иначе потолок поплывёт.
-    fn insert(&self, owner: u64, index: u64, data: Arc<[u8]>) -> Arc<[u8]> {
+    ///
+    /// Вторым ответом — лёг ли блок или уже лежал. Различать это нужно счёту:
+    /// иначе «привезено больше, чем блоков у файла» значило бы и
+    /// перечитывание вытесненного, и наложившиеся разгоны двух чтений, а
+    /// читают эту строку как первое.
+    fn insert(&self, owner: u64, index: u64, data: Arc<[u8]>) -> (Arc<[u8]>, bool) {
         let mut pool = self.pool.lock().unwrap();
         if let Some(present) = pool.blocks.get(&(owner, index)) {
-            return present.clone();
+            return (present.clone(), false);
         }
         while pool.bytes + data.len() as u64 > POOL_LIMIT {
             let Some(oldest) = pool.order.pop_front() else { break };
@@ -223,7 +228,7 @@ impl Blocks {
         pool.bytes += data.len() as u64;
         pool.order.push_back((owner, index));
         pool.blocks.insert((owner, index), data.clone());
-        data
+        (data, true)
     }
 
     /// Ресурс закрыт: его блоки не переживут его — читать их больше некому,
@@ -533,8 +538,10 @@ impl HttpRange {
         // окном читателя.
         let mut wanted = None;
         for (step, chunk) in data.chunks(BLOCK as usize).enumerate() {
-            let stored = self.blocks.insert(self.owner, index + step as u64, Arc::from(chunk));
-            self.blocks_in.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (stored, fresh) = self.blocks.insert(self.owner, index + step as u64, Arc::from(chunk));
+            if fresh {
+                self.blocks_in.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             if step == 0 {
                 wanted = Some(stored);
             }
@@ -727,8 +734,8 @@ mod tests {
         pool.insert(owner, fits, block());
         assert_eq!(pool.evicted(), 1, "лишний блок выбросил ровно один");
 
-        pool.insert(owner, fits, block());
-        assert_eq!(pool.evicted(), 1, "уже лежащий блок не выбрасывает никого");
+        assert!(!pool.insert(owner, fits, block()).1, "уже лежащий блок не кладётся заново");
+        assert_eq!(pool.evicted(), 1, "и никого не выбрасывает");
 
         pool.release(owner);
         assert_eq!(pool.evicted(), 1, "закрытие ресурса — не вытеснение");
