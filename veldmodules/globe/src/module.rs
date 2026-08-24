@@ -347,7 +347,7 @@ fn cap_tiles(state: &State) -> u64 {
             .overlays
             .iter()
             .filter(|overlay| !overlay.hidden)
-            .flat_map(|overlay| overlay.rasters.iter())
+            .flat_map(|overlay| overlay.budgeted())
             .filter_map(|raster| raster.meta.as_ref())
             .map(|meta| meta.fingerprint.as_str()),
     )
@@ -685,7 +685,7 @@ fn rebuild_bounds(state: &mut State, key: &str) {
 }
 
 fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
-    let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == key) else { return };
+    let Some(mut overlay) = state.overlays.iter_mut().find(|o| o.key == key) else { return };
     let label = overlay.label.clone();
 
     // Годность описания решает общее правило: тайлер один, пирамида одна, и
@@ -732,6 +732,33 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     // Описался — своей жалобы у него больше нет. Чужую он не трогает: причина
     // соседа от его успеха никуда не делась.
     raster.trouble = None;
+
+    // Описались оба — и подробный оказался не подробнее базы. Слою он не
+    // нужен, но сказать об этом надо: приблизившийся ждёт резкости, которая
+    // не придёт, и по молчанию «ещё едет» от «не будет» не отличить.
+    //
+    // Отпущенное здесь же: ячейки, отложенные до конца прохода, отпускает
+    // выбор растров, а выбор к этому растру больше не придёт — и слой стоял
+    // бы в «набирается пирамида» до самого снятия.
+    let mut eclipsed = None;
+    if overlay.detail_eclipsed()
+        && let Some(raster) = overlay.raster_mut(Role::Detailed)
+    {
+        let said = "подробный растр не подробнее превью — на шар не кладётся";
+        if raster.trouble.as_deref() != Some(said) {
+            veldsdk::log::info!(target: "handlers", "{}: {}", label, said);
+        }
+        raster.trouble = Some(said.to_string());
+        eclipsed = raster.meta.as_ref().map(|meta| meta.fingerprint.clone());
+        raster.fetch.reset();
+    }
+    if let Some(fingerprint) = eclipsed {
+        release_pass(state, key, Role::Detailed, &fingerprint);
+        // Наложение взято заново: заимствование выше кончилось вместе с
+        // отпусканием прохода, а ниже слой нужен целиком.
+        let Some(again) = state.overlays.iter_mut().find(|o| o.key == key) else { return };
+        overlay = again;
+    }
 
     // Привязка из самого растра главнее всего, что сказал о снимке каталог: там
     // сказано, где он, а здесь — каким пикселем куда. Кто кого перебивает,
