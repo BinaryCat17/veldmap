@@ -272,7 +272,7 @@ pub fn geolocation(
         let index = (row as usize) * (geo_w as usize) + (column as usize);
         Some((f64::from(*lat_values.get(index)?), f64::from(*lon_values.get(index)?)))
     };
-    let ties = lattice(&nodes(geo_h), &nodes(geo_w), seat, at);
+    let ties = lattice((0, geo_h - 1), (0, geo_w - 1), seat, at);
     if ties.is_empty() {
         return Err(format!("узлы сетки {}×{} не годятся в привязку", geo_w, geo_h));
     }
@@ -698,20 +698,33 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> Vec<Tie> {
     if width < 2 || height < 2 {
         return Vec::new();
     }
-    let (rows, columns) = (nodes(height), nodes(width));
+    let (rows, columns) = ((0, height - 1), (0, width - 1));
 
+    // Отказ здесь произносится вслух, потому что молчащий не отличить от
+    // «координат в файле нет»: у гранулы со сложным контуром и то и другое
+    // кончается снятым слоем, а причины у них разные.
+    let told = |ties: Vec<Tie>| {
+        if ties.is_empty() {
+            veldsdk::log::debug!(target: "decode",
+                "NetCDF: узлы сетки {}×{} не годятся в привязку", width, height);
+        }
+        ties
+    };
     if let Some((lat, lon)) = swath(file, items, chosen) {
         let at = |row: u32, column: u32| -> Option<(f64, f64)> {
             let index = (row as usize) * (width as usize) + (column as usize);
             Some((f64::from(*lat.get(index)?), f64::from(*lon.get(index)?)))
         };
-        return lattice(&rows, &columns, Seating::SAME, at);
+        return told(lattice(rows, columns, Seating::SAME, at));
     }
     if let Some((lat, lon)) = grid(items, chosen, file) {
+        // Оси одномерные, и негодность у них разделима: негодная широта уносит
+        // всю строку узлов, негодная долгота — весь столбец. Отступ чинит тут
+        // только концы осей, а ось CF с пропуском в середине — сломанный файл.
         let at = |row: u32, column: u32| -> Option<(f64, f64)> {
             Some((*lat.get(row as usize)?, *lon.get(column as usize)?))
         };
-        return lattice(&rows, &columns, Seating::SAME, at);
+        return told(lattice(rows, columns, Seating::SAME, at));
     }
     Vec::new()
 }
@@ -890,44 +903,151 @@ fn seating(
     ))
 }
 
+/// Отрезок отсчётов, на котором стои́т решётка: первый и последний, включительно.
+type Span = (u32, u32);
+
 /// Узлы по одной оси: индексы отсчётов, на которых стоят опорные точки.
-fn nodes(side: u32) -> Vec<u32> {
-    let count = TIE_GRID.min(side);
+///
+/// Отрезок задаётся концами включительно — решётка стои́т не обязательно на всей
+/// стороне (см. [`footing`]). Отрезок в один отсчёт узлов не даёт: делить на
+/// число промежутков было бы не на что.
+fn nodes(from: u32, to: u32) -> Vec<u32> {
+    if to <= from {
+        return Vec::new();
+    }
+    let count = TIE_GRID.min(to - from + 1);
     (0..count)
         .map(|at| {
-            let last = f64::from(side - 1);
-            (f64::from(at) * last / f64::from(count - 1)).round() as u32
+            let span = f64::from(to - from);
+            from + (f64::from(at) * span / f64::from(count - 1)).round() as u32
         })
         .collect()
 }
 
-/// Решётка из узлов. Одна негодная точка отменяет всю привязку: у полосы съёмки
-/// широта бывает не заполнена по краям, а решётка с дырой уложила бы снимок
-/// куда попало — по контуру каталога он ляжет хотя бы примерно верно.
+/// Годна ли пара, записанная в узле.
+///
+/// Незаполненный отсчёт помечен не только `NaN`, но и числом — −999 у SYNERGY,
+/// 9.96921e36 у CF, — и по кругу это видно. Отдельной проверки на конечность
+/// круг не требует: сравнения с `NaN` ложны, а бесконечность за край выходит,
+/// так что круг отвергает и то и другое сам.
+///
+/// Долгота проверяется наравне с широтой: у решётки, проверенной лишь по
+/// широте, дыра прошла бы долготой. Круг у долготы полный с запасом — файлы
+/// пишут её и как −180…180, и как 0…360, а развернёт её потребитель (см.
+/// `Grid::unwind`).
+fn placed(lat: f64, lon: f64) -> bool {
+    (-90.0..=90.0).contains(&lat) && (-360.0..=360.0).contains(&lon)
+}
+
+/// На чём стои́т решётка: отступ от края, пока все её узлы не встанут на
+/// записанные координаты.
+///
+/// Дыры у координатной сетки лежат по краю — за полосой съёмки координат не
+/// пишут вовсе, и край бывает рваный. Решётка на всю сторону ловит такой край
+/// узлом, а выломать узел нельзя: потребителю нужен полный прямоугольник
+/// (`Grid::new`), и решётка в 440 точек из 441 не соберётся. Значит чинится это
+/// отступом — решётка остаётся полной, просто стои́т на меньшем отрезке и оттого
+/// гуще.
+///
+/// Отступает та сторона, **после** которой негодных узлов останется меньше
+/// всего. Именно после, а не та, на которой их больше сейчас: узлы
+/// перекладываются по новому отрезку целиком, и сдвиг границы на один отсчёт
+/// уводит с дефекта всю ось. Сплошной негодный столбец, попавший ровно на
+/// узловой, иначе неисправим вовсе — негодны по одному узлу на первой и
+/// последней строке решётки, и двигались бы строки, а узловые столбцы стояли бы
+/// на месте.
+///
+/// Ничью решает сторона, на которой негодных больше сейчас, — иначе решётка
+/// топчется по чистой стороне, пока не кончится бюджет.
+///
+/// Бюджет — **мельчайший** шаг решётки, и он же ограничивает счёт шагов.
+/// Мельчайший из двух, а не свой у каждой оси: гранула вытянута вдоль витка, шаг
+/// решётки по строкам у неё в сотни отсчётов, и отступ по такой мерке бросал бы
+/// сотни километров трека. За краем решётки координаты продолжаются прямой
+/// (`Grid::cell`), так что бросать можно только то, чего решётка и так не
+/// различает.
+///
+/// `None` — бюджет вышел, а негодные узлы остались: дыра не у края отступом не
+/// чинится.
+fn footing(rows: Span, columns: Span, placed: impl Fn(u32, u32) -> bool) -> Option<(Span, Span)> {
+    let budget = (rows.1.saturating_sub(rows.0)).min(columns.1.saturating_sub(columns.0))
+        / (TIE_GRID - 1);
+    // Стороны по порядку: первая строка, последняя строка, первый столбец,
+    // последний столбец.
+    let step = |side: usize, rows: Span, columns: Span| match side {
+        0 => ((rows.0 + 1, rows.1), columns),
+        1 => ((rows.0, rows.1 - 1), columns),
+        2 => (rows, (columns.0 + 1, columns.1)),
+        _ => (rows, (columns.0, columns.1 - 1)),
+    };
+    let holes = |rows: Span, columns: Span| -> Option<usize> {
+        let (r, c) = (nodes(rows.0, rows.1), nodes(columns.0, columns.1));
+        (r.len() >= 2 && c.len() >= 2).then(|| {
+            r.iter().map(|row| c.iter().filter(|column| !placed(*row, **column)).count()).sum()
+        })
+    };
+
+    let (mut rows, mut columns) = (rows, columns);
+    let mut spent = [0u32; 4];
+    loop {
+        let (r, c) = (nodes(rows.0, rows.1), nodes(columns.0, columns.1));
+        if r.len() < 2 || c.len() < 2 {
+            return None;
+        }
+        let bad = |row: u32, column: u32| !placed(row, column);
+        if !r.iter().any(|row| c.iter().any(|column| bad(*row, *column))) {
+            return Some((rows, columns));
+        }
+        let now = [
+            c.iter().filter(|column| bad(r[0], **column)).count(),
+            c.iter().filter(|column| bad(r[r.len() - 1], **column)).count(),
+            r.iter().filter(|row| bad(**row, c[0])).count(),
+            r.iter().filter(|row| bad(**row, c[c.len() - 1])).count(),
+        ];
+        let (_, _, side) = (0..4)
+            .filter(|side| spent[*side] < budget)
+            .filter_map(|side| {
+                let (rows, columns) = step(side, rows, columns);
+                holes(rows, columns).map(|left| (left, std::cmp::Reverse(now[side]), side))
+            })
+            .min()?;
+        spent[side] += 1;
+        (rows, columns) = step(side, rows, columns);
+    }
+}
+
+/// Решётка из узлов, стоящая на отрезках, которые нашёл [`footing`]. Пусто —
+/// привязки не вышло: решётка с дырой уложила бы снимок куда попало, а у
+/// гранулы со сложным контуром слой на этом и кончается ошибкой (см.
+/// `globe::module::on_described`).
 ///
 /// Узел стои́т в середине отсчёта (+0.5): широта записана для центра пикселя, а
 /// не для его угла.
 ///
 /// `seat` — как узлы сетки садятся на пиксели растра (см. [`seating`]).
 fn lattice(
-    rows: &[u32],
-    columns: &[u32],
+    rows: Span,
+    columns: Span,
     seat: Seating,
     at: impl Fn(u32, u32) -> Option<(f64, f64)>,
 ) -> Vec<Tie> {
-    let mut ties = Vec::with_capacity(rows.len() * columns.len());
-    for &row in rows {
-        for &column in columns {
+    let sound = |row: u32, column: u32| at(row, column).is_some_and(|(lat, lon)| placed(lat, lon));
+    let Some((stand_rows, stand_columns)) = footing(rows, columns, sound) else {
+        return Vec::new();
+    };
+    if (stand_rows, stand_columns) != (rows, columns) {
+        veldsdk::log::debug!(target: "decode",
+            "NetCDF: решётка отступила от края — строки {}…{} из {}…{}, столбцы {}…{} из {}…{}",
+            stand_rows.0, stand_rows.1, rows.0, rows.1,
+            stand_columns.0, stand_columns.1, columns.0, columns.1);
+    }
+    let (r, c) = (nodes(stand_rows.0, stand_rows.1), nodes(stand_columns.0, stand_columns.1));
+    let mut ties = Vec::with_capacity(r.len() * c.len());
+    for &row in &r {
+        for &column in &c {
+            // Годность узлов обеспечил отступ — здесь остаётся только край
+            // прочитанного: не дотянулся до отсчёта, значит решётки нет.
             let Some((lat, lon)) = at(row, column) else { return Vec::new() };
-            // Долгота проверяется так же, как широта: незаполненный отсчёт
-            // помечен не только `NaN`, но и числом (9.96921e36 у CF), и
-            // проверенная лишь по широте дыра прошла бы долготой. Круг здесь
-            // полный с запасом: файлы пишут долготу и как −180…180, и как
-            // 0…360, а развернёт её потребитель (см. `Grid::unwind`).
-            let placed = (-90.0..=90.0).contains(&lat) && (-360.0..=360.0).contains(&lon);
-            if !lat.is_finite() || !lon.is_finite() || !placed {
-                return Vec::new();
-            }
             ties.push(Tie {
                 px: f64::from(column) * seat.step.0 + seat.origin.0 + 0.5,
                 py: f64::from(row) * seat.step.1 + seat.origin.1 + 0.5,
@@ -1110,32 +1230,116 @@ fn resolve(group: &str, name: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Узлы стоят по краям и равномерно между ними, без повторов: повтор
-    /// сложил бы решётку не в прямоугольник, и привязка отвалилась бы целиком.
+    /// Узлы стоят по краям отрезка и равномерно между ними, без повторов:
+    /// повтор сложил бы решётку не в прямоугольник, и привязка отвалилась бы
+    /// целиком. Отрезок в один отсчёт узлов не даёт — делить не на что.
     #[test]
-    fn nodes_span_the_side_without_repeats() {
-        assert_eq!(nodes(2), vec![0, 1]);
-        assert_eq!(nodes(21).len(), 21);
-        let wide = nodes(450);
+    fn nodes_span_the_stretch_without_repeats() {
+        assert_eq!(nodes(0, 1), vec![0, 1]);
+        assert_eq!(nodes(0, 20).len(), 21);
+        let wide = nodes(0, 449);
         assert_eq!(wide.len(), 21);
-        assert_eq!(wide[0], 0);
-        assert_eq!(*wide.last().unwrap(), 449);
+        assert_eq!((wide[0], *wide.last().unwrap()), (0, 449));
         assert!(wide.windows(2).all(|pair| pair[0] < pair[1]), "{:?}", wide);
+
+        // Отступившая решётка стои́т на отрезке, а не на всей стороне, и концы
+        // у неё те же самые — иначе крайние узлы уехали бы обратно на дыру.
+        let inset = nodes(11, 320);
+        assert_eq!(inset.len(), 21);
+        assert_eq!((inset[0], *inset.last().unwrap()), (11, 320));
+        assert!(inset.windows(2).all(|pair| pair[0] < pair[1]), "{:?}", inset);
+
+        assert!(nodes(5, 5).is_empty());
+        assert!(nodes(6, 5).is_empty());
     }
 
-    /// Одна негодная точка отменяет всю решётку: снимок с дырой в привязке
-    /// ляжет куда попало, а по контуру каталога — хотя бы примерно верно.
+    /// Годность узла: незаполненный отсчёт помечен и `NaN`, и числом, и
+    /// проверяются обе координаты порознь.
+    #[test]
+    fn a_node_is_sound_when_written_and_inside_the_circle() {
+        assert!(placed(55.0, 37.0));
+        assert!(placed(0.0, 359.0), "долгота бывает записана и как 0…360");
+        assert!(!placed(f64::NAN, 37.0), "круг отвергает NaN сам");
+        assert!(!placed(55.0, f64::NAN));
+        assert!(!placed(f64::INFINITY, 37.0), "и бесконечность тоже");
+        assert!(!placed(120.0, 37.0), "широта у шара своя, и она у́же долготной");
+        assert!(!placed(-999.0, 37.0), "заполнитель SYNERGY");
+        assert!(!placed(9.969_21e36, 37.0), "заполнитель CF");
+        assert!(!placed(55.0, -999.0));
+        assert!(!placed(55.0, 9.969_21e36));
+    }
+
+    /// Чистая сетка стои́т там, где стои́т: отступ на ней не двигает ничего.
+    /// Отрезок, на котором решётки не построить, отступ не принимает.
+    #[test]
+    fn a_clean_grid_stands_where_it_is() {
+        let stand = footing((0, 265), (0, 1499), |_, _| true);
+        assert_eq!(stand, Some(((0, 265), (0, 1499))));
+        assert_eq!(footing((0, 0), (0, 5), |_, _| true), None, "сторона в один отсчёт — не сетка");
+    }
+
+    /// Рваный край отступ обходит, а не отменяет им привязку.
+    ///
+    /// Маска настоящая — `S3A_SY_2_AOD____20260812T011939`, растр 4022×324:
+    /// столбцы 0…4 и 323 негодны целиком, строка 0 целиком, столбцы 5…10 и
+    /// 321…322 рвано. Решётка обязана встать на строки 1…4021 и столбцы
+    /// 11…320 — 95,7 % растра вместо пропавшей привязки.
+    #[test]
+    fn a_ragged_edge_is_retreated_from() {
+        let sound = |row: u32, column: u32| {
+            !(column <= 4
+                || column == 323
+                || row == 0
+                || (((5..=10).contains(&column) || (321..=322).contains(&column)) && row % 2 == 0))
+        };
+        assert_eq!(footing((0, 4021), (0, 323), sound), Some(((1, 4021), (11, 320))));
+    }
+
+    /// Отступает та сторона, которая переложит нужную ось. Сплошной негодный
+    /// столбец, попавший ровно на узловой, даёт по одному негодному узлу на
+    /// первой и последней строке решётки — и сторона, где негодных больше
+    /// сейчас, увела бы отступ в строки, где он не помогает вовсе.
+    #[test]
+    fn a_bad_line_on_a_node_moves_the_axis_that_helps() {
+        let bad = nodes(0, 319)[10];
+        assert_eq!(bad, 160);
+        let stand = footing((0, 3999), (0, 319), |_, column| column != bad);
+        assert_eq!(stand, Some(((0, 3999), (0, 318))), "решётка сдвинула столбцы, а не строки");
+    }
+
+    /// Дыра не у края отступом не чинится: сдвигать нечего, и привязки нет.
+    #[test]
+    fn a_hole_in_the_middle_is_not_retreated_from() {
+        let sound =
+            |row: u32, column: u32| !((1900..2100).contains(&row) && (130..190).contains(&column));
+        assert_eq!(footing((0, 3999), (0, 319), sound), None);
+    }
+
+    /// Бюджет меряется мельчайшим шагом решётки, а не своим у каждой оси.
+    ///
+    /// Клин тонок в узлах и толст в отсчётах: по мерке шага собственной оси
+    /// (201 отсчёт у растра в 4000 строк) отступ прошагал бы внутрь 191 строку
+    /// и бросил бы их годные данные линейной экстраполяции — сотни километров
+    /// трека молча.
+    #[test]
+    fn a_retreat_deeper_than_the_finest_step_is_refused() {
+        let sound = |row: u32, column: u32| !(column == 0 || (row <= 190 && column <= 300));
+        assert_eq!(footing((0, 3999), (0, 319), sound), None);
+    }
+
+    /// Решётке, которой некуда отступать, одна негодная точка отменяет всё:
+    /// бюджет у неё нулевой, а решётка с дырой уложила бы снимок куда попало.
     #[test]
     fn a_single_broken_node_drops_the_whole_lattice() {
-        let rows = [0u32, 1];
-        let columns = [0u32, 1];
-        let whole = lattice(&rows, &columns, Seating::SAME, |row, column| {
+        let rows = (0u32, 1u32);
+        let columns = (0u32, 1u32);
+        let whole = lattice(rows, columns, Seating::SAME, |row, column| {
             Some((f64::from(row), f64::from(column)))
         });
         assert_eq!(whole.len(), 4);
         assert_eq!(whole[0].px, 0.5, "узел стои́т в середине отсчёта");
 
-        let holed = lattice(&rows, &columns, Seating::SAME, |row, column| match (row, column) {
+        let holed = lattice(rows, columns, Seating::SAME, |row, column| match (row, column) {
             (1, 1) => Some((f64::NAN, 0.0)),
             _ => Some((f64::from(row), f64::from(column))),
         });
@@ -1144,14 +1348,14 @@ mod tests {
         // Широта за пределами шара — тоже дыра, только записанная числом:
         // так лежит незаполненный край полосы съёмки. И долгота тоже: у
         // решётки, проверенной лишь по широте, такая дыра проходила бы.
-        let filled = lattice(&rows, &columns, Seating::SAME, |_, _| Some((9.969_21e36, 0.0)));
+        let filled = lattice(rows, columns, Seating::SAME, |_, _| Some((9.969_21e36, 0.0)));
         assert!(filled.is_empty());
-        let eastless = lattice(&rows, &columns, Seating::SAME, |_, _| Some((0.0, 9.969_21e36)));
+        let eastless = lattice(rows, columns, Seating::SAME, |_, _| Some((0.0, 9.969_21e36)));
         assert!(eastless.is_empty());
 
         // Опорная сетка разрежена: отсчёт координат стои́т не на каждом пикселе,
         // и узел уезжает туда, куда указывает шаг.
-        let sparse = lattice(&rows, &columns, Seating { step: (64.0, 1.0), origin: (0.0, 0.0) }, |row, column| {
+        let sparse = lattice(rows, columns, Seating { step: (64.0, 1.0), origin: (0.0, 0.0) }, |row, column| {
             Some((f64::from(row), f64::from(column)))
         });
         assert_eq!(sparse[1].px, 64.5, "второй столбец опорной сетки — 64-й пиксель");
@@ -1160,14 +1364,33 @@ mod tests {
         // У посадки есть и начало: решётка `tx` SLSTR свисает за левый край
         // растра, и её нулевой узел приходится на 26 пикселей левее нуля.
         let shifted = lattice(
-            &rows,
-            &columns,
+            rows,
+            columns,
             Seating { step: (16.0, 1.0), origin: (-26.0, 0.0) },
             |row, column| Some((f64::from(row), f64::from(column))),
         );
         assert_eq!(shifted[0].px, -25.5, "нулевой узел стои́т левее растра");
         assert_eq!(shifted[1].px, -9.5);
         assert_eq!(shifted[1].py, 0.5, "по строкам начала нет — они совпадают отсчёт в отсчёт");
+    }
+
+    /// Отступившая решётка и строится на отступе: узлы стоят на тех отсчётах,
+    /// которые нашёл [`footing`], а не на тех, о которых спросили.
+    #[test]
+    fn a_retreated_lattice_stands_on_what_it_found() {
+        let edge = lattice((0, 40), (0, 40), Seating::SAME, |_, column| {
+            Some((if column == 0 { -999.0 } else { 1.0 }, 37.0))
+        });
+        assert_eq!(edge.len(), 441);
+        assert_eq!(edge[0].px, 1.5, "нулевой узел ушёл с негодного столбца");
+        assert_eq!(edge[0].py, 0.5, "по строкам отступать было не от чего");
+
+        // Отступ не помог — привязки нет, и решётка не строится на негодном.
+        let blocked = lattice((0, 40), (0, 40), Seating::SAME, |row, column| {
+            let inside = (15..=25).contains(&row) && (15..=25).contains(&column);
+            Some((if inside { -999.0 } else { 1.0 }, 37.0))
+        });
+        assert!(blocked.is_empty());
     }
 
     /// Отсчёт прибора у гранулы SLSTR: растр `in` и решётка `tx` стоят в
