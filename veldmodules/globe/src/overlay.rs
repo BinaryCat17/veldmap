@@ -282,7 +282,7 @@ impl Frame {
         let span = match self {
             Self::Projected { affine, .. } => affine[0].hypot(affine[3]),
             Self::Quad(_) | Self::Rough(_) => probed(),
-            Self::Grid(grid) => probed().max(grid.widest_row()),
+            Self::Grid(grid) => probed().max(grid.widest_row_m),
         };
         (span.is_finite() && span > 0.0).then(|| span / f64::from(width.max(1)))
     }
@@ -309,6 +309,14 @@ pub struct Grid {
     /// Узлы построчно (ys × xs): широта и долгота. Долготы развёрнуты в
     /// непрерывный ход вдоль самой решётки — см. [`Grid::new`].
     nodes: Vec<(f64, f64)>,
+    /// Самый длинный ряд решётки на Земле, метры (см. [`Grid::widest_row`]).
+    ///
+    /// Считается один раз, при сборке: решётка после неё не меняется — поля
+    /// закрыты, а единственный `&mut self` у неё это разворот, и зовётся он
+    /// оттуда же. Спрашивают эту величину на кадровом пути, через
+    /// [`Frame::ground_m_per_px`], по нескольку раз за кадр движения, а стои́т
+    /// она обхода всех звеньев решётки с корнем на каждое.
+    widest_row_m: f64,
 }
 
 /// Насколько узлы могут разойтись, оставаясь на одной линии решётки.
@@ -362,15 +370,18 @@ impl Grid {
             nodes[row * xs.len() + col] = Some((tie.lat, tie.lon));
         }
         let nodes: Option<Vec<(f64, f64)>> = nodes.into_iter().collect();
-        let mut grid = Self { xs, ys, nodes: nodes? };
+        let mut grid = Self { xs, ys, nodes: nodes?, widest_row_m: 0.0 };
         grid.unwind();
+        // После разворота, а не до: ряд, свёрнутый к ближней ветви, короче
+        // развёрнутого на целый круг.
+        grid.widest_row_m = grid.widest_row();
         // Решётчатость долей растра — ещё не привязка: у надирного прибора
         // поперёк трека протяжённости нет вовсе, и узлы, разложенные по долям
         // в честную сетку, ложатся на Земле в одну линию. Квады такой решётки
         // выходят нулевой площади — рисуется ничто, — а деление на её ширину
         // прибивает слой к вершине пирамиды. Отказ здесь возвращает снимок на
         // уже написанный путь «точек нет, ляжет по контуру каталога».
-        (grid.widest_row() > 0.0 && grid.widest_column() > 0.0).then_some(grid)
+        (grid.widest_row_m > 0.0 && grid.widest_column() > 0.0).then_some(grid)
     }
 
     /// Долготы — в непрерывный ход вдоль решётки: каждый узел разворачивается
@@ -2712,9 +2723,9 @@ mod tests {
                 .collect();
             Grid::new(&ties).expect("решётка 21×2")
         };
-        let straight = built(0.0).widest_row();
+        let straight = built(0.0).widest_row_m;
         for turn in [60.0, 120.0, 180.0, 300.0] {
-            let turned = built(turn).widest_row();
+            let turned = built(turn).widest_row_m;
             assert!(
                 (turned - straight).abs() < 1.0,
                 "поворот на {}°: ширина {} против {}",
@@ -2738,7 +2749,7 @@ mod tests {
             }
         }
         let grid = Grid::new(&ties).expect("решётка 5×2");
-        let span = grid.widest_row();
+        let span = grid.widest_row_m;
         let (_, west) = grid.geodetic(0.0, 0.0);
         let (_, east) = grid.geodetic(1.0, 0.0);
         assert!((east - west - 360.0).abs() < 1e-9, "запад {} восток {}", west, east);
