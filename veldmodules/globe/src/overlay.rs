@@ -328,11 +328,6 @@ pub struct Grid {
 /// не ближе доли пикселя, и слиплись бы только у растра шириной в миллион.
 const SAME_LINE: f64 = 1e-6;
 
-/// Оборот долготы. Разворот двигает узлы ровно на него, и сдвиг строки обязан
-/// остаться его кратным (см. [`Grid::unwind`]). С допуском, которым узнаётся
-/// круг ([`geodesy::FULL_CIRCLE_DEG`]), его путать нельзя: тот меряет, а этот
-/// считает.
-const TURN_DEG: f64 = 360.0;
 
 /// Номер линии решётки, на которой стои́т эта доля.
 fn line(axis: &[f64], at: f64) -> Option<usize> {
@@ -441,7 +436,7 @@ impl Grid {
                     .map(|col| {
                         let above = self.nodes[(row - 1) * across + col].1;
                         let here = self.nodes[row * across + col].1;
-                        ((geodesy::unwind(above, here) - here) / TURN_DEG).round() as i32
+                        ((geodesy::unwind(above, here) - here) / geodesy::TURN_DEG).round() as i32
                     })
                     .collect();
                 votes.sort_unstable();
@@ -453,7 +448,7 @@ impl Grid {
                     }
                     at += same;
                 }
-                let shift = f64::from(chosen) * TURN_DEG;
+                let shift = f64::from(chosen) * geodesy::TURN_DEG;
                 for col in 0..across {
                     self.nodes[row * across + col].1 += shift;
                 }

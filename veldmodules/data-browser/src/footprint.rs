@@ -112,7 +112,10 @@ fn traced(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let mut out = Vec::with_capacity(ring.len());
     for (at, &from) in ring.iter().enumerate() {
         let to = ring[(at + 1) % ring.len()];
-        let steps = (geodesy::edge_span(from, to) / MAX_EDGE_DEG).ceil().max(1.0) as u32;
+        // Размах зажат кругом — см. `outlines::edge`: ребра длиннее круга не
+        // бывает, а `as u32` насыщается вместо переполнения.
+        let span = geodesy::edge_span(from, to).min(geodesy::TURN_DEG);
+        let steps = (span / MAX_EDGE_DEG).ceil().max(1.0) as u32;
         for step in 0..steps {
             out.push(geodesy::edge_point(from, to, f64::from(step) / f64::from(steps)));
         }

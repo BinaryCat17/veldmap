@@ -386,7 +386,11 @@ fn seam_cuts(places: &[(f64, f64)], sweeps: &[f64]) -> Vec<usize> {
 /// Конечная точка не кладётся: её положит следующее ребро, а последнее замкнёт
 /// контур.
 fn edge(ring: &mut Vec<Vertex>, from: (f64, f64), to: (f64, f64)) {
-    let steps = (geodesy::edge_span(from, to) / max_edge_deg()).ceil().max(1.0) as u32;
+    // Размах зажат кругом: ребра длиннее круга не бывает, а незажатый он
+    // считает шаги из числа, пришедшего по шине, — и `as u32` насыщается вместо
+    // переполнения, то есть даёт четыре миллиарда шагов вместо отказа.
+    let span = geodesy::edge_span(from, to).min(geodesy::TURN_DEG);
+    let steps = (span / max_edge_deg()).ceil().max(1.0) as u32;
     let height_m = height_m();
     for step in 0..steps {
         let (lat_deg, lon_deg) = geodesy::edge_point(from, to, f64::from(step) / f64::from(steps));

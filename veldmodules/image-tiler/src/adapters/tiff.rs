@@ -24,7 +24,7 @@ use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid::{self, TILE};
 use super::super::resample::{resample_window, Window};
 use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples};
-use super::{Info, Kind, Placement, Tie};
+use super::{placed, Info, Kind, Placement, Tie};
 
 /// Сигнатуры BigTIFF: у него в заголовке стоит версия 43 вместо 42, и по этому
 /// числу его и узнают. Смотрится она здесь, рядом с JP2 и NetCDF, потому что
@@ -296,26 +296,54 @@ fn geo_ties(
     let point = |px: f64, py: f64, lon: f64, lat: f64| Tie { px, py, lat, lon };
     // Узел — шесть чисел: пиксель (i, j, k) и место (x, y, z).
     if points.len() > 6 {
-        return points
+        let ties: Vec<Tie> = points
             .chunks_exact(6)
             .map(|tie| point(tie[0] + half, tie[1] + half, tie[3], tie[4]))
             .collect();
+        // Числа тега — как записаны в файле, и проверяются они кругом: место,
+        // которого на Земле нет, отменяет решётку целиком. Выведенным углам
+        // (ниже) круг не подходит — у растра, чья опора стои́т далеко от угла,
+        // угол законно уходит за полюс.
+        return match ties.iter().all(|tie| placed(tie.lat, tie.lon)) {
+            true => finite(ties),
+            false => Vec::new(),
+        };
     }
 
     // Одна точка с шагом пикселя: растр лежит в градусах ровным
     // прямоугольником, и хватает его углов.
     let (Some(tie), true) = (points.get(..6), usable_step(scale)) else {
-        return corners_from_matrix(matrix, half, width, height);
+        return finite(corners_from_matrix(matrix, half, width, height));
     };
     // Шаг по Y положителен, а строки растра идут на юг — отсюда минус.
     let (x, y) = (tie[3] - (tie[0] + half) * scale[0], tie[4] + (tie[1] + half) * scale[1]);
     let (right, bottom) = (f64::from(width), f64::from(height));
-    vec![
+    finite(vec![
         point(0.0, 0.0, x, y),
         point(right, 0.0, x + right * scale[0], y),
         point(0.0, bottom, x, y - bottom * scale[1]),
         point(right, bottom, x + right * scale[0], y - bottom * scale[1]),
-    ]
+    ])
+}
+
+/// Точки, конечные все до одной, — либо ничего.
+///
+/// Тег читается из файла как есть, а файл приезжает из сети: числа в нём бывают
+/// какие угодно, включая бесконечность. Одна негодная точка отменяет всю
+/// решётку по той же причине, что и у NetCDF: потребителю нужен полный
+/// прямоугольник, и решётка без узла не соберётся.
+///
+/// Проверка стои́т здесь, у входа, а не у потребителя. Бесконечная долгота,
+/// доехав до глобуса, уводит разворот в арифметику, у которой ответа нет, а
+/// негодная доля растра разъезжается оттуда по варп-сетке и по мерке уровня.
+fn finite(ties: Vec<Tie>) -> Vec<Tie> {
+    let whole = |tie: &Tie| {
+        tie.px.is_finite() && tie.py.is_finite() && tie.lat.is_finite() && tie.lon.is_finite()
+    };
+    match ties.iter().all(whole) {
+        true => ties,
+        false => Vec::new(),
+    }
 }
 
 /// Аффинное преобразование из матрицы привязки (ModelTransformationTag).
@@ -972,6 +1000,60 @@ mod tests {
     /// угла пикселя, 2 — для его середины.
     fn geokeys_raster(model: u16, raster: u16) -> Vec<u16> {
         vec![1, 1, 0, 2, 1024, 0, 1, model, 1025, 0, 1, raster]
+    }
+
+    /// Негодное число из тега отменяет решётку целиком.
+    ///
+    /// Тег читается из файла как есть, а файл приезжает из сети. Место, которого
+    /// на Земле нет, решётку отменяет; бесконечность — тем более: доехав до
+    /// глобуса, она увела бы разворот долгот в арифметику, у которой ответа нет.
+    #[test]
+    fn a_tie_that_is_not_a_place_drops_the_whole_lattice() {
+        let node = |px: f64, lon: f64, lat: f64| vec![px, 0.0, 0.0, lon, lat, 0.0];
+        let lattice = |a: Vec<f64>, b: Vec<f64>| {
+            let mut points = a;
+            points.extend(b);
+            geo_ties(&geokeys(2), &points, &[], &[], 10, 20)
+        };
+
+        let whole = lattice(node(0.0, 10.0, 50.0), node(9.0, 11.0, 50.0));
+        assert_eq!(whole.len(), 2, "решётка из двух узлов проходит целиком");
+        assert_eq!(whole[0].lon, 10.0);
+
+        assert!(lattice(node(0.0, 10.0, 50.0), node(9.0, 11.0, 500.0)).is_empty(), "широты нет");
+        assert!(lattice(node(0.0, 10.0, 50.0), node(9.0, 400.0, 50.0)).is_empty(), "долготы нет");
+        assert!(
+            lattice(node(0.0, 10.0, 50.0), node(9.0, f64::INFINITY, 50.0)).is_empty(),
+            "бесконечная долгота"
+        );
+        assert!(
+            lattice(node(0.0, 10.0, 50.0), node(f64::NAN, 11.0, 50.0)).is_empty(),
+            "пиксель, которого нет"
+        );
+    }
+
+    /// Углы, выведенные из опоры и шага, проверяются конечностью, а не кругом:
+    /// у растра, чья опора стои́т далеко от угла, угол законно уходит за полюс.
+    #[test]
+    fn a_derived_corner_may_leave_the_sphere_but_not_the_numbers() {
+        let far = vec![100.0, 200.0, 0.0, 13.0, 50.0, 0.0];
+        let corners = geo_ties(&geokeys(2), &far, &[0.5, 0.25, 0.0], &[], 10, 20);
+        assert_eq!(corners.len(), 4);
+        assert_eq!(corners[0].lat, 100.0, "угол ушёл за полюс, и это не отказ");
+
+        let endless = vec![100.0, 200.0, 0.0, f64::INFINITY, 50.0, 0.0];
+        assert!(geo_ties(&geokeys(2), &endless, &[0.5, 0.25, 0.0], &[], 10, 20).is_empty());
+
+        // Матрица бывает конечной, а углы из неё — нет: члены её велики, и
+        // произведение на сторону растра переполняется. Вырожденность такую не
+        // ловит — определитель выходит числом.
+        let huge = vec![
+            1.0e308, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        assert!(geo_ties(&geokeys(2), &[], &[], &huge, 10, 20).is_empty());
     }
 
     /// Решётка узлов проходит как есть: пиксель берётся из первых двух чисел
