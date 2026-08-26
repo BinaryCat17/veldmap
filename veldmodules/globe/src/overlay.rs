@@ -319,6 +319,12 @@ pub struct Grid {
 /// расстояния между линиями: у решётки 21×21 они стоят на 0.05 друг от друга.
 const SAME_LINE: f64 = 1e-6;
 
+/// Оборот долготы. Разворот двигает узлы ровно на него, и сдвиг строки обязан
+/// остаться его кратным (см. [`Grid::unwind`]). С допуском, которым узнаётся
+/// круг ([`geodesy::FULL_CIRCLE_DEG`]), его путать нельзя: тот меряет, а этот
+/// считает.
+const TURN_DEG: f64 = 360.0;
+
 /// Номер линии решётки, на которой стои́т эта доля.
 fn line(axis: &[f64], at: f64) -> Option<usize> {
     let index = axis.partition_point(|line| *line < at - SAME_LINE);
@@ -402,10 +408,36 @@ impl Grid {
             }
             // Строка развёрнута сама в себе, а к предыдущей её надо ещё
             // придвинуть — целиком, чтобы ход внутри неё не сломался.
+            //
+            // На сколько придвинуть, решают все столбцы, а не первый: у витка,
+            // проходящего рядом с полюсом, первый столбец и есть пóлюсный край,
+            // и его долгота перебирает круг за полсотни строк, тогда как
+            // дальний край стои́т почти на месте. Придвинутая по такому столбцу
+            // строка уезжает на круг целиком, и дальний её край оказывается в
+            // 359° от соседнего.
+            //
+            // Считается это оборотами, а не градусами: сдвиг обязан остаться
+            // кратным кругу, а среднее двух несогласных голосов дало бы
+            // полкруга. Голоса поровну — идёт наименьший по модулю: ноль значит
+            // «строки и так непрерывны».
             if row > 0 {
-                let above = self.nodes[(row - 1) * across].1;
-                let first = self.nodes[row * across].1;
-                let shift = geodesy::unwind(above, first) - first;
+                let mut votes: Vec<i32> = (0..across)
+                    .map(|col| {
+                        let above = self.nodes[(row - 1) * across + col].1;
+                        let here = self.nodes[row * across + col].1;
+                        ((geodesy::unwind(above, here) - here) / TURN_DEG).round() as i32
+                    })
+                    .collect();
+                votes.sort_unstable();
+                let (mut chosen, mut best, mut at) = (votes[0], 0, 0);
+                while at < votes.len() {
+                    let same = votes[at..].partition_point(|vote| *vote == votes[at]);
+                    if same > best || (same == best && votes[at].abs() < chosen.abs()) {
+                        (chosen, best) = (votes[at], same);
+                    }
+                    at += same;
+                }
+                let shift = f64::from(chosen) * TURN_DEG;
                 for col in 0..across {
                     self.nodes[row * across + col].1 += shift;
                 }
@@ -2587,6 +2619,62 @@ mod tests {
         let (lat, lon) = Frame::Grid(grid).geodetic(0.5, 0.0);
         assert!((lat - 10.0).abs() < 1e-12);
         assert!((lon - 180.0).abs() < 1e-9, "{}", lon);
+    }
+
+    /// Строка придвигается к предыдущей по большинству столбцов, а не по
+    /// первому.
+    ///
+    /// Первый столбец здесь стои́т у шва и от строки к строке перескакивает
+    /// круг, остальные двадцать не двигаются вовсе. Придвинутая по нему строка
+    /// уехала бы на 360° целиком.
+    #[test]
+    fn a_row_is_aligned_by_the_many_not_by_the_first() {
+        let ties: Vec<Tie> = (0..21)
+            .flat_map(|col| {
+                let fx = f64::from(col) / 20.0;
+                let (top, bottom) = if col == 0 { (179.0, -179.0) } else { (0.0, 0.5) };
+                [tie(fx, 0.0, 10.0, top), tie(fx, 1.0, 8.0, bottom)]
+            })
+            .collect();
+        let grid = Grid::new(&ties).expect("решётка 21×2");
+        let (_, lon) = grid.geodetic(0.5, 1.0);
+        assert!((lon - 0.5).abs() < 1e-9, "нижняя строка уехала на {}", lon);
+    }
+
+    /// Строку, которой правда надо на оборот, двигают — и на оборот, а не на
+    /// что попало.
+    ///
+    /// Четыре столбца из пяти перешли шов и требуют круга, пятый стои́т у нуля
+    /// и не требует ничего. Идти надо за четырьмя, а не за отставшим и не за
+    /// наименьшим голосом.
+    #[test]
+    fn a_row_that_needs_a_turn_gets_exactly_one() {
+        let top = [179.0, 179.2, 179.4, 179.6, 0.0];
+        let bottom = [-179.0, -178.8, -178.6, -178.4, 0.5];
+        let ties: Vec<Tie> = (0..5)
+            .flat_map(|col| {
+                let fx = f64::from(col) / 4.0;
+                [tie(fx, 0.0, 10.0, top[col as usize]), tie(fx, 1.0, 8.0, bottom[col as usize])]
+            })
+            .collect();
+        let grid = Grid::new(&ties).expect("решётка 5×2");
+        let (_, lon) = grid.geodetic(0.0, 1.0);
+        assert!((lon - 181.0).abs() < 1e-9, "нижняя строка встала на {}", lon);
+    }
+
+    /// Голоса поровну — сдвиг остаётся кратным обороту, а не становится его
+    /// половиной. Столбцов тут два, и они не согласны.
+    #[test]
+    fn an_even_vote_still_shifts_by_whole_turns() {
+        let grid = Grid::new(&[
+            tie(0.0, 0.0, 10.0, 179.0),
+            tie(1.0, 0.0, 10.0, 0.0),
+            tie(0.0, 1.0, 8.0, -179.0),
+            tie(1.0, 1.0, 8.0, 0.5),
+        ])
+        .expect("решётка 2×2");
+        let (_, lon) = grid.geodetic(1.0, 1.0);
+        assert!((lon - 0.5).abs() < 1e-9, "сдвиг оказался не кратен обороту: {}", lon);
     }
 
     /// Плотная строка через шов остаётся своей ширины, а не круга.
