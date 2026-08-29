@@ -85,6 +85,9 @@ pub struct State {
     /// Заказчик здесь — имя вкладки: снять проход с учёта вправе только та, что
     /// его завела.
     passes: Passes<String>,
+    /// Где стои́т волна ряби, 0..1 периода. Одна на все канвы: рябь — про
+    /// идущую работу, а не про вид.
+    phase: f32,
 }
 
 pub fn hook_init(config: Config) -> anyhow::Result<State> {
@@ -96,6 +99,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         pending_query: veldsdk::Correlator::new(),
         pending_produce: veldsdk::Correlator::new(),
         passes: Passes::default(),
+        phase: 0.0,
     })
 }
 
@@ -216,6 +220,7 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     view.stuck = None;
     view.read_bytes = 0;
     view.total_bytes = resource.size;
+    view.near = msg.near;
     view.camera = None;
     view.drawn = None;
     view.shown = None;
@@ -240,6 +245,7 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
         // Канве привязка не нужна вовсе: она показывает растр как картинку, а
         // не кладёт его на Землю.
         geolocation: None,
+        near: view.near,
     }, &correlation);
 
     report(state, &msg.view);
@@ -366,20 +372,22 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     let desired: HashSet<Addr> = view::wanted(view, &state.tiles, cap)
         .map(|want| want.cells.into_iter().collect())
         .unwrap_or_default();
-    let reach = view.meta().map_or(tiles::Reach::Pyramid, |meta| meta.reach);
+    // Точечно ли читается запрошенный уровень: от этого зависит, ждать ли
+    // конца своего прохода молча или переспрашивать кэш.
+    let pointwise = view.meta().is_some_and(|meta| tiles::pointwise(meta, level));
     let missed = view.fetch.missed(
         &state.passes,
         &ctx.fingerprint,
         &ctx.view,
-        reach,
+        pointwise,
         &ctx.cells,
         msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
         |addr| desired.contains(&addr),
     );
     // Ручку источника и подпись берём здесь же: дальше `state` занят учётом, и
     // держать на нём ссылку в вид одновременно нельзя.
-    let (handle, label) = match view.shown.as_ref() {
-        Some(shown) => (shown.resource.handle(), view.label.clone()),
+    let (handle, label, near) = match view.shown.as_ref() {
+        Some(shown) => (shown.resource.handle(), view.label.clone(), view.near),
         None => return,
     };
 
@@ -405,12 +413,19 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         fingerprint: ctx.fingerprint.clone(),
         cells: produce_list.clone(),
     });
-    state.passes.begin(&ctx.fingerprint, ctx.view.clone(), correlation.clone(), level);
+    state.passes.begin(
+        &ctx.fingerprint,
+        ctx.view.clone(),
+        correlation.clone(),
+        level,
+        produce_list.clone(),
+    );
     crate::calls::image_tiler::on_produce(&ProduceRequest {
         resource: Some(handle),
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
+        near,
     }, &correlation);
 
     report(state, &ctx.view);
@@ -497,11 +512,35 @@ fn release_pass(state: &mut State, fingerprint: &str, view: &str) {
 
 // ── Кадровый тик ───────────────────────────────────────────────
 
+/// На сколько долей периода бьётся фаза ряби в отпечатке кадра. Тридцать шагов
+/// в секунду — предел, за которым глаз перестаёт различать движение волны, а
+/// кадры сверх него были бы перерисовкой ради одного и того же.
+const RIPPLE_STEPS: f32 = view::RIPPLE_PERIOD_S * 30.0;
+
+/// Куда ушла фаза за этот тик и чем кадр отличается от прошлого.
+///
+/// Чистой функцией, потому что стережёт она главную опасность правки — вечно
+/// рисующую канву: пока рябить нечему, огрублённая фаза обязана стоять на
+/// месте, иначе кадровое сравнение перестанет пропускать покой.
+fn advance_ripple(phase: f32, dt: f32, glowing: bool) -> (f32, u32) {
+    let phase = match glowing {
+        true => (phase + dt / view::RIPPLE_PERIOD_S).fract(),
+        false => phase,
+    };
+    (phase, (phase * RIPPLE_STEPS) as u32)
+}
+
 pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
-    if !matches!(event.event, Some(app_proto::ui_event::Event::Frame(_))) {
+    let Some(app_proto::ui_event::Event::Frame(frame)) = event.event else {
         return;
-    }
+    };
     let cap = cap_tiles(state);
+    // Фаза одна на все канвы: рябь — это про идущую работу, а не про вид, и
+    // разойдясь по видам, она читалась бы как разная скорость одной работы.
+    // Двигают её те виды, которым есть чем рябить.
+    let glowing = state.views.values().any(|view| view.glowing);
+    let (phase, stepped) = advance_ripple(state.phase, frame.dt, glowing);
+    state.phase = phase;
     // Виды, у которых кадр не записался: о такой жалобе надо ещё и сказать, а
     // рассылка состояния трогает `state` целиком — значит после обхода.
     let mut complained: Vec<String> = Vec::new();
@@ -515,12 +554,16 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
             camera,
             generation: tiles.generation,
             texture: target.texture_id,
+            ripple: stepped,
         };
         if view.drawn == Some(stamp) {
             continue;
         }
 
-        let quads = view::quads(view, tiles, cap);
+        let quads = view::quads(view, tiles, cap, phase);
+        // Чему рябить в следующем кадре — по тем же квадам, которые рисуются
+        // в этом: ответить на это раньше сборки нечем.
+        view.glowing = quads.iter().any(|quad| quad.glow > 0.0);
         let target = view.target.as_ref().expect("место проверено выше");
         match gpu::render(device, target, &mut view.vertices, &quads) {
             // Снимается только СВОЯ жалоба — на застрявший кадр. Чужую
@@ -577,10 +620,16 @@ fn want_tiles(state: &mut State, key: &str) {
     let cap = cap_tiles(state);
     let Some(view) = state.views.get(key) else { return };
     let Some(want) = view::wanted(view, &state.tiles, cap) else { return };
-    let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) else { return };
+    let Some((fingerprint, pointwise)) = view
+        .meta()
+        .map(|meta| (meta.fingerprint.clone(), tiles::pointwise(meta, want.level)))
+    else {
+        return;
+    };
     let label = view.label.clone();
 
-    if let Some(correlation) = state.passes.stale(&fingerprint, &key.to_string(), &want) {
+    if let Some(correlation) = state.passes.stale(&fingerprint, &key.to_string(), &want, pointwise)
+    {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
     let going = state.passes.going(&fingerprint);
@@ -678,13 +727,33 @@ fn report(state: &State, key: &str) {
     // тем, что нужно сейчас. Считать дёшево — у канвы видимое это
     // прямоугольник камеры, без проекций.
     let want = view::wanted(view, &state.tiles, cap_tiles(state));
+    let ordered = view.fetch.ordered();
+    // Годность байт решает не показ, а то, каким путём идёт проход, — правило
+    // общее с шаром (`tiles::pointwise`): у точечного чтения счётчик это
+    // водяной знак головы, а у прочитанного разбором целиком он равен размеру
+    // ещё до прохода. Отданные как есть, они писали бы «24 из 24 МБ» всю
+    // минуту декодирования. Уровень берётся тот, которым идёт добыча.
+    let inside = tiles::inside(
+        ordered,
+        (view.read_bytes, view.total_bytes),
+        meta.zip(want.as_ref())
+            .is_some_and(|(meta, want)| tiles::pointwise(meta, want.level)),
+    );
     let current = ViewState {
         view: key.to_string(),
         source_width: meta.map_or(0, |meta| meta.width),
         source_height: meta.map_or(0, |meta| meta.height),
         scale: view.camera.map_or(0.0, |camera| camera.scale),
-        read_bytes: view.read_bytes,
-        total_bytes: view.total_bytes,
+        read_bytes: inside.read.0,
+        total_bytes: inside.read.1,
+        // Ступень берётся у той же лестницы, по которой заказываются тайлы, а
+        // счёт ячеек — у последнего оформленного заказа: посчитанные порознь,
+        // они рассказывали бы о двух разных работах. Лестницы нет — считать не
+        // по чему, и нули значат именно это.
+        ready: ordered.0,
+        total: ordered.1,
+        step: want.as_ref().map_or(0, |want| want.climbed),
+        steps: want.as_ref().map_or(0, |want| want.steps),
         working: view.working(&state.passes, want.as_ref()),
         error: view.error.clone().unwrap_or_default(),
         // Жалоба одна на провод, а поводов два: застрявший кадр важнее
@@ -699,4 +768,34 @@ fn report(state: &State, key: &str) {
         needs_place: view.target.is_none() && view.shown.is_some() && view.error.is_none(),
     };
     crate::emit::on_view_state(&current);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advance_ripple;
+
+    /// Пока рябить нечему, огрублённая фаза стои́т — и кадр, собранный из неё,
+    /// совпадает с прошлым. Это и есть выключатель перерисовки: сломайся он —
+    /// и канва начнёт писать кадр шестьдесят раз в секунду на покое, ничем
+    /// себя не выдав.
+    #[test]
+    fn на_покое_фаза_ряби_стои́т() {
+        let dt = 1.0 / 60.0;
+        let (phase, first) = advance_ripple(0.3, dt, false);
+        let (_, second) = advance_ripple(phase, dt, false);
+
+        assert_eq!(phase, 0.3, "фаза сдвинулась без повода");
+        assert_eq!(first, second, "кадр покоя отличается от прошлого");
+    }
+
+    /// А пока есть чему рябить — соседние тики дают разные кадры.
+    #[test]
+    fn при_ряби_соседние_тики_дают_разные_кадры() {
+        let dt = 1.0 / 60.0;
+        let (phase, first) = advance_ripple(0.0, dt, true);
+        let (_, second) = advance_ripple(phase, dt, true);
+
+        assert!((0.0..1.0).contains(&phase));
+        assert_ne!(first, second, "волна стои́т на месте");
+    }
 }

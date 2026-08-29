@@ -112,10 +112,15 @@ fn traced(ring: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let mut out = Vec::with_capacity(ring.len());
     for (at, &from) in ring.iter().enumerate() {
         let to = ring[(at + 1) % ring.len()];
-        // Размах зажат кругом — см. `outlines::edge`: ребра длиннее круга не
-        // бывает, а `as u32` насыщается вместо переполнения.
-        let span = geodesy::edge_span(from, to).min(geodesy::TURN_DEG);
-        let steps = (span / MAX_EDGE_DEG).ceil().max(1.0) as u32;
+        // Шагов не больше, чем нужно ребру в полный круг: длиннее ребра не
+        // бывает, а приведение к `u32` насыщается вместо переполнения — из
+        // числа, пришедшего по шине, вышло бы четыре миллиарда шагов.
+        //
+        // Предел ставится шагам, а не размаху: `f64::min` не-число пропускает
+        // вторым доводом, и зажатый им размах дал бы полный круг там, где
+        // вести нечего вовсе.
+        const MOST: f64 = geodesy::TURN_DEG / MAX_EDGE_DEG;
+        let steps = (geodesy::edge_span(from, to) / MAX_EDGE_DEG).ceil().max(1.0).min(MOST) as u32;
         for step in 0..steps {
             out.push(geodesy::edge_point(from, to, f64::from(step) / f64::from(steps)));
         }
@@ -210,6 +215,18 @@ fn wrap(degrees: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    /// Кольцо, размах которого не с Земли, ведётся числом шагов, а не
+    /// миллиардом; кольцо без размаха — одним шагом на ребро.
+    #[test]
+    fn a_ring_wider_than_the_earth_is_not_traced_forever() {
+        let endless = traced(&[(0.0, 0.0), (1.0e9, 0.0), (0.0, 1.0)]);
+        assert!(endless.len() < 5000, "вершин {}", endless.len());
+
+        let nowhere = traced(&[(0.0, 0.0), (f64::NAN, 0.0), (0.0, 1.0)]);
+        assert!(nowhere.len() < 20, "вершин {}", nowhere.len());
+    }
+
     use super::*;
     use crate::proto::data_provider::GeoPoint;
 

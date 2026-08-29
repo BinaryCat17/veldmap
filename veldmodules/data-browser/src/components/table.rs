@@ -55,16 +55,22 @@ const COLUMNS: [Column; 10] = [
     Column::Actions,
 ];
 
-/// В каком порядке колонки уступают место, когда его мало. Первой уходит та,
-/// без которой список читается легче всего: полоса загрузки дублирует
-/// состояние, дата и размер — справка, а не действие. Значок уходит последним:
-/// род строки виден и по её имени, но пока место есть, значок читается быстрее.
+/// В каком порядке колонки уступают место, когда его мало. Первыми уходят дата
+/// и размер: это справка о записи, и она никуда не денется — запись такая же и
+/// через час. Загрузка уступает следом, но раньше состояния и формата: она
+/// говорит о том, что происходит прямо сейчас, а из двух соседей один называет
+/// род продукта, второй — где он лежит, и оба различают строки между собой.
+/// Значок уходит последним: род строки виден и по её имени, но пока место есть,
+/// значок читается быстрее.
+///
+/// Уступив колонку, работа не пропадает: её место — полоса под строкой снимка,
+/// и рисуется она ровно там, где колонки нет (см. [`strip_shown`]).
 ///
 /// Имени и кнопок в этом списке нет: имя единственное тянущееся, и сжатие
 /// доводит его до нулевой ширины (см. `Wrapping` в types.proto), а строка без
 /// имени и без действий — не строка.
 const DROP_ORDER: [Column; 6] =
-    [Column::Progress, Column::Date, Column::Size, Column::Status, Column::Format, Column::Icon];
+    [Column::Date, Column::Size, Column::Progress, Column::Status, Column::Format, Column::Icon];
 
 /// Отметка и треугольник раскрытия — узкие колонки перед значком. Полей у них
 /// нет вовсе (см. [`padding_of`]), поэтому ширина здесь — это ровно то место,
@@ -82,7 +88,10 @@ const FORMAT: f32 = 80.0;
 const DATE: f32 = 88.0;
 const SIZE: f32 = 84.0;
 const STATUS: f32 = 104.0;
-const PROGRESS: f32 = 132.0;
+/// Под подпись хода, а не под одну полосу: в ячейке стои́т фраза о том, что
+/// именно грузится, и меряна колонка по ней — «ступень 10/12 · 8,6/25 МБ» по
+/// мерке [`format::text_width`].
+const PROGRESS: f32 = 148.0;
 /// Сколько кнопок помещается в колонку действий. Больше всего их у снимка,
 /// лежащего папкой: скачать целиком, посмотреть, положить на шар и меню.
 const ACTION_BUTTONS: f32 = 4.0;
@@ -204,9 +213,13 @@ const INDENT: f32 = 12.0;
 const HEADER_HEIGHT: f32 = 22.0;
 
 /// Полоса хода укладки на шар под строкой снимка. Тонкая: она отвечает на один
-/// вопрос — «идёт ли», — а сколько именно осталось, сказано словами в «На
-/// просмотре».
+/// вопрос — «идёт ли», — а что именно и сколько осталось, сказано словами в
+/// колонке ЗАГРУЗКА и в списке «На просмотре».
 const ONTO_GLOBE: f32 = 3.0;
+
+/// Полоса в ячейке ЗАГРУЗКА. Толще той, что под строкой: там она одна на всю
+/// строку и заметна длиной, а здесь стои́т под подписью и меряется ею.
+const LOAD_BAR: f32 = 4.0;
 
 /// Расширения, у которых есть превью, — по ним же выбрана иконка строки.
 const IMAGE_FORMATS: [&str; 7] = ["png", "jpg", "jpeg", "tif", "tiff", "jp2", "webp"];
@@ -510,7 +523,8 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
             .align_x(Alignment::End)
             .into(),
             Column::Status => {
-                let (dot, label, label_color) = status_look(&row_data.status);
+                let numbers = !context.columns.contains(&Column::Progress);
+                let (dot, label, label_color) = status_look(&row_data.status, numbers);
                 let cell = row![
                     theme::dot(dot),
                     text::<Msg>(label).size(theme::TEXT_SMALL).color(label_color).single_line(),
@@ -536,7 +550,7 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
                     _ => cell.into(),
                 }
             }
-            Column::Progress => progress_cell(&row_data.status),
+            Column::Progress => progress_cell(row_data),
             Column::Actions => actions(view, row_data, context),
         },
         context.columns,
@@ -544,19 +558,8 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
         context.compact,
     );
 
-    // Снимок едет на шар — под строкой полоса хода: нажали значок здесь, и
-    // видно должно быть здесь же. Высота у неё занятая, а не добавленная: шаг
-    // строки считается в одном месте (`theme::ROW_PITCH`), им же список
-    // прокручивают к нужной строке, и подрасти он не может.
-    //
-    // Место под полосу занято, пока снимок на шаре, — а не пока по нему идёт
-    // работа. Иначе строка подпрыгивает на три точки ровно в тот миг, когда
-    // добыча кончилась, то есть на каждом слое и на глазах.
-    // Полоса — снимку, а не всякому, кто о нём знает: о шаре отвечает и файл
-    // внутри снимка (см. `rows::from_key`), но нажимали-то значок у снимка, и
-    // видно должно быть там же.
     let onto_globe = row_data.globe.pace();
-    let strip = row_data.globe.any() && row_data.is_snapshot();
+    let strip = strip_shown(row_data, context.columns);
     let height = theme::ROW_HEIGHT - if strip { ONTO_GLOBE } else { 0.0 };
     let cells = cells.height(Length::Fixed(height));
 
@@ -617,6 +620,28 @@ fn entry_line(view: ViewId, row_data: &Row, depth: usize, context: Context<'_>) 
     column(lines).width(Length::Fill).key(row_data.key().to_string()).into()
 }
 
+/// Рисуется ли под строкой полоса хода укладки на шар.
+///
+/// Запасной путь, а не второй голос: где колонка ЗАГРУЗКА показана, там она и
+/// говорит о работе — словами, числами и полосой сразу, — и вторая полоса под
+/// той же строкой повторяла бы её. Где колонки нет (узкая панель — та самая, в
+/// которой рядом стои́т шар), полоса остаётся единственным, что видно без
+/// наведения курсора.
+///
+/// Полоса — снимку, а не всякому, кто о нём знает: о шаре отвечает и файл
+/// внутри снимка (см. `rows::from_key`), но нажимали-то значок у снимка, и
+/// видно должно быть там же.
+///
+/// Место под полосу занято, пока снимок на шаре, — а не пока по нему идёт
+/// работа. Иначе строка подпрыгивает на три точки ровно в тот миг, когда
+/// добыча кончилась, то есть на каждом слое и на глазах. Высота при этом
+/// занятая, а не добавленная: шаг строки считается в одном месте
+/// (`theme::ROW_PITCH`), им же список прокручивают к нужной строке, и
+/// подрасти он не может.
+fn strip_shown(row: &Row, columns: &[Column]) -> bool {
+    row.globe.any() && row.is_snapshot() && !columns.contains(&Column::Progress)
+}
+
 /// Чем строка выделена среди соседей. Старшинство названо в самой роли
 /// (см. [`theme::RowTint`]): подсветка одна на весь экран и старше отметки,
 /// которых в списке бывает полсотни.
@@ -666,13 +691,22 @@ fn row_glyph(row: &Row) -> &'static str {
 }
 
 /// Кружок, подпись и её цвет — три способа сказать одно и то же состояние.
-fn status_look(status: &RowStatus) -> (Color, String, Color) {
+///
+/// `numbers` — говорить ли числами. Числа принадлежат колонке ЗАГРУЗКА, и пока
+/// она показана, здесь стои́т слово: две соседние ячейки с одной и той же дробью
+/// не сообщают вдвое больше. Ушла колонка — числа возвращаются сюда, потому
+/// что иначе о ходе закачки в узкой панели не осталось бы ни знака: полоса под
+/// строкой отвечает только за снимки на шаре.
+fn status_look(status: &RowStatus, numbers: bool) -> (Color, String, Color) {
     match status {
         RowStatus::Complete => (theme::ACCENT, "на диске".to_string(), theme::ACCENT_TEXT),
         RowStatus::Remote => (theme::LINE, "в хранилище".to_string(), theme::INK_DIM),
         RowStatus::Downloading { done, total } => (
             theme::ACCENT,
-            if *total > 0 { format::progress(*done, *total) } else { "скачивается".to_string() },
+            match (numbers, *total > 0) {
+                (true, true) => format::progress(*done, *total),
+                _ => "скачивается".to_string(),
+            },
             theme::ACCENT_TEXT,
         ),
         // Сорвавшаяся закачка говорит своим голосом. «Прервано» ниже — это всё
@@ -686,7 +720,10 @@ fn status_look(status: &RowStatus) -> (Color, String, Color) {
         ),
         RowStatus::Paused { done, total, .. } => (
             theme::WARN,
-            if *total > 0 { format::progress(*done, *total) } else { "прервано".to_string() },
+            match (numbers, *total > 0) {
+                (true, true) => format::progress(*done, *total),
+                _ => "прервано".to_string(),
+            },
             theme::WARN_TEXT,
         ),
         // Отказ важнее счёта: сколько скачано, видно и по размеру, а «3 на
@@ -700,20 +737,131 @@ fn status_look(status: &RowStatus) -> (Color, String, Color) {
     }
 }
 
-fn progress_cell(status: &RowStatus) -> Element<Msg> {
-    let Some((done, total)) = status.progress() else {
-        return theme::nothing();
+/// Что делается со строкой прямо сейчас — всё, чем это показывают.
+///
+/// Одна ячейка на два рода работы, потому что вопрос у смотрящего один: «идёт
+/// ли что-нибудь и сколько ещё». Два рода в двух колонках заставили бы его
+/// искать ответ в двух местах, из которых одно всегда пустое.
+struct Load {
+    /// Части подписи от старшей к младшей: ужимаясь, ячейка отбрасывает их с
+    /// хвоста (см. [`fit_label`]).
+    parts: Vec<String>,
+    /// Доля, 0..1; `None` — работа идёт, а доли у неё нет.
+    share: Option<f32>,
+    color: Color,
+    /// Подсказка: та же работа, названная целиком и словами. Место в ней есть
+    /// на всё, чего не вместила ячейка.
+    hint: String,
+}
+
+/// Чем занята строка. `None` — ничем: колонке в этой строке сказать нечего.
+///
+/// Старшинство одно и оно не про удобство: скачивание на диск меняет то, что
+/// лежит на машине, а показ по сети производен и повторим — и о нём, кроме
+/// этой ячейки, говорят зажжённый значок шара и список «На просмотре».
+///
+/// Пирамида — снимку, а не всякому, кто о нём знает: о шаре отвечает и файл
+/// внутри снимка (см. `rows::from_key`), но нажимали-то значок у снимка, и
+/// видно должно быть там же.
+fn load_of(row: &Row) -> Option<Load> {
+    match &row.status {
+        RowStatus::Downloading { done, total } => Some(Load {
+            parts: match *total > 0 {
+                true => vec![format::progress(*done, *total)],
+                false => vec!["скачивается".to_string()],
+            },
+            share: (*total > 0).then(|| *done as f32 / *total as f32),
+            color: theme::ACCENT,
+            hint: match *total > 0 {
+                true => format!(
+                    "Скачивается на диск — {}, осталось {}",
+                    format::progress(*done, *total),
+                    format::bytes(total.saturating_sub(*done)),
+                ),
+                false => "Скачивается на диск".to_string(),
+            },
+        }),
+        // Стоящая закачка — тоже ответ на «сколько ещё»: продолжать её будут с
+        // этого места. Причину говорит соседняя ячейка, здесь только место.
+        RowStatus::Paused { done, total, .. } if *total > 0 => Some(Load {
+            parts: vec![format::progress(*done, *total)],
+            share: Some(*done as f32 / *total as f32),
+            color: theme::WARN,
+            hint: format!(
+                "Закачка стои́т — {}, осталось {}",
+                format::progress(*done, *total),
+                format::bytes(total.saturating_sub(*done)),
+            ),
+        }),
+        _ => None,
+    }
+    .or_else(|| {
+        if !row.is_snapshot() {
+            return None;
+        }
+        let parts = row.globe.parts();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(Load {
+            hint: format!("Набирается пирамида — {}", parts.join(" · ")),
+            parts,
+            // Доли ещё нет, а работа идёт — полоса заливается целиком, но
+            // вполсилы: пустая дорожка на этом месте не говорит ничего, а
+            // начинается ею как раз самое долгое, что бывает со снимком, —
+            // описание растра по сети, десятки секунд.
+            share: match row.globe.pace() {
+                Pace::Share(share) => Some(share),
+                Pace::Unknown | Pace::Idle => None,
+            },
+            color: match row.globe.pace() {
+                Pace::Share(_) => theme::ACCENT,
+                Pace::Unknown | Pace::Idle => theme::ACCENT_HALF,
+            },
+        })
+    })
+}
+
+/// Подпись, ужатая под ширину: части отбрасываются с хвоста, пока не влезет.
+///
+/// С хвоста, потому что порядок частей и есть их старшинство: ступень называет,
+/// чем меряется полоса, байты — единственное, что движется у долгого чтения, а
+/// счёт ячеек мельче обоих. Не влезла и одна — отдаём её как есть: обрезать её
+/// многоточием значит показать «ступ…», из чего не выводится ничего, а ячейка
+/// обрежет лишнее сама (см. `grid`).
+fn fit_label(parts: &[String], width: f32) -> String {
+    for take in (1..=parts.len()).rev() {
+        let said = parts[..take].join(" · ");
+        if format::text_width(&said, theme::TEXT_TAG) <= width {
+            return said;
+        }
+    }
+    parts.first().cloned().unwrap_or_default()
+}
+
+fn progress_cell(row: &Row) -> Element<Msg> {
+    let Some(load) = load_of(row) else { return theme::nothing() };
+    let said = fit_label(&load.parts, PROGRESS - CELL_PADDING * 2.0);
+    let (fill, color) = match load.share {
+        Some(share) => (share, load.color),
+        None => (1.0, theme::ACCENT_HALF),
     };
-    let color = if matches!(status, RowStatus::Downloading { .. }) { theme::ACCENT } else { theme::WARN };
-    container(
-        progress_bar::<Msg>(0.0..=1.0, done as f32 / total as f32)
-            .style(theme::progress(color))
-            .width(Length::Fill)
-            .height(Length::Fixed(5.0)),
+    tooltip(
+        column![
+            text::<Msg>(said).size(theme::TEXT_TAG).color(theme::INK_DIM).single_line(),
+            progress_bar::<Msg>(0.0..=1.0, fill)
+                .style(theme::progress(color))
+                .width(Length::Fill)
+                .height(Length::Fixed(LOAD_BAR)),
+        ]
+        .spacing(3.0)
+        .width(Length::Fill),
+        load.hint,
+        TooltipPosition::TooltipTop,
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .align_y(Alignment::Center)
+    .style(theme::panel())
+    .text_size(theme::TEXT_SMALL)
+    .padding(6.0)
     .into()
 }
 
@@ -955,11 +1103,21 @@ fn quick(view: ViewId, row: &Row) -> Vec<Quick> {
             }
             OnGlobe::Laid { hidden: false, .. } => (theme::IconTone::Lit, "Снять с шара"),
         };
-        // Полосу под строкой рисует ход добычи, и объяснить её больше негде:
-        // подписи у полосы нет, а без неё она — доля неизвестно чего.
-        let hint = match row.globe.said() {
-            Some(said) => format!("{} · {}", hint, said),
-            None => hint.to_string(),
+        // Ход добычи здесь не называется: значок отвечает на «что случится, если
+        // нажать», а «что происходит сейчас» стои́т в той же строке ячейкой
+        // ЗАГРУЗКА либо, где её нет, подсказкой полосы под строкой.
+        //
+        // А вот прошлый отказ — называется, и он старше всего остального:
+        // ждать его пришлось десятки секунд, и молча позвать нажать ещё раз
+        // значило бы предложить прождать их снова. Значок при этом остаётся
+        // нажимаемым — сорваться попытка могла и по сети (см.
+        // `Row::unshowable`).
+        let (tone, hint) = match (row.unshowable.is_empty(), row.globe) {
+            (false, OnGlobe::Off) => (
+                theme::IconTone::Warn,
+                format!("Показать не вышло — {}. Нажмите, чтобы попробовать снова", row.unshowable),
+            ),
+            _ => (tone, hint.to_string()),
         };
         quick.push(
             Quick::new(
@@ -1437,7 +1595,175 @@ mod tests {
         assert!(fit.name >= NAME_MIN, "имени досталось {}", fit.name);
         assert!(!fit.compact, "значки уступают только когда имени не остаётся вовсе");
         assert!(fit.columns.contains(&Column::Name) && fit.columns.contains(&Column::Actions));
-        assert!(!fit.columns.contains(&Column::Progress), "справочное уходит первым");
+        assert!(!fit.columns.contains(&Column::Date), "справочное уходит первым");
+        assert!(!fit.columns.contains(&Column::Size));
+    }
+
+    /// Просторной панели хватает на всё, и на загрузку в том числе: колонка
+    /// эта — единственное место, где написано, что происходит со строкой прямо
+    /// сейчас, и расширенная сверх меры она молча уехала бы из кадра. Нижней
+    /// границы ширины не стережёт больше ничто.
+    #[test]
+    fn a_full_width_pane_keeps_the_loading_column() {
+        let optional = Optional { twisty: true, checkable: true };
+        // Окно по умолчанию — 2048 физических точек при ui_scale 2.0.
+        let fit = fit(1024.0, optional);
+        assert!(fit.columns.contains(&Column::Progress), "колонка не поместилась в целое окно");
+        assert!(fit.columns.contains(&Column::Status));
+        assert!(fit.name >= NAME_MIN, "имени досталось {}", fit.name);
+    }
+
+    /// Загрузка уступает место позже справки и раньше состояния: справка о
+    /// записи не изменится и через час, а работа идёт сейчас.
+    #[test]
+    fn the_loading_column_outlives_the_reference_ones() {
+        let optional = Optional { twisty: true, checkable: true };
+        let at = |width: f32| fit(width, optional).columns;
+
+        let middling = at(760.0);
+        assert!(middling.contains(&Column::Progress), "загрузка ушла раньше справки");
+        assert!(!middling.contains(&Column::Date) && !middling.contains(&Column::Size));
+
+        // А в половине окна не остаётся и её — там о ходе говорит полоса под
+        // строкой (см. `strip_shown`).
+        let half = at(512.0);
+        assert!(!half.contains(&Column::Progress));
+        assert!(half.contains(&Column::Format), "различающая колонка ушла раньше загрузки");
+    }
+
+    /// Подпись хода влезает в свою колонку — на самом длинном образце каждого
+    /// случая. Мерить её больше нечем: модуль разметку не измеряет, а не
+    /// влезшая уезжает под обрезку ячейки, то есть обрывается на середине знака.
+    #[test]
+    fn every_loading_caption_fits_its_column() {
+        let room = PROGRESS - CELL_PADDING * 2.0;
+        let samples = [
+            // Ход по сети целиком: двузначная ступень, байты и ячейки.
+            vec![
+                "ступень 10/12".to_string(),
+                format::progress(8_600_000, 25_100_000),
+                "тайлы 12/16".to_string(),
+            ],
+            // Он же без байт — так отвечает источник с произвольным доступом.
+            vec!["ступень 10/12".to_string(), "тайлы 12/16".to_string()],
+            // Закачка на диск.
+            vec![format::progress(508_000_000, 615_000_000)],
+            // Слова вместо чисел — самое длинное из них.
+            vec!["спрашиваем каталог…".to_string()],
+        ];
+        for parts in samples {
+            let said = fit_label(&parts, room);
+            let width = format::text_width(&said, theme::TEXT_TAG);
+            assert!(width <= room, "«{said}» — {width} точек при {room}");
+            assert!(!said.is_empty(), "подпись пропала целиком: {parts:?}");
+        }
+
+        // Ужимается с хвоста: байты остаются, счёт ячеек уходит. Отбрасывать с
+        // начала значило бы первой выбрасывать единицу измерения полосы.
+        let parts = vec!["ступень 3/6".to_string(), "8,2/24 МБ".to_string(), "тайлы 5/12".to_string()];
+        assert_eq!(fit_label(&parts, room), "ступень 3/6 · 8,2/24 МБ");
+        assert_eq!(fit_label(&parts, 1000.0), parts.join(" · "), "простору хватает на всё");
+    }
+
+    /// Старшинство работ: диск старше шара. Обе разом бывают у скачиваемого
+    /// снимка, который в это же время лежит на глобусе, и ячейка одна.
+    #[test]
+    fn the_disk_outranks_the_globe_in_one_cell() {
+        let laid = OnGlobe::Laid {
+            hidden: false,
+            progress: crate::module::state::overlay::Progress {
+                working: true,
+                total: 12,
+                ready: 5,
+                steps: 6,
+                step: 2,
+                ..Default::default()
+            },
+        };
+        let snapshot = || Row {
+            kind: RowKind::Product { folder: true },
+            globe: laid,
+            ..Row::default()
+        };
+
+        let downloading = Row {
+            status: RowStatus::Downloading { done: 10, total: 100 },
+            ..snapshot()
+        };
+        assert!(
+            load_of(&downloading).expect("работа есть").hint.starts_with("Скачивается"),
+            "показ по сети перебил скачивание на диск"
+        );
+
+        assert!(
+            load_of(&snapshot()).expect("работа есть").hint.starts_with("Набирается"),
+            "снимок на шаре молчит о своей пирамиде"
+        );
+
+        // Файл внутри снимка о шаре знает, но значок нажимали не у него.
+        let file = Row { kind: RowKind::File, globe: laid, ..Row::default() };
+        assert!(load_of(&file).is_none(), "полоса досталась не тому, кто её просил");
+
+        // Спокойная строка не говорит ничего: скачано, на шаре не лежит.
+        let quiet = Row {
+            status: RowStatus::Complete,
+            globe: OnGlobe::Off,
+            ..snapshot()
+        };
+        assert!(load_of(&quiet).is_none());
+    }
+
+    /// Свёрнутая строка снимка знает только скачанное — знаменателя у неё нет.
+    /// Сказать об этом всё равно надо: пустая ячейка у качающегося снимка
+    /// читается как «ничего не происходит».
+    #[test]
+    fn a_snapshot_without_a_total_still_speaks() {
+        let row = Row {
+            kind: RowKind::Product { folder: true },
+            status: RowStatus::Downloading { done: 3 << 20, total: 0 },
+            ..Row::default()
+        };
+        let load = load_of(&row).expect("работа есть");
+        assert_eq!(load.parts, vec!["скачивается".to_string()]);
+        assert!(load.share.is_none(), "доля взялась из ниоткуда");
+    }
+
+    /// Числа принадлежат одному месту за раз: пока ЗАГРУЗКА показана, СОСТОЯНИЕ
+    /// говорит словом. Ушла колонка — числа возвращаются, иначе о ходе закачки
+    /// в узкой панели не осталось бы ни знака.
+    #[test]
+    fn the_numbers_live_in_one_column_at_a_time() {
+        let downloading = RowStatus::Downloading { done: 50 << 20, total: 100 << 20 };
+        let (_, beside, _) = status_look(&downloading, false);
+        let (_, alone, _) = status_look(&downloading, true);
+
+        assert_eq!(beside, "скачивается", "оба соседа сказали одну и ту же дробь");
+        assert!(alone.contains('/'), "числа пропали вместе с колонкой: {alone}");
+
+        // Слова остальных от соседа не зависят: у них своих чисел нет.
+        assert_eq!(status_look(&RowStatus::Complete, false).1, "на диске");
+        assert_eq!(status_look(&RowStatus::Complete, true).1, "на диске");
+        // Причина отказа — не число хода, и молчать о ней нельзя никогда.
+        let broken = RowStatus::Paused { done: 0, total: 0, trouble: "HTTP 502".into() };
+        assert_eq!(status_look(&broken, false).1, "HTTP 502");
+    }
+
+    /// Полоса под строкой — запасной путь, а не второй голос: где колонка
+    /// показана, полосы нет, и наоборот.
+    #[test]
+    fn the_strip_stands_in_for_the_missing_column() {
+        let row = Row {
+            kind: RowKind::Product { folder: true },
+            globe: OnGlobe::Assembling,
+            ..Row::default()
+        };
+        assert!(!strip_shown(&row, &COLUMNS), "полоса повторила колонку");
+        assert!(strip_shown(&row, &[Column::Name]), "без колонки о ходе не сказано ничего");
+
+        // Снимка на шаре нет — полосе взяться не от чего, какой бы ни была
+        // ширина панели.
+        let off = Row { globe: OnGlobe::Off, ..row };
+        assert!(!strip_shown(&off, &[Column::Name]));
     }
 
     /// Уступать бывает нечему: в половине узкого окна одни лишь кнопки строки

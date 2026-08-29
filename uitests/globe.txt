@@ -17,5 +17,5 @@
 6600 shot uitest-globe
 6800 expect text:Тащите
 7000 tap tab_close#2
-7600 absent text:Тащите
+7600 gone text:Тащите
 7800 exit

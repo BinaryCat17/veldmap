@@ -14,6 +14,7 @@
 //! выборке файла, «нет данных» — прозрачностью; правила — в radiometry.rs,
 //! здесь только выбор выборки (см. [`mapping`]).
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
 
@@ -58,10 +59,34 @@ const CHUNK_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
 pub struct Layout {
     pub tiled: bool,
+    /// Сетка чанков базового IFD в пикселях: у тайлового файла это тайл, у
+    /// полосного — вся ширина растра на `RowsPerStrip` строк.
+    ///
+    /// Хранится с описания затем, что наименьшая читаемая единица файла —
+    /// чанк, и окно в его половину стои́т ровно столько же, сколько целый.
+    /// Без этого числа [`windowed`] мерил бы область, а платится за чанки —
+    /// и у полосного файла, где чанк во всю ширину, разница между этими
+    /// двумя мерками составляет весь растр.
+    pub chunk: (u32, u32),
     /// Уменьшенные копии (IFD с битом reduced в NewSubfileType), в порядке
     /// обнаружения. В многостраничном TIFF следующие IFD — отдельные
     /// страницы, их сюда не берут — подменять ими первую нельзя.
     pub overviews: Vec<Overview>,
+    /// Растяг показа, посчитанный при первой надобности и дальше готовый.
+    ///
+    /// Он свойство файла, а не заказа: `Mapping` прямо обещает «один раз на
+    /// файл», иначе соседние тайлы разошлись бы швами. Пересчёт же стои́т
+    /// четырёх чтений вразброс по файлу и сортировки до миллиона отсчётов, а
+    /// заказов у одного файла десятки — по ступени лестницы и по каждому
+    /// обнажившемуся краю. Чтения эти вдобавок ходят по файлу назад, и хост
+    /// читает такой ход как случайный доступ, сбрасывая разгон упреждающего
+    /// чтения перед самой работой.
+    ///
+    /// Внутренней изменяемостью, потому что разбор потребитель держит по
+    /// ссылке, а посчитать растяг можно только с читателем в руках — то есть
+    /// уже внутри производства. Инстанс однопоточный, и `RefCell` здесь та же
+    /// цена, что и обычное поле.
+    stretch: RefCell<Option<Mapping>>,
 }
 
 pub struct Overview {
@@ -69,14 +94,41 @@ pub struct Overview {
     pub image: usize,
     pub width: u32,
     pub height: u32,
+    /// Своя, а не базовая: копия бывает разложена иначе, чем первый IFD, а
+    /// читается всегда та, которую выбрал [`pick_source`].
+    pub chunk: (u32, u32),
 }
 
 impl Layout {
     /// Произвольный тайл дёшев: чанки читаются точечно, а копии закрывают
     /// глубокие уровни. Тайловому файлу без копий верхний тайл стоил бы
     /// чтения всего растра — он идёт последовательным путём.
+    ///
+    /// Это про источник целиком, а не про уровень: даже здесь копии бывают
+    /// редкими, и уровень, которому не досталось своей, читается проходом
+    /// (см. [`windowed`]).
     pub fn random_access(&self) -> bool {
         self.tiled && !self.overviews.is_empty()
+    }
+
+    /// IFD, из которого берётся выборка растяга: самая мелкая копия, а нет
+    /// копий — базовый растр. Она дешёвая и одна на все уровни.
+    ///
+    /// Свойство файла, а не заказа, и спрашивается одинаково обоими рукавами.
+    /// Растяг у файла один (см. [`Layout::stretch`]): посчитанный то по
+    /// крошечной копии, то по четырём чанкам базы, он давал бы соседним тайлам
+    /// одного уровня разную яркость — а какой лягут в кэш на диске, решал бы
+    /// порядок заказов.
+    fn stats(&self) -> usize {
+        self.overviews.iter().min_by_key(|overview| overview.width).map_or(0, |o| o.image)
+    }
+
+    /// Сетка чанков у копии с этим индексом IFD; нулевой — базовый растр.
+    fn chunk_of(&self, image: usize) -> (u32, u32) {
+        match self.overviews.iter().find(|overview| overview.image == image) {
+            Some(overview) => overview.chunk,
+            None => self.chunk,
+        }
     }
 }
 
@@ -86,6 +138,11 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     ensure_chunky(&mut decoder)?;
     ensure_readable(&mut decoder)?;
     let tiled = decoder.get_tag_unsigned::<u32>(Tag::TileWidth).is_ok();
+    // Не отказ, а худший случай: чанк, который не измерить или который не
+    // влезает в бюджет, — это «весь растр», и [`windowed`] такому уровню окна
+    // не даст. Отказывать здесь нельзя: описание несёт ещё и геопривязку, а
+    // тайлы у такого файла и так не приедут — тот же потолок стои́т в проходе.
+    let chunk = chunk_grid(&mut decoder).unwrap_or((width, height));
     let (ties, placement) = georef(&mut decoder, width, height);
 
     let mut overviews = Vec::new();
@@ -103,13 +160,17 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         if w == 0 || h == 0 {
             continue;
         }
-        overviews.push(Overview { image: index, width: w, height: h });
+        // Тем же правилом, что и у базы: неизмеримый чанк — это вся копия.
+        // Выбрать её [`pick_source`] волен, а окна она не даст, и уровень
+        // уйдёт проходом.
+        let chunk = chunk_grid(&mut decoder).unwrap_or((w, h));
+        overviews.push(Overview { image: index, width: w, height: h, chunk });
     }
 
     Ok(Info {
         width,
         height,
-        kind: Kind::Tiff(Layout { tiled, overviews }),
+        kind: Kind::Tiff(Layout { tiled, chunk, overviews, stretch: RefCell::new(None) }),
         finest: 0,
         ties,
         placement,
@@ -157,7 +218,7 @@ fn georef<R: Read + Seek>(
             "растр объявляет датум EPSG:{}, а привязка уедет как WGS84: расхождение порядка сотни метров",
             code);
     }
-    let placement = geo_placement(&keys, &points, &scale, &matrix);
+    let placement = geo_placement(&keys, &points, &scale, &matrix, width, height);
     let ties = geo_ties(&keys, &points, &scale, &matrix, width, height);
     // Сказать надо именно здесь: дальше по течению «в файле не сказано» и
     // «сказано, да не прочиталось» выглядят одинаково — пустой привязкой, — и
@@ -241,6 +302,8 @@ fn geo_placement(
     points: &[f64],
     scale: &[f64],
     matrix: &[f64],
+    width: u32,
+    height: u32,
 ) -> Option<Placement> {
     // GTModelTypeGeoKey (1024): 1 — метры проекции.
     if geokey(keys, 1024) != Some(1) || points.len() > 6 {
@@ -269,7 +332,18 @@ fn geo_placement(
     };
     // Опорная точка проверяется вместе со всем остальным: шаг мог быть годен, а
     // место названо не числом, и такая рамка доехала бы до глобуса целой с виду.
-    affine.iter().all(|value| value.is_finite()).then_some(Placement { epsg, affine })
+    //
+    // Конечных членов мало — проверяется и дальний угол. У больших членов
+    // произведение на сторону растра переполняется, а мерка рамки у глобуса
+    // смотрит только на первый столбец (`Frame::ground_m_per_px`) и такого не
+    // замечает: рамка выходит измеримой, а место у неё — не число.
+    let (right, bottom) = (f64::from(width), f64::from(height));
+    let corner = [
+        affine[0] * right + affine[1] * bottom + affine[2],
+        affine[3] * right + affine[4] * bottom + affine[5],
+    ];
+    let whole = affine.iter().chain(corner.iter()).all(|value| value.is_finite());
+    whole.then_some(Placement { epsg, affine })
 }
 
 /// Опорные точки растра, лежащего в градусах. Пусто, если файл привязан к
@@ -392,6 +466,69 @@ fn corners_from_matrix(matrix: &[f64], half: f64, width: u32, height: u32) -> Ve
 
 // ── Прямой доступ ──────────────────────────────────────────────
 
+/// Кусок копии под один тайл: где он лежит и какая его часть тайлу
+/// принадлежит.
+struct Region {
+    sx0: u64,
+    sx1: u64,
+    sy0: u64,
+    sy1: u64,
+    /// Доля прочитанного, которую занимает сам тайл. Прочитанное бывает шире
+    /// на долю пикселя с каждой стороны — усреднению нужен каждый задетый
+    /// пиксель, — и ужимается именно окно: растянутое на тайл прочитанное
+    /// целиком уехало бы на эту долю, у соседнего тайла в другую сторону, и на
+    /// стыке остался бы шов.
+    window: Window,
+}
+
+/// Где искать тайл в копии. Чистая функция, потому что от неё зависит не вид
+/// картинки, а цена чтения: пиксель, приписанный области сверх нужного,
+/// превращается в лишние чанки файла и в прыжки по нему (см. `aligned` в
+/// [`produce_direct`]).
+///
+/// `aligned` — копия и уровень суть одна сетка. Тогда тайл берётся ровно там,
+/// где он лежит, и окно совпадает с прочитанным. Иначе масштаб дробный, и
+/// границы разводятся наружу (floor/ceil): у двоичных копий доли нулевые и
+/// разницы нет, а небинарные (3, 5, 7/2) дают её на каждом тайле.
+fn region_of(
+    (tx, ty): (u32, u32),
+    (tw, th): (u32, u32),
+    (lw, lh): (u32, u32),
+    (sw, sh): (u32, u32),
+    aligned: bool,
+) -> Region {
+    let (x0, y0) = (u64::from(tx) * u64::from(TILE), u64::from(ty) * u64::from(TILE));
+    if aligned {
+        // Начало отступает назад ровно настолько, чтобы тайлу досталась хоть
+        // строка копии. Копия короче уровня на тот самый прощённый пиксель, и у
+        // последнего тайла его может не остаться вовсе: сторона 4609 — это
+        // десять рядов, последний в один пиксель, а копия кончается на 4608.
+        // Пустая область здесь не пустой тайл, а отказ всего прохода — и с ним
+        // приговор всем его ячейкам разом (см. `Fetch::produced`), то есть ряд,
+        // который не появится уже никогда.
+        let (x0, y0) = (x0.min(u64::from(sw).saturating_sub(1)), y0.min(u64::from(sh).saturating_sub(1)));
+        let (x1, y1) =
+            ((x0 + u64::from(tw)).min(u64::from(sw)), (y0 + u64::from(th)).min(u64::from(sh)));
+        let window = Window { x0: 0.0, y0: 0.0, x1: (x1 - x0) as f64, y1: (y1 - y0) as f64 };
+        return Region { sx0: x0, sx1: x1, sy0: y0, sy1: y1, window };
+    }
+
+    let exact = |at: u64, side: u32, level_side: u32| {
+        at as f64 * f64::from(side) / f64::from(level_side)
+    };
+    let sx0 = (x0 * u64::from(sw)) / u64::from(lw);
+    let sy0 = (y0 * u64::from(sh)) / u64::from(lh);
+    let sx1 = (u64::from(tx * TILE + tw) * u64::from(sw)).div_ceil(u64::from(lw)).min(u64::from(sw));
+    let sy1 = (u64::from(ty * TILE + th) * u64::from(sh)).div_ceil(u64::from(lh)).min(u64::from(sh));
+    let window = Window {
+        x0: exact(x0, sw, lw) - sx0 as f64,
+        y0: exact(y0, sh, lh) - sy0 as f64,
+        x1: exact(u64::from(tx * TILE + tw), sw, lw) - sx0 as f64,
+        y1: exact(u64::from(ty * TILE + th), sh, lh) - sy0 as f64,
+    };
+    Region { sx0, sx1, sy0, sy1, window }
+}
+
 pub fn produce_direct<R: Read + Seek>(
     reader: R,
     info: &Info,
@@ -402,10 +539,7 @@ pub fn produce_direct<R: Read + Seek>(
 ) -> Result<(), String> {
     let mut decoder = Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
 
-    // Выборка растяга — из самой мелкой копии: она дешёвая и одна на все
-    // уровни, а значит один и тот же растяг у всех тайлов файла.
-    let stats = layout.overviews.iter().min_by_key(|o| o.width).map_or(0, |o| o.image);
-    let mapping = mapping(&mut decoder, stats)?;
+    let mapping = stretch(layout, &mut decoder)?;
 
     let lw = pyramid::level_size(info.width, level);
     let lh = pyramid::level_size(info.height, level);
@@ -419,9 +553,29 @@ pub fn produce_direct<R: Read + Seek>(
     let across = sw.div_ceil(cw);
     let mut chunks = ChunkCache::new();
 
+    // Копия и уровень — одна и та же сетка, если расходятся они не больше чем
+    // на пиксель округления. Ровно это прощение объявил [`pick_source`],
+    // ВЫБИРАЯ копию, — и не заметить его при ЧТЕНИИ дорого: сторона уровня
+    // считается округлением вверх, копия в файле записана делением вниз, и
+    // пропорциональный пересчёт сдвигает область каждого тайла на пиксель
+    // влево-вверх. Область выходит на пиксель шире тайла и задевает вчетверо
+    // больше чанков файла. Само по себе это дёшево — лишний чанк чаще всего
+    // берётся готовым из кэша, — а дорого другое: чанки собираются рядами, ряд
+    // отстои́т от соседнего на всю ширину сетки, и чтение ходит по файлу
+    // вперёд-назад на каждом тайле. Хост читает такой ход как случайный доступ
+    // и сбрасывает разгон упреждающего чтения в один блок (см. `Readahead` в
+    // network/range.rs), а с ним и всю скорость.
+    //
+    // Платится за это пикселем содержимого у дальнего края тайла: сегодня та
+    // же доля пикселя размазывается ресемплом по всей стороне. Привязка при
+    // этом не двигается — она считается по сетке уровня, а не по копии.
+    let aligned = lw.abs_diff(sw) <= 1 && lh.abs_diff(sh) <= 1;
+    let began = std::time::Instant::now();
+
     veldsdk::log::debug!(target: "decode",
-        "tiff прямой доступ: уровень {} ({}×{}) из IFD {} ({}×{}), тайлов {}",
-        level, lw, lh, image, sw, sh, wants.len());
+        "tiff прямой доступ: уровень {} ({}×{}) из IFD {} ({}×{}), тайлов {}, сетка {}",
+        level, lw, lh, image, sw, sh, wants.len(),
+        if aligned { "своя" } else { "чужая" });
 
     for &(tx, ty) in wants {
         let tw = pyramid::tile_extent(tx, lw);
@@ -436,17 +590,8 @@ pub fn produce_direct<R: Read + Seek>(
         // бы на эту долю, у соседнего тайла — в другую сторону, и на стыке
         // остался бы шов. У двоичных копий доли нулевые и разницы нет, а
         // небинарные (3, 5, 7/2) дают её на каждом тайле.
-        let exact = |at: u64, side: u64, level_side: u64| f64::from(at as u32) * side as f64 / level_side as f64;
-        let sx0 = (u64::from(tx) * u64::from(TILE) * u64::from(sw)) / u64::from(lw);
-        let sy0 = (u64::from(ty) * u64::from(TILE) * u64::from(sh)) / u64::from(lh);
-        let sx1 = (u64::from(tx * TILE + tw) * u64::from(sw)).div_ceil(u64::from(lw)).min(u64::from(sw));
-        let sy1 = (u64::from(ty * TILE + th) * u64::from(sh)).div_ceil(u64::from(lh)).min(u64::from(sh));
-        let window = Window {
-            x0: exact(u64::from(tx) * u64::from(TILE), u64::from(sw), u64::from(lw)) - sx0 as f64,
-            y0: exact(u64::from(ty) * u64::from(TILE), u64::from(sh), u64::from(lh)) - sy0 as f64,
-            x1: exact(u64::from(tx * TILE + tw), u64::from(sw), u64::from(lw)) - sx0 as f64,
-            y1: exact(u64::from(ty * TILE + th), u64::from(sh), u64::from(lh)) - sy0 as f64,
-        };
+        let Region { sx0, sx1, sy0, sy1, window } =
+            region_of((tx, ty), (tw, th), (lw, lh), (sw, sh), aligned);
         let (rw, rh) = ((sx1 - sx0) as u32, (sy1 - sy0) as u32);
         if rw == 0 || rh == 0 {
             return Err(format!("tiff: тайлу {}:{} не досталось пикселей источника", tx, ty));
@@ -485,7 +630,102 @@ pub fn produce_direct<R: Read + Seek>(
         let tile = resample_window(&region, rw, rh, window, tw, th);
         emit(level, tx, ty, tw, th, &tile)?;
     }
+
+    // Чем обошёлся проход. Строка нужна затем, что цену тайла иначе не
+    // измерить: наружу едет только «сколько прочитано», а это водяной знак
+    // головы чтения, и при произвольном доступе он стои́т на месте, пока
+    // чтение ходит назад.
+    //
+    // Главное в ней — промахи кэша чанков против тайлов. Их поровну, когда
+    // сетка своя. Больше — когда область разъехалась с сеткой копии, и растёт
+    // при этом не столько число промахов, сколько время: чтение ходит по файлу
+    // назад, а возврат хост читает как случайный доступ. Вчетверо промахи
+    // растут у копии, которая крупнее уровня вдвое (её у файла может не быть
+    // на этой ступени вовсе) — там это честная цена, а не разъезд сеток.
+    veldsdk::log::debug!(target: "perf",
+        "проход: уровень {}, тайлов {}, чанков {} ({} готовыми), сетка {}, за {:.2} с",
+        level, wants.len(), chunks.asked - chunks.hits, chunks.hits,
+        if aligned { "своя" } else { "чужая" }, began.elapsed().as_secs_f32());
     Ok(())
+}
+
+/// Тайл этого уровня читается окном — то есть тем, что и правда окно.
+///
+/// Меряется не площадь области, а СКОЛЬКО ПРИДЁТСЯ ДЕРЖАТЬ, чтобы отдать один
+/// тайл, и разница здесь несущая. У полосного источника чанк — это строки во
+/// всю ширину растра: тайлу нужны все полосы, накрывающие его строки, и узость
+/// тайла не экономит ничего. Влезут они в кэш чанков — соседний тайл того же
+/// ряда возьмёт их готовыми; не влезут — перечитает заново, и ряд из семи
+/// тайлов обойдётся в семь чтений файла вместо одного. Площадь этого не видит
+/// вовсе: она засчитывает ширину, которой у полосного файла экономии нет.
+///
+/// Область при этом считается по ХУДШЕМУ тайлу сетки, а не по идеальному:
+/// границы разводятся наружу, и настоящая область бывает на пиксель шире (см.
+/// [`region_of`]). Сказать «окно» там, где [`produce_direct`] откажет по
+/// [`REGION_CAP`], нельзя вдвойне: отказ валит весь проход, а проход
+/// приговаривает все свои ячейки разом — и уровень не появится уже никогда.
+pub fn windowed(info: &Info, layout: &Layout, level: u32) -> bool {
+    let lw = pyramid::level_size(info.width, level).max(1);
+    let lh = pyramid::level_size(info.height, level).max(1);
+    let (image, sw, sh) = pick_source(info, layout, lw, lh);
+    let aligned = lw.abs_diff(sw) <= 1 && lh.abs_diff(sh) <= 1;
+
+    // У своей сетки область — ровно тайл; у пересчёта она бывает на пиксель
+    // шире, потому что пол и потолок разводят границы в разные стороны.
+    let side = |level_side: u32, source_side: u32| -> u64 {
+        let ideal = (u64::from(TILE) * u64::from(source_side)).div_ceil(u64::from(level_side));
+        match aligned {
+            true => ideal,
+            false => ideal + 1,
+        }
+    };
+    let rw = side(lw, sw).min(u64::from(sw));
+    let rh = side(lh, sh).min(u64::from(sh));
+    if rw.saturating_mul(rh) > REGION_CAP {
+        return false;
+    }
+
+    // Платится не областью, а чанками, которых она касается: чанк
+    // распаковывается целиком, и окно в его половину стои́т столько же.
+    // Полосный файл этим и отличается — чанк у него во всю ширину копии, и
+    // сузить его нечем, — но правило одно на оба рукава, потому что тайловый
+    // с крупным тайлом ведёт себя ровно так же.
+    let (cw, ch) = layout.chunk_of(image);
+    let held = spanned(rw, cw, sw, aligned).saturating_mul(spanned(rh, ch, sh, aligned));
+    held.saturating_mul(4) <= CHUNK_CACHE_BYTES as u64
+}
+
+/// Сколько пикселей стороны на деле распаковывается под область в `side`
+/// пикселей при чанке в `chunk` и копии в `source`.
+///
+/// Область растёт до границ сетки чанков, а какой именно тайл спросят —
+/// заранее неизвестно: [`windowed`] отвечает за уровень целиком. Поэтому
+/// берётся худшее смещение из тех, что у этого уровня бывают, — и бывают они
+/// разные, смотря совпадает ли сетка уровня с сеткой копии (`aligned`).
+/// Больше, чем есть у копии, не выходит: чанков у неё конечное число.
+fn spanned(side: u64, chunk: u32, source: u32, aligned: bool) -> u64 {
+    if side == 0 {
+        return 0;
+    }
+    let chunk = u64::from(chunk.max(1));
+    let tile = u64::from(TILE);
+    // Всё решает то, насколько далеко от границы чанка область может
+    // начаться. У своей сетки начало кратно тайлу (см. [`region_of`]), и если
+    // сетки соразмерны — чанк кратен тайлу либо тайл чанку, — таких начал
+    // конечное число, а дальше всех от границы стои́т `чанк − тайл`. У чужой
+    // сетки начало произвольно, и худшее отстои́т на чанк без единицы.
+    //
+    // Разница эта не тонкая: у тайлового COG с внутренним тайлом 4096 своя
+    // сетка кладёт весь экранный тайл в один чанк, а чужая мерка засчитала бы
+    // два по каждой стороне — то есть вчетверо больше памяти, чем нужно, и
+    // уровень объявлялся бы непригодным для окна на ровном месте.
+    let flush = aligned && (chunk % tile == 0 || tile % chunk == 0);
+    let offset = match flush {
+        true => chunk - tile.min(chunk),
+        false => chunk - 1,
+    };
+    let touched = ((offset + side - 1) / chunk + 1).min(u64::from(source).div_ceil(chunk));
+    touched.saturating_mul(chunk)
 }
 
 /// Источник для уровня: самая мелкая копия, которой хватает на обе его
@@ -540,11 +780,18 @@ fn pick_source(
 struct ChunkCache {
     entries: VecDeque<(u32, Vec<u8>, u32, u32)>,
     bytes: usize,
+    /// Обращений и из них попаданий. Считается затем, что по этой паре и видно
+    /// главную цену прохода: чанк, взятый готовым, не стои́т ничего, а промах —
+    /// это поход в сеть, и один такой дороже всей распаковки заказа вместе
+    /// взятой. Разъехавшаяся с уровнем сетка узнаётся здесь же — по числу
+    /// промахов, вчетверо большему числа тайлов.
+    asked: u32,
+    hits: u32,
 }
 
 impl ChunkCache {
     fn new() -> Self {
-        Self { entries: VecDeque::new(), bytes: 0 }
+        Self { entries: VecDeque::new(), bytes: 0, asked: 0, hits: 0 }
     }
 
     fn get<R: Read + Seek>(
@@ -554,7 +801,9 @@ impl ChunkCache {
         pixel: Pixel,
         mapping: &Mapping,
     ) -> Result<(&[u8], u32, u32), String> {
+        self.asked += 1;
         if let Some(at) = self.entries.iter().position(|(i, ..)| *i == index) {
+            self.hits += 1;
             let (_, data, dw, dh) = &self.entries[at];
             return Ok((data, *dw, *dh));
         }
@@ -580,9 +829,11 @@ impl ChunkCache {
 
 pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emit: Emit) -> Result<(), String> {
     let mut decoder = Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
-    // Копий нет — выборка растяга из базового IFD; байтовым файлам она не
-    // стоит ни одного лишнего чтения.
-    let mapping = mapping(&mut decoder, 0)?;
+    // Байтовым файлам растяг не стоит ни одного лишнего чтения.
+    let mapping = stretch(layout, &mut decoder)?;
+    // Наводка обязательна: выборку растяга берут из самой мелкой копии, и
+    // декодер после неё стоит на ней, а проход читает базовый растр.
+    decoder.seek_to_image(0).map_err(|e| format!("tiff: {}", e))?;
     let (cw, ch) = chunk_grid(&mut decoder)?;
     let pixel = pixel(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
     let across = info.width.div_ceil(cw);
@@ -720,13 +971,115 @@ fn pixel(color: tiff::ColorType) -> Result<Pixel, String> {
 fn ensure_readable<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<(), String> {
     let color = decoder.colortype().map_err(|e| format!("tiff: {}", e))?;
     let (_, bits) = model(color)?;
-    match bits < 8 {
-        true => Err(format!(
+    if bits < 8 {
+        return Err(format!(
             "tiff: {} бит на сэмпл — такая разрядность не разворачивается в пиксели",
             bits
-        )),
-        false => Ok(()),
+        ));
     }
+    ensure_decodable(decoder)?;
+    ensure_sampled(decoder, bits)
+}
+
+/// Сжатия, которые разбирает собранный у нас набор декодеров.
+///
+/// Список выведен из фич крейта `tiff` в `config.yaml`: `deflate`, `fax`,
+/// `jpeg`, `lzw` из умолчаний плюс наш `zstd`. Fax здесь только четвёртой
+/// группы — третью крейт не декодирует вовсе, а `webp` мы не собираем.
+///
+/// Разойдясь с `config.yaml`, список либо погасит читаемое, либо пропустит
+/// нечитаемое до первого тайла — то есть ровно туда, откуда его сюда и
+/// подняли. Компилятор такого расхождения не ловит, поэтому за их согласием
+/// следит тест buildgen.
+const DECODED: [(u16, &str); 8] = [
+    (1, "без сжатия"),
+    (4, "Fax4"),
+    (5, "LZW"),
+    (7, "JPEG"),
+    (8, "Deflate"),
+    (0x8005, "PackBits"),
+    (0x80B2, "Deflate (старый код)"),
+    (0xC350, "ZSTD"),
+];
+
+/// Отказ по сжатию — при описании, а не на первом чанке.
+///
+/// Разница здесь вся в том, что человек успеет сделать зря: сжатие у файла
+/// одно на все его тайлы, и узнать о нём можно из заголовка. Отказ, отложенный
+/// до чтения, обходится скачанными гигабайтами — и приходит после того, как
+/// весь путь до него выглядел исправным.
+fn ensure_decodable<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<(), String> {
+    // Тега нет — по спецификации это «без сжатия».
+    let code = decoder.get_tag_unsigned::<u16>(Tag::Compression).unwrap_or(1);
+    if decodable(code) {
+        return Ok(());
+    }
+    let said = match code {
+        2 => "Huffman",
+        3 => "Fax3",
+        6 => "старый JPEG",
+        0xC351 => "WebP",
+        34_887 => "LERC",
+        34_925 => "LZMA",
+        50_002 => "JPEG XL",
+        _ => "неизвестное",
+    };
+    let known = DECODED.iter().map(|(_, name)| *name).collect::<Vec<_>>().join(", ");
+    Err(format!("tiff: сжатие {} ({}) не разбирается — читаются {}", said, code, known))
+}
+
+/// Разбирается ли сжатие с этим кодом.
+///
+/// Отделено от чтения тега затем, что правило чистое, а декодер в тест не
+/// занести: заголовка TIFF в памяти у теста нет.
+fn decodable(code: u16) -> bool {
+    DECODED.iter().any(|(known, _)| *known == code)
+}
+
+/// Разворачивается ли отсчёт этого формата и разрядности в яркость.
+///
+/// Пара к [`typed`], и сойтись они обязаны механически: здесь отказ приходит
+/// при описании, там — на чанке, и разойдясь, они дают либо отказ над
+/// читаемым, либо скачанные впустую гигабайты. Закреплено тестом.
+fn sampled(format: u16, bits: u8) -> bool {
+    matches!((format, bits), (1, 8) | (1, 16) | (2, 16) | (3, 32))
+}
+
+/// Формат сэмплов — то же и по той же причине (см. [`ensure_decodable`]).
+///
+/// Показ разворачивает четыре сочетания формата с разрядностью (см.
+/// [`typed`]), и какое у файла — сказано в заголовке. Дороже всех здесь
+/// комплексный отсчёт: так записан радар до сжатия апертуры (Sentinel-1 SLC),
+/// и это гигабайты, скачанные ради отказа на первом же чанке.
+fn ensure_sampled<R: Read + Seek>(decoder: &mut Decoder<R>, bits: u8) -> Result<(), String> {
+    // Тег хранится по сэмплу на полосу; берётся первый — комплексным или
+    // целым файл бывает целиком, а не полосой. Тега нет — «беззнаковое».
+    let format = decoder
+        .get_tag_u16_vec(Tag::SampleFormat)
+        .ok()
+        .and_then(|formats| formats.first().copied())
+        // Список крейт разбирает не всякий — записанный типом LONG приходит
+        // сюда скаляром, и спросить его надо вторым способом, а не молча
+        // счесть беззнаковым.
+        .or_else(|| decoder.get_tag_unsigned::<u16>(Tag::SampleFormat).ok())
+        // Тега нет вовсе — по спецификации это «беззнаковое целое».
+        .unwrap_or(1);
+    if sampled(format, bits) {
+        return Ok(());
+    }
+    let said = match format {
+        1 => "беззнаковый",
+        2 => "знаковый",
+        3 => "дробный",
+        5 => "комплексный целый",
+        6 => "комплексный дробный",
+        _ => "неизвестного вида",
+    };
+    Err(format!(
+        "tiff: отсчёт {} по {} бит не разворачивается в яркость — читаются \
+         целые по 8 и 16 бит, знаковые по 16 и дробные по 32",
+        said, bits
+    ))
 }
 
 /// Сэмплы чанка в типизированном виде — то, что умеет разложить показ.
@@ -754,14 +1107,28 @@ fn typed(data: &DecodingResult) -> Result<Samples<'_>, String> {
     })
 }
 
+/// Растяг файла — готовым, если его уже считали, иначе посчитанный и
+/// запомненный (см. [`Layout::stretch`]).
+///
+/// Где останется декодер, зависит от того, считали ли: на готовом он не
+/// сдвинется, на посчитанном встанет на [`Layout::stats`]. Полагаться на это
+/// нельзя — вызывающий наводит его сам.
+fn stretch<R: Read + Seek>(layout: &Layout, decoder: &mut Decoder<R>) -> Result<Mapping, String> {
+    if let Some(ready) = *layout.stretch.borrow() {
+        return Ok(ready);
+    }
+    let built = mapping(decoder, layout.stats())?;
+    *layout.stretch.borrow_mut() = Some(built);
+    Ok(built)
+}
+
 /// Маппинг показа файла: байтам — тождество, широким форматам — растяг
 /// перцентилей (см. radiometry.rs). Выборка — до четырёх чанков вразброс из
-/// IFD `stats` (у COG — самая мелкая копия, у прохода — базовый), прорежена
-/// до [`radiometry::STRETCH_SAMPLES`]. Выбор детерминирован: одному файлу — один растяг,
-/// какие тайлы и в каком порядке ни спроси.
+/// IFD `stats`, прорежена до [`radiometry::STRETCH_SAMPLES`]. Выбор
+/// детерминирован: одному файлу — один растяг, какие тайлы и в каком порядке
+/// ни спроси.
 ///
-/// Декодер после возврата стоит на IFD `stats` — вызывающий сам наводит его
-/// на нужный образ.
+/// Декодер после возврата стоит на IFD `stats`.
 fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Mapping, String> {
     // GDAL_NODATA пишется в базовый IFD — читается до пере-наводки.
     let nodata = decoder
@@ -821,9 +1188,13 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
 mod tests {
     use super::*;
 
+    /// Внутренний тайл, каким его пишет GDAL, — тестам, которым важен размер
+    /// копии, а не сетка чанков.
+    const TILES: (u32, u32) = (TILE, TILE);
+
     /// Растр без копий — под ним `pick_source` смотрит только на размеры.
     fn bare(width: u32, height: u32) -> Info {
-        Info::plain(width, height, Kind::Tiff(Layout { tiled: true, overviews: Vec::new() }))
+        Info::plain(width, height, Kind::Tiff(Layout { tiled: true, chunk: TILES, overviews: Vec::new(), stretch: RefCell::new(None) }))
     }
 
     /// Копии настоящего снимка — гранула Sentinel-1 GRDH
@@ -845,9 +1216,14 @@ mod tests {
         let overviews = overviews
             .iter()
             .enumerate()
-            .map(|(step, &(width, height))| Overview { image: step + 1, width, height })
+            .map(|(step, &(width, height))| Overview {
+                image: step + 1,
+                width,
+                height,
+                chunk: TILES,
+            })
             .collect();
-        (bare(26553, 16668), Layout { tiled: true, overviews })
+        (bare(26553, 16668), Layout { tiled: true, chunk: TILES, overviews, stretch: RefCell::new(None) })
     }
 
     /// Копии, записанные делением стороны пополам вниз, — так их пишет GDAL.
@@ -857,10 +1233,10 @@ mod tests {
             .map(|image| {
                 w /= 2;
                 h /= 2;
-                Overview { image, width: w, height: h }
+                Overview { image, width: w, height: h, chunk: TILES }
             })
             .collect();
-        Layout { tiled: true, overviews }
+        Layout { tiled: true, chunk: TILES, overviews, stretch: RefCell::new(None) }
     }
 
     /// Копия годится своему уровню, хотя на пиксель у́же его. Проверять надо
@@ -932,7 +1308,12 @@ mod tests {
 
         // Вырожденный случай той же ловушки: у растра в два пикселя копия
         // ровно вдвое мельче, и абсолютный допуск пустил бы её под уровень 0.
-        let tiny = Layout { tiled: true, overviews: vec![Overview { image: 1, width: 1, height: 1 }] };
+        let tiny = Layout {
+            tiled: true,
+            chunk: TILES,
+            overviews: vec![Overview { image: 1, width: 1, height: 1, chunk: TILES }],
+            stretch: RefCell::new(None),
+        };
         assert_eq!(pick_source(&bare(2, 2), &tiny, 2, 2), (0, 2, 2), "родному разрешению копий нет");
     }
 
@@ -942,7 +1323,9 @@ mod tests {
     fn допуск_ровно_в_один_пиксель() {
         let short = |w: u32| Layout {
             tiled: true,
-            overviews: vec![Overview { image: 1, width: w, height: w }],
+            chunk: TILES,
+            overviews: vec![Overview { image: 1, width: w, height: w, chunk: TILES }],
+            stretch: RefCell::new(None),
         };
         let info = bare(2000, 2000);
         assert_eq!(pick_source(&info, &short(499), 500, 500).0, 1, "у́же на пиксель — своя");
@@ -955,7 +1338,12 @@ mod tests {
     #[test]
     fn узкая_копия_не_годится_по_высоте() {
         let info = bare(513, 3);
-        let layout = Layout { tiled: true, overviews: vec![Overview { image: 1, width: 256, height: 1 }] };
+        let layout = Layout {
+            tiled: true,
+            chunk: TILES,
+            overviews: vec![Overview { image: 1, width: 256, height: 1, chunk: TILES }],
+            stretch: RefCell::new(None),
+        };
         let (lw, lh) = (pyramid::level_size(513, 1), pyramid::level_size(3, 1));
         assert_eq!((lw, lh), (257, 2));
         assert_eq!(
@@ -972,11 +1360,13 @@ mod tests {
     fn из_годных_копий_берётся_самая_мелкая() {
         let layout = Layout {
             tiled: true,
+            chunk: TILES,
             overviews: vec![
-                Overview { image: 3, width: 800, height: 800 },
-                Overview { image: 1, width: 3200, height: 3200 },
-                Overview { image: 2, width: 1600, height: 1600 },
+                Overview { image: 3, width: 800, height: 800, chunk: TILES },
+                Overview { image: 1, width: 3200, height: 3200, chunk: TILES },
+                Overview { image: 2, width: 1600, height: 1600, chunk: TILES },
             ],
+            stretch: RefCell::new(None),
         };
         let found = pick_source(&bare(6400, 6400), &layout, 800, 800);
         assert_eq!(found, (3, 800, 800), "годная мельче — та, что ровно под уровень");
@@ -986,7 +1376,12 @@ mod tests {
     /// собрался бы растягиванием, а не ужатием.
     #[test]
     fn копия_грубее_уровня_не_годится() {
-        let layout = Layout { tiled: true, overviews: vec![Overview { image: 1, width: 400, height: 400 }] };
+        let layout = Layout {
+            tiled: true,
+            chunk: TILES,
+            overviews: vec![Overview { image: 1, width: 400, height: 400, chunk: TILES }],
+            stretch: RefCell::new(None),
+        };
         let found = pick_source(&bare(1000, 1000), &layout, 500, 500);
         assert_eq!(found, (0, 1000, 1000), "уровню в 500 копия в 400 не годится");
     }
@@ -1022,6 +1417,9 @@ mod tests {
 
         assert!(lattice(node(0.0, 10.0, 50.0), node(9.0, 11.0, 500.0)).is_empty(), "широты нет");
         assert!(lattice(node(0.0, 10.0, 50.0), node(9.0, 400.0, 50.0)).is_empty(), "долготы нет");
+        // Круг у долготы шире, чем у широты, и подставлять их друг за друга
+        // нельзя: файл, пишущий долготу как 0…360, потерял бы решётку целиком.
+        assert_eq!(lattice(node(0.0, 10.0, 50.0), node(9.0, 359.0, 50.0)).len(), 2);
         assert!(
             lattice(node(0.0, 10.0, 50.0), node(9.0, f64::INFINITY, 50.0)).is_empty(),
             "бесконечная долгота"
@@ -1030,6 +1428,9 @@ mod tests {
             lattice(node(0.0, 10.0, 50.0), node(f64::NAN, 11.0, 50.0)).is_empty(),
             "пиксель, которого нет"
         );
+        let mut broken = node(0.0, 10.0, 50.0);
+        broken.extend(vec![9.0, f64::INFINITY, 0.0, 11.0, 50.0, 0.0]);
+        assert!(geo_ties(&geokeys(2), &broken, &[], &[], 10, 20).is_empty(), "строка, которой нет");
     }
 
     /// Углы, выведенные из опоры и шага, проверяются конечностью, а не кругом:
@@ -1043,6 +1444,8 @@ mod tests {
 
         let endless = vec![100.0, 200.0, 0.0, f64::INFINITY, 50.0, 0.0];
         assert!(geo_ties(&geokeys(2), &endless, &[0.5, 0.25, 0.0], &[], 10, 20).is_empty());
+        let northless = vec![100.0, 200.0, 0.0, 13.0, f64::INFINITY, 0.0];
+        assert!(geo_ties(&geokeys(2), &northless, &[0.5, 0.25, 0.0], &[], 10, 20).is_empty());
 
         // Матрица бывает конечной, а углы из неё — нет: члены её велики, и
         // произведение на сторону растра переполняется. Вырожденность такую не
@@ -1054,6 +1457,10 @@ mod tests {
             0.0, 0.0, 0.0, 1.0,
         ];
         assert!(geo_ties(&geokeys(2), &[], &[], &huge, 10, 20).is_empty());
+
+        // Та же матрица в проекционной ветви: члены конечны, определитель тоже,
+        // а дальний угол уходит в бесконечность.
+        assert!(geo_placement(&projected_keys(32638), &[], &[], &huge, 10, 20).is_none());
     }
 
     /// Решётка узлов проходит как есть: пиксель берётся из первых двух чисел
@@ -1255,7 +1662,7 @@ mod tests {
     #[test]
     fn a_projected_raster_reports_its_system_and_transform() {
         let points = vec![0.0, 0.0, 0.0, 499_536.218_75, 7_693_329.5, 0.0];
-        let found = geo_placement(&projected_keys(32638), &points, &[30.0, 30.0, 0.0], &[])
+        let found = geo_placement(&projected_keys(32638), &points, &[30.0, 30.0, 0.0], &[], 10, 20)
             .expect("привязка к зоне 38");
 
         assert_eq!(found.epsg, 32638);
@@ -1278,7 +1685,7 @@ mod tests {
     #[test]
     fn a_tiepoint_off_the_corner_places_the_whole_raster() {
         let points = vec![100.0, 200.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
-        let found = geo_placement(&projected_keys(32638), &points, &[30.0, 15.0, 0.0], &[])
+        let found = geo_placement(&projected_keys(32638), &points, &[30.0, 15.0, 0.0], &[], 10, 20)
             .expect("привязка");
 
         assert_eq!(found.affine[0], 30.0, "шаг на восток");
@@ -1309,7 +1716,7 @@ mod tests {
             0.0, 0.0, 0.0, 1.0,
         ];
         let found =
-            geo_placement(&projected_keys_raster(32638, 2), &[], &[], &matrix).expect("поворот");
+            geo_placement(&projected_keys_raster(32638, 2), &[], &[], &matrix, 10, 20).expect("поворот");
         assert_eq!(found.affine[2], 500_000.0 - 15.0, "полшага по второму члену");
         assert_eq!(found.affine[5], 7_000_000.0 - 15.0, "и по нему же в другой строке");
     }
@@ -1325,7 +1732,7 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, //
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(geo_placement(&projected_keys(32638), &[], &[], &shear).is_none());
+        assert!(geo_placement(&projected_keys(32638), &[], &[], &shear, 10, 20).is_none());
         assert!(geo_ties(&geokeys(2), &[], &[], &shear, 10, 10).is_empty());
     }
 
@@ -1336,13 +1743,13 @@ mod tests {
     fn a_transform_of_not_a_number_binds_nothing() {
         let points = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
         let sick_step = [f64::NAN, 30.0, 0.0];
-        assert!(geo_placement(&projected_keys(32638), &points, &sick_step, &[]).is_none(), "шаг");
+        assert!(geo_placement(&projected_keys(32638), &points, &sick_step, &[], 10, 20).is_none(), "шаг");
         assert!(geo_ties(&geokeys(2), &points, &sick_step, &[], 10, 10).is_empty(), "он же в градусах");
 
         // Шаг годен, а место названо не числом: рамка вышла бы целой с виду.
         let sick_tie = vec![0.0, 0.0, 0.0, f64::NAN, 7_000_000.0, 0.0];
         assert!(
-            geo_placement(&projected_keys(32638), &sick_tie, &[30.0, 30.0, 0.0], &[]).is_none(),
+            geo_placement(&projected_keys(32638), &sick_tie, &[30.0, 30.0, 0.0], &[], 10, 20).is_none(),
             "опорная точка"
         );
 
@@ -1352,7 +1759,7 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, //
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(geo_placement(&projected_keys(32638), &[], &[], &sick_matrix).is_none(), "матрица");
+        assert!(geo_placement(&projected_keys(32638), &[], &[], &sick_matrix, 10, 20).is_none(), "матрица");
     }
 
     /// Градусный файл проекцией не притворяется — и наоборот. Ветки
@@ -1363,14 +1770,14 @@ mod tests {
         let points = vec![0.0, 0.0, 0.0, 13.0, 1.0, 0.0];
         let step = [1.0 / 3600.0, 1.0 / 3600.0, 0.0];
 
-        assert!(geo_placement(&geokeys(2), &points, &step, &[]).is_none(), "градусы — не проекция");
+        assert!(geo_placement(&geokeys(2), &points, &step, &[], 10, 20).is_none(), "градусы — не проекция");
         assert!(!geo_ties(&geokeys(2), &points, &step, &[], 3600, 3600).is_empty());
 
         let metres = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
         let keys = projected_keys(32638);
         assert!(geo_ties(&keys, &metres, &[30.0, 30.0, 0.0], &[], 10, 10).is_empty(),
             "проекция — не градусы");
-        assert!(geo_placement(&keys, &metres, &[30.0, 30.0, 0.0], &[]).is_some());
+        assert!(geo_placement(&keys, &metres, &[30.0, 30.0, 0.0], &[], 10, 20).is_some());
     }
 
     /// Полпикселя середины снимается у проекции так же, как у градусной ветки:
@@ -1382,9 +1789,9 @@ mod tests {
         let points = vec![0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0];
         let step = [30.0, 30.0, 0.0];
 
-        let corner = geo_placement(&projected_keys_raster(32638, 1), &points, &step, &[])
+        let corner = geo_placement(&projected_keys_raster(32638, 1), &points, &step, &[], 10, 20)
             .expect("угол пикселя");
-        let middle = geo_placement(&projected_keys_raster(32638, 2), &points, &step, &[])
+        let middle = geo_placement(&projected_keys_raster(32638, 2), &points, &step, &[], 10, 20)
             .expect("середина пикселя");
 
         assert_eq!((corner.affine[2], corner.affine[5]), (500_000.0, 7_000_000.0));
@@ -1414,8 +1821,8 @@ mod tests {
             0.0, 0.0, 0.0, 1.0,
         ];
         let keys = projected_keys_raster(32638, 2);
-        let by_step = geo_placement(&keys, &points, &[step, step, 0.0], &[]).expect("шагом");
-        let by_matrix = geo_placement(&keys, &[], &[], &matrix).expect("матрицей");
+        let by_step = geo_placement(&keys, &points, &[step, step, 0.0], &[], 10, 20).expect("шагом");
+        let by_matrix = geo_placement(&keys, &[], &[], &matrix, 10, 20).expect("матрицей");
         assert_eq!(by_step.affine, by_matrix.affine);
     }
 
@@ -1430,7 +1837,7 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, //
             0.0, 0.0, 0.0, 1.0,
         ];
-        let found = geo_placement(&projected_keys(32638), &[], &[], &matrix).expect("поворот");
+        let found = geo_placement(&projected_keys(32638), &[], &[], &matrix, 10, 20).expect("поворот");
         assert_eq!((found.affine[0], found.affine[1]), (0.0, 30.0));
         assert_eq!((found.affine[3], found.affine[4]), (30.0, 0.0));
     }
@@ -1444,9 +1851,9 @@ mod tests {
         let step = [30.0, 30.0, 0.0];
         let bare = vec![1, 1, 0, 1, 1024, 0, 1, 1];
 
-        assert!(geo_placement(&bare, &points, &step, &[]).is_none(), "кода нет вовсе");
-        assert!(geo_placement(&projected_keys(32767), &points, &step, &[]).is_none(), "user-defined");
-        assert!(geo_placement(&projected_keys(0), &points, &step, &[]).is_none(), "ноль");
+        assert!(geo_placement(&bare, &points, &step, &[], 10, 20).is_none(), "кода нет вовсе");
+        assert!(geo_placement(&projected_keys(32767), &points, &step, &[], 10, 20).is_none(), "user-defined");
+        assert!(geo_placement(&projected_keys(0), &points, &step, &[], 10, 20).is_none(), "ноль");
     }
 
     /// Решётка опорных точек в метрах зоны — это отказ, а не привязка по
@@ -1459,7 +1866,7 @@ mod tests {
             0.0, 0.0, 0.0, 500_000.0, 7_000_000.0, 0.0, //
             100.0, 0.0, 0.0, 503_000.0, 7_000_100.0, 0.0,
         ];
-        assert!(geo_placement(&projected_keys(32638), &points, &[30.0, 30.0, 0.0], &[]).is_none());
+        assert!(geo_placement(&projected_keys(32638), &points, &[30.0, 30.0, 0.0], &[], 10, 20).is_none());
     }
 
     /// Вырожденное преобразование привязкой не является — ни в одной ветке и ни
@@ -1475,13 +1882,13 @@ mod tests {
             0.0, 0.0, 0.0, 1.0,
         ];
         for step in [[0.0, 30.0, 0.0], [30.0, 0.0, 0.0]] {
-            assert!(geo_placement(&projected_keys(32638), &points, &step, &[]).is_none(), "шаг");
+            assert!(geo_placement(&projected_keys(32638), &points, &step, &[], 10, 20).is_none(), "шаг");
             assert!(
                 geo_ties(&geokeys(2), &points, &step, &[], 10, 10).is_empty(),
                 "тот же нулевой шаг в градусах"
             );
         }
-        assert!(geo_placement(&projected_keys(32638), &[], &[], &flat).is_none(), "матрица");
+        assert!(geo_placement(&projected_keys(32638), &[], &[], &flat, 10, 20).is_none(), "матрица");
         assert!(geo_ties(&geokeys(2), &[], &[], &flat, 10, 10).is_empty(), "она же в градусах");
     }
 
@@ -1517,6 +1924,51 @@ mod tests {
         assert!(pixel(tiff::ColorType::CMYK(8)).is_err());
     }
 
+    /// Отказ по формату отсчёта и разворот чанка — одно правило, названное
+    /// дважды. Разойдись они, файл либо получил бы отказ над тем, что
+    /// читается, либо доехал бы до чтения ради отказа на первом чанке — а это
+    /// уже скачанные гигабайты.
+    ///
+    /// Пустые векторы годятся: `typed` смотрит на разновидность, а не на
+    /// содержимое.
+    #[test]
+    fn отказ_по_формату_сходится_с_разворотом_чанка() {
+        use tiff::decoder::DecodingResult as R;
+        let cases: [(u16, u8, DecodingResult); 9] = [
+            (1, 8, R::U8(Vec::new())),
+            (1, 16, R::U16(Vec::new())),
+            (2, 16, R::I16(Vec::new())),
+            (3, 32, R::F32(Vec::new())),
+            (1, 32, R::U32(Vec::new())),
+            (1, 64, R::U64(Vec::new())),
+            (2, 8, R::I8(Vec::new())),
+            (3, 16, R::F16(Vec::new())),
+            (3, 64, R::F64(Vec::new())),
+        ];
+        for (format, bits, data) in &cases {
+            assert_eq!(
+                sampled(*format, *bits),
+                typed(data).is_ok(),
+                "формат {format} по {bits} бит: описание и чанк разошлись"
+            );
+        }
+        // Комплексный отсчёт — тот самый Sentinel-1 SLC: свой разновидности у
+        // него в выходе декодера нет вовсе, и поймать его можно только здесь.
+        assert!(!sampled(5, 32), "комплексный целый");
+        assert!(!sampled(6, 64), "комплексный дробный");
+    }
+
+    /// Несжатый читается всегда, а сжатия, которого не собрано, в таблице нет.
+    /// Согласие таблицы с фичами крейта стережёт тест buildgen — здесь только
+    /// то, что она вообще спрашивается.
+    #[test]
+    fn сжатие_вне_таблицы_не_разбирается() {
+        assert!(decodable(1), "несжатый");
+        assert!(decodable(0xC350), "ZSTD — им сжат c_gls_LST");
+        assert!(!decodable(0xC351), "WebP в наборе не собран");
+        assert!(!decodable(34_887), "LERC крейт не знает ни под какой фичей");
+    }
+
     /// Обрезанный чанк кончается строкой, а не выходом за границу среза.
     /// Разница здесь не стилистическая: срез уронил бы инстанс трапом, после
     /// которого заказчик ждёт ответа, которого никто не пришлёт.
@@ -1530,5 +1982,382 @@ mod tests {
         let short = DecodingResult::U8(vec![7u8; 4 * 3]);
         let refused = chunk_rgba(&mapping, &short, Pixel::named(1), 4, 4).expect_err("чанк неполон");
         assert!(refused.contains("неполным"), "{}", refused);
+    }
+
+    /// Копия, расходящаяся с уровнем на пиксель округления, читается своей
+    /// сеткой: тайл берётся ровно там, где лежит, и занимает ровно чанк файла.
+    ///
+    /// Цена ошибки здесь не в виде картинки, а в скорости: пиксель, приписанный
+    /// области сверх нужного, делает её 513×513 и накрывает 2×2 чанка вместо
+    /// одного, а собираются они рядами, отстоящими на весь ряд чанков. Чтение
+    /// прыгает по файлу вперёд-назад на каждом тайле, хост читает это как
+    /// случайный доступ и сбрасывает разгон упреждающего чтения.
+    ///
+    /// Числа взяты у настоящего снимка: Sentinel-1 GRD COG 25309×9217, уровень
+    /// 1 (12655×4609) из копии 12654×4608.
+    #[test]
+    fn копия_в_пиксель_от_уровня_читается_своей_сеткой() {
+        let (lw, lh) = (12655u32, 4609u32);
+        let (sw, sh) = (12654u32, 4608u32);
+        let tile = |tx, ty| region_of((tx, ty), (TILE, TILE), (lw, lh), (sw, sh), true);
+
+        // Внутренний тайл: ровно тайл, ровно на границе чанка, окно — всё
+        // прочитанное.
+        let at = tile(3, 1);
+        assert_eq!((at.sx0, at.sx1), (3 * 512, 4 * 512));
+        assert_eq!((at.sy0, at.sy1), (512, 1024));
+        assert_eq!((at.window.x0, at.window.y0), (0.0, 0.0));
+        assert_eq!((at.window.x1, at.window.y1), (512.0, 512.0));
+
+        // Начало тайла кратно стороне чанка у всех столбцов и рядов — это и
+        // есть «один чанк на тайл».
+        for tx in 0..(lw.div_ceil(TILE) - 1) {
+            let at = tile(tx, 0);
+            assert_eq!(at.sx0 % u64::from(TILE), 0, "столбец {tx} съехал с границы чанка");
+            assert_eq!(at.sx1 - at.sx0, u64::from(TILE), "столбец {tx} шире тайла");
+        }
+
+        // И НИ ОДНОМУ тайлу сетки, включая краевые, не достаётся пустой
+        // области: пустая — это не пустой тайл, а отказ всего прохода, и с ним
+        // приговор всем его ячейкам разом.
+        for ty in 0..lh.div_ceil(TILE) {
+            for tx in 0..lw.div_ceil(TILE) {
+                let at = region_of(
+                    (tx, ty),
+                    (pyramid::tile_extent(tx, lw), pyramid::tile_extent(ty, lh)),
+                    (lw, lh),
+                    (sw, sh),
+                    true,
+                );
+                assert!(at.sx1 > at.sx0 && at.sy1 > at.sy0, "тайлу {tx}:{ty} не досталось пикселей");
+                assert!(at.sx1 <= u64::from(sw) && at.sy1 <= u64::from(sh), "тайл {tx}:{ty} за копией");
+            }
+        }
+
+        // А пропорциональный пересчёт — тот самый дефект: область на пиксель
+        // левее и на пиксель шире, то есть два чанка вместо одного.
+        let askew = region_of((3, 1), (TILE, TILE), (lw, lh), (sw, sh), false);
+        assert_eq!(askew.sx0, 3 * 512 - 1, "пересчёт не сдвинул область — проверять нечего");
+        assert_eq!(askew.sx1 - askew.sx0, u64::from(TILE) + 1, "область шириной не в тайл");
+    }
+
+    /// Краевой тайл копия не дотягивает на тот же пиксель, и растягивать его
+    /// нельзя: у него своя, короткая длина, а ресемпл доводит её до стороны
+    /// тайла — как и всякую краевую.
+    /// Ряд, которому на уровне досталась одна строка, а в копии не досталось
+    /// ни одной: сторона 4609 — это десять рядов, последний в один пиксель, а
+    /// копия кончается на 4608. Такому ряду отдаётся последняя строка копии.
+    ///
+    /// Ошибка здесь не косметическая: пустая область — отказ всего прохода, а
+    /// отказ приговаривает все его ячейки, и нижний ряд уровня не появился бы
+    /// уже никогда.
+    #[test]
+    fn ряду_за_краем_копии_достаётся_её_последняя_строка() {
+        let (lw, lh) = (12655u32, 4609u32);
+        let (sw, sh) = (12654u32, 4608u32);
+        let last = lh.div_ceil(TILE) - 1;
+        let th = pyramid::tile_extent(last, lh);
+        assert_eq!((last, th), (9, 1), "проверяется именно ряд в один пиксель");
+
+        let at = region_of((0, last), (TILE, th), (lw, lh), (sw, sh), true);
+        assert_eq!((at.sy0, at.sy1), (4607, 4608), "ряду не досталось ни строки");
+        assert_eq!(at.window.y1, 1.0);
+
+        // Тот же ряд у прежнего, пропорционального пути — та же строка: клэмп
+        // не выдумывает пикселей, а берёт те же, что брались всегда.
+        let askew = region_of((0, last), (TILE, th), (lw, lh), (sw, sh), false);
+        assert_eq!((askew.sy0, askew.sy1), (at.sy0, at.sy1));
+    }
+
+    #[test]
+    fn краевой_тайл_доводится_а_не_обрезается() {
+        let (lw, lh) = (12655u32, 4609u32);
+        let (sw, sh) = (12654u32, 4608u32);
+        let last = lw.div_ceil(TILE) - 1;
+        let tw = pyramid::tile_extent(last, lw);
+
+        let at = region_of((last, 0), (tw, TILE), (lw, lh), (sw, sh), true);
+        assert_eq!(at.sx1, u64::from(sw), "край области ушёл за копию");
+        assert_eq!(at.sx1 - at.sx0, u64::from(tw) - 1, "краевому досталось не то, что осталось");
+        assert_eq!(at.window.x1, (at.sx1 - at.sx0) as f64, "окно разошлось с прочитанным");
+    }
+
+    /// Дробная копия своей сеткой не читается: там пересчёт и есть правда, а
+    /// прочитанное шире тайла нарочно — усреднению нужен каждый задетый
+    /// пиксель.
+    #[test]
+    fn дробная_копия_читается_пересчётом() {
+        // Копия вдвое мельче уровня: тайл в 512 пикселей уровня — это 256
+        // пикселей копии, и ресемпл разворачивает их обратно.
+        let at = region_of((2, 0), (TILE, TILE), (2048, 2048), (1024, 1024), false);
+        assert_eq!((at.sx0, at.sx1), (512, 768), "половинная копия считается ровно вдвое");
+        assert_eq!(at.window.x1 - at.window.x0, 256.0, "тайлу принадлежит всё прочитанное");
+
+        // А трёхкратная копия даёт дробные границы, и прочитанное выходит шире
+        // окна — ровно та доля пикселя, ради которой границы и разводят.
+        let odd = region_of((1, 0), (TILE, TILE), (1536, 1536), (512, 512), false);
+        assert!(odd.sx1 - odd.sx0 >= 170, "прочитанное у́же задетого");
+        assert!(odd.window.x1 - odd.window.x0 <= (odd.sx1 - odd.sx0) as f64);
+    }
+
+    /// Окно не смеет обещать больше, чем отдаст `produce_direct`.
+    ///
+    /// Это главное его свойство, и цена ошибки здесь не «медленно», а «никогда»:
+    /// отказ по [`REGION_CAP`] валит ВЕСЬ проход, проход приговаривает все свои
+    /// ячейки разом (`Fetch::produced`), а лестницы у такого источника нет —
+    /// отступить на ступень грубее и добрать оттуда не выйдет. Уровень просто
+    /// не появляется.
+    ///
+    /// Проверяется обходом настоящей сетки, а не идеальным тайлом: границы
+    /// разводятся наружу, и худший тайл бывает на пиксель шире.
+    #[test]
+    fn окно_не_обещает_того_чего_проход_не_отдаст() {
+        let sizes = [
+            (25309u32, 17408u32), // Sentinel-1 GRD
+            (25437, 16709),       // он же другой нарезки
+            (8271, 8391),         // Landsat 7
+            (7681, 7801),
+            (10980, 10980), // Sentinel-2
+            (1025, 1025),   // сторона ровно на границе тайла плюс пиксель
+            (513, 3),
+        ];
+        for (w, h) in sizes {
+            let info = Info::plain(w, h, Kind::Png);
+            let layout = Layout { tiled: false, chunk: (w, 1), overviews: Vec::new(), stretch: RefCell::new(None) };
+            for level in 0..pyramid::level_count(w, h) {
+                if !windowed(&info, &layout, level) {
+                    continue;
+                }
+                let (lw, lh) =
+                    (pyramid::level_size(w, level).max(1), pyramid::level_size(h, level).max(1));
+                for ty in 0..lh.div_ceil(TILE) {
+                    for tx in 0..lw.div_ceil(TILE) {
+                        let at = region_of(
+                            (tx, ty),
+                            (pyramid::tile_extent(tx, lw), pyramid::tile_extent(ty, lh)),
+                            (lw, lh),
+                            (w, h),
+                            lw.abs_diff(w) <= 1 && lh.abs_diff(h) <= 1,
+                        );
+                        let (rw, rh) = (at.sx1 - at.sx0, at.sy1 - at.sy0);
+                        assert!(rw > 0 && rh > 0, "{w}x{h} уровень {level} тайл {tx}:{ty} пуст");
+                        assert!(
+                            rw * rh <= REGION_CAP,
+                            "{w}x{h} уровень {level}: окно обещало, а тайл {tx}:{ty} даёт {rw}x{rh}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Порог окна стои́т там, где полосы под тайл перестают влезать в кэш
+    /// чанков. Дальше соседний тайл того же ряда перечитывает их заново, и ряд
+    /// из семи тайлов обходится в семь чтений файла вместо одного — то есть
+    /// окно становится дороже прохода, который оно заменяет.
+    ///
+    /// Числа настоящие: Sentinel-1 GRD 25309×17408 без копий и без внутренних
+    /// тайлов. Полосы одного тайла — это его строки во всю ширину растра.
+    #[test]
+    fn порог_окна_стои́т_на_кэше_чанков() {
+        let (w, h) = (25309u32, 17408u32);
+        let info = Info::plain(w, h, Kind::Png);
+        let layout = Layout { tiled: false, chunk: (w, 1), overviews: Vec::new(), stretch: RefCell::new(None) };
+
+        let held = |level: u32| -> u64 {
+            let lh = pyramid::level_size(h, level).max(1);
+            let rh = (u64::from(TILE) * u64::from(h)).div_ceil(u64::from(lh)) + 1;
+            rh * u64::from(w) * 4
+        };
+
+        for level in 0..pyramid::level_count(w, h) {
+            let fits = held(level) <= CHUNK_CACHE_BYTES as u64;
+            assert_eq!(
+                windowed(&info, &layout, level),
+                fits,
+                "уровень {level}: полос на {} МБ при кэше {} МБ",
+                held(level) / (1024 * 1024),
+                CHUNK_CACHE_BYTES / (1024 * 1024)
+            );
+        }
+
+        // Вблизи окно есть, издали его нет — иначе правило не о чем.
+        assert!(windowed(&info, &layout, 0), "подробный уровень не взялся окном");
+        assert!(!windowed(&info, &layout, 4), "грубый уровень объявлен окном");
+    }
+
+    /// Тайловому файлу с ПОЛНОЙ цепочкой копий окно не кончается: у всякого
+    /// уровня своя копия, и область тайла в ней всегда ровно тайл.
+    #[test]
+    fn у_полной_цепочки_копий_окно_не_кончается() {
+        let info = Info::plain(25309, 17408, Kind::Png);
+        let overviews = (1..7)
+            .map(|level| Overview {
+                image: level as usize,
+                width: pyramid::level_size(25309, level),
+                height: pyramid::level_size(17408, level),
+                chunk: TILES,
+            })
+            .collect();
+        let layout =
+            Layout { tiled: true, chunk: TILES, overviews, stretch: RefCell::new(None) };
+
+        for level in 0..7 {
+            assert!(windowed(&info, &layout, level), "уровень {level} не взялся окном");
+        }
+    }
+
+    /// А оборванная цепочка окно кончает — и это главное, ради чего окно
+    /// спрашивают у файла с произвольным доступом вообще.
+    ///
+    /// `gdaladdo 2 4` кладёт две копии и на этом останавливается. Уровню,
+    /// которому досталась самая мелкая из них, область под тайл считается
+    /// пропорцией — и растёт вдвое с каждой недостающей ступенью, пока не
+    /// перевалит [`REGION_CAP`]. Дальше `produce_direct` отказал бы, отказ
+    /// свалил бы весь проход, а проход приговаривает свои ячейки разом: без
+    /// этой проверки уровень не появился бы уже никогда.
+    #[test]
+    fn оборванная_цепочка_копий_кончает_окно() {
+        let (w, h) = (65536u32, 65536u32);
+        let info = Info::plain(w, h, Kind::Png);
+        let layout = Layout {
+            tiled: true,
+            chunk: TILES,
+            overviews: vec![
+                Overview { image: 1, width: w / 2, height: h / 2, chunk: TILES },
+                Overview { image: 2, width: w / 4, height: h / 4, chunk: TILES },
+            ],
+            stretch: RefCell::new(None),
+        };
+
+        assert!(windowed(&info, &layout, 0), "нулевому уровню копия не нужна");
+        assert!(windowed(&info, &layout, 2), "уровню 2 досталась своя копия");
+
+        let top = pyramid::level_count(w, h) - 1;
+        assert!(
+            !windowed(&info, &layout, top),
+            "вершине копий не досталось — окном её брать нельзя"
+        );
+
+        // И то же самое глазами потребителя: `Info::windowed` считает уровни
+        // снизу и обязана остановиться там же.
+        let counted = Info::plain(w, h, Kind::Tiff(layout)).windowed();
+        assert!(counted > 0 && counted <= top, "точечных уровней {counted} при вершине {top}");
+    }
+
+    /// Выборка растяга — самая мелкая копия, а нет копий — базовый растр.
+    /// Правило это одно на оба рукава производства, и держится показ на том,
+    /// что ответ у файла один: посчитанный по разным копиям, растяг развёл бы
+    /// соседние тайлы одного уровня разной яркостью.
+    #[test]
+    fn выборка_растяга_берётся_из_самой_мелкой_копии() {
+        let (_, layout) = sentinel1_grdh();
+        let smallest = layout
+            .overviews
+            .iter()
+            .min_by_key(|overview| overview.width)
+            .expect("копии у гранулы есть");
+        assert_eq!(layout.stats(), smallest.image, "выборка — из самой мелкой копии");
+        assert_eq!(smallest.width, 414, "самая мелкая копия гранулы");
+
+        let bare = Layout { tiled: false, chunk: TILES, overviews: Vec::new(), stretch: RefCell::new(None) };
+        assert_eq!(bare.stats(), 0, "копий нет — выборка из базового растра");
+    }
+
+    /// Сколько чанков задевает область — считается формулой, а проверяется
+    /// перебором смещений. Пара эта обязана сойтись механически: занизив,
+    /// [`windowed`] обещает окно там, где память кончится посреди прохода;
+    /// завысив — гонит в проход уровень, который читался бы точечно.
+    ///
+    /// Своя сетка и чужая проверяются порознь: у своей начало кратно тайлу, и
+    /// перебирать надо только такие начала.
+    #[test]
+    fn задетые_чанки_сходятся_с_перебором_смещений() {
+        let tile = u64::from(TILE);
+        // Правда: сколько чанков накрывает область в `side` пикселей,
+        // начавшаяся на `start`.
+        let touched =
+            |start: u64, side: u64, chunk: u64| (start + side - 1) / chunk - start / chunk + 1;
+
+        for chunk in [1u64, 3, 5, 256, 512, 1024, 4096] {
+            for side in [1u64, 2, 3, 511, 512, 513, 1024, 1025, 4096] {
+                let source = 1u32 << 20;
+
+                // Чужая сетка: начало где угодно.
+                let worst = (0..chunk).map(|start| touched(start, side, chunk)).max().unwrap();
+                assert_eq!(
+                    spanned(side, chunk as u32, source, false),
+                    worst * chunk,
+                    "чужая сетка: чанк {chunk}, сторона {side}"
+                );
+
+                // Своя сетка — только там, где сетки соразмерны; иначе
+                // формула честно берёт худшее из всех смещений.
+                if chunk % tile != 0 && tile % chunk != 0 {
+                    assert_eq!(
+                        spanned(side, chunk as u32, source, true),
+                        worst * chunk,
+                        "несоразмерные сетки: чанк {chunk}, сторона {side}"
+                    );
+                    continue;
+                }
+                let flush = (0..chunk)
+                    .filter(|start| start % tile == 0)
+                    .map(|start| touched(start, side, chunk))
+                    .max()
+                    .expect("хотя бы начало нуль подходит всегда");
+                assert_eq!(
+                    spanned(side, chunk as u32, source, true),
+                    flush * chunk,
+                    "своя сетка: чанк {chunk}, сторона {side}"
+                );
+            }
+        }
+
+        // Чанков у копии конечное число — больше, чем есть, не задеть.
+        assert_eq!(spanned(4096, 512, 1000, false), 1024, "область шире копии");
+    }
+
+    /// Внутренний тайл вчетверо крупнее экранного — обычный вывод GDAL, и он
+    /// обязан оставаться оконным: экранный тайл своей сетки лежит целиком
+    /// внутри одного чанка, сколько бы тот ни был.
+    #[test]
+    fn крупный_внутренний_тайл_окна_не_отнимает() {
+        let (w, h) = (40000u32, 40000u32);
+        let info = Info::plain(w, h, Kind::Png);
+        let chunk = (4096u32, 4096u32);
+        let overviews = (1..7)
+            .map(|level| Overview {
+                image: level as usize,
+                width: pyramid::level_size(w, level),
+                height: pyramid::level_size(h, level),
+                chunk,
+            })
+            .collect();
+        let layout = Layout { tiled: true, chunk, overviews, stretch: RefCell::new(None) };
+
+        // Один чанк 4096² в RGBA — 64 МиБ, и это ровно половина кэша чанков:
+        // мерка обязана насчитать один, а не четыре.
+        assert!(windowed(&info, &layout, 0), "нулевой уровень своей сетки");
+        assert!(windowed(&info, &layout, 3), "уровень со своей копией");
+    }
+
+    /// Полосный файл, у которого полоса — весь растр (TIFF без `RowsPerStrip`
+    /// пишется одной полосой по спецификации), окном не берётся ни на одном
+    /// уровне: чанк распаковывается целиком, то есть «окно» в один тайл
+    /// разворачивает весь снимок.
+    #[test]
+    fn полоса_во_весь_растр_окна_не_даёт() {
+        let (w, h) = (8000u32, 8000u32);
+        let info = Info::plain(w, h, Kind::Png);
+        let whole =
+            Layout { tiled: false, chunk: (w, h), overviews: Vec::new(), stretch: RefCell::new(None) };
+        let rows =
+            Layout { tiled: false, chunk: (w, 512), overviews: Vec::new(), stretch: RefCell::new(None) };
+
+        for level in 0..pyramid::level_count(w, h) {
+            assert!(!windowed(&info, &whole, level), "уровень {level} обещал окно на целом растре");
+        }
+        assert!(windowed(&info, &rows, 0), "полоса в 512 строк окно даёт");
     }
 }

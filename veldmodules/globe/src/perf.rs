@@ -125,6 +125,14 @@ struct Burst {
     frame_spent: Duration,
     frame_passes: u32,
     worst: Duration,
+    /// Пересборки буфера патчей: сколько их было, сколько вершин собрано всего
+    /// и чего это стоило. Отдельно от обходов, потому что это другая работа и
+    /// другой порядок цены: обход считает ячейки, пересборка — вершины, и
+    /// сложенные в одно число они не дали бы различить дорогой жест от дорогой
+    /// сетки.
+    rebuilds: u32,
+    vertices: u64,
+    rebuild_spent: Duration,
 }
 
 #[derive(Default)]
@@ -154,6 +162,27 @@ impl Meter {
         burst.spent += spent;
         burst.frame_spent += spent;
         burst.frame_passes += 1;
+    }
+
+    /// Отметить пересборку буфера патчей: столько вершин собрано, столько это
+    /// стоило.
+    ///
+    /// Всплеска сама по себе не заводит и вне его теряется: пересборке
+    /// предшествует обход, и он его уже открыл, а заведённый ею одной всплеск
+    /// мерил бы длину от пересборки до тишины — это не жест.
+    ///
+    /// Пересборка, собравшая ноль вершин, пересборкой не считается. Такая
+    /// бывает ровно одна — та, что снимает последний слой, — и стоит она
+    /// ничего, а среднее по вершинам занижает вдвое.
+    pub fn rebuilt(&mut self, vertices: usize, spent: Duration) {
+        let burst = &mut self.burst;
+        if burst.began.is_none() || vertices == 0 {
+            return;
+        }
+        burst.rebuilds += 1;
+        burst.vertices += vertices as u64;
+        burst.rebuild_spent += spent;
+        burst.frame_spent += spent;
     }
 
     /// Отметить кадр и, когда всплеск кончился, отдать строку отчёта.
@@ -200,6 +229,17 @@ impl Meter {
 
 impl Burst {
     fn report(&self, lasted: Duration) -> String {
+        // Пересборка называется, только если была: у жеста над готовым набором
+        // её нет вовсе, и нули в строке читались бы как поломка.
+        let rebuilt = match self.rebuilds {
+            0 => String::new(),
+            _ => format!(
+                "; пересборок {}, вершин {} сред., на пересборку {:.1} мс",
+                self.rebuilds,
+                self.vertices / u64::from(self.rebuilds),
+                self.rebuild_spent.as_secs_f32() * 1000.0 / self.rebuilds as f32,
+            ),
+        };
         let named: Vec<String> = Pass::ALL
             .iter()
             .filter(|kind| self.passes[kind.at()] > 0)
@@ -207,7 +247,7 @@ impl Burst {
             .collect();
         let total: u32 = self.passes.iter().sum();
         format!(
-            "обход сетки: {:.2} с, {} кадров, {} обходов ({}), ячеек {}, из них видно {}; \
+            "обход сетки: {:.2} с, {} кадров, {} обходов ({}), ячеек {}, из них видно {}{}; \
              на кадр {:.1} мс, худший {:.1}",
             lasted.as_secs_f32(),
             self.frames,
@@ -215,6 +255,7 @@ impl Burst {
             named.join(", "),
             self.seen,
             self.visible,
+            rebuilt,
             // Знаменатель — кадры всплеска: доля от его длительности сказала
             // бы «сколько времени занято», а роняет кадр не доля, а миллисекунды
             // в нём.
@@ -304,6 +345,39 @@ mod tests {
         assert!(report.contains("3 обходов"), "общий счёт — сумма по поводам: {}", report);
         assert!(report.contains("ячеек 30"), "проверенное копится по обходам: {}", report);
         assert!(report.contains("видно 3"), "видимое копится тоже: {}", report);
+    }
+
+    /// Пересборка буфера патчей названа отдельно от обходов: обход считает
+    /// ячейки, пересборка — вершины, и стоит она на порядок больше. Слитые в
+    /// одно число, дорогой жест и дорогая варп-сетка были бы неразличимы, а
+    /// лечатся они разным.
+    ///
+    /// Пришедшая вне всплеска, она молчит: всплеск заводит обход, и мерка
+    /// длины у него от первого обхода до тишины.
+    #[test]
+    fn a_rebuild_is_counted_apart_from_the_walks() {
+        let start = Instant::now();
+        let mut meter = Meter::default();
+
+        meter.rebuilt(1_000, Duration::from_millis(9));
+        for step in 0..=QUIET_FRAMES + 2 {
+            let at = start + Duration::from_millis(16 * u64::from(step));
+            assert!(meter.frame(at).is_none(), "пересборка завела всплеск сама на {}-м кадре", step);
+        }
+
+        let mut meter = Meter::default();
+        meter.pass(Pass::Camera, &toll(10, 1), Duration::from_millis(1), start);
+        meter.rebuilt(600_000, Duration::from_millis(20));
+        meter.rebuilt(400_000, Duration::from_millis(10));
+        // Снятие последнего слоя — тоже пересборка, но собравшая ноль вершин:
+        // стои́т она ничего, а среднее по вершинам занижает вдвое.
+        meter.rebuilt(0, Duration::from_micros(5));
+        let report = quiet_out(&mut meter, start);
+        assert!(report.contains("пересборок 2"), "пересборки сосчитаны: {}", report);
+        assert!(report.contains("вершин 500000"), "вершины усреднены по ним же: {}", report);
+        assert!(report.contains("на пересборку 15.0 мс"), "цена усреднена: {}", report);
+        // И она же попадает в худший кадр: роняет его именно она.
+        assert!(report.contains("худший 31.0"), "пересборка не вошла в кадр: {}", report);
     }
 
     /// Худшее — сумма за кадр, а не самый долгий обход. Кадр роняет пара

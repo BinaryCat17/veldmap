@@ -53,6 +53,7 @@ pub(crate) fn reach_note(reach: Reach) -> &'static str {
         Reach::Exact => "произвольный доступ",
         Reach::Pyramid => "проход строит пирамиду целиком",
         Reach::Coarser => "проход на каждую ступень",
+        Reach::Windowed => "чтение окном, без промежуточных ступеней",
     }
 }
 
@@ -85,6 +86,8 @@ pub struct Meta {
     pub reach: Reach,
     /// Предел детали источника: подробнее него целью не бывает.
     pub finest: u32,
+    /// Сколько уровней от нулевого читаются точечно (см. [`pointwise`]).
+    pub windowed: u32,
 }
 
 impl Meta {
@@ -130,6 +133,7 @@ pub fn describe(msg: &crate::proto::Described) -> Result<Meta, String> {
         levels: msg.levels,
         reach: msg.reach(),
         finest: msg.finest,
+        windowed: msg.windowed,
     })
 }
 
@@ -471,6 +475,79 @@ pub fn working<K: PartialEq>(
     fetch.waiting() || passes.going(fingerprint) || want.is_some_and(Want::climbing)
 }
 
+/// Ход внутри ступени: чем двигать полосу и что о нём позволено сказать вслух.
+///
+/// Один ответ на обоих потребителей пирамиды, потому что вопрос у них один, а
+/// правило годности байт — не про показ, а про источник: сложенное у каждого
+/// своё, оно разошлось бы ровно там, где разойтись всего заметнее — в числах на
+/// экране против длины полосы под ними.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct Inside {
+    /// Доля ступени, 0..1.
+    pub share: f64,
+    /// Прочитано байт источника из скольки — ровно то, что позволено показать.
+    /// Нулевой знаменатель значит «мерить нечем», а не «ноль байт».
+    pub read: (u64, u64),
+}
+
+/// Этот уровень читается точечно — ровно заказанными кусками, а не проходом по
+/// файлу.
+///
+/// Одно понятие на три вопроса, и спрашивается оно про уровень, а не про род
+/// источника. Родом ответить нельзя: у одного и того же полосного файла
+/// подробный уровень идёт окном, а грубый — проходом, и что бы про него ни
+/// сказать целиком, для одной из половин это будет неправдой.
+///
+/// Три вопроса такие, и все они про то, что отдаёт проход:
+/// * годны ли его байты как мерка хода ([`readable`]) — у точечного чтения
+///   счётчик прочитанного водяной знак головы, а не объём;
+/// * откладывать ли промахи до его конца ([`Fetch::missed`]) — точечный кладёт
+///   в кэш только заказанное, проход кладёт всю пирамиду;
+/// * можно ли снять проход, ушедший из поля зрения ([`Pass::abandoned_by`]) —
+///   уехавшее место проход добудет заодно, а точечное чтение нет.
+pub fn pointwise(meta: &Meta, level: u32) -> bool {
+    level < meta.windowed
+}
+
+/// Считать ли байты прохода правдой о ходе.
+///
+/// Отказов два, и оба про источник, а не про показ.
+///
+/// * Точечное чтение — счётчик прочитанного там водяной знак головы чтения
+///   (`Metered` у тайлера), и при произвольном доступе он прыгает к концу файла
+///   с первого же окна: доля вышла бы почти единицей на пустом месте.
+/// * Прочитано во весь размер — так отвечает источник, который разбор читает
+///   целиком (NetCDF): байты сравнялись со знаменателем ещё до прохода, и
+///   дальше идёт декодирование, о котором они не говорят ничего. Взятые за
+///   долю, они держали бы полосу полной всю минуту работы.
+fn readable(pass: (u64, u64), pointwise: bool) -> bool {
+    let (read, total) = pass;
+    total > 0 && read < total && !pointwise
+}
+
+/// Ход внутри ступени по заказу и по байтам идущего прохода.
+///
+/// По большему из двух: ступень бывает в один тайл, а чтобы его отдать,
+/// последовательный источник читается целиком — по ячейкам всё это время
+/// сделано ровно ноль, и сказать о работе больше нечем. Пустой заказ значит
+/// «спрашивать было нечего»: ступень закрыта, и считать её недобранной было бы
+/// неправдой.
+pub fn inside(ordered: (u32, u32), pass: (u64, u64), pointwise: bool) -> Inside {
+    let read = match readable(pass, pointwise) {
+        true => pass,
+        false => (0, 0),
+    };
+    let by_bytes = match read {
+        (_, 0) => 0.0,
+        (read, total) => (read as f64 / total as f64).clamp(0.0, 1.0),
+    };
+    let share = match ordered.1 {
+        0 => 1.0,
+        total => (f64::from(ordered.0) / f64::from(total)).max(by_bytes).clamp(0.0, 1.0),
+    };
+    Inside { share, read }
+}
+
 /// Что нужно пирамиде прямо сейчас: цель, ступень к ней и её ячейки.
 ///
 /// Ответ один на обоих спрашивающих — на запрос тайлов и на сборку кадра:
@@ -570,6 +647,13 @@ fn rung(
 fn ladder(target: u32, top: u32, reach: Reach) -> Vec<u32> {
     let steps = match reach {
         Reach::Coarser => (target < top).then_some(top).into_iter().collect(),
+        // Окно: промежуточных ступеней нет ни одной — лестница из одной цели
+        // (её дописывает `chain` ниже). Всякая ступень грубее цели стои́т у
+        // такого источника целого файла, то есть дороже самой цели, и «показать
+        // грубое сразу» обернулось бы «показать поздно и дорого». Грубый край
+        // закрывает соседний растр (у Sentinel-1 квиклук), а нет соседа — сама
+        // цель, взятая проходом.
+        Reach::Windowed => Vec::new(),
         Reach::Pyramid | Reach::Exact => ((target + 1)..=top).rev().collect::<Vec<u32>>(),
     };
     steps.into_iter().chain([target]).collect()
@@ -626,6 +710,22 @@ impl Fetch {
     /// Пусто — либо всё нужное уже есть, либо просить нечего.
     pub(crate) fn waiting(&self) -> bool {
         !self.inflight.is_empty()
+    }
+
+    /// Эта ячейка едет прямо сейчас — то, чем показ метит грузящееся место на
+    /// картинке.
+    ///
+    /// Два живых ограничения, и оба нужны смотрящему. Отложенные за своим
+    /// проходом из ожидания не выпадают ([`Fetch::missed`]), поэтому признак
+    /// накрывает самое долгое, что бывает с ячейкой, — молчаливое чтение
+    /// последовательного источника; а при чужом проходе ячейка с ожидания
+    /// снимается, и работа тогда видна только слоевым [`working`].
+    ///
+    /// Приговорённые ячейки спрашивать не нужно: с ожидания их снимают тем же
+    /// движением, каким выносят приговор ([`Fetch::rejected`],
+    /// [`Fetch::produced`]), — иначе безнадёжная ячейка светилась бы вечно.
+    pub fn coming(&self, addr: Addr) -> bool {
+        self.inflight.contains(&addr)
     }
 
     /// Ячейка, которой не будет: проход, в который её отдали, сорвался.
@@ -698,8 +798,8 @@ impl Fetch {
     /// Всё, что в производство не пошло, снимается с ожидания: иначе следующий
     /// пересчёт сочтёт эти ячейки уже спрошенными и не переспросит никогда.
     ///
-    /// Кроме одного случая: пока идёт **наш** проход по источнику, который
-    /// отдаёт ровно заказанное ([`Reach::Exact`]), переспрашивать нечего —
+    /// Кроме одного случая: пока идёт **наш** проход, отдающий ровно
+    /// заказанное ([`pointwise`]), переспрашивать нечего —
     /// нового в кэше не появится, а пересчёт желаемого идёт на каждом кадре,
     /// и снятая ячейка уходила бы туда сотнями запросов об одном и том же.
     /// Такие откладываются, пока проход идёт, и отпускает их
@@ -718,13 +818,13 @@ impl Fetch {
         passes: &Passes<K>,
         fingerprint: &str,
         owner: &K,
-        reach: Reach,
+        pointwise: bool,
         asked: &[Addr],
         misses: impl IntoIterator<Item = Addr>,
         still_wanted: impl Fn(Addr) -> bool,
     ) -> Missed {
         let going = passes.going(fingerprint);
-        let ours = passes.mine(fingerprint, owner) && matches!(reach, Reach::Exact);
+        let ours = passes.mine(fingerprint, owner) && pointwise;
         let mut produce = Vec::new();
         for addr in misses {
             // Не из этого запроса — про него мы ничего не знаем.
@@ -851,6 +951,51 @@ struct Pass<K> {
     level: u32,
     /// Кто его завёл.
     owner: K,
+    /// Ячейки, ради которых проход затеян. Помнятся, чтобы отличить проход,
+    /// который ещё пригодится, от проходящего мимо: уровнем этого не сказать
+    /// (см. [`Pass::abandoned_by`]).
+    cells: Vec<Addr>,
+}
+
+impl<K> Pass<K> {
+    /// Проход не даёт этому взгляду ничего, и ждать его — потерянное время.
+    ///
+    /// Спрашивается это ячейками, а не уровнем, и разница здесь несущая. По
+    /// уровню отличить нельзя: ступень грубее нынешней — это ровно то, чем
+    /// пирамида и набирается, и объявив такой проход лишним, мы выбрасывали бы
+    /// каждую пройденную ступень. Ячейки отвечают точно: пройденная ступень
+    /// нужна, пока её тайлы — предки нынешних ячеек, и не нужна, когда ни один
+    /// из них не подходит ни под одну. Случается это не только от сдвига
+    /// камеры: приближение вчетверо в ту же самую точку оставляет за кадром
+    /// краевые ячейки прежней ступени, и заказанный по ним проход становится
+    /// работой в пустоту ровно так же.
+    ///
+    /// **Только там, где проход отдаёт ровно заказанное** ([`pointwise`]).
+    /// Иначе один проход кладёт в кэш всю пирамиду либо ступень и всё грубее
+    /// неё — то есть и то место, куда взгляд ушёл, — и посылка «он ничего не
+    /// даст» неверна. Цена ошибки как раз там и наибольшая: убийство роняет
+    /// инстанс тайлера, и прочитанный целиком NetCDF пришлось бы читать заново.
+    ///
+    /// Ступень **подробнее** нынешней сюда не идёт вовсе: она либо сама цель,
+    /// либо обнажившийся край, и объявить её лишней значило бы выбросить
+    /// только что заказанное.
+    ///
+    /// Пустой взгляд — не повод: считать по нему нечего (нет места под кадр,
+    /// слой скрыт), и всякий проход выглядел бы лишним.
+    fn abandoned_by(&self, want: &Want, pointwise: bool) -> bool {
+        if !pointwise {
+            return false;
+        }
+        // Пустые с любой стороны — судить нечем: о ячейках прохода не сказано
+        // либо считать по взгляду нечего.
+        if self.level <= want.level || want.cells.is_empty() || self.cells.is_empty() {
+            return false;
+        }
+        let up = self.level - want.level;
+        let covering: HashSet<Addr> =
+            want.cells.iter().map(|&(_, x, y)| (self.level, x >> up, y >> up)).collect();
+        !self.cells.iter().any(|cell| covering.contains(cell))
+    }
 }
 
 impl<K> Default for Passes<K> {
@@ -872,8 +1017,16 @@ impl<K: PartialEq> Passes<K> {
     }
 
     /// Проход начат.
-    pub fn begin(&mut self, fingerprint: &str, owner: K, correlation: String, level: u32) {
-        self.by_source.insert(fingerprint.to_string(), Pass { correlation, level, owner });
+    pub fn begin(
+        &mut self,
+        fingerprint: &str,
+        owner: K,
+        correlation: String,
+        level: u32,
+        cells: Vec<Addr>,
+    ) {
+        self.by_source
+            .insert(fingerprint.to_string(), Pass { correlation, level, owner, cells });
     }
 
     /// Проход, ставший бесполезным: он производит уровень **подробнее** того,
@@ -902,11 +1055,24 @@ impl<K: PartialEq> Passes<K> {
     /// в ожидании, и обнажившийся грубый край стои́т предком до конца прохода,
     /// а не заливается заново. Куплено этим то, что недочитанный хвост не
     /// выбрасывается.
-    pub fn stale(&mut self, fingerprint: &str, owner: &K, want: &Want) -> Option<String> {
-        let stale = self
-            .by_source
-            .get(fingerprint)
-            .is_some_and(|pass| &pass.owner == owner && pass.level < want.target);
+    ///
+    /// Второй повод — проход, производящий место, на которое больше никто не
+    /// смотрит ([`Pass::abandoned_by`]), и только у источника, отдающего ровно
+    /// заказанное. Ждать его нечего вдвойне: он и сам ничего не даст, и держит
+    /// за собой весь источник — заказ, оформленный вслед за ним, простаивает до
+    /// его конца, а взгляд за это время уходит ещё дальше, и половина
+    /// заказанного выбрасывается неспрошенной.
+    pub fn stale(
+        &mut self,
+        fingerprint: &str,
+        owner: &K,
+        want: &Want,
+        pointwise: bool,
+    ) -> Option<String> {
+        let stale = self.by_source.get(fingerprint).is_some_and(|pass| {
+            &pass.owner == owner
+                && (pass.level < want.target || pass.abandoned_by(want, pointwise))
+        });
         match stale {
             true => self.by_source.remove(fingerprint).map(|pass| pass.correlation),
             false => None,
@@ -1045,7 +1211,7 @@ mod tests {
 
         // Идущий проход — чей угодно: свои ячейки он добудет заодно, и ждать
         // всё равно его.
-        passes.begin("fp", "сосед", "c1".into(), 0);
+        passes.begin("fp", "сосед", "c1".into(), 0, Vec::new());
         assert!(working(&fetch, &passes, "fp", Some(&done)));
         assert!(!working(&fetch, &passes, "другой", Some(&done)), "проход по чужому источнику");
         passes.finish("c1");
@@ -1270,19 +1436,19 @@ mod tests {
         let mut passes = passes();
 
         let ask = fetch.ask(&store, "s", cells(2, 0..2, 0..1)).expect("кэш спрашивают всегда");
-        passes.begin("s", "сосед", "c1".into(), 2);
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true), Missed::Waiting));
+        passes.begin("s", "сосед", "c1".into(), 2, Vec::new());
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true), Missed::Waiting));
         // Чужой проход наших ожиданий не снимет — их снимаем сами, и они
         // спросятся заново.
         assert!(fetch.ask(&store, "s", cells(2, 0..2, 0..1)).is_some());
 
         // Проход того же уровня — не устаревший; грубее нужного — тоже: его
         // тайлами ячейку нарисуют предком.
-        assert!(passes.stale("s", &"сосед", &want_at(2, 2)).is_none());
-        assert!(passes.stale("s", &"сосед", &want_at(1, 1)).is_none(), "проход грубее нужного ещё пригодится");
+        assert!(passes.stale("s", &"сосед", &want_at(2, 2), true).is_none());
+        assert!(passes.stale("s", &"сосед", &want_at(1, 1), true).is_none(), "проход грубее нужного ещё пригодится");
         // А подробнее нужного — устаревший: такими тайлами грубую ячейку не
         // нарисовать.
-        assert_eq!(passes.stale("s", &"сосед", &want_at(3, 3)).as_deref(), Some("c1"));
+        assert_eq!(passes.stale("s", &"сосед", &want_at(3, 3), true).as_deref(), Some("c1"));
         assert!(!passes.going("s"));
     }
 
@@ -1319,16 +1485,16 @@ mod tests {
     #[test]
     fn откат_на_грубую_ступень_не_отменяет_проход_по_цели() {
         let mut passes = passes();
-        passes.begin("s", "сосед", "c1".into(), 2);
+        passes.begin("s", "сосед", "c1".into(), 2, Vec::new());
 
         assert!(
-            passes.stale("s", &"сосед", &want_at(2, 5)).is_none(),
+            passes.stale("s", &"сосед", &want_at(2, 5), true).is_none(),
             "цель прежняя — проход по ней ещё нужен, какой бы ни была ступень"
         );
         assert!(passes.going("s"), "и он идёт дальше");
 
         // А отъезд камеры — это смена самой цели, и вот он проход убивает.
-        assert_eq!(passes.stale("s", &"сосед", &want_at(3, 3)).as_deref(), Some("c1"));
+        assert_eq!(passes.stale("s", &"сосед", &want_at(3, 3), true).as_deref(), Some("c1"));
     }
 
     /// Снимает проход только тот, кто его завёл: проход читает не «файл», а
@@ -1336,9 +1502,9 @@ mod tests {
     #[test]
     fn чужой_проход_не_снимают() {
         let mut passes = passes();
-        passes.begin("s", "первый", "c1".into(), 0);
+        passes.begin("s", "первый", "c1".into(), 0, Vec::new());
 
-        assert!(passes.stale("s", &"второй", &want_at(3, 3)).is_none(), "проход не его");
+        assert!(passes.stale("s", &"второй", &want_at(3, 3), true).is_none(), "проход не его");
         assert!(passes.abandon("s", &"второй").is_none(), "и уносить его не второму");
         assert!(passes.going("s"));
         assert_eq!(passes.abandon("s", &"первый").as_deref(), Some("c1"));
@@ -1349,10 +1515,10 @@ mod tests {
     #[test]
     fn поздний_конец_не_сносит_нового_прохода() {
         let mut passes = passes();
-        passes.begin("s", "первый", "c1".into(), 0);
+        passes.begin("s", "первый", "c1".into(), 0, Vec::new());
         assert_eq!(passes.abandon("s", &"первый").as_deref(), Some("c1"));
 
-        passes.begin("s", "второй", "c2".into(), 0);
+        passes.begin("s", "второй", "c2".into(), 0, Vec::new());
         passes.finish("c1");
         assert!(passes.going("s"), "проход c2 жив");
         passes.finish("c2");
@@ -1387,10 +1553,10 @@ mod tests {
         let mut fetch = Fetch::default();
         let ask = fetch.ask(&store, "s", cells(0, 0..3, 0..1)).expect("запрос");
 
-        let produce = fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |addr| addr.1 == 0);
+        let produce = fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |addr| addr.1 == 0);
         assert!(matches!(produce, Missed::Produce(cells) if cells == vec![(0, 0, 0)]));
         // Чужой промах не наш: про него мы ничего не знаем.
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, [(0, 9, 9)], |_| true), Missed::Closed));
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", true, &ask, [(0, 9, 9)], |_| true), Missed::Closed));
 
         let again = fetch.ask(&store, "s", cells(0, 0..3, 0..1)).expect("отсеянные вернулись");
         assert_eq!(again, vec![(0, 1, 0), (0, 2, 0)]);
@@ -1406,9 +1572,9 @@ mod tests {
         let mut fetch = Fetch::default();
         let ask = fetch.ask(&store, "s", cells(0, 0..2, 0..1)).expect("запрос");
 
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, [], |_| true), Missed::Closed));
-        passes.begin("s", "сосед", "c1".into(), 0);
-        assert!(matches!(fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true), Missed::Waiting));
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", true, &ask, [], |_| true), Missed::Closed));
+        passes.begin("s", "сосед", "c1".into(), 0, Vec::new());
+        assert!(matches!(fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true), Missed::Waiting));
     }
 
     /// Пока идёт свой проход, промахи не переспрашиваются: по источнику всё
@@ -1423,9 +1589,9 @@ mod tests {
         let want = cells(2, 0..2, 0..1);
 
         let ask = fetch.ask(&store, "s", want.clone()).expect("первый заказ уходит");
-        passes.begin("s", "мы", "c1".into(), 2);
+        passes.begin("s", "мы", "c1".into(), 2, Vec::new());
         assert!(matches!(
-            fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true),
+            fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true),
             Missed::Waiting
         ));
 
@@ -1447,8 +1613,8 @@ mod tests {
         let want = cells(2, 0..1, 0..1);
 
         let ask = fetch.ask(&store, "s", want.clone()).expect("заказ");
-        passes.begin("s", "мы", "c1".into(), 2);
-        fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true);
+        passes.begin("s", "мы", "c1".into(), 2, Vec::new());
+        fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true);
 
         // Ни удачный конец, ни сорвавшийся откладывания не трогают: пока
         // проход идёт, ждать по-прежнему есть чего.
@@ -1472,8 +1638,8 @@ mod tests {
         let want = cells(2, 0..1, 0..1);
 
         let ask = fetch.ask(&store, "s", want.clone()).expect("первый заказ");
-        passes.begin("s", "мы", "c1".into(), 2);
-        fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true);
+        passes.begin("s", "мы", "c1".into(), 2, Vec::new());
+        fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true);
         fetch.resume();
 
         assert_eq!(fetch.ask(&store, "s", want.clone()), Some(want.clone()));
@@ -1494,9 +1660,9 @@ mod tests {
         let want = cells(2, 0..1, 0..1);
 
         let ask = fetch.ask(&store, "s", want.clone()).expect("заказ");
-        passes.begin("s", "мы", "c1".into(), 2);
+        passes.begin("s", "мы", "c1".into(), 2, Vec::new());
         assert!(matches!(
-            fetch.missed(&passes, "s", &"мы", Reach::Pyramid, &ask, ask.clone(), |_| true),
+            fetch.missed(&passes, "s", &"мы", false, &ask, ask.clone(), |_| true),
             Missed::Waiting
         ));
 
@@ -1513,8 +1679,8 @@ mod tests {
         let want = cells(2, 0..1, 0..1);
 
         let ask = fetch.ask(&store, "s", want.clone()).expect("заказ");
-        passes.begin("s", "мы", "c1".into(), 2);
-        fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true);
+        passes.begin("s", "мы", "c1".into(), 2, Vec::new());
+        fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true);
 
         fetch.reset();
         // Новый источник, тот же адрес: заказ уходит и честно ждёт ответа.
@@ -1534,9 +1700,9 @@ mod tests {
         let want = cells(2, 0..2, 0..1);
 
         let ask = fetch.ask(&store, "s", want.clone()).expect("первый заказ уходит");
-        passes.begin("s", "сосед", "c1".into(), 2);
+        passes.begin("s", "сосед", "c1".into(), 2, Vec::new());
         assert!(matches!(
-            fetch.missed(&passes, "s", &"мы", Reach::Exact, &ask, ask.clone(), |_| true),
+            fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true),
             Missed::Waiting
         ));
 
@@ -1599,4 +1765,258 @@ mod tests {
         fetch.produced(&ask, false);
         assert!(fetch.ask(&store, "s", cells(0, 0..2, 0..1)).is_some());
     }
+
+    /// Едущая ячейка светится, приговорённая — нет. Спрашивают об этом ровно
+    /// для того, чтобы пометить грузящееся место на картинке, и вечно
+    /// светящаяся ячейка была бы там хуже молчания.
+    #[test]
+    fn едущая_ячейка_видна_а_приговорённая_нет() {
+        let store = Store::new(1 << 30);
+        let mut fetch = Fetch::default();
+        let ask = fetch.ask(&store, "s", cells(0, 0..2, 0..1)).expect("запрос");
+        assert!(fetch.coming(ask[0]) && fetch.coming(ask[1]), "спрошенное едет");
+
+        fetch.arrived(ask[0]);
+        assert!(!fetch.coming(ask[0]), "приехавшее не едет");
+        fetch.rejected(ask[1]);
+        assert!(!fetch.coming(ask[1]), "приговорённое не едет");
+
+        // Смена источника забывает всё: помнилось это про прежний.
+        let mut fetch = Fetch::default();
+        let ask = fetch.ask(&store, "s", cells(0, 0..1, 0..1)).expect("запрос");
+        fetch.reset();
+        assert!(!fetch.coming(ask[0]));
+    }
+
+    /// Отложенная за своим проходом ячейка светится всё время прохода — и это
+    /// главное, ради чего признак заведён: у источника, отдающего ровно
+    /// заказанное, между запросом и тайлом лежит всё чтение файла.
+    #[test]
+    fn отложенная_за_своим_проходом_светится_до_его_конца() {
+        let store = Store::new(1 << 30);
+        let mut passes: Passes<&str> = Passes::default();
+        let mut fetch = Fetch::default();
+        let ask = fetch.ask(&store, "s", cells(0, 0..1, 0..1)).expect("запрос");
+
+        passes.begin("s", "мы", "c".to_string(), 0, Vec::new());
+        let missed =
+            fetch.missed(&passes, "s", &"мы", true, &ask, ask.clone(), |_| true);
+        assert!(matches!(missed, Missed::Waiting));
+        assert!(fetch.coming(ask[0]), "ждём свой проход, а не молчим");
+
+        // Отпускает её отсутствие прохода, а не его конец, — и вместе с
+        // ожиданием гаснет и свечение.
+        passes.finish("c");
+        fetch.resume();
+        assert!(!fetch.coming(ask[0]));
+    }
+
+    /// Байты годны не всегда, и оба отказа — про источник, а не про показ.
+    #[test]
+    fn байты_прохода_годны_не_у_всякого_источника() {
+        // Обычный последовательный проход: байты и есть весь ход.
+        let said = inside((0, 4), (3 << 20, 12 << 20), false);
+        assert_eq!(said.read, (3 << 20, 12 << 20), "их и покажут");
+        assert!((said.share - 0.25).abs() < 1e-9, "четверть файла — четверть ступени");
+
+        // Произвольный доступ: счётчик там водяной знак головы чтения, и с
+        // первого же окна он у конца файла.
+        let said = inside((0, 4), (11 << 20, 12 << 20), true);
+        assert_eq!(said.read, (0, 0), "мерить нечем");
+        assert_eq!(said.share, 0.0, "и в долю они не идут");
+
+        // Разбор прочитал файл целиком: байты сравнялись со знаменателем ещё
+        // до прохода, а впереди декодирование.
+        let said = inside((0, 1), (12 << 20, 12 << 20), false);
+        assert_eq!(said.read, (0, 0));
+        assert_eq!(said.share, 0.0, "полная полоса означала бы «готово»");
+    }
+
+    /// Ход внутри ступени берётся по большему из двух, а пустой заказ значит
+    /// «ступень закрыта», а не «сделано ноль».
+    #[test]
+    fn ход_ступени_берётся_по_большему_из_двух() {
+        // Ячеек добыто больше, чем прочитано байт, — считаем по ячейкам.
+        let said = inside((3, 4), (1 << 20, 12 << 20), false);
+        assert!((said.share - 0.75).abs() < 1e-9);
+
+        // И наоборот: ступень в один тайл, а файл читается насквозь.
+        let said = inside((0, 1), (6 << 20, 12 << 20), false);
+        assert!((said.share - 0.5).abs() < 1e-9);
+
+        // Спрашивать было нечего.
+        assert_eq!(inside((0, 0), (0, 0), false).share, 1.0);
+
+        // Выше единицы доля не поднимается, чем бы её ни считали.
+        assert!(inside((5, 4), (0, 0), false).share <= 1.0 + 1e-9);
+    }
+
+    /// Пройденная ступень не устаревает, пока камера стои́т: её тайлы — предки
+    /// нынешних ячеек, и ими же ячейка и рисуется, пока свой тайл едет.
+    ///
+    /// А стои́т камере уехать — и тот же самый проход производит место, на
+    /// которое никто не смотрит. Ждать его вдвойне нечего: он и сам ничего не
+    /// даст, и держит за собой весь источник, пока заказ по нынешнему взгляду
+    /// стои́т в очереди.
+    #[test]
+    fn пройденная_ступень_устаревает_уехавшей_камерой_а_не_уровнем() {
+        let mut passes: Passes<&str> = Passes::default();
+        // Проход по ступени 1 добывает четыре ячейки над одним местом.
+        let serving = cells(1, 10..12, 0..2);
+        let want_at = |level: u32, cells: Vec<Addr>| Want {
+            level,
+            target: 0,
+            cells,
+            steps: 2,
+            climbed: 1,
+        };
+
+        // Камера стои́т: ячейки нулевого уровня лежат ровно под добываемыми.
+        passes.begin("s", "мы", "c1".into(), 1, serving.clone());
+        let under = cells(0, 20..24, 0..4);
+        assert!(
+            passes.stale("s", &"мы", &want_at(0, under), true).is_none(),
+            "выброшена ступень, которой рисуется нынешняя ячейка"
+        );
+
+        // Камера уехала: те же четыре ячейки теперь ни одну нынешнюю не
+        // накрывают.
+        let elsewhere = cells(0, 200..204, 0..4);
+        assert_eq!(
+            passes.stale("s", &"мы", &want_at(0, elsewhere), true).as_deref(),
+            Some("c1"),
+            "проход мимо взгляда держит очередь за собой"
+        );
+        assert!(!passes.going("s"));
+    }
+
+    /// Ступень подробнее нынешней не выбрасывается ячейками никогда: это либо
+    /// сама цель, либо обнажившийся край, и объявить её лишней значило бы
+    /// выбросить только что заказанное. Её судит прежнее правило — по цели.
+    #[test]
+    fn ступень_подробнее_нынешней_ячейками_не_судится() {
+        let mut passes: Passes<&str> = Passes::default();
+        passes.begin("s", "мы", "c1".into(), 0, cells(0, 0..2, 0..2));
+
+        // Ступень отступила на грубую — проход по цели остаётся.
+        let retreated =
+            Want { level: 2, target: 0, cells: cells(2, 90..92, 0..2), steps: 3, climbed: 1 };
+        assert!(passes.stale("s", &"мы", &retreated, true).is_none(), "выброшен проход по самой цели");
+
+        // А вот цель, ушедшая грубее прохода, его и снимает — прежним правилом.
+        let coarser =
+            Want { level: 3, target: 3, cells: cells(3, 0..1, 0..1), steps: 1, climbed: 0 };
+        assert_eq!(passes.stale("s", &"мы", &coarser, true).as_deref(), Some("c1"));
+    }
+
+    /// Судить не по чему — не повод убивать: пустой взгляд бывает у скрытого
+    /// слоя и у вкладки без места под кадр, и всякий проход выглядел бы там
+    /// лишним.
+    #[test]
+    fn пустой_взгляд_прохода_не_снимает() {
+        let mut passes: Passes<&str> = Passes::default();
+        passes.begin("s", "мы", "c1".into(), 1, cells(1, 10..12, 0..2));
+
+        let blind = Want { level: 0, target: 0, cells: Vec::new(), steps: 2, climbed: 1 };
+        assert!(passes.stale("s", &"мы", &blind, true).is_none());
+
+        // И чужой проход не трогается, как бы далеко ни уехала наша камера:
+        // сосед читает свой источник, и выброшенное им пришлось бы читать
+        // заново обоим.
+        let elsewhere =
+            Want { level: 0, target: 0, cells: cells(0, 900..902, 0..2), steps: 2, climbed: 1 };
+        assert!(passes.stale("s", &"сосед", &elsewhere, true).is_none());
+        assert!(passes.going("s"));
+    }
+
+    /// Проход, который кладёт в кэш больше заказанного (NetCDF, PNG, а у
+    /// полосного TIFF — грубая ступень), правилом про брошенный проход не
+    /// судится и судиться не должен: он добудет и то место, куда ушёл взгляд.
+    ///
+    /// Цена ошибки здесь наибольшая: убийство роняет инстанс тайлера, и
+    /// прочитанный целиком NetCDF пришлось бы читать заново — те самые минуты,
+    /// ради которых у него и стои́т потолок размера.
+    #[test]
+    fn проход_кладущий_больше_заказанного_ячейками_не_судится() {
+        let mut passes: Passes<&str> = Passes::default();
+        let want_at = |level: u32, cells: Vec<Addr>| Want {
+            level,
+            target: 0,
+            cells,
+            steps: 2,
+            climbed: 1,
+        };
+        let elsewhere = want_at(0, cells(0, 200..204, 0..4));
+
+        passes.begin("s", "мы", "c1".into(), 1, cells(1, 10..12, 0..2));
+        assert!(
+            passes.stale("s", &"мы", &elsewhere, false).is_none(),
+            "выброшен проход, который добудет и уехавшее место"
+        );
+        passes.finish("c1");
+
+        // А тот же самый проход у источника, отдающего ровно заказанное,
+        // снимается — ему уехавшее место и правда не достанется.
+        passes.begin("s", "мы", "c1".into(), 1, cells(1, 10..12, 0..2));
+        assert_eq!(passes.stale("s", &"мы", &elsewhere, true).as_deref(), Some("c1"));
+    }
+
+    /// У источника, читаемого окном, лестницы нет: всякая ступень грубее цели
+    /// стои́т ему целого файла, то есть дороже самой цели. «Показать грубое
+    /// сразу» обернулось бы «показать поздно и дорого».
+    ///
+    /// Числа настоящие: Sentinel-1 GRD 25309×17408 — семь уровней. У пирамиды
+    /// подробную картинку пришлось бы ждать через шесть ступеней, каждая из
+    /// которых читает файл насквозь; окном она берётся сразу.
+    #[test]
+    fn у_окна_лестницы_нет() {
+        let steps = |reach| ladder(0, 6, reach).len();
+        assert_eq!(steps(Reach::Windowed), 1, "окно полезло на грубые ступени");
+        assert_eq!(steps(Reach::Pyramid), 7, "у пирамиды ступени все");
+        assert_eq!(steps(Reach::Exact), 7);
+        assert_eq!(steps(Reach::Coarser), 2, "вершина и цель");
+
+        // Целью лестница кончается всегда — ступать дальше некуда.
+        assert_eq!(ladder(3, 6, Reach::Windowed), vec![3]);
+        assert_eq!(ladder(6, 6, Reach::Windowed), vec![6], "цель и есть вершина");
+    }
+
+    /// Байты честны у прохода и лгут у точечного чтения, и у ОДНОГО источника
+    /// бывает и то и другое: полосный TIFF отдаёт подробную ступень окном, а
+    /// грубую — проходом по файлу. Поэтому спрашивают не род источника, а
+    /// уровень.
+    ///
+    /// Это и есть та половина, которую легко потерять: объяви весь такой
+    /// источник точечным — и полоса загрузки встанет на нуле на всё чтение
+    /// двухгигабайтной гранулы, то есть ровно там, где она нужнее всего.
+    #[test]
+    fn байты_честны_у_прохода_и_лгут_у_точечного_чтения() {
+        let meta = |windowed| Meta {
+            fingerprint: "fp".into(),
+            width: 25309,
+            height: 17408,
+            levels: 7,
+            reach: Reach::Windowed,
+            finest: 0,
+            windowed,
+        };
+
+        // Уровни 0 и 1 читаются окном, дальше — проходом.
+        let source = meta(2);
+        assert!(pointwise(&source, 0) && pointwise(&source, 1), "подробное не окном");
+        assert!(!pointwise(&source, 2) && !pointwise(&source, 6), "грубое объявлено окном");
+
+        // И байты идут наружу ровно там, где их считал проход.
+        let bytes = (3 << 20, 12 << 20);
+        assert_eq!(inside((0, 4), bytes, pointwise(&source, 2)).read, bytes, "проход молчит");
+        assert_eq!(inside((0, 4), bytes, pointwise(&source, 0)).read, (0, 0), "окно врёт байтами");
+
+        // У источника, который весь читается проходом, окна нет ни на одном
+        // уровне; у произвольного доступа — на всех.
+        let pass = meta(0);
+        assert!((0..7).all(|level| !pointwise(&pass, level)));
+        let random = meta(7);
+        assert!((0..7).all(|level| pointwise(&random, level)));
+    }
+
 }

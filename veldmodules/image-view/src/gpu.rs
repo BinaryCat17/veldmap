@@ -20,6 +20,13 @@ use veldsdk::graphics::{
 pub struct Vertex {
     pub pos: [f32; 2],
     pub uv: [f32; 2],
+    /// Насколько сильно место этой ячейки подкрашено синевой ряби, 0..1.
+    ///
+    /// Готовой величиной, а не фазой с признаком, как у шара: сетка канвы
+    /// переписывается каждым кадром целиком, и волну дешевле испечь на месте,
+    /// чем везти в шейдер две величины ради того же самого. У шара сетка живёт
+    /// между кадрами — там иначе и нельзя.
+    pub glow: f32,
 }
 
 /// Квад одного тайла: прямоугольник кадра, кусок текстуры и её привязка.
@@ -29,6 +36,8 @@ pub struct Quad {
     /// u0, v0, u1, v1.
     pub uv: [f32; 4],
     pub bind: BindGroupId,
+    /// Сила ряби на этой ячейке (см. [`Vertex::glow`]).
+    pub glow: f32,
 }
 
 pub struct Device {
@@ -66,6 +75,7 @@ impl Device {
                 attributes: gfx::packed_attributes(&[
                     VertexFormat::VtxFloat32x2,
                     VertexFormat::VtxFloat32x2,
+                    VertexFormat::VtxFloat32,
                 ]),
             }],
             bind_group_layout_ids: vec![tile_layout.id()],
@@ -125,13 +135,14 @@ pub fn render(
     for quad in quads {
         let [x0, y0, x1, y1] = quad.rect;
         let [u0, v0, u1, v1] = quad.uv;
+        let glow = quad.glow;
         let corners = [
-            Vertex { pos: [x0, y0], uv: [u0, v0] },
-            Vertex { pos: [x1, y0], uv: [u1, v0] },
-            Vertex { pos: [x0, y1], uv: [u0, v1] },
-            Vertex { pos: [x1, y0], uv: [u1, v0] },
-            Vertex { pos: [x1, y1], uv: [u1, v1] },
-            Vertex { pos: [x0, y1], uv: [u0, v1] },
+            Vertex { pos: [x0, y0], uv: [u0, v0], glow },
+            Vertex { pos: [x1, y0], uv: [u1, v0], glow },
+            Vertex { pos: [x0, y1], uv: [u0, v1], glow },
+            Vertex { pos: [x1, y0], uv: [u1, v0], glow },
+            Vertex { pos: [x1, y1], uv: [u1, v1], glow },
+            Vertex { pos: [x0, y1], uv: [u0, v1], glow },
         ];
         mesh.extend_from_slice(&corners);
     }
@@ -149,4 +160,39 @@ pub fn render(
         }
     }
     recorder.submit(&target.view)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Раскладка вершины и её длина считаются в двух разных местах: шаг берётся
+    /// из `size_of`, а смещения — из перечня форматов. Разъедься они — пайплайн
+    /// соберётся, кадр запишется, а на канве окажется пустое место: имени у неё
+    /// нет, обходу разметки она себя не объявляет, и сценарию такой отказ не
+    /// виден вовсе.
+    #[test]
+    fn раскладка_вершины_сходится_с_её_шагом() {
+        let attributes = gfx::packed_attributes(&[
+            VertexFormat::VtxFloat32x2,
+            VertexFormat::VtxFloat32x2,
+            VertexFormat::VtxFloat32,
+        ]);
+        let spanned = attributes
+            .last()
+            .map_or(0, |last| last.offset as usize + format_size(last.format));
+        assert_eq!(spanned, std::mem::size_of::<Vertex>());
+    }
+
+    /// Сколько байт занимает атрибут такого формата. Своим перечнем, а не общей
+    /// функцией: сойтись он обязан не с кодом, а с тем, что понимает драйвер.
+    fn format_size(format: i32) -> usize {
+        match format {
+            f if f == VertexFormat::VtxFloat32 as i32 => 4,
+            f if f == VertexFormat::VtxFloat32x2 as i32 => 8,
+            f if f == VertexFormat::VtxFloat32x3 as i32 => 12,
+            f if f == VertexFormat::VtxFloat32x4 as i32 => 16,
+            other => unreachable!("неизвестный формат вершины: {other}"),
+        }
+    }
 }

@@ -31,6 +31,10 @@ pub struct View {
     pub describe: veldsdk::Latest,
     pub read_bytes: u64,
     pub total_bytes: u64,
+    /// Снимок лежит на диске, а не за проводом. Своего смысла у признака здесь
+    /// нет — его пересказывают тайлеру, у которого от этого зависит потолок
+    /// источника, читаемого только целиком (см. `DescribeRequest.near`).
+    pub near: bool,
     /// Смотреть не на что: ресурс не открылся или не описался.
     pub error: Option<String>,
     /// Кадр неполон: сорвался проход, отказал кэш. Снимок при этом жив, и
@@ -40,6 +44,12 @@ pub struct View {
     /// Слово о причине говорится здесь целиком: на провод обе жалобы уезжают
     /// одним полем, и заказчик показывает сказанное как есть.
     pub trouble: Option<String>,
+    /// В прошлой сборке квадов было чему рябить. Полем, а не ответом на месте:
+    /// отпечаток кадра сравнивается раньше, чем считаются квады, — а решать по
+    /// нему, двигать ли фазу, надо до сравнения. Опоздание на кадр здесь
+    /// безобидно: пока рябь идёт, квады пересчитываются каждым тиком и признак
+    /// обновляется вместе с ними, а погаснув, он гасит и сам пересчёт.
+    pub glowing: bool,
     /// Кадр не записался вовсе — это жалоба на сам рендер, а не на конвейер.
     /// Врозь с `trouble` затем, что снимают их разные события: конвейерную
     /// снимает приехавший тайл, эту — удавшийся кадр. Одним полем они гасили
@@ -63,6 +73,9 @@ pub struct Stamp {
     pub camera: Camera,
     pub generation: u64,
     pub texture: u64,
+    /// Фаза ряби, огрублённая до шага показа. Пока рябить нечему, она стои́т —
+    /// и кадр пропускается ровно так же, как до неё.
+    pub ripple: u32,
 }
 
 impl View {
@@ -78,9 +91,11 @@ impl View {
             describe: veldsdk::Latest::default(),
             read_bytes: 0,
             total_bytes: 0,
+            near: false,
             error: None,
             trouble: None,
             stuck: None,
+            glowing: false,
         }
     }
 
@@ -142,9 +157,19 @@ pub fn wanted(view: &View, store: &Store, cap: u64) -> Option<tiles::Want> {
 /// Квады кадра: по одному на видимую ячейку, у которой нашёлся носитель —
 /// точный тайл либо ближайший имеющийся предок (`Store::carrier`, общий с
 /// наложениями). Обращения продлевают тайлам жизнь в бюджете хранилища.
-pub fn quads(view: &View, store: &mut Store, cap: u64) -> Vec<Quad> {
+pub fn quads(view: &View, store: &mut Store, cap: u64, phase: f32) -> Vec<Quad> {
     let Some((target, camera, meta)) = parts(view) else { return Vec::new() };
     let Some(want) = wanted(view, store, cap) else { return Vec::new() };
+
+    // Сила ряби — доля внутри нынешней ступени, считанная тем же правилом, что
+    // у шара: рябит ступень, а не отдельная ячейка, и о конкретной ячейке
+    // известен ровно один бит — едет она или нет.
+    let inside = tiles::inside(
+        view.fetch.ordered(),
+        (view.read_bytes, view.total_bytes),
+        tiles::pointwise(meta, want.level),
+    );
+    let strength = ripple_strength(inside.share as f32);
 
     let mut quads = Vec::with_capacity(want.cells.len());
     for cell in want.cells {
@@ -157,9 +182,47 @@ pub fn quads(view: &View, store: &mut Store, cap: u64) -> Vec<Quad> {
             rect: to_ndc(rect, camera, target),
             uv: pyramid::cell_uv(rect, addr, tex.0, tex.1),
             bind,
+            // Накрытая своим тайлом ячейка не рябит, даже когда её ждут: свой
+            // тайл с ожидания снимается приездом.
+            glow: match addr != cell && view.fetch.coming(cell) {
+                true => glow_of(cell, phase, strength),
+                false => 0.0,
+            },
         });
     }
     quads
+}
+
+/// Период волны ряби в секундах и глубина её подмеса — те же, что у шара
+/// (`module::RIPPLE_PERIOD_S`, `RIPPLE_DEPTH` в globe.wgsl): работа одна и та
+/// же, и разная её скорость на двух экранах читалась бы как разные события.
+pub const RIPPLE_PERIOD_S: f32 = 1.6;
+const RIPPLE_DEPTH: f32 = 0.30;
+
+/// Сколько разных сдвигов по фазе раздаётся ячейкам — столько же, сколько у
+/// шара: соседи заметно расходятся, а рябь не рассыпается в шум.
+const RIPPLE_OFFSETS: u32 = 16;
+
+/// Насколько заметна рябь на ступени, дошедшей до такой доли.
+///
+/// Не самой долей: только начатая ступень идёт ничуть не меньше той, что
+/// вот-вот кончится, и невидимая рябь в её начале означала бы «ничего не
+/// происходит» ровно там, где ждать дольше всего.
+fn ripple_strength(within: f32) -> f32 {
+    (0.35 + 0.65 * within.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+}
+
+/// Готовая сила подмеса для ячейки: волна, взятая в её сдвиге по фазе.
+///
+/// Сдвиг выводится из адреса, а не из порядка обхода: порядок ячеек меняется на
+/// каждом движении камеры, и волна перескакивала бы с места на место при
+/// неподвижной картинке.
+fn glow_of(cell: tiles::Addr, phase: f32, strength: f32) -> f32 {
+    let (_, x, y) = cell;
+    let slot = (x.wrapping_mul(7).wrapping_add(y.wrapping_mul(11))) % RIPPLE_OFFSETS;
+    let offset = (slot as f32 + 0.5) / RIPPLE_OFFSETS as f32;
+    let wave = 0.5 + 0.5 * (std::f32::consts::TAU * (phase + offset)).sin();
+    RIPPLE_DEPTH * strength * wave
 }
 
 fn parts(view: &View) -> Option<(&Target, &Camera, &Meta)> {
@@ -209,6 +272,7 @@ mod tests {
             levels: pyramid::level_count(width, height),
             reach: crate::proto::image_tiler::Reach::Exact,
             finest: 0,
+            windowed: pyramid::level_count(width, height),
         }
     }
 
@@ -221,5 +285,35 @@ mod tests {
         // Кусок нулевого уровня: пиксели 500..1300 → ячейки 0..3.
         let (xs, _) = cell_range((500.0, 0.0, 1300.0, 1.0), 0, &meta);
         assert_eq!(xs, 0..3);
+    }
+
+    /// Рябь бежит по ячейке волной, а не мигает: у соседей свой сдвиг по фазе,
+    /// и привязан он к адресу, а не к порядку обхода — порядок меняется на
+    /// каждом движении камеры, и волна перескакивала бы при неподвижной
+    /// картинке.
+    #[test]
+    fn волна_ряби_привязана_к_ячейке_а_не_к_порядку() {
+        let strength = ripple_strength(1.0);
+        let at = |cell, phase| glow_of(cell, phase, strength);
+
+        assert_eq!(at((0, 3, 4), 0.25), at((0, 3, 4), 0.25), "тот же адрес и та же фаза");
+        assert_ne!(at((0, 3, 4), 0.25), at((0, 4, 4), 0.25), "сосед по строке светится в такт");
+        assert_ne!(at((0, 3, 4), 0.25), at((0, 3, 5), 0.25), "сосед по столбцу светится в такт");
+        assert_ne!(at((0, 3, 4), 0.0), at((0, 3, 4), 0.5), "волна не идёт");
+
+        // Подмес не перебивает картинку: под рябью надо видеть снимок.
+        for step in 0..16 {
+            let glow = at((0, 1, 1), step as f32 / 16.0);
+            assert!((0.0..=0.31).contains(&glow), "подмес {glow} вне меры");
+        }
+    }
+
+    /// Сила растёт к концу ступени, но и в самом её начале рябь видна: только
+    /// начатая ступень идёт ничуть не меньше той, что вот-вот кончится.
+    #[test]
+    fn рябь_видна_и_в_начале_ступени() {
+        assert!(ripple_strength(0.0) > 0.2, "начало ступени не видно вовсе");
+        assert!(ripple_strength(1.0) > ripple_strength(0.0), "конец не заметнее начала");
+        assert!(ripple_strength(-1.0) >= 0.0 && ripple_strength(7.0) <= 1.0);
     }
 }

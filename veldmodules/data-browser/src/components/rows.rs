@@ -45,8 +45,18 @@ fn mark_globe(state: &State, rows: &mut [Row]) {
     for row in rows {
         row.globe = onto_globe(state, row.product_key());
         row.outlined = outlined(state, row.product_key());
+        row.unshowable = unshowable(state, row.product_key());
         mark_globe(state, &mut row.children);
     }
+}
+
+/// Почему показ этого снимка не вышел; пусто — не пробовали либо вышло.
+///
+/// По ключу снимка, как и всё остальное про шар: причина принадлежит снимку, а
+/// не строке, и один и тот же снимок в каталоге, в выдаче и в скачанном обязан
+/// объясняться одинаково.
+pub fn unshowable(state: &State, key: &str) -> String {
+    state.unshowable.get(key).cloned().unwrap_or_default()
 }
 
 /// Чем снимок этой строки лежит на шаре (см. [`OnGlobe`]).
@@ -273,6 +283,7 @@ fn from_key(
     };
     let globe = onto_globe(state, snapshot);
     let outlined = outlined(state, snapshot);
+    let unshowable = unshowable(state, snapshot);
     if kind.is_folder() {
         // Два разных вопроса о папке, и второй задаётся только снимку. Сколько
         // её содержимого на диске, видно по ключам записей — это и всё, что
@@ -283,8 +294,7 @@ fn from_key(
         // Спрашивается оно снимком, а не ключом строки: ключ папки приезжает со
         // слэшем на конце, а записи библиотеки помнят снимок без него.
         let under = state.library.under(&folder_path(&identifier));
-        let (done, files) = state.library.snapshot(&product);
-        let whole = files > 0 && done as u32 == files;
+        let whole = state.library.whole(&product);
         // Пока хоть один файл едет, едет весь снимок — то же правило, что у
         // сложенной строки «Скачанного» (см. `row::snapshot`). Без него
         // качающийся снимок стои́т с зелёным «3 на диске» и без полосы: два
@@ -307,12 +317,13 @@ fn from_key(
             (false, false, done) => RowStatus::Partial { done, trouble: String::new() },
         };
         let row = Row::container_row(identifier, title, status, kind);
-        return Row { size, date, product, globe, outlined, ..row };
+        return Row { size, date, product, globe, outlined, unshowable, ..row };
     }
     Row {
         product,
         globe,
         outlined,
+        unshowable,
         ..Row::remote(&state.library, identifier, title, size, date, kind)
     }
 }

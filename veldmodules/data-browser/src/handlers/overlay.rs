@@ -81,6 +81,10 @@ pub fn on_toggle_pressed(state: &mut State, view: ViewId, identifier: String) {
     // Меню строки закрываем сами: нажатое в нём сделано, а открытым оно
     // осталось бы висеть над списком.
     state.close_menus();
+    // Прежний отказ снимается новой попыткой: держать его дальше значило бы
+    // объяснять причиной то, чего больше не происходит, — а сорваться показ
+    // мог и по сети, и второй заход тогда удаётся.
+    state.unshowable.remove(&identifier);
     // Уже на шаре или туда едет — значит просят снять. Скрытый в этот счёт
     // идёт наравне с видимым: он остаётся слоем, и значок в строке горит у
     // него так же.
@@ -170,6 +174,12 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
 /// `source` — вид поиска, из выдачи которого продукт взят; для продукта,
 /// восстановленного по ключу, его нет (см. `OverlayState::source`).
 pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
+    // Прежний отказ снимается всякой новой попыткой показать, каким бы путём
+    // она ни пришла — значком, контуром или выдачей поиска. Сниматься он обязан
+    // здесь, в общей воронке: у входов в показ три места, и причина, оставшаяся
+    // после удавшегося показа, пережила бы его и всплыла бы охрой на снятом
+    // слое.
+    state.unshowable.remove(&product.identifier);
     if state.overlays.iter().any(|overlay| overlay.identifier == product.identifier) {
         // Класть нечего, а сказать есть о чём: сюда приходят и с ответом
         // каталога, снявшим просьбу (см. [`on_located`]), — а просьба помечена
@@ -192,6 +202,10 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
         overlay.imagery = Some(correlation.clone());
     }
     crate::calls::data_provider::on_imagery(&ImageryRequest {
+        // Скачан ли снимок, знаем только мы: у провайдера одно хранилище. От
+        // этого зависит состав растров — подробный, читаемый целым проходом,
+        // предлагается лишь тогда, когда файл под рукой.
+        downloaded: state.library.whole(&product.identifier),
         identifier: product.identifier.clone(),
     }, &correlation);
     // Набор наложений сам по себе не изменился — собирающийся в него не
@@ -265,11 +279,11 @@ fn abandon(state: &mut State, overlay: OverlayState) {
         // убрали» — ресурс в нём наш, там его примут и отпустят. Снять с учёта
         // совсем нельзя: неопознанный ответ уходит в `discard`, а тот ресурса
         // не трогает — файл остался бы открытым до конца сеанса.
-        if let Some((_, role, part)) = state.opens.take(correlation) {
-            state.opens.insert(correlation.clone(), (String::new(), role, part));
+        if let Some((_, role, part, _)) = state.opens.take(correlation) {
+            state.opens.insert(correlation.clone(), (String::new(), role, part, false));
         }
     }
-    for (_, _, handle) in assembly.collected {
+    for (.., handle, _) in assembly.collected {
         veldsdk::resource::release(handle);
     }
 }
@@ -370,8 +384,15 @@ pub fn hide_all(state: &mut State, hidden: bool) {
 /// пропал, и человек вправе узнать почему.
 fn give_up(state: &mut State, key: &str, label: &str, why: String) {
     veldsdk::log::warn!(target: "handlers", "'{}': {}", label, why);
+    // Сказать надо в двух местах, и это не дублирование: вопросы разные.
+    // Строка состояния отвечает «что случилось сейчас» — нажавший значок в
+    // этот миг смотрит на шар, а не в список, и другого места сказать ему нет.
+    // Память у ключа отвечает «что это за снимок»: причина переживает слово в
+    // строке состояния и встречает вернувшегося в список — иначе он видит тот
+    // же зовущий значок и ждёт отказа снова.
     state.notice =
         Some(format!("«{}»: {}", crate::module::components::format::ellipsize(label, 40), why));
+    state.unshowable.insert(key.to_string(), why);
     remove(state, key);
 }
 
@@ -437,7 +458,10 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
             let local = state.library.local_name(&identifier).map(str::to_string);
             // Роль переводится сразу, на границе: дальше по нашему коду ездит
             // уже та, которую поймёт глобус.
-            let correlation = state.opens.begin((key.clone(), role, part));
+            // Чем открыт файл, помнится здесь же: ответ об открытии этого уже
+            // не несёт, а тайлеру от этого зависит потолок источника, который
+            // читается только целиком (см. `DescribeRequest.near`).
+            let correlation = state.opens.begin((key.clone(), role, part, local.is_some()));
             opens.push(correlation.clone());
             match local {
                 Some(name) => crate::calls::data_library::on_open(
@@ -463,7 +487,7 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
 /// приехавший ресурс добьёт общий discard (см. module::on_open_result).
 pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     let correlation = veldsdk::correlation();
-    let Some((key, role, part)) = state.opens.take(&correlation) else { return false };
+    let Some((key, role, part, near)) = state.opens.take(&correlation) else { return false };
 
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else {
         // Наложение убрали между запросом и ответом: ресурс наш, и отпустить
@@ -484,7 +508,7 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 
     assembly.opens.retain(|waiting| waiting != &correlation);
     match veldsdk::resource::accept(opened) {
-        Ok(handle) => assembly.collected.push((role, part, handle)),
+        Ok(handle) => assembly.collected.push((role, part, handle, near)),
         // Не открылось — наложение живёт тем, что открылось: без растра нет
         // роли, без координат нет привязки, и оба исхода объясняются ниже.
         Err(error) => veldsdk::log::warn!(target: "handlers", "файл наложения: {}", error),
@@ -516,13 +540,15 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 /// первому растру своей роли, и второго такого набор не несёт (см.
 /// `imagery::scan` у провайдера — по одному растру на роль).
 fn paired<H>(
-    collected: Vec<(OverlayRole, Part, H)>,
-) -> (Vec<(OverlayRole, H, Option<H>)>, Vec<H>) {
-    let mut pairs: Vec<(OverlayRole, H, Option<H>)> = Vec::new();
+    collected: Vec<(OverlayRole, Part, H, bool)>,
+) -> (Vec<(OverlayRole, H, Option<H>, bool)>, Vec<H>) {
+    let mut pairs: Vec<(OverlayRole, H, Option<H>, bool)> = Vec::new();
     let mut coordinates = Vec::new();
-    for (role, part, handle) in collected {
+    // Признак «с диска» остаётся при растре: он про то, чем открыт сам растр,
+    // а координаты — соседний файл со своей судьбой.
+    for (role, part, handle, near) in collected {
         match part {
-            Part::Raster => pairs.push((role, handle, None)),
+            Part::Raster => pairs.push((role, handle, None, near)),
             Part::Geolocation => coordinates.push((role, handle)),
         }
     }
@@ -560,7 +586,7 @@ fn finish(state: &mut State, key: &str) {
     // Передача владения — до сообщения: получив набор, глобус вправе сразу
     // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
     let mut rasters = Vec::new();
-    for (role, raster, coordinates) in pairs {
+    for (role, raster, coordinates, near) in pairs {
         let raster = match veldsdk::resource::hand_off(raster, "globe") {
             Ok(handle) => handle,
             Err(error) => {
@@ -589,6 +615,7 @@ fn finish(state: &mut State, key: &str) {
             resource: Some(raster),
             role: role as i32,
             geolocation: coordinates,
+            near,
         });
     }
     if rasters.is_empty() {
@@ -680,6 +707,7 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
             step: said.step,
             steps: said.steps,
             blank: said.blank,
+            pass: (said.pass_read, said.pass_total),
         };
     }
 
@@ -783,12 +811,14 @@ mod tests {
     #[test]
     fn превью_уезжает_впереди_подробного() {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected =
-            vec![(detailed, Part::Raster, "подробный"), (preview, Part::Raster, "квиклук")];
+        let collected = vec![
+            (detailed, Part::Raster, "подробный", false),
+            (preview, Part::Raster, "квиклук", false),
+        ];
 
         let (pairs, orphans) = paired(collected);
 
-        let order: Vec<_> = pairs.iter().map(|(_, raster, _)| *raster).collect();
+        let order: Vec<_> = pairs.iter().map(|(_, raster, ..)| *raster).collect();
         assert_eq!(order, ["квиклук", "подробный"]);
         assert!(orphans.is_empty());
     }
@@ -799,15 +829,24 @@ mod tests {
     #[test]
     fn координаты_достаются_растру_своей_роли() {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
+        // Растры открыты по-разному: подробный уже на диске, квиклук по сети.
+        // Признак обязан остаться при своём растре — по нему тайлер меряет
+        // потолок источника, читаемого только целиком.
         let collected = vec![
-            (detailed, Part::Geolocation, "широты"),
-            (preview, Part::Raster, "квиклук"),
-            (detailed, Part::Raster, "подробный"),
+            (detailed, Part::Geolocation, "широты", true),
+            (preview, Part::Raster, "квиклук", false),
+            (detailed, Part::Raster, "подробный", true),
         ];
 
         let (pairs, orphans) = paired(collected);
 
-        assert_eq!(pairs, vec![(preview, "квиклук", None), (detailed, "подробный", Some("широты"))]);
+        assert_eq!(
+            pairs,
+            vec![
+                (preview, "квиклук", None, false),
+                (detailed, "подробный", Some("широты"), true),
+            ]
+        );
         assert!(orphans.is_empty());
     }
 
@@ -816,12 +855,14 @@ mod tests {
     #[test]
     fn координаты_без_своего_растра_возвращаются_отпустить() {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected =
-            vec![(detailed, Part::Geolocation, "широты"), (preview, Part::Raster, "квиклук")];
+        let collected = vec![
+            (detailed, Part::Geolocation, "широты", false),
+            (preview, Part::Raster, "квиклук", false),
+        ];
 
         let (pairs, orphans) = paired(collected);
 
-        assert_eq!(pairs, vec![(preview, "квиклук", None)]);
+        assert_eq!(pairs, vec![(preview, "квиклук", None, false)]);
         assert_eq!(orphans, vec!["широты"]);
     }
 
@@ -894,5 +935,54 @@ mod tests {
     #[test]
     fn без_контура_нет_и_места() {
         assert!(quad_of(&shot(Vec::new())).is_none());
+    }
+
+    /// Отказ показа помнится ключом снимка и переживает слово в строке
+    /// состояния: вернувшись в список через минуту, человек обязан увидеть, что
+    /// этот снимок уже пробовали и почему не вышло, — иначе он жмёт тот же
+    /// значок и ждёт тех же полминуты.
+    ///
+    /// А новая попытка причину снимает: сорваться показ мог и по сети, и
+    /// объяснять отказом то, чего больше не происходит, — врать.
+    #[test]
+    fn отказ_показа_помнится_снимком_и_снимается_новой_попыткой() {
+        let key = "eodata/store/A.SEN3";
+        let mut state =
+            State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
+        let pane = state.focused();
+        let view = state.open_in(
+            pane,
+            crate::module::state::ViewKind::Browse(crate::module::state::BrowseState::default()),
+        );
+
+        give_up(&mut state, key, "A.SEN3", "это измерения, а не изображение".to_string());
+        assert_eq!(
+            crate::module::components::rows::unshowable(&state, key),
+            "это измерения, а не изображение",
+            "причина не досталась строке"
+        );
+        // Сказано и там, где смотрит нажавший: он в этот миг на шаре, а не в
+        // списке.
+        assert!(state.notice.is_some(), "о случившемся не сказано вовсе");
+
+        on_toggle_pressed(&mut state, view, key.to_string());
+        assert!(
+            crate::module::components::rows::unshowable(&state, key).is_empty(),
+            "прежний отказ пережил новую попытку"
+        );
+
+        // Чужой строки это не касается: причина принадлежит снимку.
+        give_up(&mut state, key, "A.SEN3", "не влезает".to_string());
+        assert!(crate::module::components::rows::unshowable(&state, "eodata/store/B.SEN3").is_empty());
+
+        // И снимается она всяким путём в показ, а не одним лишь значком: путей
+        // три (значок, контур, выдача поиска), и причина, пережившая удавшийся
+        // показ, всплыла бы охрой на снятом слое.
+        let product = DataProduct { identifier: key.to_string(), ..Default::default() };
+        show(&mut state, &product, None);
+        assert!(
+            crate::module::components::rows::unshowable(&state, key).is_empty(),
+            "показ другим путём оставил прежнюю причину"
+        );
     }
 }

@@ -386,11 +386,16 @@ fn seam_cuts(places: &[(f64, f64)], sweeps: &[f64]) -> Vec<usize> {
 /// Конечная точка не кладётся: её положит следующее ребро, а последнее замкнёт
 /// контур.
 fn edge(ring: &mut Vec<Vertex>, from: (f64, f64), to: (f64, f64)) {
-    // Размах зажат кругом: ребра длиннее круга не бывает, а незажатый он
-    // считает шаги из числа, пришедшего по шине, — и `as u32` насыщается вместо
-    // переполнения, то есть даёт четыре миллиарда шагов вместо отказа.
-    let span = geodesy::edge_span(from, to).min(geodesy::TURN_DEG);
-    let steps = (span / max_edge_deg()).ceil().max(1.0) as u32;
+    // Шагов не больше, чем нужно ребру в полный круг: длиннее ребра не бывает,
+    // а приведение к `u32` насыщается вместо переполнения — из числа, пришедшего
+    // по шине, вышло бы четыре миллиарда шагов с вершиной на каждом.
+    //
+    // Предел ставится шагам, а не размаху: `f64::min` не-число пропускает
+    // вторым доводом, и зажатый им размах дал бы полный круг там, где вести
+    // нечего вовсе.
+    let edge_deg = max_edge_deg();
+    let most = (geodesy::TURN_DEG / edge_deg).ceil();
+    let steps = (geodesy::edge_span(from, to) / edge_deg).ceil().max(1.0).min(most) as u32;
     let height_m = height_m();
     for step in 0..steps {
         let (lat_deg, lon_deg) = geodesy::edge_point(from, to, f64::from(step) / f64::from(steps));
@@ -400,6 +405,24 @@ fn edge(ring: &mut Vec<Vertex>, from: (f64, f64), to: (f64, f64)) {
 
 #[cfg(test)]
 mod tests {
+
+    /// Ребро, размах которого не с Земли, ведётся числом шагов, а не миллиардом.
+    ///
+    /// Числа приходят по шине, и приведение к `u32` насыщается вместо
+    /// переполнения: незажатое, оно дало бы четыре миллиарда вершин. А ребро,
+    /// размаха у которого нет вовсе, ведётся одним шагом — не полным кругом.
+    #[test]
+    fn an_edge_wider_than_the_earth_is_not_drawn_forever() {
+        let mut endless = Vec::new();
+        edge(&mut endless, (0.0, 0.0), (1.0e9, 0.0));
+        let most = (geodesy::TURN_DEG / max_edge_deg()).ceil() as usize;
+        assert_eq!(endless.len(), most, "вершин {}", endless.len());
+
+        let mut nowhere = Vec::new();
+        edge(&mut nowhere, (0.0, 0.0), (f64::NAN, 0.0));
+        assert_eq!(nowhere.len(), 1, "вести нечего — один шаг");
+    }
+
     use super::*;
     use crate::proto::globe::GeoPoint;
 

@@ -27,7 +27,11 @@ struct Camera {
     /// ширину (см. vs_ribbon). Штриховке он не нужен: она считает по
     /// координате фрагмента, а та уже в пикселях.
     viewport: vec2<f32>,
-    _pad3: vec2<f32>,
+    /// Где стои́т волна ряби (доля периода) и насколько она заметна. Обе
+    /// величины одинаковы для всего кадра: рябит ступень слоя, а не отдельная
+    /// ячейка, и ячейка приносит только признак — рябить ей или нет.
+    phase: f32,
+    ripple: f32,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -244,6 +248,10 @@ struct OverlayVsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) alpha: f32,
+    /// Ноль — ячейка накрыта тем, чем должна, и не рябит. Иначе — её сдвиг по
+    /// фазе, 0..1: у каждой ячейки свой, чтобы грузящееся место переливалось, а
+    /// не мигало разом (см. overlay::ripple_of в globe).
+    @location(2) ripple: f32,
 };
 
 @vertex
@@ -252,11 +260,13 @@ fn vs_overlay(
     @location(1) position_low: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) alpha: f32,
+    @location(4) ripple: f32,
 ) -> OverlayVsOut {
     var out: OverlayVsOut;
     out.clip = camera.view_proj * vec4<f32>(relative(position, position_low), 1.0);
     out.uv = uv;
     out.alpha = alpha;
+    out.ripple = ripple;
     return out;
 }
 
@@ -269,11 +279,31 @@ fn encode_srgb(linear: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, linear <= vec3<f32>(0.0031308));
 }
 
+/// Синева грузящегося: холодный цвет, которого нет ни у Земли, ни у контуров,
+/// ни у акцента. sRGB, как и остальные здешние числа, и через encode_srgb она
+/// не проходит — он только для сэмплированного.
+const LOADING = vec3<f32>(0.247, 0.443, 0.643); // #3F71A4
+
+/// На сколько рябь перебивает картинку в самый сильный свой миг. «Слегка
+/// заметная» — это про неё: под ней надо видеть снимок, а не синеву.
+const RIPPLE_DEPTH: f32 = 0.30;
+
+const TAU: f32 = 6.2831855;
+
 @fragment
 fn fs_overlay(in: OverlayVsOut) -> @location(0) vec4<f32> {
     let sampled = textureSample(overlay_texture, overlay_sampler, in.uv);
+    var rgb = encode_srgb(sampled.rgb);
+    // Ячейка приносит признак и свой сдвиг, кадр — саму фазу и силу. Сила
+    // растёт к концу ступени: рябь тем заметнее, чем ближе резкая картинка.
+    if in.ripple > 0.0 {
+        let wave = 0.5 + 0.5 * sin(TAU * (camera.phase + in.ripple));
+        rgb = mix(rgb, LOADING, RIPPLE_DEPTH * camera.ripple * wave);
+    }
     // Альфа носителя проходит как есть — прозрачные поля квиклуков показывают
     // Землю, — а прозрачность слоя её домножает: полупрозрачным становится то,
-    // что было видно, и не проступает то, чего не было.
-    return vec4<f32>(encode_srgb(sampled.rgb), sampled.a * in.alpha);
+    // что было видно, и не проступает то, чего не было. Рябь на неё не влияет:
+    // она красит видимое, а не проявляет невидимое, и второе домножение на
+    // прозрачность слоя погасило бы её вдвое там, где ползунок и так убавил.
+    return vec4<f32>(rgb, sampled.a * in.alpha);
 }

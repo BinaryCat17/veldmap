@@ -78,7 +78,10 @@ pub fn on_view_product_pressed(state: &mut State, from: ViewId, identifier: Stri
     let correlation_id = state.preview_mut(view).expect("вид только что открыт").begin();
     state.preview_imagery.insert(correlation_id.clone(), view);
     crate::calls::data_provider::on_imagery(
-        &crate::proto::data_provider::ImageryRequest { identifier },
+        &crate::proto::data_provider::ImageryRequest {
+            downloaded: state.library.whole(&identifier),
+            identifier,
+        },
         &correlation_id,
     );
 }
@@ -234,6 +237,9 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
         view: view.to_string(),
         resource: Some(resource),
         label: preview.label.clone(),
+        // Чем открыт снимок, уже сказано записью библиотеки: она и есть весь
+        // смысл `entry` (см. [`reopen`]), и второго правила заводить незачем.
+        near: preview.entry.is_some(),
     });
     true
 }

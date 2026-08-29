@@ -24,7 +24,7 @@ pub mod resample;
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use veldsdk::graphics as gfx;
 // Формат тайла — не наш: он общий с кэшем и объявлен там, где его видят оба
@@ -69,7 +69,18 @@ pub struct Config {}
 /// после того, как заказчик решил, что снимок вот-вот появится.
 struct Parsed {
     resource: u64,
+    /// Лежит ли источник на диске. В ключе memo, а не рядом с ним: разбор
+    /// зависит от этого довода (по сети у NetCDF свой потолок терпения), и
+    /// ключ, знающий только про ресурс, однажды отдаст разбор, сделанный при
+    /// другом ответе.
+    near: bool,
     info: adapters::Info,
+    /// Ключ этого источника в кэше тайлов. Лежит рядом с разбором затем, что
+    /// считается он тем же чтением файла: голова и хвост по 64 КиБ, то есть у
+    /// удалённого ресурса — два похода к блочному пулу. Разбор переживает
+    /// десятки заказов (ступень лестницы, обнажившийся край), и отпечаток
+    /// обязан пережить столько же: он свойство файла, а не заказа.
+    fingerprint: String,
 }
 
 pub struct State {
@@ -86,7 +97,7 @@ impl State {
     /// отсчёты величины; лёгкий — заголовки. Своим слотом каждому затем, что
     /// иначе дешёвый вытеснял бы дорогой.
     fn keep(&mut self, kept: Parsed) {
-        match kept.info.read_whole() {
+        match kept.info.holds_samples() {
             true => self.heavy = Some(kept),
             false => self.light = Some(kept),
         }
@@ -102,11 +113,11 @@ impl State {
     }
 
     /// Разбор этого ресурса, если он лежит в каком-нибудь из слотов.
-    fn kept(&self, resource_id: u64) -> Option<&Parsed> {
+    fn kept(&self, resource_id: u64, near: bool) -> Option<&Parsed> {
         [self.heavy.as_ref(), self.light.as_ref()]
             .into_iter()
             .flatten()
-            .find(|kept| kept.resource == resource_id)
+            .find(|kept| kept.resource == resource_id && kept.near == near)
     }
 }
 
@@ -120,26 +131,23 @@ fn parsed<'a>(
     resource_id: u64,
     size: u64,
     bytes: &Rc<Cell<u64>>,
-) -> Result<&'a adapters::Info, String> {
-    if state.kept(resource_id).is_none() {
+    near: bool,
+) -> Result<(&'a Parsed, Duration), String> {
+    let mut stamped = Duration::ZERO;
+    if state.kept(resource_id, near).is_none() {
         // Отпускается здесь, до нового разбора: две плоскости разом лимит
         // памяти инстанса не переживёт.
         state.release_heavy();
         veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт)", resource_id, size);
-        let info = adapters::describe(resource_id, size, bytes)?;
-        state.keep(Parsed { resource: resource_id, info });
+        let began = Instant::now();
+        let fingerprint = fingerprint::fingerprint(resource_id, size)?;
+        stamped = began.elapsed();
+        let info = adapters::describe(resource_id, size, bytes, near)?;
+        state.keep(Parsed { resource: resource_id, near, info, fingerprint });
     } else {
         veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
     }
-    let info = &state.kept(resource_id).expect("разбор только что положен").info;
-    // Прочитанное засчитывается и на готовом разборе — но только там, где
-    // разбор и правда прочитал файл целиком (NetCDF). У прочих байты идут
-    // проходом, и объявить их прочитанными значит показать заказчику «100 %»
-    // с первого тика и заглушить весь дальнейший счёт (см. `Sink::progress`).
-    if info.read_whole() {
-        bytes.set(size);
-    }
-    Ok(&state.kept(resource_id).expect("разбор только что положен").info)
+    Ok((state.kept(resource_id, near).expect("разбор только что положен"), stamped))
 }
 
 pub fn on_describe(state: &mut State, req: DescribeRequest) {
@@ -165,12 +173,12 @@ pub fn on_describe(state: &mut State, req: DescribeRequest) {
 fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, String> {
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
     let began = Instant::now();
-    let fingerprint = fingerprint::fingerprint(resource.id, resource.size)?;
-    let stamped = began.elapsed();
     // Привязка приезжает из соседнего файла и в memo не идёт: она свойство
     // пары «растр и его координаты», а memo знает только про растр.
     let mut ties = Vec::new();
-    let info = parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)))?;
+    let (kept, stamped) =
+        parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)), req.near)?;
+    let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
     let read = began.elapsed();
 
     // Координаты из соседнего файла — только когда в самом растре их нет: то,
@@ -220,6 +228,7 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
         levels: pyramid::level_count(info.width, info.height),
         reach: info.reach() as i32,
         finest: info.finest,
+        windowed: info.windowed(),
         ties: info
             .ties
             .iter()
@@ -262,8 +271,8 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
 
     let bytes = Rc::new(Cell::new(0u64));
-    let fingerprint = fingerprint::fingerprint(resource.id, resource.size)?;
-    let info = parsed(state, resource.id, resource.size, &bytes)?;
+    let (kept, _) = parsed(state, resource.id, resource.size, &bytes, req.near)?;
+    let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
 
     let single_pass = matches!(info.reach(), crate::proto::image_tiler::Reach::Pyramid);
     // Заказ проверяется отдельной функцией, а не по месту: у проверок свои
@@ -285,7 +294,16 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
                 want_total: ordered.len() as u32,
                 done: 0,
                 bytes: bytes.clone(),
-                total_bytes: resource.size,
+                // У источника, чей разбор уже держит отсчёты величины, байты
+                // прохода о работе впереди не говорят ничего: читать больше
+                // нечего, а стои́т время разворот плоскости в пирамиду.
+                // Знаменатель нулём — это и есть «мерить нечем» (см.
+                // `tiles::readable`), и подпись тогда идёт ступенями и
+                // ячейками, а не мегабайтами.
+                total_bytes: match info.holds_samples() {
+                    true => 0,
+                    false => resource.size,
+                },
                 reported: 0,
             };
             let outcome = {
@@ -302,7 +320,8 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     };
     // Разбор, из которого проход строит всю пирамиду разом, после него не
     // нужен: второго прохода по такому источнику не будет, пока не спросят
-    // заново, — а держит он с собой отсчёты величины, то есть до полугигабайта
+    // заново, — а держит он с собой отсчёты величины, то есть до восьмисот
+    // мегабайт
     // памяти инстанса (`netcdf::PLANE_BUDGET`). Остаётся он у тех, к кому
     // приходят за каждой ступенью отдельно (тайловый TIFF, JPEG 2000), — там
     // разбор это заголовки, и он дёшев.
@@ -466,7 +485,7 @@ mod tests {
     use crate::proto::image_tiler::TileAddr;
 
     fn keep(state: &mut State, resource: u64, info: adapters::Info) {
-        state.keep(Parsed { resource, info });
+        state.keep(Parsed { resource, near: true, info, fingerprint: String::new() });
     }
 
     /// Лёгкий разбор не вытесняет тяжёлый. У наложения растров два, и приходят
@@ -482,8 +501,8 @@ mod tests {
         keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
         keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
 
-        assert!(state.kept(1).is_some(), "гранула на месте");
-        assert!(state.kept(2).is_some(), "и квиклук рядом");
+        assert!(state.kept(1, true).is_some(), "гранула на месте");
+        assert!(state.kept(2, true).is_some(), "и квиклук рядом");
     }
 
     /// Перед новым разбором отпускается тяжёлый, а лёгкий остаётся. Отпусти
@@ -497,8 +516,8 @@ mod tests {
 
         state.release_heavy();
 
-        assert!(state.kept(1).is_none(), "плоскость отпущена");
-        assert!(state.kept(2).is_some(), "заголовки остались");
+        assert!(state.kept(1, true).is_none(), "плоскость отпущена");
+        assert!(state.kept(2, true).is_some(), "заголовки остались");
     }
 
     /// А тяжёлый тяжёлый вытесняет: две плоскости разом лимит памяти инстанса
@@ -510,8 +529,8 @@ mod tests {
         keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
         keep(&mut state, 2, adapters::Info::heavy(3000, 2404));
 
-        assert!(state.kept(1).is_none(), "первая плоскость отпущена");
-        assert!(state.kept(2).is_some());
+        assert!(state.kept(1, true).is_none(), "первая плоскость отпущена");
+        assert!(state.kept(2, true).is_some());
     }
 
     /// И лёгкий лёгкий вытесняет тоже: держать их без счёта незачем, а разбор
@@ -523,8 +542,8 @@ mod tests {
         keep(&mut state, 1, adapters::Info::plain(64, 64, adapters::Kind::Png));
         keep(&mut state, 2, adapters::Info::plain(64, 64, adapters::Kind::Png));
 
-        assert!(state.kept(1).is_none());
-        assert!(state.kept(2).is_some());
+        assert!(state.kept(1, true).is_none());
+        assert!(state.kept(2, true).is_some());
     }
 
     fn asked(level: u32, tiles: &[(u32, u32)]) -> ProduceRequest {

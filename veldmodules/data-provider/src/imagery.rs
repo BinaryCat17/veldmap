@@ -22,11 +22,16 @@ pub enum Role {
 /// Ключи поддерева продукта → растры с ролями. Ключи — полные идентификаторы
 /// (с префиксом бакета), как их отдаёт листинг.
 ///
+/// `product` — идентификатор самого продукта, тот же, которым листали
+/// поддерево. Спрашивается он ради одного: продукт называет величину, которую
+/// меряет, и по ней среди полос узнаётся измерение (см.
+/// [`names_the_measurand`]).
+///
 /// `measured` — файлы, которые манифест продукта назвал измерением (пути от
 /// корня продукта; см. `manifest::measurements`). Пусто — манифеста не было
 /// или он ничего не сказал, и подробный растр выбирается по именам файлов, как
 /// и до него.
-pub fn scan(keys: &[String], measured: &[String]) -> Scan {
+pub fn scan(product: &str, keys: &[String], measured: &[String], downloaded: bool) -> Scan {
     let mut rasters = Vec::new();
 
     // Sentinel-2: квиклук гранулы лежит в QI_DATA, истинный цвет — в
@@ -44,25 +49,39 @@ pub fn scan(keys: &[String], measured: &[String]) -> Scan {
         rasters.push((tci.clone(), Role::Detailed));
     }
 
-    // Sentinel-1: квиклук в preview/, подробный — measurement-COG. Только
-    // продукты -COG: их тайловый GeoTIFF с копиями читается точечно, а
-    // полосным гигантам старых GRD подробная роль стоила бы прохода по
-    // всему файлу через сеть. Ко-поляризация (vv/hh) предпочтительнее
-    // кросс-: на её амплитуде читаются и суша, и море.
+    // Sentinel-1: квиклук в preview/, подробный — measurement. Ко-поляризация
+    // (vv/hh) предпочтительнее кросс-: на её амплитуде читаются и суша, и море.
+    //
+    // Sentinel-1: квиклук в preview/, подробный — measurement. Ко-поляризация
+    // (vv/hh) предпочтительнее кросс-: на её амплитуде читаются и суша, и море.
+    //
+    // Тайловый GeoTIFF с копиями (-COG) предлагается всегда: у него на всякий
+    // уровень своя копия, и любой из них стои́т своих тайлов.
+    //
+    // А полосный гигант старых GRD — только когда файл под рукой, и решает это
+    // не подробный его край, а грубый. Подробный тайл у него дёшев: 512 строк
+    // на всю ширину, десятки мегабайт, и тайлер читает такой уровень окном
+    // (`Reach::Windowed`). А вот грубому уровню нужна КАЖДАЯ строка файла —
+    // полосу не пропустишь, нужная строка есть в каждой, — и он стои́т целого
+    // прохода. Спрашивают же именно грубый: канва просмотра открывает
+    // подробный растр и вписывает его в окно. По сети это четверть часа, с
+    // диска — секунды.
+    //
+    // Знает это только заказчик: что лежит на диске, ведёт библиотека, а
+    // провайдер видит одно хранилище.
     if rasters.is_empty() {
         if let Some(quicklook) = keys.iter().find(|key| key.ends_with("/preview/quick-look.png"))
         {
             rasters.push((quicklook.clone(), Role::Preview));
         }
-        let cog = |key: &str| {
-            key.contains("_COG.SAFE/")
-                && key.contains("/measurement/")
-                && (key.ends_with(".tiff") || key.ends_with(".tif"))
+        let raster = |key: &str| {
+            key.contains("/measurement/") && (key.ends_with(".tiff") || key.ends_with(".tif"))
         };
+        let affordable = |key: &str| raster(key) && (downloaded || key.contains("_COG.SAFE/"));
         let measurement = keys
             .iter()
-            .find(|key| cog(key) && (key.contains("-vv-") || key.contains("-hh-")))
-            .or_else(|| keys.iter().find(|key| cog(key)));
+            .find(|key| affordable(key) && (key.contains("-vv-") || key.contains("-hh-")))
+            .or_else(|| keys.iter().find(|key| affordable(key)));
         if let Some(measurement) = measurement {
             rasters.push((measurement.clone(), Role::Detailed));
         }
@@ -90,13 +109,24 @@ pub fn scan(keys: &[String], measured: &[String]) -> Scan {
             true => readable,
             false => named,
         };
-        // Порядок выбора: сперва то, что похоже на цветной снимок целиком,
-        // потом по алфавиту — не выбор, а определённость: одному продукту один
-        // и тот же ответ от запуска к запуску.
+        // Порядок выбора: сперва то, что похоже на цветной снимок целиком;
+        // потом измерительный формат против показного; потом названное
+        // величиной самого продукта; потом всё, кроме объявивших себя
+        // подсобными; а не различило ни одно из четырёх — по алфавиту: это уже
+        // не выбор, а определённость, одному продукту один и тот же ответ от
+        // запуска к запуску.
         let detailed = among
             .into_iter()
             .filter(|key| !a_quicklook(key) && !a_decoration(key))
-            .min_by_key(|key| (!a_whole_picture(key), file_name(key)));
+            .min_by_key(|key| {
+                (
+                    !a_whole_picture(key),
+                    a_picture_format(key),
+                    !names_the_measurand(key, product),
+                    an_aside(key),
+                    file_name(key),
+                )
+            });
         if let Some(detailed) = detailed {
             rasters.push((detailed.clone(), Role::Detailed));
         }
@@ -125,11 +155,72 @@ fn file_name(key: &str) -> &str {
 }
 
 /// Имя, за которым обычно лежит маленькая обзорная картинка, а не измерение.
+///
+/// Куском имени, потому что пишут это по-разному: и через дефис, и слитно, и с
+/// приставкой миссии. Исключение — `BP`: две буквы куском ловят что угодно,
+/// поэтому Browse Product узнаётся отдельным словом.
+///
+/// Зовёт им свою картинку архив ESA: у Landsat-5 рядом с каталогом `.TIFF`, где
+/// лежат сами полосы, стои́т `LS05_…_52FE.BP.PNG`. Не названная обзорной, она
+/// становится подробным растром — по алфавиту `LS05…` идёт раньше
+/// `LT51…_B1.TIF`, — и на шар вместо снимка ложится картинка для показа.
 fn a_quicklook(key: &str) -> bool {
     let name = file_name(key).to_ascii_lowercase();
-    ["quick-look", "quicklook", "thumb", "browse", "preview", "_pvi"]
+    let by_piece = ["quick-look", "quicklook", "thumb", "browse", "preview", "_pvi"]
         .iter()
-        .any(|hint| name.contains(hint))
+        .any(|hint| name.contains(hint));
+    by_piece || words(&name).any(|word| word == "bp")
+}
+
+/// Имя, которое само говорит, что файл стои́т при измерении, а не является им.
+///
+/// Словом, а не куском: «coordinates» внутри чужого имени ничего не значит.
+///
+/// Слова здесь те же, какими зовутся файлы координат у [`geolocation`], плюс
+/// «ancillary». Разница в вопросе: там ищут ровно тот файл, который сядет под
+/// растр, здесь — узнаю́т всякий такой, чтобы он не сел на шар вместо растра.
+///
+/// Держится это на том, что лежит в дереве. У гранулы SLSTR рядом с `LST_in.nc`
+/// лежит `LST_ancillary_ds.nc`, и по алфавиту первым стои́т он — прописные буквы
+/// идут раньше строчных, так что спор решается на `a` против `i`. У гранулы
+/// OLCI строчными названы все, и первым по алфавиту идёт `geo_coordinates.nc` —
+/// файл чистых широт с долготами; измерение (`gifapar.nc`) стои́т сразу за ним.
+///
+/// Обычно такую гранулу разбирает манифест, он измерение называет прямо; но
+/// манифест бывает и недоступен (`cdse.rs`, ветка `Asked::Manifest`), и тогда
+/// весь ответ — в именах файлов.
+fn an_aside(key: &str) -> bool {
+    const ASIDE: [&str; 4] = ["ancillary", "coordinates", "geodetic", "geolocation"];
+    let name = file_name(key).to_ascii_lowercase();
+    words(&name).any(|word| ASIDE.contains(&word))
+}
+
+/// Расширения, за которыми приезжает измерение, а не картинка для показа: они
+/// умеют и отсчёты шире байта, и метку «нет данных».
+///
+/// Список один, а не два: спрашивают у того, что уже прошло [`is_raster`], и
+/// «не измерительное» там означает ровно «показное».
+const MEASURED_SUFFIXES: [&str; 6] = ["tif", "tiff", "jp2", "j2k", "nc", "h5"];
+
+/// Возит ли ключ картинку для показа, а не измерение.
+///
+/// Расширением, а не именем: у Landsat в архиве ESA обзорная картинка зовётся
+/// именем продукта и от полос отличается только им — `LS05_…_52FE.BP.PNG`
+/// против `LT51…_B1.TIF`, — а всякое имя такой картинки не перечислить.
+/// Измерения в PNG не возят: ни отсчёта шире байта, ни «нет данных» он не
+/// умеет.
+fn a_picture_format(key: &str) -> bool {
+    let name = file_name(key).to_ascii_lowercase();
+    match name.rsplit_once('.') {
+        Some((_, suffix)) => !MEASURED_SUFFIXES.contains(&suffix),
+        None => true,
+    }
+}
+
+/// Имя, разобранное на слова: разделители у всех разборщиков имён одни и те же,
+/// и разойтись им нельзя — иначе `BP` в одном месте слово, а в другом кусок.
+fn words(name: &str) -> impl Iterator<Item = &str> {
+    name.split(['_', '-', '.', ' ']).filter(|word| !word.is_empty())
 }
 
 /// Назван ли ключ манифестом среди измерений. Пути манифеста идут от корня
@@ -156,16 +247,57 @@ fn a_decoration(key: &str) -> bool {
 /// цветным снимком общего только три буквы.
 fn a_whole_picture(key: &str) -> bool {
     let name = file_name(key).to_ascii_uppercase();
-    let mut words = name.split(['_', '-', '.', ' ']).peekable();
-    while let Some(word) = words.next() {
+    let mut parts = words(&name).peekable();
+    while let Some(word) = parts.next() {
         if ["TCI", "TRUECOLOR", "RGB"].contains(&word) {
             return true;
         }
-        if word == "TRUE" && words.peek() == Some(&"COLOR") {
+        if word == "TRUE" && parts.peek() == Some(&"COLOR") {
             return true;
         }
     }
     false
+}
+
+/// Названа ли полоса той же величиной, что и сам продукт.
+///
+/// CLMS складывает имя файла из имени продукта и приставки полосы: у продукта
+/// `c_gls_LST_202608271600_GLOBE_GEO_V3.0.1_cog` внутри лежат
+/// `c_gls_LST-LST_…`, `c_gls_LST-ERRORBAR_…`, `c_gls_LST-QFLAG_…` и
+/// `c_gls_LST-TDELTA_…`, все четыре — читаемые растры одного размера. По
+/// алфавиту первой из них стои́т погрешность, и на шар легла бы она — разброс в
+/// кельвинах вместо самой температуры, причём отличить одно от другого по виду
+/// нельзя: маска «нет данных» у полос общая.
+///
+/// Повтором слова, а не списком служебных приставок: список пришлось бы вести
+/// за всеми продуктами CLMS, а свою величину продукт называет сам. Слово должно
+/// встретиться в имени файла **чаще**, чем в имени продукта, — просто
+/// вхождения мало: имя продукта целиком лежит в каждой из четырёх полос, и на
+/// него отвечали бы все разом.
+///
+/// Числа словами здесь не считаются: дата и куски версии повторяются в именах
+/// полос сами собой, а о величине не говорят ничего.
+///
+/// Считается по последнему сегменту пути: соседние сегменты приносят в счёт
+/// свои слова, и повтор, случившийся выше по дереву хранилища, погасил бы
+/// верное срабатывание — величина оказалась бы названа дважды ещё до полосы.
+///
+/// Повтор дословный, слово в слово. У продукта, названного вместе с
+/// разрешением (`c_gls_LAI300_…` при полосе `-LAI`), слова разные, и правило
+/// молчит — решает алфавит, как и всюду, где повторять нечего.
+///
+/// «Нет» здесь — обычный ответ, а не промах: у Landsat полосы зовутся `_B1`…
+/// `_B7`, повторять в них нечего, и решает алфавит. Ярусом выше стои́т цветной
+/// снимок целиком ([`a_whole_picture`]): он готовая картинка, а повтор величины
+/// различает лишь полосы измерения между собой.
+fn names_the_measurand(key: &str, product: &str) -> bool {
+    let product = file_name(product);
+    let times = |name: &str, word: &str| {
+        words(name).filter(|other| other.eq_ignore_ascii_case(word)).count()
+    };
+    words(product)
+        .filter(|word| !word.bytes().all(|sign| sign.is_ascii_digit()))
+        .any(|word| times(file_name(key), word) > times(product, word))
 }
 
 /// Файл с координатами пикселей растра — там, где они лежат отдельно от него.
@@ -294,15 +426,45 @@ pub fn single(identifier: &str) -> Option<(String, Role)> {
 ///
 /// `level` — уровень обработки, если он известен (в листинге хранилища его
 /// сообщить некому: уровень живёт в атрибутах каталога).
-pub fn unviewable(identifier: &str, folder: bool, level: Option<u32>) -> String {
+/// `kind` — продуктовый тип из каталога (`productType`); пусто там, где его
+/// никто не сказал (листинг хранилища знает только пути).
+pub fn unviewable(identifier: &str, folder: bool, level: Option<u32>, kind: &str) -> String {
     if level == Some(0) {
         return "это сырьё уровня 0: изображения в продукте нет вовсе, только эхо приёмника"
             .to_string();
+    }
+    if let Some(why) = hopeless_type(kind) {
+        return why.to_string();
     }
     match folder || single(identifier).is_some() {
         true => String::new(),
         false => just_a_file(identifier),
     }
+}
+
+/// Продуктовые типы, у которых изображения не будет ни при каком чтении.
+///
+/// Спрашивается это до скачивания — тем и ценно. Тип продукт объявляет сам, и
+/// каталог его уже разобрал; без этого отказ приходит от декодера на первом
+/// чанке, то есть после того, как гигабайты уже приехали по проводу, а весь
+/// путь до этого выглядел исправным.
+///
+/// Список короткий нарочно, и коротким его держат не лень, а цена ошибки.
+/// Лишнее скачивание человек замечает и больше не повторяет; погашенный значок
+/// над тем, что открылось бы, он не заметит никогда — просто решит, что данных
+/// нет.
+///
+/// Гасится поэтому весь ПРОДУКТ, а не растр, и мерка тут своя: годится только
+/// то, у чего непоказуема всякая часть. Радар до сжатия апертуры (SLC) сюда не
+/// идёт, хотя измерительный растр у него и правда комплексный: рядом лежит
+/// квиклук, и он показывается — то есть погасить продукт значило бы отнять
+/// единственный способ его увидеть. Комплексный отсчёт ловится там, где он и
+/// живёт, — на описании растра (`tiff::sampled`).
+fn hopeless_type(kind: &str) -> Option<&'static str> {
+    if kind.to_ascii_uppercase().starts_with("AUX") {
+        return Some("это служебные данные прибора, а не съёмка");
+    }
+    None
 }
 
 /// Форматы, которые открывает наложение, — словами, для отказа.
@@ -401,8 +563,10 @@ fn suffixes(keys: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     /// Растры из [`scan`] — тестам нужны только они.
-    fn scan_rasters(keys: &[String], measured: &[String]) -> Vec<(String, Role)> {
-        scan(keys, measured).rasters
+    /// Растры удалённого продукта — того, что ещё не скачан. Скачанный
+    /// спрашивается отдельно, там свой ответ.
+    fn scan_rasters(product: &str, keys: &[String], measured: &[String]) -> Vec<(String, Role)> {
+        scan(product, keys, measured, false).rasters
     }
 
     use super::*;
@@ -420,7 +584,7 @@ mod tests {
             "eodata/…/S2C_MSIL2A_T40WFC.SAFE/GRANULE/L2A_T40WFC_A/IMG_DATA/R10m/T40WFC_20260812_B08_10m.jp2",
             "eodata/…/S2C_MSIL2A_T40WFC.SAFE/MTD_MSIL2A.xml",
         ]);
-        let rasters = scan_rasters(&keys, &[]);
+        let rasters = scan_rasters("eodata/…/S2C_MSIL2A_T40WFC.SAFE", &keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("_PVI.jp2") && rasters[0].1 == Role::Preview);
         assert!(rasters[1].0.ends_with("_TCI_10m.jp2") && rasters[1].1 == Role::Detailed);
@@ -433,22 +597,47 @@ mod tests {
             "eodata/…/S2B_MSIL1C_T33UUP.SAFE/GRANULE/L1C_T33UUP_A/IMG_DATA/T33UUP_20260601_TCI.jp2",
             "eodata/…/S2B_MSIL1C_T33UUP.SAFE/GRANULE/L1C_T33UUP_A/IMG_DATA/T33UUP_20260601_B02.jp2",
         ]);
-        let rasters = scan_rasters(&keys, &[]);
+        let rasters = scan_rasters("eodata/…/S2B_MSIL1C_T33UUP.SAFE", &keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[1].0.ends_with("_TCI.jp2") && rasters[1].1 == Role::Detailed);
     }
 
+    /// Полосный гигант старых GRD показывается только скачанным, и решает это
+    /// его ГРУБЫЙ край, а не подробный. Подробный тайл у него дёшев — 512 строк
+    /// на всю ширину, тайлер читает такой уровень окном; а грубому нужна каждая
+    /// строка файла, и он стои́т целого прохода. Спрашивают же именно грубый:
+    /// канва просмотра открывает подробный растр и вписывает его в окно.
     #[test]
-    fn sentinel1_plain_grd_yields_quicklook_only() {
-        // Не-COG: measurement — полосный гигант, подробной роли не получает.
+    fn sentinel1_plain_grd_yields_measurement_only_when_downloaded() {
         let keys = keys(&[
             "eodata/…/S1C_IW_GRDH.SAFE/preview/quick-look.png",
             "eodata/…/S1C_IW_GRDH.SAFE/measurement/s1c-iw-grd-vv.tiff",
             "eodata/…/S1C_IW_GRDH.SAFE/manifest.safe",
         ]);
-        let rasters = scan_rasters(&keys, &[]);
-        assert_eq!(rasters.len(), 1);
-        assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
+
+        let remote = scan_rasters("eodata/…/S1C_IW_GRDH.SAFE", &keys, &[]);
+        assert_eq!(remote.len(), 1, "по сети предложен проход по всему файлу");
+        assert!(remote[0].0.ends_with("quick-look.png") && remote[0].1 == Role::Preview);
+
+        let local = scan("eodata/…/S1C_IW_GRDH.SAFE", &keys, &[], true).rasters;
+        assert_eq!(local.len(), 2, "скачанный снимок остался при одном квиклуке");
+        assert!(local[0].0.ends_with("quick-look.png") && local[0].1 == Role::Preview);
+        assert!(local[1].0.ends_with("-vv.tiff") && local[1].1 == Role::Detailed);
+    }
+
+    /// А тайловый COG предлагается независимо от того, скачан он или нет:
+    /// читается он точечно, и приближение стои́т своих тайлов, а не файла.
+    #[test]
+    fn sentinel1_cog_measurement_needs_no_disk() {
+        let keys = keys(&[
+            "eodata/…/S1C_IW_GRDH_COG.SAFE/preview/quick-look.png",
+            "eodata/…/S1C_IW_GRDH_COG.SAFE/measurement/s1c-iw-grd-vv-cog.tiff",
+        ]);
+        for downloaded in [false, true] {
+            let rasters = scan("eodata/…/S1C_IW_GRDH_COG.SAFE", &keys, &[], downloaded).rasters;
+            assert_eq!(rasters.len(), 2, "скачан={downloaded}");
+            assert!(rasters[1].0.ends_with("-vv-cog.tiff") && rasters[1].1 == Role::Detailed);
+        }
     }
 
     #[test]
@@ -459,7 +648,7 @@ mod tests {
             "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/measurement/s1c-iw-grd-vv-20260812t153507-001-cog.tiff",
             "eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE/manifest.safe",
         ]);
-        let rasters = scan_rasters(&keys, &[]);
+        let rasters = scan_rasters("eodata/…/S1C_IW_GRDH_1SDV_COG.SAFE", &keys, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
         // Из двух поляризаций подробной выбрана ко- (vv), не первая по списку.
@@ -473,7 +662,8 @@ mod tests {
         let clms = keys(&[
             "eodata/CLMS/lst/c_gls_LST_202608161000_GLOBE_GEO_V3.0.1_nc/c_gls_LST.nc",
         ]);
-        let rasters = scan_rasters(&clms, &[]);
+        let rasters =
+            scan_rasters("eodata/CLMS/lst/c_gls_LST_202608161000_GLOBE_GEO_V3.0.1_nc", &clms, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with(".nc") && rasters[0].1 == Role::Detailed);
     }
@@ -488,10 +678,139 @@ mod tests {
             "eodata/Landsat-5/LT51780121988065ESA00/LT51780121988065ESA00_B2.TIF",
             "eodata/Landsat-5/LT51780121988065ESA00/LT51780121988065ESA00_B1.TIF",
         ]);
-        let rasters = scan_rasters(&bands, &[]);
+        let rasters = scan_rasters("eodata/Landsat-5/LT51780121988065ESA00", &bands, &[]);
         assert_eq!(rasters.len(), 2);
         assert!(rasters[0].0.ends_with("_thumb_large.jpg") && rasters[0].1 == Role::Preview);
         assert!(rasters[1].0.ends_with("_B1.TIF") && rasters[1].1 == Role::Detailed);
+    }
+
+    /// Обзорная картинка архива ESA зовётся `BP` — Browse Product, — и слово
+    /// это перечислено: иначе она становится подробным растром, потому что по
+    /// алфавиту `LS05…BP.PNG` стои́т раньше полос `LT51…_B1.TIF` из соседнего
+    /// каталога. Раскладка настоящая: так лежит Landsat-5 в бакете CDSE.
+    #[test]
+    fn a_browse_product_is_a_quicklook_not_the_picture() {
+        const PRODUCT: &str = "eodata/Landsat-5/TM/L1G/1988/03/05/LS05_RKSE_TM__GEO_1P_52FE";
+        let scene = keys(&[
+            "eodata/…/LS05_RKSE_TM__GEO_1P_52FE/LS05_RKSE_TM__GEO_1P_52FE.BP.PNG",
+            "eodata/…/LS05_RKSE_TM__GEO_1P_52FE/LS05_RKSE_TM__GEO_1P_52FE.BP.XML",
+            "eodata/…/LS05_RKSE_TM__GEO_1P_52FE/LS05_RKSE_TM__GEO_1P_52FE.JPG",
+            "eodata/…/LS05_RKSE_TM__GEO_1P_52FE/LS05_RKSE_TM__GEO_1P_52FE.TIFF/LT51780121988065ESA00_B2.TIF",
+            "eodata/…/LS05_RKSE_TM__GEO_1P_52FE/LS05_RKSE_TM__GEO_1P_52FE.TIFF/LT51780121988065ESA00_B1.TIF",
+        ]);
+        let rasters = scan_rasters(PRODUCT, &scene, &[]);
+        assert_eq!(rasters.len(), 2, "{:?}", rasters);
+        assert!(rasters[0].0.ends_with(".BP.PNG") && rasters[0].1 == Role::Preview);
+        assert!(rasters[1].0.ends_with("_B1.TIF") && rasters[1].1 == Role::Detailed);
+
+        // Словом, а не куском: две буквы подстрокой ловят что угодно.
+        assert!(a_quicklook("x/scene.BP.PNG"));
+        assert!(!a_quicklook("x/S3A_SL_2_LST_bpm_in.nc"));
+
+        // Второй картинки в списке довольно, чтобы слово `BP` перестало
+        // помогать: `LS05_…52FE.JPG` не названо ничем и по алфавиту стои́т
+        // раньше полос (`S` < `T`). Различает их формат, а не имя.
+        assert!(a_picture_format("x/LS05_RKSE_TM__GEO_1P_52FE.JPG"));
+        assert!(!a_picture_format("x/LT51780121988065ESA00_B1.TIF"));
+        assert!(!a_picture_format("x/LST_in.nc"));
+    }
+
+    /// Гранула OLCI без манифеста: первым по алфавиту стои́т файл координат, а
+    /// не измерение — у неё все имена строчные, и уступки регистра, что
+    /// выручает SLSTR, здесь нет. Имена настоящие, с гранулы `OL_2_LRR`.
+    ///
+    /// Те же координаты, найденные [`geolocation`], садятся потом под растр —
+    /// одно и то же знание, спрошенное с двух сторон.
+    #[test]
+    fn a_coordinate_file_never_becomes_the_measurement() {
+        const PRODUCT: &str = "eodata/…/S3A_OL_2_LRR____20260824T161836_PS1_O_NR_003.SEN3";
+        let granule = keys(&[
+            "eodata/…/S3A_OL_2_LRR.SEN3/quicklook.jpg",
+            "eodata/…/S3A_OL_2_LRR.SEN3/geo_coordinates.nc",
+            "eodata/…/S3A_OL_2_LRR.SEN3/gifapar.nc",
+            "eodata/…/S3A_OL_2_LRR.SEN3/iwv.nc",
+            "eodata/…/S3A_OL_2_LRR.SEN3/otci.nc",
+            "eodata/…/S3A_OL_2_LRR.SEN3/tie_geo_coordinates.nc",
+            "eodata/…/S3A_OL_2_LRR.SEN3/time_coordinates.nc",
+            "eodata/…/S3A_OL_2_LRR.SEN3/xfdumanifest.xml",
+        ]);
+        let rasters = scan_rasters(PRODUCT, &granule, &[]);
+        assert_eq!(rasters.len(), 2, "{:?}", rasters);
+        assert!(rasters[1].0.ends_with("/gifapar.nc"), "{:?}", rasters[1]);
+
+        // То же самое говорит и манифест — правило с ним не спорит, а
+        // повторяет его там, где его нет.
+        let said = vec!["gifapar.nc".to_string()];
+        assert!(scan_rasters(PRODUCT, &granule, &said)[1].0.ends_with("/gifapar.nc"));
+    }
+
+    /// Гранула SLSTR без манифеста: рядом с измерением лежит подсобный файл, и
+    /// по алфавиту он первый — прописные идут раньше строчных, так что спор
+    /// решается на `a` против `i`. Имена настоящие, с гранулы `SL_2_LST`.
+    ///
+    /// Обычно такую гранулу разбирает манифест — он измерение называет прямо, —
+    /// но манифест бывает и недоступен, и тогда весь ответ в именах файлов.
+    #[test]
+    fn an_ancillary_file_never_becomes_the_measurement() {
+        const PRODUCT: &str = "eodata/…/S3A_SL_2_LST____20260824T174507_0540_PS1_O_NR_005.SEN3";
+        let granule = keys(&[
+            "eodata/…/S3A_SL_2_LST.SEN3/quicklook.jpg",
+            "eodata/…/S3A_SL_2_LST.SEN3/LST_ancillary_ds.nc",
+            "eodata/…/S3A_SL_2_LST.SEN3/LST_in.nc",
+            "eodata/…/S3A_SL_2_LST.SEN3/flags_in.nc",
+            "eodata/…/S3A_SL_2_LST.SEN3/geodetic_in.nc",
+            "eodata/…/S3A_SL_2_LST.SEN3/xfdumanifest.xml",
+        ]);
+        let rasters = scan_rasters(PRODUCT, &granule, &[]);
+        assert_eq!(rasters.len(), 2, "{:?}", rasters);
+        assert!(rasters[0].0.ends_with("quicklook.jpg") && rasters[0].1 == Role::Preview);
+        assert!(rasters[1].0.ends_with("/LST_in.nc") && rasters[1].1 == Role::Detailed);
+
+        // А названный манифестом побеждает и без всяких ярусов.
+        let said = vec!["LST_ancillary_ds.nc".to_string()];
+        let by_manifest = scan_rasters(PRODUCT, &granule, &said);
+        assert!(by_manifest[1].0.ends_with("LST_ancillary_ds.nc"), "{:?}", by_manifest);
+    }
+
+    /// Полосы CLMS — измерение, погрешность, флаги качества и время съёмки —
+    /// все четыре читаемые растры одного размера, и первой по алфавиту стои́т
+    /// погрешность: на шар легла бы она — разброс в кельвинах вместо самой
+    /// температуры, а по виду это неотличимо, маска «нет данных» у полос общая.
+    ///
+    /// Спасает то, что имя файла у CLMS — это имя продукта с приставкой полосы:
+    /// измерение узнаётся тем, что повторяет величину продукта.
+    #[test]
+    fn a_clms_product_shows_its_measurement_not_its_error_bar() {
+        const PRODUCT: &str = "eodata/…/c_gls_LST_202608271600_GLOBE_GEO_V3.0.1_cog";
+        let band = |what: &str| {
+            format!("{}/c_gls_LST-{}_202608271600_GLOBE_GEO_V3.0.1.tiff", PRODUCT, what)
+        };
+        let bands: Vec<String> =
+            ["ERRORBAR", "LST", "QFLAG", "TDELTA"].iter().map(|what| band(what)).collect();
+
+        let rasters = scan_rasters(PRODUCT, &bands, &[]);
+        assert_eq!(rasters.len(), 1, "{:?}", rasters);
+        assert_eq!(rasters[0], (band("LST"), Role::Detailed));
+
+        // Повтор считается по последнему сегменту пути, а не по всему: путь
+        // назвал величину ещё до полосы, и со всем путём в счёте `LST` вышло бы
+        // два против двух — измерение сравнялось бы с соседями.
+        let deep = format!("eodata/CLMS/x_lst_y/2026/08/27/{}", file_name(PRODUCT));
+        assert!(names_the_measurand(&band("LST"), &deep));
+        assert!(!names_the_measurand(&band("ERRORBAR"), &deep));
+
+        // Дата и версия повторяются в именах полос сами собой, и словами не
+        // считаются: иначе на правило отвечала бы всякая полоса, у которой в
+        // хвосте стои́т лишний номер.
+        let numbered =
+            format!("{}/c_gls_LST-QFLAG_202608271600_GLOBE_GEO_V3.0.1-1.tiff", PRODUCT);
+        assert!(!names_the_measurand(&numbered, PRODUCT));
+
+        // Полосе, которая величину продукта не повторяет, правило не отвечает
+        // ничего, и выбор остаётся за алфавитом — как у Landsat, где полосы
+        // зовутся `_B1`…`_B7`.
+        let scene = "eodata/Landsat-5/LT51780121988065ESA00";
+        assert!(!names_the_measurand(&format!("{}/LT51780121988065ESA00_B1.TIF", scene), scene));
     }
 
     /// Цветной снимок целиком идёт вперёд отдельных полос — по имени, потому
@@ -503,13 +822,16 @@ mod tests {
             "eodata/Sentinel-3/SR/x.SEN3/Oa01_radiance.nc",
             "eodata/Sentinel-3/SR/x.SEN3/rgb_TCI.nc",
         ]);
-        let rasters = scan_rasters(&granule, &[]);
+        let rasters = scan_rasters("eodata/Sentinel-3/SR/x.SEN3", &granule, &[]);
         assert_eq!(rasters.len(), 1);
         assert!(rasters[0].0.ends_with("rgb_TCI.nc"));
 
         assert!(a_whole_picture("x/T35UNV_20260818_TCI_10m.jp2"));
         assert!(a_whole_picture("x/scene_true_color.tif"));
         assert!(a_whole_picture("x/L2_TRUECOLOR.png"));
+        // Пустые токены разборщик отбрасывает, и двойной разделитель пару не
+        // разрывает: у ESA двойное подчёркивание — обычное дело.
+        assert!(a_whole_picture("x/S3A_OL__TRUE__COLOR.png"));
         assert!(!a_whole_picture("eodata/…/S3A_OL_2_LFR.SEN3/otci.nc"));
         assert!(!a_whole_picture("eodata/…/S3A_OL_2_LFR.SEN3/rc_gifapar.nc"));
     }
@@ -528,7 +850,7 @@ mod tests {
             "eodata/…/S1C_EW_OCN__2SDH.SAFE/measurement/s1c-ew1-osw-hh-20260818t193953-002.nc",
             "eodata/…/S1C_EW_OCN__2SDH.SAFE/manifest.safe",
         ]);
-        let rasters = scan_rasters(&ocn, &[]);
+        let rasters = scan_rasters("eodata/…/S1C_EW_OCN__2SDH.SAFE", &ocn, &[]);
         assert_eq!(rasters.len(), 2, "{:?}", rasters);
         assert!(
             rasters[0].0.ends_with("quick-look-l2-owi.png") && rasters[0].1 == Role::Preview,
@@ -551,7 +873,7 @@ mod tests {
             "eodata/…/X.SAFE/preview/icons/logo.png",
             "eodata/…/X.SAFE/annotation/report.xml",
         ]);
-        let rasters = scan_rasters(&only, &[]);
+        let rasters = scan_rasters("eodata/…/X.SAFE", &only, &[]);
         assert_eq!(rasters.len(), 1, "{:?}", rasters);
         assert!(rasters[0].0.ends_with("quick-look.png") && rasters[0].1 == Role::Preview);
     }
@@ -604,19 +926,39 @@ mod tests {
         // Сырьё уровня 0 — изображения в нём нет, сколько ни листай. И отказ
         // называет именно уровень: по «нет растра» его не отличить от снимка
         // незнакомой раскладки, а поступают с ними по-разному.
-        let raw = unviewable("eodata/…/S1C_IW_RAW__0SDV.SAFE", true, Some(0));
+        let raw = unviewable("eodata/…/S1C_IW_RAW__0SDV.SAFE", true, Some(0), "IW_RAW__0S");
         assert!(raw.contains("уровня 0"), "отказ не назвал уровень: {}", raw);
         // Архив калибровочных таблиц — один файл, и он не растр. Отказ
         // называет и то, что лежит, и то, что подошло бы.
-        let archive = unviewable("eodata/…/S2A_OPER_GIP_R2EQOG_B03.TGZ", false, Some(1));
+        let archive = unviewable("eodata/…/S2A_OPER_GIP_R2EQOG_B03.TGZ", false, Some(1), "");
         assert!(archive.contains(".tgz"), "отказ не назвал файла: {}", archive);
         assert!(archive.contains("TIFF"), "отказ не назвал подходящего: {}", archive);
         // Гранула Sentinel-5P — один файл, и он читается.
-        assert!(unviewable("eodata/…/S5P_NRTI_L2__NO2___.nc", false, Some(2)).is_empty());
+        assert!(unviewable("eodata/…/S5P_NRTI_L2__NO2___.nc", false, Some(2), "L2__NO2___").is_empty());
         // Папка: что внутри, скажет листинг.
-        assert!(unviewable("eodata/…/S2C_MSIL2A_T40WFC.SAFE", true, Some(2)).is_empty());
+        assert!(unviewable("eodata/…/S2C_MSIL2A_T40WFC.SAFE", true, Some(2), "S2MSI2A").is_empty());
         // Уровень неизвестен (листинг хранилища) — судим по одному ключу.
-        assert!(unviewable("eodata/…/tile.TIF", false, None).is_empty());
+        assert!(unviewable("eodata/…/tile.TIF", false, None, "").is_empty());
+
+        // Служебные данные гаснут типом продукта — до скачивания. Папкой, а
+        // не файлом: у файла отказ дало бы и расширение, и проверка вышла бы
+        // пустой.
+        let aux = unviewable("eodata/…/S1A_AUX_PP1.SAFE", true, None, "AUX_PP1");
+        assert!(aux.contains("служебные"), "AUX обязан гаснуть типом: {aux}");
+        assert!(
+            unviewable("eodata/…/S1A_AUX_PP1.SAFE", true, None, "").is_empty(),
+            "без типа гасить нечем — проверка обязана держаться на нём"
+        );
+
+        // А снимаемое типом не гасится, каким бы длинным он ни был: цена
+        // ошибки здесь односторонняя. SLC в этом списке не случайно — растр у
+        // него комплексный, но квиклук рядом показывается.
+        for kind in ["IW_GRDH_1S", "S2MSI1C", "SL_2_LST___", "L2__CO____", "IW_SLC__1S"] {
+            assert!(
+                unviewable("eodata/…/product.SAFE", true, Some(2), kind).is_empty(),
+                "тип {kind} погашен, а он показуемый"
+            );
+        }
     }
 
     /// Пустой ответ объясняется тем, что в продукте лежит: сырьё уровня 0 и

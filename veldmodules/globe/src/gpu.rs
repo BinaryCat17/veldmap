@@ -47,7 +47,29 @@ struct CameraUniform {
     eye_low: World,
     _pad2: f32,
     viewport: [f32; 2],
-    _pad3: [f32; 2],
+    /// Фаза ряби в долях её периода, 0..1, и её сила, 0..1 — то, чем помечено
+    /// грузящееся место снимка (см. `fs_overlay`).
+    ///
+    /// Сила здесь, а не в вершине, потому что она величина слоя, а не ячейки:
+    /// положенная в вершину, она звала бы пересобирать всю варп-сетку на
+    /// каждое движение прочитанных байт. Ячейка приносит только признак —
+    /// рябит она или нет.
+    phase: f32,
+    ripple: f32,
+}
+
+/// Рябь на грузящихся ячейках: где волна стои́т сейчас и насколько заметна.
+///
+/// Обеими величинами сразу, потому что порознь они бессмысленны: фаза без силы
+/// двигает невидимое, сила без фазы рисует неподвижное пятно. Считает их
+/// кадровый тик, а не отрисовка: фаза меряется временем, а времени у неё нет.
+#[derive(Clone, Copy, Default)]
+pub struct Ripple {
+    /// Доля периода волны, 0..1.
+    pub phase: f32,
+    /// Сила, 0..1: чем ближе ступень к концу, тем заметнее. Ноль — рябить
+    /// нечему, и тогда кадр от прежнего не отличается вовсе.
+    pub strength: f32,
 }
 
 /// Вершина ленты выделенного контура: точка поверхности с нормалью, её соседи
@@ -76,15 +98,16 @@ pub struct RibbonVertex {
 /// видеопамятью в те разы, когда очерчено две строки.
 const INITIAL_OUTLINE_BUFFER: u64 = 64 * 1024;
 
-/// С чего начинается буфер варп-сеток наложений. У гранулы ячейка — несколько
-/// сотен вершин, у растра покрупнее — тысячи, и буфер дорастает сам; четверти
-/// мегабайта хватает первому кадру, чтобы не расти трижды подряд.
+/// С чего начинаются буферы варп-сеток наложений — оба, и вершин, и номеров. У
+/// гранулы ячейка — восемь десятков узлов и четыре сотни номеров, у растра
+/// покрупнее тысячи тех и других, и буферы дорастают сами; четверти мегабайта
+/// хватает первому кадру, чтобы не расти трижды подряд.
 const INITIAL_OVERLAY_BUFFER: u64 = 256 * 1024;
 
-/// Вершина варп-сетки наложения: точка мира, координата в текстуре носителя и
-/// прозрачность своего слоя. Последняя одинакова у всех вершин наложения —
-/// вершиной она едет потому, что все наложения лежат в одном буфере и рисуются
-/// одним пайплайном (см. `overlay::patch`).
+/// Вершина варп-сетки наложения: точка мира, координата в текстуре носителя,
+/// прозрачность своего слоя и признак идущей загрузки. Две последние одинаковы
+/// у всех вершин одной ячейки — вершиной они едут потому, что все наложения
+/// лежат в одном буфере и рисуются одним пайплайном (см. `overlay::spread`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct OverlayVertex {
@@ -92,14 +115,38 @@ pub struct OverlayVertex {
     pub position_low: World,
     pub uv: [f32; 2],
     pub alpha: f32,
+    /// 1 — своему тайлу этой ячейки ещё ехать, и место под ним рябит; 0 —
+    /// ячейка накрыта тем, чем и должна. Признак, а не сила: силу везёт
+    /// uniform кадра (см. [`CameraUniform::ripple`]).
+    pub ripple: f32,
 }
 
-/// Собранные патчи наложений: общий вершинный буфер и отрисовки диапазонами —
-/// по одной на носителя. Пересобирается не кадром, а сменой состава (см.
-/// module.rs): камера двигает только uniform, мир патчей от неё не зависит.
+/// Одна отрисовка наложения: чем красить, какой густоты у неё варп-сетка и с
+/// какого узла общего буфера она начинается.
+///
+/// Густотой, а не диапазоном номеров: номера у всех ячеек одной густоты
+/// одинаковы, и различает их только начало (см. [`OverlayBatch::block`]).
+pub struct Patch {
+    pub bind: BindGroupId,
+    pub segments: u32,
+    pub base: u32,
+}
+
+/// Собранные патчи наложений: общий буфер вершин, буфер номеров блоками по
+/// густоте и отрисовки — по одной на ячейку. Пересобирается не кадром, а сменой
+/// состава (см. module.rs): камера двигает только uniform, мир патчей от неё не
+/// зависит.
 pub struct OverlayBatch {
     vertices: GrowingBuffer,
-    pub draws: Vec<(BindGroupId, std::ops::Range<u32>)>,
+    indices: GrowingBuffer,
+    /// Номера по густоте: где в буфере лежит блок сетки в `segments` сегментов.
+    /// Блок строится раз на густоту и живёт, сколько живёт устройство, — от
+    /// ячейки в нём не зависит ничего.
+    blocks: Vec<(u32, std::ops::Range<u32>)>,
+    /// Сами номера, чтобы дописывать блок. Держатся здесь потому, что буфер
+    /// заливается целиком: дописать в него хвост, не имея начала, нечем.
+    laid: Vec<u32>,
+    pub draws: Vec<(BindGroupId, std::ops::Range<u32>, i32)>,
 }
 
 impl OverlayBatch {
@@ -110,18 +157,70 @@ impl OverlayBatch {
                 "вершины наложений",
                 INITIAL_OVERLAY_BUFFER,
             ),
+            indices: GrowingBuffer::new(
+                buffer_usage::INDEX,
+                "номера наложений",
+                INITIAL_OVERLAY_BUFFER,
+            ),
+            blocks: Vec::new(),
+            laid: Vec::new(),
             draws: Vec::new(),
         }
     }
 
+    /// Номера сетки такой густоты: из блоков либо построенные и туда же
+    /// положенные.
+    ///
+    /// Диагональ квада — от `b` к `c`, и обе тройки шестёрки её держат: по ней
+    /// делит себя нарисованное, по ней же считается провал хорды
+    /// (`mesh::lift_m`), и проведённая иначе она разошлась бы с меркой подъёма.
+    fn block(&mut self, segments: u32) -> std::ops::Range<u32> {
+        if let Some((_, range)) = self.blocks.iter().find(|(at, _)| *at == segments) {
+            return range.clone();
+        }
+        let (side, from) = (segments + 1, self.laid.len() as u32);
+        self.laid.reserve((segments * segments * 6) as usize);
+        for row in 0..segments {
+            for col in 0..segments {
+                let a = row * side + col;
+                let (b, c, d) = (a + 1, a + side, a + side + 1);
+                self.laid.extend_from_slice(&[a, b, c, b, d, c]);
+            }
+        }
+        let range = from..self.laid.len() as u32;
+        self.blocks.push((segments, range.clone()));
+        range
+    }
+
     /// Заливает пересобранные патчи. Пустой набор законен: наложения сняты
     /// или их тайлы ещё не приехали.
+    ///
+    /// Отрисовки гасятся первым делом — по той же причине, что и у контуров
+    /// (см. [`Device::set_outlines`]): не залившийся буфер оставляет за собой
+    /// новый размер при старом содержимом, и диапазон от прошлой сборки уехал
+    /// бы за его конец. Буферов здесь два, и разойтись они могут между собой:
+    /// вершины залились, номера нет.
     pub fn fill(
         &mut self,
         vertices: &[OverlayVertex],
-        draws: Vec<(BindGroupId, std::ops::Range<u32>)>,
+        patches: &[Patch],
     ) -> anyhow::Result<()> {
+        self.draws.clear();
+        let laid = self.laid.len();
+        let draws: Vec<(BindGroupId, std::ops::Range<u32>, i32)> = patches
+            .iter()
+            .map(|patch| (patch.bind.clone(), self.block(patch.segments), patch.base as i32))
+            .collect();
+
         self.vertices.write(vertices)?;
+        // Номера заливаются только когда добавился блок: густоты в кадре
+        // повторяются, и обычная пересборка их не трогает вовсе.
+        if self.laid.len() != laid || self.indices.id().is_none() {
+            let laid = std::mem::take(&mut self.laid);
+            let written = self.indices.write(&laid);
+            self.laid = laid;
+            written?;
+        }
         self.draws = draws;
         Ok(())
     }
@@ -277,6 +376,7 @@ impl Device {
                     VertexFormat::VtxFloat32x3,
                     VertexFormat::VtxFloat32x2,
                     VertexFormat::VtxFloat32,
+                    VertexFormat::VtxFloat32,
                 ]),
             }],
             bind_group_layout_ids: vec![camera_layout.id(), overlay_layout.id()],
@@ -404,7 +504,12 @@ impl Target {
 /// Отдельно от отрисовки, потому что иначе непроверяемо: обеих половин глаза
 /// глазом не увидеть — обнули младшую, и картинка останется той же, только
 /// вершины пойдут шагом в метр (см. `geodesy::parts`).
-fn camera_uniform(camera: &Camera, aspect: f32, size: (u32, u32)) -> CameraUniform {
+fn camera_uniform(
+    camera: &Camera,
+    aspect: f32,
+    size: (u32, u32),
+    ripple: Ripple,
+) -> CameraUniform {
     let (eye, eye_low) = camera.eye_parts();
     CameraUniform {
         view_proj: camera.view_projection(aspect),
@@ -413,7 +518,8 @@ fn camera_uniform(camera: &Camera, aspect: f32, size: (u32, u32)) -> CameraUnifo
         eye_low,
         _pad2: 0.0,
         viewport: [size.0.max(1) as f32, size.1.max(1) as f32],
-        _pad3: [0.0, 0.0],
+        phase: ripple.phase,
+        ripple: ripple.strength,
     }
 }
 
@@ -426,8 +532,10 @@ pub fn render(
     target: &Target,
     camera: &Camera,
     overlays: &OverlayBatch,
+    ripple: Ripple,
 ) -> anyhow::Result<()> {
-    let uniform = camera_uniform(camera, target.aspect(), (target.width, target.height));
+    let uniform =
+        camera_uniform(camera, target.aspect(), (target.width, target.height), ripple);
     resource_write(device.camera.id(), 0, gfx::bytes_of(std::slice::from_ref(&uniform)))?;
 
     let mut recorder = RenderRecorder::new();
@@ -444,18 +552,26 @@ pub fn render(
 
     // Наложения — после тела (его глубина заслоняет дальнюю сторону), но до
     // сетки и контуров: линии обязаны читаться поверх снимка.
-    if !overlays.draws.is_empty() {
-        if let Some(buffer) = overlays.vertices.id() {
-            recorder.set_pipeline(&device.overlay);
-            recorder.set_bind_group(0, &device.camera_bind_group);
-            recorder.set_vertex_buffer(0, buffer, 0, overlays.vertices.filled());
-            for (bind, range) in &overlays.draws {
-                recorder.set_bind_group(1, bind);
-                recorder.draw(range.clone(), 0..1);
-            }
-            // Дальше рисуют Земля и линии — их буферы возвращаются на место.
-            recorder.set_vertex_buffer(0, device.vertices.id(), 0, 0);
+    if !overlays.draws.is_empty()
+        && let (Some(vertices), Some(indices)) =
+            (overlays.vertices.id(), overlays.indices.id())
+    {
+        recorder.set_pipeline(&device.overlay);
+        recorder.set_bind_group(0, &device.camera_bind_group);
+        recorder.set_vertex_buffer(0, vertices, 0, overlays.vertices.filled());
+        recorder.set_index_buffer(indices, IndexFormat::IdxUint32, 0, overlays.indices.filled());
+        for (bind, range, base) in &overlays.draws {
+            recorder.set_bind_group(1, bind);
+            // Номера у всех ячеек одной густоты общие, а начало у каждой своё, и
+            // несёт его `base_vertex`: он прибавляется к номеру уже на
+            // видеокарте.
+            recorder.draw_indexed(range.clone(), *base, 0..1);
         }
+        // Дальше рисуют Земля и линии — их буферы возвращаются на место. Оба:
+        // сетка сразу за наложениями рисуется номерами, и оставленный чужой
+        // буфер номеров увёл бы её в пустое место.
+        recorder.set_vertex_buffer(0, device.vertices.id(), 0, 0);
+        recorder.set_index_buffer(device.indices.id(), IndexFormat::IdxUint32, 0, 0);
     }
 
     recorder.set_pipeline(&device.grid);
@@ -570,7 +686,7 @@ mod tests {
     #[test]
     fn the_uniform_carries_both_halves_of_the_eye() {
         let camera = Camera::default();
-        let uniform = camera_uniform(&camera, 16.0 / 9.0, (1920, 1080));
+        let uniform = camera_uniform(&camera, 16.0 / 9.0, (1920, 1080), Ripple::default());
         let (eye, eye_low) = camera.eye_parts();
 
         assert_eq!(uniform.eye, eye);
@@ -578,11 +694,79 @@ mod tests {
         assert_ne!(eye_low, [0.0; 3], "младшая половина пуста — проверять было бы нечего");
     }
 
+    /// Блок номеров строится раз на густоту и отдаётся повторно: у всех ячеек
+    /// одной густоты номера одни и те же, а различает их начало, и его несёт
+    /// `base_vertex`.
+    ///
+    /// Здесь же закреплена шестёрка квада `[a, b, c, b, d, c]` и его диагональ
+    /// `b`–`c`: по ней делит себя нарисованное, по ней же считается провал
+    /// хорды (`mesh::lift_m`), и проведённая иначе она разошлась бы с меркой
+    /// подъёма — снимок нырнул бы под поверхность серединами квадов.
+    #[test]
+    fn a_density_block_is_laid_once_and_reused() {
+        let mut batch = OverlayBatch::new();
+
+        let eight = batch.block(8);
+        assert_eq!(eight.len(), 8 * 8 * 6, "квадов у сетки в восемь сегментов 64");
+        assert_eq!(batch.block(8), eight, "та же густота — тот же блок, а не второй такой же");
+        assert_eq!(batch.laid.len(), eight.len(), "блок положен один раз");
+
+        // Шестёрка первого квада: узлы 0 и 1 — верхние, 9 и 10 — под ними
+        // (сторона сетки — девять узлов), диагональ идёт от 1 к 9.
+        assert_eq!(&batch.laid[..6], &[0, 1, 9, 1, 10, 9]);
+        let span = |at: &std::ops::Range<u32>| at.start as usize..at.end as usize;
+        assert!(batch.laid[span(&eight)].iter().all(|&at| at < 81), "номер мимо своих узлов");
+
+        // Вторая густота ложится следом и своей длины.
+        let sixteen = batch.block(16);
+        assert_eq!(sixteen.start, eight.end);
+        assert_eq!(sixteen.len(), 16 * 16 * 6);
+        assert!(batch.laid[span(&sixteen)].iter().all(|&at| at < 17 * 17));
+    }
+
     /// Размер кадра не бывает нулевым: им лента делит, считая свою ширину в
-    /// долях отсечения.
+    /// долях отсечения.""
     #[test]
     fn an_empty_target_still_has_a_viewport() {
-        let uniform = camera_uniform(&Camera::default(), 1.0, (0, 0));
+        let uniform = camera_uniform(&Camera::default(), 1.0, (0, 0), Ripple::default());
         assert_eq!(uniform.viewport, [1.0, 1.0]);
+    }
+
+    /// Раскладка вершины и её длина считаются в двух разных местах: шаг берётся
+    /// из `size_of`, а смещения — из перечня форматов. Разъедься они — пайплайн
+    /// соберётся, кадр запишется, а на шаре окажется пустое место: имён у
+    /// наложений нет, и сценарию такой отказ не виден вовсе.
+    ///
+    /// Здесь же и вторая пара, которую компилятор не сводит, — размер uniform'а
+    /// камеры против объявленной в globe.wgsl структуры. Шестнадцать байт
+    /// выравнивания у неё заняты нацело, и лишнее поле молча съело бы фазу
+    /// ряби, а не отказало бы вслух.
+    #[test]
+    fn the_vertex_layout_and_its_stride_agree() {
+        let overlay = gfx::packed_attributes(&[
+            VertexFormat::VtxFloat32x3,
+            VertexFormat::VtxFloat32x3,
+            VertexFormat::VtxFloat32x2,
+            VertexFormat::VtxFloat32,
+            VertexFormat::VtxFloat32,
+        ]);
+        let spanned = overlay
+            .last()
+            .map_or(0, |last| last.offset as usize + format_size(last.format));
+        assert_eq!(spanned, std::mem::size_of::<OverlayVertex>(), "вершина наложения");
+
+        assert_eq!(std::mem::size_of::<CameraUniform>(), 112, "uniform камеры");
+    }
+
+    /// Сколько байт занимает атрибут такого формата. Своим перечнем, а не общей
+    /// функцией: сойтись он обязан не с кодом, а с тем, что понимает драйвер.
+    fn format_size(format: i32) -> usize {
+        match format {
+            f if f == VertexFormat::VtxFloat32 as i32 => 4,
+            f if f == VertexFormat::VtxFloat32x2 as i32 => 8,
+            f if f == VertexFormat::VtxFloat32x3 as i32 => 12,
+            f if f == VertexFormat::VtxFloat32x4 as i32 => 16,
+            other => unreachable!("неизвестный формат вершины: {other}"),
+        }
     }
 }

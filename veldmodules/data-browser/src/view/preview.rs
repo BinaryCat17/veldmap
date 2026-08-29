@@ -112,8 +112,8 @@ fn toolbar(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> 
 /// Строка хода показа. `None` — показывать нечего: канва не занята и ни на что
 /// не жалуется.
 ///
-/// Жалоба старше хода: «читается…» рядом с недоехавшей ступенью говорило бы,
-/// что всё идёт своим чередом, — а оно как раз не идёт.
+/// Жалоба старше хода: ход рядом с недоехавшей ступенью говорил бы, что всё
+/// идёт своим чередом, — а оно как раз не идёт.
 fn progress_line(preview: &PreviewState) -> Option<String> {
     if preview.request.is_pending() {
         return Some("открывается…".to_string());
@@ -128,17 +128,19 @@ fn progress_line(preview: &PreviewState) -> Option<String> {
     if !view.trouble.is_empty() {
         return Some(format::ellipsize(&view.trouble, 66));
     }
-    if !view.working {
-        return None;
+    // Ход называется тем же словарём, что и у снимка на шаре: работа у них
+    // одна и та же — набирается пирамида тайлов, — и два способа рассказать о
+    // ней заставляли бы смотрящего гадать, не разные ли это вещи.
+    crate::module::state::overlay::Progress {
+        ready: view.ready,
+        total: view.total,
+        step: view.step,
+        steps: view.steps,
+        pass: (view.read_bytes, view.total_bytes),
+        working: view.working,
+        ..Default::default()
     }
-    if view.read_bytes > 0 && view.total_bytes > 0 {
-        return Some(format!(
-            "читается… {} из {}",
-            format::bytes(view.read_bytes),
-            format::bytes(view.total_bytes),
-        ));
-    }
-    Some("готовится…".to_string())
+    .said()
 }
 
 /// Полоса под кадром: чем снимок является слева, что с ним сейчас происходит

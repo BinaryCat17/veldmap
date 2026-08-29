@@ -179,9 +179,32 @@ pub struct Blocks {
     evicted: std::sync::atomic::AtomicU64,
 }
 
+/// Чем один и тот же объект хранилища узнаётся в двух разных открытиях.
+///
+/// Адрес без запроса, потому что подпись живёт в запросе: превью и скачивание
+/// подписывают один и тот же путь порознь, и строки адресов у них разные, а
+/// байты — одни и те же. Длина и валидатор — чтобы перевыложенный объект не
+/// достался в наследство прежнему: путь у него тот же самый, и по одному пути
+/// новые байты легли бы под старый ключ.
+///
+/// Валидатора у сервера может и не быть; тогда общего ключа не заводят вовсе
+/// (см. [`Blocks::claim_for`]) — угадывать тождество по пути и длине нельзя,
+/// а ошибка здесь стоит подменённой середины файла.
+#[derive(PartialEq, Eq, Hash, Clone)]
+pub struct Identity {
+    path: String,
+    len: u64,
+    validator: String,
+}
+
 #[derive(Default)]
 struct Pool {
     blocks: HashMap<(u64, u64), Arc<[u8]>>,
+    /// Объект → его ключ владения и сколько ресурсов сейчас его читают.
+    ///
+    /// Счётчик обязателен: блоки не должны переживать последнего читателя,
+    /// иначе вытеснение начнёт выбрасывать чужое живое ради мёртвого.
+    shared: HashMap<Identity, (u64, u32)>,
     /// Порядок появления — им же и вытесняем: у последовательного прохода
     /// (а это основной сценарий) самый старый блок и есть самый ненужный.
     /// Ключи закрытого ресурса снимаются отсюда вместе с его блоками: они
@@ -194,6 +217,30 @@ struct Pool {
 impl Blocks {
     fn claim(&self) -> u64 {
         self.next_owner.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    }
+
+    /// Ключ владения для этого объекта: у второго открытия того же объекта он
+    /// тот же, и привезённые блоки достаются ему готовыми.
+    ///
+    /// Ради этого всё и заведено: одно открытие снимка живёт минутами и тянет
+    /// сотни блоков, а открытий у него бывает несколько — превью, наложение на
+    /// шар, второй слой того же файла, — и каждое ходило бы в сеть за тем же
+    /// самым.
+    ///
+    /// `None` — тождества не установить (сервер не прислал ни ETag, ни
+    /// Last-Modified): тогда ресурс читает сам за себя, как и раньше. Угадывать
+    /// тождество нельзя — по одному пути и длине два разных объекта склеились
+    /// бы молча, серединой файла.
+    fn claim_for(&self, identity: Option<Identity>) -> u64 {
+        let Some(identity) = identity else { return self.claim() };
+        let mut pool = self.pool.lock().unwrap();
+        if let Some((owner, readers)) = pool.shared.get_mut(&identity) {
+            *readers += 1;
+            return *owner;
+        }
+        let owner = self.next_owner.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        pool.shared.insert(identity, (owner, 1));
+        owner
     }
 
     fn get(&self, owner: u64, index: u64) -> Option<Arc<[u8]>> {
@@ -233,8 +280,25 @@ impl Blocks {
 
     /// Ресурс закрыт: его блоки не переживут его — читать их больше некому,
     /// а место они держат общее.
+    ///
+    /// Кроме одного случая: тот же объект читает кто-то ещё. Ключ у них общий,
+    /// и унесённые блоки пришлось бы везти по проводу заново — ровно тому
+    /// читателю, который никуда не уходил.
     fn release(&self, owner: u64) {
         let mut pool = self.pool.lock().unwrap();
+        // Ключ ищется перебором: объектов в карте столько, сколько ресурсов
+        // открыто, то есть единицы, а держать вторую карту «ключ → объект»
+        // значило бы завести две правды об одном.
+        if let Some((identity, (_, readers))) =
+            pool.shared.iter_mut().find(|(_, (who, _))| *who == owner)
+        {
+            *readers -= 1;
+            if *readers > 0 {
+                return;
+            }
+            let identity = identity.clone();
+            pool.shared.remove(&identity);
+        }
         let mut freed = 0;
         pool.blocks.retain(|&(who, _), data| {
             let mine = who == owner;
@@ -377,6 +441,7 @@ impl HttpRange {
     /// Range, и узнаёт полный размер из Content-Range.
     fn open(url: &str, headers: HashMap<String, String>, blocks: Arc<Blocks>) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Handle::current();
+        let mut validator = String::new();
         let len = with_retries(&format!("открытие {}", url), || {
             shutting_down()?;
             let response = runtime
@@ -398,6 +463,18 @@ impl HttpRange {
                     "удалённый ресурс не открыт: HTTP {} на {}", status, url
                 )));
             }
+            // Валидатор берётся тем же пробным запросом: второго повода
+            // ходить за ним нет, а без него блоки этого объекта не разделить
+            // с его же вторым открытием (см. [`Identity`]). ETag старше даты:
+            // он про содержимое, а секундная дата у перевыложенного объекта
+            // вполне совпадает с прежней.
+            validator = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .or_else(|| response.headers().get(reqwest::header::LAST_MODIFIED))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
             response
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
@@ -408,12 +485,18 @@ impl HttpRange {
                 })
         })?;
 
+        let identity = (!validator.is_empty()).then(|| Identity {
+            path: url.split('?').next().unwrap_or(url).to_string(),
+            len,
+            validator,
+        });
+
         Ok(Self {
             url: url.to_string(),
             headers,
             len,
             runtime,
-            owner: blocks.claim(),
+            owner: blocks.claim_for(identity),
             blocks,
             readahead: Mutex::new(Readahead::default()),
             fetched: std::sync::atomic::AtomicU64::new(0),
@@ -753,5 +836,71 @@ mod tests {
         let second = pool.claim();
         assert_ne!(first, second);
         assert!(pool.get(second, 0).is_none(), "новый ресурс начинает с пустого");
+    }
+
+    fn identity(path: &str, len: u64, validator: &str) -> Identity {
+        Identity { path: path.to_string(), len, validator: validator.to_string() }
+    }
+
+    /// Два открытия одного и того же объекта читают один пул: превью снимка и
+    /// его же наложение на шар подписывают один путь порознь, и строки адресов
+    /// у них разные — а байты одни и те же.
+    #[test]
+    fn один_объект_читается_одним_ключом() {
+        let pool = Blocks::default();
+        let same = identity("s3://bucket/scene.tif", 4096, "\"abc\"");
+
+        let first = pool.claim_for(Some(same.clone()));
+        pool.insert(first, 0, block());
+
+        let second = pool.claim_for(Some(same));
+        assert_eq!(first, second, "второе открытие пошло бы в сеть за тем же самым");
+        assert!(pool.get(second, 0).is_some(), "привезённое досталось не готовым");
+    }
+
+    /// А разные объекты — разными, чем бы они ни были похожи. Ошибка здесь
+    /// стоит подменённой середины файла: длина и путь совпадают, а байты нет.
+    #[test]
+    fn разные_объекты_читаются_порознь() {
+        let pool = Blocks::default();
+        let path = "s3://bucket/scene.tif";
+
+        // Перевыложенный объект: путь и длина те же, содержимое другое.
+        let old = pool.claim_for(Some(identity(path, 4096, "\"abc\"")));
+        let new = pool.claim_for(Some(identity(path, 4096, "\"def\"")));
+        assert_ne!(old, new);
+
+        // Другой объект по тому же пути другой длины.
+        let longer = pool.claim_for(Some(identity(path, 8192, "\"abc\"")));
+        assert_ne!(old, longer);
+
+        // И объект, о котором сервер не сказал ничего: тождества не установить,
+        // и угадывать его нельзя — каждое открытие читает само за себя.
+        let (mute, mute_again) = (pool.claim_for(None), pool.claim_for(None));
+        assert_ne!(mute, mute_again);
+    }
+
+    /// Уходит один из двух читателей — блоки остаются: они нужны тому, кто
+    /// никуда не уходил, и увезённые пришлось бы везти по проводу заново.
+    /// Уходит последний — уносит всё, как и всякий закрытый ресурс.
+    #[test]
+    fn блоки_живут_столько_же_сколько_последний_их_читатель() {
+        let pool = Blocks::default();
+        let same = identity("s3://bucket/scene.tif", 4096, "\"abc\"");
+        let first = pool.claim_for(Some(same.clone()));
+        let second = pool.claim_for(Some(same.clone()));
+        pool.insert(first, 0, block());
+
+        pool.release(first);
+        assert!(pool.get(second, 0).is_some(), "блоки ушли с тем, кто их не держал один");
+        assert_eq!(pool.pool.lock().unwrap().bytes, BLOCK);
+
+        pool.release(second);
+        assert_eq!(pool.pool.lock().unwrap().bytes, 0, "последний читатель не унёс своё");
+
+        // И ключ объекта освободился вместе с ними: открытый следом начинает с
+        // пустого, а не наследует чужую очередь вытеснения.
+        let again = pool.claim_for(Some(same));
+        assert!(pool.get(again, 0).is_none());
     }
 }

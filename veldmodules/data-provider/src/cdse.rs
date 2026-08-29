@@ -55,6 +55,7 @@ fn imagery_page(
     correlation_id: String,
     identifier: String,
     keys: Vec<String>,
+    downloaded: bool,
     token: &str,
 ) -> Result<(), String> {
     let path = format!("{}/", identifier.trim_end_matches('/'));
@@ -62,7 +63,7 @@ fn imagery_page(
         let Some(identity) = state.identity.as_ref() else { return Err(NO_KEYS.to_string()) };
         s3::listing_deep(identity, &path, token)
     };
-    let what = Asked::Imagery { identifier, keys };
+    let what = Asked::Imagery { identifier, keys, downloaded };
     ask(state, correlation_id, listing.url, listing.headers, what);
     Ok(())
 }
@@ -236,8 +237,14 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
     log::info!(target: "handlers",
         "Растры продукта: {}/", request.identifier.trim_end_matches('/'));
     let correlation_id = veldsdk::correlation();
-    if let Err(error) = imagery_page(state, correlation_id.clone(), request.identifier, Vec::new(), "")
-    {
+    if let Err(error) = imagery_page(
+        state,
+        correlation_id.clone(),
+        request.identifier,
+        Vec::new(),
+        request.downloaded,
+        "",
+    ) {
         refuse_imagery(&correlation_id, error);
     }
 }
@@ -425,10 +432,14 @@ pub fn on_http_result(
                             // знает — его сообщает только каталог.
                             let itself = product == entry.identifier.trim_end_matches('/');
                             let unviewable = match itself {
+                                // Продуктовый тип листинг знает не лучше уровня:
+                                // в путях его нет, а разбирать имя ради него —
+                                // это гадание там, где каталог отвечает точно.
                                 true => imagery::unviewable(
                                     &entry.identifier,
                                     entry.identifier.ends_with('/'),
                                     None,
+                                    "",
                                 ),
                                 // Причина эта до смотрящего не доходит и дойти не
                                 // может: у записи, которая снимком не оказалась,
@@ -462,7 +473,7 @@ pub fn on_http_result(
                 error,
             }, &pending.correlation_id);
         }
-        Asked::Imagery { identifier, mut keys } => {
+        Asked::Imagery { identifier, mut keys, downloaded } => {
             let listing = from_storage(&response, |body| s3::parse_listing(body, &identifier));
 
             match listing {
@@ -476,6 +487,7 @@ pub fn on_http_result(
                             pending.correlation_id.clone(),
                             identifier,
                             keys,
+                            downloaded,
                             &listing.next_token,
                         ) {
                             refuse_imagery(&pending.correlation_id, error);
@@ -488,7 +500,7 @@ pub fn on_http_result(
                     // собственным правилом, а манифест — это ещё один
                     // подписанный запрос на сотни килобайт, а у OLCI полного
                     // разрешения и на полтора мегабайта.
-                    let known = imagery::scan(&keys, &[]);
+                    let known = imagery::scan(&identifier, &keys, &[], downloaded);
                     // Ключи здесь заведомо есть: без них не состоялся бы и сам
                     // обход. Ложной эта клауза не бывает, и стои́т она вместо
                     // `unwrap` не для надёжности, а по цене промаха: `unwrap`
@@ -501,7 +513,7 @@ pub fn on_http_result(
                         && let Some(identity) = state.identity.as_ref()
                     {
                         let object = s3::object(identity, manifest);
-                        let what = Asked::Manifest { identifier, keys };
+                        let what = Asked::Manifest { identifier, keys, downloaded };
                         ask(
                             state,
                             pending.correlation_id,
@@ -522,7 +534,7 @@ pub fn on_http_result(
                 }
             }
         }
-        Asked::Manifest { identifier, keys } => {
+        Asked::Manifest { identifier, keys, downloaded } => {
             // Манифест не достался — это не отказ продукту: раскладка
             // разбирается по именам файлов, как и до манифеста. Сказать об
             // этом стоит: выбор растра тогда объясняется другим правилом.
@@ -539,8 +551,9 @@ pub fn on_http_result(
                 log::debug!(target: "handlers",
                     "Манифест '{}' измерений не назвал — выбор по именам файлов", identifier);
             }
+            let found = imagery::scan(&identifier, &keys, &measured, downloaded).rasters;
             crate::emit::on_imagery_result(
-                &imagery_response(&identifier, &keys, imagery::scan(&keys, &measured).rasters),
+                &imagery_response(&identifier, &keys, found),
                 &pending.correlation_id,
             );
         }

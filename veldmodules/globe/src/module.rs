@@ -86,6 +86,14 @@ pub struct State {
     /// Новую текстуру этого сравнения довольно, чтобы отличить: id ресурсов
     /// монотонны и не переиспользуются (см. `ResourceRegistry::register`).
     drawn: Option<Frame>,
+    /// Где стои́т волна ряби, 0..1 периода.
+    phase: f32,
+    /// Сила ряби, если в кадре есть чему рябить; `None` — нечему, и фаза стои́т.
+    ///
+    /// Считается пересборкой патчей — по тем же ячейкам, которые и рисуются, —
+    /// и держится полем потому, что кадровый тик спрашивает её раньше, чем
+    /// собирает отпечаток кадра.
+    ripple: Option<f32>,
     /// Последний присланный набор контуров. Хранится потому, что приехать он
     /// может раньше места под рендер, а залить его в буферы можно только с
     /// готовым устройством.
@@ -112,11 +120,22 @@ pub struct State {
     /// Заказчик здесь — слой и роль растра: снять проход с учёта вправе только
     /// тот, кто его завёл.
     passes: Passes<(String, Role)>,
-    /// Собранные варп-патчи и то, из чего они собраны: поколение хранилища,
-    /// выборы растров и прозрачность слоёв (она запечена в вершинах). Разошлось
-    /// с нынешним — пересборка (см. build_patches).
+    /// Собранные варп-патчи: буфер вершин, блоки номеров по густоте и отрисовки.
     batch: gpu::OverlayBatch,
-    built: Option<(u64, Vec<overlay::Built>)>,
+    /// Вершины патчей, пережившие прошлую пересборку. Держатся здесь ради
+    /// ёмкости, а не ради содержимого: состав меняется на всякое движение
+    /// камеры, а у глобального растра это мегабайты (сотня ячеек по 1225 узлов
+    /// по 36 байт), которые заведённый заново вектор растил бы переаллокациями
+    /// каждый раз.
+    ///
+    /// Ёмкость набирается по худшей сцене и назад не отдаётся. Возвращать её
+    /// некому: линейную память wasm аллокатор хосту не отдаёт, так что
+    /// освобождённый вектор освободил бы место только для себя же.
+    patch_vertices: Vec<gpu::OverlayVertex>,
+    /// То, из чего собраны нынешние патчи: выборы растров, накрывшие их тайлы и
+    /// прозрачность слоёв (она запечена в вершинах). Разошлось с нынешним —
+    /// пересборка (см. [`build_patches`]).
+    built: Option<Vec<overlay::Built>>,
     /// Сколько раз патчи пересобирались — их вклад в сравнение кадра.
     patches: u64,
     /// Смены состава наложений и хода добычи: принятие, описание, снятие, конец
@@ -146,6 +165,12 @@ struct Frame {
     texture: u64,
     generation: u64,
     patches: u64,
+    /// Фаза ряби, огрублённая до шага показа. Пока рябить нечему, она стои́т, и
+    /// кадр пропускается ровно так же, как до неё; как только в кадре появилась
+    /// едущая ячейка, она двигается каждым тиком — и тем самым сама включает
+    /// перерисовку на всё время загрузки. Отдельного «перерисовать» поэтому не
+    /// нужно: сравнение кадра здесь и есть тот выключатель.
+    ripple: u32,
 }
 
 pub fn hook_init(config: Config) -> anyhow::Result<State> {
@@ -154,6 +179,8 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         device: None,
         target: None,
         drawn: None,
+        phase: 0.0,
+        ripple: None,
         outlines: Vec::new(),
         generation: 0,
         overlays: Vec::new(),
@@ -161,6 +188,7 @@ pub fn hook_init(config: Config) -> anyhow::Result<State> {
         tiles: Store::new(config.vram_budget_mb * 1024 * 1024),
         passes: Passes::default(),
         batch: gpu::OverlayBatch::new(),
+        patch_vertices: Vec::new(),
         built: None,
         patches: 0,
         epoch: 0,
@@ -457,6 +485,9 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         // Координаты приходят во владение вместе с растром, и без него они
         // никому не нужны: отпускать их надо на каждом выходе из этого круга,
         // иначе файл остаётся открытым до конца жизни модуля.
+        // Читается до того, как имя займёт свой, здешний растр: у пришедшего и
+        // у заведённого поля одинаковы по смыслу, но это разные штуки.
+        let near = raster.near;
         let Some(handle) = raster.resource else {
             release_coordinates(raster.geolocation);
             continue;
@@ -488,6 +519,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         });
         let mut raster = Raster::new(role, veldsdk::OwnedResource::new(handle.clone()));
         raster.geolocation = coordinates.clone().map(veldsdk::OwnedResource::new);
+        raster.near = near;
 
         let correlation = raster.describe.begin();
         state.pending_describe.insert(correlation.clone(), (incoming.key.clone(), role));
@@ -496,6 +528,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
                 resource: Some(handle),
                 label: label.clone(),
                 geolocation: coordinates,
+                near: raster.near,
             },
             &correlation,
         );
@@ -629,7 +662,21 @@ pub fn on_described(state: &mut State, msg: Described) {
         if !overlay.rasters.iter().any(|raster| raster.meta.is_some()) {
             veldsdk::log::warn!(target: "handlers",
                 "{}: ни один растр не описался — накладывать нечего", overlay.label);
-            overlay.error = "ни один растр не описался".to_string();
+            // Наружу уезжает не «не описался», а то, чем именно: причину знает
+            // тайлер и уже сказал её словами («это измерения, а не
+            // изображение», «скачайте его, и он покажется»), а показывает её
+            // приславший — у него список и место под подпись. Общая фраза на
+            // её месте объясняла бы ровно ничего и отнимала бы у человека
+            // единственное, что он может с этим сделать.
+            //
+            // Растров бывает два, и причины у них разные: обе и называются —
+            // их собирает `trouble`. Пусто — сказать нечего, и тогда общая
+            // фраза честнее пустой строки.
+            let said = overlay.trouble();
+            overlay.error = match said.is_empty() {
+                true => "ни один растр не описался".to_string(),
+                false => said,
+            };
         } else if !overlay.frame.measurable() {
             // Рамка есть, а протяжённости у неё нет: контур каталога сошёлся в
             // точку или в линию. Ни ячейки по ней не нарисовать, ни уровня не
@@ -729,7 +776,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
         .collect();
 
     let Some(raster) = overlay.raster_mut(role) else { return };
-    raster.meta = Some(meta);
+    raster.describe_as(meta);
     // Описался — своей жалобы у него больше нет. Чужую он не трогает: причина
     // соседа от его успеха никуда не делась.
     raster.trouble = None;
@@ -886,7 +933,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         .unwrap_or_default();
     state.perf.pass(perf::Pass::Answer, &toll, began.elapsed(), Instant::now());
 
-    let Some((label, produce_list, resource)) = ({
+    let Some((label, produce_list, resource, near)) = ({
         let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
         let label = overlay.label.clone();
         // Слой скрыли, пока кэш искал: заводить под него проход — занять
@@ -915,18 +962,22 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             return;
         }
 
-        let reach = raster.meta.as_ref().map_or(tiles::Reach::Pyramid, |meta| meta.reach);
+        // Точечно ли читается запрошенный уровень: от этого зависит, ждать ли
+        // конца своего прохода молча или переспрашивать кэш (проход кладёт в
+        // него больше, чем отдаёт заказчику).
+        let pointwise =
+            raster.meta.as_ref().is_some_and(|meta| tiles::pointwise(meta, level));
         let missed = raster.fetch.missed(
             &state.passes,
             &ctx.fingerprint,
             &(ctx.key.clone(), ctx.role),
-            reach,
+            pointwise,
             &ctx.cells,
             msg.misses.iter().map(|addr| (level, addr.x, addr.y)),
             |addr| desired.contains(&addr),
         );
         match missed {
-            Missed::Produce(cells) => Some((label, cells, raster.resource.handle())),
+            Missed::Produce(cells) => Some((label, cells, raster.resource.handle(), raster.near)),
             // Ждём чужой проход молча: его конец пересчитает нужное всем.
             Missed::Waiting => return,
             Missed::Closed => None,
@@ -947,12 +998,19 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         fingerprint: ctx.fingerprint.clone(),
         cells: produce_list.clone(),
     });
-    state.passes.begin(&ctx.fingerprint, (ctx.key.clone(), ctx.role), correlation.clone(), level);
+    state.passes.begin(
+        &ctx.fingerprint,
+        (ctx.key.clone(), ctx.role),
+        correlation.clone(),
+        level,
+        produce_list.clone(),
+    );
     crate::calls::image_tiler::on_produce(&ProduceRequest {
         resource: Some(resource),
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
+        near,
     }, &correlation);
 }
 
@@ -1074,7 +1132,8 @@ fn want_overlay(state: &mut State, key: &str, wanted: overlay::Wanted) {
     let label = overlay.label.clone();
 
     let owner = (key.to_string(), wanted.choice.role);
-    if let Some(correlation) = state.passes.stale(&fingerprint, &owner, &wanted.want) {
+    let pointwise = tiles::pointwise(meta, wanted.want.level);
+    if let Some(correlation) = state.passes.stale(&fingerprint, &owner, &wanted.want, pointwise) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
     let going = state.passes.going(&fingerprint);
@@ -1160,6 +1219,9 @@ fn accept_tile(
 /// им отбираются ячейки и берётся уровень, а это и есть выбор.
 fn build_patches(state: &mut State) {
     let Some(look) = looking(state) else {
+        // Рябить негде: без места под кадр не рисуется ничего, и волна,
+        // оставленная идти, звала бы перерисовку впустую.
+        state.ripple = None;
         // Места под кадр нет — считать по нему нечего, а сказать есть о чём:
         // отвергнутый слой и слой, кончившийся ошибкой, известны и без кадра.
         // Молча оставленные, они висят у приславшего «готовится…» до тех пор,
@@ -1207,36 +1269,103 @@ fn build_patches(state: &mut State) {
     // разошёлся бы с рисуемым на глазах у смотрящего в список.
     report_progress(state, &wanted);
 
+    // Носители спрашиваются до сравнения отпечатка, а не в самой сборке: ими он
+    // и меряется. Пока ячейки накрыты теми же тайлами, вершины вышли бы теми же,
+    // сколько бы ни менялось хранилище вокруг (см. `Built::cells`).
+    //
+    // Стои́т это обхода цепочки предков на ячейку, и платится он теперь на
+    // всяком тике, прошедшем ворота, а не только на пересборке. Обращения при
+    // этом продлевают тайлам жизнь в бюджете — но не ради этого: вытеснение
+    // идёт только с приездом (`Store::accept`), а приезд двигает поколение и
+    // открывает ворота сам.
+    let mut pieces: Vec<Vec<overlay::Piece>> = Vec::with_capacity(wanted.len());
+    {
+        let State { overlays, tiles, .. } = &mut *state;
+        for (key, _, wanted) in &wanted {
+            let found = overlays.iter().find(|o| &o.key == key);
+            pieces.push(found.map_or_else(Vec::new, |o| overlay::pieces(o, wanted, tiles)));
+        }
+    }
+
+    // Сила ряби — до сравнения отпечатка: ячейки уже посчитаны, а ниже лежит
+    // выход по совпадению, за которым её было бы негде взять. Наибольшая из
+    // слоёв: рябь одна на кадр, и слой, которому ехать дольше всех, задаёт её
+    // целиком.
+    state.ripple = wanted
+        .iter()
+        .zip(&pieces)
+        .filter(|(_, pieces)| pieces.iter().any(overlay::Piece::coming))
+        .filter_map(|((key, ..), _)| state.overlays.iter().find(|o| &o.key == key))
+        .map(|overlay| ripple_strength(overlay.progress.within))
+        .max_by(f32::total_cmp);
+
     // Что вошло в отпечаток и почему — у него самого (`Overlay::built`).
     let stamp: Vec<overlay::Built> = wanted
         .iter()
-        .filter_map(|(key, _, wanted)| {
-            Some(state.overlays.iter().find(|o| &o.key == key)?.built(wanted))
+        .zip(&pieces)
+        .filter_map(|((key, _, wanted), pieces)| {
+            let drawn: Vec<overlay::Drawn> = pieces.iter().map(overlay::Piece::drawn).collect();
+            Some(state.overlays.iter().find(|o| &o.key == key)?.built(wanted, &drawn))
         })
         .collect();
-    let fresh = (state.tiles.generation, stamp);
-    if state.built.as_ref() == Some(&fresh) {
+    if state.built.as_ref() == Some(&stamp) {
         return;
     }
-    let (generation, stamp) = fresh;
 
-    let mut vertices = Vec::new();
     let mut draws = Vec::new();
-    let State { overlays, tiles, .. } = state;
-    for (key, _, wanted) in &wanted {
-        let Some(overlay) = overlays.iter().find(|o| &o.key == key) else { continue };
-        overlay::patches(overlay, wanted, tiles, &mut vertices, &mut draws);
+    let assembled = Instant::now();
+    let State { overlays, patch_vertices, .. } = state;
+    patch_vertices.clear();
+    for ((key, _, wanted), pieces) in wanted.iter().zip(&pieces) {
+        let Some(overlay) = overlays.iter_mut().find(|o| &o.key == key) else { continue };
+        overlay::patches(overlay, wanted, pieces, patch_vertices, &mut draws);
     }
 
-    match state.batch.fill(&vertices, draws) {
+    let filled = state.batch.fill(&state.patch_vertices, &draws);
+    // Замер здесь, а не сразу после сборки, и до разбора исхода: заливка — та же
+    // пересборка, и уезжает в неё столько же, сколько собрано, а неудавшаяся
+    // стоила ровно столько же, сколько удавшаяся.
+    state.perf.rebuilt(state.patch_vertices.len(), assembled.elapsed());
+    match filled {
         Ok(()) => {
             state.patches += 1;
-            state.built = Some((generation, stamp));
+            state.built = Some(stamp);
         }
         Err(error) => {
             veldsdk::log::error!(target: "render", "патчи наложений не залиты: {:#}", error);
         }
     }
+}
+
+/// Период волны ряби в секундах: столько занимает один её пробег через фазу.
+const RIPPLE_PERIOD_S: f32 = 1.6;
+
+/// На сколько долей периода бьётся фаза в отпечатке кадра. Тридцать шагов в
+/// секунду — предел, за которым глаз перестаёт различать движение волны, а
+/// кадры сверх него были бы перерисовкой ради одного и того же.
+const RIPPLE_STEPS: f32 = RIPPLE_PERIOD_S * 30.0;
+
+/// Куда ушла фаза за этот тик и чем кадр отличается от прошлого.
+///
+/// Чистой функцией, потому что стережёт она главную опасность правки — вечно
+/// рисующий шар: пока рябить нечему, огрублённая фаза обязана стоять на месте,
+/// иначе кадровое сравнение перестанет пропускать покой.
+fn advance_ripple(phase: f32, dt: f32, ripple: Option<f32>) -> (f32, u32) {
+    let phase = match ripple {
+        Some(_) => (phase + dt / RIPPLE_PERIOD_S).fract(),
+        None => phase,
+    };
+    (phase, (phase * RIPPLE_STEPS) as u32)
+}
+
+/// Насколько заметна рябь на ступени, дошедшей до такой доли.
+///
+/// Не самой долей: ступень, только начатая, идёт ничуть не меньше той, что
+/// вот-вот кончится, и невидимая рябь в её начале означала бы «ничего не
+/// происходит» ровно там, где ждать дольше всего. Поэтому доля не задаёт силу,
+/// а прибавляет к её основанию.
+fn ripple_strength(within: f32) -> f32 {
+    (0.35 + 0.65 * within.clamp(0.0, 1.0)).clamp(0.0, 1.0)
 }
 
 /// Пересчитать ход добычи по тому, что слою нужно прямо сейчас, и разослать
@@ -1272,24 +1401,10 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
         else {
             continue;
         };
-        let (ready, total) = raster.fetch.ordered();
-        // Доля внутри ступени — по большему из двух. Пустой заказ значит
-        // «спрашивать было нечего»: ступень закрыта, и считать её недобранной
-        // было бы неправдой. А байты нужны там, где ячейка одна: чтобы отдать
-        // её, последовательный источник читается целиком, и по ячейкам всё это
-        // время сделано ровно ноль.
-        let within = match total {
-            0 => 1.0,
-            total => (f64::from(ready) / f64::from(total)).max(raster.read()),
-        };
-        overlay.progress = overlay::Progress {
-            ready,
-            total,
-            share: ((f64::from(mine.want.climbed) + within) / f64::from(mine.want.steps.max(1)))
-                .clamp(0.0, 1.0) as f32,
-            step: mine.want.climbed,
-            steps: mine.want.steps,
-        };
+        // Байты берутся у того же растра, что и ступени: растров у слоя бывает
+        // два, и сложенные из разных пирамид числа рассказали бы о двух разных
+        // работах сразу.
+        overlay.progress = overlay::progress_of(raster, &mine.want);
     }
 
     let overlays: Vec<OverlayProgress> = state
@@ -1322,6 +1437,8 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
                 step: overlay.progress.step,
                 steps: overlay.progress.steps,
                 blank: overlay.blank(),
+                pass_read: overlay.progress.pass.0,
+                pass_total: overlay.progress.pass.1,
             }
         })
         // Отвергнутые — теми же строками: наложения у нас нет, а сказать о нём
@@ -1337,6 +1454,8 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             step: 0,
             steps: 0,
             blank: false,
+            pass_read: 0,
+            pass_total: 0,
         }))
         .collect();
 
@@ -1387,8 +1506,14 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         want_tiles(state, perf::Pass::Camera);
     }
     // Патчи наложений — до сравнения кадра: пришедшие тайлы и смена уровня
-    // видны как их пересборка, и она же двигает счётчик в [`Frame`].
+    // видны как их пересборка, и она же двигает счётчик в [`Frame`]. Она же
+    // отвечает, есть ли в кадре чему рябить.
     build_patches(state);
+
+    // Фаза двигается только когда есть чему рябить, и огрублённая уезжает в
+    // отпечаток кадра — тем и включается перерисовка ровно на время загрузки.
+    let (phase, stepped) = advance_ripple(state.phase, frame.dt, state.ripple);
+    state.phase = phase;
 
     let (Some(device), Some(target)) = (&state.device, &state.target) else { return };
 
@@ -1397,14 +1522,74 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         texture: target.texture_id,
         generation: state.generation,
         patches: state.patches,
+        ripple: stepped,
     };
     if state.drawn == Some(now) {
         return;
     }
 
-    if let Err(error) = gpu::render(device, target, &state.camera, &state.batch) {
+    let ripple = gpu::Ripple { phase, strength: state.ripple.unwrap_or(0.0) };
+    if let Err(error) = gpu::render(device, target, &state.camera, &state.batch, ripple) {
         veldsdk::log::error!(target: "render", "кадр не записан: {:#}", error);
         return;
     }
     state.drawn = Some(now);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{advance_ripple, ripple_strength, RIPPLE_PERIOD_S};
+
+    /// Пока рябить нечему, огрублённая фаза стои́т — и кадр, собранный из неё,
+    /// совпадает с прошлым. Это и есть выключатель перерисовки: сломайся он —
+    /// и шар начнёт писать кадр шестьдесят раз в секунду на покое, ничем себя
+    /// не выдав, кроме нагретой видеокарты.
+    #[test]
+    fn на_покое_фаза_ряби_стои́т() {
+        let dt = 1.0 / 60.0;
+        let (phase, first) = advance_ripple(0.3, dt, None);
+        let (_, second) = advance_ripple(phase, dt, None);
+
+        assert_eq!(phase, 0.3, "фаза сдвинулась без повода");
+        assert_eq!(first, second, "кадр покоя отличается от прошлого");
+    }
+
+    /// А пока есть чему рябить — соседние тики дают разные кадры, иначе волна
+    /// не двинется вовсе.
+    #[test]
+    fn при_ряби_соседние_тики_дают_разные_кадры() {
+        let dt = 1.0 / 60.0;
+        let (phase, first) = advance_ripple(0.0, dt, Some(1.0));
+        let (_, second) = advance_ripple(phase, dt, Some(1.0));
+
+        assert!(phase > 0.0);
+        assert_ne!(first, second, "волна стои́т на месте");
+    }
+
+    /// Фаза ходит по кругу и за период возвращается к началу: без этого она
+    /// росла бы без предела, а огрубление её — вместе с ней.
+    #[test]
+    fn фаза_ходит_по_кругу() {
+        let mut phase = 0.0;
+        // Тиками по кадру, а не одним прыжком: округление шага накапливается
+        // ровно так же, как в жизни.
+        for _ in 0..(RIPPLE_PERIOD_S * 60.0) as u32 {
+            phase = advance_ripple(phase, 1.0 / 60.0, Some(1.0)).0;
+        }
+        assert!((0.0..1.0).contains(&phase), "фаза ушла за период: {phase}");
+    }
+
+    /// Сила растёт к концу ступени, но и в самом её начале рябь видна: только
+    /// начатая ступень идёт ничуть не меньше той, что вот-вот кончится, и
+    /// невидимая рябь означала бы «ничего не происходит» там, где ждать дольше
+    /// всего.
+    #[test]
+    fn рябь_видна_и_в_начале_ступени() {
+        assert!(ripple_strength(0.0) > 0.2, "начало ступени не видно вовсе");
+        assert!(ripple_strength(1.0) > ripple_strength(0.0), "конец не заметнее начала");
+        assert!(ripple_strength(1.0) <= 1.0);
+        // Доля приходит посчитанной, но приходит она издалека, и упереться
+        // рябь обязана в свои пределы, а не в чужую арифметику.
+        assert!(ripple_strength(-1.0) >= 0.0 && ripple_strength(7.0) <= 1.0);
+    }
 }

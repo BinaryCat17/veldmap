@@ -15,6 +15,7 @@ use std::rc::Rc;
 use image::ImageFormat;
 
 use super::cascade::Emit;
+use super::pyramid;
 use crate::proto::image_tiler::Reach;
 
 pub mod full;
@@ -139,13 +140,37 @@ impl Info {
         Self::plain(width, height, Kind::Netcdf(Box::new(netcdf::Source::hollow())))
     }
 
-    /// Разбор прочитал файл целиком и держит его отсчёты при себе.
+    /// Разбор держит при себе отсчёты величины — то есть тяжёл.
     ///
-    /// Так устроен только NetCDF: он читается не окнами, а целиком, и годность
-    /// величины видна лишь по её значениям. У прочих разбор — это заголовки, а
-    /// байты идут проходом.
-    pub fn read_whole(&self) -> bool {
+    /// Так устроен только NetCDF: годность величины видна лишь по её
+    /// значениям, поэтому разбор их читает и оставляет показу. У прочих разбор
+    /// — это заголовки, а байты идут проходом.
+    ///
+    /// Это про память, а не про провод: файл читается по требованию, и сколько
+    /// его уехало по проводу, отсюда не следует вовсе (см. `netcdf::Resource`).
+    pub fn holds_samples(&self) -> bool {
         matches!(self.kind, Kind::Netcdf(_))
+    }
+
+    /// Сколько уровней от нулевого читаются точечно (см. `Described.windowed`).
+    ///
+    /// Считается перебором, а не формулой: у каждого уровня своя копия и своя
+    /// раскладка чанков, и «до какого уровня окно» выводится из них, а не из
+    /// размеров растра. Уровней у пирамиды единицы.
+    pub fn windowed(&self) -> u32 {
+        match &self.kind {
+            // Один вопрос на оба рукава TIFF, и это не упрощение. Копии
+            // закрывают уровень, только пока они есть: цепочка, оборванная на
+            // второй ступени, оставляет вершине копию вчетверо крупнее нужной,
+            // и область под тайл растёт в ней вдвое с каждой недостающей
+            // ступенью. Отвечать за такой уровень «точечный» значит обещать
+            // потребителю цену, которой не будет.
+            Kind::Tiff(layout) => (0..pyramid::level_count(self.width, self.height))
+                .take_while(|level| tiff::windowed(self, layout, *level))
+                .count() as u32,
+            // Прочие читаются только проходом: точечного пути у них нет вовсе.
+            _ => 0,
+        }
     }
 
     /// Что закроет один проход по этому источнику — то, по чему потребитель
@@ -154,10 +179,23 @@ impl Info {
     /// Стои́т рядом с [`produce`] и обязано разбирать те же рукава: разойдясь,
     /// они обещают потребителю не ту цену, которую он заплатит.
     pub fn reach(&self) -> Reach {
+        let levels = pyramid::level_count(self.width, self.height);
         match &self.kind {
-            Kind::Tiff(layout) if layout.random_access() => Reach::Exact,
+            // Ступать по всем уровням стои́т только там, где своя копия есть у
+            // каждого: лестница [`Reach::Exact`] начинается с вершины, и
+            // вершина, которой копии не досталось, обошлась бы проходом по
+            // всему растру — то есть самой дорогой ступенью впереди всех.
+            Kind::Tiff(layout) if layout.random_access() && self.windowed() == levels => {
+                Reach::Exact
+            }
+            // Полосный (и тайловый без копий): полосы адресуются поштучно, и
+            // подробный тайл читается окном в несколько полос. Грубый — нет:
+            // ему нужна каждая строка файла, и такую ступень закрывает целый
+            // проход. Отсюда `Windowed`, а не `Pyramid`: у пирамиды лестница
+            // начинается с вершины, то есть с самой дорогой здесь ступени.
+            Kind::Tiff(_) => Reach::Windowed,
             // Каскад этих стартует с нулевого уровня и строит пирамиду целиком.
-            Kind::Tiff(_) | Kind::Png | Kind::Full(_) | Kind::Netcdf(_) => Reach::Pyramid,
+            Kind::Png | Kind::Full(_) | Kind::Netcdf(_) => Reach::Pyramid,
             // А эти декодируют сразу в масштаб запрошенного уровня, и каскад
             // идёт от него вниз: подробнее — только новым проходом.
             Kind::Jpeg | Kind::Jp2 => Reach::Coarser,
@@ -167,7 +205,12 @@ impl Info {
 
 /// Заголовок растра: формат, размеры, раскладка. Дешёвый и для гигабайтного
 /// файла — читаются заголовки и каталоги, не пиксели.
-pub fn describe(resource_id: u64, len: u64, bytes: &Rc<Cell<u64>>) -> Result<Info, String> {
+pub fn describe(
+    resource_id: u64,
+    len: u64,
+    bytes: &Rc<Cell<u64>>,
+    near: bool,
+) -> Result<Info, String> {
     let mut reader = Metered::new(resource_id, len, bytes.clone());
     let mut head = [0u8; 32];
     let read = reader.read(&mut head).map_err(|e| format!("чтение заголовка: {}", e))?;
@@ -180,8 +223,19 @@ pub fn describe(resource_id: u64, len: u64, bytes: &Rc<Cell<u64>>) -> Result<Inf
         return checked(info);
     }
     if head.starts_with(netcdf::MAGIC) {
-        let info = netcdf::describe(reader, len)?;
+        // Ресурсом, а не читателем: HDF5 ходит по файлу вразброс абсолютными
+        // смещениями, и оборачивать это в последовательный поток значило бы
+        // отнять у него ровно то, чем он и дёшев (см. `netcdf::Resource`).
+        drop(reader);
+        let info = netcdf::describe(resource_id, len, near)?;
         return checked(info);
+    }
+    // Классический NetCDF-3 — другой формат, и читателя у него здесь нет.
+    // Назван он отдельно затем, что общий отказ ниже перечисляет NetCDF среди
+    // открываемых: сказанный над файлом `.nc`, он читается как поломка.
+    if netcdf::CLASSIC.iter().any(|magic| head.starts_with(magic)) {
+        return Err("это классический NetCDF-3, а читается NetCDF-4 — тот, что записан HDF5"
+            .to_string());
     }
     if tiff::BIG_MAGIC.iter().any(|magic| head.starts_with(magic)) {
         let info = tiff::describe(reader)?;
@@ -241,7 +295,21 @@ pub fn produce(
 ) -> Result<(), String> {
     let reader = Metered::new(resource_id, len, bytes.clone());
     match &info.kind {
-        Kind::Tiff(layout) if layout.random_access() => {
+        // Точечно — где окно тайла и правда окно. Решается это уровнем, а не
+        // источником: полосная гранула читается точечно вблизи и проходом
+        // издали, и грубый край закрывает проход.
+        //
+        // Спрашивается это и у источника с произвольным доступом, а не только
+        // у полосного. У файла с редкими копиями область под тайл верхнего
+        // уровня перерастает потолок, `produce_direct` отказывает, отказ валит
+        // весь проход — а проход приговаривает свои ячейки разом. Уровень,
+        // взятый проходом, приезжает медленно; уровень, взятый отказом, не
+        // приезжает никогда.
+        //
+        // Тот же вопрос задаёт [`Info::windowed`] — с той разницей, что она
+        // считает подряд идущий низ пирамиды, а здесь спрашивают про один
+        // уровень. Правьте вместе.
+        Kind::Tiff(layout) if tiff::windowed(info, layout, level) => {
             tiff::produce_direct(reader, info, layout, level, wants, emit)
         }
         Kind::Tiff(layout) => tiff::produce_pass(reader, info, layout, emit),
