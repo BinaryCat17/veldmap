@@ -26,18 +26,23 @@ pub fn produce<R: Read>(reader: R, info: &Info, level: u32, emit: Emit) -> Resul
 
     let mut decoder = jpeg_decoder::Decoder::new(reader);
     decoder.read_info().map_err(|e| format!("jpeg: {}", e))?;
-    decoder
+    // Размер выхода спрашивается у `scale`, а не у `info` после декода: потолок
+    // обязан сработать ДО того, как кадр выделен, — иначе он отвергает уже
+    // оплаченное, а на кадре, ради которого заведён, не срабатывает вовсе.
+    // Пропуск уровней DWT здесь не идеален: декодер округляет масштаб до
+    // восьмых долей, поэтому выход бывает крупнее запрошенного уровня.
+    let (dw, dh) = decoder
         .scale(clamp_u16(lw), clamp_u16(lh))
+        .map(|(w, h)| (u32::from(w), u32::from(h)))
         .map_err(|e| format!("jpeg: {}", e))?;
-    let pixels = decoder.decode().map_err(|e| format!("jpeg: {}", e))?;
-    let dinfo = decoder.info().ok_or_else(|| "jpeg: нет заголовка".to_string())?;
-    let (dw, dh) = (u32::from(dinfo.width), u32::from(dinfo.height));
     if u64::from(dw) * u64::from(dh) * 4 > FULL_DECODE_BUDGET {
         return Err(format!(
             "jpeg {}×{}: кадр целиком не влезает в бюджет ({} МБ)",
             dw, dh, FULL_DECODE_BUDGET / (1024 * 1024)
         ));
     }
+    let pixels = decoder.decode().map_err(|e| format!("jpeg: {}", e))?;
+    let dinfo = decoder.info().ok_or_else(|| "jpeg: нет заголовка".to_string())?;
 
     let rgba = match dinfo.pixel_format {
         jpeg_decoder::PixelFormat::L8 => to_rgba(&pixels, Pixel::named(1), (dw as usize) * (dh as usize)),
@@ -61,4 +66,54 @@ pub fn produce<R: Read>(reader: R, info: &Info, level: u32, emit: Emit) -> Resul
 
 fn clamp_u16(v: u32) -> u16 {
     v.min(u32::from(u16::MAX)) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Заголовок JPEG без единого байта сканирования: размеры объявлены, а
+    /// декодировать нечего.
+    fn header(width: u16, height: u16) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08];
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.push(3);
+        for id in 1..=3u8 {
+            bytes.extend_from_slice(&[id, 0x11, 0x00]);
+        }
+        bytes
+    }
+
+    /// Потолок кадра срабатывает ДО декода, а не после него.
+    ///
+    /// Проверяется здесь именно порядок, и заголовок без данных сканирования —
+    /// то, чем его видно: сработай потолок после, декодер упёрся бы в конец
+    /// файла и сказал бы про него, а не про бюджет. Порядок этот и есть весь
+    /// смысл проверки: кадр, ради которого она написана, не влезает в память
+    /// инстанса, то есть выделить его значит упасть, ничего не сказав.
+    #[test]
+    fn потолок_кадра_срабатывает_до_декода() {
+        let huge = header(20_000, 20_000);
+        let info = Info::plain(20_000, 20_000, Kind::Jpeg);
+        let mut emit = |_: u32, _: u32, _: u32, _: u32, _: u32, _: &[u8]| Ok(());
+
+        let why = produce(huge.as_slice(), &info, 0, &mut emit)
+            .expect_err("кадр 20000×20000 обязан быть отвергнут");
+        assert!(why.contains("не влезает в бюджет"), "отказ не про бюджет: {why}");
+    }
+
+    /// А кадр по размеру потолок не трогает — и тогда до декода дело доходит,
+    /// что по отказу и видно. Без этой половины первый тест доказывал бы лишь,
+    /// что `produce` всегда отказывает.
+    #[test]
+    fn кадр_по_размеру_до_потолка_не_доходит() {
+        let small = header(64, 64);
+        let info = Info::plain(64, 64, Kind::Jpeg);
+        let mut emit = |_: u32, _: u32, _: u32, _: u32, _: u32, _: &[u8]| Ok(());
+
+        let why = produce(small.as_slice(), &info, 0, &mut emit)
+            .expect_err("данных сканирования в заголовке нет, декод обязан сорваться");
+        assert!(!why.contains("бюджет"), "мелкий кадр отвергнут потолком: {why}");
+    }
 }
