@@ -163,8 +163,10 @@ fn affordable(element: u32, width: u32, height: u32, wire: u64, near: bool) -> R
     let free = budget::free();
     let pixels = u64::from(width) * u64::from(height);
     let read = pixels.saturating_mul(u64::from(peak_per_pixel(element)));
-    let beside = TIES_BUDGET.max(cascade::bytes(width, height) + strip_bytes(width, height));
-    let pass = pixels.saturating_mul(4).saturating_add(beside);
+    let pass = pixels
+        .saturating_mul(4)
+        .saturating_add(cascade::bytes(width, height))
+        .saturating_add(strip_bytes(width, height));
     if read > free {
         return Err(format!(
             "чтение величины займёт {} МБ, а в память помещается {} МБ",
@@ -209,6 +211,18 @@ const TIES_BUDGET: u64 = 64 * 1024 * 1024;
 /// Спрашивают это оба места, где решётки читаются, — соседний файл координат и
 /// поотсчётные координаты самой величины. Порознь мерки разошлись бы, и одна и
 /// та же пара плоскостей проходила бы в одном месте и отвергалась в другом.
+fn ties_peak(nodes: u64, element: u32) -> u64 {
+    nodes.saturating_mul(u64::from(4 + peak_per_pixel(element)))
+}
+
+/// Влезает ли пара решёток в отведённый привязке бюджет.
+///
+/// Сравнение живёт здесь, а не у обоих зовущих: разойтись им нечем, если
+/// сравнивать порознь нечем.
+fn ties_fit(nodes: u64, element: u32) -> bool {
+    ties_peak(nodes, element) <= TIES_BUDGET
+}
+
 /// Полоса RGBA, которую проход отдаёт каскаду.
 ///
 /// Каскад копирует её к себе в полосу базового уровня, но копирует не отпуская:
@@ -216,10 +230,6 @@ const TIES_BUDGET: u64 = 64 * 1024 * 1024;
 /// не «внутри каскада».
 fn strip_bytes(width: u32, height: u32) -> u64 {
     u64::from(width) * u64::from(height.min(TILE)) * 4
-}
-
-fn ties_peak(nodes: u64, element: u32) -> u64 {
-    nodes.saturating_mul(u64::from(4 + peak_per_pixel(element)))
 }
 
 /// Ширина отсчёта величины в байтах — по заголовку, без единого прочитанного
@@ -472,13 +482,10 @@ pub fn geolocation(
     // плоскостей проходила бы здесь и отвергалась там.
     //
     // Пиком, а не осевшим: решётки читаются одна за другой, и на второй рядом с
-    // осевшей первой живут обе копии второй (см. [`peak_per_pixel`]). У решёток
-    // OLCI, записанных целыми по четыре байта, это двенадцать байт на узел
-    // против четырёх осевших — считать по осевшему значит обещать отказ там,
-    // где случится трап.
+    // осевшей первой живут обе копии второй (см. [`ties_peak`]). Считать по
+    // осевшему значит обещать отказ там, где случится трап.
     let nodes = u64::from(geo_w) * u64::from(geo_h);
-    let unpacked_size = ties_peak(nodes, element_of(&file, lat).max(element_of(&file, lon)));
-    if unpacked_size > TIES_BUDGET {
+    if !ties_fit(nodes, element_of(&file, lat).max(element_of(&file, lon))) {
         return Err(format!(
             "решётки координат {}×{} не влезают в бюджет привязки ({} МБ)",
             geo_w, geo_h, TIES_BUDGET / (1024 * 1024)
@@ -1388,7 +1395,7 @@ fn swath(file: &File, items: &[Item], chosen: &Item) -> Swath {
     // Бюджет проверяется здесь, а не в начале: у регулярной сетки жаловаться на
     // размер поотсчётных было бы не про неё.
     let pixels = u64::from(plane.0) * u64::from(plane.1);
-    if ties_peak(pixels, element_of(file, lat).max(element_of(file, lon))) > TIES_BUDGET {
+    if !ties_fit(pixels, element_of(file, lat).max(element_of(file, lon))) {
         return Swath::Refused(format!(
             "поотсчётные координаты {}×{} не влезают в бюджет привязки ({} МБ)",
             plane.1,
@@ -2314,7 +2321,7 @@ mod tests {
             Ok(()) => unreachable!("величина обязана быть отвергнута"),
         };
         // Растр, помещающийся в память с запасом: 8192² по четыре байта — это
-        // 537 МиБ чтения и 309 прохода при свободных девятистах с лишним.
+        // 512 МиБ чтения и 320 прохода при свободных девятистах с лишним.
         let (w, h) = (8192u32, 8192u32);
         let between = (WIRE_PLANE + budget::free()) / 2;
 
@@ -2332,14 +2339,14 @@ mod tests {
             assert!(!huge.contains("скачайте"), "обещано лечение, которого нет: {huge}");
         }
 
-        // Живая гранула OLCI: величина 15076×1217 по два байта разворачивается
-        // в 105 МБ, а в файле лежит сжатой примерно в восьмую часть. Мерка
-        // терпения обязана смотреть на второе — иначе снимок, который
-        // приезжает за десяток секунд, отвергается по сети как долгий.
-        let held = 15076u64 * 1217 * u64::from(peak_per_pixel(2));
+        // Живая гранула OLCI: 1217 в ширину и 15076 в высоту, по два байта на
+        // отсчёт — 105 МБ развёрнутых, а в файле сжато примерно в восьмую
+        // часть. Мерка терпения обязана смотреть на второе — иначе снимок,
+        // который приезжает за десяток секунд, отвергается по сети как долгий.
+        let held = 1217u64 * 15076 * u64::from(peak_per_pixel(2));
         assert!(held > WIRE_PLANE, "развёрнутая величина не переросла потолок терпения");
         assert!(
-            affordable(2, 15076, 1217, 4 * 1024 * 1024, false).is_ok(),
+            affordable(2, 1217, 15076, 4 * 1024 * 1024, false).is_ok(),
             "сжатая гранула отвергнута по сети развёрнутым объёмом"
         );
 
@@ -2364,7 +2371,41 @@ mod tests {
         assert_eq!(peak_per_pixel(2), 6);
         assert_eq!(peak_per_pixel(4), 8);
         assert_eq!(peak_per_pixel(8), 16, "восьмибайтовый отсчёт дороже развёртки в f32");
+    }
 
+    /// Порог отказа — это ровно свободная память, а не число рядом с ней.
+    ///
+    /// Растр берётся узкий и высокий: при такой ширине каскад и полоса стоя́т
+    /// килобайтов, и исход решает одна мерка чтения. Подмени `budget::free()`
+    /// литералом — граница сдвинется, и этот тест её сдвиг увидит.
+    #[test]
+    fn порог_отказа_совпадает_со_свободной_памятью() {
+        let (element, width) = (4u32, 4u32);
+        let pixels = budget::free() / u64::from(peak_per_pixel(element));
+        let height = u32::try_from(pixels / u64::from(width)).expect("высота в u32");
+
+        assert!(affordable(element, width, height, 0, true).is_ok(), "ровно у порога — проходит");
+        assert!(
+            affordable(element, width, height + 1, 0, true).is_err(),
+            "на строку выше порога — отвергается"
+        );
+    }
+
+    /// Решётки координат никогда не решают, влезет ли величина, — и потому в
+    /// мерку не входят.
+    ///
+    /// Держится это на самой мерке чтения: она уже ограничила осевшую плоскость
+    /// четырьмя пятыми свободного, потому что самый дешёвый отсчёт стои́т пяти
+    /// байт пика на четыре осевших. Прибавить к этому весь бюджет привязки —
+    /// всё равно останется запас. Подними [`TIES_BUDGET`] настолько, чтобы
+    /// перестало, — и молчаливой эта перемена не будет.
+    #[test]
+    fn решётки_координат_не_могут_решить_исход() {
+        let settled = budget::free() / u64::from(peak_per_pixel(1)) * 4;
+        assert!(
+            settled + TIES_BUDGET < budget::free(),
+            "осевшая плоскость {settled} и бюджет привязки {TIES_BUDGET} перевесили свободное"
+        );
     }
 
     /// Полоса RGBA живёт рядом с плоскостью и каскадом, а не внутри них: каскад
@@ -2412,8 +2453,10 @@ mod tests {
         }
         // Решётки OLCI: четырёхбайтовые целые, двенадцать байт на узел.
         assert_eq!(ties_peak(nodes, 4), nodes * 12);
-        // Неузнанный тип считается самым дорогим — отказать безопаснее, чем упасть.
-        assert_eq!(ties_peak(nodes, 8), ties_peak(nodes, 8).max(ties_peak(nodes, 4)));
+        // Чем шире отсчёт, тем дороже пара, — и потому у пары спрашивается
+        // больший из двух типов, а не первый попавшийся.
+        assert!(ties_peak(nodes, 8) > ties_peak(nodes, 4));
+        assert!(ties_peak(nodes, 4) > ties_peak(nodes, 1));
     }
 
     /// Широкий растр отсекается проходом, а не чтением. Мерки эти считают

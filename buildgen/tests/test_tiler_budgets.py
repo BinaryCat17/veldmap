@@ -34,11 +34,11 @@ def read(path: str) -> str:
 
 
 def literal(source: str, name: str) -> int:
-    """Значение константы вида `pub const NAME: u64 = 832 * 1024 * 1024;`."""
+    """Значение константы вида `pub const NAME: u64 = 96 * 1024 * 1024;`."""
     found = re.search(rf"(?:pub )?const {name}: u\w+ = ([^;]+);", source)
     assert found, f"константы {name} нет — её переименовали или убрали"
     body = found.group(1).replace("_", "")
-    assert re.fullmatch(r"[\d\s*+-]+", body), f"{name} задана не арифметикой чисел: {body}"
+    assert re.fullmatch(r"[\d\s*+]+", body), f"{name} задана не арифметикой чисел: {body}"
     return eval(body)  # noqa: S307 — выражение уже сведено к цифрам и знакам
 
 

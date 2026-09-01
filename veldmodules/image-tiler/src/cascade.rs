@@ -3,9 +3,11 @@
 //! Вход — полнокровные группы строк базового уровня, сверху вниз; выход —
 //! готовые тайлы каждого уровня через колбэк, в момент, когда полоса уровня
 //! дозаполнилась. Полоса — это `TILE` строк уровня: заполнилась → нарезана в
-//! тайлы и ужата вдвое в полосу следующего уровня. Память — по одной полосе
-//! на уровень, геометрическая прогрессия от ширины: ≈ `width × TILE × 4 × 2`
-//! байт, от высоты источника не зависит.
+//! тайлы и ужата вдвое в полосу следующего уровня. Память — по одной полосе на
+//! уровень, геометрическая прогрессия от ширины; от высоты источника она
+//! зависит только числом уровней. Точную цену называет [`bytes`], и спрашивать
+//! её надо там, а не выводить из этой строки: у зовущего сверх неё живёт ещё и
+//! полоса, которую он каскаду отдаёт.
 //!
 //! Границы полос выровнены по чётным строкам (TILE чётный), а ужатие идёт
 //! точными блоками 2×2 (`resample::halve`), поэтому пополосный проход даёт в
@@ -24,6 +26,30 @@ pub struct Cascade {
     /// уровня: базовым может быть и не нулевой (JPEG декодируется сразу в
     /// масштаб запрошенного уровня).
     bands: Vec<Band>,
+    /// Временное дожатия: живо сейчас и было в пике. Этим и сверяется
+    /// предсказание [`flush_bytes`] — не со второй формулой рядом, а с тем,
+    /// что проход выделил на самом деле.
+    #[cfg(test)]
+    spent: Spent,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct Spent {
+    live: u64,
+    peak: u64,
+}
+
+#[cfg(test)]
+impl Spent {
+    fn take(&mut self, bytes: u64) {
+        self.live += bytes;
+        self.peak = self.peak.max(self.live);
+    }
+
+    fn give(&mut self, bytes: u64) {
+        self.live -= bytes;
+    }
 }
 
 struct Band {
@@ -87,15 +113,22 @@ fn bands_bytes(base_w: u32, base_h: u32) -> u64 {
     levels(base_w, base_h).map(|(w, rows)| u64::from(w) * rows * 4).sum()
 }
 
-/// Временное дожатия: тайл, вырезанный из полосы, и ужатая вдвое полоса.
-/// Суммой по уровням, а не худшим из них: `flush` уровня идёт в `flush`
-/// следующего, не отпустив своего ужатого.
+/// Временное дожатия: вырезанный тайл и ужатая вдвое полоса.
+///
+/// Слагаемые считаются по-разному, потому что живут по-разному. **Ужатое
+/// складывается по уровням**: `flush` уровня уходит в `flush` следующего, не
+/// отпустив своего, — и на глубине k живы все ужатые выше. **Тайл берётся один
+/// самый большой**: он объявлен в теле цикла по тайлам, гибнет на каждом витке
+/// и к моменту ужатия мёртв, так что двух тайлов разом не бывает нигде.
 fn flush_bytes(base_w: u32, base_h: u32) -> u64 {
-    levels(base_w, base_h)
-        .map(|(w, rows)| {
-            u64::from(w.min(TILE)) * rows * 4 + u64::from(w.div_ceil(2)) * rows.div_ceil(2) * 4
-        })
-        .sum()
+    let halves: u64 = levels(base_w, base_h)
+        .map(|(w, rows)| u64::from(w.div_ceil(2)) * rows.div_ceil(2) * 4)
+        .sum();
+    let tile = levels(base_w, base_h)
+        .map(|(w, rows)| u64::from(w.min(TILE)) * rows * 4)
+        .max()
+        .unwrap_or(0);
+    halves + tile
 }
 
 /// Уровни каскада как пары «ширина, строк в полосе» — тем же делением пополам,
@@ -140,7 +173,7 @@ impl Cascade {
             h = h.div_ceil(2);
             level += 1;
         }
-        Self { bands }
+        Self { bands, #[cfg(test)] spent: Spent::default() }
     }
 
     /// Группа полных строк базового уровня, сверху вниз, RGBA8 подряд.
@@ -152,6 +185,12 @@ impl Cascade {
     /// Конец источника: дожать неполные полосы всех уровней. Порядок сверху
     /// вниз обязателен — неполная полоса уровня k доносит строки в k+1.
     pub fn finish(mut self, emit: Emit) -> Result<(), String> {
+        self.drain(emit)
+    }
+
+    /// Тело [`Self::finish`] по ссылке — чтобы после дожатия можно было ещё
+    /// спросить каскад, во что оно обошлось.
+    fn drain(&mut self, emit: Emit) -> Result<(), String> {
         for i in 0..self.bands.len() {
             self.flush(i, emit)?;
         }
@@ -200,13 +239,19 @@ impl Cascade {
         let ty = top / TILE;
         for tx in 0..pyramid::grid(width) {
             let tw = pyramid::tile_extent(tx, width);
-            let mut tile = Vec::with_capacity((tw as usize) * (rows as usize) * 4);
+            let taken = u64::from(tw) * u64::from(rows) * 4;
+            #[cfg(test)]
+            self.spent.take(taken);
+            let mut tile = Vec::with_capacity(taken as usize);
             let buf = &self.bands[i].buf;
             for row in 0..rows as usize {
                 let from = (row * (width as usize) + (tx * TILE) as usize) * 4;
                 tile.extend_from_slice(&buf[from..from + (tw as usize) * 4]);
             }
             emit(level, tx, ty, tw, rows, &tile)?;
+            drop(tile);
+            #[cfg(test)]
+            self.spent.give(taken);
         }
 
         let half = if i + 1 < self.bands.len() {
@@ -225,7 +270,15 @@ impl Cascade {
             band.filled = 0;
         }
         if let Some((half, hrows)) = half {
-            self.feed(i + 1, &half, hrows, emit)?;
+            #[cfg(test)]
+            let taken = half.len() as u64;
+            #[cfg(test)]
+            self.spent.take(taken);
+            let outcome = self.feed(i + 1, &half, hrows, emit);
+            drop(half);
+            #[cfg(test)]
+            self.spent.give(taken);
+            outcome?;
         }
         Ok(())
     }
@@ -275,6 +328,51 @@ mod tests {
             "пятикратная высота подняла цену с {} до {} — это не логарифм",
             low, high
         );
+    }
+
+    /// Предсказание временного сходится с тем, что проход потратил на самом
+    /// деле. Полосы сверены с постройкой отдельно; это второе слагаемое
+    /// [`bytes`], и сверять его не с чем, кроме прохода: две формулы,
+    /// написанные по одному правилу, расходятся молча.
+    ///
+    /// Кормится каскад рваными порциями нарочно — полосы уровней
+    /// дозаполняются вразнобой, и рекурсия `flush → feed → flush` проходится
+    /// вся, до самой вершины.
+    #[test]
+    fn предсказание_временного_сходится_с_проходом() {
+        for (w, h) in [(1301u32, 523u32), (2000, 1500), (700, 3000), (5000, 517)] {
+            let src = image(w, h);
+            let mut emit = |_: u32, _: u32, _: u32, _: u32, _: u32, _: &[u8]| Ok(());
+            let mut cascade = Cascade::new(0, w, h);
+
+            let mut fed = 0u32;
+            for take in [1u32, 7, 500, 12, 3].iter().cycle() {
+                if fed >= h {
+                    break;
+                }
+                let rows = (*take).min(h - fed);
+                let from = (fed as usize) * (w as usize) * 4;
+                let slice = &src[from..from + (rows as usize) * (w as usize) * 4];
+                cascade.push_rows(slice, rows, &mut emit).expect("полоса принята");
+                fed += rows;
+            }
+            cascade.drain(&mut emit).expect("хвост дожат");
+
+            let spent = cascade.spent.peak;
+            let predicted = flush_bytes(w, h);
+            assert!(
+                spent <= predicted,
+                "растр {}×{}: проход потратил {} при обещанных {}",
+                w, h, spent, predicted
+            );
+            // И не вдвое меньше: завышенное предсказание — это отказ читаемому
+            // источнику, такой же промах, как заниженное.
+            assert!(
+                spent * 2 > predicted,
+                "растр {}×{}: обещано {}, потрачено {} — предсказание завышено вдвое",
+                w, h, predicted, spent
+            );
+        }
     }
 
     /// Детерминированный «шум»: содержимое не важно, важно несовпадение
