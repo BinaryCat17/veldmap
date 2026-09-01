@@ -285,6 +285,78 @@ impl Datum {
     }
 }
 
+/// Проекция растра: как его плоские метры ложатся на эллипсоид.
+///
+/// Семейств здесь два, и объединять их в одно нельзя — у них разная
+/// математика, а не разные числа. Поперечное цилиндрическое накрывает всё, что
+/// нарезано зонами: UTM, Гаусса-Крюгера, местные системы. Веб-Меркатор стои́т
+/// особняком и попал сюда затем, что в него сложены все тайловые карты мира.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Projection {
+    /// UTM, зоны Гаусса-Крюгера, местные системы — см. [`System`].
+    Transverse(System),
+    /// Веб-Меркатор, EPSG:3857.
+    WebMercator,
+}
+
+impl From<System> for Projection {
+    fn from(system: System) -> Self {
+        Self::Transverse(system)
+    }
+}
+
+/// Радиус сферы веб-Меркатора — большая полуось WGS84, взятая за радиус.
+///
+/// Так эту проекцию и определили: широта берётся эллипсоидальная, а считается
+/// по сфере. Строго равноугольной она от этого быть перестаёт — расхождение
+/// доходит до трёх десятых процента по масштабу, — зато сетка получается
+/// степенями двойки, и на ней стои́т всякая веб-карта.
+const WEB_MERCATOR_RADIUS_M: f64 = SEMI_MAJOR_M;
+
+/// Предел широты веб-Меркатора: дальше проекция уходит в бесконечность, и
+/// сетку обрезают так, чтобы мир вышел квадратом.
+const WEB_MERCATOR_LIMIT_DEG: f64 = 85.051_128_779_806_59;
+
+impl Projection {
+    /// Проекция по коду EPSG. `None` — кода мы не знаем; такой растр ложится
+    /// по контуру каталога, а не по своей привязке.
+    pub fn from_epsg(code: u32) -> Option<Self> {
+        match code {
+            3857 => Some(Self::WebMercator),
+            _ => System::from_epsg(code).map(Self::Transverse),
+        }
+    }
+
+    /// Широта и долгота WGS84 → метры проекции.
+    pub fn from_geodetic(&self, lat_deg: f64, lon_deg: f64) -> (f64, f64) {
+        match self {
+            Self::Transverse(system) => system.from_geodetic(lat_deg, lon_deg),
+            Self::WebMercator => {
+                let lat = lat_deg.clamp(-WEB_MERCATOR_LIMIT_DEG, WEB_MERCATOR_LIMIT_DEG);
+                let phi = lat.to_radians();
+                (
+                    WEB_MERCATOR_RADIUS_M * lon_deg.to_radians(),
+                    WEB_MERCATOR_RADIUS_M * (std::f64::consts::FRAC_PI_4 + phi / 2.0).tan().ln(),
+                )
+            }
+        }
+    }
+
+    /// Метры проекции → широта и долгота WGS84. Обратная к
+    /// [`Projection::from_geodetic`].
+    pub fn to_geodetic(&self, easting: f64, northing: f64) -> (f64, f64) {
+        match self {
+            Self::Transverse(system) => system.to_geodetic(easting, northing),
+            Self::WebMercator => {
+                let lon = (easting / WEB_MERCATOR_RADIUS_M).to_degrees();
+                let phi = 2.0 * (northing / WEB_MERCATOR_RADIUS_M).exp().atan()
+                    - std::f64::consts::FRAC_PI_2;
+                (phi.to_degrees(), lon)
+            }
+        }
+    }
+}
+
 /// Поперечная цилиндрическая проекция со своими числами: UTM, шестиградусные
 /// зоны Гаусса-Крюгера и местные системы — это она, а не разные проекции.
 ///
@@ -465,6 +537,77 @@ impl System {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Веб-Меркатор кладёт мир в квадрат со стороной в два раза по 20 037 508
+    /// метров — на этом стои́т вся тайловая сетка степеней двойки, и числа эти
+    /// не наши, а её.
+    #[test]
+    fn мир_веб_меркатора_квадратный() {
+        let map = Projection::WebMercator;
+        let side = 20_037_508.34;
+
+        let (x, y) = map.from_geodetic(0.0, 0.0);
+        assert!(x.abs() < 1e-6 && y.abs() < 1e-6, "нуль градусов — нуль метров: {x} {y}");
+
+        let (x, _) = map.from_geodetic(0.0, 180.0);
+        assert!((x - side).abs() < 0.5, "край по долготе: {x}");
+
+        let (_, y) = map.from_geodetic(WEB_MERCATOR_LIMIT_DEG, 0.0);
+        assert!((y - side).abs() < 0.5, "край по широте: {y}");
+    }
+
+    /// Числа настоящих мест — против таблиц, а не против нашей же формулы,
+    /// переписанной в тест.
+    #[test]
+    fn настоящие_места_ложатся_куда_положено() {
+        let map = Projection::WebMercator;
+        for (lat, lon, ex, ey) in [
+            (47.2357, 39.7015, 4_419_550.76, 5_980_631.53),
+            (-33.8688, 151.2093, 16_832_542.28, -4_011_198.65),
+        ] {
+            let (x, y) = map.from_geodetic(lat, lon);
+            assert!((x - ex).abs() < 0.5 && (y - ey).abs() < 0.5, "{lat} {lon} → {x} {y}");
+        }
+    }
+
+    /// Прямая и обратная сходятся. Это единственная проверка проекции, не
+    /// сводящаяся к переписыванию её же формул: ошибись в одной — пара
+    /// разойдётся.
+    #[test]
+    fn веб_меркатор_обратим() {
+        let map = Projection::WebMercator;
+        for lat in [-84.0, -45.0, -0.5, 0.0, 12.25, 60.0, 84.9] {
+            for lon in [-179.5, -90.0, 0.0, 33.3, 179.5] {
+                let (x, y) = map.from_geodetic(lat, lon);
+                let (back_lat, back_lon) = map.to_geodetic(x, y);
+                assert!(
+                    (back_lat - lat).abs() < 1e-9 && (back_lon - lon).abs() < 1e-9,
+                    "{lat} {lon} → {x} {y} → {back_lat} {back_lon}"
+                );
+            }
+        }
+    }
+
+    /// За полюсами проекция уходит в бесконечность, поэтому широта зажимается
+    /// пределом сетки. Без зажима координата стала бы бесконечной, а с ней —
+    /// вся варп-сетка наложения.
+    #[test]
+    fn за_пределом_широта_зажимается() {
+        let map = Projection::WebMercator;
+        let (_, edge) = map.from_geodetic(WEB_MERCATOR_LIMIT_DEG, 0.0);
+        let (_, beyond) = map.from_geodetic(89.9, 0.0);
+        assert_eq!(edge, beyond, "за пределом координата обязана встать");
+        assert!(beyond.is_finite(), "и остаться конечной");
+    }
+
+    /// Код 3857 узнаётся, а неизвестный по-прежнему остаётся неизвестным:
+    /// растр с чужой системой ложится по контуру каталога, а не мимо себя.
+    #[test]
+    fn веб_меркатор_узнаётся_по_коду() {
+        assert_eq!(Projection::from_epsg(3857), Some(Projection::WebMercator));
+        assert!(matches!(Projection::from_epsg(32637), Some(Projection::Transverse(_))));
+        assert_eq!(Projection::from_epsg(3035), None, "равновеликую азимутальную мы не умеем");
+    }
 
     /// Насколько разошлись две точки по земле, метры. Грубой метрики здесь
     /// довольно: проверяется сходство в сантиметрах, а не форма Земли.
