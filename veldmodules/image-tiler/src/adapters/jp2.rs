@@ -26,7 +26,7 @@ use hayro_jpeg2000::{ColorSpace, DecodeSettings, DecoderContext, Image};
 use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid;
 use super::radiometry::Pixel;
-use super::{to_rgba, Info, Kind, Metered};
+use super::{to_rgba, Info, Kind, Metered, Placement};
 
 /// Потолок памяти одного прохода: сам файл, f32-плоскости декодера, его
 /// интерливленный выход и RGBA. Считается до чтения; уровень, не влезающий в
@@ -47,7 +47,122 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     let (width, height) = header_dims(&head)?;
     let mut info = Info::plain(width, height, Kind::Jp2);
     info.finest = finest(len, width, height);
+    info.placement = gml_placement(&head, width, height);
     Ok(info)
+}
+
+/// Привязка из коробки GMLJP2 — единственное место, где JP2 говорит о Земле.
+///
+/// Так лежит гранула Sentinel-2: коробка `asoc` с меткой `gml.data`, внутри
+/// вторая с `gml.root-instance`, а в ней GML с прямоугольной решёткой.
+/// Второго способа — вырожденного GeoTIFF в коробке `uuid` — у Sentinel-2 нет
+/// вовсе, и разбирать его незачем, пока не встретится файл, который его несёт.
+///
+/// `None` — коробки нет, форма не та или решётка не про этот растр. Молчание,
+/// а не отказ: JP2 без привязки — обычное дело, и такой снимок ложится по
+/// контуру каталога.
+fn gml_placement(head: &[u8], width: u32, height: u32) -> Option<Placement> {
+    let text = gml_text(head)?;
+    let epsg = after(&text, "EPSG::")?.parse::<u32>().ok()?;
+    let (ox, oy) = pair(numbers(after_tag(&text, "<gml:pos>")?)?)?;
+    let mut offsets = text.match_indices("<gml:offsetVector").filter_map(|(at, _)| {
+        pair(numbers(after_tag(&text[at..], ">")?)?)
+    });
+    let (x_per_i, y_per_i) = offsets.next()?;
+    let (x_per_j, y_per_j) = offsets.next()?;
+
+    // Решётка обязана быть про этот растр. Разойдись она с ним — оси у файла
+    // переставлены либо решётка описывает не его, и натянутая всё равно она
+    // положила бы снимок мимо себя, причём молча.
+    let (low, high) = (
+        pair(numbers(after_tag(&text, "<gml:low>")?)?)?,
+        pair(numbers(after_tag(&text, "<gml:high>")?)?)?,
+    );
+    let across = high.0 - low.0 + 1.0;
+    let down = high.1 - low.1 + 1.0;
+    if across != f64::from(width) || down != f64::from(height) {
+        return None;
+    }
+
+    // Начало решётки — центр первого отсчёта, а наружу уезжает угол пикселя
+    // (см. `Placement` в types.proto): та же конвенция, что снимает полпикселя
+    // у `RasterPixelIsPoint` в GeoTIFF.
+    Some(Placement {
+        epsg,
+        affine: [
+            x_per_i,
+            x_per_j,
+            ox - (x_per_i + x_per_j) / 2.0,
+            y_per_i,
+            y_per_j,
+            oy - (y_per_i + y_per_j) / 2.0,
+        ],
+    })
+}
+
+/// Текст GML из вложенных коробок `asoc`. Ищется по содержимому, а не по
+/// порядку: меток внутри бывает несколько, и та, что нужна, — при решётке.
+fn gml_text(head: &[u8]) -> Option<String> {
+    fn dig(buf: &[u8], depth: usize) -> Option<String> {
+        if depth > 4 {
+            return None;
+        }
+        let mut at = 0usize;
+        while at + 8 <= buf.len() {
+            let length = u32::from_be_bytes(buf.get(at..at + 4)?.try_into().ok()?) as u64;
+            let kind = buf.get(at + 4..at + 8)?;
+            // Нулевая длина — «до конца», единица — длина следующей восьмёркой.
+            let (length, body) = match length {
+                0 => ((buf.len() - at) as u64, at + 8),
+                1 => (u64::from_be_bytes(buf.get(at + 8..at + 16)?.try_into().ok()?), at + 16),
+                _ => (length, at + 8),
+            };
+            let end = usize::try_from(at as u64 + length).ok()?.min(buf.len());
+            if body > end {
+                return None;
+            }
+            let inner = &buf[body..end];
+            let found = match kind {
+                b"asoc" => dig(inner, depth + 1),
+                b"xml " => String::from_utf8(inner.to_vec())
+                    .ok()
+                    .filter(|text| text.contains("RectifiedGrid")),
+                _ => None,
+            };
+            if found.is_some() {
+                return found;
+            }
+            at = end.max(at + 8);
+        }
+        None
+    }
+    dig(head, 0)
+}
+
+/// Хвост строки после первого вхождения — до конца строки или до `<`.
+fn after<'a>(text: &'a str, mark: &str) -> Option<&'a str> {
+    let tail = &text[text.find(mark)? + mark.len()..];
+    Some(&tail[..tail.find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len())])
+}
+
+/// Содержимое элемента, открывающий тег которого только что назвали.
+fn after_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let tail = &text[text.find(tag)? + tag.len()..];
+    Some(&tail[..tail.find('<').unwrap_or(tail.len())])
+}
+
+/// Числа через пробел.
+fn numbers(text: &str) -> Option<Vec<f64>> {
+    text.split_whitespace().map(|word| word.parse::<f64>().ok()).collect()
+}
+
+/// Ровно два числа: пара координат либо пара шагов. Больше или меньше — форма
+/// не та, и додумывать её нечем.
+fn pair(values: Vec<f64>) -> Option<(f64, f64)> {
+    match values.as_slice() {
+        [first, second] => Some((*first, *second)),
+        _ => None,
+    }
 }
 
 /// Самый подробный уровень, который влезает в бюджет декода. Считается по тем
@@ -305,6 +420,84 @@ fn siz_dims(from_siz: &[u8]) -> Result<(u32, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Коробка JP2: длина, тип, содержимое. `extended` — длина восьмёркой
+    /// после типа, как её пишет настоящая гранула Sentinel-2.
+    fn box_of(kind: &[u8; 4], body: &[u8], extended: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        match extended {
+            false => out.extend_from_slice(&((body.len() + 8) as u32).to_be_bytes()),
+            true => out.extend_from_slice(&1u32.to_be_bytes()),
+        }
+        out.extend_from_slice(kind);
+        if extended {
+            out.extend_from_slice(&((body.len() + 16) as u64).to_be_bytes());
+        }
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// GMLJP2 так, как он лежит в грануле: две вложенные `asoc` с метками,
+    /// внешняя — с длиной восьмёркой.
+    fn gmljp2(gml: &str) -> Vec<u8> {
+        let inner = [
+            box_of(b"lbl ", b"gml.root-instance", false),
+            box_of(b"xml ", gml.as_bytes(), false),
+        ]
+        .concat();
+        let outer = [box_of(b"lbl ", b"gml.data", false), box_of(b"asoc", &inner, false)].concat();
+        box_of(b"asoc", &outer, true)
+    }
+
+    /// Настоящий GML из гранулы `S2B_MSIL2A_20260901T104619_..._T42XWQ`,
+    /// урезанный до того, что читается. Числа не выдуманы.
+    const REAL_GML: &str = r#"<gml:FeatureCollection>
+      <gml:RectifiedGridCoverage><gml:domainSet><gml:RectifiedGrid dimension="2">
+        <gml:limits><gml:GridEnvelope>
+          <gml:low>1 1</gml:low><gml:high>10980 10980</gml:high>
+        </gml:GridEnvelope></gml:limits>
+        <gml:origin><gml:Point gml:id="P0001" srsName="urn:ogc:def:crs:EPSG::32642">
+          <gml:pos>499985 8999995</gml:pos></gml:Point></gml:origin>
+        <gml:offsetVector srsName="urn:ogc:def:crs:EPSG::32642">10 0</gml:offsetVector>
+        <gml:offsetVector srsName="urn:ogc:def:crs:EPSG::32642">0 -10</gml:offsetVector>
+      </gml:RectifiedGrid></gml:domainSet></gml:RectifiedGridCoverage></gml:FeatureCollection>"#;
+
+    /// Привязка Sentinel-2 читается из файла, и угол выходит круглым.
+    ///
+    /// Круглый угол — не украшение, а проверка полпикселя: начало решётки в GML
+    /// названо центром первого отсчёта, и снятые пять метров дают ровно ту
+    /// сотку, по которой нарезана плитка MGRS. Не снятые — сдвинули бы снимок
+    /// на полпикселя, и заметить это было бы нечем.
+    #[test]
+    fn привязка_гранулы_читается_и_угол_выходит_круглым() {
+        let head = gmljp2(REAL_GML);
+        let said = gml_placement(&head, 10980, 10980).expect("гранула несёт привязку");
+
+        assert_eq!(said.epsg, 32642, "UTM 42 северная");
+        assert_eq!(said.affine, [10.0, 0.0, 499_980.0, 0.0, -10.0, 9_000_000.0]);
+    }
+
+    /// Решётка не про этот растр — привязки нет. Натянутая, она положила бы
+    /// снимок мимо себя, и молча: числа-то настоящие, просто чужие.
+    #[test]
+    fn чужая_решётка_не_берётся() {
+        let head = gmljp2(REAL_GML);
+        assert!(gml_placement(&head, 10980, 10980).is_some(), "своя берётся");
+        assert!(gml_placement(&head, 5490, 10980).is_none(), "ширина не та");
+        assert!(gml_placement(&head, 10980, 5490).is_none(), "высота не та");
+    }
+
+    /// Ни коробки, ни формы — молчание, а не отказ: JP2 без привязки обычен, и
+    /// такой снимок ложится по контуру каталога.
+    #[test]
+    fn без_коробки_привязки_нет_и_это_не_беда() {
+        assert!(gml_placement(&[], 10980, 10980).is_none(), "пусто");
+        assert!(gml_placement(b"not a jp2 at all", 10980, 10980).is_none(), "мусор");
+
+        let empty = gmljp2("<gml:FeatureCollection>RectifiedGrid без чисел</gml:FeatureCollection>");
+        assert!(gml_placement(&empty, 10980, 10980).is_none(), "форма не та");
+    }
+
 
     /// Бокс с телом — как их пишет контейнер.
     fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
