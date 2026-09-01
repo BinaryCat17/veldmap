@@ -19,7 +19,8 @@
 
 use veld_ui_service_wrap::{column, popover, row, slider, Keyed};
 use crate::proto::ui_service::{
-    container, mono, scrollable, text, Alignment, Element, Length, Padding, ScrollDirection,
+    container, mono, scrollable, text, tooltip, Alignment, Color, Element, Length, Padding,
+    ScrollDirection, TooltipPosition,
 };
 use crate::module::components::{format, list_screen, menu, preview_of, table};
 use crate::module::state::listing::Choice;
@@ -176,7 +177,7 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
         theme::RowTint::Plain
     };
 
-    let said = state_said(overlay).map(|(said, _)| said).unwrap_or_default();
+    let said = state_said(overlay).map(|said| said.shown).unwrap_or_default();
     let name_chars = row_name_chars(width, &said);
     let name = row![
         theme::row_glyph::<Msg>(
@@ -437,17 +438,42 @@ fn options(state: &State, view: ViewId, overlay: &OverlayState) -> Element<Msg> 
 /// скрыт — тоже наше, а сколько тайлов осталось, знает только глобус и
 /// рассказывает сам (см. `state::overlay::Progress`). Ждать снимок приходится
 /// десятками секунд, и без этой подписи он выглядит зависшим.
-fn state_said(overlay: &OverlayState) -> Option<(String, crate::proto::ui_service::Color)> {
+/// Сколько знаков подписи о беде помещается в строку.
+///
+/// Ограничение не украшение: ширину под имя считает [`row_name_chars`] по тому,
+/// что осталось от подписи, а причину пишет не разметка, а тот, кто отказал, —
+/// длины у неё нет вовсе. Неограниченная, она оставляет имени снимка его нижний
+/// предел в шестьдесят точек, то есть огрызок, по которому строку не узнать.
+const TROUBLE_CHARS: usize = 44;
+
+/// Подпись состояния слоя: что стои́т в строке, каким цветом и что сказать
+/// целиком.
+///
+/// Целиком — врозь с показанным, потому что показанное ужато: срезанная на
+/// полуслове причина не объясняет ничего, а место, где она помещается вся, в
+/// строке одно — подсказка.
+struct Said {
+    shown: String,
+    color: Color,
+    whole: Option<String>,
+}
+
+fn state_said(overlay: &OverlayState) -> Option<Said> {
+    let plain = |shown: &str, color| Said { shown: shown.to_string(), color, whole: None };
     let said = match (overlay.on_globe(), overlay.hidden) {
-        (false, _) => ("готовится…".to_string(), theme::INK_FAINT),
-        (true, true) => ("скрыт".to_string(), theme::INK_FAINT),
+        (false, _) => plain("готовится…", theme::INK_FAINT),
+        (true, true) => plain("скрыт", theme::INK_FAINT),
         // Отказ растра говорится последним и остаётся насовсем: пока слой
         // чего-то ждёт, важнее ожидание, а когда дождался — только он и
         // объясняет, почему приближение больше ничего не даст.
         (true, false) => match (overlay.progress.said(), overlay.trouble.as_str()) {
-            (Some(said), _) => (said, theme::ACCENT_TEXT),
+            (Some(said), _) => plain(&said, theme::ACCENT_TEXT),
             (None, "") => return None,
-            (None, trouble) => (trouble.to_string(), theme::INK_FAINT),
+            (None, trouble) => Said {
+                shown: format::ellipsize(trouble, TROUBLE_CHARS),
+                color: theme::INK_FAINT,
+                whole: Some(trouble.to_string()),
+            },
         },
     };
     Some(said)
@@ -456,11 +482,16 @@ fn state_said(overlay: &OverlayState) -> Option<(String, crate::proto::ui_servic
 /// Та же подпись элементом. Врозь с [`state_said`] затем, что её ширину надо
 /// знать до сборки строки: место под имя считается по ней.
 fn state_label(overlay: &OverlayState) -> Element<Msg> {
-    match state_said(overlay) {
-        Some((label, color)) => {
-            text::<Msg>(label).size(theme::TEXT_SMALL).color(color).single_line().into()
-        }
-        None => theme::nothing(),
+    let Some(said) = state_said(overlay) else { return theme::nothing() };
+    let label = text::<Msg>(said.shown).size(theme::TEXT_SMALL).color(said.color).single_line();
+    match said.whole {
+        // Подсказка идёт одной строкой и шире окна не влезет — ужимаем и её,
+        // тем же пределом, что и у списка загрузок.
+        Some(whole) => tooltip(label, format::ellipsize(&whole, 90), TooltipPosition::TooltipTop)
+            .style(theme::panel())
+            .text_size(theme::TEXT_SMALL)
+            .into(),
+        None => label.into(),
     }
 }
 

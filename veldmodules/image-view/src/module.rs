@@ -359,9 +359,13 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     // Кэш отказал — но снимок от этого не портится: ожидания снимаются, и
     // ячейки спросятся заново следующим пересчётом. Показывать причину вместо
     // кадра значило бы стереть картинку из-за осечки, которая пройдёт сама.
-    if !msg.error.is_empty() {
+    // Договорённый хостом ответ — тот же отказ, и путь у него тот же: свои
+    // ячейки снять с ожидания и сказать вслух. Принятый за удачу, он оставил бы
+    // их висеть навсегда (см. `tiles::undelivered`).
+    let error = tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone());
+    if !error.is_empty() {
         view.fetch.forget_asked(&ctx.cells);
-        view.trouble = Some(format!("неполно: {}", msg.error));
+        view.trouble = Some(format!("неполно: {}", error));
         report(state, &ctx.view);
         return;
     }
@@ -452,13 +456,22 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     // на виде, и заказчика прохода могли закрыть, пока проход шёл. Уйди мы
     // отсюда, не сняв его, — соседние вкладки с тем же файлом ждали бы конца,
     // которого уже не будет.
-    state.passes.finish(&correlation);
+    // Сняли проход мы сами — это обычный ход приближения, а не срыв (см.
+    // `tiles::Passes::finish`).
+    let ours_kill = state.passes.finish(&correlation);
 
     if let Some(view) = state.views.get_mut(&ctx.view) {
         // Показ мог смениться, пока проход шёл: тогда его ячейки уже не про
         // этот вид, и ни ожидания, ни отказ к нему не относятся.
         let ours = view.meta().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
-        let failed = ours && !msg.error.is_empty();
+        // Пустой ответ, договорённый хостом за упавшего, — это сорвавшийся
+        // проход, а не удачный: принятый за удачу, он ещё и простил бы ячейки,
+        // которых никто не производил (`Fetch::forgive`).
+        let error = match ours_kill {
+            true => msg.error.clone(),
+            false => tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone()),
+        };
+        let failed = ours && !error.is_empty();
         view.fetch.produced(if ours { &ctx.cells } else { &[] }, failed);
         if ours {
             // Прочитанное — про кончившийся проход, и пережить его оно не
@@ -474,8 +487,8 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
             // недоехавшие ячейки одной ступени, а не негодный снимок. Ступени
             // выше уже нарисованы, и заменить их причиной значило бы стереть
             // готовую картинку из-за одного оборванного чтения.
-            veldsdk::log::warn!(target: "handlers", "{}: производство: {}", view.label, msg.error);
-            view.trouble = Some(format!("неполно: {}", msg.error));
+            veldsdk::log::warn!(target: "handlers", "{}: производство: {}", view.label, error);
+            view.trouble = Some(format!("неполно: {}", error));
         }
     }
 
@@ -699,7 +712,7 @@ fn accept_tile(
         // приехавший раньше, чем канва завелась.
         None => {
             tiles::release(texture);
-            true
+            tiles::Landing::Retry
         }
     };
 
@@ -707,11 +720,16 @@ fn accept_tile(
         && view.meta().is_some_and(|meta| meta.fingerprint == fingerprint)
     {
         match landed {
-            true => {
+            tiles::Landing::Landed => {
                 view.fetch.arrived(addr);
                 view.landed();
             }
-            false => view.fetch.rejected(addr),
+            // Осечка наша: ячейка спросится заново. Второй раз подряд на той же
+            // ячейке `stumbled` приговорит её сам.
+            tiles::Landing::Retry => {
+                view.fetch.stumbled(addr);
+            }
+            tiles::Landing::Verdict => view.fetch.rejected(addr),
         }
     }
 }

@@ -651,9 +651,16 @@ pub fn on_described(state: &mut State, msg: Described) {
     {
         // Привязка так и осталась догадкой: снимок вот-вот ляжет по контуру
         // каталога, и повёрнутый снимок на шаре ничем другим не объясняется.
+        //
+        // Только в лог: четырьмя вершинами футпринта ложится всякий снимок,
+        // растр которого о привязке не заговаривал вовсе, — квиклук, картинка
+        // без геоключей, — и это штатный исход, а не беда. Подпись у каждого
+        // такого слоя была бы ровно тем шумом, против которого затевалась
+        // жалоба. Растр, который о привязке заговорил и не дал её, скажет о
+        // себе сам — через `complain`.
         if matches!(overlay.frame, overlay::Frame::Quad(_)) {
             veldsdk::log::warn!(target: "handlers",
-                "{}: привязка из растров не взята — снимок ложится по контуру каталога, порядок его вершин обходу растра не обязан совпадать (причина — строкой выше)",
+                "{}: привязка из растров не взята — снимок ложится по контуру каталога, порядок его вершин обходу растра не обязан совпадать",
                 overlay.label);
         }
         // А вот описаться не вышло ни одному — тогда слою нечем лечь вовсе, и
@@ -685,7 +692,10 @@ pub fn on_described(state: &mut State, msg: Described) {
             veldsdk::log::warn!(target: "handlers",
                 "{}: у контура каталога нет протяжённости — класть снимок не по чему",
                 overlay.label);
-            overlay.error = "контур снимка сошёлся в точку: класть растр не по чему".to_string();
+            overlay.error = said_with(
+                &overlay.binding_trouble,
+                "контур снимка сошёлся в точку: класть растр не по чему",
+            );
         } else if matches!(overlay.frame, overlay::Frame::Rough(_)) {
             // Место держали в расчёте на решётку из растра, а её не оказалось.
             // Габарит сложного контура привязкой не является (см.
@@ -693,15 +703,29 @@ pub fn on_described(state: &mut State, msg: Described) {
             veldsdk::log::warn!(target: "handlers",
                 "{}: контур каталога сложнее четырёхугольника, а привязка из растра не взята",
                 overlay.label);
-            overlay.error =
+            overlay.error = said_with(
+                &overlay.binding_trouble,
                 "привязки нет: из растра её взять не удалось, а контур каталога сложнее \
-                 четырёхугольника"
-                    .to_string();
+                 четырёхугольника",
+            );
         }
     }
 
     state.epoch += 1;
     want_tiles(state, perf::Pass::Set);
+}
+
+/// Отказ слоя вместе с причиной, если растр её назвал.
+///
+/// Внутри общей фразы, а не рядом с ней: по `error` приславший слой снимает, и
+/// вместе со слоем уходит его `trouble`, где причина и лежала. Другого случая
+/// сказать её не будет — а без неё смотрящий читает про свой снимок ровно то
+/// же, что и про всякий другой не легший.
+fn said_with(trouble: &Option<String>, general: &str) -> String {
+    match trouble {
+        Some(said) => format!("{} ({})", general, said),
+        None => general.to_string(),
+    }
 }
 
 /// Пересчитать шары ячеек у всех растров слоя.
@@ -827,7 +851,6 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
                 veldsdk::log::info!(target: "handlers",
                     "{}: привязка сеткой из {} узлов", label, ties.len());
                 overlay.relay(overlay::Frame::Grid(grid), rank);
-                overlay.binding_trouble = None;
                 return;
             }
             // Точки есть, а решётки не вышло — молчать об этом нельзя: снимок
@@ -840,7 +863,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
                 let said = format!("{} опорных точек не сложились в решётку", ties.len());
                 veldsdk::log::warn!(target: "handlers",
                     "{}: {} — привязка остаётся по контуру", label, said);
-                overlay.binding_trouble = Some(said);
+                overlay.complain(said);
             }
         }
     }
@@ -848,7 +871,17 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     // Растр лежит в проекции. Код системы толкуется здесь, а не в тайлере:
     // ряды Крюгера в дереве одни (`projection.rs`), и вторая их копия сошлась
     // бы с первой на глаз и разошлась на числах.
-    let Some(found) = msg.placement else { return };
+    let Some(found) = msg.placement else {
+        // Привязки растр не принёс вовсе — и если сказал почему, то это и есть
+        // ответ смотрящему: снимок ляжет по контуру каталога, а вопрос у него
+        // один — сами мы не сумели или в файле про место не сказано.
+        if !msg.binding_trouble.is_empty() {
+            veldsdk::log::warn!(target: "handlers",
+                "{}: {} — привязка остаётся по контуру", label, msg.binding_trouble);
+            overlay.complain(msg.binding_trouble);
+        }
+        return;
+    };
     if overlay.binding >= overlay::Binding::Projected {
         return;
     }
@@ -869,7 +902,6 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
             veldsdk::log::info!(target: "handlers",
                 "{}: привязка проекцией EPSG:{}", label, found.epsg);
             overlay.relay(frame, overlay::Binding::Projected);
-            overlay.binding_trouble = None;
         }
         // Система названа, а перевести её нечем. Сказать об этом надо кодом: по
         // «привязки нет» неумение от молчания файла не отличить, и разбирать
@@ -880,7 +912,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
         Err(why) => {
             veldsdk::log::warn!(target: "handlers",
                 "{}: растр привязан к {} — привязка остаётся по контуру", label, why);
-            overlay.binding_trouble = Some(format!("привязка не взята: {}", why));
+            overlay.complain(format!("привязка не взята: {}", why));
         }
     }
 }
@@ -950,9 +982,17 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         if raster.meta.as_ref().is_none_or(|meta| meta.fingerprint != ctx.fingerprint) {
             return;
         }
-        if !msg.error.is_empty() {
+        // Договорённый хостом ответ — тот же отказ, и путь у него тот же: свои
+        // ячейки снять с ожидания, сказать вслух, двинуть эпоху. Принятый за
+        // удачу, он оставил бы их висеть навсегда (см. `tiles::undelivered`).
+        let error = tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone());
+        if !error.is_empty() {
             raster.fetch.forget_asked(&ctx.cells);
-            veldsdk::log::warn!(target: "handlers", "{}: кэш тайлов: {}", label, msg.error);
+            veldsdk::log::warn!(target: "handlers", "{}: кэш тайлов: {}", label, error);
+            // И на экран: снимок жив, но резче не станет, а по молчанию
+            // «ещё едет» от «не будет» не отличить. Тем же полем и теми же
+            // словами, что у канвы, — работа у них одна.
+            raster.trouble = Some(format!("неполно: {}", error));
             // Эпоху двигаем и здесь: без неё `build_patches` выйдет по
             // сравнению, ход добычи больше не пересчитается, и последнее
             // присланное «идёт работа» останется действующим до конца запуска.
@@ -1043,7 +1083,10 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
     // на растре, и наложение могли снять, пока проход шёл. Уйди мы отсюда, не
     // сняв его, — соседние растры того же файла ждали бы конца, которого уже
     // не будет.
-    state.passes.finish(&correlation);
+    // Сняли проход мы сами — это обычный ход приближения, а не срыв: хост
+    // договаривает ответ за снятого тем же пустым сообщением, что и за
+    // упавшего, и различить их может только тот, кто снимал.
+    let ours_kill = state.passes.finish(&correlation);
 
     if let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) {
         let label = overlay.label.clone();
@@ -1052,13 +1095,21 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
             // этот растр, и относить к нему ни ожидания, ни отказ нельзя.
             let ours =
                 raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == ctx.fingerprint);
-            let failed = ours && !msg.error.is_empty();
+            // Пустой ответ, договорённый хостом за упавшего, — это сорвавшийся
+            // проход, а не удачный: принятый за удачу, он ещё и простил бы
+            // ячейки, которых никто не производил (`Fetch::forgive`).
+            let error = match ours_kill {
+                true => msg.error.clone(),
+                false => tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone()),
+            };
+            let failed = ours && !error.is_empty();
             raster.pass = (0, 0);
             raster.fetch.produced(if ours { &ctx.cells } else { &[] }, failed);
             if failed {
                 // Не переспрашивать то, что уже не произвелось: каждый кадр
                 // долбил бы производителя тем же отказом.
-                veldsdk::log::warn!(target: "handlers", "{}: производство: {}", label, msg.error);
+                veldsdk::log::warn!(target: "handlers", "{}: производство: {}", label, error);
+                raster.trouble = Some(format!("неполно: {}", error));
             }
         }
     }
@@ -1189,7 +1240,7 @@ fn accept_tile(
         // чём не виновата и спросится заново, когда место под кадр появится.
         None => {
             tiles::release(texture);
-            true
+            tiles::Landing::Retry
         }
     };
 
@@ -1198,8 +1249,17 @@ fn accept_tile(
         && raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == fingerprint)
     {
         match landed {
-            true => raster.fetch.arrived(addr),
-            false => {
+            tiles::Landing::Landed => raster.fetch.arrived(addr),
+            // Осечка наша: ячейка ни в чём не виновата и спросится заново.
+            // Ход добычи от этого не меняется — ожидание просто снято.
+            tiles::Landing::Retry => {
+                // Вторая осечка подряд — уже приговор, и ход добычи меняется
+                // ровно так же, как у ветки ниже.
+                if raster.fetch.stumbled(addr) {
+                    state.epoch += 1;
+                }
+            }
+            tiles::Landing::Verdict => {
                 // Безнадёжная ячейка перестаёт держать ступень
                 // (`Fetch::hopeless`) и больше не спрашивается, то есть ход
                 // добычи меняется. Поколение хранилища об этом не скажет:

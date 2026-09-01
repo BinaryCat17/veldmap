@@ -208,9 +208,7 @@ impl Store {
         (self.budget / TILE_BYTES.max(1) / (2 * pyramids.len().max(1) as u64)).max(1)
     }
 
-    /// [`Self::accept`], но ответом «лёг или нет»: не легший тайл — промах, а
-    /// не ошибка ячейки, и вызывающему нужен именно этот один бит, чтобы снять
-    /// ячейку с ожиданий верной стороной (см. [`Fetch::rejected`]).
+    /// [`Self::accept`], но ответом о том, что делать с ячейкой дальше.
     ///
     /// Причина не легшего уезжает в лог здесь: она одна и та же у обоих
     /// потребителей, и складывать её двумя строками значило бы читать один
@@ -223,13 +221,18 @@ impl Store {
         width: u32,
         height: u32,
         bind: impl FnOnce(&TextureViewId) -> veldsdk::anyhow::Result<BindGroupId>,
-    ) -> bool {
+    ) -> Landing {
         match self.accept(fingerprint, addr, texture, width, height, bind) {
-            Ok(()) => true,
-            Err(error) => {
+            Ok(()) => Landing::Landed,
+            Err(Unlanded::Answer(why)) => {
                 veldsdk::log::warn!(target: "tiles",
-                    "тайл {}:{}:{} не принят: {}", addr.0, addr.1, addr.2, error);
-                false
+                    "тайл {}:{}:{} негоден: {} — больше не просим", addr.0, addr.1, addr.2, why);
+                Landing::Verdict
+            }
+            Err(Unlanded::Attempt(why)) => {
+                veldsdk::log::warn!(target: "tiles",
+                    "тайл {}:{}:{} не принят: {} — спросим заново", addr.0, addr.1, addr.2, why);
+                Landing::Retry
             }
         }
     }
@@ -250,17 +253,18 @@ impl Store {
         width: u32,
         height: u32,
         bind: impl FnOnce(&TextureViewId) -> veldsdk::anyhow::Result<BindGroupId>,
-    ) -> Result<(), String> {
+    ) -> Result<(), Unlanded> {
         let Some(texture) = texture else {
-            return Err("в ответе нет текстуры".to_string());
+            return Err(Unlanded::Answer("в ответе нет текстуры".to_string()));
         };
         if width == 0 || height == 0 {
             release(Some(texture));
-            return Err(format!("тайл {}×{}", width, height));
+            return Err(Unlanded::Answer(format!("тайл {}×{}", width, height)));
         }
         let texture = veldsdk::OwnedResource::new(texture);
-        let view = gfx::create_texture_view(texture.id()).map_err(|e| e.to_string())?;
-        let bind = bind(&view).map_err(|e| e.to_string())?;
+        let view =
+            gfx::create_texture_view(texture.id()).map_err(|e| Unlanded::Attempt(e.to_string()))?;
+        let bind = bind(&view).map_err(|e| Unlanded::Attempt(e.to_string()))?;
 
         let bytes = u64::from(width) * u64::from(height) * 4;
         self.tick += 1;
@@ -695,6 +699,9 @@ pub struct Fetch {
     /// и по чужому поводу — концу прохода, — и без списка пришлось бы искать
     /// их перебором всего ожидаемого.
     deferred: HashSet<Addr>,
+    /// Ячейки, на которых мы уже спотыкались: вторая осечка подряд на одной и
+    /// той же — уже её свойство, а не наша (см. [`Fetch::stumbled`]).
+    stumbled: HashSet<Addr>,
 }
 
 impl Fetch {
@@ -743,6 +750,7 @@ impl Fetch {
         self.retried.clear();
         self.ordered.clear();
         self.deferred.clear();
+        self.stumbled.clear();
     }
 
     /// По источнику никто не идёт — отложенному больше нечего ждать.
@@ -857,6 +865,8 @@ impl Fetch {
     /// Тайл приехал и лёг — из ожидания вон, чей бы запрос его ни привёз.
     pub fn arrived(&mut self, addr: Addr) {
         self.inflight.remove(&addr);
+        // Удача и делает счёт осечек счётом подряд (см. [`Fetch::stumbled`]).
+        self.stumbled.remove(&addr);
     }
 
     /// Ответ про ячейку пришёл, но тайл не лёг: не выделилась текстура, не
@@ -869,6 +879,31 @@ impl Fetch {
     pub fn rejected(&mut self, addr: Addr) {
         self.inflight.remove(&addr);
         self.failed.insert(addr);
+    }
+
+    /// Тайл не лёг по нашей осечке, а не по своей негодности: ожидание
+    /// снимается, и ячейка спросится заново следующим пересчётом.
+    ///
+    /// Второй раз подряд на той же ячейке — уже приговор. Осечка, повторяющаяся
+    /// на одном и том же месте, ничем не отличается от свойства этого места, а
+    /// переспрашивание без конца звало бы производителя по кругу — то же
+    /// правило и по тому же доводу, что у прощения сорвавшегося прохода
+    /// ([`Fetch::produced`]).
+    ///
+    /// Подряд — это и значит подряд: приехавший тайл отметку снимает
+    /// ([`Fetch::arrived`]), а смена источника уносит её вместе со всем прочим
+    /// ([`Fetch::reset`]). Иначе ячейка, споткнувшаяся однажды и с тех пор
+    /// исправно приезжавшая, приговаривалась бы за вторую осечку через час.
+    /// Отвечает, стал ли этот заход приговором: приговорённая ячейка перестаёт
+    /// держать ступень, то есть ход добычи меняется, а сказать об этом
+    /// хранилищу нечем — непринятый тайл в него не лёг и счётчика не сдвинул.
+    pub fn stumbled(&mut self, addr: Addr) -> bool {
+        self.inflight.remove(&addr);
+        let sentenced = !self.stumbled.insert(addr);
+        if sentenced {
+            self.failed.insert(addr);
+        }
+        sentenced
     }
 
     /// Проход кончился, чем бы он ни кончился. `failed` — сорвался: эти ячейки
@@ -897,6 +932,55 @@ impl Fetch {
         self.failed.retain(|addr| !retried.insert(*addr));
         self.retried = retried;
     }
+}
+
+/// Почему тайл не лёг — и, главное, надо ли спрашивать его заново.
+///
+/// Различаются здесь не тексты, а места, и правило то же, каким кэш разводит
+/// свои промахи (`Miss::NoFile` против `Miss::Broken`). Пустая текстура и
+/// нулевые размеры — свойство самого ответа: тот же ответ приедет и в
+/// следующий раз, а переспрашивание звало бы производителя по кругу за одним и
+/// тем же отказом. Вид же и привязка делаются здесь и сейчас, и отказать они
+/// могут от нехватки видеопамяти — такое проходит само, а ячейка,
+/// приговорённая за это, оставляет в резком снимке мутное пятно до самого
+/// переоткрытия вкладки.
+enum Unlanded {
+    /// Ответ негоден: больше не просить.
+    Answer(String),
+    /// Попытка не удалась: снять с ожидания и спросить заново.
+    Attempt(String),
+}
+
+/// Что делать с ячейкой после ответа про неё.
+///
+/// Названными исходами, а не булевым «лёг или нет»: тот сводил бы негодный
+/// ответ и нашу осечку в один приговор, а поступать с ними надо по-разному.
+pub enum Landing {
+    Landed,
+    /// Спросить заново: осечка была наша.
+    Retry,
+    /// Больше не просить: негоден сам ответ.
+    Verdict,
+}
+
+/// Терминальный ответ, договорённый хостом, — это отказ, а не успех.
+///
+/// Пустой ответ читается как удача: у `QueryDone` пустые промахи значат «всё
+/// нашлось», у `ProduceDone` пустая ошибка — «прошло». А договаривает его хост
+/// там, где исполнитель умер посреди работы либо подписчика у запроса не
+/// нашлось вовсе (см. [`veldsdk::answered_by_host`]) — и заказчик, принявший
+/// это за удачу, снимает с ожидания ячейки, которых никто не привозил. Ступень
+/// после этого не достроится никогда: ожидания висят, пересчёт их не спросит
+/// заново, а полоса хода объявит «готово» над дырой в снимке.
+///
+/// Одно правило на обоих потребителей и на оба терминальных ответа: вопрос у
+/// них один, а разойдясь, они дали бы разное поведение канвы и шара над одной
+/// и той же бедой.
+///
+/// `None` — ответ настоящий, каким бы он ни был.
+pub fn undelivered(error: &str) -> Option<String> {
+    (error.is_empty() && veldsdk::answered_by_host())
+        .then(|| "исполнитель не довёл работу: ответ договорил хост".to_string())
 }
 
 /// Чем кончился разбор промахов кэша ([`Fetch::missed`]).
@@ -942,6 +1026,17 @@ pub enum Missed {
 /// же файлу.
 pub struct Passes<K> {
     by_source: HashMap<String, Pass<K>>,
+    /// Корреляции проходов, которые сняли мы сами.
+    ///
+    /// Хост договаривает терминальный ответ за снятого ровно тем же пустым
+    /// сообщением, каким отвечает за упавшего, и различить их конвертом нельзя
+    /// никогда: `dispatcher::kill` и `plugins::answer_for_lost` публикуют
+    /// одинаково (см. [`undelivered`]). Различить может только тот, кто снимал.
+    ///
+    /// Помнится это здесь, рядом с самим снятием: у зовущего оба конца —
+    /// снятие и приход ответа — лежат в разных обработчиках, и память,
+    /// заведённая между ними, разошлась бы с тем, что снято на самом деле.
+    killed: HashSet<String>,
 }
 
 struct Pass<K> {
@@ -1000,7 +1095,7 @@ impl<K> Pass<K> {
 
 impl<K> Default for Passes<K> {
     fn default() -> Self {
-        Self { by_source: HashMap::new() }
+        Self { by_source: HashMap::new(), killed: HashSet::new() }
     }
 }
 
@@ -1074,7 +1169,10 @@ impl<K: PartialEq> Passes<K> {
                 && (pass.level < want.target || pass.abandoned_by(want, pointwise))
         });
         match stale {
-            true => self.by_source.remove(fingerprint).map(|pass| pass.correlation),
+            true => {
+                let taken = self.by_source.remove(fingerprint).map(|p| p.correlation);
+                self.remembered(taken)
+            }
             false => None,
         }
     }
@@ -1089,16 +1187,40 @@ impl<K: PartialEq> Passes<K> {
     pub fn abandon(&mut self, fingerprint: &str, owner: &K) -> Option<String> {
         let ours = self.by_source.get(fingerprint).is_some_and(|pass| &pass.owner == owner);
         match ours {
-            true => self.by_source.remove(fingerprint).map(|pass| pass.correlation),
+            true => {
+                let taken = self.by_source.remove(fingerprint).map(|p| p.correlation);
+                self.remembered(taken)
+            }
             false => None,
         }
+    }
+
+    /// Отдать корреляцию зовущему и запомнить, что снимаем её мы.
+    ///
+    /// Одним ходом с отдачей: два места, отдающих корреляцию на снятие, и
+    /// третье, помнящее об этом, разошлись бы на первой же новой ветке — а
+    /// цена расхождения тихая, ответ за снятое прочитался бы срывом.
+    fn remembered(&mut self, correlation: Option<String>) -> Option<String> {
+        if let Some(correlation) = &correlation {
+            self.killed.insert(correlation.clone());
+        }
+        correlation
     }
 
     /// Проход кончился, чем бы он ни кончился. По корреляции, а не по
     /// источнику: заказчика могли закрыть, а проход по тому же файлу успеть
     /// начать заново.
-    pub fn finish(&mut self, correlation: &str) {
+    ///
+    /// Отвечает, снимали ли этот проход мы сами. Ответ нужен ровно затем, чтобы
+    /// не прочесть своё же снятие срывом: пустой терминал от хоста одинаков у
+    /// снятого и у упавшего (см. [`undelivered`]), а поступать с ними надо
+    /// по-разному — упавший это беда, снятое нами — обычный ход приближения.
+    ///
+    /// Спрашивается один раз: ответ за снятый проход приходит один, и память о
+    /// нём здесь же и кончается.
+    pub fn finish(&mut self, correlation: &str) -> bool {
         self.by_source.retain(|_, pass| pass.correlation != correlation);
+        self.killed.remove(correlation)
     }
 }
 
@@ -1726,7 +1848,135 @@ mod tests {
         assert_eq!(fetch.ask(&store, "s", cells(0, 0..2, 0..1)), Some(vec![ask[1]]));
     }
 
-    /// Непринятый тайл поколения хранилища не двигает.
+    /// Осечку прощают один раз, а вторую подряд считают свойством ячейки.
+    ///
+    /// Обе крайности тихие и обе плохи. Приговор с первого раза оставляет в
+    /// резком снимке мутное пятно от одной нехватки видеопамяти — вылечить его
+    /// можно только переоткрытием вкладки. Прощение без счёта закручивает круг:
+    /// ячейка снимается с ожидания, следующий пересчёт спрашивает её снова, и
+    /// так на каждом кадре.
+    #[test]
+    fn осечка_прощается_однажды() {
+        let store = Store::new(1 << 30);
+        let mut fetch = Fetch::default();
+        let cell = (0, 0, 0);
+        assert_eq!(fetch.ask(&store, "s", vec![cell]), Some(vec![cell]), "первый заказ уходит");
+        assert!(fetch.ask(&store, "s", vec![cell]).is_none(), "спрошенное не просят второй раз");
+
+        fetch.stumbled(cell);
+        assert_eq!(
+            fetch.ask(&store, "s", vec![cell]),
+            Some(vec![cell]),
+            "после первой осечки ячейку обязаны спросить заново"
+        );
+
+        fetch.stumbled(cell);
+        assert!(
+            fetch.ask(&store, "s", vec![cell]).is_none(),
+            "вторая осечка подряд — уже свойство ячейки, и просить её больше нечего"
+        );
+    }
+
+    /// Отказ графики — наша осечка, а не приговор ячейке.
+    ///
+    /// Вид текстуры и привязка делаются здесь и сейчас, и отказать они могут от
+    /// нехватки видеопамяти — такое проходит само. Записанное приговором, оно
+    /// оставляет в резком снимке мутное пятно до самого переоткрытия вкладки, а
+    /// вылечить его можно только случайно.
+    ///
+    /// Натив­но графики нет вовсе (`veld_resource_create` заглушён нулём), и
+    /// этим тест и пользуется: путь тот же, что и при настоящей нехватке.
+    #[test]
+    fn отказ_графики_не_приговор() {
+        let mut store = Store::new(1 << 30);
+        let texture = veldsdk::ResourceHandle { id: 7, size: 256 * 256 * 4 };
+        assert!(
+            matches!(
+                store.land("s", (0, 0, 0), Some(texture), 256, 256, |_| unreachable!(
+                    "до привязки дело не дойдёт: вид не создался"
+                )),
+                Landing::Retry
+            ),
+            "не созданный вид записан приговором ячейке"
+        );
+    }
+
+    /// Своё снятие прохода отличается от чужой смерти — и только по памяти
+    /// того, кто снимал.
+    ///
+    /// Конверт их не различает никогда: хост договаривает пустым сообщением и
+    /// за упавшего, и за снятого. А поступать надо по-разному, и разница
+    /// дорогая: снятие своего прохода случается на каждом приближении
+    /// подробнее идущего (`Passes::stale`), и прочтённое срывом оно
+    /// приговаривало бы все его ячейки навсегда — показ, который прежде
+    /// досыпался, вставал бы с ложной жалобой.
+    #[test]
+    fn своё_снятие_не_читается_срывом() {
+        let want = Want { level: 0, target: 0, cells: vec![(0, 0, 0)], steps: 1, climbed: 0 };
+        let mut passes: Passes<&str> = Passes::default();
+
+        // Проход, снятый нами, узнаётся по своей корреляции — и только раз:
+        // ответ за снятое приходит один.
+        passes.begin("s", "owner", "c1".to_string(), 0, vec![(0, 0, 0)]);
+        assert_eq!(passes.abandon("s", &"owner"), Some("c1".to_string()));
+        assert!(passes.finish("c1"), "снятый нами проход обязан узнаваться");
+        assert!(!passes.finish("c1"), "память о снятом кончается первым же ответом");
+
+        // Проход, кончившийся сам, снятым не считается — иначе настоящий срыв
+        // прочитался бы удачей.
+        passes.begin("s", "owner", "c2".to_string(), 0, vec![(0, 0, 0)]);
+        assert!(!passes.finish("c2"), "чужой конец не наше снятие");
+
+        // Устаревший проход — тот же случай, и путь к памяти у него свой.
+        passes.begin("s", "owner", "c3".to_string(), 0, vec![(0, 0, 0)]);
+        let stale = passes.stale("s", &"owner", &Want { target: 2, ..want }, true);
+        assert_eq!(stale, Some("c3".to_string()), "проход грубее цели снимается");
+        assert!(passes.finish("c3"), "снятое устареванием тоже наше");
+    }
+
+    /// Счёт осечек — счёт подряд: удача его обнуляет, смена источника уносит.
+    ///
+    /// Иначе ячейка, споткнувшаяся однажды и с тех пор исправно приезжавшая,
+    /// приговаривается за вторую осечку через час — а её тайл к этому времени
+    /// уже дважды побывал на экране.
+    #[test]
+    fn счёт_осечек_обнуляется_удачей_и_сбросом() {
+        let store = Store::new(1 << 30);
+        let mut fetch = Fetch::default();
+        let cell = (0, 0, 0);
+
+        fetch.ask(&store, "s", vec![cell]);
+        assert!(!fetch.stumbled(cell), "первая осечка — не приговор");
+        fetch.ask(&store, "s", vec![cell]);
+        fetch.arrived(cell);
+        assert!(!fetch.stumbled(cell), "после удачи счёт начинается заново");
+
+        fetch.reset();
+        fetch.ask(&store, "s", vec![cell]);
+        assert!(!fetch.stumbled(cell), "сброс уносит память о прежнем источнике");
+    }
+
+    /// Договорённый хостом терминальный ответ — отказ, а не успех.    /// Договорённый хостом терминальный ответ — отказ, а не успех.
+    ///
+    /// Пустое сообщение читается как удача обоими ответами: у `QueryDone`
+    /// пустые промахи значат «всё нашлось», у `ProduceDone` пустая ошибка —
+    /// «прошло». Принятый за удачу, он оставляет ожидания висеть навсегда.
+    #[test]
+    fn договорённый_ответ_не_считается_удачей() {
+        veldsdk::abi::set_event_context("tile-cache".to_string(), "c".to_string(), false);
+        assert_eq!(undelivered(""), None, "ответ от самого исполнителя — настоящий");
+        assert_eq!(undelivered("кэш отказал"), None, "у настоящего отказа своя причина");
+
+        veldsdk::abi::set_event_context(String::new(), "c".to_string(), false);
+        assert!(undelivered("").is_some(), "пустой ответ от хоста — недоведённая работа");
+        assert_eq!(
+            undelivered("кэш отказал"),
+            None,
+            "непустая причина сказана исполнителем до смерти и своего смысла не теряет"
+        );
+    }
+
+    /// Непринятый тайл поколения хранилища не двигает.    /// Непринятый тайл поколения хранилища не двигает.
     ///
     /// На этом стои́т весь учёт непринятого у заказчика: поколение — то
     /// единственное, чем хранилище объявляет о себе снаружи, и раз оно молчит,
@@ -1738,8 +1988,11 @@ mod tests {
         let mut store = Store::new(1 << 30);
         let before = store.generation;
         assert!(
-            !store.land("s", (0, 0, 0), None, 256, 256, |_| unreachable!("текстуры нет")),
-            "тайл без текстуры не принимается"
+            matches!(
+                store.land("s", (0, 0, 0), None, 256, 256, |_| unreachable!("текстуры нет")),
+                Landing::Verdict
+            ),
+            "ответ без текстуры — приговор ячейке, а не наша осечка"
         );
         assert_eq!(store.generation, before, "отказ сдвинул поколение");
     }

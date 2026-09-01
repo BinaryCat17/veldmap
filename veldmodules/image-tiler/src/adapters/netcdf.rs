@@ -434,7 +434,7 @@ pub fn geolocation(
     };
     let ties = lattice((0, geo_h - 1), (0, geo_w - 1), seat, at);
     if ties.is_empty() {
-        return Err(format!("узлы сетки {}×{} не годятся в привязку", geo_w, geo_h));
+        return Err(nodes_unfit(geo_w, geo_h));
     }
     veldsdk::log::debug!(target: "decode",
         "NetCDF привязка из соседнего файла: сетка {}×{} ('{}' и '{}'), шаг {:.2}×{:.2} пикселя от {:+.1}×{:+.1}, узлов {}",
@@ -487,7 +487,7 @@ fn told(
             false => format!("; пропущено: {} ({})", skipped.len(), listed(skipped)),
         });
 
-    let ties = ties(file, surveyed, chosen);
+    let (ties, binding_trouble) = ties(file, surveyed, chosen);
     Ok(Info {
         width,
         height,
@@ -503,6 +503,7 @@ fn told(
         // бывает вовсе.
         placement: None,
         frame: frame(&globals(file)),
+        binding_trouble,
     })
 }
 
@@ -820,15 +821,32 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
 /// они читаются (см. [`describe`]). Пустая в этой грануле величина — не
 /// измерение этой гранулы, и следующий по порядку кандидат честнее её.
 fn preferred(items: &[Item]) -> Vec<&Item> {
-    let mut order: Vec<&Item> = items.iter().filter(|item| item.candidate).collect();
-    order.sort_by(|left, right| {
-        left.depth
-            .cmp(&right.depth)
+    // Привязываемость спрашивается раз на величину, а не на каждое сравнение:
+    // ответ на неё стои́т обхода всех заголовков файла, а сортировка спросила бы
+    // его столько раз, сколько сравнивает.
+    let mut order: Vec<(bool, &Item)> = items
+        .iter()
+        .filter(|item| item.candidate)
+        .map(|item| (placeable(items, item), item))
+        .collect();
+    order.sort_by(|(left_placed, left), (right_placed, right)| {
+        // Место старше всего остального, и это не удобство: величина, которой
+        // негде лечь, не изображение этой гранулы, чем бы она ни была измерена.
+        // Спрошенная последней, она побеждает по любому из прочих доводов и
+        // уводит показ в то, что вообще не про Землю: у гранулы Sentinel-5P
+        // уровня 1B так побеждала таблица длин волн прибора — не угловая,
+        // дробная, на той же глубине, что и углы наблюдения.
+        //
+        // Отбором, а не отсевом: файл, не сказавший о месте ничего, показать
+        // всё равно надо — он ляжет по контуру каталога, как и лежал.
+        right_placed
+            .cmp(left_placed)
+            .then(left.depth.cmp(&right.depth))
             .then(right.real.cmp(&left.real))
             .then(left.angular.cmp(&right.angular))
             .then(left.path.cmp(&right.path))
     });
-    order
+    order.into_iter().map(|(_, item)| item).collect()
 }
 
 /// Почему показывать нечего — теми же словами, какими решали.
@@ -858,32 +876,45 @@ fn explain(items: &[Item]) -> String {
 /// и длине: ось строк ровно такой длины, сколько в растре строк.
 ///
 /// Пусто — привязки в файле не нашлось; снимок ляжет по контуру каталога.
-fn ties(file: &File, items: &[Item], chosen: &Item) -> Vec<Tie> {
+///
+/// Вторым уезжает оговорка ([`Info::binding_trouble`]) — и уезжает она ровно
+/// там, где координаты нашлись, а решётки из них не вышло. Пустота без неё
+/// значит «в файле их нет вовсе», и это разные ответы: по первому слой ложится
+/// догадкой из-за нас, по второму — из-за файла.
+fn ties(file: &File, items: &[Item], chosen: &Item) -> (Vec<Tie>, Option<String>) {
     let (height, width) = match chosen.plane {
         Some(plane) => plane,
-        None => return Vec::new(),
+        None => return (Vec::new(), None),
     };
     if width < 2 || height < 2 {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let (rows, columns) = ((0, height - 1), (0, width - 1));
 
     // Отказ здесь произносится вслух, потому что молчащий не отличить от
     // «координат в файле нет»: у гранулы со сложным контуром и то и другое
     // кончается снятым слоем, а причины у них разные.
-    let told = |ties: Vec<Tie>| {
-        if ties.is_empty() {
-            veldsdk::log::warn!(target: "decode",
-                "NetCDF: узлы сетки {}×{} не годятся в привязку", width, height);
-        }
-        ties
+    // Причина уезжает и в лог, и полем. Одно другого не заменяет: полем её
+    // доносит потребитель и решает по своему слою, показывать ли, а
+    // разбирающему она нужна всегда.
+    let said = |why: String| {
+        veldsdk::log::warn!(target: "decode", "NetCDF: {}", why);
+        Some(why)
     };
-    if let Some((lat, lon)) = swath(file, items, chosen) {
-        let at = |row: u32, column: u32| -> Option<(f64, f64)> {
-            let index = (row as usize) * (width as usize) + (column as usize);
-            Some((f64::from(*lat.get(index)?), f64::from(*lon.get(index)?)))
-        };
-        return told(lattice(rows, columns, Seating::SAME, at));
+    let told = |ties: Vec<Tie>| match ties.is_empty() {
+        true => (Vec::new(), said(nodes_unfit(width, height))),
+        false => (ties, None),
+    };
+    match swath(file, items, chosen) {
+        Swath::Found(lat, lon) => {
+            let at = |row: u32, column: u32| -> Option<(f64, f64)> {
+                let index = (row as usize) * (width as usize) + (column as usize);
+                Some((f64::from(*lat.get(index)?), f64::from(*lon.get(index)?)))
+            };
+            return told(lattice(rows, columns, Seating::SAME, at));
+        }
+        Swath::Refused(why) => return (Vec::new(), said(why)),
+        Swath::Absent => {}
     }
     if let Some((lat, lon)) = grid(items, chosen, file) {
         // Оси одномерные, и негодность у них разделима: негодная широта уносит
@@ -894,7 +925,23 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> Vec<Tie> {
         };
         return told(lattice(rows, columns, Seating::SAME, at));
     }
-    Vec::new()
+    // Координат не нашлось вовсе — и это тоже ответ, а не молчание: у величины,
+    // снятой не над Землёй (калибровочная таблица прибора, спектральная ось),
+    // их не бывает, и «привязки нет» без имени величины разбирать не по чему.
+    (
+        Vec::new(),
+        said(format!(
+            "координат для '{}' не нашлось: ни поотсчётных в её группе, ни осей длиной {} и {}",
+            chosen.path, height, width
+        )),
+    )
+}
+
+/// Узлы нашлись, а решётки из них не вышло. Текст один на оба места, где это
+/// случается, — у своей сетки и у соседнего файла: вопрос у смотрящего один, и
+/// две формулировки читались бы как две разные беды.
+fn nodes_unfit(width: u32, height: u32) -> String {
+    format!("узлы сетки {}×{} не годятся в привязку", width, height)
 }
 
 /// Отсчёт прибора, в котором записана решётка файла: с какого её узла файл
@@ -1266,26 +1313,54 @@ fn lattice(
 
 /// Поотсчётные широта и долгота полосы съёмки — те, которые величина назвала
 /// в `coordinates`.
-fn swath(file: &File, items: &[Item], chosen: &Item) -> Option<(Vec<f32>, Vec<f32>)> {
-    let plane = chosen.plane?;
+fn swath(file: &File, items: &[Item], chosen: &Item) -> Swath {
+    let Some(plane) = chosen.plane else { return Swath::Absent };
+    // Не нашлось — обычный ответ, а не беда: так лежит регулярная сетка, у
+    // которой поотсчётных координат нет вовсе.
+    let Some((lat, lon)) = swath_pair(items, chosen) else { return Swath::Absent };
+    // Бюджет проверяется здесь, а не в начале: у регулярной сетки жаловаться на
+    // размер поотсчётных было бы не про неё.
+    let pixels = u64::from(plane.0) * u64::from(plane.1);
+    if pixels.saturating_mul(4 * 2) > TIES_BUDGET {
+        return Swath::Refused(format!(
+            "поотсчётные координаты {}×{} не влезают в бюджет привязки ({} МБ)",
+            plane.1,
+            plane.0,
+            TIES_BUDGET / (1024 * 1024)
+        ));
+    }
+    let read =
+        |item: &Item| Some(unpacked(item, file.dataset(&item.path).ok()?.read_f32().ok()?));
+    match (read(lat), read(lon)) {
+        (Some(north), Some(east)) => Swath::Found(north, east),
+        _ => Swath::Refused(format!(
+            "координаты '{}' и '{}' не прочитались",
+            lat.path, lon.path
+        )),
+    }
+}
+
+/// Пара поотсчётных координат величины — по заголовкам, без единого
+/// прочитанного отсчёта.
+///
+/// Названное `coordinates` — первый ответ: файл сам сказал, где лежат его
+/// отсчёты, и спорить тут не с чем. Не сказал — спрашиваем единицы: плоскость в
+/// `degrees_north` той же формы и той же группы и есть широта этого измерения.
+/// Так лежит `.nc` внутри `.SAFE`: упаковка там своя, CF-атрибута `coordinates`
+/// у измерений нет вовсе, а широта с долготой лежат рядом и названы единицами.
+///
+/// Единственность обязательна: две широты одной формы — это уже вопрос
+/// «которая», а ответа на него у файла нет. Гранула SLSTR держит их несколько
+/// (`latitude_in`, `latitude_tx`), но разной формы, и под это условие они не
+/// подпадают.
+fn swath_pair<'a>(items: &'a [Item], chosen: &Item) -> Option<(&'a Item, &'a Item)> {
     let named: Vec<&Item> = chosen
         .coordinates
         .iter()
         .filter_map(|path| items.iter().find(|item| &item.path == path))
         .filter(|item| item.plane == chosen.plane)
         .collect();
-    // Названное `coordinates` — первый ответ: файл сам сказал, где лежат его
-    // отсчёты, и спорить тут не с чем. Не сказал — спрашиваем единицы:
-    // плоскость в `degrees_north` той же формы и той же группы и есть широта
-    // этого измерения. Так лежит `.nc` внутри `.SAFE`: упаковка там своя, и
-    // CF-атрибута `coordinates` у измерений нет вовсе, а широта с долготой
-    // лежат рядом и названы единицами.
-    //
-    // Единственность обязательна: две широты одной формы — это уже вопрос
-    // «которая», а ответа на него у файла нет. Гранула SLSTR держит их
-    // несколько (`latitude_in`, `latitude_tx`), но разной формы, и под это
-    // условие они не подпадают.
-    let alone = |pick: fn(&Item) -> bool| -> Option<&Item> {
+    let alone = |pick: fn(&Item) -> bool| -> Option<&'a Item> {
         let mut found = items
             .iter()
             .filter(|item| item.plane == chosen.plane && item.group == chosen.group && pick(item));
@@ -1300,28 +1375,45 @@ fn swath(file: &File, items: &[Item], chosen: &Item) -> Option<(Vec<f32>, Vec<f3
         Some(lon) => lon,
         None => alone(easting)?,
     };
-    // Бюджет проверяется здесь, а не в начале: у регулярной сетки поотсчётных
-    // координат нет вовсе, и жаловаться на их размер было бы не про неё.
-    let pixels = u64::from(plane.0) * u64::from(plane.1);
-    if pixels.saturating_mul(4 * 2) > TIES_BUDGET {
-        veldsdk::log::debug!(target: "decode",
-            "NetCDF: решётки координат {}×{} не влезают в бюджет привязки", plane.1, plane.0);
-        return None;
-    }
-    let read =
-        |item: &Item| Some(unpacked(item, file.dataset(&item.path).ok()?.read_f32().ok()?));
-    Some((read(lat)?, read(lon)?))
+    Some((lat, lon))
+}
+
+/// Оси регулярной сетки: ряды широт и долгот той же длины, что стороны растра.
+/// Ищутся в группе величины и в корне — там их и держит CF.
+fn grid_axes<'a>(items: &'a [Item], chosen: &Item) -> Option<(&'a Item, &'a Item)> {
+    let (height, width) = chosen.plane?;
+    let nearby = |item: &Item| item.group == chosen.group || item.group.is_empty();
+    let lat = items.iter().find(|item| nearby(item) && item.line == Some(height) && northing(item))?;
+    let lon = items.iter().find(|item| nearby(item) && item.line == Some(width) && easting(item))?;
+    Some((lat, lon))
+}
+
+/// Есть ли у величины оси земли — то есть выражено ли в файле её место вообще.
+///
+/// Тем же кодом, каким координаты потом и берутся: вторая мерка того же самого
+/// разошлась бы с первой молча — величину выбрали бы как привязываемую, а
+/// привязки у неё не оказалось бы. Отвечает по заголовкам, ни одного отсчёта не
+/// читая: форма и единицы записаны рядом с именем.
+fn placeable(items: &[Item], chosen: &Item) -> bool {
+    swath_pair(items, chosen).is_some() || grid_axes(items, chosen).is_some()
+}
+
+/// Чем кончился поиск поотсчётных координат.
+///
+/// Тремя ответами, а не двумя: «их нет» и «есть, да взять нельзя» — разные
+/// вещи, и сведённые в пустоту они кончаются одной подписью на оба случая.
+/// Первое — обычный ход (так лежит регулярная сетка), второе надо сказать
+/// вслух: снимок ляжет догадкой из-за нашего потолка, а не из-за файла.
+enum Swath {
+    Found(Vec<f32>, Vec<f32>),
+    Absent,
+    Refused(String),
 }
 
 /// Оси регулярной сетки: ряды широт и долгот той же длины, что стороны растра.
 /// Ищутся в группе величины и в корне — там их и держит CF.
 fn grid(items: &[Item], chosen: &Item, file: &File) -> Option<(Vec<f64>, Vec<f64>)> {
-    let (height, width) = chosen.plane?;
-    let nearby = |item: &Item| item.group == chosen.group || item.group.is_empty();
-    let lat =
-        items.iter().find(|item| nearby(item) && item.line == Some(height) && northing(item))?;
-    let lon =
-        items.iter().find(|item| nearby(item) && item.line == Some(width) && easting(item))?;
+    let (lat, lon) = grid_axes(items, chosen)?;
     let read = |item: &Item| {
         let values = file.dataset(&item.path).ok()?.read_f64().ok()?;
         let (scale, offset) = item.packing;
@@ -1983,6 +2075,90 @@ mod tests {
         assert_eq!(number(&AttrValue::I32(-32767)), Some(-32767.0));
         assert_eq!(number(&AttrValue::F64(0.5)), Some(0.5));
         assert_eq!(number(&AttrValue::AsciiString("K".to_string())), None);
+    }
+
+    /// Величина, которой негде лечь, не изображение этой гранулы, чем бы она ни
+    /// была измерена, — и спрашивается место раньше всех прочих доводов.
+    ///
+    /// Живой случай, ради которого правило и заведено: у гранулы Sentinel-5P
+    /// уровня 1B в одной группе с широтой и долготой лежат углы наблюдения, а в
+    /// соседней — таблица длин волн прибора. Таблица дробная, не угловая и той
+    /// же глубины, поэтому по прежним доводам она побеждала все четыре угла — и
+    /// показ уходил в то, что вообще не про Землю, а слой кончался словами
+    /// «привязки нет», хотя привязка была не нужна ей одной.
+    ///
+    /// Отбором, а не отсевом: файл, о месте не сказавший ничего, показывается
+    /// по-прежнему — он ляжет по контуру каталога.
+    #[test]
+    fn место_спрашивается_раньше_всех_прочих_доводов() {
+        let plane = |path: &str, group: &str, shape: (u32, u32)| Item {
+            path: path.to_string(),
+            group: group.to_string(),
+            depth: 3,
+            plane: Some(shape),
+            line: None,
+            real: true,
+            angular: false,
+            candidate: true,
+            fill: None,
+            packing: (1.0, 0.0),
+            said: String::new(),
+            units: String::new(),
+            coordinates: Vec::new(),
+            ancillary: Vec::new(),
+        };
+        let coordinate = |path: &str, group: &str, units: &str| Item {
+            units: units.to_string(),
+            candidate: false,
+            ..plane(path, group, (497, 77))
+        };
+        const GEO: &str = "/BAND1/STANDARD_MODE/GEODATA";
+        const INSTR: &str = "/BAND1/STANDARD_MODE/INSTRUMENT";
+        let items = vec![
+            // Таблица прибора: дробная, не угловая, но её форма — канал на
+            // пиксель, и координат такой формы в файле нет.
+            plane(&format!("{}/nominal_wavelength", INSTR), INSTR, (497, 77)),
+            // Угол наблюдения: угловой, то есть по прежним доводам младше, —
+            // зато широта с долготой лежат рядом и той же формы.
+            Item { angular: true, ..plane(&format!("{}/solar_zenith_angle", GEO), GEO, (497, 77)) },
+            coordinate(&format!("{}/latitude", GEO), GEO, "degrees_north"),
+            coordinate(&format!("{}/longitude", GEO), GEO, "degrees_east"),
+        ];
+        let order = preferred(&items);
+        assert_eq!(
+            order.first().map(|item| item.path.as_str()),
+            Some("/BAND1/STANDARD_MODE/GEODATA/solar_zenith_angle"),
+            "победила величина, которой негде лечь",
+        );
+
+        // Место старше и глубины — довода, который до него был первым. Проверить
+        // это на живом файле нечем: у Sentinel-5P обе группы лежат на одной
+        // глубине, и там два правила отвечают одинаково. А разойтись они могут,
+        // и ответ должен быть тот же: величина, которой негде лечь, не
+        // становится изображением оттого, что лежит ближе к корню.
+        let deeper = vec![
+            Item { depth: 1, ..plane("/shallow/nominal_wavelength", "/shallow", (497, 77)) },
+            Item { depth: 5, ..plane(&format!("{}/solar_zenith_angle", GEO), GEO, (497, 77)) },
+            coordinate(&format!("{}/latitude", GEO), GEO, "degrees_north"),
+            coordinate(&format!("{}/longitude", GEO), GEO, "degrees_east"),
+        ];
+        assert_eq!(
+            preferred(&deeper).first().map(|item| item.path.as_str()),
+            Some("/BAND1/STANDARD_MODE/GEODATA/solar_zenith_angle"),
+            "мелкая величина без места победила глубокую с местом",
+        );
+
+        // Те же две величины, но файл о месте не сказал ничего: прежний порядок
+        // цел — место не отменяет доводов, оно только идёт раньше них.
+        let mute = vec![
+            plane(&format!("{}/nominal_wavelength", INSTR), INSTR, (497, 77)),
+            Item { angular: true, ..plane(&format!("{}/solar_zenith_angle", GEO), GEO, (497, 77)) },
+        ];
+        assert_eq!(
+            preferred(&mute).first().map(|item| item.path.as_str()),
+            Some("/BAND1/STANDARD_MODE/INSTRUMENT/nominal_wavelength"),
+            "без координат выбор обязан остаться прежним",
+        );
     }
 
     /// Из годных величин показывается та, что ближе к корню и дробная:

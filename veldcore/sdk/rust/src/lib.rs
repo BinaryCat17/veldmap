@@ -28,6 +28,7 @@ pub use log;
 pub use proto::core::ResourceHandle;
 pub use abi::generate_id;
 pub use abi::event_publisher;
+pub use abi::answered_by_host;
 pub use abi::correlation;
 pub use correlator::Correlator;
 pub use latest::{Latest, Reply};

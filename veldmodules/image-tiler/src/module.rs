@@ -186,7 +186,10 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
     //
     // Неудача здесь описания не отменяет. Растр от этого не портится, он лишь
     // остаётся без привязки — и что с ним тогда делать, решает заказчик: у
-    // него есть контур каталога, а у нас нет ничего.
+    // него есть контур каталога, а у нас нет ничего. Но и молчать о ней
+    // нельзя: по пустой привязке заказчику не отличить «в файлах не сказано»
+    // от «сказано, да не прочиталось».
+    let mut sidecar = None;
     if info.ties.is_empty()
         && info.placement.is_none()
         && let Some(coordinates) = req.geolocation.as_ref()
@@ -199,7 +202,10 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
             info.height,
         ) {
             Ok(found) => ties = found,
-            Err(error) => veldsdk::log::warn!(target: "decode", "файл координат: {}", error),
+            Err(error) => {
+                veldsdk::log::warn!(target: "decode", "файл координат: {}", error);
+                sidecar = Some(format!("файл координат: {}", error));
+            }
         }
     }
 
@@ -214,6 +220,9 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
     // Только время: сколько уехало по проводу, отсюда не видно — счётчик
     // `Metered` считает дальнюю достигнутую позицию, а не объём, и провод
     // мерит хост (`network::perf`).
+    // Привязка в ответе есть — своя у растра либо приехавшая из соседнего файла.
+    let placed = !info.ties.is_empty() || info.placement.is_some() || !ties.is_empty();
+
     let total = began.elapsed();
     veldsdk::log::debug!(target: "perf",
         "описание ресурса {}: {:.2} с — отпечаток {:.2}, разбор {:.2}, координаты {:.2}",
@@ -245,6 +254,26 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
             y0: found.affine[5],
         }),
         error: String::new(),
+        // Оговорка едет ровно тогда, когда привязки в ответе нет: обещано полем
+        // «привязку взять не удалось», и присланная вместе со взятой привязкой
+        // она называла бы беду там, где её нет. Ловится это здесь, а не у
+        // потребителя: адаптер про соседний файл координат не знает, а тот его
+        // жалобу как раз и отменяет, когда сам справился.
+        //
+        // Обе половины, а не старшая: они про разные файлы, и вторая первую не
+        // отменяет. Каждая называет свой — иначе склеенное читается повтором,
+        // потому что беда у них бывает одна и та же.
+        binding_trouble: match placed {
+            true => String::new(),
+            false => [
+                info.binding_trouble.as_ref().map(|said| format!("растр: {}", said)),
+                sidecar,
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<String>>()
+            .join("; "),
+        },
     })
 }
 

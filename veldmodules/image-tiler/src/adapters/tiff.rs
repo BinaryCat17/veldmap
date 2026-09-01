@@ -143,7 +143,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     // не даст. Отказывать здесь нельзя: описание несёт ещё и геопривязку, а
     // тайлы у такого файла и так не приедут — тот же потолок стои́т в проходе.
     let chunk = chunk_grid(&mut decoder).unwrap_or((width, height));
-    let (ties, placement) = georef(&mut decoder, width, height);
+    let (ties, placement, binding_trouble) = georef(&mut decoder, width, height);
 
     let mut overviews = Vec::new();
     let mut index = 0;
@@ -177,6 +177,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         // Отсчёт прибора объявляет один Sentinel-3 своими глобальными
         // атрибутами; у GeoTIFF место записано самим растром.
         frame: None,
+        binding_trouble,
     })
 }
 
@@ -200,12 +201,15 @@ fn is_overview(subfile_type: u32) -> bool {
 /// Градусы разбирает [`geo_ties`], проекцию — [`geo_placement`]; здесь только
 /// чтение тегов и то, о чём надо сказать вслух.
 ///
+/// Третьим уезжает оговорка — та, что доедет до смотрящего
+/// ([`Info::binding_trouble`]): по одной лишь пустой привязке объяснить нечего.
+///
 /// Декодер после возврата стоит на том же образе: наводки здесь нет.
 fn georef<R: Read + Seek>(
     decoder: &mut Decoder<R>,
     width: u32,
     height: u32,
-) -> (Vec<Tie>, Option<Placement>) {
+) -> (Vec<Tie>, Option<Placement>, Option<String>) {
     let keys = decoder.get_tag_u16_vec(Tag::GeoKeyDirectoryTag).unwrap_or_default();
     let points = decoder.get_tag_f64_vec(Tag::ModelTiepointTag).unwrap_or_default();
     let scale = decoder.get_tag_f64_vec(Tag::ModelPixelScaleTag).unwrap_or_default();
@@ -213,6 +217,11 @@ fn georef<R: Read + Seek>(
     // из спецификации GeoTIFF — ModelTransformationTag.
     let matrix = decoder.get_tag_f64_vec(Tag::Unknown(34264)).unwrap_or_default();
 
+    // Чужой датум — про привязку, которая как раз взялась: числа в файле верны,
+    // а лягут они на сотню метров в стороне. Смотрящему это не подпись под
+    // снимком (снимок на месте с точностью, которой хватает глазу), а
+    // разбирающему — строка в логе, и уходит она отсюда независимо от того, кто
+    // растр описывает и чем кончится привязка.
     if let Some(code) = foreign_datum(&keys) {
         veldsdk::log::warn!(target: "decode",
             "растр объявляет датум EPSG:{}, а привязка уедет как WGS84: расхождение порядка сотни метров",
@@ -220,20 +229,46 @@ fn georef<R: Read + Seek>(
     }
     let placement = geo_placement(&keys, &points, &scale, &matrix, width, height);
     let ties = geo_ties(&keys, &points, &scale, &matrix, width, height);
-    // Сказать надо именно здесь: дальше по течению «в файле не сказано» и
-    // «сказано, да не прочиталось» выглядят одинаково — пустой привязкой, — и
-    // объяснить по такой пустоте нечего.
-    //
     // Условие — по тегам привязки, а не по модели координат: молчаливых исходов
     // столько же у геоцентрики (1024 = 3) и у user-defined, сколько у проекции,
     // и названный род оставил бы их всех без объяснения.
     let carries = !points.is_empty() || !scale.is_empty() || !matrix.is_empty();
-    if carries && ties.is_empty() && placement.is_none() {
-        veldsdk::log::warn!(target: "decode",
-            "растр несёт привязку, а взять её не удалось: модель {:?}, система {:?}, опорных точек {}",
-            geokey(&keys, 1024), geokey(&keys, 3072), points.len() / 6);
+    let taken = !ties.is_empty() || placement.is_some();
+    let trouble = binding_trouble(carries, taken, &keys, points.len() / 6);
+    // В лог — здесь же, где причина и родилась. Полем она поедет к смотрящему,
+    // но доедет не всегда: доносит её потребитель, и решает он по своему слою.
+    // Разбирающему она нужна в обоих случаях.
+    if let Some(said) = &trouble {
+        veldsdk::log::warn!(target: "decode", "{}", said);
     }
-    (ties, placement)
+    (ties, placement, trouble)
+}
+
+/// Оговорка о привязке: файл о ней заговорил, а прочитать её нечем.
+///
+/// Сказать это надо именно здесь: дальше по течению «в файле не сказано» и
+/// «сказано, да не прочиталось» выглядят одинаково — пустой привязкой, — и
+/// объяснить по такой пустоте нечего.
+///
+/// Один род высказывания, и в этом весь смысл поля: «привязки нет, и вот
+/// почему». Чужой датум сюда не входит — он о взятой привязке, — и втиснутый
+/// сюда, он говорил бы смотрящему «место неизвестно» о снимке, лежащем на своём
+/// месте.
+///
+/// Отдельной функцией ради теста: здесь решается, что человек прочтёт.
+fn binding_trouble(carries: bool, taken: bool, keys: &[u16], points: usize) -> Option<String> {
+    (carries && !taken).then(|| {
+        // Числом, а не отладочной печатью: `Some(1)` в подписи под снимком не
+        // говорит смотрящему ничего, а разбирающему довольно и числа.
+        let named = |id: u16| match geokey(keys, id) {
+            Some(code) => code.to_string(),
+            None => "не названа".to_string(),
+        };
+        format!(
+            "растр несёт привязку, а прочитать её нечем: модель координат {}, система {}, опорных точек {}",
+            named(1024), named(3072), points
+        )
+    })
 }
 
 /// Значение простого геоключа: ключи лежат четвёрками после заголовка из
@@ -1907,6 +1942,32 @@ mod tests {
         assert_eq!(foreign_datum(&with(4979)), None, "он же, трёхмерный");
         assert_eq!(foreign_datum(&with(32767)), None, "user-defined — не ответ");
         assert_eq!(foreign_datum(&geokeys(2)), None, "ключа нет вовсе");
+    }
+
+    /// Оговорка о привязке говорит про один род беды — «файл о ней заговорил, а
+    /// прочитать нечем», — и молчит обо всём остальном.
+    ///
+    /// Иначе поле врёт своим именем. Чужой датум сюда попасть не должен: у него
+    /// привязка как раз взялась, и снимок лежит на своём месте с точностью до
+    /// сотни метров, а подпись объявляла бы место неизвестным. Молчание файла —
+    /// тем более не беда: так лежит всякий квиклук, и жалоба у каждого была бы
+    /// шумом, за которым не видно настоящей.
+    ///
+    /// Код системы называется числом: отладочное `Some(1)` в подписи под
+    /// снимком не говорит смотрящему ничего.
+    #[test]
+    fn оговорка_о_привязке_говорит_только_о_непрочитанной() {
+        // 1024 = 2 (географическая), 3072 не назван.
+        let keys = geokeys(2);
+        let said = binding_trouble(true, false, &keys, 1).expect("несёт, а взять нечем");
+        assert!(said.contains("модель координат 2"), "{}", said);
+        assert!(said.contains("система не названа"), "{}", said);
+        assert!(said.contains("опорных точек 1"), "{}", said);
+        assert!(!said.contains("Some("), "отладочная печать уехала бы подписью: {}", said);
+
+        assert_eq!(binding_trouble(true, true, &keys, 1), None, "привязка взята — беды нет");
+        assert_eq!(binding_trouble(false, false, &keys, 0), None, "файл о привязке не говорил");
+        assert_eq!(binding_trouble(false, true, &keys, 0), None);
     }
 
     /// Цветовая модель разбирается один раз и отвечает обоим спрашивающим — и
