@@ -62,25 +62,51 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
 /// а не отказ: JP2 без привязки — обычное дело, и такой снимок ложится по
 /// контуру каталога.
 fn gml_placement(head: &[u8], width: u32, height: u32) -> Option<Placement> {
-    let text = gml_text(head)?;
-    let epsg = after(&text, "EPSG::")?.parse::<u32>().ok()?;
-    let (ox, oy) = pair(numbers(after_tag(&text, "<gml:pos>")?)?)?;
+    let whole = gml_text(head)?;
+    // Читается только сама решётка, а не весь документ. Рядом в GML лежит
+    // `gml:boundedBy` — тот же `gml:pos`, но в градусах и в другой системе, — и
+    // первое вхождение по всему тексту достало бы его: снимок уехал бы на сотню
+    // километров, не сказав ни слова.
+    let text = slice_of(&whole, "<gml:RectifiedGrid", "</gml:RectifiedGrid>")?;
+
+    // Код системы берётся из начала решётки, а не откуда придётся: srsName
+    // стои́т и у других элементов, и чужой сюда попадать не должен.
+    let origin = slice_of(text, "<gml:origin", "</gml:origin>")?;
+    let epsg = after(origin, "EPSG::")?.parse::<u32>().ok()?;
+    // Ноль и user-defined кодом не являются, и наружу их пускать нельзя:
+    // `Placement` тем и определён, что нуля в нём не бывает (см. types.proto).
+    if epsg == 0 || epsg == 32767 || !easting_first(epsg) {
+        return None;
+    }
+    let (ox, oy) = pair(numbers(after_tag(origin, "<gml:pos>")?)?)?;
+
     let mut offsets = text.match_indices("<gml:offsetVector").filter_map(|(at, _)| {
         pair(numbers(after_tag(&text[at..], ">")?)?)
     });
-    let (x_per_i, y_per_i) = offsets.next()?;
-    let (x_per_j, y_per_j) = offsets.next()?;
+    let (first, second) = (offsets.next()?, offsets.next()?);
+    let ((x_per_i, y_per_i), (x_per_j, y_per_j)) = ordered(first, second);
 
-    // Решётка обязана быть про этот растр. Разойдись она с ним — оси у файла
-    // переставлены либо решётка описывает не его, и натянутая всё равно она
-    // положила бы снимок мимо себя, причём молча.
+    // Решётка обязана быть про этот растр. Разойдись она с ним — она описывает
+    // не его, и натянутая всё равно положила бы снимок мимо себя, причём молча.
+    //
+    // Границы решётки читаются только на эту сверку. По букве GML это смещения
+    // от начала, и тогда при `low = 1 1` первый отсчёт лежал бы в
+    // `origin + v1 + v2`; гранула Sentinel-2 пишет туда единичную нумерацию
+    // отсчётов, и следование букве сдвинуло бы всякую её плитку на пиксель.
+    // Поэтому начало вешается на пиксель (0, 0), а `low` в него не входит.
     let (low, high) = (
-        pair(numbers(after_tag(&text, "<gml:low>")?)?)?,
-        pair(numbers(after_tag(&text, "<gml:high>")?)?)?,
+        pair(numbers(after_tag(text, "<gml:low>")?)?)?,
+        pair(numbers(after_tag(text, "<gml:high>")?)?)?,
     );
     let across = high.0 - low.0 + 1.0;
     let down = high.1 - low.1 + 1.0;
     if across != f64::from(width) || down != f64::from(height) {
+        return None;
+    }
+    // Не-число прошло бы все проверки выше: оно не равно ничему, в том числе
+    // самому себе. Дальше по нему считается варп-сетка, и там его уже не
+    // поймать (тот же инвариант держит `tiff::usable_step`).
+    if ![ox, oy, x_per_i, y_per_i, x_per_j, y_per_j].iter().all(|v| v.is_finite()) {
         return None;
     }
 
@@ -149,6 +175,44 @@ fn after<'a>(text: &'a str, mark: &str) -> Option<&'a str> {
 fn after_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let tail = &text[text.find(tag)? + tag.len()..];
     Some(&tail[..tail.find('<').unwrap_or(tail.len())])
+}
+
+/// Кусок текста между открывающим и закрывающим — чтобы читать элемент, а не
+/// весь документ.
+fn slice_of<'a>(text: &'a str, from: &str, to: &str) -> Option<&'a str> {
+    let start = text.find(from)?;
+    let end = text[start..].find(to)? + start;
+    Some(&text[start..end])
+}
+
+/// Идут ли координаты системы «восток, север» — в том порядке, в каком их
+/// пишет GML.
+///
+/// Порядок этот у системы свой: у зон UTM и веб-Меркатора восток первым, а у
+/// зон Гаусса-Крюгера и местных систем — север. Перепутанный, он кладёт снимок
+/// накрест, и заметить это по числам нельзя: они настоящие.
+///
+/// Здесь названы только те, чей порядок известен наверняка. Прочие остаются без
+/// привязки из файла — и это верный размен: снимок ложится по контуру каталога,
+/// то есть примерно, а не накрест.
+fn easting_first(epsg: u32) -> bool {
+    matches!(epsg, 3857 | 32601..=32660 | 32701..=32760)
+}
+
+/// Векторы сдвига в порядке «на столбец, на строку».
+///
+/// Порядок их задаёт файл своими `axisLabels`, и записывают его по-разному.
+/// Переставленную пару видно по форме: у растра без поворота первый вектор идёт
+/// вдоль строки, то есть его восточная составляющая не нулевая. Нулевая при
+/// ненулевой северной — оси переставлены.
+///
+/// Разбирается только этот случай, однозначный. У повёрнутого растра обе
+/// составляющие ненулевые, догадываться там не о чем, и пара берётся как есть.
+fn ordered(first: (f64, f64), second: (f64, f64)) -> ((f64, f64), (f64, f64)) {
+    match first.0 == 0.0 && first.1 != 0.0 && second.0 != 0.0 && second.1 == 0.0 {
+        true => (second, first),
+        false => (first, second),
+    }
 }
 
 /// Числа через пробел.
@@ -475,6 +539,65 @@ mod tests {
 
         assert_eq!(said.epsg, 32642, "UTM 42 северная");
         assert_eq!(said.affine, [10.0, 0.0, 499_980.0, 0.0, -10.0, 9_000_000.0]);
+    }
+
+    /// Читается решётка, а не весь документ.
+    ///
+    /// В GML рядом с ней лежит габарит, а у файлов побогаче — и чужие сетки с
+    /// теми же именами тегов. Ищи мы по всему тексту, первым нашлось бы
+    /// постороннее: система, границы и шаг уехали бы от чужого элемента, а
+    /// числа при этом остались бы правдоподобными.
+    ///
+    /// Приманки здесь собраны нарочно — по одной на каждое читаемое поле.
+    #[test]
+    fn читается_решётка_а_не_весь_документ() {
+        let with_decoys = format!(
+            r#"<gml:FeatureCollection>
+                 <gml:boundedBy><gml:Envelope srsName="urn:ogc:def:crs:EPSG::4326">
+                   <gml:pos>81.0 66.0</gml:pos></gml:Envelope></gml:boundedBy>
+                 <gml:GridEnvelope><gml:low>0 0</gml:low><gml:high>1 1</gml:high></gml:GridEnvelope>
+                 <gml:offsetVector srsName="urn:ogc:def:crs:EPSG::4326">1 0</gml:offsetVector>
+                 <gml:offsetVector srsName="urn:ogc:def:crs:EPSG::4326">0 -1</gml:offsetVector>
+                 {}
+               </gml:FeatureCollection>"#,
+            REAL_GML
+        );
+        let said = gml_placement(&gmljp2(&with_decoys), 10980, 10980).expect("решётка на месте");
+        assert_eq!(said.epsg, 32642, "система взята у решётки");
+        assert_eq!(said.affine, [10.0, 0.0, 499_980.0, 0.0, -10.0, 9_000_000.0], "и шаг с началом");
+    }
+
+    /// Система, чей порядок осей неизвестен, привязки не даёт: у зон
+    /// Гаусса-Крюгера север пишется первым, и взятая как есть пара положила бы
+    /// снимок накрест — числа при этом настоящие, и поймать это нечем.
+    #[test]
+    fn система_с_неизвестным_порядком_осей_не_берётся() {
+        let gk = REAL_GML.replace("EPSG::32642", "EPSG::28408");
+        assert!(gml_placement(&gmljp2(&gk), 10980, 10980).is_none());
+
+        let web = REAL_GML.replace("EPSG::32642", "EPSG::3857");
+        assert!(gml_placement(&gmljp2(&web), 10980, 10980).is_some(), "веб-Меркатор известен");
+    }
+
+    /// Переставленные векторы сдвига возвращаются на места. У квадратной
+    /// гранулы сверка размера решётки такую перестановку не ловит вовсе, а
+    /// файлы с обоими порядками записи существуют.
+    #[test]
+    fn переставленные_векторы_возвращаются_на_места() {
+        let swapped = REAL_GML
+            .replace(">10 0</gml:offsetVector>", ">\u{1}</gml:offsetVector>")
+            .replace(">0 -10</gml:offsetVector>", ">10 0</gml:offsetVector>")
+            .replace(">\u{1}</gml:offsetVector>", ">0 -10</gml:offsetVector>");
+        let said = gml_placement(&gmljp2(&swapped), 10980, 10980).expect("привязка читается");
+        assert_eq!(said.affine, [10.0, 0.0, 499_980.0, 0.0, -10.0, 9_000_000.0]);
+    }
+
+    /// Не-число проходит всякое сравнение — оно не равно ничему, включая себя.
+    /// Дальше по нему считается варп-сетка, и там его уже не поймать.
+    #[test]
+    fn не_число_в_привязке_не_берётся() {
+        let broken = REAL_GML.replace("499985 8999995", "NaN 8999995");
+        assert!(gml_placement(&gmljp2(&broken), 10980, 10980).is_none());
     }
 
     /// Решётка не про этот растр — привязки нет. Натянутая, она положила бы
