@@ -739,12 +739,25 @@ fn accept_tile(
 /// (см. schema.yaml).
 fn report(state: &State, key: &str) {
     let Some(view) = state.views.get(key) else { return };
-    let meta = view.shown.as_ref().and_then(|shown| shown.meta.as_ref());
     // Желаемое считается заново, а не берётся с прошлого раза: «работа идёт»
     // держится в том числе на непройденном пути к цели, а путь этот меряется
     // тем, что нужно сейчас. Считать дёшево — у канвы видимое это
     // прямоугольник камеры, без проекций.
     let want = view::wanted(view, &state.tiles, cap_tiles(state));
+    let current = view_state(view, key, want.as_ref(), &state.passes);
+    crate::emit::on_view_state(&current);
+}
+
+/// Чем показ выглядит снаружи — врозь с рассылкой затем, что проверяемо только
+/// это. Публикация в нативной сборке — заглушка (`veldsdk::abi`), и отправленное
+/// сообщение тесту не видно; собранное — видно.
+fn view_state(
+    view: &View,
+    key: &str,
+    want: Option<&tiles::Want>,
+    passes: &Passes<String>,
+) -> ViewState {
+    let meta = view.shown.as_ref().and_then(|shown| shown.meta.as_ref());
     let ordered = view.fetch.ordered();
     // Годность байт решает не показ, а то, каким путём идёт проход, — правило
     // общее с шаром (`tiles::pointwise`): у точечного чтения счётчик это
@@ -754,10 +767,10 @@ fn report(state: &State, key: &str) {
     let inside = tiles::inside(
         ordered,
         (view.read_bytes, view.total_bytes),
-        meta.zip(want.as_ref())
-            .is_some_and(|(meta, want)| tiles::pointwise(meta, want.level)),
+        meta.zip(want).is_some_and(|(meta, want)| tiles::pointwise(meta, want.level)),
     );
-    let current = ViewState {
+    let working = view.working(passes, want);
+    ViewState {
         view: key.to_string(),
         source_width: meta.map_or(0, |meta| meta.width),
         source_height: meta.map_or(0, |meta| meta.height),
@@ -770,27 +783,79 @@ fn report(state: &State, key: &str) {
         // по чему, и нули значат именно это.
         ready: ordered.0,
         total: ordered.1,
-        step: want.as_ref().map_or(0, |want| want.climbed),
-        steps: want.as_ref().map_or(0, |want| want.steps),
-        working: view.working(&state.passes, want.as_ref()),
+        step: want.map_or(0, |want| want.climbed),
+        steps: want.map_or(0, |want| want.steps),
+        working,
         error: view.error.clone().unwrap_or_default(),
-        // Жалоба одна на провод, а поводов два: застрявший кадр важнее
-        // неполноты — неполный кадр хотя бы рисуется. Обе приезжают уже
-        // сказанными словами: подписать их заново некому, заказчик о разнице
-        // не знает (см. `View::stuck`).
-        trouble: view.stuck.clone().or_else(|| view.trouble.clone()).unwrap_or_default(),
+        // Жалоба одна на провод, а поводов три, и складывает их `View::said`.
+        // Приезжают они уже сказанными словами: подписать их заново некому,
+        // заказчик о разнице не знает (см. `View::stuck`). Ход добычи туда же
+        // и по той же причине: заказчик показывает жалобу вместо него.
+        trouble: view.said(want.is_some() && !working),
         // Место не собралось — значит выдать его заново может только владелец
         // разметки: сами мы его не выделяем (см. `complain`). Приговорённому
         // виду место не нужно: канвы для него в разметке всё равно нет, и
         // текстура под неё выделилась бы впустую.
         needs_place: view.target.is_none() && view.shown.is_some() && view.error.is_none(),
-    };
-    crate::emit::on_view_state(&current);
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::advance_ripple;
+    use super::{advance_ripple, view_state};
+
+    /// Показу, которому ещё не дали ни места, ни камеры, хотеть нечего — а раз
+    /// нечего хотеть, то и работы нет. Одной незанятости для предела поэтому
+    /// мало, и это место и решает: сюда приезжает `settled`, сложенный из двух
+    /// половин.
+    ///
+    /// Место вызова, а не сама `View::said`: собранное здесь и уезжает на
+    /// провод, а обе правки — и «вернуть строку к прежней, без предела», и
+    /// «спрашивать одну незанятость» — не поймает ни компилятор, ни тест самой
+    /// функции. Осевшую канву нативно не собрать: `want` требует места под
+    /// кадр, а его выдаёт видеокарта, — эту половину держит сценарий на живой
+    /// грануле Sentinel-2.
+    #[test]
+    fn предел_детали_доезжает_до_заказчика() {
+        use super::view::{Shown, View};
+        use veldmap_image_tiler_wrap::pyramid;
+        use veldmap_image_tiler_wrap::tiles::{self, Meta, Passes};
+
+        let mut view = View::new("снимок".into());
+        view.shown = Some(Shown {
+            resource: veldsdk::OwnedResource::from_raw_id(1),
+            meta: Some(Meta {
+                fingerprint: "t".into(),
+                width: 4001,
+                height: 3001,
+                levels: pyramid::level_count(4001, 3001),
+                reach: crate::proto::image_tiler::Reach::Exact,
+                finest: 1,
+                windowed: 0,
+            }),
+        });
+
+        let idle: Passes<String> = Passes::default();
+
+        // Места под кадр нет — хотеть нечего, и предел молчит.
+        let blind = view_state(&view, "снимок", None, &idle);
+        assert!(!blind.working, "стенд не о том: канва считает, что работа идёт");
+        assert_eq!(blind.trouble, "", "предел объявлен над местом, которого ещё нет");
+
+        // Показ идёт, лестница в одну ступень и она же последняя — канва осела,
+        // и вот теперь предел отвечает на заданный вопрос.
+        let want =
+            tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 };
+        let settled = view_state(&view, "снимок", Some(&want), &idle);
+        assert!(!settled.working, "стенд не о том: за осевшей канвой осталась работа");
+        assert_eq!(settled.trouble, "подробнее 2001×1501 из 4001×3001 не будет");
+
+        // А на полпути — снова молчит: за этой ступенью пойдёт следующая.
+        let climbing = tiles::Want { steps: 2, ..want };
+        let midway = view_state(&view, "снимок", Some(&climbing), &idle);
+        assert!(midway.working, "стенд не о том: лестница считается пройденной");
+        assert_eq!(midway.trouble, "", "предел объявлен на полпути к цели");
+    }
 
     /// Пока рябить нечему, огрублённая фаза стои́т — и кадр, собранный из неё,
     /// совпадает с прошлым. Это и есть выключатель перерисовки: сломайся он —

@@ -1485,21 +1485,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             // полёте либо ступень не последняя». Держать это двумя способами
             // значило бы однажды поправить один и не поправить другой.
             let mine = wanted.iter().filter(|(key, ..)| key == &overlay.key).next_back();
-            let live = mine.is_some();
-            OverlayProgress {
-                key: overlay.key.clone(),
-                ready: overlay.progress.ready,
-                total: overlay.progress.total,
-                working: overlay.working(&state.passes, mine.map(|(.., wanted)| wanted), live),
-                share: overlay.progress.share,
-                error: overlay.error.clone(),
-                trouble: overlay.trouble(),
-                step: overlay.progress.step,
-                steps: overlay.progress.steps,
-                blank: overlay.blank(),
-                pass_read: overlay.progress.pass.0,
-                pass_total: overlay.progress.pass.1,
-            }
+            overlay.report(mine.map(|(.., wanted)| wanted), &state.passes)
         })
         // Отвергнутые — теми же строками: наложения у нас нет, а сказать о нём
         // надо, иначе приславший будет считать его лежащим на шаре вечно.

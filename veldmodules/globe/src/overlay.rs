@@ -961,14 +961,104 @@ impl Overlay {
     /// Собирается при показе, а не хранится: причин бывает две, и сложенные в
     /// одно поле они отменяли бы друг друга по порядку описания. Пусто — сказать
     /// нечего.
+    ///
     pub fn trouble(&self) -> String {
-        let said: Vec<&str> = self
+        let said: Vec<String> = self
             .rasters
             .iter()
-            .filter_map(|raster| raster.trouble.as_deref())
-            .chain(self.binding_trouble.as_deref())
+            .filter_map(|raster| raster.trouble.clone())
+            .chain(self.binding_trouble.clone())
             .collect();
         said.join("; ")
+    }
+
+    /// Каким слой выглядит снаружи. Здесь, а не у рассылки, потому что
+    /// проверяемо только это: рассылка публикует, а публикация в нативной
+    /// сборке — заглушка (`veldsdk::abi`), и отправленное тесту не видно.
+    ///
+    /// `mine` — желаемое этого слоя в нынешнем кадре; `None` значит, что кадра
+    /// он не спрашивает вовсе (скрыт, места нет, пересчёт ещё не дошёл).
+    pub fn report<K: PartialEq>(
+        &self,
+        mine: Option<&Wanted>,
+        passes: &Passes<K>,
+    ) -> crate::proto::globe::OverlayProgress {
+        let live = mine.is_some();
+        let working = self.working(passes, mine, live);
+        // Кадр рисует **тот самый** растр, чей потолок называем, и работы за
+        // ним нет — только тогда предел отвечает на заданный вопрос (см.
+        // [`Overlay::said`]). Роль в этой паре не придирка: у Sentinel-2 кадр
+        // добрал превью и рисует его, пока подробный только описался, — и
+        // «резче не будет» про подробный в этот миг сказано про то, чего на
+        // экране ещё нет вовсе.
+        //
+        // Отдельного «слой в кадре» рядом нет намеренно: у слоя, кадра не
+        // спрашивающего, роли нет, и совпасть ей не с чем — кроме случая, когда
+        // решающего растра нет тоже. А без него нет и предела, так что ответ
+        // `said` от этого не зависит вовсе.
+        let drawn = mine.map(|wanted| wanted.choice.role);
+        let settled = !working && drawn == self.decider().map(|it| it.role);
+        crate::proto::globe::OverlayProgress {
+            key: self.key.clone(),
+            ready: self.progress.ready,
+            total: self.progress.total,
+            working,
+            share: self.progress.share,
+            error: self.error.clone(),
+            trouble: self.said(settled),
+            step: self.progress.step,
+            steps: self.progress.steps,
+            blank: self.blank(),
+            pass_read: self.progress.pass.0,
+            pass_total: self.progress.pass.1,
+        }
+    }
+
+    /// То же для провода — вместе с пределом детали (`Meta::capped`).
+    ///
+    /// Врозь с [`Overlay::trouble`] затем, что предел уместен не всегда:
+    /// жалоба — про случившееся и верна с той секунды, как случилась, а предел
+    /// отвечает на «резче уже не будет» и над недобранным слоем читается как
+    /// «добыча кончилась, вот её потолок».
+    ///
+    /// `settled` — слой в полёте и работы за ним нет. Обе половины нужны, и
+    /// вторая одна не годится: сразу после описания пересчёт желаемого ещё не
+    /// прошёл, слой в набор не попал, и [`Overlay::working`] честно отвечает
+    /// «нет» — при одном проценте прочитанного растра. Канва считает
+    /// `settled` тем же способом и по той же причине (`View::said`).
+    pub fn said(&self, settled: bool) -> String {
+        let cap = settled.then(|| self.detail_cap()).flatten();
+        let said: Vec<String> = self
+            .rasters
+            .iter()
+            .filter_map(|raster| raster.trouble.clone())
+            .chain(cap)
+            .chain(self.binding_trouble.clone())
+            .collect();
+        said.join("; ")
+    }
+
+    /// Растр, решающий деталь слоя: самый подробный из кладущихся.
+    ///
+    /// Не всякий: превью грубее подробного всегда — иначе подробный отвергнут
+    /// ([`Overlay::detail_eclipsed`]), — и говорить о пределе превью значило бы
+    /// обещать мутность там, где приближение её снимет. У Sentinel-2 оба растра
+    /// JP2, и предел бывает у обоих, так что случай этот не выдуманный.
+    ///
+    /// Считается по [`Overlay::budgeted`], а не по всем растрам: отвергнутый
+    /// подробный не рисуется, и деталь решает не он. Тем же ходом ответ
+    /// оказывается верным и когда подробного нет вовсе, и когда он отвергнут, —
+    /// в обоих случаях деталь решает превью.
+    fn decider(&self) -> Option<&Raster> {
+        self.budgeted()
+            .filter(|raster| raster.meta.is_some())
+            .max_by_key(|raster| raster.meta.as_ref().expect("отобраны по наличию").reachable().0)
+    }
+
+    /// Предел детали **слоя** — предел решающего растра, и `None`, если тот
+    /// отдаёт своё разрешение целиком.
+    fn detail_cap(&self) -> Option<String> {
+        self.decider()?.meta.as_ref()?.capped()
     }
 
     pub fn raster_mut(&mut self, role: Role) -> Option<&mut Raster> {
@@ -1109,8 +1199,9 @@ impl Overlay {
             let meta = self.raster(role)?.meta.as_ref()?;
             // Достижимое разрешение, а не записанная ширина: подробнее своего
             // предела детали источник не отдаст, сколько бы пикселей в нём ни
-            // было (`Described.finest`).
-            Some(meta.width >> meta.finest.min(31))
+            // было (`Described.finest`). Считает это `Meta::reachable` — тот
+            // же ответ, что уходит в лог и в подпись слоя.
+            Some(meta.reachable().0)
         };
         match (width(Role::Preview), width(Role::Detailed)) {
             (Some(base), Some(detail)) => detail <= base,
@@ -2520,6 +2611,196 @@ mod tests {
 
         assert_eq!(near.len(), 1, "4000 с пределом на первом уровне — это те же 2000");
         assert_eq!(near[0].choice.role, Role::Preview);
+    }
+
+    /// Достижимую ширину считает `Meta::reachable`, а не сдвиг вправо. Разница
+    /// между ними — один пиксель на нечётной стороне, и решает она судьбу
+    /// растра целиком: 4001 с пределом на первом уровне даёт 2001 — на пиксель
+    /// подробнее превью, то есть кладётся. Сдвиг дал бы 2000 и отверг бы его
+    /// молча.
+    ///
+    /// Сама по себе разница мелка, но живёт она на шве: тот же `reachable`
+    /// отвечает логу и подписи слоя, и разойдись он с выбором — человеку
+    /// сказали бы одно, а решили за него другое.
+    #[test]
+    fn the_reachable_width_rounds_up_like_the_pyramid_does() {
+        let overlay = overlay(vec![
+            raster(Role::Preview, Some(meta(2000, 2000))),
+            raster(Role::Detailed, Some(Meta { finest: 1, ..meta(4001, 4001) })),
+        ]);
+
+        assert!(
+            !overlay.detail_eclipsed(),
+            "4001 на первом уровне — это 2001, и он подробнее превью в 2000"
+        );
+    }
+
+    /// Подрезанный растр — неквадратный и нечётный: подпись называет обе его
+    /// стороны, и квадратный стенд не отличил бы ширину от высоты.
+    fn capped(role: Role, width: u32, height: u32, finest: u32) -> Raster {
+        raster(role, Some(Meta { finest, ..meta(width, height) }))
+    }
+
+    /// Предел детали доезжает до подписи слоя. Сам по себе он молчалив: растр
+    /// лёг, рисуется и выглядит исправным, — а приближающийся ждёт резкости,
+    /// которая никогда не придёт.
+    ///
+    /// Строка сверяется целиком: числа в ней стоя́т в своих ролях, и
+    /// перевёрнутая фраза содержит ровно те же два числа.
+    #[test]
+    fn a_capped_raster_says_so_in_the_layer_line() {
+        let native = overlay(vec![raster(Role::Detailed, Some(meta(4001, 3001)))]);
+        assert_eq!(native.said(true), "", "предела нет, а слой на что-то жалуется");
+
+        let capped = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
+        assert_eq!(capped.said(true), "подробнее 2001×1501 из 4001×3001 не будет");
+    }
+
+    /// Пока слой не осел, предел молчит — а жалобы говорятся всегда: они про
+    /// случившееся и верны с той секунды, как случились. Обе — и растровая, и
+    /// привязочная.
+    #[test]
+    fn an_unsettled_layer_keeps_the_cap_quiet() {
+        let mut rasters = vec![capped(Role::Detailed, 4001, 3001, 1)];
+        rasters[0].trouble = Some("неполно: сорвался проход".into());
+        let mut overlay = overlay(rasters);
+        assert_eq!(overlay.said(false), "неполно: сорвался проход", "жалоба замолчала с пределом");
+
+        overlay.binding_trouble = Some("узлы сетки не годятся".into());
+        assert_eq!(overlay.said(false), "неполно: сорвался проход; узлы сетки не годятся");
+        assert!(!overlay.said(false).contains("подробнее"), "предел объявлен над недобранным");
+    }
+
+    /// Слой, кадра не спрашивающий, о пределе молчит — и молчит именно из-за
+    /// того, что он не в полёте: работы за ним и правда нет, так что одна
+    /// незанятость дала бы обратный ответ.
+    ///
+    /// Померено на живой грануле Sentinel-2: подпись встала на экран через
+    /// секунду после описания, когда подробного растра было прочитано 675 517
+    /// байт из 34 229 949 — один процент. Пересчёт желаемого к тому мигу ещё
+    /// не прошёл, слой в набор не попал, и `working` честно отвечал «нет».
+    #[test]
+    fn a_layer_out_of_the_frame_reports_no_cap() {
+        let overlay = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
+        let idle: Passes<&str> = Passes::default();
+
+        let out = overlay.report(None, &idle);
+        assert!(!out.working, "стенд не о том: слой считает, что работа идёт");
+        assert_eq!(out.trouble, "", "предел объявлен слоем, который кадра не спрашивает");
+
+        // Лестница в одну ступень и она же последняя — это и есть «добрано»:
+        // за ней не пойдёт следующая (`Want::climbing`).
+        let mine = Wanted {
+            choice: Choice { role: Role::Detailed, fingerprint: "fp".into(), level: 0 },
+            want: tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 },
+        };
+        let settled = overlay.report(Some(&mine), &idle);
+        assert!(!settled.working, "стенд не о том: за осевшим слоем осталась работа");
+        assert_eq!(settled.trouble, "подробнее 2001×1501 из 4001×3001 не будет");
+
+        // А в полёте, но с непройденной лестницей, предел снова молчит: за этой
+        // ступенью пойдёт следующая, и пойдёт сама. Одного полёта поэтому мало
+        // ровно так же, как мало одной незанятости.
+        let climbing = Wanted {
+            choice: Choice { role: Role::Detailed, fingerprint: "fp".into(), level: 1 },
+            want: tiles::Want { level: 1, target: 0, cells: Vec::new(), steps: 2, climbed: 0 },
+        };
+        let midway = overlay.report(Some(&climbing), &idle);
+        assert!(midway.working, "стенд не о том: лестница считается пройденной");
+        assert_eq!(midway.trouble, "", "предел объявлен на полпути к цели");
+    }
+
+    /// Кадр может рисовать превью, пока подробный только описался: работы за
+    /// подробным в этот миг ещё нет — заказать он ничего не успел, — и «резче
+    /// не будет» про него сказано про то, чего на экране нет вовсе.
+    ///
+    /// Померено на живой грануле Sentinel-2: в логе `Preview уровень 0, ячеек
+    /// 1` — тайлы просило только превью, — а подпись о пределе подробного
+    /// встала на экран той же секундой, при десяти процентах прочитанного.
+    #[test]
+    fn a_frame_drawing_the_preview_says_nothing_of_the_detail_cap() {
+        let overlay = overlay(vec![
+            raster(Role::Preview, Some(meta(343, 343))),
+            capped(Role::Detailed, 4001, 3001, 1),
+        ]);
+        let idle: Passes<&str> = Passes::default();
+        let settled = |role| Wanted {
+            choice: Choice { role, fingerprint: "fp".into(), level: 0 },
+            want: tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 },
+        };
+
+        assert!(!overlay.detail_eclipsed(), "стенд не о том: подробный отвергнут");
+        let on_preview = overlay.report(Some(&settled(Role::Preview)), &idle);
+        assert!(!on_preview.working, "стенд не о том: за слоем осталась работа");
+        assert_eq!(on_preview.trouble, "", "предел подробного назван поверх превью");
+
+        let on_detail = overlay.report(Some(&settled(Role::Detailed)), &idle);
+        assert_eq!(on_detail.trouble, "подробнее 2001×1501 из 4001×3001 не будет");
+    }
+
+    /// Предел называет тот растр, который деталь и решает. Превью обязано быть
+    /// грубее подробного — иначе подробный отвергнут, — и его собственный
+    /// предел о слое не говорит ничего: приблизившийся получит подробный.
+    ///
+    /// Случай не выдуманный: у Sentinel-2 оба растра JP2, а предел ставит
+    /// только он.
+    #[test]
+    fn the_cap_of_a_preview_says_nothing_while_the_detail_is_healthy() {
+        let overlay = overlay(vec![
+            capped(Role::Preview, 4001, 3001, 1),
+            raster(Role::Detailed, Some(meta(10980, 10980))),
+        ]);
+
+        assert!(!overlay.detail_eclipsed(), "стенд не о том: подробный отвергнут");
+        assert_eq!(overlay.said(true), "", "слой пожаловался на предел превью");
+    }
+
+    /// А когда подробный отвергнут, деталь решает превью — и назван его предел:
+    /// вот теперь приближение упрётся именно в него.
+    #[test]
+    fn a_rejected_detail_hands_the_cap_over_to_the_preview() {
+        let mut rasters =
+            vec![capped(Role::Preview, 4001, 3001, 1), raster(Role::Detailed, Some(meta(1500, 1200)))];
+        rasters[1].trouble = Some("подробный растр не подробнее превью".into());
+        let overlay = overlay(rasters);
+
+        assert!(overlay.detail_eclipsed(), "стенд не о том: подробный не отвергнут");
+        assert_eq!(
+            overlay.said(true),
+            "подробный растр не подробнее превью; подробнее 2001×1501 из 4001×3001 не будет"
+        );
+    }
+
+    /// Отвергнутый растр не вправе замолчать предел слоя, даже сравнявшись с
+    /// превью: отвергают его по `detail <= base`, то есть равенство — уже
+    /// отказ. Взятый наравне с кладущимися, он оказался бы самым подробным из
+    /// найденных, своего предела не имеет — и слой промолчал бы о чужом.
+    #[test]
+    fn a_rejected_detail_of_equal_width_does_not_mute_the_cap() {
+        let mut rasters =
+            vec![capped(Role::Preview, 4001, 3001, 1), raster(Role::Detailed, Some(meta(2001, 1501)))];
+        rasters[1].trouble = Some("подробный растр не подробнее превью".into());
+        let overlay = overlay(rasters);
+
+        assert!(overlay.detail_eclipsed(), "стенд не о том: равенство обязано быть отказом");
+        assert!(
+            overlay.said(true).contains("подробнее 2001×1501 из 4001×3001 не будет"),
+            "предел слоя замолчал отвергнутым растром: {}",
+            overlay.said(true)
+        );
+    }
+
+    /// Жалоба на привязку по-прежнему доезжает до человека и стои́т последней:
+    /// для смотрящего это один вопрос, и потеряться она не вправе.
+    #[test]
+    fn the_binding_complaint_still_comes_last() {
+        let mut overlay = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
+        overlay.binding_trouble = Some("узлы сетки не годятся".into());
+
+        assert_eq!(
+            overlay.said(true),
+            "подробнее 2001×1501 из 4001×3001 не будет; узлы сетки не годятся"
+        );
     }
 
     /// А без превью подробный кладётся, каким бы он ни был: сравнивать не с
