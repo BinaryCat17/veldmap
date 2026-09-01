@@ -121,6 +121,21 @@ impl State {
     }
 }
 
+/// Тяжёл ли разбор, который сейчас начнётся, — по первым байтам ресурса.
+///
+/// Не прочиталось — считаем тяжёлым. Осторожность здесь дешевле ошибки и не
+/// симметрична ей: лишнее отпускание стои́т повторного разбора, а недостающее —
+/// двух плоскостей в памяти инстанса, то есть трапа.
+///
+/// Отдельно от чтения, чтобы правило было проверяемо: сам ресурс натив­но
+/// недостижим, а решение по нему — обычная функция над своим доводом.
+fn heavy_ahead<E>(head: Result<Vec<u8>, E>) -> bool {
+    match head {
+        Ok(head) => adapters::heavy_head(&head),
+        Err(_) => true,
+    }
+}
+
 /// Разбор источника — из memo, если это тот же ресурс, иначе заново.
 ///
 /// Отдаётся ссылкой, а не значением: за одним описанием идёт столько проходов,
@@ -135,9 +150,14 @@ fn parsed<'a>(
 ) -> Result<(&'a Parsed, Duration), String> {
     let mut stamped = Duration::ZERO;
     if state.kept(resource_id, near).is_none() {
-        // Отпускается здесь, до нового разбора: две плоскости разом лимит
-        // памяти инстанса не переживёт.
-        state.release_heavy();
+        // Отпускается до нового разбора: две плоскости разом лимит памяти
+        // инстанса не переживёт. Но только перед тяжёлым — заголовки соседнего
+        // квиклука плоскости не занимают, а выброшенная ради них плоскость
+        // гранулы прочиталась бы заново ровно между её описанием и её
+        // производством (см. `adapters::heavy_head`).
+        if heavy_ahead(veldsdk::abi::resource_read(resource_id, 0, 32)) {
+            state.release_heavy();
+        }
         veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт)", resource_id, size);
         let began = Instant::now();
         let fingerprint = fingerprint::fingerprint(resource_id, size)?;
@@ -322,7 +342,11 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     let (kept, _) = parsed(state, resource.id, resource.size, &bytes, req.near)?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
 
-    let single_pass = matches!(info.reach(), crate::proto::image_tiler::Reach::Pyramid);
+    // Спрашивается вес разбора, а не цена прохода: `Reach::Pyramid` покрывает и
+    // PNG с мелочью, чей разбор лежит в лёгком слоте, — и отпущен по нему был
+    // бы чужой тяжёлый. Отпускать же есть смысл только тяжёлый: лёгкий стои́т
+    // заголовков.
+    let single_pass = info.holds_samples();
     // Заказ проверяется отдельной функцией, а не по месту: у проверок свои
     // выходы, и уйти по любому из них, не отпустив разбор, значит оставить
     // висеть отсчёты величины — ровно то, от чего memo и освобождают ниже.
@@ -529,6 +553,18 @@ impl Sink<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// Не прочитавшаяся голова считается тяжёлой, и это не мелочь: ошибиться
+    /// здесь можно в обе стороны, но цены у них разные. Лишнее отпускание
+    /// стои́т повторного разбора, недостающее — двух плоскостей в памяти
+    /// инстанса, то есть трапа.
+    #[test]
+    fn непрочитанная_голова_считается_тяжёлой() {
+        assert!(heavy_ahead::<String>(Err("ресурс закрыт".to_string())));
+        assert!(heavy_ahead::<String>(Ok(adapters::netcdf::MAGIC.to_vec())));
+        assert!(!heavy_ahead::<String>(Ok(b"\x89PNG\r\n\x1a\n".to_vec())));
+        assert!(!heavy_ahead::<String>(Ok(Vec::new())), "пустая голова — не тяжёлая");
+    }
+
     use super::*;
     use crate::proto::image_tiler::TileAddr;
 
