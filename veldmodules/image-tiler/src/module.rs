@@ -283,6 +283,7 @@ pub fn on_produce(state: &mut State, req: ProduceRequest) {
     let correlation = veldsdk::correlation();
     let label = if req.label.is_empty() { correlation.clone() } else { req.label.clone() };
 
+    let began = Instant::now();
     let error = match produce(state, &req, &correlation) {
         Ok(()) => String::new(),
         Err(error) => {
@@ -290,6 +291,24 @@ pub fn on_produce(state: &mut State, req: ProduceRequest) {
             error
         }
     };
+    // Проход — самая долгая работа тайлера, и мерить её больше нечем: описание
+    // печатает свою раскладку, а во что обошлось само декодирование, из логов
+    // не следовало никак. Числами взяты те же, какими проход отчитывается о
+    // ходе: без уровня и числа тайлов секунды не с чем сравнить — у грубой
+    // ступени и у подробной работа разная.
+    //
+    // Сорвавшийся мерится наравне с удавшимся: его секунды человек прождал так
+    // же, а по молчанию долгий отказ неотличим от быстрого.
+    veldsdk::log::debug!(target: "perf",
+        "проход по ресурсу {}: {:.2} с — уровень {}, тайлов {}{}",
+        req.resource.as_ref().map_or(0, |handle| handle.id),
+        began.elapsed().as_secs_f32(),
+        req.level,
+        req.tiles.len(),
+        match error.is_empty() {
+            true => String::new(),
+            false => format!(", сорвался: {}", error),
+        });
     crate::emit::on_produce_done(&ProduceDone { error }, &correlation);
 }
 

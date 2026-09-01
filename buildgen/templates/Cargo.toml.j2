@@ -20,7 +20,9 @@ veldsdk = { path = "{{ sdk_path }}" }
 prost-build = "0.14"
 
 [profile.release]
-opt-level = "s"
+# По скорости, а не по размеру: в модулях лежит попиксельная работа — декодеры,
+# ужатие, растяг, — и размер бинарника не стои́т ничего, он не едет по проводу.
+opt-level = 3
 panic = "abort"
 lto = false
 codegen-units = 16
