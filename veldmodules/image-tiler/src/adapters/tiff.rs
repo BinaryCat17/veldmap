@@ -303,7 +303,10 @@ fn half_pixel(keys: &[u16]) -> f64 {
 /// Молчание файла и `user-defined` — не чужой датум, а отсутствие ответа:
 /// сказать о них нечего.
 fn foreign_datum(keys: &[u16]) -> Option<u16> {
-    const WGS84: [u16; 2] = [4326, 4979];
+    // 4055 — «сфера популярной визуализации», датум веб-Меркатора: координаты у
+    // него численно те же, что у WGS84, на том вся эта проекция и построена.
+    // Старые экспорты в EPSG:3857 объявляют его сплошь, и чужим он не считается.
+    const WGS84: [u16; 3] = [4326, 4979, 4055];
     const UNSAID: [u16; 2] = [0, 32767];
     geokey(keys, 2048).filter(|code| !WGS84.contains(code) && !UNSAID.contains(code))
 }
@@ -1940,6 +1943,11 @@ mod tests {
         assert_eq!(foreign_datum(&with(4258)), Some(4258), "ETRS89");
         assert_eq!(foreign_datum(&with(4326)), None, "он и есть WGS84");
         assert_eq!(foreign_datum(&with(4979)), None, "он же, трёхмерный");
+        assert_eq!(
+            foreign_datum(&with(4055)),
+            None,
+            "сфера веб-Меркатора: координаты те же, что у WGS84"
+        );
         assert_eq!(foreign_datum(&with(32767)), None, "user-defined — не ответ");
         assert_eq!(foreign_datum(&geokeys(2)), None, "ключа нет вовсе");
     }
