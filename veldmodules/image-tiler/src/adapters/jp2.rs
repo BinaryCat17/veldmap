@@ -45,6 +45,20 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     let mut head = vec![0u8; len.min(HEAD as u64) as usize];
     reader.read_exact(&mut head).map_err(|e| format!("jp2: чтение заголовка: {}", e))?;
     let (width, height) = header_dims(&head)?;
+    // Раскладка кодстрима — не про показ, а про то, чего стои́т чтение куска:
+    // единица чтения у JPEG 2000 это тайл, и нарезка решает, есть ли смысл
+    // просить область вместо уровня целиком. Отказ здесь не приговор — растр
+    // читается по-прежнему, просто выбирать способ не по чему.
+    match codestream(&head) {
+        Ok(layout) => {
+            let (across, down) = layout.grid();
+            veldsdk::log::debug!(target: "perf",
+                "jp2 {}×{}: тайлов {}×{} по {}×{}, начало {:?}, компонент {}, разрешений {}",
+                width, height, across, down, layout.tile.0, layout.tile.1,
+                layout.origin, layout.components, layout.resolutions);
+        }
+        Err(why) => veldsdk::log::debug!(target: "perf", "jp2 {}×{}: {}", width, height, why),
+    }
     let mut info = Info::plain(width, height, Kind::Jp2);
     info.finest = finest(len, width, height);
     info.placement = gml_placement(&head, width, height);
@@ -481,6 +495,132 @@ fn siz_dims(from_siz: &[u8]) -> Result<(u32, u32), String> {
     Ok((xsiz - xo, ysiz - yo))
 }
 
+/// Раскладка кодстрима: чем он нарезан и на сколько разрешений разложен.
+///
+/// Нужна не показу, а выбору способа чтения, и решает она его целиком.
+/// Единица чтения у JPEG 2000 — **тайл-парт**, а не пакет: тело тайла читается
+/// сплошняком. Значит «прочитать кусок картинки» стои́т ровно столько тайлов,
+/// сколько этот кусок задевает, и у нарезанного на один тайл файла выбор куска
+/// не экономит ни байта.
+///
+/// `resolutions` — сколько ступеней вейвлета записано. Грубее последней
+/// декодер не отдаёт, и такие уровни пирамиды добираются своим делением
+/// пополам.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Codestream {
+    /// Холст и его начало (`Xsiz`/`Ysiz`, `XOsiz`/`YOsiz`).
+    pub canvas: (u32, u32),
+    pub origin: (u32, u32),
+    /// Шаг сетки тайлов и её начало (`XTsiz`/`YTsiz`, `XTOsiz`/`YTOsiz`).
+    pub tile: (u32, u32),
+    pub tile_origin: (u32, u32),
+    pub components: u16,
+    pub resolutions: u8,
+}
+
+impl Codestream {
+    /// Тайлов по горизонтали и вертикали (ISO 15444-1, B.3).
+    pub fn grid(&self) -> (u32, u32) {
+        let across = |canvas: u32, origin: u32, step: u32| match step {
+            0 => 0,
+            _ => (canvas.saturating_sub(origin)).div_ceil(step),
+        };
+        (
+            across(self.canvas.0, self.tile_origin.0, self.tile.0),
+            across(self.canvas.1, self.tile_origin.1, self.tile.1),
+        )
+    }
+}
+
+/// Начало кодстрима в голове файла: тело коробки `jp2c` либо сам файл, если это
+/// голый кодстрим. `None` — коробки в прочитанную голову не поместилось.
+fn codestream_at(head: &[u8]) -> Option<usize> {
+    if head.starts_with(CODESTREAM_MAGIC) {
+        return Some(0);
+    }
+    let mut at = 0usize;
+    while at + 8 <= head.len() {
+        let len = u32::from_be_bytes(head[at..at + 4].try_into().unwrap()) as u64;
+        let kind = &head[at + 4..at + 8];
+        let (body, next) = match len {
+            0 => (at + 8, head.len()),
+            1 => {
+                if at + 16 > head.len() {
+                    return None;
+                }
+                let xlen = u64::from_be_bytes(head[at + 8..at + 16].try_into().unwrap());
+                (at + 16, step(at, xlen, head.len()))
+            }
+            _ => (at + 8, step(at, len, head.len())),
+        };
+        if kind == b"jp2c" {
+            return Some(body);
+        }
+        if next <= at {
+            return None;
+        }
+        at = next;
+    }
+    None
+}
+
+/// Раскладка из головы: маркер SIZ даёт холст и сетку тайлов, первый COD —
+/// число разрешений.
+///
+/// COD ищется обходом маркеров, а не по смещению: между SIZ и COD стоя́т
+/// необязательные сегменты, и порядок их файл выбирает сам. Обход кончается на
+/// SOT — дальше идут тайлы, а нам нужен главный заголовок.
+pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
+    let at = codestream_at(head).ok_or("jp2: кодстрим не найден в голове файла")?;
+    let cs = &head[at..];
+    if cs.len() < 40 || cs[0] != 0xFF || cs[1] != 0x4F || cs[2] != 0xFF || cs[3] != 0x51 {
+        return Err("jp2: кодстрим без SOC и SIZ".to_string());
+    }
+    let be32 = |at: usize| u32::from_be_bytes(cs[at..at + 4].try_into().unwrap());
+    let be16 = |at: usize| u16::from_be_bytes(cs[at..at + 2].try_into().unwrap());
+    // SOC — два байта без длины, дальше сегмент SIZ: [маркер 2][Lsiz 2][Rsiz 2]
+    // [Xsiz 4][Ysiz 4][XOsiz 4][YOsiz 4][XTsiz 4][YTsiz 4][XTOsiz 4][YTOsiz 4]
+    // [Csiz 2]. Смещения считаются от маркера SIZ, а не от начала кодстрима:
+    // SOC перед ним свою пару байт занимает.
+    let siz = 2usize;
+    let mut layout = Codestream {
+        canvas: (be32(siz + 6), be32(siz + 10)),
+        origin: (be32(siz + 14), be32(siz + 18)),
+        tile: (be32(siz + 22), be32(siz + 26)),
+        tile_origin: (be32(siz + 30), be32(siz + 34)),
+        components: be16(siz + 38),
+        resolutions: 0,
+    };
+
+    // Обход сегментов главного заголовка. Длина у каждого стои́т сразу за
+    // маркером и считает саму себя, так что следующий маркер — через `2 + L`.
+    // Обход кончается на SOT: дальше идут тайлы, а нужен главный заголовок.
+    let mut walk = siz + 2 + be16(siz + 2) as usize;
+    while walk + 4 <= cs.len() {
+        if cs[walk] != 0xFF {
+            return Err("jp2: главный заголовок кончился не маркером".to_string());
+        }
+        let marker = cs[walk + 1];
+        if marker == 0x90 {
+            break;
+        }
+        let length = be16(walk + 2) as usize;
+        if length < 2 || walk + 2 + length > cs.len() {
+            break;
+        }
+        // COD: [Scod 1][SGcod: порядок 1, слоёв 2, MCT 1][SPcod: ступеней 1…].
+        // Ступеней вейвлета на единицу меньше, чем разрешений.
+        if marker == 0x52 && length >= 12 {
+            layout.resolutions = cs[walk + 9].saturating_add(1);
+        }
+        walk += 2 + length;
+    }
+    if layout.resolutions == 0 {
+        return Err("jp2: кодстрим без COD в голове файла".to_string());
+    }
+    Ok(layout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,6 +787,83 @@ mod tests {
         assert_eq!(header_dims(&jp2_head(10980, 5490)), Ok((10980, 5490)));
     }
 
+    /// Кодстрим: SOC, SIZ с холстом и сеткой тайлов, необязательный сегмент
+    /// между ними и COD, потом SOT. Именно так и лежит настоящий файл, и
+    /// именно поэтому COD ищется обходом, а не по смещению.
+    fn codestream_bytes(canvas: (u32, u32), origin: (u32, u32), tile: (u32, u32), levels: u8)
+    -> Vec<u8> {
+        let mut out = CODESTREAM_MAGIC.to_vec(); // SOC + маркер SIZ
+        let mut siz = 0u16.to_be_bytes().to_vec(); // Rsiz
+        for value in [canvas.0, canvas.1, origin.0, origin.1, tile.0, tile.1, origin.0, origin.1] {
+            siz.extend_from_slice(&value.to_be_bytes());
+        }
+        siz.extend_from_slice(&3u16.to_be_bytes()); // Csiz
+        siz.extend_from_slice(&[7, 1, 1, 7, 1, 1, 7, 1, 1]); // Ssiz/XRsiz/YRsiz ×3
+        out.extend_from_slice(&((siz.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&siz);
+
+        // Необязательный сегмент перед COD — обход обязан через него перешагнуть.
+        out.extend_from_slice(&[0xFF, 0x55, 0x00, 0x04, 0x00, 0x00]); // TLM
+
+        let cod = [0u8, 0, 0, 1, 0, levels, 5, 5, 0, 0, 0];
+        out.extend_from_slice(&[0xFF, 0x52]);
+        out.extend_from_slice(&((cod.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&cod);
+        out.extend_from_slice(&[0xFF, 0x90]); // SOT — дальше главного заголовка нет
+        out
+    }
+
+    /// Раскладка читается из кодстрима: холст, сетка тайлов, компоненты,
+    /// разрешения. Число разрешений на единицу больше записанных ступеней —
+    /// файл пишет ступени, а нам нужны уровни, которые декодер отдаст.
+    #[test]
+    fn codestream_layout_is_read_from_the_main_header() {
+        let raw = codestream_bytes((10980, 10980), (0, 0), (1024, 1024), 5);
+        let layout = codestream(&raw).expect("раскладка читается");
+
+        assert_eq!(layout.canvas, (10980, 10980));
+        assert_eq!(layout.origin, (0, 0));
+        assert_eq!(layout.tile, (1024, 1024));
+        assert_eq!(layout.components, 3);
+        assert_eq!(layout.resolutions, 6, "ступеней 5 — значит разрешений 6");
+        assert_eq!(layout.grid(), (11, 11));
+    }
+
+    /// Тот же кодстрим внутри коробки `jp2c`: у контейнера главный заголовок
+    /// лежит не с начала файла, и найти его — половина работы.
+    #[test]
+    fn codestream_is_found_inside_the_container() {
+        let mut head = jp2_head(700, 40);
+        head.extend_from_slice(&boxed(b"jp2c", &codestream_bytes((700, 40), (0, 0), (700, 40), 4)));
+        let layout = codestream(&head).expect("раскладка читается и в контейнере");
+
+        assert_eq!(layout.canvas, (700, 40));
+        assert_eq!(layout.resolutions, 5);
+        assert_eq!(layout.grid(), (1, 1), "один тайл на весь холст");
+    }
+
+    /// Нарезка считается от начала сетки, а не от нуля: у файла со смещением
+    /// холста они разные, и деление нацело здесь солгало бы.
+    #[test]
+    fn the_tile_grid_counts_from_its_own_origin() {
+        let raw = codestream_bytes((1000, 600), (40, 40), (256, 256), 3);
+        let layout = codestream(&raw).expect("раскладка читается");
+
+        assert_eq!(layout.origin, (40, 40));
+        assert_eq!(layout.grid(), (4, 3), "(1000-40)/256 → 4, (600-40)/256 → 3");
+    }
+
+    /// Кодстрим без COD — не раскладка «по умолчанию», а отказ: число
+    /// разрешений решает, до какого уровня действует фактор декодера, и
+    /// придумать его нельзя.
+    #[test]
+    fn a_codestream_without_cod_is_refused() {
+        let mut raw = codestream_bytes((700, 40), (0, 0), (700, 40), 4);
+        let cod = raw.windows(2).position(|pair| pair == [0xFF, 0x52]).expect("COD на месте");
+        raw[cod + 1] = 0x58; // RGN — сегмент есть, но не тот
+        assert!(codestream(&raw).is_err());
+    }
+
     #[test]
     fn raw_codestream_yields_dims() {
         // SOC + SIZ с холстом 700×40 без смещения.
@@ -721,3 +938,4 @@ mod tests {
         assert_eq!(&rgba[..3], &[0, 0, 0]);
     }
 }
+
