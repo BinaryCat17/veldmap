@@ -44,11 +44,21 @@ def prints(source: str, needle: str) -> bool:
 
 
 def test_the_runner_reads_the_words_the_host_prints():
-    """Обе иглы прогона встречаются там, где хост об этом пишет."""
+    """Обе иглы прогона встречаются там, где хост об этом пишет.
+
+    Про видеокарту пишут два места, и оба обязательны. `setup.rs` — обработчик
+    неперехваченного: рисование, шейдеры, раскладки. `memory.rs` — отказ
+    выделения, и сюда он попадает потому, что ловится областью ошибок на месте
+    и до обработчика не доходит вовсе. Проверять одно из двух значит ослепнуть
+    ровно наполовину, не заметив этого.
+    """
     runner = load_runner()
 
     assert prints("setup.rs", runner.GPU_NEEDLE), \
         f"'{runner.GPU_NEEDLE}' больше не печатается в setup.rs — ловля ослепла"
+    assert prints("memory.rs", runner.GPU_NEEDLE), \
+        f"'{runner.GPU_NEEDLE}' больше не печатается в memory.rs — отказ выделения " \
+        "перестал быть виден прогону"
     assert prints("plugins.rs", runner.TRAP_NEEDLE), \
         f"'{runner.TRAP_NEEDLE}' больше не печатается в plugins.rs — ловля ослепла"
 

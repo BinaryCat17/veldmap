@@ -120,18 +120,117 @@ fn window(offset: u64, size: u64, align: u64, limit: u64) -> (u64, u64, usize) {
 ///
 /// Сам менеджер ничего не хранит: записи (носитель + lease) живут в
 /// реестре, здесь только создание носителей и байтовые операции над ними.
+/// Потеря устройства — единственный отказ, которого не видно областью ошибок.
+///
+/// Все прочие отказы выделения ловятся на месте (см. [`watched`]), а этот
+/// приходит раньше их: у потерянного устройства `create_*` отказывает до
+/// всякой проверки, и wgpu такую ошибку в области ошибок не кладёт — она уходит
+/// своим обратным вызовом. Потеря необратима, поэтому и помнится навсегда:
+/// после неё всякое выделение обязано отказывать, иначе с этого мгновения все
+/// они снова молча отдают живой номер битого ресурса.
+#[derive(Default)]
+pub struct GpuFaults {
+    lost: std::sync::OnceLock<String>,
+}
+
+impl GpuFaults {
+    /// Записать потерю. Зовётся обратным вызовом, который ставит `setup`.
+    /// Первая причина и остаётся: дальнейшие — её следствия.
+    pub fn lose(&self, why: String) {
+        let _ = self.lost.set(why);
+    }
+
+    /// Причина, если устройства больше нет.
+    fn gone(&self) -> Option<&str> {
+        self.lost.get().map(String::as_str)
+    }
+}
+
+/// Значение готового фьючера, без исполнителя.
+///
+/// `ErrorScopeGuard::pop` снимает область немедленно и отдаёт фьючер, который
+/// уже готов; ждать его нечем и незачем — тем же приёмом пользуется сам wgpu
+/// (`Device::noop`). `None` значит «не готов», и это не «жалобы не было», а
+/// «спросить не удалось»: разница видна вызывающему.
+fn settled<T>(future: impl std::future::Future<Output = T>) -> Option<T> {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(value) => Some(value),
+        std::task::Poll::Pending => None,
+    }
+}
+
+/// Выделить и узнать, пожаловалась ли на это видеокарта.
+///
+/// `create_texture` и `create_buffer` при неудаче возвращают объект, а не
+/// отказ: битая текстура снаружи неотличима от годной, пока её не нарисуют, —
+/// то есть модуль получает живой номер ресурса и ждёт картинку, которой не
+/// будет. Область ошибок — то единственное, чем эту разницу видно.
+///
+/// Области потоко-локальны, и в этом всё дело: рисующий жалуется со своего
+/// потока, модули со своих, и чужая жалоба сюда не попадёт. Замка поэтому здесь
+/// нет вовсе — выделять можно параллельно, как и раньше.
+///
+/// Областей три, потому что фильтр у области один, а отказать выделению wgpu
+/// умеет тремя способами. Снимаются они в обратном порядке: жалоба достаётся
+/// самой внутренней области с подходящим фильтром.
+fn watched<T>(device: &wgpu::Device, make: impl FnOnce() -> T) -> (T, Option<String>) {
+    let scopes: Vec<wgpu::ErrorScopeGuard> = [
+        wgpu::ErrorFilter::Internal,
+        wgpu::ErrorFilter::OutOfMemory,
+        wgpu::ErrorFilter::Validation,
+    ]
+    .into_iter()
+    .map(|filter| device.push_error_scope(filter))
+    .collect();
+
+    let made = make();
+
+    let said = complaint(
+        scopes
+            .into_iter()
+            .rev()
+            .map(|scope| settled(scope.pop()).map(|error| error.map(|error| error.to_string()))),
+    );
+    (made, said)
+}
+
+/// Что сказали снятые области ошибок.
+///
+/// `Some(Some(_))` — область ответила, и в ней жалоба; `Some(None)` — ответила
+/// и пусто; `None` — не ответила сразу. Последнее тоже отказ: спросить не
+/// удалось, а принять «не спросили» за «жалобы не было» значит вернуть ровно
+/// тот молчаливый отказ, ради которого всё это заведено.
+///
+/// Берётся первая жалоба: областей три ради трёх родов отказа, а отказ у
+/// выделения один, и называть его дважды незачем.
+fn complaint(answers: impl IntoIterator<Item = Option<Option<String>>>) -> Option<String> {
+    answers.into_iter().find_map(|answer| match answer {
+        Some(said) => said,
+        None => Some("область ошибок не ответила сразу".to_string()),
+    })
+}
+
 pub struct MemoryManager {
     registry: Arc<ResourceRegistry>,
     device: Arc<wgpu::Device>,
     queue: Arc<std::sync::Mutex<wgpu::Queue>>,
+    faults: Arc<GpuFaults>,
 }
 
 impl MemoryManager {
-    pub fn new(registry: Arc<ResourceRegistry>, device: Arc<wgpu::Device>, queue: Arc<std::sync::Mutex<wgpu::Queue>>) -> Self {
+    pub fn new(
+        registry: Arc<ResourceRegistry>,
+        device: Arc<wgpu::Device>,
+        queue: Arc<std::sync::Mutex<wgpu::Queue>>,
+        faults: Arc<GpuFaults>,
+    ) -> Self {
         Self {
             registry,
             device,
             queue,
+            faults,
         }
     }
 
@@ -187,12 +286,22 @@ impl MemoryManager {
         let mut final_usage = wgpu::BufferUsages::from_bits_truncate(usage);
         if !mapped { final_usage |= wgpu::BufferUsages::COPY_DST; }
         if mapped { final_usage |= wgpu::BufferUsages::MAP_WRITE; }
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("memory-buf"), // id ресурса выдаёт реестр, а он ещё впереди
-            size: aligned(size),
-            usage: final_usage,
-            mapped_at_creation: mapped,
+        if let Some(why) = self.faults.gone() {
+            log::warn!(target: "memory", "wgpu: буфер в {} байт не выделен: {}", size, why);
+            return 0;
+        }
+        let (buffer, refused) = watched(&self.device, || {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("memory-buf"), // id ресурса выдаёт реестр, а он ещё впереди
+                size: aligned(size),
+                usage: final_usage,
+                mapped_at_creation: mapped,
+            })
         });
+        if let Some(why) = refused {
+            log::warn!(target: "memory", "wgpu: буфер в {} байт не выделен: {}", size, why);
+            return 0;
+        }
         self.alloc(DataBacking::Buffer { buffer: Arc::new(buffer), mapped }, owner_id)
     }
 
@@ -216,16 +325,26 @@ impl MemoryManager {
         if !crate::format::is_depth(format_proto) {
             final_usage |= wgpu::TextureUsages::COPY_DST;
         }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("memory-tex"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: final_usage,
-            view_formats: &[],
+        if let Some(why) = self.faults.gone() {
+            log::warn!(target: "memory", "wgpu: текстура {}x{} не выделена: {}", width, height, why);
+            return 0;
+        }
+        let (texture, refused) = watched(&self.device, || {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("memory-tex"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: final_usage,
+                view_formats: &[],
+            })
         });
+        if let Some(why) = refused {
+            log::warn!(target: "memory", "wgpu: текстура {}x{} не выделена: {}", width, height, why);
+            return 0;
+        }
         self.registry.register(
             ResourcePayload::Gpu(GpuObject::Texture {
                 texture: Arc::new(texture), width, height, format: format_proto,
@@ -508,6 +627,50 @@ impl MemoryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Готовый фьючер отдаёт значение без исполнителя, а неготовый честно
+    /// говорит «не сразу». На этой разнице стои́т весь съём области ошибок:
+    /// принять «не сразу» за «жалобы не было» значит вернуть молчаливый отказ.
+    #[test]
+    fn готовый_фьючер_отдаёт_значение_а_неготовый_говорит_об_этом() {
+        assert_eq!(settled(std::future::ready(7)), Some(7));
+        assert_eq!(settled(std::future::pending::<u8>()), None);
+    }
+
+    /// Не ответившая область читается отказом, а не молчанием. Разница ровно
+    /// та, ради которой всё это заведено: принять «спросить не удалось» за
+    /// «жалобы не было» значит снова отдать модулю живой номер битого ресурса.
+    #[test]
+    fn неответ_области_читается_отказом_а_не_молчанием() {
+        assert_eq!(complaint([Some(None), Some(None), Some(None)]), None, "все ответили и все пусты");
+
+        assert_eq!(
+            complaint([Some(None), Some(Some("нехватка памяти".to_string()))]).as_deref(),
+            Some("нехватка памяти")
+        );
+
+        assert!(complaint([Some(None), None]).is_some(), "не ответившая область — тоже отказ");
+
+        // Первая жалоба и остаётся: отказ у выделения один.
+        assert_eq!(
+            complaint([Some(Some("первая".to_string())), Some(Some("вторая".to_string()))]).as_deref(),
+            Some("первая")
+        );
+    }
+
+    /// Потеря устройства помнится навсегда и первой причиной: дальнейшие — её
+    /// следствия, и заменять ими первую значит терять то, с чего началось.
+    #[test]
+    fn потеря_устройства_помнится_навсегда_и_первой_причиной() {
+        let faults = GpuFaults::default();
+        assert!(faults.gone().is_none(), "целое устройство не считается потерянным");
+
+        faults.lose("кабель выдернули".to_string());
+        assert_eq!(faults.gone(), Some("кабель выдернули"));
+
+        faults.lose("и ещё раз".to_string());
+        assert_eq!(faults.gone(), Some("кабель выдернули"), "первая причина осталась");
+    }
 
     /// Размер буфера дотягивается до границы копирования, а не отвергается:
     /// просить пять байт законно, копировать пять — нет.

@@ -178,12 +178,12 @@ impl Running {
         });
         let surface = instance.create_surface(window.clone())?;
         let size = window.inner_size();
-        let (_adapter, device, queue, surface_config, surface_format) =
+        let (_adapter, device, queue, surface_config, surface_format, faults) =
             veldmap_host_core::setup::init_wgpu(&instance, &surface, size.width, size.height).await?;
 
         // ── 3. Ядро и сервисы ──────────────────────────────────────────────
         let ctx = veldmap_host_core::setup::init_core_services(
-            device.clone(), queue.clone(), surface_format, host_config,
+            device.clone(), queue.clone(), surface_format, host_config, faults,
         ).await?;
         let dispatcher = ctx.dispatcher.clone();
 

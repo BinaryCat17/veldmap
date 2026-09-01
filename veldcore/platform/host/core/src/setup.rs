@@ -25,13 +25,22 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
     Ok(())
 }
 
-/// Поднимает графику: адаптер, устройство, очередь и настройку поверхности.
+/// Поднимает графику: адаптер, устройство, очередь, настройку поверхности и
+/// ловушку отказов видеокарты. Ловушка выходит отсюда потому, что здесь ставят
+/// обработчик ошибок, — а нужна она выделяющему.
 pub async fn init_wgpu<'a>(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'a>,
     window_width: u32,
     window_height: u32,
-) -> anyhow::Result<(wgpu::Adapter, Arc<wgpu::Device>, Arc<Mutex<wgpu::Queue>>, wgpu::SurfaceConfiguration, wgpu::TextureFormat)> {
+) -> anyhow::Result<(
+    wgpu::Adapter,
+    Arc<wgpu::Device>,
+    Arc<Mutex<wgpu::Queue>>,
+    wgpu::SurfaceConfiguration,
+    wgpu::TextureFormat,
+    Arc<crate::memory::GpuFaults>,
+)> {
     // Все основные бэкенды, а не один Vulkan: под Windows аппаратный адаптер
     // приходит через DX12, под macOS — через Metal, и перебор одного лишь
     // Vulkan не нашёл бы там ничего вовсе. Тогда сработал бы запасной путь ниже,
@@ -85,9 +94,23 @@ pub async fn init_wgpu<'a>(
     // именно хост: модуль после ошибки трапается и воскресает, хосту же
     // падать из-за бага одного модуля нельзя. Поэтому неперехваченное
     // становится строкой в логе, а не паникой кадрового цикла.
-    device_arc.on_uncaptured_error(Arc::new(|error: wgpu::Error| {
+    //
+    // Отказы выделения сюда не доходят: их ловит на месте тот, кто выделял
+    // (`memory::watched`), — иначе модуль получил бы живой номер битого
+    // ресурса. Здесь остаётся всё прочее: рисование, шейдеры, раскладки.
+    device_arc.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
         log::error!(target: "render", "wgpu: {}", error);
     }));
+
+    // Потеря устройства областью ошибок не ловится вовсе — у неё свой обратный
+    // вызов, и без него выделения после потери снова молча отдавали бы живые
+    // номера битых ресурсов.
+    let faults = Arc::new(crate::memory::GpuFaults::default());
+    let losing = faults.clone();
+    device_arc.set_device_lost_callback(move |reason, message| {
+        log::error!(target: "render", "wgpu: устройство потеряно ({:?}): {}", reason, message);
+        losing.lose(format!("устройство потеряно: {}", message));
+    });
     let queue_arc = Arc::new(Mutex::new(queue));
 
     let caps = surface.get_capabilities(&adapter);
@@ -125,7 +148,7 @@ pub async fn init_wgpu<'a>(
     
     surface.configure(&device_arc, &config);
 
-    Ok((adapter, device_arc, queue_arc, config, surface_format))
+    Ok((adapter, device_arc, queue_arc, config, surface_format, faults))
 }
 
 #[derive(Clone)]
@@ -171,9 +194,10 @@ pub async fn init_core_services(
     queue: Arc<Mutex<wgpu::Queue>>,
     surface_format: wgpu::TextureFormat,
     config: Arc<crate::config::HostConfig>,
+    faults: Arc<crate::memory::GpuFaults>,
 ) -> anyhow::Result<Arc<HostContext>> {
     let registry = Arc::new(ResourceRegistry::new());
-    let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone()));
+    let memory = Arc::new(MemoryManager::new(registry.clone(), device.clone(), queue.clone(), faults));
     let graphics = Arc::new(GraphicsDevice::new(registry.clone(), memory.clone(), device.clone(), surface_format));
     let tasks = Arc::new(crate::tasks::TaskRegistry::new());
     let surfaces = Arc::new(crate::surfaces::SurfaceQueue::new());

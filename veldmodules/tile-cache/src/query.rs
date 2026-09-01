@@ -149,6 +149,15 @@ enum Miss {
 /// Файл открыт → байты → RGBA → текстура с передачей владения заказчику.
 fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Result<TileResult, Miss> {
     let handle = veldsdk::resource::accept(opened).map_err(Miss::NoFile)?;
+    // Длина спрашивается до чтения: файл в каталоге кэша пишем мы сами, но
+    // пережить он может и оборванную запись, и чужую руку, а читается он
+    // целиком в память инстанса. Потолок тот же, что у записи, — тело тайла
+    // сжато, и сжатое крупнее развёрнутого не бывает.
+    if handle.size > layout::MAX_TILE_BYTES as u64 {
+        return Err(Miss::Broken(format!(
+            "тело тайла {} байт при потолке {}", handle.size, layout::MAX_TILE_BYTES
+        )));
+    }
     let file = veldsdk::OwnedResource::new(handle.clone());
     let bytes = veldsdk::abi::resource_read(file.id(), 0, handle.size)
         .map_err(|e| Miss::Broken(e.to_string()))?;
@@ -165,11 +174,17 @@ fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Re
 /// Кодированный тайл → RGBA8. Трёхканальные разворачиваются: кодек хранит
 /// столько каналов, сколько было при записи, а текстуре нужны четыре.
 fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    let (header, pixels) = qoi::decode_to_vec(bytes).map_err(|e| format!("qoi: {}", e))?;
+    // Размеры спрашиваются у заголовка, а не у декодированного. Декодер
+    // выделяет по ним, и проверка после него отвергала бы уже занятое — а на
+    // размерах, ради которых она написана, не исполнялась бы вовсе: свой
+    // потолок у кодека — четыреста мегапикселей, то есть полтора гигабайта
+    // RGBA, и столько инстансу не дают.
+    let header = qoi::decode_header(bytes).map_err(|e| format!("qoi: {}", e))?;
     let (width, height) = (header.width, header.height);
     if width == 0 || height == 0 || width > layout::MAX_TILE_SIDE || height > layout::MAX_TILE_SIDE {
         return Err(format!("qoi: неправдоподобные размеры {}×{}", width, height));
     }
+    let (_, pixels) = qoi::decode_to_vec(bytes).map_err(|e| format!("qoi: {}", e))?;
     let pixel_count = (width as usize) * (height as usize);
     match pixels.len() / pixel_count.max(1) {
         4 => Ok((width, height, pixels)),
@@ -182,5 +197,53 @@ fn decode(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
             Ok((width, height, rgba))
         }
         other => Err(format!("qoi: {} каналов", other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Заголовок QOI без единого байта тела: размеры объявлены, декодировать
+    /// нечего.
+    fn header(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"qoif".to_vec();
+        bytes.extend_from_slice(&width.to_be_bytes());
+        bytes.extend_from_slice(&height.to_be_bytes());
+        bytes.extend_from_slice(&[4, 0]);
+        bytes
+    }
+
+    /// Размеры проверяются ДО декодирования, а не после него.
+    ///
+    /// Порядок здесь и есть вся защита: декодер выделяет по объявленным
+    /// размерам, и его собственный потолок — четыреста мегапикселей, то есть
+    /// полтора гигабайта RGBA. Столько инстансу не дают, и проверка после
+    /// декода не исполнилась бы вовсе.
+    ///
+    /// Видно это по тому, чем кончается отказ: сработай проверка позже, речь
+    /// шла бы о нехватке байтов, а не о размерах.
+    #[test]
+    fn размеры_проверяются_до_декодирования() {
+        let why = decode(&header(20_000, 20_000)).expect_err("тайл 20000×20000 обязан быть отвергнут");
+        assert!(why.contains("неправдоподобные размеры"), "отказ не про размеры: {why}");
+    }
+
+    /// А правдоподобные размеры проверку проходят, и дело доходит до декодера —
+    /// по отказу это и видно. Без этой половины первый тест доказывал бы лишь,
+    /// что `decode` всегда отказывает.
+    #[test]
+    fn правдоподобные_размеры_до_потолка_не_доходят() {
+        let why = decode(&header(512, 512)).expect_err("тела в заголовке нет, декод обязан сорваться");
+        assert!(!why.contains("неправдоподобные"), "законный тайл отвергнут потолком: {why}");
+    }
+
+    /// Пустой и битый заголовок — отказ, а не паника: файл в каталоге кэша
+    /// переживает и оборванную запись.
+    #[test]
+    fn битый_заголовок_не_роняет() {
+        assert!(decode(&[]).is_err());
+        assert!(decode(b"not a qoi file at all").is_err());
+        assert!(decode(&header(0, 512)).is_err(), "нулевая сторона");
     }
 }
