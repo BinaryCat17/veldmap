@@ -40,14 +40,25 @@ file, and `finest = 0` traps on a single-tile stream. Keeping both decoders.
 
 ## Consequences
 
-Measured before 2026-09-02 by parsing the main header with `jp2::codestream`
-(the file is not kept): TCI 10980² — tiles 11×11 of 1024², origin (0, 0), 3
-components, 5 resolutions against 6 pyramid levels; PVI 343² — tiles 43×43 of
-8². TLM/PLT presence is not measured; roadmap step 3 measures it. Level 0
-memory for that TCI, computed from the constants on 2026-09-02: strip of rows
-≈ 45 MB, one decoded tile ≈ 13 MB (i32 per sample), cascade strips
-`cascade::bytes(10980, 10980)` ≈ 56 MB — about 114 MB against `budget::free()`,
-where `jp2::estimate` for the same level is about 3 GB today. Obligations: a
-fixture from the crate's encoder; openjp2 equal to hayro byte for byte on the
-5/3 wavelet and within a named tolerance on 9/7; a scenario in `uitests/` that
-proves level 0 on a granule; wasm size and start time recorded here.
+Measured on 2026-09-02 with the application itself: the layout line that
+`jp2::codestream` prints at describe (`veldmap::image-tiler::perf`), on the
+L2A granule `S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713` —
+the TCI downloaded with the application (`uitests/fixtures/s2-tci.txt`) and
+opened by `uitests/jp2canvas.txt`, PVI and B04 described over the network.
+TCI 10 m and B04 10 m: 10980², tiles 11×11 of 1024², origin (0, 0), 3 and 1
+components, 5 resolutions against 6 pyramid levels, progression LRCP, one
+quality layer, precincts of the file's own (Scod = 1), a TLM listing 121
+tile-parts (one per tile), PLT in the first tile-part header, a GML box. PVI:
+343², tiles 43×43 of 8², one pyramid level, LRCP, one layer, PLT and GML, no
+TLM.
+So the network outcome is tile granularity by TLM, about a megabyte per TCI
+tile, with a refinement: one layer in LRCP means the packets of a tile-part
+run coarse to fine, and PLT gives their lengths, so a prefix of a tile-part is
+the coarse levels of that tile. Level 0 memory for that TCI, computed from the
+constants on 2026-09-02: strip of rows ≈ 45 MB, one decoded tile ≈ 13 MB (i32
+per sample), cascade strips `cascade::bytes(10980, 10980)` ≈ 56 MB — about
+114 MB against `budget::free()`, where `jp2::estimate` for the same level is
+about 3 GB today. Obligations: a fixture from the crate's encoder; openjp2
+equal to hayro byte for byte on the 5/3 wavelet and within a named tolerance
+on 9/7; `uitests/jp2canvas.txt` switches its `wait text:не будет` to `absent`
+when level 0 is served; wasm size and start time recorded here.

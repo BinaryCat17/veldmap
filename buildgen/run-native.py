@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import signal
 import subprocess
 import os
 import sys
@@ -55,21 +56,22 @@ def main():
         print("Please run build first: python3 build.py")
         return 1
     
+    # Запускаем процесс напрямую (без cargo); stdout и stderr — в консоль.
+    process = subprocess.Popen(cmd, env=env, stdout=None, stderr=subprocess.STDOUT)
+
+    # TERM, пришедший нам, — хосту: иначе убитый `timeout` или пределом
+    # прогона посредник оставляет окно жить, и следующий запуск делит с ним
+    # runtime/ и видеокарту. Своего обработчика у хоста нет, он умирает сразу;
+    # дожидаемся его, чтобы вернуть его код, а не свой.
+    def hand_over(signum, _frame):
+        process.send_signal(signum)
+    signal.signal(signal.SIGTERM, hand_over)
+
     try:
-        # Запускаем процесс напрямую (без cargo)
-        # stdout и stderr -> консоль
-        process = subprocess.Popen(
-            cmd, 
-            env=env,
-            stdout=None,  # stdout в консоль
-            stderr=subprocess.STDOUT  # stderr тоже в консоль
-        )
         # Код возврата хоста — наш собственный: по нему прогон по сценарию
         # отличает «сошлось» от «не сошлось», и глотать его нельзя.
         return process.wait()
     except KeyboardInterrupt:
-        # Хост дописывает логи уже после сигнала — дожидаемся его, иначе лог
-        # обрывается на середине последнего кадра.
         print("\nShutting down.")
         process.wait()
         return 130

@@ -112,3 +112,16 @@ def test_a_quiet_log_leaves_the_return_code_alone():
 
     assert runner.outcome(0, "") == "сошёлся"
     assert runner.outcome(1, "") == "НЕ СОШЁЛСЯ"
+
+
+def test_the_run_limit_grows_with_the_scenario_wait(tmp_path):
+    """Сценарий, ждущий закачку минутами, не должен быть убит общим пределом:
+    предел прогона — запас сверх самого долгого объявленного ожидания."""
+    runner = load_runner()
+    short = tmp_path / "short.txt"
+    short.write_text("100 wait tab_menu\n200 exit\n", encoding="utf-8")
+    long = tmp_path / "long.txt"
+    long.write_text("100 timeout 10000\n200 timeout 900000\n300 gone text:x\n400 timeout 30000\n",
+                    encoding="utf-8")
+    assert runner.limit_for(str(short)) == runner.LIMIT_SECONDS
+    assert runner.limit_for(str(long)) == runner.LIMIT_SECONDS + 900

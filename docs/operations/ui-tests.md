@@ -29,6 +29,9 @@ asks the network itself. Downloaded data in `runtime/data/` — for those that
 open a raster or put it on the globe. Each scenario states its needs in its
 header; on an empty machine the set does not pass as a whole, and that is not
 a failure but the price of checking the live application rather than stubs.
+A large fixture is fetched once, by hand, with a scenario from
+`uitests/fixtures/` — the runner does not look there — and the scenario that
+needs it names it in its header.
 
 One scenario takes seconds, half of it the application's start (GPU, module
 loading). They cannot run at once: they share `runtime/` — logs, the tile
@@ -56,9 +59,13 @@ than pressing what is under it). Hence the trick: to wait for a menu to close,
 wait for what it covered, not for the menu itself.
 
 Only what `ui-service` draws is addressable by name — pressable boxes, input
-fields and labels. The globe, the preview canvas and the panel dividers have
-no names (they are `Viewport` and `Divider` and do not announce themselves to
-the walk); for those the pixel steps remain.
+fields and labels. A row's menu opens by its key (`open_menu:row:<key>`, the
+provider's key of the row), and the items inside it are reached by their
+label (`text:`), which depends on the row's state — a scenario that must
+converge from more than one state waits for the state first. The globe, the
+preview canvas and the panel dividers have no names (they are `Viewport` and
+`Divider` and do not announce themselves to the walk); for those the pixel
+steps remain.
 
 ## Steps
 
@@ -143,7 +150,13 @@ rather than replacing it: a scenario that held is `сошёлся`, and
 `НЕ СОШЁЛСЯ + ТРАП МОДУЛЯ` is two facts, both needed. The same goes for
 `ЗАВИС`, where the log matters most: steps are
 replayed per frame, so a stalled frame loop also holds the scenario clock —
-its own wait limit never fires, and the run hits the global one.
+its own wait limit never fires, and the run hits the global one. That global
+limit is `LIMIT_SECONDS` of the runner plus the longest `timeout` the scenario
+declares, so a scenario that honestly waits minutes for a download is not
+killed for waiting. When the limit does fire, the runner stops the whole
+process group: the host is a grandchild, started by `run-native.py`, and that
+script hands a `SIGTERM` it gets over to the host — so neither a stopped run
+nor a `timeout` around `run-native.py` leaves a window behind.
 
 The order of failures in the line is fixed, so the same pair of runs is always
 named the same; there is no causality between them.

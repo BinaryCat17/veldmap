@@ -23,6 +23,7 @@
 осталось бы ничего — его лог затёрли бы следующие.
 """
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -33,10 +34,23 @@ SCENARIOS_DIR = os.path.join(PROJECT_ROOT, "uitests")
 WINDOW_STATE = os.path.join(PROJECT_ROOT, "runtime", "state", "data-browser.json")
 HOST_LOG = os.path.join(PROJECT_ROOT, "runtime", "logs", "host.log")
 
-# Предел на один сценарий. Сам сценарий кончается шагом `exit`; сюда прогон
-# доходит, только если приложение зависло или не дошло до конца — и тогда это
-# провал, а не повод ждать дальше.
+# Предел на один сценарий сверх его собственных ожиданий. Сам сценарий
+# кончается шагом `exit`; сюда прогон доходит, только если приложение зависло
+# или не дошло до конца — и тогда это провал, а не повод ждать дальше.
+# Сценарий, объявивший `timeout` длиннее (закачка файла — минуты), получает
+# столько же сверх него: иначе прогон убивал бы то, чего сценарий честно ждёт.
 LIMIT_SECONDS = 180
+
+
+def limit_for(path: str) -> float:
+    """Предел прогона: общий запас плюс самое долгое ожидание сценария."""
+    longest = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) >= 3 and fields[1] == "timeout" and fields[2].isdigit():
+                longest = max(longest, int(fields[2]))
+    return LIMIT_SECONDS + longest / 1000
 
 
 def scenarios(names: list[str]) -> list[str]:
@@ -49,6 +63,19 @@ def scenarios(names: list[str]) -> list[str]:
             for name in sorted(os.listdir(SCENARIOS_DIR)) if name.endswith(".txt")]
 
 
+def stop(running: subprocess.Popen) -> None:
+    """Снять прогон целиком — всю группу процессов, а не одного посредника.
+    Сперва TERM — обработчика у хоста нет, и он просто умирает, а лог цел,
+    потому что пишется построчно; не ушёл (посредник, ждущий потомка) —
+    KILL."""
+    os.killpg(running.pid, signal.SIGTERM)
+    try:
+        running.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(running.pid, signal.SIGKILL)
+        running.wait()
+
+
 def play(path: str, name: str) -> tuple[str, float]:
     """Один сценарий: чем он кончился."""
     env = os.environ.copy()
@@ -59,14 +86,17 @@ def play(path: str, name: str) -> tuple[str, float]:
     if os.path.exists(HOST_LOG):
         os.remove(HOST_LOG)
     started = time.monotonic()
+    # Своей группой процессов: хост — внук (его поднимает run-native.py), и
+    # убитый по пределу посредник сам по себе окно не уносит.
+    running = subprocess.Popen(
+        [sys.executable, os.path.join(BUILDGEN_DIR, "run-native.py")],
+        cwd=PROJECT_ROOT, env=env, start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+    )
     try:
-        done = subprocess.run(
-            [sys.executable, os.path.join(BUILDGEN_DIR, "run-native.py")],
-            cwd=PROJECT_ROOT, env=env, timeout=LIMIT_SECONDS,
-            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-        )
-        result = outcome(done.returncode, host_log())
+        result = outcome(running.wait(timeout=limit_for(path)), host_log())
     except subprocess.TimeoutExpired:
+        stop(running)
         # Отличается от «не сошёлся» намеренно: сценарий, дошедший до своего
         # конца, кончается сам, а упёршийся в предел — это зависшее
         # приложение, и искать его причину надо не в сценарии.

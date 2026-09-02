@@ -54,9 +54,14 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
         Ok(layout) => {
             let (across, down) = layout.grid();
             veldsdk::log::debug!(target: "perf",
-                "jp2 {}×{}: тайлов {}×{} по {}×{}, начало {:?}, компонент {}, разрешений {}",
+                "jp2 {}×{}: тайлов {}×{} по {}×{}, начало {:?}, компонент {}, разрешений {}, \
+                 прогрессия {}, слоёв {}, тайл-партов в TLM {}, PLT у первого тайл-парта {}, GML {}",
                 width, height, across, down, layout.tile.0, layout.tile.1,
-                layout.origin, layout.components, layout.resolutions);
+                layout.origin, layout.components, layout.resolutions, layout.progression,
+                layout.layers,
+                layout.tlm_parts.map_or("нет TLM".to_string(), |n| n.to_string()),
+                layout.plt_first.map_or("не видно", |plt| if plt { "есть" } else { "нет" }),
+                if gml_text(&head).is_some() { "есть" } else { "нет" });
         }
         Err(why) => veldsdk::log::debug!(target: "perf", "jp2 {}×{}: {}", width, height, why),
     }
@@ -508,6 +513,13 @@ fn siz_dims(from_siz: &[u8]) -> Result<(u32, u32), String> {
 /// `resolutions` — сколько ступеней вейвлета записано. Грубее последней
 /// декодер не отдаёт, и такие уровни пирамиды добираются своим делением
 /// пополам.
+///
+/// Три поля про то, найдётся ли тайл без обхода всего файла: `tlm_parts` —
+/// сколько тайл-партов перечислено в TLM главного заголовка (`None` — TLM
+/// нет, и адрес тайла узнаётся только обходом SOT); `plt_first` — есть ли PLT
+/// в заголовке первого тайл-парта (`None` — тот в голову не поместился);
+/// `progression` — порядок прогрессии из COD. Записываются в журнал описания:
+/// по ним решается, как читать гранулу по сети (см. `docs/decisions/0002`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Codestream {
     /// Холст и его начало (`Xsiz`/`Ysiz`, `XOsiz`/`YOsiz`).
@@ -518,6 +530,12 @@ pub struct Codestream {
     pub tile_origin: (u32, u32),
     pub components: u16,
     pub resolutions: u8,
+    pub progression: u8,
+    /// Слоёв качества из COD: при одном слое пакеты тайл-парта в LRCP идут
+    /// по разрешениям, и его префикс — грубые уровни.
+    pub layers: u16,
+    pub tlm_parts: Option<u32>,
+    pub plt_first: Option<bool>,
 }
 
 impl Codestream {
@@ -592,6 +610,10 @@ pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
         tile_origin: (be32(siz + 30), be32(siz + 34)),
         components: be16(siz + 38),
         resolutions: 0,
+        progression: 0,
+        layers: 0,
+        tlm_parts: None,
+        plt_first: None,
     };
 
     // Обход сегментов главного заголовка. Длина у каждого стои́т сразу за
@@ -604,6 +626,7 @@ pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
         }
         let marker = cs[walk + 1];
         if marker == 0x90 {
+            layout.plt_first = first_tile_part_has_plt(cs, walk);
             break;
         }
         let length = be16(walk + 2) as usize;
@@ -613,7 +636,18 @@ pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
         // COD: [Scod 1][SGcod: порядок 1, слоёв 2, MCT 1][SPcod: ступеней 1…].
         // Ступеней вейвлета на единицу меньше, чем разрешений.
         if marker == 0x52 && length >= 12 {
+            layout.progression = cs[walk + 5];
+            layout.layers = be16(walk + 6);
             layout.resolutions = cs[walk + 9].saturating_add(1);
+        }
+        // TLM: [Ztlm 1][Stlm 1][записи…]; в Stlm биты 4–5 — ширина Ttlm
+        // (0, 1 или 2 байта), бит 6 — ширина Ptlm (2 или 4). Сегментов бывает
+        // несколько, записи считаются по всем.
+        if marker == 0x55 && length >= 4 {
+            let stlm = cs[walk + 5];
+            let entry = usize::from((stlm >> 4) & 3) + if stlm & 0x40 != 0 { 4 } else { 2 };
+            let listed = ((length - 4) / entry) as u32;
+            layout.tlm_parts = Some(layout.tlm_parts.unwrap_or(0) + listed);
         }
         walk += 2 + length;
     }
@@ -621,6 +655,32 @@ pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
         return Err("jp2: кодстрим без COD в голове файла".to_string());
     }
     Ok(layout)
+}
+
+/// Есть ли PLT в заголовке первого тайл-парта, начинающегося маркером SOT в
+/// `at`. `None` — заголовок в прочитанную голову не поместился: до SOD не
+/// дошли и PLT не встретили.
+fn first_tile_part_has_plt(cs: &[u8], at: usize) -> Option<bool> {
+    // SOT: [Lsot 2 = 10][Isot 2][Psot 4][TPsot 1][TNsot 1]; дальше сегменты
+    // заголовка тайл-парта до SOD.
+    let mut walk = at + 12;
+    while walk + 2 <= cs.len() && cs[walk] == 0xFF {
+        match cs[walk + 1] {
+            0x93 => return Some(false),
+            0x58 => return Some(true),
+            _ => {}
+        }
+        // У прочих сегментов есть длина; SOD и PLT решены выше, до неё.
+        if walk + 4 > cs.len() {
+            break;
+        }
+        let length = usize::from(u16::from_be_bytes([cs[walk + 2], cs[walk + 3]]));
+        if length < 2 {
+            break;
+        }
+        walk += 2 + length;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -813,6 +873,35 @@ mod tests {
         out.extend_from_slice(&cod);
         out.extend_from_slice(&[0xFF, 0x90]); // SOT — дальше главного заголовка нет
         out
+    }
+
+    /// Что решает чтение по сети, читается из той же головы: записи TLM
+    /// считаются по всем сегментам и по ширине полей из Stlm, PLT ищется в
+    /// заголовке первого тайл-парта, прогрессия берётся из COD.
+    #[test]
+    fn tile_part_index_and_plt_are_read_from_the_head() {
+        let mut raw = codestream_bytes((2048, 2048), (0, 0), (1024, 1024), 4);
+        let sot_at = raw.len() - 2;
+        raw.truncate(sot_at);
+        // Второй TLM: Ztlm 1, Stlm 0x40 (Ttlm нет, Ptlm по 4 байта), три записи.
+        raw.extend_from_slice(&[0xFF, 0x55, 0x00, 0x10, 0x01, 0x40]);
+        raw.extend_from_slice(&[0; 12]);
+        // SOT первого тайл-парта, его заголовок с PLT, потом SOD.
+        raw.extend_from_slice(&[0xFF, 0x90, 0x00, 0x0A, 0, 0, 0, 0, 0, 0, 0, 1]);
+        raw.extend_from_slice(&[0xFF, 0x58, 0x00, 0x03, 0x00]);
+        raw.extend_from_slice(&[0xFF, 0x93]);
+        let layout = codestream(&raw).expect("раскладка читается");
+        assert_eq!(layout.tlm_parts, Some(3), "первый TLM пуст, второй перечисляет три тайл-парта");
+        assert_eq!(layout.plt_first, Some(true));
+        assert_eq!((layout.progression, layout.layers), (0, 1));
+
+        // Без PLT до SOD — «нет»; голова, кончившаяся раньше SOD, — «не видно».
+        let without = codestream_bytes((2048, 2048), (0, 0), (1024, 1024), 4);
+        let mut bare = without.clone();
+        bare.extend_from_slice(&[0x00, 0x0A, 0, 0, 0, 0, 0, 0, 0, 1, 0xFF, 0x93]);
+        assert_eq!(codestream(&bare).unwrap().plt_first, Some(false));
+        assert_eq!(codestream(&without).unwrap().plt_first, None);
+        assert_eq!(codestream(&without).unwrap().tlm_parts, Some(0), "пустой TLM — сегмент есть, записей нет");
     }
 
     /// Раскладка читается из кодстрима: холст, сетка тайлов, компоненты,

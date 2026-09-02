@@ -1,0 +1,57 @@
+# Фикстура для jp2canvas.txt: TCI 10 м гранулы Sentinel-2 приезжает в
+# runtime/data через браузер продукта, а не обходным клиентом. Не в наборе —
+# лежит в fixtures/, и run-uitests.py сюда не заглядывает: файл в сотню
+# мегабайт качается один раз, вручную:
+#
+#     VELDMAP_SCRIPT=uitests/fixtures/s2-tci.txt python3 buildgen/run-native.py
+#
+# Продукт назван целиком, а не порядком в выдаче: выдача сортируется по
+# свежести и меняется каждый день, а скачанный файл должен быть одним и тем же
+# — на нём меряется раскладка кодстрима (docs/decisions/0002). Строки внутри
+# продукта адресуются ключами хранилища: путь по папкам одинаков у всякой
+# гранулы L2A, меняется только имя.
+#
+# Ждём не секунд, а конца закачки: статусная строка «Скачивается …» появляется
+# с первым байтом и пропадает с последним. Файл в сотню мегабайт — минуты.
+# Пункт меню зовётся подписью: у нескачанного файла это «Скачать», у
+# оборванного — «Продолжить»; оборванную закачку доводят, сменив подпись в
+# строке ниже. Уже скачанный файл сценарий не переписывает: строка «на диске»
+# (вторая после подвала окна) — отказ до всякого меню.
+#
+# Нужна сеть. Скачанное остаётся в runtime/data.
+100 timeout 90000
+500 wait tab_menu
+700 tap tab_menu
+1100 tap new_tab:search
+1900 wait search_query
+2100 tap search_query
+2300 type S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ
+2500 key enter
+2700 wait text:Спрашиваем каталог
+2900 gone text:Спрашиваем каталог
+3100 tap expand:eodata/Sentinel-2/MSI/L2A/2026/09/02/S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713.SAFE
+3300 wait text:GRANULE
+3500 tap expand:eodata/Sentinel-2/MSI/L2A/2026/09/02/S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713.SAFE/GRANULE/
+3700 wait text:L2A_T31TGJ
+3900 tap expand:eodata/Sentinel-2/MSI/L2A/2026/09/02/S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713.SAFE/GRANULE/L2A_T31TGJ_A058478_20260902T103012/
+4100 wait text:IMG_DATA
+4300 tap expand:eodata/Sentinel-2/MSI/L2A/2026/09/02/S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713.SAFE/GRANULE/L2A_T31TGJ_A058478_20260902T103012/IMG_DATA/
+4500 wait text:R10m
+4700 tap expand:eodata/Sentinel-2/MSI/L2A/2026/09/02/S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713.SAFE/GRANULE/L2A_T31TGJ_A058478_20260902T103012/IMG_DATA/R10m/
+4900 wait text:AOT_10m
+5100 move 1000 1000
+5300 scroll 0 -120
+5600 scroll 0 -120
+5900 scroll 0 -120
+6200 scroll 0 -120
+6500 scroll 0 -120
+6800 scroll 0 -120
+8250 absent text:на диске#2
+8300 wait open_menu:row:eodata/Sentinel-2/MSI/L2A/2026/09/02/S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713.SAFE/GRANULE/L2A_T31TGJ_A058478_20260902T103012/IMG_DATA/R10m/T31TGJ_20260902T102701_TCI_10m.jp2
+8500 tap open_menu:row:eodata/Sentinel-2/MSI/L2A/2026/09/02/S2A_MSIL2A_20260902T102701_N0512_R108_T31TGJ_20260902T170713.SAFE/GRANULE/L2A_T31TGJ_A058478_20260902T103012/IMG_DATA/R10m/T31TGJ_20260902T102701_TCI_10m.jp2
+8700 wait text:Скачать
+8900 tap text:Скачать
+9100 wait text:Скачивается
+9300 timeout 900000
+9500 gone text:Скачивается
+9700 exit
