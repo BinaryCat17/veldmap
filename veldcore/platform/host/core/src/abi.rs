@@ -3,6 +3,11 @@ use crate::HostState;
 use crate::core::EventEnvelope;
 use prost::Message;
 
+// Перевод уровня лога в число провода и обратно — тот же файл, что у SDK:
+// две таблицы сходились бы, только пока кто-то держит их одинаковыми.
+#[path = "../../../../sdk/rust/src/abi/log_level.rs"]
+mod log_level;
+
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // ── Шина событий ──────────────────────────────────────────
 
@@ -30,13 +35,12 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // veld_host_log — запись в общий лог хоста, минуя шину.
     linker.func_wrap_async("env", "veld_host_log", |mut caller: Caller<'_, HostState>, (level, target_ptr, target_len, ptr, len): (u64, u64, u64, u64, u64)| {
         Box::new(async move {
-            use log::Level;
             let mem = match caller.get_export("memory") { Some(Extern::Memory(m)) => m, _ => return Ok(()) };
             let read = |p: u64, n: u64| mem.data(&caller).get(p as usize..(p + n) as usize)
                 .and_then(|s| std::str::from_utf8(s).ok());
             let msg = read(ptr, len).unwrap_or("<invalid>").to_string();
             let sub = read(target_ptr, target_len).unwrap_or_default().to_string();
-            let log_level = match level { 4 => Level::Error, 3 => Level::Warn, 2 => Level::Info, 1 => Level::Debug, _ => Level::Trace };
+            let log_level = log_level::from_wire(level);
 
             // Таргет модуля дополняется его именем: подсистему модуль называет
             // сам ("handlers"), а кто он такой — знает хост, и подделать это

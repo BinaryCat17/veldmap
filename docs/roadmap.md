@@ -392,17 +392,14 @@ NetCDF и сети; страницы docs — по одной в чужих ко
    `docs/decisions/0002-jpeg2000-decoder.md`, `docs/architecture/imagery.md`,
    `docs/glossary.md`, `buildgen/tests/test_docs.py`; зависимость openjp2
    снята до шага 8.
-2. **[S] Измерители и дефект хоста.** `#[test]` на overlay.rs:3848, дубль
-   :3803 и самосравнение :3899 сняты; `hash_of` в продакшен; `cargo test
-   --workspace` вместо списка; предупреждения rustc тестовой цели видимы.
-   Таблица пар через провод (`test_wire_pairs.py`, один парсер): WHEEL_NOTCH,
-   PART_SUFFIX; ZOOM — в globe-wrap; уровни лога — общий файл; FLOW — в
-   test_project; удалить test_wheel_step.py и два теста test_tiler_budgets.
-   plugins.rs: после неудавшегося воскрешения актор зовёт трапнутый инстанс
-   [C high] — чинить; тестом без wasmtime не накрывается, только прогоном.
-   Мутационный харнес в дерево минимально. Docs: operations/build.md,
-   ui-tests.md, CLAUDE.md → процесс. *Проверка:* build.py печатает util среди
-   tested; правка любой половины пары — красный с именами обеих.
+2. **[S] Измерители и дефект хоста** — выполнен 2 сентября 2026: тесты
+   overlay.rs починены, `hash_of` в продакшене, `cargo test --workspace` со
+   сводкой предупреждений rustc, `buildgen/tests/test_wire_pairs.py`
+   (WHEEL_NOTCH, PART_SUFFIX, INSTANCE), шаг колеса в `globe/src/wheel.rs`
+   через wrap, уровни лога общим файлом `sdk/rust/src/abi/log_level.rs`,
+   сортировка FLOW в test_project, актор без инстанса поднимает его снова и
+   договаривает обмены, `buildgen/mutate.py` с мутациями тайлера,
+   `docs/operations/{build,ui-tests,diagnostics}.md`, CLAUDE.md — процесс.
 3. **[S] Замер гранулы.** Одна debug-строка из существующего `codestream()`:
    TLM (0xFF55), PLT (0xFF58), тайл-партов на тайл, прогрессия из COD, есть ли
    бокс GML — на TCI 10 м, PVI и одном B*. Гранула — сценарием приложения

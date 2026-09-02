@@ -19,6 +19,7 @@ pub mod outlines;
 pub mod overlay;
 pub mod perf;
 pub mod projection;
+pub mod wheel;
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};

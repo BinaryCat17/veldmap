@@ -143,6 +143,11 @@ const ANSWER: std::time::Duration = std::time::Duration::from_secs(2);
 /// пятнадцати секунд ему бывает мало.
 const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Один щелчок колеса в единицах, которыми его считает окно. По ту сторону
+/// провода то же число знает ui-service (`RAW_WHEEL_NOTCH`); равенство держит
+/// таблица пар `buildgen/tests/test_wire_pairs.py`.
+const WHEEL_NOTCH: f32 = 120.0;
+
 impl Running {
     async fn start(
         event_loop: &ActiveEventLoop,
@@ -730,8 +735,8 @@ impl ApplicationHandler for App<'_> {
             WindowEvent::MouseWheel { delta, .. } => {
                 publish_ui_event(&r.app_pub, &r.hw.owner, app::ui_event::Event::Scroll(
                     app::ScrollEvent {
-                        delta_x: match delta { winit::event::MouseScrollDelta::LineDelta(x, _) => x * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.x as f32 },
-                        delta_y: match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y * 120.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 },
+                        delta_x: match delta { winit::event::MouseScrollDelta::LineDelta(x, _) => x * WHEEL_NOTCH, winit::event::MouseScrollDelta::PixelDelta(p) => p.x as f32 },
+                        delta_y: match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y * WHEEL_NOTCH, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 },
                     },
                 ));
             }

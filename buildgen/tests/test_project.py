@@ -6,6 +6,7 @@
 а не в рантайме.
 """
 import argparse
+import re
 
 import pytest
 
@@ -113,6 +114,16 @@ def test_the_flow_table_reaches_the_host(gen, real_schemas, tmp_path):
             topic = f"{service}/{request}"
             row = f'("{topic}", "{service}/{terminal}", {str(topic in killable).lower()})'
             assert row in table, f"{name}: в таблице хоста нет строки {row}"
+
+    # Хост ищет в таблице бинарным поиском (`flow::exchange_of`), а тот верен
+    # только над отсортированным: перестань генератор сортировать — и часть
+    # запросов молча осталась бы без учёта. Порядок сравнивается в том виде, в
+    # каком его сравнивает Rust, — по байтам строки.
+    requests = [row[0] for row in
+                re.findall(r'\("([^"]+)", "([^"]+)", (?:true|false)\)', table)]
+    assert requests == sorted(requests, key=lambda s: s.encode("utf-8")), \
+        "таблица FLOW не отсортирована по запросу — бинарный поиск хоста промахнётся"
+    assert len(requests) == len(set(requests)), "в таблице FLOW запрос повторяется"
 
 
 def test_download_progress_is_not_terminal(gen, real_schemas):

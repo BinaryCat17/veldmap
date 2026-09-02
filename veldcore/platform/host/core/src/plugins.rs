@@ -99,7 +99,9 @@ impl PluginSpec {
 /// вызовом экспорта `handle_event`. Общий цикл очереди — `Dispatcher::spawn_actor`.
 struct WasmActor {
     spec: PluginSpec,
-    module: WasmModule,
+    /// Живой инстанс; `None` — не поднялся после трапа, и следующее событие
+    /// попробует поднять его снова (см. [`WasmActor::deliver`]).
+    module: Option<WasmModule>,
     /// Приговор текущему инстансу вместе с номером идущей доставки — общий с
     /// epoch-колбэком его стора (см. `tasks::Sentence`).
     sentence: Arc<crate::tasks::Sentence>,
@@ -110,6 +112,20 @@ struct WasmActor {
 #[async_trait::async_trait]
 impl Actor for WasmActor {
     async fn deliver(&mut self, ev: Event) {
+        // Инстанса нет — прошлое воскрешение не удалось. Второй заход здесь,
+        // а не молчание: причина отказа бывает и проходящей. Не поднялся и
+        // теперь — это событие исполнить некому, а его обмен уже на учёте:
+        // приговор ему выписывается так же, как выписывался бы при доставке,
+        // чтобы `answer_for_lost` увидел его среди начатых и договорил.
+        if self.module.is_none() && !self.raise().await {
+            if let Some(terminal) = ev.accounted {
+                let doom = crate::tasks::Doom::new(self.sentence.clone());
+                self.tasks.arm(&ev.correlation, terminal, move |victim| victim.doomed = Some(doom));
+            }
+            self.answer_for_lost();
+            return;
+        }
+
         // Приговор действует ровно на одну операцию: шаг счётчика доставок
         // его и снимает — выписанный на прошлую, он больше ни с чем не
         // совпадает (см. `tasks::Sentence`).
@@ -147,16 +163,17 @@ impl Actor for WasmActor {
             target: String::new(),
         };
         let call_ctx = CallContext::new(prost::Message::encode_to_vec(&req));
-        self.module.store.data_mut().call_context = Some(call_ctx);
-        // Экспорта нет — инстанс не поднялся (отравленный стор после
-        // неудавшегося воскрешения). Учтённую операцию надо договорить и
-        // здесь: она уже на учёте, а исполнить её больше нечем.
-        let Ok(handle_event) = self.module.instance.get_typed_func::<(), i32>(&mut self.module.store, "handle_event") else {
+        let module = self.module.as_mut().expect("инстанс поднят выше");
+        module.store.data_mut().call_context = Some(call_ctx);
+        // Экспорта нет — бинарник собран не кодогеном. Такой отсеивается ещё
+        // на загрузке, но учтённую операцию договорить обязан и этот путь:
+        // она уже на учёте, а исполнить её нечем.
+        let Ok(handle_event) = module.instance.get_typed_func::<(), i32>(&mut module.store, "handle_event") else {
             log::error!("Модуль '{}' не отвечает: экспорта handle_event нет", self.spec.name);
             self.answer_for_lost();
             return;
         };
-        if let Err(trap) = handle_event.call_async(&mut self.module.store, ()).await {
+        if let Err(trap) = handle_event.call_async(&mut module.store, ()).await {
             self.revive(trap).await;
             // И после убийства тоже: снятую операцию диспетчер уже договорил и
             // с учёта снял (`Dispatcher::kill`), но инстанс убийство уносит
@@ -204,13 +221,7 @@ impl WasmActor {
     /// с нуля и проходит init: состояние модуля при этом теряется целиком,
     /// и это ровно то, что означает отключение электричества. Пережить его
     /// должно только то, что модуль успел положить на диск.
-    ///
-    /// Пересобирается инстанс, но не бинарник: `Module` уже скомпилирован и
-    /// переиспользуется, поэтому цена — новый Store с чистой линейной памятью
-    /// плюс init. Её и печатает лог: подниматься дорого — это про компиляцию,
-    /// а её здесь нет.
     async fn revive(&mut self, trap: wasmtime::Error) {
-        let started = std::time::Instant::now();
         if self.sentence.struck() {
             log::info!(target: "tasks", "Модуль '{}' снят посреди обработчика, поднимаем заново", self.spec.name);
         } else {
@@ -224,16 +235,36 @@ impl WasmActor {
         if freed > 0 {
             log::info!(target: "tasks", "Возвращено ресурсов: {} — от модуля '{}'", freed, self.spec.name);
         }
+        self.raise().await;
+    }
+
+    /// Собирает инстанс из спецификации на место прежнего. `false` — не
+    /// поднялся: актор остаётся без инстанса, и поднять его попробует
+    /// следующая доставка. Молчать об этом нельзя — до неё сервис выбыл из
+    /// системы, и за его обмены отвечает хост.
+    ///
+    /// Пересобирается инстанс, но не бинарник: `Module` уже скомпилирован и
+    /// переиспользуется, поэтому цена — новый Store с чистой линейной памятью
+    /// плюс init. Её и печатает лог: подниматься дорого — это про компиляцию,
+    /// а её здесь нет.
+    async fn raise(&mut self) -> bool {
+        let started = std::time::Instant::now();
         match self.spec.build().await {
             Ok((module, sentence)) => {
-                self.module = module;
+                self.module = Some(module);
                 self.sentence = sentence;
                 log::info!(target: "tasks", "Модуль '{}' поднят заново за {:?}", self.spec.name, started.elapsed());
+                true
             }
-            // Инстанс не поднялся — актор остаётся с отравленным стором, и
-            // каждое следующее событие будет падать. Молчать об этом нельзя:
-            // сервис фактически выбыл из системы.
-            Err(e) => log::error!("Модуль '{}' не поднялся заново: {:#}", self.spec.name, e),
+            Err(e) => {
+                self.module = None;
+                // Не поднявшийся инстанс мог успеть завладеть ресурсом в init —
+                // вернуть его некому, кроме хоста, как и после трапа.
+                let freed = self.spec.ctx.registry.free_owned_by(self.spec.instance_id);
+                log::error!("Модуль '{}' не поднялся заново: {:#} (возвращено ресурсов: {})",
+                    self.spec.name, e, freed);
+                false
+            }
         }
     }
 }
@@ -368,7 +399,7 @@ pub async fn load_services(ctx: Arc<crate::setup::HostContext>) -> anyhow::Resul
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
         Dispatcher::spawn_actor(rx, WasmActor {
             spec,
-            module,
+            module: Some(module),
             sentence,
             dispatcher: ctx.dispatcher.clone(),
             tasks: ctx.tasks.clone(),

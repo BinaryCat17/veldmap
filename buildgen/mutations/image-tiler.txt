@@ -1,0 +1,17 @@
+# Мутации тайлера: каждая ломает правило, которое тест обязан держать.
+# Формат — buildgen/mutate.py.
+
+имя: отпечаток не зависит от длины файла
+файл: veldmodules/image-tiler/src/fingerprint.rs
+было: hash.update(&len.to_le_bytes());
+стало: let _ = len;
+
+имя: хвост отпечатка перехлёстывает голову
+файл: veldmodules/image-tiler/src/fingerprint.rs
+было: let from = (len - SAMPLE).max(SAMPLE);
+стало: let from = len - SAMPLE;
+
+имя: сторона уровня делится с округлением вниз
+файл: veldmodules/image-tiler/src/pyramid.rs
+было: size = size.div_ceil(2);
+стало: size /= 2;

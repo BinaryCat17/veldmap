@@ -6,6 +6,10 @@
 use crate::proto::core::EventEnvelope;
 use prost::Message;
 
+// Уровень лога на проводе: файл включён и в ядро хоста (через `#[path]`),
+// чтобы число и его смысл были одним кодом по обе стороны.
+mod log_level;
+
 // ── ABI микроядра Veld ─────────────────────────────────────────
 
 // Имя wasm-модуля импортов объявлено явно: хост регистрирует эти функции
@@ -274,13 +278,9 @@ pub(crate) fn resource_free(region_id: u64) -> bool {
 /// (`veldmap::<plugin>::<target>`) и отфильтрует.
 #[doc(hidden)]
 pub fn log(level: log::Level, target: &str, message: &str) {
-    let level_u64 = match level {
-        log::Level::Error => 4u64, log::Level::Warn => 3u64, log::Level::Info => 2u64,
-        log::Level::Debug => 1u64, _ => 0u64,
-    };
     unsafe {
         veld_host_log(
-            level_u64,
+            log_level::to_wire(level),
             target.as_ptr() as u64, target.len() as u64,
             message.as_ptr() as u64, message.len() as u64,
         );

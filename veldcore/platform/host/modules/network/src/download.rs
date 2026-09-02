@@ -24,6 +24,11 @@ use std::path::PathBuf;
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 
+/// Суффикс недокачанного файла. По ту сторону провода его же читает
+/// data-library (`storage::PART_SUFFIX`) как признак «начато, но не доведено»;
+/// равенство держит таблица пар `buildgen/tests/test_wire_pairs.py`.
+const PART_SUFFIX: &str = ".part";
+
 /// Логирует провал скачивания и уведомляет подписчиков терминальным
 /// on_fs_download_result — им же операция снимается с учёта.
 fn fail_download(ctx: &HostContext, correlation_id: &str, error: String) -> String {
@@ -50,7 +55,7 @@ pub fn on_fs_download(state: &State, req: FsDownloadRequest, caller: Caller) {
     // "foo.zip" в одной папке схлопнулись бы в один и тот же "foo.part".
     let part_path: PathBuf = {
         let mut s = path.clone().into_os_string();
-        s.push(".part");
+        s.push(PART_SUFFIX);
         s.into()
     };
 

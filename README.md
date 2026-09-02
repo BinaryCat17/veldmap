@@ -46,7 +46,7 @@ python3 buildgen/run-native.py     # запуск
 Сборка проходит пять этапов: тесты buildgen, генерация
 `generated/`-крейтов из схем, компиляция wasm-модулей в `build/plugins/`,
 компиляция нативного хоста и юнит-тесты Rust (нативные, для чистой логики —
-подробнее в [CLAUDE.md](CLAUDE.md#сборка-и-проверка)).
+подробнее в [docs/operations/build.md](docs/operations/build.md)).
 
 Кодогенерация переписывает файл, только если его содержимое изменилось: cargo
 сверяет исходники по mtime, и перезапись тем же текстом заставляла бы
@@ -78,7 +78,8 @@ COPERNICUS_ACCESS_SECRET=...
 обойти каталог, ни подписать адрес. `.env` в `.gitignore`; как значения
 попадают в конфиги — в разделе [Конфигурация](#конфигурация).
 
-Логи и уровни логирования — в [CLAUDE.md](CLAUDE.md#диагностика).
+Логи и уровни логирования — в
+[docs/operations/diagnostics.md](docs/operations/diagnostics.md).
 
 ---
 
@@ -98,7 +99,7 @@ veldcore/
     modules/<имя>/        нативная реализация платформенного сервиса
     runners/desktop/      цикл событий ОС, окно, кадровый цикл
 veldmodules/<имя>/      wasm-модуль: schema.yaml, config.yaml, types.proto, src/
-uitests/                сценарии прогона интерфейса (см. CLAUDE.md)
+uitests/                сценарии прогона интерфейса (см. docs/operations/ui-tests.md)
 buildgen/               сборка и кодогенерация
   build.py                единственная команда сборки
   run-native.py           запуск собранного

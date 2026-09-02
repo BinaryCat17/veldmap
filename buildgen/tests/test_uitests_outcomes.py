@@ -82,7 +82,7 @@ def test_the_unseen_refusal_outranks_the_return_code():
     """Отказ, которого сценарий не видит, называется и у провалившегося прогона.
 
     Это и есть вся суть ловли: падение валит сценарий ничуть не реже, чем
-    обходится незамеченным (почему — в CLAUDE.md).
+    обходится незамеченным (почему — в docs/operations/ui-tests.md).
     """
     runner = load_runner()
     trap = f"... {runner.TRAP_NEEDLE} ...\n"

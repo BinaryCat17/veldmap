@@ -62,6 +62,42 @@ def run(cmd, cwd=None, env=None):
         sys.exit(1)
 
 
+def run_quietly(cmd, cwd=None) -> str:
+    """Как `run`, но вывод копится и печатается только у упавшей команды.
+
+    Тесты печатают сотни строк, и читать в них нечего — кроме предупреждений
+    компилятора, которые иначе тонут между ними (см. `rustc_warnings`).
+    """
+    if VERBOSE:
+        print(f"-> {' '.join(str(c) for c in cmd)}")
+    res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if res.returncode != 0:
+        sys.stdout.write(res.stdout)
+        sys.stderr.write(res.stderr)
+        print(f"\nFATAL: команда завершилась с кодом {res.returncode}:")
+        print(f"  {' '.join(str(c) for c in cmd)}")
+        if cwd:
+            print(f"  (запущена в {cwd})")
+        sys.exit(1)
+    return res.stdout + res.stderr
+
+
+def rustc_warnings(output: str) -> list[str]:
+    """Предупреждения компилятора из вывода cargo, каждое со своим местом.
+
+    Сводные строки cargo («`crate` generated N warnings») не считаются: это
+    счёт, а не предупреждение. Кэшированную цель cargo не пересобирает, но её
+    предупреждения повторяет, так что список не зависит от того, что менялось.
+    """
+    lines = output.splitlines()
+    found = set()
+    for at, line in enumerate(lines):
+        if line.startswith("warning:") and not line.startswith("warning: `"):
+            where = next((l.strip() for l in lines[at + 1:at + 4] if l.strip().startswith("-->")), "")
+            found.add(f"{line} {where}".strip())
+    return sorted(found)
+
+
 def elapsed(since: float) -> str:
     """Длительность в том виде, в каком её читают: секунды до минуты, дальше
     минуты с секундами."""
@@ -449,45 +485,64 @@ def _has_unit_tests(src: str) -> bool:
     return False
 
 
+def workspace_packages(manifest_dir: str) -> list[str]:
+    """Пакеты воркспейса — у cargo, а не списком в этом файле: список
+    отставал бы от Cargo.toml молча, и тесты нового крейта не бежали бы."""
+    out = run_quietly(["cargo", "metadata", "--no-deps", "--format-version", "1"], cwd=manifest_dir)
+    return [package["name"] for package in json.loads(out)["packages"]]
+
+
 def test_rust_units():
     """Юнит-тесты чистой логики: календарь, кодек сообщений, геодезия, Dedup.
 
     Компилируются и бегут нативно — хоста им не нужно, хостовые ABI-функции
     подменяются заглушками SDK (см. veldsdk::abi, cfg(not(target_arch =
     "wasm32"))). Это единственная механическая проверка Rust-кода помимо
-    «компилируется»: интерфейс по-прежнему проверяется запуском (см. CLAUDE.md),
-    но парные функции — encode/decode, прямая/обратная — сходятся здесь.
+    «компилируется»: интерфейс по-прежнему проверяется запуском (см.
+    docs/operations/ui-tests.md), но парные функции — encode/decode,
+    прямая/обратная — сходятся здесь.
 
-    `--release`, чтобы у veldcore тесты переиспользовали кэш обычной сборки.
+    `--release`, чтобы у veldcore тесты переиспользовали кэш обычной сборки;
+    `--workspace`, чтобы новый крейт воркспейса не остался без прогона.
     Модули гоняются только те, где тесты есть: остальным незачем компилировать
     нативный вариант крейта.
+
+    Предупреждения компилятора у тестовых целей собираются и печатаются после
+    итога: сирота без `#[test]`, дубль атрибута, неиспользуемый помощник — это
+    видит компилятор, а тест-раннер нет, и в потоке вывода тестов они тонут.
     """
     print("\n[4/4] Rust unit tests...")
     started = time.monotonic()
+    warnings: list[str] = []
 
-    run(["cargo", "test", "--release", "-q",
-         "-p", "veldsdk", "-p", "veldmap-host-core", "-p", "veldmap-host-network",
-         "-p", "veldmap-host-gui"],
-        cwd=os.path.join(PROJECT_ROOT, "veldcore"))
+    veldcore = os.path.join(PROJECT_ROOT, "veldcore")
+    warnings += rustc_warnings(run_quietly(["cargo", "test", "--release", "-q", "--workspace"], cwd=veldcore))
+    tested = workspace_packages(veldcore)
 
-    tested = ["veldsdk", "veldmap-host-core", "veldmap-host-network", "veldmap-host-gui"]
     for module in discover_modules():
         if module["language"] != "rust":
             continue
         if _has_unit_tests(os.path.join(module["dir"], "src")):
-            run(["cargo", "test", "--release", "-q", "-p", module["package"]],
-                cwd=os.path.join(module["dir"], "generated"))
+            warnings += rustc_warnings(run_quietly(
+                ["cargo", "test", "--release", "-q", "-p", module["package"]],
+                cwd=os.path.join(module["dir"], "generated")))
             tested.append(module["name"])
         # Wrap-крейт — отдельный пакет в своём воркспейсе, и тестами модуля он
         # не покрывается: рукописные хелперы для потребителей живут только в
         # нём (см. veldmodules/*/wraps/rust/src).
         wrap = os.path.join(module["dir"], "wraps", "rust", "src")
         if os.path.isdir(wrap) and _has_unit_tests(wrap):
-            run(["cargo", "test", "--release", "-q"],
-                cwd=os.path.join(module["dir"], "generated", "wraps", "rust"))
+            warnings += rustc_warnings(run_quietly(
+                ["cargo", "test", "--release", "-q"],
+                cwd=os.path.join(module["dir"], "generated", "wraps", "rust")))
             tested.append(f"{module['name']}-wrap")
 
     print(f"  {', '.join(tested)} — {elapsed(started)}")
+    warnings = sorted(set(warnings))
+    if warnings:
+        print(f"  предупреждений rustc у тестовых целей: {len(warnings)}")
+        for warning in warnings:
+            print(f"    {warning}")
 
 
 # ── Windows deployment ─────────────────────────────────────────────────────────

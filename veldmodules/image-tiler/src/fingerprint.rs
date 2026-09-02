@@ -33,19 +33,23 @@ const DECODE_REV: u32 = 12;
 /// Отпечаток ресурса: `<fnv64 hex>-t<TILE>q<DECODE_REV>`.
 pub fn fingerprint(resource_id: u64, len: u64) -> Result<String, String> {
     let mut reader = veldsdk::ResourceReader::new(resource_id, len);
-
-    let mut hash = Fnv::new();
-    hash.update(&len.to_le_bytes());
-
     let (head, tail) = edges(len);
     let head = read_exact_at(&mut reader, head.0, head.1)?;
-    hash.update(&head);
-    if let Some((from, size)) = tail {
-        let tail = read_exact_at(&mut reader, from, size)?;
-        hash.update(&tail);
-    }
+    let tail = match tail {
+        Some((from, size)) => read_exact_at(&mut reader, from, size)?,
+        None => Vec::new(),
+    };
+    Ok(hash_of(len, &head, &tail))
+}
 
-    Ok(format!("{:016x}-t{}q{}", hash.finish(), TILE, DECODE_REV))
+/// Свёртка «длина ∥ голова ∥ хвост» по готовым срезам — одна и для чтения
+/// ресурса, и для тестов, у которых ресурса нет.
+fn hash_of(len: u64, head: &[u8], tail: &[u8]) -> String {
+    let mut hash = Fnv::new();
+    hash.update(&len.to_le_bytes());
+    hash.update(head);
+    hash.update(tail);
+    format!("{:016x}-t{}q{}", hash.finish(), TILE, DECODE_REV)
 }
 
 /// Какие куски файла попадают в отпечаток: голова и не перекрытый ею хвост.
@@ -95,38 +99,27 @@ impl Fnv {
     }
 }
 
-/// Та же свёртка по готовым срезам — для тестов: у них нет ресурса, но
-/// правило «длина ∥ голова ∥ хвост» обязано быть одним.
-#[cfg(test)]
-fn of_slices(len: u64, head: &[u8], tail: &[u8]) -> String {
-    let mut hash = Fnv::new();
-    hash.update(&len.to_le_bytes());
-    hash.update(head);
-    hash.update(tail);
-    format!("{:016x}-t{}q{}", hash.finish(), TILE, DECODE_REV)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn same_edges_same_print() {
-        let a = of_slices(1000, b"head", b"tail");
-        let b = of_slices(1000, b"head", b"tail");
+        let a = hash_of(1000, b"head", b"tail");
+        let b = hash_of(1000, b"head", b"tail");
         assert_eq!(a, b);
     }
 
     #[test]
     fn every_ingredient_matters() {
-        let base = of_slices(1000, b"head", b"tail");
-        assert_ne!(base, of_slices(1001, b"head", b"tail"), "длина");
-        assert_ne!(base, of_slices(1000, b"heaD", b"tail"), "голова");
-        assert_ne!(base, of_slices(1000, b"head", b"taiL"), "хвост");
+        let base = hash_of(1000, b"head", b"tail");
+        assert_ne!(base, hash_of(1001, b"head", b"tail"), "длина");
+        assert_ne!(base, hash_of(1000, b"heaD", b"tail"), "голова");
+        assert_ne!(base, hash_of(1000, b"head", b"taiL"), "хвост");
         // Граница между кусками не теряется: (head, tail) ≠ (headt, ail)
         // было бы неверно требовать от свёртки подряд идущих байт — важно,
         // что ДЛИНА разводит такие пары раньше самих байт.
-        assert_ne!(of_slices(8, b"head", b"tail"), of_slices(9, b"headt", b"ail!"));
+        assert_ne!(hash_of(8, b"head", b"tail"), hash_of(9, b"headt", b"ail!"));
     }
 
     /// Голова и хвост не перехлёстываются и не оставляют дыры посередине
@@ -162,6 +155,6 @@ mod tests {
 
     #[test]
     fn suffix_pins_layout_and_decode_revision() {
-        assert!(of_slices(1, b"a", b"").ends_with(&format!("-t{}q{}", TILE, DECODE_REV)));
+        assert!(hash_of(1, b"a", b"").ends_with(&format!("-t{}q{}", TILE, DECODE_REV)));
     }
 }
