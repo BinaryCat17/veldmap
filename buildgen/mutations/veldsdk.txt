@@ -1,4 +1,5 @@
-# Мутации SDK: читатель окнами и кодировка ответа хоста.
+# Мутации SDK: читатель окнами, кодировка ответа хоста, договорённый ответ,
+# байты туда и обратно.
 # Формат — buildgen/mutate.py; крейт — пакет воркспейса veldcore.
 
 имя: читатель не переиспользует окно
@@ -15,3 +16,23 @@
 файл: veldcore/sdk/rust/src/fake.rs
 было: return Ok(Vec::new());
 стало: return Err(format!("за концом ресурса {}", id));
+
+имя: договорённый ответ узнаётся по содержимому, а не по отправителю
+файл: veldcore/sdk/rust/src/reply.rs
+было: (error.is_empty() && crate::abi::answered_by_host())
+стало: error.is_empty()
+
+имя: принятое открытие не отличает договорённый ответ
+файл: veldcore/sdk/rust/src/resource.rs
+было: if let Some(why) = crate::reply::undelivered(error) {
+стало: if let Some(why) = None::<String> {
+
+имя: чтение целиком не смотрит на потолок
+файл: veldcore/sdk/rust/src/resource.rs
+было: if resource.size() > cap {
+стало: if false {
+
+имя: регион не знает своего размера
+файл: veldcore/sdk/rust/src/resource.rs
+было: let region = OwnedResource::new(ResourceHandle { id, size });
+стало: let region = OwnedResource::new(ResourceHandle { id, size: 0 });

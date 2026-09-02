@@ -79,11 +79,10 @@ impl AsRef<ResourceHandle> for OwnedResource {
 // `data-library` — чужими руками. Обряд вокруг него один: узнать заказчика,
 // дождаться ресурса, передать ему владение, ответить.
 //
-// Здесь собрана его wasm-половина; у нативных `fs` и `network` своё зеркало
-// (`host/util/src/resource.rs`) — до SDK им не дотянуться, — и сходятся эти
-// двое раскладкой ответа. Собран он в двух местах, а не в шести: разойдясь,
-// копии разошлись бы и текстами отказов, а по ним заказчик отличает «нет
-// такого» от «не отдам». Передают владение и те, кто отвечает своим типом
+// Здесь собрана его wasm-половина; нативным `fs` и `network` до SDK не
+// дотянуться, и сборку ответа они включают тем же файлом (`resource/opened.rs`,
+// через `#[path]` из `host/util`) — раскладка ответа одна по построению, а
+// не по договорённости. Передают владение и те, кто отвечает своим типом
 // (`tile-cache`, `image-tiler` — тайлом), — им из обряда нужна середина.
 
 /// Заказчик текущего события — тот, кому уйдёт владение открытым ресурсом.
@@ -114,6 +113,12 @@ pub fn accept(opened: &ResourceOpened) -> Result<ResourceHandle, String> {
 /// не сам, а терминальным ответом — и разбирается поэтому иначе. Открыта она
 /// на такой ответ: заведись он, разбирать его будут отсюда, а не заново.
 pub fn accept_parts(handle: Option<ResourceHandle>, error: &str) -> Result<ResourceHandle, String> {
+    // Пустой ответ без ресурса — так выглядит и ответ, который договорил за
+    // упавшего исполнителя хост; назвать его «ответом без handle» значило бы
+    // винить открывающего в том, чего он не делал.
+    if let Some(why) = crate::reply::undelivered(error) {
+        return Err(why);
+    }
     if !error.is_empty() {
         return Err(error.to_string());
     }
@@ -156,19 +161,9 @@ pub fn grant_write_or_free(id: u64, service: &str) -> Result<(), String> {
     Err(format!("не удалось выдать запись ресурса {} сервису '{}'", id, service))
 }
 
-/// Собирает ответ на «открой мне это» — удача и неудача одной формы.
-///
-/// Публикует его модуль сам, своим стабом (`crate::emit::on_open_result`), и
-/// передаёт туда же корреляцию запроса: SDK топиков модуля не знает и знать
-/// не должен, иначе исходящая связь перестала бы быть объявленной в его
-/// schema.yaml.
-pub fn opened(result: Result<ResourceHandle, String>) -> ResourceOpened {
-    let (handle, error) = match result {
-        Ok(handle) => (Some(handle), String::new()),
-        Err(error) => (None, error),
-    };
-    ResourceOpened { handle, error }
-}
+// Сборка ответа — общий с `host/util` файл: см. его шапку.
+mod opened;
+pub use opened::opened;
 
 /// Ответ, которого мы не ждём. На разделяемом топике ответов
 /// (`fs/on_read_result` слушают и data-library, и tile-cache, и data-browser)
@@ -206,6 +201,46 @@ pub fn release(handle: ResourceHandle) {
 /// частями, а в ответе — текст причины.
 pub fn relay(opened: &ResourceOpened, owner: &str) -> ResourceOpened {
     self::opened(accept(opened).and_then(|handle| hand_off(handle, owner)))
+}
+
+// ── Байты туда и обратно ─────────────────────────────────────
+
+/// Регион памяти хоста с этими байтами, во владении вызывающего.
+///
+/// Так байты уходят платформенной службе запросом — файл через `fs/on_write`:
+/// в запросе едет handle региона (`into_handle`), владение уезжает в таблицу
+/// ожидания вызывающего, и освобождает регион ответ. Права выдавать не нужно:
+/// fs проверяет доступ по публикующему запрос, а он и есть владелец региона.
+///
+/// Во владельца регион берётся сразу после выделения: сорвись запись байт,
+/// его освободит Drop, а голый id остался бы висеть на хосте до конца
+/// процесса. Размер в handle — размер байт: платформенная служба читает
+/// регион по нему.
+pub fn region_of(bytes: &[u8]) -> Result<OwnedResource, String> {
+    let size = bytes.len() as u64;
+    let Some(id) = crate::abi::resource_alloc_cpu(size) else {
+        return Err("нет памяти под регион".to_string());
+    };
+    let region = OwnedResource::new(ResourceHandle { id, size });
+    crate::abi::resource_write(region.id(), 0, bytes).map_err(|e| e.to_string())?;
+    Ok(region)
+}
+
+/// Ресурс целиком, одним чтением, и освобождённый следом — на любом исходе.
+///
+/// Для файлов, которые пишем мы сами и которым место в памяти инстанса:
+/// сидкар, раскладка окна, тело тайла. Потолок обязателен и называется
+/// вызывающим: пережить файл может и оборванную запись, и чужую руку, а
+/// неправдоподобный размер, втянутый целиком, уронил бы весь модуль. Всему,
+/// что крупнее или читается частями, — `ResourceReader`.
+pub fn read_whole(handle: ResourceHandle, cap: u64) -> Result<Vec<u8>, String> {
+    // RAII-гард первым: ресурс открыт на нас, и освободить его обязаны мы —
+    // при любом выходе ниже, включая отказ по размеру.
+    let resource = OwnedResource::new(handle);
+    if resource.size() > cap {
+        return Err(format!("{} байт при потолке {}", resource.size(), cap));
+    }
+    crate::abi::resource_read(resource.id(), 0, resource.size()).map_err(|e| e.to_string())
 }
 
 /// Окно чтения. Компромисс между числом ABI-вызовов и памятью: гигабайтный
@@ -355,5 +390,47 @@ mod tests {
         assert_eq!(fake::leaked(), vec![handle.id]);
         drop(OwnedResource::new(handle));
         assert!(fake::leaked().is_empty());
+    }
+
+    /// Регион под байты несёт их и свой размер: платформенная служба прочтёт
+    /// его по handle из запроса ровно на длину байт.
+    #[test]
+    fn a_region_holds_the_bytes_and_their_size() {
+        fake::install();
+        let bytes: Vec<u8> = (0..300u32).map(|i| (i % 7) as u8).collect();
+        let region = region_of(&bytes).unwrap();
+        assert_eq!(region.size(), bytes.len() as u64);
+        let handle = region.handle();
+        assert_eq!(read_whole(handle, 1024).unwrap(), bytes);
+        drop(region);
+        assert!(fake::leaked().is_empty());
+    }
+
+    /// Чтение целиком отпускает ресурс на обоих исходах, а над потолком не
+    /// читает вовсе.
+    #[test]
+    fn reading_whole_frees_the_resource_whatever_the_outcome() {
+        fake::install();
+        let small = fake::mount(vec![7u8; 10]);
+        assert_eq!(read_whole(small, 10).unwrap(), vec![7u8; 10]);
+        assert!(fake::leaked().is_empty());
+
+        let big = fake::mount(vec![7u8; 11]);
+        let refused = read_whole(big, 10).unwrap_err();
+        assert!(refused.contains("потолке"), "{}", refused);
+        assert!(fake::leaked().is_empty(), "отказ по размеру тоже отпускает");
+        assert_eq!(fake::reads().len(), 1, "над потолком к хосту не ходили");
+    }
+
+    /// Пустой ответ на открытие, договорённый хостом, называет хост, а не
+    /// «ответ без handle»; тот же пустой ответ от исполнителя — его ошибка.
+    #[test]
+    fn a_settled_open_names_the_host() {
+        crate::abi::set_event_context(String::new(), "c".to_string(), false);
+        let settled = ResourceOpened { handle: None, error: String::new() };
+        assert!(accept(&settled).unwrap_err().contains("хост"));
+
+        crate::abi::set_event_context("fs".to_string(), "c".to_string(), false);
+        assert_eq!(accept(&settled).unwrap_err(), "ответ без handle");
     }
 }

@@ -985,8 +985,8 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         }
         // Договорённый хостом ответ — тот же отказ, и путь у него тот же: свои
         // ячейки снять с ожидания, сказать вслух, двинуть эпоху. Принятый за
-        // удачу, он оставил бы их висеть навсегда (см. `tiles::undelivered`).
-        let error = tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone());
+        // удачу, он оставил бы их висеть навсегда (см. `veldsdk::reply::undelivered`).
+        let error = veldsdk::reply::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone());
         if !error.is_empty() {
             raster.fetch.forget_asked(&ctx.cells);
             veldsdk::log::warn!(target: "handlers", "{}: кэш тайлов: {}", label, error);
@@ -1101,7 +1101,7 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
             // ячейки, которых никто не производил (`Fetch::forgive`).
             let error = match ours_kill {
                 true => msg.error.clone(),
-                false => tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone()),
+                false => veldsdk::reply::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone()),
             };
             let failed = ours && !error.is_empty();
             raster.pass = (0, 0);

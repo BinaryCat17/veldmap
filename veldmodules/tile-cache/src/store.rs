@@ -5,7 +5,6 @@
 //! промах, не поломка. Атомарность на стороне fs (tmp + rename): на диске
 //! не бывает полутайла.
 
-use veldsdk::proto::core::ResourceHandle;
 use veldsdk::proto::fs::{FsWriteRequest, FsWriteResult};
 
 use crate::module::{evict, layout, State};
@@ -56,30 +55,22 @@ pub fn touch(state: &mut State, key: &str) {
     }
 }
 
-/// Кладёт байты в файл через fs: CPU-регион → on_write → освобождение по
-/// ответу (см. PendingWrite).
+/// Кладёт байты в файл через fs: регион → on_write → освобождение по ответу
+/// (см. PendingWrite).
 pub fn write_file(state: &mut State, path: String, data: &[u8]) {
-    let Some(region_id) = veldsdk::abi::resource_alloc_cpu(data.len() as u64) else {
-        veldsdk::log::warn!(target: "handlers", "{} не записан: нет памяти под регион", path);
-        return;
+    let region = match veldsdk::resource::region_of(data) {
+        Ok(region) => region,
+        Err(error) => {
+            veldsdk::log::warn!(target: "handlers", "{} не записан: {}", path, error);
+            return;
+        }
     };
-    // Во владельца сразу после выделения: сорвись запись, регион освободит
-    // Drop, а голый id остался бы висеть на хосте до конца процесса.
-    let region = veldsdk::OwnedResource::from_raw_id(region_id);
-    if let Err(e) = veldsdk::abi::resource_write(region.id(), 0, data) {
-        veldsdk::log::warn!(target: "handlers", "{} не записан: {}", path, e);
-        return;
-    }
-
-    // Гранта на "fs" не нужно: on_write проверяет доступ по requestor_id —
-    // паблишеру события, то есть нам же, а мы и так владелец региона.
-    let size = data.len() as u64;
     let correlation =
         state.pending_writes.begin(PendingWrite { region: region.id(), path: path.clone() });
     crate::calls::fs::on_write(&FsWriteRequest {
         path,
         // Владение уезжает в таблицу ожидания: освободит его on_write_result.
-        handle: Some(ResourceHandle { id: region.into_handle().id, size }),
+        handle: Some(region.into_handle()),
     }, &correlation);
 }
 

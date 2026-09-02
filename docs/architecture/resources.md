@@ -38,8 +38,12 @@ new window from the new position. Its window is the only buffer — it
 implements `BufRead` itself rather than through `BufReader`, which would copy
 the window into a second buffer. Two kinds of reader bypass it: NetCDF,
 because HDF5 walks the file at absolute offsets, and the modules that read a
-small resource whole in one call — the tile cache, the library catalogue, the
-window layout.
+small file they wrote themselves — a tile body, a sidecar, the window layout —
+through `read_whole`, which takes a ceiling named by the caller, refuses
+anything larger and frees the resource on every outcome. Bytes go the other
+way through `region_of`: a host region holding them, owned by the caller,
+whose handle travels in a request to a platform service — a file write
+through `fs/on_write` — and is freed by the reply.
 
 For a remote object a window becomes an HTTP request, and the price of one is
 twofold: the request itself and the bytes per megabyte. The network module
@@ -109,8 +113,13 @@ resource passes to the requester. The shared part of the exchange lives in
 `discard`, `release`; so does the whole discipline of ownership — the RAII
 wrapper `OwnedResource`, and `grant_read_or_free` / `grant_write_or_free`,
 which free the resource when delegation is refused. The native `fs` and
-`network` have their own mirror of the rite in `veldcore/platform/host/util/`,
-and the two agree on the layout of the answer.
+`network` cannot reach the SDK; their mirror in `veldcore/platform/host/util/`
+includes the same file for the layout of the answer
+(`veldcore/sdk/rust/src/resource/opened.rs`, through `#[path]`), and keeps of
+its own only the host's `(id, len)` form. `accept` reads a host-settled reply
+as the host's refusal, not as "no handle": the rule is
+`veldsdk::reply::undelivered`, one for every reply whose empty form would read
+as success.
 
 `discard` and `release` are opposites. `discard` answers a **foreign** reply
 and does not touch the resource: the bus delivers a reply to every subscriber

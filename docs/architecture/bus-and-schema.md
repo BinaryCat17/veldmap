@@ -76,7 +76,11 @@ that will not come), and a native service that panics with `panic = "abort"`
 and takes the process with it. A settled reply is empty, and an empty proto3
 message is every field at its default — "all is well, and there is nothing";
 the receiver should read an empty terminal reply as "no end was seen", not as
-"it worked".
+"it worked". The reading is one function, `veldsdk::reply::undelivered`: a
+settled reply is told by its publisher — the host stamps none — not by its
+content. It is asked wherever an empty reply would read as success — the
+tile replies of the globe and the canvas, the signed address of a download,
+and any `ResourceOpened` through `accept`.
 
 The FLOW table the host searches is generated from the schemas and sorted by
 request, because the lookup is a binary search; `buildgen/tests/test_project.py`

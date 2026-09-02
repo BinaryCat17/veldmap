@@ -1,23 +1,15 @@
-//! Сборка ответа «ресурс открыт» — зеркало `veldsdk::resource::opened` для
-//! нативной стороны.
-//!
-//! Открытие ресурса отвечает одним и тем же `core.ResourceOpened` у fs,
-//! network и прикладных модулей, и раскладка «успех → handle, отказ → текст»
-//! у всех одна. Собранная руками, она расходится в мелочах: пустая строка
-//! против отсутствующего поля, handle рядом с непустой ошибкой.
+//! Зеркало обряда «открой мне это» для нативной стороны. Сборка ответа — тот
+//! же файл, что у SDK (`resource/opened.rs`, через `#[path]`); своя здесь
+//! только форма, в которой хост держит открытое: `(id, len)`.
 //!
 //! Публикует ответ модуль сам, своим emit-стабом: топики объявлены в его
 //! схеме, и util о них не знает.
 
 use veldmap_host_core::core::{ResourceHandle, ResourceOpened};
 
-pub fn opened(result: Result<ResourceHandle, String>) -> ResourceOpened {
-    let (handle, error) = match result {
-        Ok(handle) => (Some(handle), String::new()),
-        Err(error) => (None, error),
-    };
-    ResourceOpened { handle, error }
-}
+#[path = "../../../../sdk/rust/src/resource/opened.rs"]
+mod opened;
+pub use opened::opened;
 
 /// То же по идентификатору и размеру — обычная форма на стороне хоста, где
 /// открытие возвращает `(id, len)`.

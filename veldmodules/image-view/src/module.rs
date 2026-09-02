@@ -361,8 +361,8 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     // кадра значило бы стереть картинку из-за осечки, которая пройдёт сама.
     // Договорённый хостом ответ — тот же отказ, и путь у него тот же: свои
     // ячейки снять с ожидания и сказать вслух. Принятый за удачу, он оставил бы
-    // их висеть навсегда (см. `tiles::undelivered`).
-    let error = tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone());
+    // их висеть навсегда (см. `veldsdk::reply::undelivered`).
+    let error = veldsdk::reply::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone());
     if !error.is_empty() {
         view.fetch.forget_asked(&ctx.cells);
         view.trouble = Some(format!("неполно: {}", error));
@@ -469,7 +469,7 @@ pub fn on_produce_done(state: &mut State, msg: ProduceDone) {
         // которых никто не производил (`Fetch::forgive`).
         let error = match ours_kill {
             true => msg.error.clone(),
-            false => tiles::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone()),
+            false => veldsdk::reply::undelivered(&msg.error).unwrap_or_else(|| msg.error.clone()),
         };
         let failed = ours && !error.is_empty();
         view.fetch.produced(if ours { &ctx.cells } else { &[] }, failed);

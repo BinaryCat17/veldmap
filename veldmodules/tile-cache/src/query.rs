@@ -149,19 +149,10 @@ enum Miss {
 /// Файл открыт → байты → RGBA → текстура с передачей владения заказчику.
 fn serve(owner: &str, level: u32, x: u32, y: u32, opened: &ResourceOpened) -> Result<TileResult, Miss> {
     let handle = veldsdk::resource::accept(opened).map_err(Miss::NoFile)?;
-    // Длина спрашивается до чтения: файл в каталоге кэша пишем мы сами, но
-    // пережить он может и оборванную запись, и чужую руку, а читается он
-    // целиком в память инстанса. Потолок тот же, что у записи, — тело тайла
-    // сжато, и сжатое крупнее развёрнутого не бывает.
-    if handle.size > layout::MAX_TILE_BYTES as u64 {
-        return Err(Miss::Broken(format!(
-            "тело тайла {} байт при потолке {}", handle.size, layout::MAX_TILE_BYTES
-        )));
-    }
-    let file = veldsdk::OwnedResource::new(handle.clone());
-    let bytes = veldsdk::abi::resource_read(file.id(), 0, handle.size)
-        .map_err(|e| Miss::Broken(e.to_string()))?;
-    drop(file);
+    // Потолок тот же, что у записи: тело тайла сжато, и сжатое крупнее
+    // развёрнутого не бывает.
+    let bytes = veldsdk::resource::read_whole(handle, layout::MAX_TILE_BYTES as u64)
+        .map_err(Miss::Broken)?;
 
     let (width, height, rgba) = decode(&bytes).map_err(Miss::Broken)?;
     let texture = veldsdk::graphics::upload_texture(

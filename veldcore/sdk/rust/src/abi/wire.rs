@@ -16,7 +16,10 @@ pub const OK: u8 = 0;
 /// Тег отказа: дальше текст причины.
 pub const ERR: u8 = 1;
 
-/// Кодирует результат: тег и байты за ним.
+/// Кодирует результат: тег и байты за ним. Гостю нужен только разбор; собирают
+/// ответ хост и фальшивый хост, которые включают этот файл, — у wasm-цели
+/// сборка поэтому лежит без дела.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn tagged(result: Result<Vec<u8>, String>) -> Vec<u8> {
     match result {
         Ok(payload) => {
@@ -35,6 +38,7 @@ pub fn tagged(result: Result<Vec<u8>, String>) -> Vec<u8> {
 }
 
 /// Упаковывает ответ, лежащий по `ptr` длиной `len`.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn pack(ptr: u64, len: u64) -> u64 {
     (len << 32) | ptr
 }

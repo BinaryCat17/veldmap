@@ -429,20 +429,17 @@ NetCDF и сети; страницы docs — по одной в чужих ко
    повторы; каталог библиотеки на рукотворном листинге; `abandon` наложения
    → `leaked()` пуст. Мутации всех четырёх крейтов в `buildgen/mutations/`.
    Docs: bus-and-schema.md, tasks.md; README без трёх разделов.
-6. **[S] Три хелпера клея.** `open_resource(state, key, local)` в
-   data-browser вместо четырёх копий развилки (relay-модули не сливать);
-   `veldsdk::reply::undelivered` из tiles.rs — в download.rs вместо
-   `url.is_empty()`, в tile-cache и data-provider; хелпер записи через fs в SDK
-   вместо трёх ритуалов и хелпер чтения ресурса целиком вместо трёх
-   `resource_read(id, 0, size)` (tile-cache query, data-library catalog,
-   data-browser persist); зеркало обряда «открой мне это» в `host/util`:
-   чистую часть (сборка `ResourceOpened`, разбор «error пуст → handle есть»)
-   — общим файлом через `#[path]`, как `abi/wire.rs`, если она дословно одна,
-   порознь оставить только вызовы ABI. Docs: screen.md (README 584–800
-   удаляется здесь),
-   download.md. *Проверка:* по одному вызову `data_library::on_open` /
-   `data_provider::on_open`; grep `url.is_empty()` в download.rs пуст; uitests
-   preview/remote/shown/outline/download.
+6. **[S] Три хелпера клея** — выполнен 3 сентября 2026:
+   `veldsdk::reply::undelivered` (из tiles.rs; `answered_by_host` перестал быть
+   публичной дверью), им же `accept` называет договорённый ответ — это и есть
+   tile-cache с relay data-provider/data-library, — а download.rs зовёт его
+   вместо `url.is_empty()`; `veldsdk::resource::{region_of, read_whole}` вместо
+   трёх ритуалов записи и трёх чтений целиком (persist получил `LAYOUT_CAP`);
+   сборка `ResourceOpened` — общий файл `resource/opened.rs`, host/util включает
+   его через `#[path]`; data-browser `handlers::open_resource(identifier, local,
+   &correlation)` в пяти местах, учёт ожидания у зовущего — хелпер без `state`,
+   потому что журналы у превью и наложения разные. Docs: screen.md,
+   download.md, README без двух разделов; мутации veldsdk.
 7. **[L] Общий драйвер сетки чанков и один счёт памяти.** Из tiff.rs: трейт
    источника уровня (сетка чанков, адресуем ли, `read_chunk`) и два общих
    цикла `direct`/`pass`; таблица уровней (обслуживание, байты, влезает)

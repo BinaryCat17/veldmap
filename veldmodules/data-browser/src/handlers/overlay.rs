@@ -463,16 +463,7 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
             // читается только целиком (см. `DescribeRequest.near`).
             let correlation = state.opens.begin((key.clone(), role, part, local.is_some()));
             opens.push(correlation.clone());
-            match local {
-                Some(name) => crate::calls::data_library::on_open(
-                    &crate::proto::data_library::OpenRequest { name },
-                    &correlation,
-                ),
-                None => crate::calls::data_provider::on_open(
-                    &crate::proto::data_provider::OpenRequest { identifier },
-                    &correlation,
-                ),
-            }
+            super::open_resource(identifier, local, &correlation);
         }
     }
 

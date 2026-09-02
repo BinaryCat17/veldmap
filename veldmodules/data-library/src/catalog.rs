@@ -236,20 +236,15 @@ pub fn on_snapshot(state: &mut State, request: SnapshotFiles) {
 pub fn on_sidecar_read(state: &mut State, name: String, opened: &ResourceOpened) {
     let Some(handle) = &opened.handle else { return };
 
-    // RAII-гард заводится первым: файл открыт на нас, и освободить его обязаны
-    // мы — при любом выходе ниже, включая отказ по размеру.
-    let resource = veldsdk::OwnedResource::new(handle.clone());
-
-    // Сидкар — это десятки байт json, который пишем мы сами. Что-то большее
-    // под этим именем — не наш файл (обрезанная закачка, чужой мусор), и
-    // втягивать его целиком в линейную память инстанса нельзя: неправдоподобный
-    // размер уронил бы весь модуль, а с ним и список скачанного.
-    if handle.size > SIDECAR_CAP {
-        veldsdk::log::warn!(target: "handlers",
-            "сидкар {} размером {} байт — это не наш файл, пропускаем", name, handle.size);
-        return;
-    }
-    let Ok(bytes) = veldsdk::abi::resource_read(resource.id(), 0, handle.size) else { return };
+    // Сидкар — это десятки байт json, который пишем мы сами; что-то большее
+    // под этим именем — не наш файл (обрезанная закачка, чужой мусор).
+    let bytes = match veldsdk::resource::read_whole(handle.clone(), SIDECAR_CAP) {
+        Ok(bytes) => bytes,
+        Err(why) => {
+            veldsdk::log::warn!(target: "handlers", "сидкар {} не прочитан: {}", name, why);
+            return;
+        }
+    };
     let Ok(sidecar) = serde_json::from_slice::<OriginSidecar>(&bytes) else { return };
     if sidecar.provider != storage::PROVIDER_NAME { return }
 
@@ -298,20 +293,13 @@ pub fn write_sidecar(state: &mut State, name: &str, sidecar: OriginSidecar) {
         veldsdk::log::warn!(target: "handlers", "сидкар {} не собрался в json", name);
         return;
     };
-    let Some(region_id) = veldsdk::abi::resource_alloc_cpu(json.len() as u64) else {
-        veldsdk::log::warn!(target: "handlers", "сидкар {}: нет памяти под регион", name);
-        return;
+    let region = match veldsdk::resource::region_of(&json) {
+        Ok(region) => region,
+        Err(error) => {
+            veldsdk::log::warn!(target: "handlers", "сидкар {} не записан: {}", name, error);
+            return;
+        }
     };
-    // Во владельца — сразу после выделения: сорвись запись, регион освободит
-    // Drop, а голый id остался бы висеть на хосте до конца процесса.
-    let region = veldsdk::OwnedResource::from_raw_id(region_id);
-    if let Err(e) = veldsdk::abi::resource_write(region.id(), 0, &json) {
-        veldsdk::log::warn!(target: "handlers", "сидкар {} не записан: {}", name, e);
-        return;
-    }
-
-    // Гранта на "fs" не нужно: on_write проверяет доступ по requestor_id —
-    // паблишеру события, то есть нам же, а мы и так владелец региона.
     let correlation_id = state.pending_sidecar_writes.begin(SidecarWrite {
         region: region.id(),
         name: name.to_string(),
@@ -319,10 +307,7 @@ pub fn write_sidecar(state: &mut State, name: &str, sidecar: OriginSidecar) {
     crate::calls::fs::on_write(&FsWriteRequest {
         path: storage::origin_path(name),
         // Владение уезжает в таблицу ожидания: освободит его on_write_result.
-        handle: Some(veldsdk::proto::core::ResourceHandle {
-            id: region.into_handle().id,
-            size: json.len() as u64,
-        }),
+        handle: Some(region.into_handle()),
     }, &correlation_id);
 }
 

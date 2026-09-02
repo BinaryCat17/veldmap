@@ -170,15 +170,11 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
     let Some(dl) = state.downloads.get(&correlation_id) else { return };
     let name = dl.name.clone();
 
-    // Пустой адрес при пустой причине — не удача: так выглядит ответ, который
-    // договорил за исполнителя хост, не дождавшись его самого (см. README про
-    // терминальный ответ). Приняв его за подпись, мы послали бы закачку в
-    // пустоту и сказали бы человеку про сеть там, где дело в упавшем модуле.
-    let refusal = match (signed.error.is_empty(), signed.url.is_empty()) {
-        (false, _) => Some(signed.error.clone()),
-        (true, true) => Some("провайдер не ответил".to_string()),
-        (true, false) => None,
-    };
+    // Пустой ответ при пустой причине — не удача, а ответ, который договорил
+    // за исполнителя хост: принятый за подпись, он послал бы закачку в пустоту
+    // и сказал бы человеку про сеть там, где дело в упавшем модуле.
+    let refusal = veldsdk::reply::undelivered(&signed.error)
+        .or_else(|| (!signed.error.is_empty()).then(|| signed.error.clone()));
     if let Some(why) = refusal {
         veldsdk::log::warn!(target: "handlers", "подпись для {} не удалась: {}", name, why);
         state.troubles.insert(name, format!("подпись не удалась: {}", why));

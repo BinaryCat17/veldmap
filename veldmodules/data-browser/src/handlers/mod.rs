@@ -14,6 +14,26 @@ pub mod window;
 
 use veldsdk::graphics::TextureFormat;
 
+/// Открыть файл ресурсом тем, чей он: скачанный — библиотекой, потому что файл
+/// под рукой, прочее — провайдером, по сети. `local` — имя записи библиотеки,
+/// если файл лежит на диске целиком (`LibraryState::local_name`); им же
+/// вкладка и сборка наложения помнят, чем открыт файл. Оба открывателя
+/// отвечают одним `core.ResourceOpened` на эту корреляцию, и дальше разницы
+/// нет. Учёт ожидания у каждого зовущего свой, поэтому корреляцию он заводит
+/// сам.
+pub fn open_resource(identifier: String, local: Option<String>, correlation: &str) {
+    match local {
+        Some(name) => crate::calls::data_library::on_open(
+            &crate::proto::data_library::OpenRequest { name },
+            correlation,
+        ),
+        None => crate::calls::data_provider::on_open(
+            &crate::proto::data_provider::OpenRequest { identifier },
+            correlation,
+        ),
+    }
+}
+
 /// Формат места под чужой рендер — и у канвы просмотра, и у шара. UNORM с
 /// sRGB-числами: разметка сэмплит эту текстуру как обычную картинку и
 /// линеаризует сама, а закодируй её GPU второй раз — вкладка приехала бы

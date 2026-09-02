@@ -42,9 +42,7 @@ pub fn on_view_local_pressed(state: &mut State, from: ViewId, name: String) {
     if name.is_empty() { return; }
 
     let correlation_id = begin_open(state, from, name.clone(), Some(name.clone()));
-    crate::calls::data_library::on_open(&crate::proto::data_library::OpenRequest {
-        name,
-    }, &correlation_id);
+    super::open_resource(name.clone(), Some(name), &correlation_id);
 }
 
 /// Просмотр ещё не скачанного. Ресурс открывает data-provider (подписать
@@ -55,9 +53,7 @@ pub fn on_view_remote_pressed(state: &mut State, from: ViewId, identifier: Strin
     if identifier.is_empty() { return; }
 
     let correlation_id = begin_open(state, from, identifier.clone(), None);
-    crate::calls::data_provider::on_open(&crate::proto::data_provider::OpenRequest {
-        identifier,
-    }, &correlation_id);
+    super::open_resource(identifier, None, &correlation_id);
 }
 
 /// Показать снимок, лежащий папкой. Прямо его не открыть: `GET` по пути
@@ -126,17 +122,7 @@ pub fn on_imagery_result(state: &mut State, response: &ImageryResponse) -> bool 
     preview.entry = local.clone();
     let correlation_id = preview.begin();
     state.previews.insert(correlation_id.clone(), view);
-
-    match local {
-        Some(name) => crate::calls::data_library::on_open(
-            &crate::proto::data_library::OpenRequest { name },
-            &correlation_id,
-        ),
-        None => crate::calls::data_provider::on_open(
-            &crate::proto::data_provider::OpenRequest { identifier },
-            &correlation_id,
-        ),
-    }
+    super::open_resource(identifier, local, &correlation_id);
     true
 }
 
@@ -159,17 +145,7 @@ pub fn reopen(
     let view = super::nav::open_preview(state, pane, label.clone(), entry.clone());
     let correlation_id = state.preview_mut(view).expect("вид только что открыт").begin();
     state.previews.insert(correlation_id.clone(), view);
-
-    match entry {
-        Some(name) => crate::calls::data_library::on_open(
-            &crate::proto::data_library::OpenRequest { name },
-            &correlation_id,
-        ),
-        None => crate::calls::data_provider::on_open(
-            &crate::proto::data_provider::OpenRequest { identifier: label },
-            &correlation_id,
-        ),
-    }
+    super::open_resource(label, entry, &correlation_id);
 }
 
 /// Общее начало обоих путей: новая вкладка и корреляция, по которой её найдёт

@@ -30,3 +30,5 @@ and in the logs. Where one word carries two senses in the tree, both are given.
 | binding | привязка | how raster pixels map to the Earth; four kinds, from the catalogue's footprint up to a lattice of tie points |
 | scene, product, part | снимок, продукт, часть | what a person sees as one acquisition; what the catalogue lists; the products folded into one scene |
 | quicklook | квиклук | the small preview raster of a scene |
+| pane | панель | a place on the screen that holds tabs; the screen is a tree of panes |
+| sidecar | сидкар | the `.origin` file the library writes next to a downloaded file: where it came from, which scene it belongs to, how many files the scene has |

@@ -19,12 +19,16 @@ use crate::module::state::{
     Axis, BrowseState, Node, PaneId, SearchState, State, ViewKind,
 };
 use crate::module::NewTab;
-use veldsdk::proto::core::{ResourceHandle, ResourceOpened};
+use veldsdk::proto::core::ResourceOpened;
 use veldsdk::proto::fs::{FsReadRequest, FsWriteRequest, FsWriteResult};
 
 /// Где лежит запомненное. Рядом с `runtime/`, а не в `data/`: там скачанное, и
 /// снос кэша данных не должен уносить с собой расставленные вкладки.
 const PATH: &str = "state/data-browser.json";
+
+/// Потолок файла раскладки при чтении: она — десятки строк json на вкладку, и
+/// крупнее этого под её именем лежит не она.
+const LAYOUT_CAP: u64 = 1024 * 1024;
 
 // -- Сохранённая раскладка --
 //
@@ -125,30 +129,23 @@ fn fingerprint(body: &[u8]) -> u64 {
     hasher.finish()
 }
 
-/// Кладёт байты в файл через fs: CPU-регион → on_write → освобождение по
-/// ответу (см. [`on_write_result`]).
+/// Кладёт байты в файл через fs: регион → on_write → освобождение по ответу
+/// (см. [`on_write_result`]).
 fn write(state: &mut State, body: &[u8]) {
-    let Some(region_id) = veldsdk::abi::resource_alloc_cpu(body.len() as u64) else {
-        veldsdk::log::warn!(target: "handlers", "раскладка не записана: нет памяти под регион");
-        forget(state);
-        return;
+    let region = match veldsdk::resource::region_of(body) {
+        Ok(region) => region,
+        Err(error) => {
+            veldsdk::log::warn!(target: "handlers", "раскладка не записана: {}", error);
+            forget(state);
+            return;
+        }
     };
-    // Во владельца сразу после выделения: сорвись запись, регион освободит
-    // Drop, а голый id остался бы висеть на хосте до конца процесса.
-    let region = veldsdk::OwnedResource::from_raw_id(region_id);
-    if let Err(error) = veldsdk::abi::resource_write(region.id(), 0, body) {
-        veldsdk::log::warn!(target: "handlers", "раскладка не записана: {}", error);
-        forget(state);
-        return;
-    }
-
-    let size = body.len() as u64;
     let correlation = state.layout_writes.begin(region.id());
     crate::calls::fs::on_write(
         &FsWriteRequest {
             path: PATH.to_string(),
             // Владение уезжает в таблицу ожидания: освободит его ответ.
-            handle: Some(ResourceHandle { id: region.into_handle().id, size }),
+            handle: Some(region.into_handle()),
         },
         &correlation,
     );
@@ -199,9 +196,7 @@ pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     }
 
     let Ok(handle) = veldsdk::resource::accept(&opened) else { return fresh(state) };
-    // RAII-гард: регион освобождается при любом выходе ниже.
-    let resource = veldsdk::OwnedResource::new(handle.clone());
-    let Ok(bytes) = veldsdk::abi::resource_read(resource.id(), 0, handle.size) else {
+    let Ok(bytes) = veldsdk::resource::read_whole(handle, LAYOUT_CAP) else {
         return fresh(state);
     };
     let saved = match veldsdk::serde_json::from_slice::<Saved>(&bytes) {
