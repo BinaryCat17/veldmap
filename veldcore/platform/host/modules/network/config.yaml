@@ -7,4 +7,6 @@ rust:
     tokio: { version: "1.49", features: ["full"] }
     anyhow: "1.0"
     reqwest: { version: "0.12", features: ["json", "stream"] }
+    # Тело ответа отдаётся как есть, без копии: блоки режутся из него срезами.
+    bytes: "1"
     futures-util: "0.3"

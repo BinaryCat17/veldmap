@@ -459,6 +459,62 @@ mod tests {
         state.snapshot.insert(name.to_string(), LocalFile { size: 7, is_partial, modified: 0 });
     }
 
+    fn listing(names: &[&str]) -> veldsdk::proto::fs::FsListResult {
+        veldsdk::proto::fs::FsListResult {
+            entries: names
+                .iter()
+                .map(|name| veldsdk::proto::fs::FsEntry { name: name.to_string(), size: 7, modified: 0 })
+                .collect(),
+            error: String::new(),
+        }
+    }
+
+    /// Обход диска на рукотворном листинге: `foo` и `foo.part` сворачиваются в
+    /// одну запись, и побеждает `.part`; файл, у которого на диске лежит один
+    /// сидкар, дочитывается запросом к fs — и всё это видно снаружи, на шине:
+    /// состояние уезжает сразу, сидкар спрашивается следом.
+    #[test]
+    fn a_listing_folds_parts_and_asks_for_missing_sidecars() {
+        use veldsdk::prost::Message;
+        veldsdk::fake::install();
+        let mut state = state();
+
+        ingest(&mut state, listing(&["a.tif", "a.tif.part", "b.tif.origin", "b.tif"]));
+
+        assert_eq!(state.snapshot.len(), 2, "две записи: {:?}", state.snapshot.keys().collect::<Vec<_>>());
+        assert!(state.snapshot["a.tif"].is_partial, "у пары побеждает .part");
+        assert!(!state.snapshot["b.tif"].is_partial);
+
+        let published = veldsdk::fake::published();
+        let topics: Vec<&str> = published.iter().map(|p| p.topic.as_str()).collect();
+        assert!(topics.contains(&"data-library/on_state"), "состояние разослано: {topics:?}");
+        let asked: Vec<String> = published
+            .iter()
+            .filter(|p| p.topic == "fs/on_read")
+            .map(|p| veldsdk::proto::fs::FsReadRequest::decode(&p.payload[..]).unwrap().path)
+            .collect();
+        assert_eq!(asked, vec![storage::origin_path("b.tif")], "сидкар без записи в памяти дочитывается");
+        assert!(topics.iter().position(|t| *t == "data-library/on_state") < topics.iter().position(|t| *t == "fs/on_read"),
+            "состояние уезжает раньше, чем спрошен сидкар");
+    }
+
+    /// Отказ листинга уезжает ошибкой состояния, а снимок в памяти не трогается.
+    #[test]
+    fn a_failed_listing_is_reported_and_keeps_the_snapshot() {
+        use veldsdk::prost::Message;
+        veldsdk::fake::install();
+        let mut state = state();
+        on_disk(&mut state, "kept.tif", false);
+
+        ingest(&mut state, veldsdk::proto::fs::FsListResult { entries: Vec::new(), error: "нет каталога".into() });
+
+        assert!(state.snapshot.contains_key("kept.tif"));
+        let last = veldsdk::fake::published().pop().expect("что-то ушло");
+        assert_eq!(last.topic, "data-library/on_state");
+        let told = LibraryState::decode(&last.payload[..]).unwrap();
+        assert_eq!(told.error, "нет каталога");
+    }
+
     /// Причину срыва носит только стоящая запись.
     ///
     /// У доведённой она означала бы, что сорвалось то, что дошло, — а дойти

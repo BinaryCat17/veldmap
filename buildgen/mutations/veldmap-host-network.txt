@@ -1,0 +1,12 @@
+# Мутации сетевого чтения: сборка ответа из блоков и разгон.
+# Формат — buildgen/mutate.py; крейт — пакет воркспейса veldcore.
+
+имя: блок берётся с начала, а не со смещения в нём
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:             let start = (position % BLOCK) as usize;
+стало:             let start = 0usize;
+
+имя: разгон не сбрасывается прыжком
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:             false => 1,
+стало:             false => (self.run * 2).max(1).min(READAHEAD / BLOCK),

@@ -804,6 +804,32 @@ mod tests {
         DataProduct { footprint, ..Default::default() }
     }
 
+    /// Убранное наложение не оставляет за собой ничего: ресурсы оборванной
+    /// сборки отпущены, а открытия в полёте сняты с ключа — их ответ пройдёт
+    /// веткой «наложение убрали», а не ляжет в чужой набор.
+    #[test]
+    fn an_abandoned_overlay_leaks_nothing() {
+        veldsdk::fake::install();
+        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
+        let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
+        let quicklook = veldsdk::fake::mount(vec![1, 2, 3]);
+        let raster = veldsdk::fake::mount(vec![4, 5, 6]);
+        state.opens.insert("open-1".to_string(), ("scene".to_string(), detailed, Part::Raster, false));
+
+        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
+        overlay.assembly = Some(Assembly {
+            utm: None,
+            opens: vec!["open-1".to_string()],
+            collected: vec![(preview, Part::Raster, quicklook, false), (detailed, Part::Raster, raster, true)],
+        });
+
+        abandon(&mut state, overlay);
+
+        assert!(veldsdk::fake::leaked().is_empty(), "собранные растры не отпущены");
+        let (key, ..) = state.opens.take("open-1").expect("открытие в полёте остаётся на учёте");
+        assert!(key.is_empty(), "открытие снято с ключа наложения");
+    }
+
     /// Набор уезжает глобусу превью вперёд, каким бы ни был порядок ответов
     /// сети. Тайлер описывает набор по одному, поэтому вставший первым держит
     /// остальных: у гранулы, где подробный растр вернулся раньше квиклука,

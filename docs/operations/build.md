@@ -107,7 +107,8 @@ incremental compilation error` is a failure with one cure:
 rm -rf veldcore/target/release/incremental
 ```
 
-It follows a change to a `.proto` under `veldcore/interface/`: the generated
-bindings crate changes and the host's incremental cache is left from the old
-one. Only `incremental/` goes; it rebuilds in minutes, the whole `target/`
-does not.
+It has followed a change to a `.proto` under `veldcore/interface/` — the
+generated bindings crate changes and the host's incremental cache is left from
+the old one — and, twice on the same day, a change inside the network module
+with the same query named in the panic. Only `incremental/` goes; it rebuilds
+in minutes, the whole `target/` does not.

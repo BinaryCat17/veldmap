@@ -1,0 +1,12 @@
+# Мутации ядра хоста: учёт обменов у диспетчера.
+# Формат — buildgen/mutate.py; крейт — пакет воркспейса veldcore.
+
+имя: за отсутствующего подписчика хост не отвечает
+файл: veldcore/platform/host/core/src/dispatcher.rs
+было:                 self.publish_from(terminal, Vec::new(), 0, correlation, "");
+стало:                 let _ = terminal;
+
+имя: адресная публикация уходит всем
+файл: veldcore/platform/host/core/src/dispatcher.rs
+было:                 .filter(|(name, _)| name == target)
+стало:                 .filter(|(_name, _)| true)

@@ -15,3 +15,23 @@
 файл: veldmodules/image-tiler/src/pyramid.rs
 было: size = size.div_ceil(2);
 стало: size /= 2;
+
+имя: регион копии сдвинут на пиксель
+файл: veldmodules/image-tiler/src/adapters/tiff.rs
+было: let window = Window { x0: 0.0, y0: 0.0,
+стало: let window = Window { x0: 1.0, y0: 0.0,
+
+имя: проход пропускает первый ряд чанков
+файл: veldmodules/image-tiler/src/adapters/tiff.rs
+было:     for cy in 0..down {
+стало:     for cy in 1..down {
+
+имя: прямое чтение берёт чанки с начала ряда
+файл: veldmodules/image-tiler/src/adapters/tiff.rs
+было:             for cx in sx0 / cw..=(sx0 + rw - 1) / cw {
+стало:             for cx in 0..=(sx0 + rw - 1) / cw {
+
+имя: Exact без окна на всех уровнях
+файл: veldmodules/image-tiler/src/adapters/mod.rs
+было:             Kind::Tiff(layout) if layout.random_access() && self.windowed() == levels => {
+стало:             Kind::Tiff(layout) if layout.random_access() => {

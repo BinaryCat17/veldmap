@@ -97,13 +97,19 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
 }
 
 /// Носитель поверх HTTP: блоки тянутся по требованию и кэшируются.
+/// Поход в сеть за диапазоном `[from, to)`: тело ответа либо исход попытки.
+///
+/// Замыканием, а не методом, — это названное исключение из «никаких трейтов
+/// для тестов»: у хоста нет фальшивки SDK, а сборка ответа из блоков, разгон
+/// и пул обязаны проверяться без сети. Всё, что знает про HTTP, — статусы,
+/// заголовки, рантайм — живёт внутри замыкания, которое собирает [`HttpRange::open`].
+type Fetch = Box<dyn Fn(u64, u64) -> Result<bytes::Bytes, Attempt> + Send + Sync>;
+
 struct HttpRange {
+    /// Адрес — только для журнала: ходит в сеть [`HttpRange::fetch`].
     url: String,
-    headers: HashMap<String, String>,
     len: u64,
-    /// Хендл рантайма: read_at вызывается хостом с blocking-пула, где
-    /// асинхронный запрос надо кому-то отдать.
-    runtime: tokio::runtime::Handle,
+    fetch: Fetch,
     /// Общий на все ресурсы пул блоков и ключ владения в нём.
     blocks: Arc<Blocks>,
     owner: u64,
@@ -394,6 +400,52 @@ fn refusal_or_hiccup(status: reqwest::StatusCode, error: anyhow::Error) -> Attem
     }
 }
 
+/// Исход пробного запроса по статусу. Range здесь ни при чём, если ответ
+/// вообще не про содержимое: 404 — неверный адрес, 401/403 — просроченная или
+/// чужая подпись, и валить всё в «не поддерживает Range» значило бы уводить от
+/// причины; отсутствие поддержки — это именно 200 вместо 206.
+fn probed(status: reqwest::StatusCode, url: &str) -> Result<(), Attempt> {
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        return Ok(());
+    }
+    if status == reqwest::StatusCode::OK {
+        return Err(Attempt::Refused(anyhow::anyhow!(
+            "сервер не поддерживает Range: на запрос диапазона ответил целым файлом (HTTP 200)"
+        )));
+    }
+    Err(refusal_or_hiccup(status, anyhow::anyhow!("удалённый ресурс не открыт: HTTP {} на {}", status, url)))
+}
+
+/// Исход чтения диапазона по статусу: только 206 — ответ 200 означал бы, что
+/// Range проигнорирован и пришёл весь файл, а принять его за блок значило бы
+/// сдвинуть все смещения. 401/403 посреди чтения — истёкшая подпись.
+fn ranged(status: reqwest::StatusCode, from: u64, to: u64) -> Result<(), Attempt> {
+    if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        return Ok(());
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(Attempt::Refused(anyhow::anyhow!(
+            "доступ к удалённому ресурсу больше не действителен (HTTP {}): \
+             заголовки авторизации выданы при открытии и могли истечь", status)));
+    }
+    Err(refusal_or_hiccup(status, anyhow::anyhow!("чтение диапазона {}..{}: HTTP {}", from, to, status)))
+}
+
+/// Полная длина объекта из `Content-Range: bytes 0-1/12345`; `None` — сервер
+/// её не назвал.
+fn full_length(content_range: &str) -> Option<u64> {
+    content_range.rsplit('/').next()?.trim().parse::<u64>().ok()
+}
+
+/// Короткий ответ — обрыв, а не конец файла: длина известна из Content-Range,
+/// и запрошено ровно столько, сколько есть.
+fn delivered(got: u64, expected: u64) -> Result<(), Attempt> {
+    match got == expected {
+        true => Ok(()),
+        false => Err(Attempt::Broken(anyhow::anyhow!("получено {} байт вместо {}", got, expected))),
+    }
+}
+
 /// Сколько ждать перед следующей попыткой. `None` — следующей не будет.
 ///
 /// Отдельной функцией, а не условием внутри цикла: всё правило повторов —
@@ -447,22 +499,7 @@ impl HttpRange {
             let response = runtime
                 .block_on(super::http::get(url, &headers, Some((0, 1))).send())
                 .map_err(|e| Attempt::Broken(e.into()))?;
-
-            // Range здесь ни при чём, если ответ вообще не про содержимое: 404 —
-            // это неверный адрес, 401/403 — просроченная или чужая подпись. Валить
-            // всё в «сервер не поддерживает Range» значило бы уводить от причины;
-            // отсутствие поддержки — это именно 200 вместо 206.
-            let status = response.status();
-            if status != reqwest::StatusCode::PARTIAL_CONTENT {
-                if status == reqwest::StatusCode::OK {
-                    return Err(Attempt::Refused(anyhow::anyhow!(
-                        "сервер не поддерживает Range: на запрос диапазона ответил целым файлом (HTTP 200)"
-                    )));
-                }
-                return Err(refusal_or_hiccup(status, anyhow::anyhow!(
-                    "удалённый ресурс не открыт: HTTP {} на {}", status, url
-                )));
-            }
+            probed(response.status(), url)?;
             // Валидатор берётся тем же пробным запросом: второго повода
             // ходить за ним нет, а без него блоки этого объекта не разделить
             // с его же вторым открытием (см. [`Identity`]). ETag старше даты:
@@ -479,7 +516,7 @@ impl HttpRange {
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit('/').next()?.parse::<u64>().ok())
+                .and_then(full_length)
                 .ok_or_else(|| {
                     Attempt::Refused(anyhow::anyhow!("сервер не сообщил размер файла (Content-Range)"))
                 })
@@ -491,11 +528,28 @@ impl HttpRange {
             validator,
         });
 
-        Ok(Self {
+        // Рантайм нужен только походу в сеть: read_at вызывается хостом с
+        // blocking-пула, где асинхронный запрос надо кому-то отдать.
+        let fetch: Fetch = {
+            let (url, headers) = (url.to_string(), headers);
+            Box::new(move |from, to| {
+                let response = runtime
+                    .block_on(super::http::get(&url, &headers, Some((from, to))).send())
+                    .map_err(|e| Attempt::Broken(e.into()))?;
+                ranged(response.status(), from, to)?;
+                runtime.block_on(response.bytes()).map_err(|e| Attempt::Broken(e.into()))
+            })
+        };
+        Ok(Self::over(url, len, blocks, identity, fetch))
+    }
+
+    /// Носитель над готовым походом в сеть — тем, что собрал `open`, либо
+    /// тем, что подложил тест.
+    fn over(url: &str, len: u64, blocks: Arc<Blocks>, identity: Option<Identity>, fetch: Fetch) -> Self {
+        Self {
             url: url.to_string(),
-            headers,
             len,
-            runtime,
+            fetch,
             owner: blocks.claim_for(identity),
             blocks,
             readahead: Mutex::new(Readahead::default()),
@@ -505,7 +559,7 @@ impl HttpRange {
             blocks_in: std::sync::atomic::AtomicU64::new(0),
             id: std::sync::atomic::AtomicU64::new(0),
             reported: std::sync::atomic::AtomicU64::new(0),
-        })
+        }
     }
 
     /// Носителю сообщают его номер в реестре: до этого он о себе знает только
@@ -581,35 +635,8 @@ impl HttpRange {
             &format!("чтение диапазона {}..{} ({})", from, to, self.url),
             || {
                 shutting_down()?;
-                let response = self
-                    .runtime
-                    .block_on(super::http::get(&self.url, &self.headers, Some((from, to))).send())
-                    .map_err(|e| Attempt::Broken(e.into()))?;
-
-                // Только 206: ответ 200 означал бы, что Range проигнорирован и
-                // пришёл весь файл — принять его за блок значило бы сдвинуть все
-                // смещения.
-                let status = response.status();
-                if status != reqwest::StatusCode::PARTIAL_CONTENT {
-                    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-                        return Err(Attempt::Refused(anyhow::anyhow!(
-                            "доступ к удалённому ресурсу больше не действителен (HTTP {}): \
-                             заголовки авторизации выданы при открытии и могли истечь", status)));
-                    }
-                    return Err(refusal_or_hiccup(status, anyhow::anyhow!(
-                        "чтение диапазона {}..{}: HTTP {}", from, to, status)));
-                }
-
-                let data = self
-                    .runtime
-                    .block_on(response.bytes())
-                    .map_err(|e| Attempt::Broken(e.into()))?;
-                // Короткий ответ — это обрыв, а не конец файла: длину мы знаем из
-                // Content-Range и запросили ровно столько, сколько есть.
-                if data.len() as u64 != expected {
-                    return Err(Attempt::Broken(anyhow::anyhow!(
-                        "получено {} байт вместо {}", data.len(), expected)));
-                }
+                let data = (self.fetch)(from, to)?;
+                delivered(data.len() as u64, expected)?;
                 Ok(data)
             },
         )?;
@@ -902,5 +929,126 @@ mod tests {
         // пустого, а не наследует чужую очередь вытеснения.
         let again = pool.claim_for(Some(same));
         assert!(pool.get(again, 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod reads {
+    use super::*;
+
+    /// Носитель над байтами в памяти: «сеть» — срез вектора, и каждый поход
+    /// за диапазоном записывается.
+    fn in_memory(bytes: Vec<u8>) -> (HttpRange, Arc<Mutex<Vec<(u64, u64)>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let journal = asked.clone();
+        let len = bytes.len() as u64;
+        let fetch: Fetch = Box::new(move |from, to| {
+            journal.lock().unwrap().push((from, to));
+            Ok(bytes::Bytes::copy_from_slice(&bytes[from as usize..to as usize]))
+        });
+        let source = HttpRange::over("http://host/path/file.tif?sig", len, Arc::new(Blocks::default()), None, fetch);
+        (source, asked)
+    }
+
+    fn pattern(len: u64) -> Vec<u8> {
+        (0..len).map(|i| (i * 31 % 251) as u8).collect()
+    }
+
+    /// Чтение через границу блоков собирается из двух блоков байт в байт, а
+    /// хвост файла короче блока приезжает ровно такой длины, какая есть.
+    #[test]
+    fn read_at_crosses_block_boundaries_and_ends_short() {
+        let bytes = pattern(2 * BLOCK + 1000);
+        let (source, asked) = in_memory(bytes.clone());
+
+        let across = source.read_at(BLOCK - 10, 20).unwrap();
+        assert_eq!(across, bytes[(BLOCK - 10) as usize..(BLOCK + 10) as usize]);
+
+        let tail = source.read_at(2 * BLOCK - 5, 1005).unwrap();
+        assert_eq!(tail, bytes[(2 * BLOCK - 5) as usize..]);
+
+        // Хвост приезжает разгоном второго запроса: тот обрезан ровно по
+        // концу файла, за него не просят ни байта.
+        let asked = asked.lock().unwrap();
+        let len = 2 * BLOCK + 1000;
+        assert!(asked.iter().any(|(_, to)| *to == len), "хвост просится ровно до конца: {asked:?}");
+        assert!(asked.iter().all(|(from, to)| from % BLOCK == 0 && *to <= len), "запросы идут с границ блоков и не за конец: {asked:?}");
+    }
+
+    /// Последовательный проход разгоняется удвоением, прыжок в сторону
+    /// сбрасывает разгон к одному блоку.
+    #[test]
+    fn a_sequential_pass_speeds_up_and_a_jump_resets() {
+        let (source, asked) = in_memory(pattern(40 * BLOCK));
+        let mut at = 0;
+        for _ in 0..4 {
+            source.read_at(at, 16).unwrap();
+            at = asked.lock().unwrap().last().unwrap().1;
+        }
+        source.read_at(30 * BLOCK, 16).unwrap();
+        let runs: Vec<u64> = asked.lock().unwrap().iter().map(|(from, to)| (to - from) / BLOCK).collect();
+        assert_eq!(runs, vec![1, 2, 4, 8, 1]);
+    }
+
+    /// Пул отдаёт привезённое без сети: второе чтение того же блока — попадание.
+    #[test]
+    fn a_second_read_of_a_block_is_a_hit() {
+        let (source, asked) = in_memory(pattern(3 * BLOCK));
+        source.read_at(10, 10).unwrap();
+        source.read_at(20, 10).unwrap();
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert_eq!(source.hits.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// Полная длина берётся из Content-Range; без неё открытие невозможно.
+    #[test]
+    fn content_range_names_the_full_length() {
+        assert_eq!(full_length("bytes 0-1/12345"), Some(12345));
+        assert_eq!(full_length("bytes */999"), Some(999));
+        assert_eq!(full_length("bytes 0-1"), None);
+    }
+
+    /// Только 206 значит «понимает Range»: 200 — отказ по существу, шлюз —
+    /// обрыв, чужой адрес — отказ; истёкшая подпись посреди чтения — отказ с
+    /// названной причиной; короткое тело — обрыв.
+    #[test]
+    fn statuses_are_read_as_refusals_or_hiccups() {
+        use reqwest::StatusCode;
+        assert!(probed(StatusCode::PARTIAL_CONTENT, "u").is_ok());
+        let no_range = probed(StatusCode::OK, "u").unwrap_err();
+        assert!(matches!(&no_range, Attempt::Refused(e) if e.to_string().contains("не поддерживает Range")));
+        assert!(matches!(probed(StatusCode::BAD_GATEWAY, "u"), Err(Attempt::Broken(_))));
+        assert!(matches!(probed(StatusCode::NOT_FOUND, "u"), Err(Attempt::Refused(_))));
+
+        assert!(ranged(StatusCode::PARTIAL_CONTENT, 0, 1).is_ok());
+        let expired = ranged(StatusCode::FORBIDDEN, 0, 1).unwrap_err();
+        assert!(matches!(&expired, Attempt::Refused(e) if e.to_string().contains("истечь")));
+        assert!(matches!(ranged(StatusCode::TOO_MANY_REQUESTS, 0, 1), Err(Attempt::Broken(_))));
+
+        assert!(delivered(10, 10).is_ok());
+        assert!(matches!(delivered(5, 10), Err(Attempt::Broken(_))));
+    }
+
+    /// Оборвавшийся диапазон переспрашивается и доезжает; отказ по существу
+    /// не переспрашивается вовсе.
+    #[test]
+    fn a_broken_range_is_asked_again_and_a_refusal_is_not() {
+        let tries = Arc::new(Mutex::new(0u32));
+        let counter = tries.clone();
+        let fetch: Fetch = Box::new(move |from, to| {
+            let mut tries = counter.lock().unwrap();
+            *tries += 1;
+            match *tries {
+                1 => Err(Attempt::Broken(anyhow::anyhow!("сброс"))),
+                _ => Ok(bytes::Bytes::from(vec![7; (to - from) as usize])),
+            }
+        });
+        let source = HttpRange::over("http://h/f", 2 * BLOCK, Arc::new(Blocks::default()), None, fetch);
+        assert_eq!(source.read_at(0, 4).unwrap(), vec![7, 7, 7, 7]);
+        assert_eq!(*tries.lock().unwrap(), 2);
+
+        let refused: Fetch = Box::new(|_, _| Err(Attempt::Refused(anyhow::anyhow!("403"))));
+        let source = HttpRange::over("http://h/f", 2 * BLOCK, Arc::new(Blocks::default()), None, refused);
+        assert!(source.read_at(0, 4).is_err());
     }
 }

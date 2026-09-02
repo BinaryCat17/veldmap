@@ -360,3 +360,106 @@ impl Dispatcher {
         self.publisher_for(instance)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::TaskRegistry;
+
+    /// Шина без рантайма: очереди подписчиков — каналы, `publish_from` кладёт
+    /// в них синхронно, а `try_recv` читает без актора. Топики — из таблицы
+    /// FLOW сгенерированных биндингов, той самой, по которой хост ведёт учёт.
+    fn bus() -> (Arc<TaskRegistry>, Dispatcher) {
+        let tasks = Arc::new(TaskRegistry::new());
+        (tasks.clone(), Dispatcher::new(tasks))
+    }
+
+    fn listen(bus: &Dispatcher, topic: &str, name: &str) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        bus.register_subscription(topic.to_string(), name.to_string(), tx);
+        rx
+    }
+
+    /// Запрос с корреляцией открывает учёт обмена и говорит исполнителю, чем
+    /// тот обязан кончиться; терминальный ответ учёт закрывает.
+    #[test]
+    fn a_request_opens_the_exchange_and_its_reply_closes_it() {
+        let (tasks, bus) = bus();
+        let mut inbox = listen(&bus, "data-library/on_open", "data-library");
+
+        bus.publish_from("data-library/on_open", vec![1], 7, "c-1", "");
+        let request = inbox.try_recv().expect("запрос доставлен");
+        assert_eq!(request.accounted, Some("data-library/on_open_result"));
+        assert_eq!((request.publisher, request.correlation.as_str()), (7, "c-1"));
+
+        bus.publish_from("data-library/on_open_result", Vec::new(), 3, "c-1", "");
+        assert!(!tasks.finish("c-1", "data-library/on_open_result"), "ответ уже закрыл учёт");
+    }
+
+    /// Запрос, которого некому получить, хост договаривает сам: заказчик
+    /// получает терминальный ответ с пустой нагрузкой от нулевого паблишера, а
+    /// учёт не висит до конца процесса.
+    #[test]
+    fn without_a_subscriber_the_host_settles_the_exchange() {
+        let (tasks, bus) = bus();
+        let mut replies = listen(&bus, "data-library/on_open_result", "requester");
+
+        bus.publish_from("data-library/on_open", vec![1], 7, "c-2", "");
+        let reply = replies.try_recv().expect("хост договорил конец");
+        assert_eq!((reply.publisher, reply.correlation.as_str()), (0, "c-2"));
+        assert!(reply.payload.is_empty());
+        assert!(!tasks.finish("c-2", "data-library/on_open_result"), "учёт закрыт");
+    }
+
+    /// Топик без объявленного ответа учёта не открывает, а без корреляции не
+    /// открывает его и запрос.
+    #[test]
+    fn only_a_correlated_request_is_accounted() {
+        let (tasks, bus) = bus();
+        let mut store = listen(&bus, "tile-cache/on_store", "tile-cache");
+        let mut open = listen(&bus, "data-library/on_open", "data-library");
+
+        bus.publish_from("tile-cache/on_store", vec![1], 7, "c-3", "");
+        assert_eq!(store.try_recv().unwrap().accounted, None);
+        bus.publish_from("data-library/on_open", vec![1], 7, "", "");
+        assert_eq!(open.try_recv().unwrap().accounted, None);
+        assert!(!tasks.finish("c-3", "tile-cache/on_store"));
+    }
+
+    /// Адресная публикация доходит до одного подписчика — того, чьё имя
+    /// названо; широковещательная — до всех.
+    #[test]
+    fn a_targeted_publication_reaches_its_addressee_only() {
+        let (_, bus) = bus();
+        let mut first = listen(&bus, "ui-service/on_ui_event", "data-browser");
+        let mut second = listen(&bus, "ui-service/on_ui_event", "image-view");
+
+        bus.publish_from("ui-service/on_ui_event", vec![1], 2, "", "image-view");
+        assert!(first.try_recv().is_err(), "чужой адресат событие не видит");
+        assert_eq!(second.try_recv().unwrap().payload, vec![1]);
+
+        bus.publish_from("ui-service/on_ui_event", vec![2], 2, "", "");
+        assert_eq!(first.try_recv().unwrap().payload, vec![2]);
+        assert_eq!(second.try_recv().unwrap().payload, vec![2]);
+    }
+
+    /// Убить можно только своё и только объявленное отменяемым; за убитого
+    /// терминальный ответ публикует хост.
+    #[test]
+    fn kill_is_for_the_owner_and_only_of_a_cancellable_exchange() {
+        let (_, bus) = bus();
+        let _tiler = listen(&bus, "image-tiler/on_produce", "image-tiler");
+        let mut done = listen(&bus, "image-tiler/on_produce_done", "requester");
+        let _library = listen(&bus, "data-library/on_open", "data-library");
+
+        bus.publish_from("image-tiler/on_produce", vec![1], 5, "c-4", "");
+        assert!(!bus.kill("c-4", 6), "чужую операцию снять нельзя");
+        assert!(bus.kill("c-4", 5));
+        let reply = done.try_recv().expect("за убитого ответил хост");
+        assert_eq!((reply.publisher, reply.correlation.as_str()), (0, "c-4"));
+        assert!(!bus.kill("c-4", 5), "второй раз снимать нечего");
+
+        bus.publish_from("data-library/on_open", vec![1], 5, "c-5", "");
+        assert!(!bus.kill("c-5", 5), "не объявленное отменяемым не убивается");
+    }
+}

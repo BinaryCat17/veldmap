@@ -39,7 +39,10 @@ pub fn pack(ptr: u64, len: u64) -> u64 {
     (len << 32) | ptr
 }
 
-/// Разбирает упакованную пару в `(ptr, len)`; `None` — ответа нет.
+/// Разбирает упакованную пару в `(ptr, len)`; `None` — ответа нет. Хост
+/// только пакует, разбирает SDK — отсюда `allow(dead_code)`, как у
+/// `log_level.rs`.
+#[allow(dead_code)]
 pub fn unpack(packed: u64) -> Option<(u64, u64)> {
     if packed == 0 {
         return None;
