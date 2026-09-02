@@ -7,6 +7,8 @@ use prost::Message;
 // две таблицы сходились бы, только пока кто-то держит их одинаковыми.
 #[path = "../../../../sdk/rust/src/abi/log_level.rs"]
 mod log_level;
+#[path = "../../../../sdk/rust/src/abi/wire.rs"]
+mod wire;
 
 pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
     // ── Шина событий ──────────────────────────────────────────
@@ -376,25 +378,10 @@ fn write_bytes(caller: &mut Caller<'_, HostState>, id: u64, offset: Option<u64>,
     }
 }
 
-/// Кодирует результат синхронного ABI-вызова без protobuf: первый байт — тег
-/// (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст). Разбирается на
-/// SDK-стороне (sdk/rust/src/abi.rs::take_host_response).
+/// Кодирует результат синхронного ABI-вызова без protobuf — общей с SDK
+/// кодировкой (`wire.rs`): тег и байты за ним.
 fn tagged_response(result: anyhow::Result<Vec<u8>>) -> Vec<u8> {
-    match result {
-        Ok(payload) => {
-            let mut buf = Vec::with_capacity(1 + payload.len());
-            buf.push(0);
-            buf.extend_from_slice(&payload);
-            buf
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            let mut buf = Vec::with_capacity(1 + msg.len());
-            buf.push(1);
-            buf.extend_from_slice(msg.as_bytes());
-            buf
-        }
-    }
+    wire::tagged(result.map_err(|e| e.to_string()))
 }
 
 /// Кладёт ответ обратно в память гостя: место под него просит сам гость
@@ -410,7 +397,7 @@ async fn write_response_back(caller: &mut Caller<'_, HostState>, res_buf: &[u8])
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 if let Some(target) = mem.data_mut(&mut *caller).get_mut(res_ptr as usize..(res_ptr as usize + res_buf.len())) {
                     target.copy_from_slice(res_buf);
-                    return Ok((res_buf.len() as u64) << 32 | res_ptr);
+                    return Ok(wire::pack(res_ptr, res_buf.len() as u64));
                 }
             }
         }

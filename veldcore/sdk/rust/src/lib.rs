@@ -20,6 +20,12 @@ pub mod logging;
 #[doc(hidden)]
 pub mod runtime;
 
+/// Фальшивый хост для нативных тестов: ресурсы, журналы чтений и публикаций,
+/// лог. Поднимается `fake::install()` в начале теста; без него нативные
+/// заглушки ABI отвечают нулями.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fake;
+
 pub use serde_json;
 pub use prost;
 pub use anyhow;

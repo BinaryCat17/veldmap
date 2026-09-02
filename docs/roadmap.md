@@ -408,14 +408,15 @@ NetCDF и сети; страницы docs — по одной в чужих ко
    `uitests/jp2canvas.txt` открывает его в канве, ждёт тайлы, приближает до
    предела детали; предел прогона run-uitests растёт с `timeout` сценария, а
    снятый прогон уносит с собой окно.
-4. **[M] Фальшивый хост в SDK.** `veldsdk::fake::{install, mount, reads,
-   published, leaked}` под `not(wasm32)`: карта ресурсов с арендой, журнал
-   чтений окнами, журнал публикаций, захват лога; кодировка ответа — общим с
-   хостом файлом; контекст события и фальшивка — thread_local; без `install`
-   прежние нули. Docs: resources.md. *Проверка:* `ResourceReader` над
-   смонтированным Vec читает окнами ровно [0, len); `OwnedResource::drop` →
-   `leaked()` пуст; emit-стаб виден в `published()`; существующие тесты не
-   тронуты.
+4. **[M] Фальшивый хост в SDK** — выполнен 2 сентября 2026:
+   `veldsdk::fake::{install, mount, reads, published, logged, leaked, owner,
+   readers}` под `not(wasm32)`; нативные заглушки ABI отвечают из него, без
+   `install` — прежние нули; кодировка ответа — общий с хостом файл
+   `abi/wire.rs` (через `#[path]`), ответы лежат в арене-«линейной памяти»;
+   контекст события нативно `thread_local`; тесты читателя (окна ровно
+   [0, len), окно начинается с места чтения), владения, публикации, лога;
+   мутации `buildgen/mutations/veldsdk.txt`; `docs/architecture/resources.md`
+   вместо раздела README.
 5. **[M] Метрика цели 1 и швы хоста как тесты.** Фикстуры из `tiff::encoder`
    + `DirectoryEncoder` в несколько окон; четыре свойства (describe ≤ головы;
    тайл ⊆ окна чанков; проход — один раз; direct == pass на копиях вдвое) и
@@ -430,7 +431,13 @@ NetCDF и сети; страницы docs — по одной в чужих ко
    data-browser вместо четырёх копий развилки (relay-модули не сливать);
    `veldsdk::reply::undelivered` из tiles.rs — в download.rs вместо
    `url.is_empty()`, в tile-cache и data-provider; хелпер записи через fs в SDK
-   вместо трёх ритуалов. Docs: screen.md (README 584–800 удаляется здесь),
+   вместо трёх ритуалов и хелпер чтения ресурса целиком вместо трёх
+   `resource_read(id, 0, size)` (tile-cache query, data-library catalog,
+   data-browser persist); зеркало обряда «открой мне это» в `host/util`:
+   чистую часть (сборка `ResourceOpened`, разбор «error пуст → handle есть»)
+   — общим файлом через `#[path]`, как `abi/wire.rs`, если она дословно одна,
+   порознь оставить только вызовы ABI. Docs: screen.md (README 584–800
+   удаляется здесь),
    download.md. *Проверка:* по одному вызову `data_library::on_open` /
    `data_provider::on_open`; grep `url.is_empty()` в download.rs пуст; uitests
    preview/remote/shown/outline/download.

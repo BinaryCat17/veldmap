@@ -1,0 +1,17 @@
+# Мутации SDK: читатель окнами и кодировка ответа хоста.
+# Формат — buildgen/mutate.py; крейт — пакет воркспейса veldcore.
+
+имя: читатель не переиспользует окно
+файл: veldcore/sdk/rust/src/resource.rs
+было: if covered { return Ok(true); }
+стало: let _ = covered;
+
+имя: упаковка ответа перепутала длину и указатель
+файл: veldcore/sdk/rust/src/abi/wire.rs
+было: (len << 32) | ptr
+стало: (ptr << 32) | len
+
+имя: чтение за концом стало ошибкой
+файл: veldcore/sdk/rust/src/fake.rs
+было: return Ok(Vec::new());
+стало: return Err(format!("за концом ресурса {}", id));

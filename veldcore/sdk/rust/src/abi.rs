@@ -6,9 +6,10 @@
 use crate::proto::core::EventEnvelope;
 use prost::Message;
 
-// Уровень лога на проводе: файл включён и в ядро хоста (через `#[path]`),
-// чтобы число и его смысл были одним кодом по обе стороны.
+// Уровень лога на проводе и кодировка ответа: файлы включены и в ядро хоста
+// (через `#[path]`), чтобы число и его смысл были одним кодом по обе стороны.
 mod log_level;
+pub(crate) mod wire;
 
 // ── ABI микроядра Veld ─────────────────────────────────────────
 
@@ -48,11 +49,13 @@ mod host {
 }
 
 // Нативные заглушки хостовых функций — для `cargo test`: юнит-тесты чистой
-// логики (календарь, Correlator, кодек сообщений разметки) линкуются нативно,
-// где хоста нет. Ведут себя как хост, у которого кончилось всё: аллокации не
-// выдаются, ресурсы не находятся, публикации уходят в никуда. Единственное
-// исключение — энтропия: она детерминированная и ненулевая, потому что на ней
-// стоит уникальность корреляций, которую тесты и проверяют.
+// логики линкуются нативно, где хоста нет. Без фальшивого хоста
+// (`crate::fake::install`) они ведут себя как хост, у которого кончилось всё:
+// аллокации не выдаются, ресурсы не находятся, публикации уходят в никуда.
+// Поднятый на потоке фальшивый хост отвечает вместо них — из своих ресурсов и
+// в свои журналы. Единственное, что живёт здесь само, — энтропия: она
+// детерминированная и ненулевая, потому что на ней стоит уникальность
+// корреляций, которую тесты и проверяют.
 //
 // `unsafe fn`, как и настоящие импорты: call-сайты не отличают заглушку от
 // хоста ни формой, ни требованиями.
@@ -60,8 +63,26 @@ mod host {
 mod host {
     #![allow(clippy::missing_safety_doc)]
 
-    pub unsafe fn veld_host_publish(_ptr: u64, _len: u64) {}
-    pub unsafe fn veld_host_log(_level: u64, _tp: u64, _tl: u64, _p: u64, _l: u64) {}
+    use crate::fake;
+
+    unsafe fn bytes<'a>(ptr: u64, len: u64) -> &'a [u8] {
+        if len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) }
+    }
+
+    unsafe fn text<'a>(ptr: u64, len: u64) -> &'a str {
+        std::str::from_utf8(unsafe { bytes(ptr, len) }).unwrap_or("")
+    }
+
+    pub unsafe fn veld_host_publish(ptr: u64, len: u64) {
+        fake::publish(unsafe { bytes(ptr, len) });
+    }
+
+    pub unsafe fn veld_host_log(level: u64, tp: u64, tl: u64, p: u64, l: u64) {
+        fake::log(super::log_level::from_wire(level), unsafe { text(tp, tl) }, unsafe { text(p, l) });
+    }
 
     pub unsafe fn veld_random_bytes(ptr: u64, len: u64) {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -73,20 +94,22 @@ mod host {
         }
     }
 
-    pub unsafe fn veld_resource_create(_ptr: u64, _len: u64) -> u64 { 0 }
-    pub unsafe fn veld_graphics_execute(_ptr: u64, _len: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_write(_id: u64, _offset: u64, _ptr: u64, _len: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_upload_image(_id: u64, _ptr: u64, _len: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_read(_id: u64, _offset: u64, _size: u64) -> u64 { 0 }
+    pub unsafe fn veld_resource_create(_ptr: u64, _len: u64) -> u64 { fake::unsupported("собирать GPU-объекты") }
+    pub unsafe fn veld_graphics_execute(_ptr: u64, _len: u64) -> u64 { fake::unsupported("рисовать") }
+    pub unsafe fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64) -> u64 {
+        fake::resource_write(id, offset, unsafe { bytes(ptr, len) })
+    }
+    pub unsafe fn veld_resource_upload_image(_id: u64, _ptr: u64, _len: u64) -> u64 { fake::unsupported("заливать текстуры") }
+    pub unsafe fn veld_resource_read(id: u64, offset: u64, size: u64) -> u64 { fake::resource_read(id, offset, size) }
     pub unsafe fn veld_resource_texture_size(_id: u64) -> u64 { 0 }
-    pub unsafe fn veld_task_kill(_ptr: u64, _len: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_alloc_buffer(_size: u64, _usage: u64, _mapped: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_alloc_cpu(_size: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_alloc_texture(_w: u64, _h: u64, _f: u64, _u: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_transfer(_id: u64, _np: u64, _nl: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_grant_read(_id: u64, _np: u64, _nl: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_grant_write(_id: u64, _np: u64, _nl: u64) -> u64 { 0 }
-    pub unsafe fn veld_resource_free(_id: u64) -> u64 { 0 }
+    pub unsafe fn veld_task_kill(ptr: u64, len: u64) -> u64 { fake::task_kill(unsafe { text(ptr, len) }) }
+    pub unsafe fn veld_resource_alloc_buffer(size: u64, _usage: u64, _mapped: u64) -> u64 { fake::alloc_bytes(size) }
+    pub unsafe fn veld_resource_alloc_cpu(size: u64) -> u64 { fake::alloc_bytes(size) }
+    pub unsafe fn veld_resource_alloc_texture(_w: u64, _h: u64, _f: u64, _u: u64) -> u64 { fake::alloc_opaque() }
+    pub unsafe fn veld_resource_transfer(id: u64, np: u64, nl: u64) -> u64 { fake::transfer(id, unsafe { text(np, nl) }) }
+    pub unsafe fn veld_resource_grant_read(id: u64, np: u64, nl: u64) -> u64 { fake::grant_read(id, unsafe { text(np, nl) }) }
+    pub unsafe fn veld_resource_grant_write(id: u64, np: u64, nl: u64) -> u64 { fake::grant_write(id, unsafe { text(np, nl) }) }
+    pub unsafe fn veld_resource_free(id: u64) -> u64 { fake::free(id) }
     pub unsafe fn veld_input_len() -> u64 { 0 }
     pub unsafe fn veld_input_copy(_p: u64, _n: u64) {}
     pub unsafe fn veld_output_set(_p: u64, _n: u64) {}
@@ -100,6 +123,7 @@ use host::*;
 // результаты синхронных ABI-вызовов через veld_alloc (см. host
 // write_response_back). vec![0u8; size] гарантирует capacity == size,
 // иначе from_raw_parts в veld_free_wasm был бы UB.
+#[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 #[unsafe(no_mangle)]
 pub extern "C" fn veld_alloc(size: u64) -> u64 {
@@ -109,35 +133,58 @@ pub extern "C" fn veld_alloc(size: u64) -> u64 {
     ptr as u64
 }
 
+#[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
     let _ = unsafe { Vec::from_raw_parts(ptr as *mut u8, size as usize, size as usize) };
 }
 
+// Нативно указатель обязан влезать в 32 бита упаковки — как в wasm, — и
+// нативная куча для этого не годится: место под ответы выдаёт арена
+// фальшивого хоста, а «указатель» — смещение в ней.
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub extern "C" fn veld_alloc(size: u64) -> u64 {
+    crate::fake::arena::alloc(size)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub unsafe extern "C" fn veld_free_wasm(ptr: u64, size: u64) {
+    crate::fake::arena::free(ptr, size)
+}
+
+/// Байты гостя за «указателем» ответа: в wasm это адрес, нативно — смещение
+/// в арене фальшивого хоста.
+#[cfg(target_arch = "wasm32")]
+fn guest_address(ptr: u64) -> *const u8 {
+    ptr as *const u8
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn guest_address(ptr: u64) -> *const u8 {
+    crate::fake::arena::address(ptr)
+}
+
 // ── Шина событий ───────────────────────────────────────────────
 
-/// Забирает сырой буфер хоста: (len << 32 | ptr) → байты, 0 → None.
-/// Память под ответ хост выделил через veld_alloc; здесь она освобождается.
+/// Забирает сырой буфер хоста: упакованная пара → байты, ноль → `None`.
+/// Память под ответ хост выделил через `veld_alloc`; здесь она освобождается.
 unsafe fn take_host_bytes(packed: u64) -> Option<Vec<u8>> {
-    if packed == 0 {
-        return None;
-    }
-    let ptr = (packed & 0xFFFF_FFFF) as *mut u8;
-    let len = (packed >> 32) as usize;
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
-    unsafe { veld_free_wasm(ptr as u64, len as u64) };
+    let (ptr, len) = wire::unpack(packed)?;
+    let bytes = unsafe { std::slice::from_raw_parts(guest_address(ptr), len as usize) }.to_vec();
+    unsafe { veld_free_wasm(ptr, len) };
     Some(bytes)
 }
 
-/// Распаковывает ответ хоста: (len << 32 | ptr) → байты, первый байт —
-/// тег (0 = успех, дальше payload; 1 = ошибка, дальше UTF-8 текст),
-/// см. host-side `abi.rs::tagged_response`.
+/// Разбирает ответ хоста по общей кодировке (`wire.rs`): тег удачи — дальше
+/// нагрузка, тег отказа — дальше текст причины.
 unsafe fn take_host_response(packed: u64, what: &str) -> anyhow::Result<Vec<u8>> {
     let buf = unsafe { take_host_bytes(packed) }.ok_or_else(|| anyhow::anyhow!("{} не выполнился", what))?;
     match buf.split_first() {
-        Some((0, payload)) => Ok(payload.to_vec()),
-        Some((1, msg)) => Err(anyhow::anyhow!(String::from_utf8_lossy(msg).into_owned())),
+        Some((&wire::OK, payload)) => Ok(payload.to_vec()),
+        Some((&wire::ERR, msg)) => Err(anyhow::anyhow!(String::from_utf8_lossy(msg).into_owned())),
         _ => Err(anyhow::anyhow!("{}: ответ хоста испорчен", what)),
     }
 }
@@ -304,21 +351,55 @@ pub fn generate_id() -> String {
 
 // ── Контекст вызова ────────────────────────────────────────────
 
-/// Конверт обрабатываемого сейчас события — то, что известно о вызове помимо
-/// payload (заполняется handle_event из конверта, который кодирует хост, —
-/// полям можно доверять). Wasm однопоточный, поэтому простого Mutex хватает.
-static EVENT_PUBLISHER: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-static EVENT_CORRELATION: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-static EVENT_INTERMEDIATE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+// Конверт обрабатываемого сейчас события — то, что известно о вызове помимо
+// payload (заполняется handle_event из конверта, который кодирует хост, —
+// полям можно доверять). Wasm однопоточный, и там хватает статики; нативно
+// тесты бегут потоками, и контекст, как и фальшивый хост, живёт на потоке —
+// иначе один тест читал бы конверт другого.
+#[cfg(target_arch = "wasm32")]
+mod context {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static PUBLISHER: Mutex<String> = Mutex::new(String::new());
+    static CORRELATION: Mutex<String> = Mutex::new(String::new());
+    static INTERMEDIATE: AtomicBool = AtomicBool::new(false);
+
+    pub fn set(publisher: String, correlation: String, intermediate: bool) {
+        *PUBLISHER.lock().unwrap() = publisher;
+        *CORRELATION.lock().unwrap() = correlation;
+        INTERMEDIATE.store(intermediate, Ordering::Relaxed);
+    }
+    pub fn publisher() -> String { PUBLISHER.lock().unwrap().clone() }
+    pub fn correlation() -> String { CORRELATION.lock().unwrap().clone() }
+    pub fn intermediate() -> bool { INTERMEDIATE.load(Ordering::Relaxed) }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod context {
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static PUBLISHER: RefCell<String> = const { RefCell::new(String::new()) };
+        static CORRELATION: RefCell<String> = const { RefCell::new(String::new()) };
+        static INTERMEDIATE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub fn set(publisher: String, correlation: String, intermediate: bool) {
+        PUBLISHER.with(|p| *p.borrow_mut() = publisher);
+        CORRELATION.with(|c| *c.borrow_mut() = correlation);
+        INTERMEDIATE.with(|i| i.set(intermediate));
+    }
+    pub fn publisher() -> String { PUBLISHER.with(|p| p.borrow().clone()) }
+    pub fn correlation() -> String { CORRELATION.with(|c| c.borrow().clone()) }
+    pub fn intermediate() -> bool { INTERMEDIATE.with(|i| i.get()) }
+}
 
 /// Заполняется handle_event сгенерированного клея — читается через
 /// [`event_publisher`], [`correlation`] и [`reply_is_intermediate`].
 #[doc(hidden)]
 pub fn set_event_context(publisher: String, correlation: String, intermediate: bool) {
-    *EVENT_PUBLISHER.lock().unwrap() = publisher;
-    *EVENT_CORRELATION.lock().unwrap() = correlation;
-    EVENT_INTERMEDIATE.store(intermediate, std::sync::atomic::Ordering::Relaxed);
+    context::set(publisher, correlation, intermediate);
 }
 
 /// Придёт ли по этой корреляции ещё ответ: текущее событие объявлено в схеме
@@ -329,7 +410,7 @@ pub fn set_event_context(publisher: String, correlation: String, intermediate: b
 /// корреляцией. Надёжен здесь только `true` — на нём снимать запрос с учёта
 /// заведомо рано.
 pub fn reply_is_intermediate() -> bool {
-    EVENT_INTERMEDIATE.load(std::sync::atomic::Ordering::Relaxed)
+    context::intermediate()
 }
 
 /// Общая жалоба таблиц ожидания на преждевременное снятие с учёта.
@@ -350,7 +431,7 @@ pub(crate) fn warn_if_intermediate(method: &str) {
 /// Имя сервиса, опубликовавшего текущее событие ("" — хост).
 /// Для авторизации: сравнивайте с ожидаемым отправителем.
 pub fn event_publisher() -> String {
-    EVENT_PUBLISHER.lock().unwrap().clone()
+    context::publisher()
 }
 
 /// Терминальный ответ договорил хост, а не прислал исполнитель.
@@ -387,7 +468,7 @@ pub fn answered_by_host() -> bool {
 /// Едет в конверте, а не полем доменного сообщения: иначе её обязан был бы
 /// объявить каждый контракт.
 pub fn correlation() -> String {
-    EVENT_CORRELATION.lock().unwrap().clone()
+    context::correlation()
 }
 
 /// Вход текущего вызова хоста (конверт события, конфиг при init).

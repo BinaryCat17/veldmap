@@ -211,7 +211,7 @@ pub fn relay(opened: &ResourceOpened, owner: &str) -> ResourceOpened {
 /// Окно чтения. Компромисс между числом ABI-вызовов и памятью: гигабайтный
 /// файл при 256 КБ окна — это тысячи вызовов, что на фоне декодирования
 /// незаметно.
-const WINDOW: u64 = 256 * 1024;
+pub(crate) const WINDOW: u64 = 256 * 1024;
 
 pub struct ResourceReader {
     id: u64,
@@ -298,5 +298,62 @@ impl Seek for ResourceReader {
         // Позиция за концом допустима (как у файла) — чтение оттуда вернёт 0.
         self.pos = target as u64;
         Ok(self.pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fake;
+
+    /// Читатель над смонтированными байтами читает их окнами ровно по одному
+    /// разу — [0, len) без перехлёста и дыр, последнее окно короткое.
+    #[test]
+    fn the_reader_walks_a_resource_in_windows_exactly_once() {
+        fake::install();
+        let tail = 123u64;
+        let bytes: Vec<u8> = (0..2 * WINDOW + tail).map(|i| (i % 251) as u8).collect();
+        let handle = fake::mount(bytes.clone());
+
+        let mut reader = ResourceReader::new(handle.id, handle.size);
+        let mut got = Vec::new();
+        reader.read_to_end(&mut got).unwrap();
+        assert_eq!(got, bytes);
+
+        let windows: Vec<(u64, u64)> = fake::reads().iter().map(|r| (r.offset, r.size)).collect();
+        assert_eq!(windows, vec![(0, WINDOW), (WINDOW, WINDOW), (2 * WINDOW, tail)]);
+    }
+
+    /// Окно начинается там, где было чтение, а не по выровненной границе:
+    /// прыжок вперёд внутри окна к хосту не ходит, прыжок назад за его начало
+    /// — ходит, и новое окно начинается с места прыжка.
+    #[test]
+    fn a_window_starts_where_the_read_did() {
+        fake::install();
+        let handle = fake::mount(vec![1u8; (3 * WINDOW) as usize]);
+        let mut reader = ResourceReader::new(handle.id, handle.size);
+        let mut byte = [0u8; 1];
+
+        reader.seek(SeekFrom::Start(10)).unwrap();
+        reader.read_exact(&mut byte).unwrap();
+        reader.seek(SeekFrom::Start(WINDOW)).unwrap();
+        reader.read_exact(&mut byte).unwrap();
+        assert_eq!(fake::reads().len(), 1, "оба байта из окна [10, 10 + WINDOW)");
+
+        reader.seek(SeekFrom::Start(5)).unwrap();
+        reader.read_exact(&mut byte).unwrap();
+        let windows: Vec<(u64, u64)> = fake::reads().iter().map(|r| (r.offset, r.size)).collect();
+        assert_eq!(windows, vec![(10, WINDOW), (5, WINDOW)]);
+    }
+
+    /// Владелец освобождает ресурс ровно раз — после него у хоста ничего не
+    /// остаётся.
+    #[test]
+    fn an_owned_resource_is_freed_on_drop() {
+        fake::install();
+        let handle = fake::mount(vec![0u8; 16]);
+        assert_eq!(fake::leaked(), vec![handle.id]);
+        drop(OwnedResource::new(handle));
+        assert!(fake::leaked().is_empty());
     }
 }
