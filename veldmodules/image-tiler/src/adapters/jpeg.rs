@@ -11,7 +11,7 @@ use super::super::cascade::{Cascade, Emit};
 use super::super::pyramid;
 use super::super::resample::resample;
 use super::radiometry::Pixel;
-use super::{to_rgba, Info, Kind, FULL_DECODE_BUDGET};
+use super::{frame_fits, to_rgba, Info, Kind, FULL_DECODE_BUDGET};
 
 pub fn describe<R: Read>(reader: R) -> Result<Info, String> {
     let mut decoder = jpeg_decoder::Decoder::new(reader);
@@ -35,7 +35,7 @@ pub fn produce<R: Read>(reader: R, info: &Info, level: u32, emit: Emit) -> Resul
         .scale(clamp_u16(lw), clamp_u16(lh))
         .map(|(w, h)| (u32::from(w), u32::from(h)))
         .map_err(|e| format!("jpeg: {}", e))?;
-    if u64::from(dw) * u64::from(dh) * 4 > FULL_DECODE_BUDGET {
+    if !frame_fits(dw, dh) {
         return Err(format!(
             "jpeg {}×{}: кадр целиком не влезает в бюджет ({} МБ)",
             dw, dh, FULL_DECODE_BUDGET / (1024 * 1024)
@@ -72,6 +72,23 @@ fn clamp_u16(v: u32) -> u16 {
     v.min(u32::from(u16::MAX)) as u16
 }
 
+/// Размер кадра, который декодер отдаст под уровень: масштабы у него
+/// дискретные — 1/8, 1/4, 1/2 и целый, — и берётся первый, у которого хотя бы
+/// одна сторона не меньше стороны уровня (так выбирает `Decoder::scale`;
+/// сторона выхода — `ceil(сторона · масштаб)`). Считается заранее таблицей
+/// уровней, чтобы потолок кадра лёг в столбец «влезает», а не в отказ на
+/// каждый запрос; сходство с декодером держит тест.
+pub(super) fn decoded_size(width: u32, height: u32, level: u32) -> (u32, u32) {
+    let lw = pyramid::level_size(width, level);
+    let lh = pyramid::level_size(height, level);
+    let scaled = |side: u32, eighths: u32| (u64::from(side) * u64::from(eighths)).div_ceil(8) as u32;
+    let eighths = [1u32, 2, 4]
+        .into_iter()
+        .find(|&e| scaled(width, e) >= lw || scaled(height, e) >= lh)
+        .unwrap_or(8);
+    (scaled(width, eighths), scaled(height, eighths))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +122,31 @@ mod tests {
         let why = produce(huge.as_slice(), &info, 0, &mut emit)
             .expect_err("кадр 20000×20000 обязан быть отвергнут");
         assert!(why.contains("не влезает в бюджет"), "отказ не про бюджет: {why}");
+    }
+
+    /// Размер кадра под уровень считается так же, как его выберет декодер:
+    /// иначе столбец «влезает» таблицы уровней обещал бы кадр, которого
+    /// декодер не даст. Проверяется на заголовке без данных сканирования —
+    /// `scale` читает только его.
+    #[test]
+    fn decoded_size_matches_the_decoder() {
+        for (w, h) in [(5472u16, 3648u16), (4000, 3000), (1301, 523), (64, 64)] {
+            let head = header(w, h);
+            for level in 0..pyramid::level_count(u32::from(w), u32::from(h)) + 1 {
+                let mut decoder = jpeg_decoder::Decoder::new(head.as_slice());
+                decoder.read_info().unwrap();
+                let (lw, lh) = (
+                    pyramid::level_size(u32::from(w), level),
+                    pyramid::level_size(u32::from(h), level),
+                );
+                let got = decoder.scale(clamp_u16(lw), clamp_u16(lh)).unwrap();
+                assert_eq!(
+                    decoded_size(u32::from(w), u32::from(h), level),
+                    (u32::from(got.0), u32::from(got.1)),
+                    "{w}×{h}, уровень {level}"
+                );
+            }
+        }
     }
 
     /// А кадр по размеру потолок не трогает — и тогда до декода дело доходит,

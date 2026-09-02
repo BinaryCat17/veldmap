@@ -6,7 +6,7 @@ use std::io::{BufRead, Seek};
 use image::ImageFormat;
 
 use super::super::cascade::{Cascade, Emit};
-use super::{Info, Kind, FULL_DECODE_BUDGET};
+use super::{frame_fits, Info, Kind, FULL_DECODE_BUDGET};
 
 pub fn describe<R: BufRead + Seek>(reader: R, format: ImageFormat) -> Result<Info, String> {
     let decoder = image::ImageReader::with_format(reader, format)
@@ -29,7 +29,7 @@ pub fn produce<R: BufRead + Seek>(
         .into_decoder()
         .map_err(|e| format!("{:?}: {}", format, e))?;
     let (w, h) = image::ImageDecoder::dimensions(&decoder);
-    if u64::from(w) * u64::from(h) * 4 > FULL_DECODE_BUDGET {
+    if !frame_fits(w, h) {
         return Err(format!(
             "{:?} {}×{}: кадр целиком не влезает в бюджет ({} МБ)",
             format, w, h, FULL_DECODE_BUDGET / (1024 * 1024)

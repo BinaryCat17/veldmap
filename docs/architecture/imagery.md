@@ -55,27 +55,45 @@ is detected by content (`veldmodules/image-tiler/src/adapters/mod.rs`), and the
 difference between formats is one question: can it hand over an arbitrary tile
 cheaply.
 
-| Format | How levels are read | What is partial | Ceilings |
-|---|---|---|---|
-| Tiled TIFF with overviews (COG) | each level from the nearest overview at or above it, only the chunks under the requested tiles (`produce_direct`) | every level, as long as each level's region per tile fits `REGION_CAP` and its chunks fit `CHUNK_CACHE_BYTES` (`tiff::windowed`) — then `reach = EXACT`; otherwise the covered low levels are pointwise (`windowed`) and the rest go by a pass | `REGION_CAP` (source area per tile), `CHUNK_CACHE_BYTES` (decoded chunks kept) |
-| Stripped TIFF; tiled TIFF without overviews | fine levels pointwise, a window of strips (or tiles) of the base image per tile; coarse levels by one sequential pass that builds every level through the cascade (`produce_pass`) | the lowest `windowed` levels, as many as `REGION_CAP` and `CHUNK_CACHE_BYTES` allow; `reach = WINDOWED`, and the ladder has no intermediate steps | `REGION_CAP`, `CHUNK_CACHE_BYTES` (how many levels are windowed), `BAND_CAP` (one row of chunks in a pass), `MAX_SOURCE_SIDE` |
-| JPEG 2000 (`hayro-jpeg2000`) | the whole file is read on every pass; the frame decodes at the requested level by skipping DWT levels — or finer, when the file allows fewer skips — and the cascade goes down from the level actually decoded (`reach = COARSER`) | nothing: no region, no tile | `DECODE_BUDGET` against `jp2::estimate` (file plus decoder planes), which sets `finest` at describe |
-| JPEG | the whole frame decodes at the smallest of the scales 1/8, 1/4, 1/2, 1 that is not coarser than the level; the cascade goes down from it (`reach = COARSER`) | nothing | `FULL_DECODE_BUDGET` per request; no `finest`, so a frame that does not fit is refused on every request |
-| PNG; GIF, BMP, WebP | one pass from level 0; the cascade builds all levels (`reach = PYRAMID`) | nothing | `FULL_DECODE_BUDGET` on the non-streaming paths, `MAX_SOURCE_SIDE` |
-| NetCDF-4 (HDF5) | metadata on demand through a metadata cache; at describe, candidate variables are read whole into f32 in order of preference until one is neither empty nor flat, and the winner is kept as the heavy memo until the pass; the pass feeds the cascade in strips of `TILE` rows (`reach = PYRAMID`) | the file: only the chunks of the variables probed and of the coordinate grids; a plane itself: nothing | `PROBE_BUDGET` (bytes read while probing), `affordable()` against `budget::free()` (plane, cascade strips, RGBA strip), `TIES_BUDGET` for the coordinate grids, `WIRE_PLANE` for a remote variable |
+The answer is the **level table** (`veldmodules/image-tiler/src/adapters/table.rs`,
+[ADR 0003](../decisions/0003-raster-reading-model.md)): one row per pyramid
+level — how it is served (pointwise, or by a pass from some level), how many
+source pixels a step costs, the memory peak as named terms, and whether it
+fits. `reach`, `windowed` and `finest` on the wire are read from it, and so is
+the branch `produce` takes; the test `reach_and_the_produce_branch_agree` in
+`adapters/reads.rs` holds the table against the driver's window rule. The two
+loops — pointwise `direct` over the chunks of the nearest overview, and the
+sequential `pass` feeding the cascade — belong to the chunk grid driver
+(`adapters/grid.rs`), behind the trait `Chunked`; a format supplies chunks.
 
-`MAX_SOURCE_SIDE` applies to every format; it is named where it is the only
-ceiling by side. `windowed` counts the levels from 0 that are read pointwise;
-`reach` says what one pass covers; `finest` is the finest level the source will
-ever serve. `Info::reach()` and `produce` branch on the same kinds and must
-agree; today that agreement is held by a comment, not by a test.
+| Format | Rows of the table | What is partial | Named ceilings |
+|---|---|---|---|
+| Tiled TIFF with overviews (COG) | a level is pointwise when its grid is not degenerate (`MIN_CHUNK_PIXELS`), the region under the worst tile fits `REGION_CAP` and the chunks it touches fit the chunk cache (`Grid::footprint`); with halved overviews every level is — `reach = EXACT` | every pointwise level: only the chunks under the requested tiles | `budget::CHUNK_CACHE` (a share of free memory), `REGION_CAP` (half of it, in source pixels) |
+| Stripped TIFF; tiled TIFF without overviews | the fine levels pointwise, a window of strips (or tiles) of the base image per tile; the rest by a pass from level 0 that builds every level through the cascade — `reach = WINDOWED`, and the ladder has no intermediate steps; with no pointwise level at all, `PYRAMID` | the pointwise prefix (`windowed`) | the same; a pass whose row of chunks plus cascade does not fit `budget::free()` is refused by the sum, not by a ceiling of its own |
+| JPEG 2000 (`hayro-jpeg2000`) | every level a pass from itself: the whole file is read, the frame decodes at the requested level by skipping DWT levels — or finer, when the file allows fewer skips — and the cascade goes down from the level actually decoded (`reach = COARSER`); `fits` is `jp2::estimate` against `DECODE_BUDGET`, and `finest` the first level that fits | nothing: no region, no tile | `DECODE_BUDGET` (the decoder's own, until [ADR 0002](../decisions/0002-jpeg2000-decoder.md)) |
+| JPEG | every level a pass from itself: the frame decodes at the decoder's scale (1/8, 1/4, 1/2, 1; `jpeg::decoded_size`), is brought to the level's grid, and the cascade goes down from it (`reach = COARSER`); `finest` is the first level whose decoded frame fits | nothing | `FULL_DECODE_BUDGET` on the decoded frame |
+| PNG; GIF, BMP, WebP | one pass from level 0; the cascade builds all levels (`reach = PYRAMID`); a streaming PNG costs a row, an interlaced PNG and the others a whole frame | nothing | `FULL_DECODE_BUDGET` on the whole-frame paths, `MAX_SOURCE_SIDE` |
+| NetCDF-4 (HDF5) | one pass from level 0 over the plane kept by describe (`reach = PYRAMID`); metadata on demand through a metadata cache; at describe, candidate variables are read whole into f32 in order of preference until one is neither empty nor flat, and the winner is kept as the heavy memo until the pass; the pass feeds the cascade in strips of `TILE` rows | the file: only the chunks of the variables probed and of the coordinate grids; a plane itself: nothing | `PROBE_BUDGET` (bytes read while probing), `TIES_BUDGET` for the coordinate grids, `WIRE_PLANE` for a remote variable |
+
+`MAX_SOURCE_SIDE` applies to every format at describe. `windowed` counts the
+pointwise levels from 0; `reach` says what one pass covers; `finest` is the
+finest level the source will ever serve — the first row that fits, or the top
+when none does.
 
 ## Memory
 
 An instance has `budget::INSTANCE` of linear memory, `budget::RESERVE` of it is
 always taken, and `budget::free()` is what work on a source may use
-(`veldmodules/image-tiler/src/budget.rs`). Only NetCDF adds its terms up
-against `free()`; the other ceilings in the table are assigned numbers.
+(`veldmodules/image-tiler/src/budget.rs`). Every path sums the memory of its
+work into a `budget::Peak` of named terms — strip, chunk, cascade, region,
+frame, plane — and asks `admit()` against `free()`; the table's `fits` column
+is the same sum computed at describe, and `produce` adds the parse of a
+neighbouring source still held in the memo before it starts. Two shares are
+set from the budget: the chunk cache of pointwise reading (`budget::CHUNK_CACHE`)
+and, from it, the region a tile may read (`grid::REGION_CAP`). The ceilings
+that stay named are those of a path's own decoder: `FULL_DECODE_BUDGET` for a
+frame decoded whole, `jp2::DECODE_BUDGET` for hayro, and the NetCDF probe and
+wire limits.
 
 ## Fingerprint and cache
 

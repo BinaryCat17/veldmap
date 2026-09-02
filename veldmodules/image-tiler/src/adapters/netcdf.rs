@@ -228,7 +228,7 @@ fn ties_fit(nodes: u64, element: u32) -> bool {
 /// Каскад копирует её к себе в полосу базового уровня, но копирует не отпуская:
 /// обе живут, пока идёт `push_rows`. Считается поэтому отдельным слагаемым, а
 /// не «внутри каскада».
-fn strip_bytes(width: u32, height: u32) -> u64 {
+pub(super) fn strip_bytes(width: u32, height: u32) -> u64 {
     u64::from(width) * u64::from(height.min(TILE)) * 4
 }
 
@@ -312,6 +312,11 @@ impl Source {
     #[cfg(test)]
     pub fn hollow() -> Self {
         Self { values: Vec::new(), path: String::new(), fill: None, said: String::new() }
+    }
+
+    /// Сколько памяти держит осевшая плоскость величины.
+    pub fn plane_bytes(&self) -> u64 {
+        self.values.len() as u64 * 4
     }
 }
 
@@ -571,7 +576,6 @@ fn told(
             fill: chosen.fill,
             said: chosen.said.clone(),
         })),
-        finest: 0,
         ties,
         // Координаты NetCDF записаны в градусах и решёткой: проекции здесь не
         // бывает вовсе.

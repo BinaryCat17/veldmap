@@ -31,7 +31,22 @@
 было:             for cx in sx0 / cw..=(sx0 + rw - 1) / cw {
 стало:             for cx in 0..=(sx0 + rw - 1) / cw {
 
-имя: Exact без окна на всех уровнях
-файл: veldmodules/image-tiler/src/adapters/mod.rs
-было:             Kind::Tiff(layout) if layout.grid.random_access() && self.windowed() == levels => {
-стало:             Kind::Tiff(layout) if layout.grid.random_access() => {
+имя: Exact при окне на части уровней
+файл: veldmodules/image-tiler/src/adapters/table.rs
+было:         if pointwise == rows.len() {
+стало:         if pointwise > 0 {
+
+имя: вырожденная сетка читается точечно
+файл: veldmodules/image-tiler/src/adapters/grid.rs
+было: if u64::from(cw) * u64::from(ch) < MIN_CHUNK_PIXELS {
+стало: if false {
+
+имя: предел детали — последний влезающий уровень
+файл: veldmodules/image-tiler/src/adapters/table.rs
+было: rows.iter().position(|row| row.fits).map_or(top, |at| at as u32)
+стало: rows.iter().rposition(|row| row.fits).map_or(top, |at| at as u32)
+
+имя: пик не сверяется со свободным
+файл: veldmodules/image-tiler/src/budget.rs
+было: self.total() <= free()
+стало: true

@@ -145,6 +145,17 @@ impl State {
         }
     }
 
+    /// Сколько памяти держат разборы чужих источников, лежащие в memo: работа
+    /// над своим идёт рядом с ними, и её пик обязан учесть их слагаемым.
+    fn neighbour_footprint(&self, resource_id: u64, near: bool) -> u64 {
+        [self.heavy.as_ref(), self.light.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|kept| kept.resource != resource_id || kept.near != near)
+            .map(|kept| kept.info.footprint())
+            .sum()
+    }
+
     /// Разбор этого ресурса, если он лежит в каком-нибудь из слотов.
     fn kept(&self, resource_id: u64, near: bool) -> Option<&Parsed> {
         [self.heavy.as_ref(), self.light.as_ref()]
@@ -154,7 +165,10 @@ impl State {
     }
 }
 
-/// Разбор источника — из memo, если это тот же ресурс, иначе заново.
+/// Разбор источника — из memo, если это тот же ресурс, иначе заново; с ним —
+/// сколько длился отпечаток и сколько памяти держат разборы соседей, оставшиеся
+/// в memo ([`State::neighbour_footprint`]): пока разбор взят ссылкой, самого
+/// `state` больше не спросить.
 ///
 /// Отдаётся ссылкой, а не значением: за одним описанием идёт столько проходов,
 /// сколько у источника ступеней (у тайлового TIFF это четыре-пять), и разбор,
@@ -165,7 +179,7 @@ fn parsed<'a>(
     size: u64,
     bytes: &Rc<Cell<u64>>,
     near: bool,
-) -> Result<(&'a Parsed, Duration), String> {
+) -> Result<(&'a Parsed, Duration, u64), String> {
     let mut stamped = Duration::ZERO;
     // Место освобождается до развилки, а не в ветке промаха: взять разбор
     // готовым — это тоже работа, и памяти декодера она стои́т столько же,
@@ -181,7 +195,8 @@ fn parsed<'a>(
     } else {
         veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
     }
-    Ok((state.kept(resource_id, near).expect("разбор только что положен"), stamped))
+    let neighbour = state.neighbour_footprint(resource_id, near);
+    Ok((state.kept(resource_id, near).expect("разбор только что положен"), stamped, neighbour))
 }
 
 pub fn on_describe(state: &mut State, req: DescribeRequest) {
@@ -210,7 +225,7 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
     // Привязка приезжает из соседнего файла и в memo не идёт: она свойство
     // пары «растр и его координаты», а memo знает только про растр.
     let mut ties = Vec::new();
-    let (kept, stamped) =
+    let (kept, stamped, _) =
         parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)), req.near)?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
     let read = began.elapsed();
@@ -270,7 +285,7 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
         tile: pyramid::TILE,
         levels: pyramid::level_count(info.width, info.height),
         reach: info.reach() as i32,
-        finest: info.finest,
+        finest: info.finest(),
         windowed: info.windowed(),
         ties: info
             .ties
@@ -353,7 +368,7 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
 
     let bytes = Rc::new(Cell::new(0u64));
-    let (kept, _) = parsed(state, resource.id, resource.size, &bytes, req.near)?;
+    let (kept, _, neighbour) = parsed(state, resource.id, resource.size, &bytes, req.near)?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
 
     // Спрашивается вес разбора, а не цена прохода: `Reach::Pyramid` покрывает и
@@ -362,10 +377,17 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     // защищает не от него, а от того, что вход однажды переставят: отпускать
     // по лёгкому проходу нечего, и молчаливым такое отпускание быть не должно.
     let single_pass = info.holds_samples();
+    // Пик работы сверяется со свободным до неё — вместе с разбором соседа,
+    // который лежит в memo и памяти не отпускает. Строка таблицы та же, по
+    // которой описание обещало «влезает»; отказ здесь называет слагаемые.
+    let admitted = match info.level(req.level) {
+        Some(row) => row.peak.with("разбор соседа", neighbour).admit(),
+        None => Ok(()),
+    };
     // Заказ проверяется отдельной функцией, а не по месту: у проверок свои
     // выходы, и уйти по любому из них, не отпустив разбор, значит оставить
     // висеть отсчёты величины — ровно то, от чего memo и освобождают ниже.
-    let planned = plan(info, req);
+    let planned = plan(info, req).and_then(|ordered| admitted.map(|()| ordered));
 
     let mut sink = None;
     let outcome = match planned {
@@ -626,8 +648,8 @@ mod tests {
     fn лёгкий_разбор_вытесняет_лёгкий() {
         let mut state = State { heavy: None, light: None };
 
-        keep(&mut state, 1, adapters::Info::plain(64, 64, adapters::Kind::Png));
-        keep(&mut state, 2, adapters::Info::plain(64, 64, adapters::Kind::Png));
+        keep(&mut state, 1, adapters::Info::plain(64, 64, adapters::Kind::Png { interlaced: false }));
+        keep(&mut state, 2, adapters::Info::plain(64, 64, adapters::Kind::Png { interlaced: false }));
 
         assert!(state.kept(1, true).is_none());
         assert!(state.kept(2, true).is_some());
@@ -645,7 +667,7 @@ mod tests {
         let mut state = State { heavy: None, light: None };
 
         state.clear_for(2, true);
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jp2));
+        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jp2 { len: 0 }));
         state.clear_for(1, true);
         keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
 
@@ -678,15 +700,28 @@ mod tests {
     #[test]
     fn готовый_разбор_отпускает_чужую_плоскость() {
         let mut state = State { heavy: None, light: None };
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jp2));
+        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jp2 { len: 0 }));
         keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
 
         let bytes = Rc::new(Cell::new(0));
-        let (kept, _) = parsed(&mut state, 2, 0, &bytes, true).expect("разбор лежит готовым");
+        let (kept, _, _) = parsed(&mut state, 2, 0, &bytes, true).expect("разбор лежит готовым");
         assert!(!kept.info.holds_samples(), "готовым взят лёгкий разбор");
 
         assert!(state.kept(1, true).is_none(), "а плоскость гранулы отпущена");
         assert!(state.kept(2, true).is_some(), "сам же он на месте");
+    }
+
+    /// Сосед в memo входит в пик работы над своим источником: чужой разбор
+    /// считается, свой — нет.
+    #[test]
+    fn сосед_в_memo_входит_в_пик() {
+        let mut state = State { heavy: None, light: None };
+        let mut tiff = adapters::Info::plain(64, 64, adapters::Kind::Jpeg);
+        tiff.ties = vec![adapters::Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }];
+        keep(&mut state, 2, tiff);
+
+        assert!(state.neighbour_footprint(1, true) > 0, "чужой разбор не посчитан");
+        assert_eq!(state.neighbour_footprint(2, true), 0, "свой разбор — не сосед");
     }
 
     /// Тот же ресурс, прочитанный иначе, — чужой. Разбор зависит от того, лежит
@@ -717,7 +752,7 @@ mod tests {
     /// сбрасывает разгон, так что весь проход едет блоками по одному.
     #[test]
     fn заказ_отдаётся_рядами_а_не_столбцами() {
-        let info = adapters::Info::plain(2048, 2048, adapters::Kind::Png);
+        let info = adapters::Info::plain(2048, 2048, adapters::Kind::Png { interlaced: false });
         let req = asked(0, &[(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]);
 
         let ordered = plan(&info, &req).expect("сетка вмещает");
@@ -728,7 +763,7 @@ mod tests {
     /// Повторы в заказе не удваивают работу: тайл производят один раз.
     #[test]
     fn повторённый_тайл_заказан_однажды() {
-        let info = adapters::Info::plain(2048, 2048, adapters::Kind::Png);
+        let info = adapters::Info::plain(2048, 2048, adapters::Kind::Png { interlaced: false });
         let req = asked(0, &[(1, 1), (0, 0), (1, 1)]);
 
         assert_eq!(plan(&info, &req).expect("сетка вмещает"), vec![(0, 0), (1, 1)]);
@@ -738,7 +773,7 @@ mod tests {
     /// ждал бы его до закрытия вида.
     #[test]
     fn тайл_за_краем_сетки_отвергается() {
-        let info = adapters::Info::plain(1024, 1024, adapters::Kind::Png);
+        let info = adapters::Info::plain(1024, 1024, adapters::Kind::Png { interlaced: false });
 
         assert!(plan(&info, &asked(0, &[(2, 0)])).is_err(), "сетка уровня 0 — 2×2");
         assert!(plan(&info, &asked(1, &[(1, 0)])).is_err(), "у первого уровня она 1×1");

@@ -6,13 +6,13 @@ use std::io::{BufRead, Seek};
 
 use super::super::cascade::{Cascade, Emit};
 use super::radiometry::Pixel;
-use super::{to_rgba, Info, Kind, FULL_DECODE_BUDGET};
+use super::{frame_fits, to_rgba, Info, Kind, FULL_DECODE_BUDGET};
 
 pub fn describe<R: BufRead + Seek>(reader: R) -> Result<Info, String> {
     let decoder = png::Decoder::new(reader);
     let reader = decoder.read_info().map_err(|e| format!("png: {}", e))?;
     let info = reader.info();
-    Ok(Info::plain(info.width, info.height, Kind::Png))
+    Ok(Info::plain(info.width, info.height, Kind::Png { interlaced: info.interlaced }))
 }
 
 pub fn produce_pass<R: BufRead + Seek>(reader: R, info: &Info, emit: Emit) -> Result<(), String> {
@@ -35,7 +35,7 @@ pub fn produce_pass<R: BufRead + Seek>(reader: R, info: &Info, emit: Emit) -> Re
     // У чересстрочного PNG строки идут в порядке Adam7, а не сверху вниз:
     // потокового пути нет, кадр декодируется целиком — и потому с бюджетом.
     if interlaced {
-        if u64::from(w) * u64::from(h) * 4 > FULL_DECODE_BUDGET {
+        if !frame_fits(w, h) {
             return Err(format!(
                 "png (Adam7) {}×{}: кадр целиком не влезает в бюджет ({} МБ)",
                 w, h, FULL_DECODE_BUDGET / (1024 * 1024)

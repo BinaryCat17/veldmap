@@ -26,7 +26,9 @@ and in the logs. Where one word carries two senses in the tree, both are given.
 | pointwise reading | точечное чтение | reading only the chunks under the requested tiles |
 | cascade | каскад | the tiler's downscaling chain that turns rows of its base level — level 0, or the level a decoder produced — into tiles of every coarser level |
 | ladder, step | лестница, ступень | the consumer's order of levels from coarse to fine, a step being one level asked for; in the tiler, also the halving of sizes from level to level |
-| detail limit | предел детали | `finest`: the finest level a source will ever serve |
+| detail limit | предел детали | `finest`: the finest level a source will ever serve — the first row of the level table that fits |
+| level table | таблица уровней | one row per pyramid level: how it is served (pointwise or by a pass), what a step costs, the memory peak, whether it fits |
+| peak | пик | the memory a piece of work needs at its highest, as named terms summed against the instance's free memory |
 | binding | привязка | how raster pixels map to the Earth; four kinds, from the catalogue's footprint up to a lattice of tie points |
 | scene, product, part | снимок, продукт, часть | what a person sees as one acquisition; what the catalogue lists; the products folded into one scene |
 | quicklook | квиклук | the small preview raster of a scene |

@@ -15,8 +15,9 @@
 //! дважды: по запрошенному уровню до чтения файла и по фактическим размерам
 //! декода (`Image::width/height`, уже с учётом пропуска) до самого декода; не
 //! влезает — честный отказ, и уровни, которым он заведомо достанется,
-//! описание объявляет заранее (см. [`finest`]). Файл при этом читается целиком
-//! на каждый проход. А описание источника не декодирует ничего: размеры
+//! таблица уровней объявляет заранее (`adapters::table`, по [`fits`]). Файл
+//! при этом читается целиком на каждый проход. А описание источника не
+//! декодирует ничего: размеры
 //! читаются своим разбором заголовка (`header_dims`) из первых килобайт —
 //! тянуть гигабайтный файл ради describe нельзя.
 
@@ -65,8 +66,7 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
         }
         Err(why) => veldsdk::log::debug!(target: "perf", "jp2 {}×{}: {}", width, height, why),
     }
-    let mut info = Info::plain(width, height, Kind::Jp2);
-    info.finest = finest(len, width, height);
+    let mut info = Info::plain(width, height, Kind::Jp2 { len });
     info.placement = gml_placement(&head, width, height);
     Ok(info)
 }
@@ -249,22 +249,12 @@ fn pair(values: Vec<f64>) -> Option<(f64, f64)> {
     }
 }
 
-/// Самый подробный уровень, который влезает в бюджет декода. Считается по тем
-/// же [`estimate`] и [`DECODE_BUDGET`], которыми [`produce`] потом и отказывает,
-/// — затем и считается заранее: заказчику не за чем просить то, что заведомо
-/// получит отказ (см. `Described.finest`).
-///
-/// Уровней у пирамиды конечное число, и если не влезает ни один — отдаётся
-/// последний: вершина помещается в тайл, и не влезть она может только вместе с
-/// самим файлом, который в память всё равно поднимать.
-fn finest(len: u64, width: u32, height: u32) -> u32 {
-    let top = pyramid::level_count(width, height).saturating_sub(1);
-    (0..=top)
-        .find(|level| {
-            let (w, h) = (pyramid::level_size(width, *level), pyramid::level_size(height, *level));
-            estimate(len, w, h) <= DECODE_BUDGET
-        })
-        .unwrap_or(top)
+/// Влезает ли декод уровня `w`×`h` в бюджет декодера — по тем же [`estimate`]
+/// и [`DECODE_BUDGET`], которыми [`produce`] потом и отказывает. Спрашивает
+/// это таблица уровней (`adapters::table`): заказчику незачем просить то, что
+/// заведомо получит отказ.
+pub(super) fn fits(len: u64, w: u32, h: u32) -> bool {
+    estimate(len, w, h) <= DECODE_BUDGET
 }
 
 pub fn produce(
@@ -407,7 +397,7 @@ fn key_margins(rgba: &mut [u8], w: u32, h: u32) {
 
 /// Пик памяти прохода при декоде в w×h: сам файл, f32-плоскости декодера
 /// (до четырёх каналов), его интерливленный u8-выход и RGBA.
-fn estimate(file_len: u64, w: u32, h: u32) -> u64 {
+pub(super) fn estimate(file_len: u64, w: u32, h: u32) -> u64 {
     file_len + u64::from(w) * u64::from(h) * (4 * 4 + 4 + 4)
 }
 

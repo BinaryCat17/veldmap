@@ -20,7 +20,12 @@ use super::super::pyramid::{self, TILE};
 use super::super::resample::halve;
 use super::grid::Overview;
 use super::tiff::{self, Layout};
-use super::{describe, produce, Info, Kind, Metered, Reach};
+use super::table::Serve;
+
+/// Байт на пиксель фикстур: все они RGB8.
+const RGB8: u32 = 3;
+use super::{describe, produce, Info, Kind, Metered};
+use crate::proto::image_tiler::Reach;
 
 /// Окно читателя SDK — то, чем меряются чтения.
 const WINDOW: u64 = 256 * 1024;
@@ -296,12 +301,12 @@ fn direct_equals_pass_on_exact_halves() {
 }
 
 /// `Info::reach()` и рукав `produce` спрашивают одно и то же — и обязаны
-/// отвечать согласно на всякой раскладке и всяком уровне. Обе стороны зовут
-/// `Grid::pointwise`, так что держит это не два счёта, а правило `reach()`:
-/// `Exact` только у произвольного доступа с окном на всех уровнях, иначе
-/// `Windowed` с окном ровно на нижних. Оборванная цепочка — 32·TILE с одной
-/// копией: верхний уровень читался бы из неё областью больше `REGION_CAP`, и
-/// окно кончается раньше уровней.
+/// отвечать согласно на всякой раскладке и всяком уровне. Обе стороны читают
+/// таблицу уровней, а та — `Grid::pointwise`, так что держит это правило
+/// вывода `reach()`, и оно проверяется здесь против самого окна: `Exact` при
+/// окне на всех уровнях, иначе `Windowed` с окном ровно на нижних. Оборванная
+/// цепочка — 32·TILE с одной копией: верхний уровень читался бы из неё
+/// областью больше `REGION_CAP`, и окно кончается раньше уровней.
 #[test]
 fn reach_and_the_produce_branch_agree() {
     let tiles = (TILE, TILE);
@@ -320,11 +325,15 @@ fn reach_and_the_produce_branch_agree() {
     ];
     let mut partial_seen = false;
     for (name, (w, h), tiled, count, chunk) in layouts {
-        let layout = Layout::of(tiled, chunk, overviews(count, (w, h)));
+        let layout = Layout::of(tiled, chunk, overviews(count, (w, h)), RGB8);
         let info = Info::plain(w, h, Kind::Tiff(layout));
         let levels = pyramid::level_count(w, h);
         let Kind::Tiff(layout) = &info.kind else { unreachable!() };
         let branch: Vec<bool> = (0..levels).map(|level| layout.grid.pointwise((w, h), level)).collect();
+        let served: Vec<bool> = (0..levels)
+            .map(|level| info.level(level).expect("уровень есть").serve == Serve::Pointwise)
+            .collect();
+        assert_eq!(served, branch, "{name}: таблица уровней разошлась с правилом окна");
         match info.reach() {
             Reach::Exact => assert!(branch.iter().all(|&b| b), "{name}: Exact, но рукав прохода на {branch:?}"),
             Reach::Windowed => {

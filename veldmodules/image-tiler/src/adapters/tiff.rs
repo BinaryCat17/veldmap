@@ -16,6 +16,7 @@ use std::io::{Read, Seek};
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 
+use super::super::budget::Peak;
 use super::super::cascade::Emit;
 use super::grid::{self, Chunked, Grid, Overview};
 use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples};
@@ -48,9 +49,10 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Раскладка без посчитанного растяга — он считается при первой надобности.
-    pub fn of(tiled: bool, chunk: (u32, u32), overviews: Vec<Overview>) -> Self {
-        Self { grid: Grid { tiled, chunk, overviews }, stretch: RefCell::new(None) }
+    /// Раскладка без посчитанного растяга — он считается при первой
+    /// надобности; `depth` — байт на пиксель в сырых сэмплах файла.
+    pub fn of(tiled: bool, chunk: (u32, u32), overviews: Vec<Overview>, depth: u32) -> Self {
+        Self { grid: Grid { tiled, chunk, overviews, depth }, stretch: RefCell::new(None) }
     }
 
     /// IFD, из которого берётся выборка растяга: самая мелкая копия, а нет
@@ -72,10 +74,11 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     ensure_chunky(&mut decoder)?;
     ensure_readable(&mut decoder)?;
     let tiled = decoder.get_tag_unsigned::<u32>(Tag::TileWidth).is_ok();
+    let depth = depth_of(&mut decoder)?;
     // Не отказ, а худший случай: чанк, который не измерить или который не
-    // влезает в бюджет, — это «весь растр», и `Grid::pointwise` такому уровню
-    // окна не даст. Отказывать здесь нельзя: описание несёт ещё и геопривязку, а
-    // тайлы у такого файла и так не приедут — тот же потолок стои́т в проходе.
+    // влезает в память, — это «весь растр», и `Grid::footprint` такому уровню
+    // окна не даст. Влезает ли тогда хоть один уровень проходом, скажет
+    // таблица уровней при общей проверке описания (`adapters::checked`).
     let chunk = chunk_grid(&mut decoder).unwrap_or((width, height));
     let (ties, placement, binding_trouble) = georef(&mut decoder, width, height);
 
@@ -104,8 +107,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
     Ok(Info {
         width,
         height,
-        kind: Kind::Tiff(Layout::of(tiled, chunk, overviews)),
-        finest: 0,
+        kind: Kind::Tiff(Layout::of(tiled, chunk, overviews, depth)),
         ties,
         placement,
         // Отсчёт прибора объявляет один Sentinel-3 своими глобальными
@@ -521,9 +523,13 @@ fn chunk_grid<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<(u32, u32), St
     if cw == 0 || ch == 0 {
         return Err("tiff: нулевой размер чанка".to_string());
     }
-    if u64::from(cw) * u64::from(ch) * 4 > grid::BAND_CAP {
-        return Err(format!("tiff: чанк {}×{} не влезает в бюджет памяти", cw, ch));
-    }
+    // Свежий чанк — сырые сэмплы и RGBA разом; то же слагаемое считает
+    // `Grid::chunk_bytes`.
+    let depth = depth_of(decoder)?;
+    Peak::new()
+        .with("свежий чанк", u64::from(cw) * u64::from(ch) * (u64::from(depth) + 4))
+        .admit()
+        .map_err(|why| format!("tiff: чанк {}×{}: {}", cw, ch, why))?;
     Ok((cw, ch))
 }
 
@@ -585,6 +591,13 @@ fn model(color: tiff::ColorType) -> Result<(Pixel, u8), String> {
 
 fn pixel(color: tiff::ColorType) -> Result<Pixel, String> {
     Ok(model(color)?.0)
+}
+
+/// Байт на пиксель в сырых сэмплах образа, на котором стои́т декодер: каналы ×
+/// байт сэмпла. Разрядность меньше байта отвергает [`ensure_readable`].
+fn depth_of<R: Read + Seek>(decoder: &mut Decoder<R>) -> Result<u32, String> {
+    let (pixel, bits) = model(decoder.colortype().map_err(|e| format!("tiff: {}", e))?)?;
+    Ok(pixel.channels as u32 * u32::from(bits.div_ceil(8)))
 }
 
 /// Отказ на том, что иначе упало бы посреди прохода.
@@ -816,6 +829,9 @@ fn mapping<R: Read + Seek>(decoder: &mut Decoder<R>, stats: usize) -> Result<Map
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Байт на пиксель RGB8 — тестам геометрии сетки глубина сэмпла безразлична.
+    const RGB8: u32 = 3;
     use super::super::super::pyramid::{self, TILE};
     use super::super::grid::{region_of, spanned, CHUNK_CACHE_BYTES, REGION_CAP};
 
@@ -825,7 +841,7 @@ mod tests {
 
     /// Растр без копий — под ним `pick_source` смотрит только на размеры.
     fn bare(width: u32, height: u32) -> Info {
-        Info::plain(width, height, Kind::Tiff(Layout::of(true, TILES, Vec::new())))
+        Info::plain(width, height, Kind::Tiff(Layout::of(true, TILES, Vec::new(), RGB8)))
     }
 
     /// Копии настоящего снимка — гранула Sentinel-1 GRDH
@@ -854,7 +870,7 @@ mod tests {
                 chunk: TILES,
             })
             .collect();
-        (bare(26553, 16668), Layout::of(true, TILES, overviews))
+        (bare(26553, 16668), Layout::of(true, TILES, overviews, RGB8))
     }
 
     /// Копии, записанные делением стороны пополам вниз, — так их пишет GDAL.
@@ -867,7 +883,7 @@ mod tests {
                 Overview { image, width: w, height: h, chunk: TILES }
             })
             .collect();
-        Layout::of(true, TILES, overviews)
+        Layout::of(true, TILES, overviews, RGB8)
     }
 
     /// Копия годится своему уровню, хотя на пиксель у́же его. Проверять надо
@@ -939,7 +955,7 @@ mod tests {
 
         // Вырожденный случай той же ловушки: у растра в два пикселя копия
         // ровно вдвое мельче, и абсолютный допуск пустил бы её под уровень 0.
-        let tiny = Layout::of(true, TILES, vec![Overview { image: 1, width: 1, height: 1, chunk: TILES }]);
+        let tiny = Layout::of(true, TILES, vec![Overview { image: 1, width: 1, height: 1, chunk: TILES }], RGB8);
         assert_eq!(tiny.grid.source_for((2, 2), 2, 2), (0, 2, 2), "родному разрешению копий нет");
     }
 
@@ -947,7 +963,7 @@ mod tests {
     /// годится: прощается округление, а не близость.
     #[test]
     fn допуск_ровно_в_один_пиксель() {
-        let short = |w: u32| Layout::of(true, TILES, vec![Overview { image: 1, width: w, height: w, chunk: TILES }]);
+        let short = |w: u32| Layout::of(true, TILES, vec![Overview { image: 1, width: w, height: w, chunk: TILES }], RGB8);
         let info = bare(2000, 2000);
         assert_eq!(short(499).grid.source_for((info.width, info.height), 500, 500).0, 1, "у́же на пиксель — своя");
         assert_eq!(short(498).grid.source_for((info.width, info.height), 500, 500).0, 0, "у́же на два — чужая");
@@ -959,7 +975,7 @@ mod tests {
     #[test]
     fn узкая_копия_не_годится_по_высоте() {
         let info = bare(513, 3);
-        let layout = Layout::of(true, TILES, vec![Overview { image: 1, width: 256, height: 1, chunk: TILES }]);
+        let layout = Layout::of(true, TILES, vec![Overview { image: 1, width: 256, height: 1, chunk: TILES }], RGB8);
         let (lw, lh) = (pyramid::level_size(513, 1), pyramid::level_size(3, 1));
         assert_eq!((lw, lh), (257, 2));
         assert_eq!(
@@ -978,7 +994,7 @@ mod tests {
                 Overview { image: 3, width: 800, height: 800, chunk: TILES },
                 Overview { image: 1, width: 3200, height: 3200, chunk: TILES },
                 Overview { image: 2, width: 1600, height: 1600, chunk: TILES },
-            ]);
+            ], RGB8);
         let found = layout.grid.source_for((6400, 6400), 800, 800);
         assert_eq!(found, (3, 800, 800), "годная мельче — та, что ровно под уровень");
     }
@@ -987,7 +1003,7 @@ mod tests {
     /// собрался бы растягиванием, а не ужатием.
     #[test]
     fn копия_грубее_уровня_не_годится() {
-        let layout = Layout::of(true, TILES, vec![Overview { image: 1, width: 400, height: 400, chunk: TILES }]);
+        let layout = Layout::of(true, TILES, vec![Overview { image: 1, width: 400, height: 400, chunk: TILES }], RGB8);
         let found = layout.grid.source_for((1000, 1000), 500, 500);
         assert_eq!(found, (0, 1000, 1000), "уровню в 500 копия в 400 не годится");
     }
@@ -1759,7 +1775,7 @@ mod tests {
             (513, 3),
         ];
         for (w, h) in sizes {
-            let layout = Layout::of(false, (w, 1), Vec::new());
+            let layout = Layout::of(false, (w, 1), Vec::new(), RGB8);
             for level in 0..pyramid::level_count(w, h) {
                 if !layout.grid.pointwise((w, h), level) {
                     continue;
@@ -1797,7 +1813,7 @@ mod tests {
     #[test]
     fn порог_окна_стои́т_на_кэше_чанков() {
         let (w, h) = (25309u32, 17408u32);
-        let layout = Layout::of(false, (w, 1), Vec::new());
+        let layout = Layout::of(false, (w, 1), Vec::new(), RGB8);
 
         let held = |level: u32| -> u64 {
             let lh = pyramid::level_size(h, level).max(1);
@@ -1834,7 +1850,7 @@ mod tests {
             })
             .collect();
         let layout =
-            Layout::of(true, TILES, overviews);
+            Layout::of(true, TILES, overviews, RGB8);
 
         for level in 0..7 {
             assert!(layout.grid.pointwise((25309, 17408), level), "уровень {level} не взялся окном");
@@ -1856,7 +1872,7 @@ mod tests {
         let layout = Layout::of(true, TILES, vec![
                 Overview { image: 1, width: w / 2, height: h / 2, chunk: TILES },
                 Overview { image: 2, width: w / 4, height: h / 4, chunk: TILES },
-            ]);
+            ], RGB8);
 
         assert!(layout.grid.pointwise((w, h), 0), "нулевому уровню копия не нужна");
         assert!(layout.grid.pointwise((w, h), 2), "уровню 2 досталась своя копия");
@@ -1888,7 +1904,7 @@ mod tests {
         assert_eq!(layout.stats(), smallest.image, "выборка — из самой мелкой копии");
         assert_eq!(smallest.width, 414, "самая мелкая копия гранулы");
 
-        let bare = Layout::of(false, TILES, Vec::new());
+        let bare = Layout::of(false, TILES, Vec::new(), RGB8);
         assert_eq!(bare.stats(), 0, "копий нет — выборка из базового растра");
     }
 
@@ -1961,7 +1977,7 @@ mod tests {
                 chunk,
             })
             .collect();
-        let layout = Layout::of(true, chunk, overviews);
+        let layout = Layout::of(true, chunk, overviews, RGB8);
 
         // Один чанк 4096² в RGBA — 64 МиБ, и это ровно половина кэша чанков:
         // мерка обязана насчитать один, а не четыре.
@@ -1977,9 +1993,9 @@ mod tests {
     fn полоса_во_весь_растр_окна_не_даёт() {
         let (w, h) = (8000u32, 8000u32);
         let whole =
-            Layout::of(false, (w, h), Vec::new());
+            Layout::of(false, (w, h), Vec::new(), RGB8);
         let rows =
-            Layout::of(false, (w, 512), Vec::new());
+            Layout::of(false, (w, 512), Vec::new(), RGB8);
 
         for level in 0..pyramid::level_count(w, h) {
             assert!(!whole.grid.pointwise((w, h), level), "уровень {level} обещал окно на целом растре");
