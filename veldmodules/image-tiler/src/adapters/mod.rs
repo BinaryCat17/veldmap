@@ -19,6 +19,7 @@ use super::pyramid;
 use crate::proto::image_tiler::Reach;
 
 pub mod full;
+pub mod grid;
 pub mod jp2;
 pub mod jpeg;
 pub mod netcdf;
@@ -198,7 +199,7 @@ impl Info {
             // ступенью. Отвечать за такой уровень «точечный» значит обещать
             // потребителю цену, которой не будет.
             Kind::Tiff(layout) => (0..pyramid::level_count(self.width, self.height))
-                .take_while(|level| tiff::windowed(self, layout, *level))
+                .take_while(|level| layout.grid.pointwise((self.width, self.height), *level))
                 .count() as u32,
             // Прочие читаются только проходом: точечного пути у них нет вовсе.
             _ => 0,
@@ -217,7 +218,7 @@ impl Info {
             // каждого: лестница [`Reach::Exact`] начинается с вершины, и
             // вершина, которой копии не досталось, обошлась бы проходом по
             // всему растру — то есть самой дорогой ступенью впереди всех.
-            Kind::Tiff(layout) if layout.random_access() && self.windowed() == levels => {
+            Kind::Tiff(layout) if layout.grid.random_access() && self.windowed() == levels => {
                 Reach::Exact
             }
             // Полосный (и тайловый без копий): полосы адресуются поштучно, и
@@ -335,7 +336,7 @@ pub fn produce(
         //
         // Спрашивается это и у источника с произвольным доступом, а не только
         // у полосного. У файла с редкими копиями область под тайл верхнего
-        // уровня перерастает потолок, `produce_direct` отказывает, отказ валит
+        // уровня перерастает потолок, `grid::direct` отказывает, отказ валит
         // весь проход — а проход приговаривает свои ячейки разом. Уровень,
         // взятый проходом, приезжает медленно; уровень, взятый отказом, не
         // приезжает никогда.
@@ -343,7 +344,7 @@ pub fn produce(
         // Тот же вопрос задаёт [`Info::windowed`] — с той разницей, что она
         // считает подряд идущий низ пирамиды, а здесь спрашивают про один
         // уровень. Правьте вместе.
-        Kind::Tiff(layout) if tiff::windowed(info, layout, level) => {
+        Kind::Tiff(layout) if layout.grid.pointwise((info.width, info.height), level) => {
             tiff::produce_direct(reader, info, layout, level, wants, emit)
         }
         Kind::Tiff(layout) => tiff::produce_pass(reader, info, layout, emit),

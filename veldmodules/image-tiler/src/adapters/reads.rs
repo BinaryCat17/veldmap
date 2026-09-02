@@ -18,7 +18,8 @@ use veldsdk::fake;
 
 use super::super::pyramid::{self, TILE};
 use super::super::resample::halve;
-use super::tiff::{self, Layout, Overview};
+use super::grid::Overview;
+use super::tiff::{self, Layout};
 use super::{describe, produce, Info, Kind, Metered, Reach};
 
 /// Окно читателя SDK — то, чем меряются чтения.
@@ -189,7 +190,7 @@ fn describing_reads_the_header_and_the_ifds_only() {
     let handle = fake::mount(file);
 
     let info = described(&handle);
-    assert!(matches!(&info.kind, Kind::Tiff(layout) if layout.overviews.len() == levels as usize));
+    assert!(matches!(&info.kind, Kind::Tiff(layout) if layout.grid.overviews.len() == levels as usize));
     let asked = windows();
     let strangers: Vec<(u64, u64)> = asked.iter().copied().filter(|w| !near_head_or_ifd(*w, &ifds)).collect();
     assert!(strangers.is_empty(), "описание читало вдали от каталогов: {:?} (каталоги в {:?})", strangers, ifds);
@@ -296,7 +297,7 @@ fn direct_equals_pass_on_exact_halves() {
 
 /// `Info::reach()` и рукав `produce` спрашивают одно и то же — и обязаны
 /// отвечать согласно на всякой раскладке и всяком уровне. Обе стороны зовут
-/// `tiff::windowed`, так что держит это не два счёта, а правило `reach()`:
+/// `Grid::pointwise`, так что держит это не два счёта, а правило `reach()`:
 /// `Exact` только у произвольного доступа с окном на всех уровнях, иначе
 /// `Windowed` с окном ровно на нижних. Оборванная цепочка — 32·TILE с одной
 /// копией: верхний уровень читался бы из неё областью больше `REGION_CAP`, и
@@ -323,7 +324,7 @@ fn reach_and_the_produce_branch_agree() {
         let info = Info::plain(w, h, Kind::Tiff(layout));
         let levels = pyramid::level_count(w, h);
         let Kind::Tiff(layout) = &info.kind else { unreachable!() };
-        let branch: Vec<bool> = (0..levels).map(|level| super::tiff::windowed(&info, layout, level)).collect();
+        let branch: Vec<bool> = (0..levels).map(|level| layout.grid.pointwise((w, h), level)).collect();
         match info.reach() {
             Reach::Exact => assert!(branch.iter().all(|&b| b), "{name}: Exact, но рукав прохода на {branch:?}"),
             Reach::Windowed => {
