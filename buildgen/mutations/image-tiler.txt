@@ -65,3 +65,38 @@
 файл: veldmodules/image-tiler/src/adapters/codec.rs
 было: self.dead = true;
 стало: self.dead = self.dead;
+
+имя: выдержка не дописывает пустые пакеты за отрезанные
+файл: veldmodules/image-tiler/src/adapters/excerpt.rs
+было:                 (head.sod as u64 + plt[..packets].iter().sum::<u64>(), total - wanted)
+стало:                 (head.sod as u64 + plt[..packets].iter().sum::<u64>(), 0)
+
+имя: Psot обрезанного тайл-парта не переписывается
+файл: veldmodules/image-tiler/src/adapters/excerpt.rs
+было:             probe[6..10].copy_from_slice(&((keep + pad) as u32).to_be_bytes());
+стало:             let _ = keep + pad;
+
+имя: прецинкты всегда по умолчанию
+файл: veldmodules/image-tiler/src/adapters/excerpt.rs
+было:             true => Ok(tail[..resolutions].iter().map(|b| (b & 15, b >> 4)).collect()),
+стало:             true => Ok(vec![(15, 15); resolutions]),
+
+имя: LRCP со многими слоями считается префиксным
+файл: veldmodules/image-tiler/src/adapters/excerpt.rs
+было:             && matches!((self.progression, self.layers), (0, 1) | (1, _) | (2, _))
+стало:             && matches!((self.progression, self.layers), (0, _) | (1, _) | (2, _))
+
+имя: заголовок тайла с COD не отменяет обрезку
+файл: veldmodules/image-tiler/src/adapters/excerpt.rs
+было:             0x52 | 0x53 | 0x5F | 0x61 => overrides = true,
+стало:             0x52 | 0x53 | 0x5F | 0x61 => overrides = overrides,
+
+имя: POC и PPM в главном заголовке не мешают префиксу
+файл: veldmodules/image-tiler/src/adapters/excerpt.rs
+было:                 0x5F | 0x60 => coding.changes = true,
+стало:                 0x5F | 0x60 => coding.changes = coding.changes,
+
+имя: SOP и EPH не мешают префиксу
+файл: veldmodules/image-tiler/src/adapters/excerpt.rs
+было:         self.marked = body[0] & 0x06 != 0;
+стало:         self.marked = false;

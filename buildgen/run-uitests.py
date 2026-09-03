@@ -9,10 +9,13 @@
 разобранные снимки живут между шагами, и делить их между сценариями значило бы
 ставить исход одного в зависимость от того, что успел сделать другой.
 
-Раскладка окна (runtime/state/data-browser.json) на время прогона убирается и
-возвращается в конце: она переживает запуск, и сценарий, начинающийся «с той
-вкладки, что была», не воспроизводим. Без неё окно открывается тем, что задано
-в runtime/config.
+Два состояния переживают запуск, и оба на время прогона убираются, а в конце
+возвращаются: раскладка окна (runtime/state/data-browser.json) — с ней
+сценарий, начинающийся «с той вкладки, что была», не воспроизводим, — и кэш
+тайлов (runtime/data/tiles), с которым снимок, показанный прошлым прогоном,
+приезжает с диска, и ни декодер, ни провод в сценарии не участвуют. Сам
+хозяйский кэш прогону не нужен: он откладывается в сторону целиком, а кэш,
+набранный сценариями, стирается перед каждым следующим.
 
     python3 buildgen/run-uitests.py            # все сценарии
     python3 buildgen/run-uitests.py tabs menus # названные
@@ -23,6 +26,8 @@
 осталось бы ничего — его лог затёрли бы следующие.
 """
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -33,6 +38,11 @@ PROJECT_ROOT = os.path.normpath(os.path.join(BUILDGEN_DIR, ".."))
 SCENARIOS_DIR = os.path.join(PROJECT_ROOT, "uitests")
 WINDOW_STATE = os.path.join(PROJECT_ROOT, "runtime", "state", "data-browser.json")
 HOST_LOG = os.path.join(PROJECT_ROOT, "runtime", "logs", "host.log")
+TRACE_LOG = os.path.join(PROJECT_ROOT, "runtime", "logs", "trace.log")
+# Кэш тайлов (`tile-cache/src/layout.rs::ROOT`) и куда он откладывается на
+# время прогона.
+TILE_CACHE = os.path.join(PROJECT_ROOT, "runtime", "data", "tiles")
+TILE_CACHE_ASIDE = TILE_CACHE + ".aside"
 
 # Предел на один сценарий сверх его собственных ожиданий. Сам сценарий
 # кончается шагом `exit`; сюда прогон доходит, только если приложение зависло
@@ -42,15 +52,34 @@ HOST_LOG = os.path.join(PROJECT_ROOT, "runtime", "logs", "host.log")
 LIMIT_SECONDS = 180
 
 
-def limit_for(path: str) -> float:
-    """Предел прогона: общий запас плюс самое долгое ожидание сценария."""
-    longest = 0
+def steps(path: str, verb: str) -> list[int]:
+    """Числа при шагах сценария с данным вербом — в порядке файла.
+
+    Комментарий режется тем же правилом, что у хоста (`capture.rs::strip_comment`):
+    решётка, начинающая слово, — начало заметки; иначе закомментированный шаг
+    считался бы обещанием.
+    """
+    found = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             fields = line.split()
-            if len(fields) >= 3 and fields[1] == "timeout" and fields[2].isdigit():
-                longest = max(longest, int(fields[2]))
-    return LIMIT_SECONDS + longest / 1000
+            noted = next((at for at, word in enumerate(fields) if word.startswith("#")), len(fields))
+            fields = fields[:noted]
+            if len(fields) >= 3 and fields[1] == verb and fields[2].isdigit():
+                found.append(int(fields[2]))
+    return found
+
+
+def limit_for(path: str) -> float:
+    """Предел прогона: общий запас плюс самое долгое ожидание сценария."""
+    return LIMIT_SECONDS + max(steps(path, "timeout"), default=0) / 1000
+
+
+def delivered_limit(path: str) -> int | None:
+    """За какую долю доставленного по сети ручается сценарий (шаг
+    `delivered`), процентов от длины ресурса; None — ни за какую."""
+    promised = steps(path, "delivered")
+    return min(promised) if promised else None
 
 
 def scenarios(names: list[str]) -> list[str]:
@@ -80,11 +109,12 @@ def play(path: str, name: str) -> tuple[str, float]:
     """Один сценарий: чем он кончился."""
     env = os.environ.copy()
     env["VELDMAP_SCRIPT"] = path
-    # Лог прошлого сценария убираем сами: хост перезаписывает его на старте, а
+    # Логи прошлого сценария убираем сами: хост перезаписывает их на старте, а
     # не дойдя до этого места (не разобранный конфиг, не поднявшееся окно), он
-    # оставил бы на диске чужой — и отказ из него приписался бы этому прогону.
-    if os.path.exists(HOST_LOG):
-        os.remove(HOST_LOG)
+    # оставил бы на диске чужие — и отказ из них приписался бы этому прогону.
+    for stale in (HOST_LOG, TRACE_LOG):
+        if os.path.exists(stale):
+            os.remove(stale)
     started = time.monotonic()
     # Своей группой процессов: хост — внук (его поднимает run-native.py), и
     # убитый по пределу посредник сам по себе окно не уносит.
@@ -93,8 +123,9 @@ def play(path: str, name: str) -> tuple[str, float]:
         cwd=PROJECT_ROOT, env=env, start_new_session=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
     )
+    promised = delivered_limit(path)
     try:
-        result = outcome(running.wait(timeout=limit_for(path)), host_log())
+        result = outcome(running.wait(timeout=limit_for(path)), host_log(), trace_log(), promised)
     except subprocess.TimeoutExpired:
         stop(running)
         # Отличается от «не сошёлся» намеренно: сценарий, дошедший до своего
@@ -106,7 +137,7 @@ def play(path: str, name: str) -> tuple[str, float]:
         # сценария — свой предел ожидания не срабатывает, и прогон доезжает
         # досюда. Ответ при этом в логе уже лежит.
         result = " + ".join(["ЗАВИС"] + unseen(host_log()))
-    keep_log(name)
+    keep_log(name, promised is not None)
     return result, time.monotonic() - started
 
 
@@ -115,6 +146,17 @@ def play(path: str, name: str) -> tuple[str, float]:
 # см. buildgen/tests/test_uitests_outcomes.py.
 GPU_NEEDLE = "wgpu: "
 TRAP_NEEDLE = "поймал трап"
+# Строка сети о доставленном (`network::perf` в trace.log): формат, как его
+# пишет range.rs, и разбор той же строки.
+DELIVERED_FORMAT = "доставлено {:.1} из {:.1} МиБ ({}%)"
+DELIVERED_LINE = re.compile(r"доставлено [\d.]+ из [\d.]+ МиБ \((\d+)%\)")
+
+
+def read_log(path: str) -> str:
+    if not os.path.exists(path):
+        return ""
+    with open(path, encoding="utf-8", errors="replace") as log:
+        return log.read()
 
 
 def host_log() -> str:
@@ -125,13 +167,15 @@ def host_log() -> str:
     ненулевой код, и прогон объявит отказ и без лога. Чужого лога здесь не
     бывает: прошлый убран перед запуском (см. `play`).
     """
-    if not os.path.exists(HOST_LOG):
-        return ""
-    with open(HOST_LOG, encoding="utf-8", errors="replace") as log:
-        return log.read()
+    return read_log(HOST_LOG)
 
 
-def outcome(returncode: int, log: str) -> str:
+def trace_log() -> str:
+    """Полный поток последнего запуска: сюда сеть пишет, сколько привезла."""
+    return read_log(TRACE_LOG)
+
+
+def outcome(returncode: int, log: str, trace: str = "", promised: int | None = None) -> str:
     """Чем кончился прогон: код возврата плюс то, чего сценарий не видит.
 
     Лог смотрится при любом коде возврата, а найденное в нём дополняет вердикт,
@@ -139,16 +183,37 @@ def outcome(returncode: int, log: str) -> str:
     нужны оба. Почему так и почему порядок отказов постоянный — в
     docs/operations/ui-tests.md.
     """
-    found = unseen(log)
+    found = unseen(log, trace, promised)
     if returncode == 0:
         return " + ".join(found) if found else "сошёлся"
     return " + ".join(["НЕ СОШЁЛСЯ"] + found)
 
 
-def unseen(log: str) -> list[str]:
+def unseen(log: str, trace: str = "", promised: int | None = None) -> list[str]:
     """Отказы, которых сценарий не заметил, — в порядке, названном у `outcome`."""
-    return [name for name, seen in (("ОТКАЗ ВИДЕОКАРТЫ", gpu_refused(log)),
-                                    ("ТРАП МОДУЛЯ", module_trapped(log))) if seen]
+    found = [name for name, seen in (("ОТКАЗ ВИДЕОКАРТЫ", gpu_refused(log)),
+                                     ("ТРАП МОДУЛЯ", module_trapped(log))) if seen]
+    if promised is not None:
+        found.extend(broken_promise(trace, promised))
+    return found
+
+
+def broken_promise(trace: str, promised: int) -> list[str]:
+    """Чем не сдержано ручательство за провод: долей больше обещанной либо
+    тем, что провода не было вовсе.
+
+    Сценарий за провод ручается шагом `delivered`, а байты считает сеть и
+    пишет их в trace.log нарастающим итогом по каждому ресурсу — так что
+    последняя строка ресурса и есть его итог, а наибольшая по всем строкам —
+    худший ресурс прогона. Ни одной строки — значит, ни один ресурс по сети не
+    читался: снимок открыт с диска либо приехал из кэша, и ручательство
+    сошлось бы ровно там, где проверять нечего.
+    """
+    shares = [int(share) for share in DELIVERED_LINE.findall(trace)]
+    if not shares:
+        return ["РУЧАТЕЛЬСТВО БЕЗ ПРОВОДА"]
+    worst = max(shares)
+    return [f"ДОСТАВЛЕНО {worst}% ПРИ ОБЕЩАННЫХ {promised}%"] if worst > promised else []
 
 
 def gpu_refused(log: str) -> bool:
@@ -188,14 +253,22 @@ def module_trapped(log: str) -> bool:
     return TRAP_NEEDLE in log
 
 
-def keep_log(name: str) -> None:
-    """Копия лога сценария рядом с ним: следующий запуск host.log затрёт."""
-    if not os.path.exists(HOST_LOG):
-        return
-    with open(HOST_LOG, "rb") as source:
-        text = source.read()
-    with open(os.path.join(os.path.dirname(HOST_LOG), f"{name}.log"), "wb") as kept:
-        kept.write(text)
+def keep_log(name: str, with_trace: bool) -> None:
+    """Копия лога сценария рядом с ним: следующий запуск host.log затрёт.
+
+    Полный поток остаётся только у сценария с ручательством за провод: вердикт
+    вынесен по его строкам, и числа за вердиктом должны быть под рукой, а у
+    прочих сценариев trace.log — мегабайты ни о чём.
+    """
+    for source, kept in ((HOST_LOG, f"{name}.log"), (TRACE_LOG, f"{name}.trace.log")):
+        if source == TRACE_LOG and not with_trace:
+            continue
+        if not os.path.exists(source):
+            continue
+        with open(source, "rb") as original:
+            text = original.read()
+        with open(os.path.join(os.path.dirname(HOST_LOG), kept), "wb") as copy:
+            copy.write(text)
 
 
 def main() -> int:
@@ -204,12 +277,15 @@ def main() -> int:
         print(f"Сценариев нет: {SCENARIOS_DIR}")
         return 1
 
-    # Раскладку окна убираем на время прогона и возвращаем в конце — она
-    # хозяйская, а не наша.
+    # Раскладку окна и кэш тайлов убираем на время прогона и возвращаем в
+    # конце — они хозяйские, а не наши. Кэш не копируется, а откладывается
+    # переименованием: в нём сотни мегабайт, и они остаются где лежали.
     stashed = None
     if os.path.exists(WINDOW_STATE):
         with open(WINDOW_STATE, "rb") as f:
             stashed = f.read()
+    if os.path.isdir(TILE_CACHE) and not os.path.exists(TILE_CACHE_ASIDE):
+        os.rename(TILE_CACHE, TILE_CACHE_ASIDE)
 
     failed = []
     try:
@@ -221,6 +297,7 @@ def main() -> int:
                 continue
             if os.path.exists(WINDOW_STATE):
                 os.remove(WINDOW_STATE)
+            shutil.rmtree(TILE_CACHE, ignore_errors=True)
             print(f"  {name}: ", end="", flush=True)
             result, spent = play(path, name)
             print(f"{result} — {spent:.1f}s")
@@ -231,6 +308,9 @@ def main() -> int:
             os.makedirs(os.path.dirname(WINDOW_STATE), exist_ok=True)
             with open(WINDOW_STATE, "wb") as f:
                 f.write(stashed)
+        if os.path.exists(TILE_CACHE_ASIDE):
+            shutil.rmtree(TILE_CACHE, ignore_errors=True)
+            os.rename(TILE_CACHE_ASIDE, TILE_CACHE)
 
     print()
     if failed:

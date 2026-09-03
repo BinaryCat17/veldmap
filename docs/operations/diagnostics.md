@@ -33,7 +33,11 @@ All four are `debug`, that is, `trace.log` only.
   fingerprint, parse and coordinate file, needed because describing has no
   progress at all and the application is silent for all of its seconds; under
   the same target, one line per pass, one per level read directly from a
-  TIFF, and the codestream layout of a JP2.
+  TIFF, and the codestream layout of a JP2 together with how its tiles will
+  be read — by an excerpt over the TLM index, or by the decoder's own walk
+  over the SOT headers, and why; whether the excerpt can stop at a
+  resolution is decided per tile, and the line only says if the progression
+  allows it and if the first tile-part carries a PLT.
 
 ## Three rules of reading
 

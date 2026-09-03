@@ -66,6 +66,11 @@ pub enum Action {
     Type { text: String },
     /// Служебная клавиша целиком — нажать и отпустить.
     Key { code: u32, name: String },
+    /// Ручательство сценария за провод: ни один удалённый ресурс не привёз
+    /// больше этой доли своей длины. Окну проверять нечего — байты считает
+    /// сеть и пишет в trace.log, — поэтому шаг только записывается в лог, а
+    /// сверяет его прогон (`buildgen/run-uitests.py`).
+    Delivered { share: u32 },
     /// Закрыть окно — конец прогона.
     Exit,
 }
@@ -315,6 +320,7 @@ fn parse_step(line: &str, logs: &Path) -> Option<(Duration, Action)> {
         // и прочие, и разбирать текст по словам нельзя.
         "type" => return (!tail.is_empty()).then(|| (at, Action::Type { text: tail.to_string() })),
         "key" => return Some((at, Action::Key { code: named_key(tail)?, name: tail.to_string() })),
+        "delivered" => Action::Delivered { share: words.next()?.parse().ok().filter(|share| *share <= 100)? },
         "exit" => Action::Exit,
         _ => return None,
     };
@@ -548,6 +554,19 @@ mod tests {
         assert!(parse_step("2000 key enter", Path::new("/tmp")).is_some());
         assert!(parse_step("2000 key 13", Path::new("/tmp")).is_none());
         assert!(parse_step("2000 type", Path::new("/tmp")).is_none());
+    }
+
+    /// Ручательство за провод — доля в процентах, и только она: больше ста
+    /// или без числа — не шаг, а опечатка.
+    #[test]
+    fn a_delivery_promise_is_a_share() {
+        match parse_step("9700 delivered 75", Path::new("/tmp")).expect("шаг разобран") {
+            (_, Action::Delivered { share }) => assert_eq!(share, 75),
+            _ => panic!("ожидалось ручательство"),
+        }
+        assert!(parse_step("9700 delivered 101", Path::new("/tmp")).is_none());
+        assert!(parse_step("9700 delivered", Path::new("/tmp")).is_none());
+        assert!(parse_step("9700 delivered 50 60", Path::new("/tmp")).is_none());
     }
 
     /// Созревшее вместе с ждущим шагом — это созревшее ДО него, а не вместо:

@@ -17,9 +17,13 @@ python3 buildgen/run-uitests.py tabs menus # the named ones
 VELDMAP_SCRIPT=uitests/tabs.txt python3 buildgen/run-native.py   # one, by hand
 ```
 
-Each scenario is a separate launch. The window layout
-(`runtime/state/data-browser.json`) is set aside for the run and restored at
-the end, otherwise a scenario would start "from the tab that was open". A copy
+Each scenario is a separate launch, and it starts cold. Two things survive a
+launch and are set aside for the run and restored at the end: the window
+layout (`runtime/state/data-browser.json`), otherwise a scenario would start
+"from the tab that was open", and the tile cache (`runtime/data/tiles`),
+otherwise a raster shown by an earlier run would come from disk, with neither
+the decoder nor the wire taking part — the runner moves the cache aside and
+wipes what the scenarios themselves accumulate before each of them. A copy
 of `host.log` is kept under the scenario's name, otherwise nothing would be
 left of the one that failed first.
 
@@ -86,8 +90,15 @@ steps remain.
 2600 type Sentinel     # type where the caret is (a press puts it there)
 2700 key enter         # a named key
 2800 shot browse       # runtime/logs/browse.png
+2850 delivered 75      # promise: no remote resource fetched more than 75% of its length
 2900 exit              # close the window
 ```
+
+`delivered` is a promise about the wire, not a step of the window: the host
+only logs it, and `run-uitests.py` checks it after the run against the
+`network::perf` lines of `trace.log` (see Verdicts). The share is the worst
+resource of the run, in percent of its length, as the network counts it —
+delivered bytes, in pool blocks.
 
 `expect` demands "right now" and gives no second chance: it checks what the
 previous step already guaranteed. Everything that comes from disk or network
@@ -140,6 +151,17 @@ answered by the raised instance. The trap is looked for by the line
 `поймал трап`, not by
 an instance coming up in general: a module killed mid-handler is raised the
 same way, and that is normal work (`run-uitests.py::module_trapped`).
+
+The third is a **broken delivery promise** (`ДОСТАВЛЕНО N% ПРИ ОБЕЩАННЫХ M%`),
+looked for only in a scenario that made one with `delivered`. What went over
+the wire is not in the markup either: the network module counts it and writes
+it to `trace.log` as a running total per resource, so the last line of a
+resource is its total and the largest share over all lines is the worst
+resource of the run (`run-uitests.py::over_delivered`). The format of that
+line lives in `range.rs` and the runner's parser next to it; the pair is held
+by `buildgen/tests/test_uitests_outcomes.py`. Such a scenario keeps its full
+stream next to its log, as `<name>.trace.log`: the numbers behind the verdict
+stay at hand, and the next run does not take them away.
 
 The log is read whatever the exit code, and not as a precaution: a trap takes
 the module's state, and with it whatever `wait` is waiting for leaves the

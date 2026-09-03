@@ -487,6 +487,9 @@ impl Running {
                 capture::Action::Tap { address } => self.await_widget(address, true, false, true),
                 capture::Action::Await { address, gone } => self.await_widget(address, false, gone, true),
                 capture::Action::Assert { address, gone } => self.await_widget(address, false, gone, false),
+                capture::Action::Delivered { share } => {
+                    log::info!(target: "render", "Сценарий ручается: по сети доставлено не больше {}% длины ресурса", share)
+                }
                 capture::Action::Exit => self.exit_requested = true,
             }
         }

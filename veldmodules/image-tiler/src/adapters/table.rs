@@ -182,13 +182,14 @@ mod tests {
             tile: (1024, 1024),
             tile_origin: (0, 0),
             components: 3,
+            precision: 8,
             resolutions: 5,
             progression: 0,
             layers: 1,
             tlm_parts: Some(121),
             plt_first: Some(true),
         };
-        Info::plain(10980, 10980, Kind::Jp2(jp2::Layout::of(&codestream, 130 << 20, Format::Jp2, Some(0.0))))
+        Info::plain(10980, 10980, Kind::Jp2(jp2::Layout::of(&codestream, 130 << 20, Format::Jp2, Some(0.0), None)))
     }
 
     /// Байт на пиксель RGB8 — таблице геометрии глубина сэмпла безразлична.

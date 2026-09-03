@@ -18,7 +18,8 @@ use veldsdk::fake;
 
 use super::super::pyramid::{self, TILE};
 use super::super::resample::halve;
-use super::codec::fixture::{gray_j2k, tiled_j2k};
+use super::codec::fixture::{addressed_j2k, gray_j2k, tiled_j2k, Addressing};
+use super::excerpt::PROBE;
 use super::grid::Overview;
 use super::tiff::{self, Layout};
 use super::table::Serve;
@@ -481,3 +482,133 @@ fn a_twelve_bit_band_with_overviews_is_stretched() {
     assert!(mean(right) > mean(left), "градиент растёт слева направо: {} против {}", mean(left), mean(right));
     assert!(left.iter().skip(3).step_by(4).all(|a| *a == 255), "без ключа nodata прозрачных нет");
 }
+
+/// Кодстрим с индексом: TLM в главном заголовке, PLT в каждом тайл-парте —
+/// как пишет гранулы Kakadu.
+const INDEXED: Addressing = Addressing { tlm: true, plt: true, precinct: None, container: false };
+
+/// Байт, прочитанных у хоста с момента `from` в журнале.
+fn read_since(from: usize) -> u64 {
+    windows()[from..].iter().map(|win| win.1).sum()
+}
+
+/// С индексом тайл нулевого уровня стои́т ровно своего тайл-парта: пробы с
+/// его начала и окон внутри него, ни одного окна вне своих — ни заголовков
+/// предыдущих, ни обхода последующих. Пиксели те же, что без индекса.
+#[test]
+fn an_indexed_jp2_tile_reads_its_own_part_and_nothing_beyond() {
+    fake::install();
+    let (w, h) = (4 * TILE, 4 * TILE);
+    let rgb = noise(w, h);
+    let file = addressed_j2k(w, h, TILE, 3, INDEXED, &rgb);
+    let parts = tile_parts(&file);
+    assert_eq!(parts.len(), 16, "по тайл-парту на тайл");
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    let Kind::Jp2(layout) = &info.kind else { panic!("не JP2") };
+    assert!(layout.indexed(), "TLM фикстуры прочитан в индекс");
+    let head = fake::reads().len();
+
+    let tiles = produced(&handle, &info, 0, &[(1, 1), (2, 1)]);
+    assert_eq!(tiles[0].1, rgb_to_rgba(&tile_bytes(&rgb, w, h, 1, 1)), "обратимый тайл разошёлся с исходником");
+    assert_eq!(tiles[1].1, rgb_to_rgba(&tile_bytes(&rgb, w, h, 2, 1)));
+
+    let asked = &windows()[head..];
+    let own = |win: &(u64, u64)| [parts[5], parts[6]].iter().any(|part| win.0 >= part.0 && win.0 + win.1 <= part.0 + part.1);
+    assert!(asked.iter().all(own), "читалось вне своих тайл-партов: {:?}", asked);
+    assert_eq!(asked[0], (parts[5].0, PROBE.min(parts[5].1)), "первое чтение — проба с начала тайл-парта");
+    assert!(asked.iter().any(|win| win.0 >= parts[6].0), "второй тайл читался");
+}
+
+/// Самый грубый уровень с индексом стои́т по пробе на тайл: пакеты грубых
+/// разрешений лежат в начале тайл-парта, и выдержка режет его там, где
+/// кончается нужное разрешение. Уровень при этом тот же, что у чтения без
+/// индекса, — обрезанный тайл-парт декодируется в те же пиксели.
+#[test]
+fn the_coarsest_level_of_an_indexed_jp2_costs_a_probe_per_tile() {
+    fake::install();
+    let (w, h) = (4 * TILE, 4 * TILE);
+    let rgb = noise(w, h);
+    let plain = fake::mount(tiled_j2k(w, h, TILE, 3, &rgb));
+    let expected = produced(&plain, &described(&plain), 2, &[(0, 0)]);
+
+    let file = addressed_j2k(w, h, TILE, 3, INDEXED, &rgb);
+    let len = file.len() as u64;
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    assert_eq!(info.levels().len(), 3, "2048² — три уровня");
+    let head = fake::reads().len();
+
+    let tiles = produced(&handle, &info, 2, &[(0, 0)]);
+    assert_eq!(tiles, expected, "выдержка декодируется в те же пиксели, что весь файл");
+    let asked = &windows()[head..];
+    assert_eq!(asked.len(), 16, "по одному чтению на тайл: {:?}", asked);
+    assert!(asked.iter().all(|win| win.1 <= PROBE));
+    assert!(read_since(head) * 8 < len, "прочитано {} из {} — не префикс", read_since(head), len);
+}
+
+/// Свои прецинкты, как у гранулы: пакетов на разрешение больше одного на
+/// компонент, и счёт их обязан сойтись с PLT энкодера — иначе выдержка
+/// молча взяла бы тайл-парт целиком, и это видно по прочитанному.
+#[test]
+fn precincts_are_counted_as_the_encoder_writes_them() {
+    fake::install();
+    let (w, h) = (2 * TILE, 2 * TILE);
+    let rgb = noise(w, h);
+    let plain = fake::mount(tiled_j2k(w, h, TILE, 3, &rgb));
+    let info = described(&plain);
+    let expected: Vec<_> = (0..info.levels().len() as u32).map(|level| produced(&plain, &info, level, &[(0, 0)])).collect();
+
+    let file = addressed_j2k(w, h, TILE, 3, Addressing { precinct: Some(64), ..INDEXED }, &rgb);
+    let len = file.len() as u64;
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    for level in 1..info.levels().len() as u32 {
+        let head = fake::reads().len();
+        assert_eq!(produced(&handle, &info, level, &[(0, 0)]), expected[level as usize], "уровень {}", level);
+        assert!(read_since(head) * 2 < len, "уровень {}: прочитано {} из {}", level, read_since(head), len);
+    }
+    assert_eq!(produced(&handle, &info, 0, &[(0, 0)]), expected[0]);
+}
+
+/// Контейнер JP2 — коробки до `jp2c` идут в выдержку вместе с главным
+/// заголовком, и кодек контейнера принимает её так же, как кодек кодстрима.
+#[test]
+fn a_jp2_container_is_excerpted_with_its_boxes() {
+    fake::install();
+    let (w, h) = (2 * TILE, 2 * TILE);
+    let rgb = noise(w, h);
+    let file = addressed_j2k(w, h, TILE, 3, Addressing { container: true, ..INDEXED }, &rgb);
+    assert!(file.starts_with(super::jp2::JP2_MAGIC), "энкодер написал контейнер");
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    let Kind::Jp2(layout) = &info.kind else { panic!("не JP2") };
+    assert!(layout.indexed(), "индекс читается и из контейнера");
+
+    let tiles = produced(&handle, &info, 0, &[(1, 1)]);
+    assert_eq!(tiles[0].1, rgb_to_rgba(&tile_bytes(&rgb, w, h, 1, 1)));
+    let plain = fake::mount(tiled_j2k(w, h, TILE, 3, &rgb));
+    assert_eq!(produced(&handle, &info, 1, &[(0, 0)]), produced(&plain, &described(&plain), 1, &[(0, 0)]));
+}
+
+/// TLM без PLT — второй исход: тайл находится по индексу и читается целым
+/// тайл-партом на любом уровне, потому что резать его не по чему.
+#[test]
+fn tlm_without_plt_reads_whole_tile_parts() {
+    fake::install();
+    let (w, h) = (2 * TILE, 2 * TILE);
+    let rgb = noise(w, h);
+    let file = addressed_j2k(w, h, TILE, 3, Addressing { plt: false, ..INDEXED }, &rgb);
+    let parts = tile_parts(&file);
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    let Kind::Jp2(layout) = &info.kind else { panic!("не JP2") };
+    assert!(layout.indexed());
+    let head = fake::reads().len();
+
+    let plain = fake::mount(tiled_j2k(w, h, TILE, 3, &rgb));
+    assert_eq!(produced(&handle, &info, 1, &[(0, 0)]), produced(&plain, &described(&plain), 1, &[(0, 0)]));
+    let own: u64 = parts.iter().map(|part| part.1).sum();
+    assert!(read_since(head) >= own, "тайл-парты целиком: прочитано {} при {} в них", read_since(head), own);
+}
+

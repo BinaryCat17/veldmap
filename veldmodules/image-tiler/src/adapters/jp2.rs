@@ -1,20 +1,22 @@
 //! JPEG 2000 (JP2/J2C): квиклуки и гранулы Sentinel-2 — чанками драйвера.
-//!
 //! Чанк — тайл кодстрима на факторе разрешения: декодирует его openjp2 за
 //! unsafe-островом (`codec.rs`), а какие чанки читать и когда идти проходом,
 //! решает общий драйвер сетки чанков (`grid.rs`) по раскладке из главного
 //! заголовка ([`Layout`]). Описание кодека не запускает: размеры, сетку тайлов
 //! и число разрешений читает свой разбор головы файла ([`codestream`]),
-//! привязку — коробка GMLJP2 ([`gml_placement`]). Что решено и почему —
-//! `docs/decisions/0002-jpeg2000-decoder.md`.
+//! привязку — коробка GMLJP2 ([`gml_placement`]). Тайл кодеку подаётся
+//! выдержкой по индексу TLM (`excerpt.rs`), а без TLM — всем файлом, по
+//! которому кодек ходит сам. Что решено и почему —
+//! `docs/decisions/0002-jpeg2000-decoder.md` и `0004-jp2-excerpt.md`.
 
 use std::cell::{Cell, RefCell};
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::rc::Rc;
 
 use super::super::cascade::Emit;
 use super::super::pyramid;
 use super::codec::{Decoder, Format, Header, Tile};
+use super::excerpt;
 use super::grid::{self, Chunked, Grid, Overview};
 use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples};
 use super::{Info, Kind, Metered, Placement};
@@ -37,6 +39,9 @@ pub struct Layout {
     /// Длина файла: кодек считает по ней остаток потока.
     pub len: u64,
     format: Format,
+    /// Разрядность отсчёта: до байта растяг не нужен, и решается это без
+    /// кодека.
+    precision: u8,
     /// Ноль — «нет данных»: у гранулы Sentinel-2 годные значения 1..255, и
     /// поля снимка приезжают нулём. Ставится только файлу с привязкой GMLJP2:
     /// у произвольного JP2 чёрному никто не запрещал быть цветом.
@@ -44,6 +49,8 @@ pub struct Layout {
     /// Растяг показа отсчётов шире байта — один на файл, иначе соседние тайлы
     /// разошлись бы яркостью (см. `tiff::Layout`).
     stretch: RefCell<Option<Mapping>>,
+    /// Индекс тайл-партов по TLM; без него тайл ищет сам кодек, обходя SOT.
+    index: Option<excerpt::Index>,
 }
 
 impl Layout {
@@ -51,7 +58,13 @@ impl Layout {
     /// сетка тайлов на уменьшенной решётке остаётся равномерной, и она же
     /// — сетка чанков копии. Дальше уровни берут самую мелкую копию по общему
     /// правилу драйвера.
-    pub fn of(codestream: &Codestream, len: u64, format: Format, nodata: Option<f32>) -> Self {
+    pub fn of(
+        codestream: &Codestream,
+        len: u64,
+        format: Format,
+        nodata: Option<f32>,
+        index: Option<excerpt::Index>,
+    ) -> Self {
         let width = codestream.canvas.0 - codestream.origin.0;
         let height = codestream.canvas.1 - codestream.origin.1;
         let (tw, th) = codestream.tile;
@@ -70,9 +83,16 @@ impl Layout {
             tiles: codestream.grid(),
             len,
             format,
+            precision: codestream.precision,
             nodata,
             stretch: RefCell::new(None),
+            index,
         }
+    }
+
+    /// Читается ли тайл выдержкой по TLM, а не обходом SOT.
+    pub fn indexed(&self) -> bool {
+        self.index.is_some()
     }
 }
 
@@ -99,14 +119,24 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
         return Err("jp2: размеры контейнера и кодстрима разошлись".to_string());
     }
     let (across, down) = layout.grid();
+    // Индекс строится здесь же, из той же головы: тайл по сети читается
+    // выдержкой, только если TLM есть и сходится с файлом, и об этом говорит
+    // строка описания — по ней меряется гранула.
+    let index = excerpt::Index::of(&head, len);
     veldsdk::log::debug!(target: "perf",
         "jp2 {}×{}: тайлов {}×{} по {}×{}, компонент {}, разрешений {}, \
-         прогрессия {}, слоёв {}, тайл-партов в TLM {}, PLT у первого тайл-парта {}, GML {}",
+         прогрессия {}, слоёв {}, тайл-партов в TLM {}, PLT у первого тайл-парта {}, GML {}, \
+         тайл читается {}",
         width, height, across, down, layout.tile.0, layout.tile.1,
         layout.components, layout.resolutions, layout.progression, layout.layers,
         layout.tlm_parts.map_or("нет TLM".to_string(), |n| n.to_string()),
         layout.plt_first.map_or("не видно", |plt| if plt { "есть" } else { "нет" }),
-        if gml_text(&head).is_some() { "есть" } else { "нет" });
+        if gml_text(&head).is_some() { "есть" } else { "нет" },
+        match &index {
+            Ok(index) => format!("выдержкой по TLM ({} тайл-партов, префикс по разрешениям {})",
+                index.parts(), if index.coding().prefixed() { "возможен" } else { "невозможен" }),
+            Err(why) => format!("обходом SOT: {}", why),
+        });
 
     let format = match head.starts_with(CODESTREAM_MAGIC) {
         true => Format::J2k,
@@ -114,7 +144,7 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     };
     let placement = gml_placement(&head, width, height);
     let nodata = placement.is_some().then_some(0.0);
-    let mut info = Info::plain(width, height, Kind::Jp2(Layout::of(&layout, len, format, nodata)));
+    let mut info = Info::plain(width, height, Kind::Jp2(Layout::of(&layout, len, format, nodata, index.ok())));
     info.placement = placement;
     Ok(info)
 }
@@ -297,42 +327,77 @@ fn pair(values: Vec<f64>) -> Option<(f64, f64)> {
     }
 }
 
-/// Чанки JP2 за трейтом драйвера: декодер на факторе образа, растяг файла и
-/// ключ «нет данных». Читатели заводятся здесь же: кодеку нужен свой поток, и
-/// смена фактора — это новый кодек над новым читателем того же ресурса.
+/// Чанки JP2 за трейтом драйвера: тайл на факторе образа, растяг файла и
+/// ключ «нет данных». Кодек с индексом — на тайл: его поток и есть выдержка
+/// этого тайла; без индекса — на фактор над всем файлом, потому что фактор
+/// задаётся при открытии, а обход SOT кодек ведёт от последнего прочитанного.
 pub struct Chunks<'a> {
     resource: u64,
     layout: &'a Layout,
     bytes: Rc<Cell<u64>>,
-    decoder: Option<(u32, Decoder<Metered>)>,
+    walker: Option<(u32, Decoder<Metered>)>,
 }
 
 impl<'a> Chunks<'a> {
     pub fn new(resource: u64, layout: &'a Layout, bytes: Rc<Cell<u64>>) -> Self {
-        Self { resource, layout, bytes, decoder: None }
+        Self { resource, layout, bytes, walker: None }
     }
 
-    /// Декодер на факторе `factor` — готовый или открытый заново.
-    fn aim(&mut self, factor: u32) -> Result<&mut Decoder<Metered>, String> {
-        if !matches!(&self.decoder, Some((at, _)) if *at == factor) {
-            let reader = Metered::new(self.resource, self.layout.len, self.bytes.clone());
-            let decoder = Decoder::open(reader, self.layout.len, self.layout.format, factor)
-                .map_err(|why| format!("jp2: {}", why))?;
-            let header = decoder.header();
-            if header.uneven {
-                return Err("jp2: компоненты разной решётки или разрядности не разложить в RGBA".to_string());
+    /// Тайл `index` на факторе `factor` — плоскости и заголовок кодека
+    /// читателю `read`, пока они живы.
+    fn decode<T>(
+        &mut self,
+        factor: u32,
+        index: u32,
+        read: impl FnOnce(&Tile<'_>, Header) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match &self.layout.index {
+            Some(excerpt) => {
+                let mut decoder = self.excerpt(excerpt, index, factor)?;
+                let header = decoder.header();
+                decoder.tile(index, |tile| read(tile, header))
             }
-            if header.components == 0 || header.components > 4 {
-                return Err(format!("jp2: {} компонентов не разложить в RGBA", header.components));
+            None => {
+                let decoder = self.walker(factor)?;
+                let header = decoder.header();
+                decoder.tile(index, |tile| read(tile, header))
             }
-            self.decoder = Some((factor, decoder));
         }
-        Ok(&mut self.decoder.as_mut().expect("декодер только что открыт").1)
+    }
+
+    /// Кодек над выдержкой тайла: пробы его тайл-партов читаются здесь,
+    /// сборка и чтение остального — у `excerpt`. Счётчик `bytes` здесь —
+    /// сумма проб и окон, а у кодека над всем файлом (`Metered`) — дальняя
+    /// достигнутая позиция; в прогресс оба идут как «прочитано», и сумма
+    /// перевалит за размер файла только при повторном чтении одного места.
+    fn excerpt(&self, index: &excerpt::Index, tile: u32, factor: u32) -> Result<Decoder<excerpt::Reader>, String> {
+        let mut probes = Vec::new();
+        for part in index.parts_of(tile) {
+            let size = part.len.min(excerpt::PROBE);
+            let probe = veldsdk::abi::resource_read(self.resource, part.offset, size)
+                .map_err(|e| format!("jp2: проба тайл-парта тайла {}: {}", tile, e))?;
+            self.bytes.set(self.bytes.get() + probe.len() as u64);
+            probes.push(probe);
+        }
+        let segments = excerpt::assemble(index, tile, factor, probes).map_err(|why| format!("jp2: {}", why))?;
+        let reader = excerpt::Reader::over(self.resource, segments, self.bytes.clone());
+        let len = reader.len();
+        opened(Decoder::open(reader, len, self.layout.format, factor))
+    }
+
+    /// Кодек над всем файлом на факторе `factor` — готовый или открытый заново.
+    fn walker(&mut self, factor: u32) -> Result<&mut Decoder<Metered>, String> {
+        if !matches!(&self.walker, Some((at, _)) if *at == factor) {
+            let reader = Metered::new(self.resource, self.layout.len, self.bytes.clone());
+            let decoder = opened(Decoder::open(reader, self.layout.len, self.layout.format, factor))?;
+            self.walker = Some((factor, decoder));
+        }
+        Ok(&mut self.walker.as_mut().expect("декодер только что открыт").1)
     }
 
     /// Растяг файла — готовый либо посчитанный по выборке самой мелкой копии
     /// и запомненный. Байтовым отсчётам растяг не нужен: у них тождество и
-    /// ключ «нет данных».
+    /// ключ «нет данных», и кодек ради этого не открывается.
     fn mapping(&mut self) -> Result<Mapping, String> {
         if let Some(ready) = *self.layout.stretch.borrow() {
             return Ok(ready);
@@ -340,23 +405,21 @@ impl<'a> Chunks<'a> {
         // Раскладка берётся ссылкой до декодера: тот заимствует `self` целиком.
         let layout = self.layout;
         let nodata = layout.nodata;
-        let coarsest = layout.grid.overviews.len() as u32;
-        let decoder = self.aim(coarsest)?;
-        let header = decoder.header();
-        let built = match header.precision <= 8 {
+        let built = match layout.precision <= 8 {
             true => Mapping::identity(nodata),
             false => {
                 // Выборка — четыре тайла вразброс по сетке кодстрима, на самом
                 // мелком факторе, прореженные до общего порога выборки; цвет
                 // берётся из первого компонента. Сетка тайлов у кодека одна на
                 // все факторы, и считать её по уменьшенному чанку нельзя.
+                let coarsest = layout.grid.overviews.len() as u32;
                 let mut values = Vec::new();
                 let total = layout.tiles.0 * layout.tiles.1;
                 let mut picks = [0, total / 3, 2 * total / 3, total.saturating_sub(1)].to_vec();
                 picks.dedup();
-                let offset = sample_offset(header);
                 for &index in &picks {
-                    decoder.tile(index, |tile| {
+                    self.decode(coarsest, index, |tile, header| {
+                        let offset = sample_offset(header);
                         let plane = tile.planes[0];
                         let step = (plane.len() * picks.len() / radiometry::STRETCH_SAMPLES).max(1);
                         for at in (0..plane.len()).step_by(step) {
@@ -379,12 +442,24 @@ impl<'a> Chunks<'a> {
     }
 }
 
+/// Открытый кодек, чей заголовок раскладывается в RGBA: компоненты одной
+/// решётки и разрядности, от одного до четырёх.
+fn opened<R: Read + Seek>(decoder: Result<Decoder<R>, String>) -> Result<Decoder<R>, String> {
+    let decoder = decoder.map_err(|why| format!("jp2: {}", why))?;
+    let header = decoder.header();
+    if header.uneven {
+        return Err("jp2: компоненты разной решётки или разрядности не разложить в RGBA".to_string());
+    }
+    if header.components == 0 || header.components > 4 {
+        return Err(format!("jp2: {} компонентов не разложить в RGBA", header.components));
+    }
+    Ok(decoder)
+}
+
 impl Chunked for Chunks<'_> {
     fn chunk(&mut self, image: usize, index: u32) -> Result<(Vec<u8>, u32, u32), String> {
         let mapping = self.mapping()?;
-        let decoder = self.aim(image as u32)?;
-        let header = decoder.header();
-        decoder.tile(index, |tile| Ok((rgba(tile, header, &mapping), tile.width, tile.height)))
+        self.decode(image as u32, index, |tile, header| Ok((rgba(tile, header, &mapping), tile.width, tile.height)))
     }
 }
 
@@ -559,6 +634,9 @@ pub struct Codestream {
     pub tile: (u32, u32),
     pub tile_origin: (u32, u32),
     pub components: u16,
+    /// Разрядность первого компонента (`Ssiz`): до байта отсчёты идут без
+    /// растяга.
+    pub precision: u8,
     pub resolutions: u8,
     pub progression: u8,
     /// Слоёв качества из COD: при одном слое пакеты тайл-парта в LRCP идут
@@ -582,36 +660,97 @@ impl Codestream {
     }
 }
 
-/// Начало кодстрима в голове файла: тело коробки `jp2c` либо сам файл, если это
-/// голый кодстрим. `None` — коробки в прочитанную голову не поместилось.
-fn codestream_at(head: &[u8]) -> Option<usize> {
+/// Где в файле длиной `len` лежит кодстрим: начало в голове и конец в файле.
+/// У голого кодстрима это весь файл, у контейнера — тело коробки `jp2c`, и
+/// длина её нулём значит «до конца файла». `None` — коробки в прочитанную
+/// голову не поместилось.
+pub(super) fn codestream_span(head: &[u8], len: u64) -> Option<(usize, u64)> {
     if head.starts_with(CODESTREAM_MAGIC) {
-        return Some(0);
+        return Some((0, len));
     }
     let mut at = 0usize;
     while at + 8 <= head.len() {
-        let len = u32::from_be_bytes(head[at..at + 4].try_into().unwrap()) as u64;
+        let declared = u32::from_be_bytes(head[at..at + 4].try_into().unwrap()) as u64;
         let kind = &head[at + 4..at + 8];
-        let (body, next) = match len {
-            0 => (at + 8, head.len()),
+        let (body, declared) = match declared {
+            0 => (at + 8, 0),
             1 => {
                 if at + 16 > head.len() {
                     return None;
                 }
-                let xlen = u64::from_be_bytes(head[at + 8..at + 16].try_into().unwrap());
-                (at + 16, step(at, xlen, head.len()))
+                (at + 16, u64::from_be_bytes(head[at + 8..at + 16].try_into().unwrap()))
             }
-            _ => (at + 8, step(at, len, head.len())),
+            _ => (at + 8, declared),
         };
         if kind == b"jp2c" {
-            return Some(body);
+            let end = match declared {
+                0 => len,
+                _ => (at as u64).saturating_add(declared).min(len),
+            };
+            return Some((body, end));
         }
+        let next = match declared {
+            0 => head.len(),
+            _ => step(at, declared, head.len()),
+        };
         if next <= at {
             return None;
         }
         at = next;
     }
     None
+}
+
+/// Обход сегментов главного заголовка за SIZ: маркер и тело сегмента (без
+/// маркера и длины), пока не встретится SOT. Один на раскладку
+/// ([`codestream`]) и индекс тайл-партов (`excerpt::Index`): двум обходчикам
+/// одного заголовка незачем расходиться в том, где он кончается.
+///
+/// Длина у сегмента стои́т сразу за маркером и считает саму себя, так что
+/// следующий маркер — через `2 + L`. Сегмент, не поместившийся в голову,
+/// кончает обход молча: голова конечна, и это не порча файла.
+pub(super) struct Segments<'a> {
+    cs: &'a [u8],
+    walk: usize,
+    sot: Option<usize>,
+}
+
+pub(super) fn segments(cs: &[u8]) -> Segments<'_> {
+    // SOC — два байта без длины, дальше SIZ со своей длиной за маркером.
+    let lsiz = cs.get(4..6).map_or(0, |b| usize::from(u16::from_be_bytes([b[0], b[1]])));
+    Segments { cs, walk: 4 + lsiz, sot: None }
+}
+
+impl<'a> Segments<'a> {
+    /// Следующий сегмент; `None` — дошли до SOT либо голова кончилась.
+    /// Не-маркер там, где положено быть маркеру, — отказ: заголовок битый.
+    pub(super) fn next(&mut self) -> Result<Option<(u8, &'a [u8])>, String> {
+        let cs = self.cs;
+        if self.sot.is_some() || self.walk + 4 > cs.len() {
+            return Ok(None);
+        }
+        if cs[self.walk] != 0xFF {
+            return Err("jp2: главный заголовок кончился не маркером".to_string());
+        }
+        let marker = cs[self.walk + 1];
+        if marker == 0x90 {
+            self.sot = Some(self.walk);
+            return Ok(None);
+        }
+        let length = usize::from(u16::from_be_bytes([cs[self.walk + 2], cs[self.walk + 3]]));
+        if length < 2 || self.walk + 2 + length > cs.len() {
+            self.walk = cs.len();
+            return Ok(None);
+        }
+        let body = &cs[self.walk + 4..self.walk + 2 + length];
+        self.walk += 2 + length;
+        Ok(Some((marker, body)))
+    }
+
+    /// Где стоит первый SOT, если обход до него дошёл.
+    pub(super) fn sot(&self) -> Option<usize> {
+        self.sot
+    }
 }
 
 /// Раскладка из головы: маркер SIZ даёт холст и сетку тайлов, первый COD —
@@ -621,17 +760,18 @@ fn codestream_at(head: &[u8]) -> Option<usize> {
 /// необязательные сегменты, и порядок их файл выбирает сам. Обход кончается на
 /// SOT — дальше идут тайлы, а нам нужен главный заголовок.
 pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
-    let at = codestream_at(head).ok_or("jp2: кодстрим не найден в голове файла")?;
+    let (at, _) = codestream_span(head, head.len() as u64).ok_or("jp2: кодстрим не найден в голове файла")?;
     let cs = &head[at..];
-    if cs.len() < 40 || cs[0] != 0xFF || cs[1] != 0x4F || cs[2] != 0xFF || cs[3] != 0x51 {
+    if cs.len() < 43 || cs[0] != 0xFF || cs[1] != 0x4F || cs[2] != 0xFF || cs[3] != 0x51 {
         return Err("jp2: кодстрим без SOC и SIZ".to_string());
     }
     let be32 = |at: usize| u32::from_be_bytes(cs[at..at + 4].try_into().unwrap());
     let be16 = |at: usize| u16::from_be_bytes(cs[at..at + 2].try_into().unwrap());
     // SOC — два байта без длины, дальше сегмент SIZ: [маркер 2][Lsiz 2][Rsiz 2]
     // [Xsiz 4][Ysiz 4][XOsiz 4][YOsiz 4][XTsiz 4][YTsiz 4][XTOsiz 4][YTOsiz 4]
-    // [Csiz 2]. Смещения считаются от маркера SIZ, а не от начала кодстрима:
-    // SOC перед ним свою пару байт занимает.
+    // [Csiz 2][Ssiz 1 XRsiz 1 YRsiz 1]… Смещения считаются от маркера SIZ, а
+    // не от начала кодстрима: SOC перед ним свою пару байт занимает. В Ssiz
+    // младшие семь бит — разрядность без единицы.
     let siz = 2usize;
     let mut layout = Codestream {
         canvas: (be32(siz + 6), be32(siz + 10)),
@@ -639,6 +779,7 @@ pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
         tile: (be32(siz + 22), be32(siz + 26)),
         tile_origin: (be32(siz + 30), be32(siz + 34)),
         components: be16(siz + 38),
+        precision: (cs[siz + 40] & 0x7F).saturating_add(1),
         resolutions: 0,
         progression: 0,
         layers: 0,
@@ -646,40 +787,27 @@ pub fn codestream(head: &[u8]) -> Result<Codestream, String> {
         plt_first: None,
     };
 
-    // Обход сегментов главного заголовка. Длина у каждого стои́т сразу за
-    // маркером и считает саму себя, так что следующий маркер — через `2 + L`.
-    // Обход кончается на SOT: дальше идут тайлы, а нужен главный заголовок.
-    let mut walk = siz + 2 + be16(siz + 2) as usize;
-    while walk + 4 <= cs.len() {
-        if cs[walk] != 0xFF {
-            return Err("jp2: главный заголовок кончился не маркером".to_string());
-        }
-        let marker = cs[walk + 1];
-        if marker == 0x90 {
-            layout.plt_first = first_tile_part_has_plt(cs, walk);
-            break;
-        }
-        let length = be16(walk + 2) as usize;
-        if length < 2 || walk + 2 + length > cs.len() {
-            break;
-        }
+    let mut walk = segments(cs);
+    while let Some((marker, body)) = walk.next()? {
         // COD: [Scod 1][SGcod: порядок 1, слоёв 2, MCT 1][SPcod: ступеней 1…].
         // Ступеней вейвлета на единицу меньше, чем разрешений.
-        if marker == 0x52 && length >= 12 {
-            layout.progression = cs[walk + 5];
-            layout.layers = be16(walk + 6);
-            layout.resolutions = cs[walk + 9].saturating_add(1);
+        if marker == 0x52 && body.len() >= 10 {
+            layout.progression = body[1];
+            layout.layers = u16::from_be_bytes([body[2], body[3]]);
+            layout.resolutions = body[5].saturating_add(1);
         }
         // TLM: [Ztlm 1][Stlm 1][записи…]; в Stlm биты 4–5 — ширина Ttlm
         // (0, 1 или 2 байта), бит 6 — ширина Ptlm (2 или 4). Сегментов бывает
         // несколько, записи считаются по всем.
-        if marker == 0x55 && length >= 4 {
-            let stlm = cs[walk + 5];
+        if marker == 0x55 && body.len() >= 2 {
+            let stlm = body[1];
             let entry = usize::from((stlm >> 4) & 3) + if stlm & 0x40 != 0 { 4 } else { 2 };
-            let listed = ((length - 4) / entry) as u32;
+            let listed = ((body.len() - 2) / entry) as u32;
             layout.tlm_parts = Some(layout.tlm_parts.unwrap_or(0) + listed);
         }
-        walk += 2 + length;
+    }
+    if let Some(sot) = walk.sot() {
+        layout.plt_first = first_tile_part_has_plt(cs, sot);
     }
     if layout.resolutions == 0 {
         return Err("jp2: кодстрим без COD в голове файла".to_string());
@@ -1058,13 +1186,14 @@ mod tests {
             tile: (1024, 1024),
             tile_origin: (0, 0),
             components: 3,
+            precision: 8,
             resolutions: 5,
             progression: 0,
             layers: 1,
             tlm_parts: Some(121),
             plt_first: Some(true),
         };
-        let layout = Layout::of(&cs, 130 << 20, Format::Jp2, Some(0.0));
+        let layout = Layout::of(&cs, 130 << 20, Format::Jp2, Some(0.0), None);
         assert_eq!(layout.grid.chunk, (1024, 1024));
         assert_eq!(layout.tiles, (11, 11));
         assert_eq!(layout.grid.overviews.len(), 4, "четыре копии при пяти разрешениях");
@@ -1074,8 +1203,8 @@ mod tests {
         // Копии кончаются там, где тайл перестаёт делиться на два: у 300
         // это фактор 3, у нечётного тайла копий нет вовсе.
         let even = Codestream { tile: (300, 300), canvas: (600, 600), ..cs };
-        assert_eq!(Layout::of(&even, 1, Format::J2k, None).grid.overviews.len(), 2);
+        assert_eq!(Layout::of(&even, 1, Format::J2k, None, None).grid.overviews.len(), 2);
         let odd = Codestream { tile: (301, 301), canvas: (602, 602), ..cs };
-        assert!(Layout::of(&odd, 1, Format::J2k, None).grid.overviews.is_empty());
+        assert!(Layout::of(&odd, 1, Format::J2k, None, None).grid.overviews.is_empty());
     }
 }

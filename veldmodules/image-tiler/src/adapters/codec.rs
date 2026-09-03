@@ -251,6 +251,7 @@ unsafe extern "C" fn seek<R: Read + Seek>(offset: i64, user: *mut c_void) -> i32
 /// C-ABI, что у чтения, и второго острова заводить незачем.
 #[cfg(test)]
 pub(super) mod fixture {
+    use std::cell::RefCell;
     use std::ffi::c_void;
     use std::io::{Cursor, Seek, SeekFrom, Write};
 
@@ -260,13 +261,35 @@ pub(super) mod fixture {
     };
     use openjp2::{opj_cparameters_t, opj_image, opj_image_comptparm, Codec, Stream, CODEC_FORMAT, COLOR_SPACE};
 
+    /// Как кодстрим адресуется и уложен: индекс тайл-партов `tlm` в главном
+    /// заголовке и длины пакетов `plt` в каждом тайл-парте (так пишет гранулы
+    /// Kakadu) либо ни того, ни другого — тогда тайл находится только обходом
+    /// SOT; `precinct` — сторона прецинкта, если она своя, а не 2^15;
+    /// `container` — коробки JP2 вокруг кодстрима. Тайл из нескольких
+    /// тайл-партов энкодер крейта не пишет: с `tp_on` он кладёт в каждый
+    /// тайл-парт все пакеты тайла и один и тот же Psot.
+    #[derive(Clone, Copy)]
+    pub struct Addressing {
+        pub tlm: bool,
+        pub plt: bool,
+        pub precinct: Option<u32>,
+        pub container: bool,
+    }
+
+    pub const PLAIN: Addressing = Addressing { tlm: false, plt: false, precinct: None, container: false };
+
     /// Кодстрим `width`×`height` RGB8 тайлами `tile`×`tile` с `resolutions`
     /// уровнями разрешения; `rgb` — отсчёты построчно.
     pub fn tiled_j2k(width: u32, height: u32, tile: u32, resolutions: u32, rgb: &[u8]) -> Vec<u8> {
+        addressed_j2k(width, height, tile, resolutions, PLAIN, rgb)
+    }
+
+    /// Тот же RGB8 с заданной адресацией.
+    pub fn addressed_j2k(width: u32, height: u32, tile: u32, resolutions: u32, how: Addressing, rgb: &[u8]) -> Vec<u8> {
         assert_eq!(rgb.len(), (width as usize) * (height as usize) * 3);
         let planes: Vec<Vec<i32>> =
             (0..3).map(|channel| rgb.chunks_exact(3).map(|px| i32::from(px[channel])).collect()).collect();
-        encode(width, height, tile, resolutions, 8, &planes, COLOR_SPACE::OPJ_CLRSPC_SRGB)
+        encode(width, height, tile, resolutions, 8, &planes, COLOR_SPACE::OPJ_CLRSPC_SRGB, how)
     }
 
     /// Серый кодстрим шире байта: один компонент разрядности `prec`, отсчёты
@@ -274,10 +297,19 @@ pub(super) mod fixture {
     pub fn gray_j2k(width: u32, height: u32, tile: u32, resolutions: u32, prec: u32, samples: &[u16]) -> Vec<u8> {
         assert_eq!(samples.len(), (width as usize) * (height as usize));
         let plane: Vec<i32> = samples.iter().map(|s| i32::from(*s)).collect();
-        encode(width, height, tile, resolutions, prec, &[plane], COLOR_SPACE::OPJ_CLRSPC_GRAY)
+        encode(width, height, tile, resolutions, prec, &[plane], COLOR_SPACE::OPJ_CLRSPC_GRAY, PLAIN)
     }
 
-    fn encode(width: u32, height: u32, tile: u32, resolutions: u32, prec: u32, planes: &[Vec<i32>], space: COLOR_SPACE) -> Vec<u8> {
+    fn encode(
+        width: u32,
+        height: u32,
+        tile: u32,
+        resolutions: u32,
+        prec: u32,
+        planes: &[Vec<i32>],
+        space: COLOR_SPACE,
+        how: Addressing,
+    ) -> Vec<u8> {
         let component = opj_image_comptparm { dx: 1, dy: 1, w: width, h: height, x0: 0, y0: 0, prec, bpp: prec, sgnd: 0 };
         let components: Vec<opj_image_comptparm> = planes.iter().map(|_| component).collect();
         let mut image = opj_image::create(&components, space).expect("образ создаётся");
@@ -300,9 +332,35 @@ pub(super) mod fixture {
         parameters.tcp_rates[0] = 0.0;
         parameters.cp_disto_alloc = 1;
         parameters.irreversible = 0;
+        if let Some(side) = how.precinct {
+            // Свои прецинкты одной стороны на всех разрешениях (бит 0 стиля
+            // кодирования) — как у гранулы Sentinel-2.
+            parameters.csty |= 1;
+            parameters.res_spec = resolutions as i32;
+            for r in 0..resolutions as usize {
+                parameters.prcw_init[r] = side as i32;
+                parameters.prch_init[r] = side as i32;
+            }
+        }
 
-        let mut codec = Codec::new_encoder(CODEC_FORMAT::OPJ_CODEC_J2K).expect("энкодер создаётся");
-        assert_eq!(codec.setup_encoder(&mut parameters, &mut image), 1, "энкодер настраивается");
+        let format = match how.container {
+            true => CODEC_FORMAT::OPJ_CODEC_JP2,
+            false => CODEC_FORMAT::OPJ_CODEC_J2K,
+        };
+        let mut codec = Codec::new_encoder(format).expect("энкодер создаётся");
+        // Причины отказов энкодера — те же, что у декодера: без обработчика
+        // тест падал бы молча.
+        let errors = Box::new(RefCell::new(String::new()));
+        codec.set_error_handler(Some(super::on_error), &*errors as *const RefCell<String> as *mut c_void);
+        let said = || errors.borrow().clone();
+        assert_eq!(codec.setup_encoder(&mut parameters, &mut image), 1, "энкодер настраивается: {}", said());
+        let options: Vec<&str> = [(how.tlm, "TLM=YES"), (how.plt, "PLT=YES")]
+            .into_iter()
+            .filter_map(|(on, option)| on.then_some(option))
+            .collect();
+        if !options.is_empty() {
+            assert!(codec.encoder_set_extra_options(&options), "энкодер умеет TLM и PLT");
+        }
 
         let mut out = Box::new(Cursor::new(Vec::new()));
         // SAFETY: поток создан здесь и уничтожен ниже; пользовательские данные
@@ -318,9 +376,9 @@ pub(super) mod fixture {
         };
         // SAFETY: за указателем лежит `Stream`.
         let as_stream = || unsafe { &mut *(stream as *mut Stream) };
-        assert_eq!(codec.start_compress(&mut image, as_stream()), 1, "сжатие начинается");
-        assert_eq!(codec.encode(as_stream()), 1, "кодстрим пишется");
-        assert_eq!(codec.end_compress(as_stream()), 1, "кодстрим закрывается");
+        assert_eq!(codec.start_compress(&mut image, as_stream()), 1, "сжатие начинается: {}", said());
+        assert_eq!(codec.encode(as_stream()), 1, "кодстрим пишется: {}", said());
+        assert_eq!(codec.end_compress(as_stream()), 1, "кодстрим закрывается: {}", said());
         // SAFETY: указатель выдан `opj_stream_create` и больше не используется.
         unsafe { opj_stream_destroy(stream) };
         drop(codec);

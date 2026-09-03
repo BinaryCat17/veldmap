@@ -18,6 +18,7 @@ use super::cascade::Emit;
 use super::pyramid;
 
 pub mod codec;
+pub mod excerpt;
 pub mod full;
 pub mod grid;
 pub mod jp2;

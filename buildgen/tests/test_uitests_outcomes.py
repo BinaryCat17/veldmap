@@ -21,6 +21,7 @@ import os
 from conftest import BUILDGEN_DIR, PROJECT_ROOT
 
 HOST_SRC = os.path.join(PROJECT_ROOT, "veldcore", "platform", "host", "core", "src")
+NETWORK_SRC = os.path.join(PROJECT_ROOT, "veldcore", "platform", "host", "modules", "network", "src")
 
 # Отрицательный пример: снятый посреди обработчика поднимается тем же ходом, что
 # упавший, и спутать их значило бы валить всякий прогон, в котором что-нибудь
@@ -112,6 +113,53 @@ def test_a_quiet_log_leaves_the_return_code_alone():
 
     assert runner.outcome(0, "") == "сошёлся"
     assert runner.outcome(1, "") == "НЕ СОШЁЛСЯ"
+
+
+def test_the_delivered_line_is_read_as_the_network_writes_it():
+    """Строка о доставленном разбирается тем же форматом, каким её пишет сеть.
+
+    Формат лежит в range.rs строкой Rust, разбор — регулярным выражением
+    прогона; разойдись они, прогон перестал бы видеть провод и молча считал бы
+    всякое ручательство сдержанным. Сводятся они здесь: формат берётся у
+    прогона и ищется в исходнике сети, а выражение проверяется на строке,
+    собранной по этому формату.
+    """
+    runner = load_runner()
+    with open(os.path.join(NETWORK_SRC, "range.rs"), encoding="utf-8") as f:
+        assert runner.DELIVERED_FORMAT in f.read(), \
+            f"'{runner.DELIVERED_FORMAT}' больше не печатается в range.rs — ручательство за провод ослепло"
+    line = "ресурс 7: " + runner.DELIVERED_FORMAT.replace("{:.1}", "61.5", 1).replace("{:.1}", "128.8", 1) \
+        .replace("{}", "47") + ", запросов 121 по 512 КиБ"
+    assert runner.DELIVERED_LINE.findall(line) == ["47"]
+
+
+def test_the_delivery_promise_is_checked_against_the_worst_resource():
+    """Ручательство сценария сверяется с наибольшей долей по всем строкам:
+    доля у ресурса нарастает, так что его последняя строка и есть итог, а
+    худший ресурс решает исход. Без ручательства провод не смотрится, а
+    ручательство без единой строки сети — не сдержано: провода не было."""
+    runner = load_runner()
+    trace = ("… ресурс 7: доставлено 4.0 из 128.8 МиБ (3%), запросов 8 по 512 КиБ …\n"
+             "… ресурс 7: доставлено 61.5 из 128.8 МиБ (47%), запросов 121 по 512 КиБ …\n"
+             "… ресурс 9: доставлено 0.3 из 0.3 МиБ (100%), запросов 1 по 270 КиБ …\n")
+    assert runner.broken_promise(trace, 100) == []
+    assert runner.broken_promise(trace, 75) == ["ДОСТАВЛЕНО 100% ПРИ ОБЕЩАННЫХ 75%"]
+    assert runner.outcome(0, "", trace, None) == "сошёлся", "без ручательства провод не смотрится"
+    assert runner.outcome(0, "", trace, 50) == "ДОСТАВЛЕНО 100% ПРИ ОБЕЩАННЫХ 50%"
+    assert runner.outcome(1, "", trace, 50) == "НЕ СОШЁЛСЯ + ДОСТАВЛЕНО 100% ПРИ ОБЕЩАННЫХ 50%"
+    assert runner.outcome(0, "", "", 50) == "РУЧАТЕЛЬСТВО БЕЗ ПРОВОДА"
+
+
+def test_the_promise_is_read_from_the_scenario(tmp_path):
+    """Доля берётся у шага `delivered`, а при нескольких — наименьшая."""
+    runner = load_runner()
+    quiet = tmp_path / "quiet.txt"
+    quiet.write_text("100 wait tab_menu\n200 exit\n", encoding="utf-8")
+    promising = tmp_path / "promising.txt"
+    promising.write_text("100 delivered 80\n200 delivered 60 # строже\n#300 delivered 10\n"
+                         "# 400 delivered 5\n500 exit\n", encoding="utf-8")
+    assert runner.delivered_limit(str(quiet)) is None
+    assert runner.delivered_limit(str(promising)) == 60, "закомментированный шаг — не обещание"
 
 
 def test_the_run_limit_grows_with_the_scenario_wait(tmp_path):
