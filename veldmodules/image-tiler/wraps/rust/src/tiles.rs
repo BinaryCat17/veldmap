@@ -28,7 +28,7 @@ use veldsdk::graphics::{self as gfx, BindGroupId, TextureViewId};
 use veldsdk::proto::core::ResourceHandle;
 
 use super::pyramid;
-pub use crate::proto::Reach;
+use super::tile::MAX_QUERY_TILES;
 
 /// Адрес тайла в пирамиде: уровень, колонка, ряд. Тот же, каким его знают
 /// дисковый кэш и производитель.
@@ -45,16 +45,72 @@ const TILE_BYTES: u64 = (pyramid::TILE as u64) * (pyramid::TILE as u64) * 4;
 /// она молча дала бы шару и канве разные пределы.
 pub const DEFAULT_VRAM_BUDGET_MB: u64 = 256;
 
-/// Как назвать цену прохода в логе. Наружу уезжает не она, а `Meta::note`,
-/// куда она и вложена: потребителям нужна строка про источник целиком, а
-/// собранная порознь, она читалась бы у двоих по-разному.
-pub(crate) fn reach_note(reach: Reach) -> &'static str {
-    match reach {
-        Reach::Exact => "произвольный доступ",
-        Reach::Pyramid => "проход строит пирамиду целиком",
-        Reach::Coarser => "проход на каждую ступень",
-        Reach::Windowed => "чтение окном, без промежуточных ступеней",
+/// Как уровень обслуживается — столбец таблицы уровней тайлера, прочитанный с
+/// провода в свой тип (`Described.levels`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Serve {
+    /// Точечно: ступень стоит своих тайлов, байты прохода про ход не говорят,
+    /// в кэш кладётся только заказанное.
+    Pointwise,
+    /// Проходом с уровня `from`, который строит каскадом все уровни от него и
+    /// грубее и кладёт их в кэш разом.
+    Pass { from: u32 },
+}
+
+/// Строка таблицы уровней: как уровень обслуживается, сколько памяти стоит и
+/// влезает ли.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row {
+    pub serve: Serve,
+    pub bytes: u64,
+    pub fits: bool,
+}
+
+/// Таблица словами для лога: подряд идущие строки одного обслуживания
+/// складываются в отрезки — «точечно 0–1, проход с 0 на 2–6». Наружу уезжает
+/// не она, а `Meta::note`, куда она и вложена: потребителям нужна строка про
+/// источник целиком, а собранная порознь, она читалась бы у двоих по-разному.
+pub(crate) fn table_note(rows: &[Row]) -> String {
+    /// Род отрезка: точечный, проход с одного и того же уровня, проход со
+    /// своего уровня у каждой строки (JPEG: кадр в масштаб каждого уровня).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Pointwise,
+        From(u32),
+        Own,
     }
+    let mut spans: Vec<(Kind, u32, u32)> = Vec::new();
+    for (level, row) in rows.iter().enumerate() {
+        let level = level as u32;
+        match (spans.last_mut(), row.serve) {
+            (Some(span), Serve::Pointwise) if span.0 == Kind::Pointwise => span.2 = level,
+            (Some(span), Serve::Pass { from: b }) if span.0 == Kind::From(b) => span.2 = level,
+            // Одна строка «проход с L на L» и следом «проход с L+1 на L+1» —
+            // это проход со своего уровня, и дальше он складывается по строке.
+            (Some(span), Serve::Pass { from: b })
+                if span.1 == span.2 && span.0 == Kind::From(span.2) && b == level =>
+            {
+                span.0 = Kind::Own;
+                span.2 = level;
+            }
+            (Some(span), Serve::Pass { from: b }) if span.0 == Kind::Own && b == level => span.2 = level,
+            (_, Serve::Pointwise) => spans.push((Kind::Pointwise, level, level)),
+            (_, Serve::Pass { from }) => spans.push((Kind::From(from), level, level)),
+        }
+    }
+    let range = |from: u32, to: u32| match from == to {
+        true => from.to_string(),
+        false => format!("{from}–{to}"),
+    };
+    spans
+        .iter()
+        .map(|(kind, from, to)| match kind {
+            Kind::Pointwise => format!("точечно {}", range(*from, *to)),
+            Kind::From(at) => format!("проход с {at} на {}", range(*from, *to)),
+            Kind::Own => format!("проход со своего уровня на {}", range(*from, *to)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Ресурс освободить, если он приехал. Приехавшая текстура уже наша, чей бы
@@ -75,27 +131,104 @@ pub fn release(texture: Option<ResourceHandle>) {
 
 /// Всё, что потребитель обязан знать о пирамиде, прежде чем просить у неё
 /// ячейки. Ровно то же самое у обоих: чем источник является, не зависит от
-/// того, кто на него смотрит.
+/// того, кто на него смотрит. Про цену показа здесь одна таблица уровней —
+/// та же, по которой производитель выбирает, как читать уровень, — и всё, что
+/// потребителю нужно решить (лестницу к цели, точечность уровня, предел
+/// детали), он выводит из её строк, а не получает пересказом.
 pub struct Meta {
     pub fingerprint: String,
     pub width: u32,
     pub height: u32,
-    pub levels: u32,
-    /// Во что обходится лишняя ступень пирамиды у этого источника — по нему
-    /// выбирается лестница к цели (см. [`want`]).
-    pub reach: Reach,
-    /// Предел детали источника: подробнее него целью не бывает.
-    pub finest: u32,
-    /// Сколько уровней от нулевого читаются точечно (см. [`pointwise`]).
-    pub windowed: u32,
+    /// Строка на уровень пирамиды, от нулевого к вершине; уровней столько,
+    /// сколько строк.
+    pub rows: Vec<Row>,
 }
 
 impl Meta {
-    /// Чем источник оказался — строкой для лога.
+    /// Уровней в пирамиде: 0 — родное разрешение, вершина ≤ одного тайла.
+    pub fn levels(&self) -> u32 {
+        self.rows.len() as u32
+    }
+
+    /// Вершина пирамиды — самый грубый уровень.
+    pub fn top(&self) -> u32 {
+        self.levels().saturating_sub(1)
+    }
+
+    /// Предел детали источника: первая строка, которая влезает в память, —
+    /// подробнее неё целью не бывает. Не влезает ни одна — вершина; такого
+    /// описания производитель не отдаёт, и ответ здесь — чтобы вершина
+    /// оставалась потолком и у таблицы, посчитанной мимо него.
+    pub fn finest(&self) -> u32 {
+        self.rows.iter().position(|row| row.fits).map_or(self.top(), |at| at as u32)
+    }
+
+    /// Этот уровень читается точечно — ровно заказанными кусками, а не
+    /// проходом по файлу.
+    ///
+    /// Одно понятие на три вопроса, и спрашивается оно про уровень, а не про
+    /// род источника. Родом ответить нельзя: у одного и того же полосного файла
+    /// подробный уровень идёт окном, а грубый — проходом, и что бы про него ни
+    /// сказать целиком, для одной из половин это будет неправдой.
+    ///
+    /// Три вопроса такие, и все они про то, что отдаёт проход:
+    /// * годны ли его байты как мерка хода ([`readable`]) — у точечного чтения
+    ///   счётчик прочитанного водяной знак головы, а не объём;
+    /// * откладывать ли промахи до его конца ([`Fetch::missed`]) — точечный
+    ///   кладёт в кэш только заказанное, проход кладёт всю пирамиду;
+    /// * можно ли снять проход, ушедший из поля зрения
+    ///   ([`Pass::abandoned_by`]) — уехавшее место проход добудет заодно, а
+    ///   точечное чтение нет.
+    pub fn pointwise(&self, level: u32) -> bool {
+        self.rows.get(level as usize).is_some_and(|row| row.serve == Serve::Pointwise)
+    }
+
+    /// С какого уровня идёт проход, обслуживающий этот уровень; `None` —
+    /// уровень точечный.
+    fn pass_from(&self, level: u32) -> Option<u32> {
+        match self.rows.get(level as usize)?.serve {
+            Serve::Pass { from } => Some(from),
+            Serve::Pointwise => None,
+        }
+    }
+
+    /// Лестница к цели: уровни, по которым имеет смысл ступать, от вершины к
+    /// самой цели. Целью она всегда и кончается — ступать дальше некуда, —
+    /// поэтому пустой не бывает.
+    ///
+    /// Ступень грубее цели берётся, когда она не стоит дороже самой цели:
+    /// точечный уровень стоит своих тайлов; уровень того же прохода, что и
+    /// цель, — попадания в кэш, потому что первая же ступень оплачивает
+    /// остальные (PNG, полосный TIFF за окном: один проход строит всю
+    /// пирамиду); вершина, которую декодер отдаёт своим проходом (JPEG:
+    /// кадр сразу в масштаб вершины), — самый мелкий кадр, чтобы снимок
+    /// появился. Прочие ступени стоят ещё одного прохода по файлу: у JPEG
+    /// каждый промежуточный уровень — новый декод, у полосного TIFF грубая
+    /// ступень над точечной целью — чтение файла насквозь, то есть дороже
+    /// цели, и «показать грубое сразу» обернулось бы «показать поздно и
+    /// дорого» — такие пропускаются.
+    pub fn ladder(&self, target: u32) -> Vec<u32> {
+        let top = self.top();
+        let target = target.min(top);
+        let goal = self.pass_from(target);
+        ((target + 1)..=top)
+            .rev()
+            .filter(|&level| {
+                let from = self.pass_from(level);
+                from.is_none() || from == goal || (level == top && from == Some(top))
+            })
+            .chain([target])
+            .collect()
+    }
+
+    /// Чем источник оказался — строкой для лога: размер, таблица словами и
+    /// самый тяжёлый её пик — то, чего показ этого источника стоит памяти
+    /// тайлера.
     pub fn note(&self) -> String {
+        let peak = self.rows.iter().map(|row| row.bytes).max().unwrap_or(0) / (1024 * 1024);
         let said = format!(
-            "{}×{}, уровней {}, {}",
-            self.width, self.height, self.levels, reach_note(self.reach)
+            "{}×{}, уровней {}, {}, пик {} МБ",
+            self.width, self.height, self.levels(), table_note(&self.rows), peak
         );
         match self.capped() {
             Some(limit) => format!("{said}, {limit}"),
@@ -104,7 +237,7 @@ impl Meta {
     }
 
     /// Достижимый размер: подробнее своего предела детали источник не отдаст,
-    /// сколько бы пикселей в нём ни было (`Described.finest`).
+    /// сколько бы пикселей в нём ни было.
     ///
     /// Предел обрезается вершиной той же отсечкой, что и в [`want`]
     /// (`finest.min(top)`): подробнее вершины уровней не бывает, и предел ниже
@@ -116,7 +249,7 @@ impl Meta {
     /// лог, подпись, выбор растров и сам заказ уровня, — и пиксель расхождения
     /// значил бы, что сказанное человеку и решённое за него посчитаны порознь.
     pub fn reachable(&self) -> (u32, u32) {
-        let level = self.finest.min(self.levels.saturating_sub(1));
+        let level = self.finest().min(self.top());
         (pyramid::level_size(self.width, level), pyramid::level_size(self.height, level))
     }
 
@@ -159,9 +292,29 @@ pub fn describe(msg: &crate::proto::Described) -> Result<Meta, String> {
     if !msg.error.is_empty() {
         return Err(msg.error.clone());
     }
-    if msg.width == 0 || msg.height == 0 || msg.levels == 0 {
+    if msg.width == 0 || msg.height == 0 || msg.levels.is_empty() {
         return Err("источник описан пустым".to_string());
     }
+    // Строка таблицы обязана быть про свой уровень: проход строит уровни от
+    // своего начала и грубее, и начало подробнее уровня — не таблица, а
+    // опечатка производителя; читать её дальше значило бы гадать.
+    let rows: Vec<Row> = msg
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(level, row)| {
+            let serve = match row.serve() {
+                crate::proto::Serve::Pointwise => Serve::Pointwise,
+                crate::proto::Serve::Pass => Serve::Pass { from: row.from },
+            };
+            match serve {
+                Serve::Pass { from } if from > level as u32 => {
+                    Err(format!("уровень {level} обслуживается проходом с {from} — подробнее себя"))
+                }
+                _ => Ok(Row { serve, bytes: row.bytes, fits: row.fits }),
+            }
+        })
+        .collect::<Result<_, _>>()?;
     // Сторону тайла здесь не сверяют, и `msg.tile` не читают: арифметику ячеек
     // обе стороны считают одним `pyramid.rs` — производитель своим, потребитель
     // тем же файлом через `#[path]` в wrap.rs, — так что разойтись эти два
@@ -173,15 +326,7 @@ pub fn describe(msg: &crate::proto::Described) -> Result<Meta, String> {
     if msg.fingerprint.is_empty() {
         return Err("источник описан без отпечатка".to_string());
     }
-    Ok(Meta {
-        fingerprint: msg.fingerprint.clone(),
-        width: msg.width,
-        height: msg.height,
-        levels: msg.levels,
-        reach: msg.reach(),
-        finest: msg.finest,
-        windowed: msg.windowed,
-    })
+    Ok(Meta { fingerprint: msg.fingerprint.clone(), width: msg.width, height: msg.height, rows })
 }
 
 // ── Видеопамять ────────────────────────────────────────────────
@@ -250,9 +395,14 @@ impl Store {
     /// гранула 10 000² нулевым уровнем не помещается ни в какой бюджет, и мерь
     /// мы им — снимок не показал бы подробностей ни на каком приближении, а
     /// видно от силы десяток ячеек, сколько ни приближай (см. [`want`]).
+    ///
+    /// Сверху потолок режет кэш: больше `MAX_QUERY_TILES` тайлов за раз он не
+    /// примет, а выхода из такого отказа у заказчика нет — он прислал бы тот
+    /// же список снова. Число одно на обоих — тот же файл `tile.rs`.
     pub fn cap_tiles<'a>(&self, drawing: impl IntoIterator<Item = &'a str>) -> u64 {
         let pyramids: HashSet<&str> = drawing.into_iter().collect();
-        (self.budget / TILE_BYTES.max(1) / (2 * pyramids.len().max(1) as u64)).max(1)
+        (self.budget / TILE_BYTES.max(1) / (2 * pyramids.len().max(1) as u64))
+            .clamp(1, MAX_QUERY_TILES as u64)
     }
 
     /// [`Self::accept`], но ответом о том, что делать с ячейкой дальше.
@@ -541,25 +691,6 @@ pub struct Inside {
     pub read: (u64, u64),
 }
 
-/// Этот уровень читается точечно — ровно заказанными кусками, а не проходом по
-/// файлу.
-///
-/// Одно понятие на три вопроса, и спрашивается оно про уровень, а не про род
-/// источника. Родом ответить нельзя: у одного и того же полосного файла
-/// подробный уровень идёт окном, а грубый — проходом, и что бы про него ни
-/// сказать целиком, для одной из половин это будет неправдой.
-///
-/// Три вопроса такие, и все они про то, что отдаёт проход:
-/// * годны ли его байты как мерка хода ([`readable`]) — у точечного чтения
-///   счётчик прочитанного водяной знак головы, а не объём;
-/// * откладывать ли промахи до его конца ([`Fetch::missed`]) — точечный кладёт
-///   в кэш только заказанное, проход кладёт всю пирамиду;
-/// * можно ли снять проход, ушедший из поля зрения ([`Pass::abandoned_by`]) —
-///   уехавшее место проход добудет заодно, а точечное чтение нет.
-pub fn pointwise(meta: &Meta, level: u32) -> bool {
-    level < meta.windowed
-}
-
 /// Считать ли байты прохода правдой о ходе.
 ///
 /// Отказов два, и оба про источник, а не про показ.
@@ -609,33 +740,31 @@ pub fn inside(ordered: (u32, u32), pass: (u64, u64), pointwise: bool) -> Inside 
 /// `sharpest` — уровень под экранный пиксель, единственное, что потребители
 /// считают по-своему: у канвы это масштаб камеры, у наложения — метры на
 /// пиксель кадра. `visible` — их же ответ на «что из этого уровня видно».
-/// `finest` — предел детали самого источника (`Described.finest`).
+/// Предел детали и лестницу даёт таблица уровней источника ([`Meta`]).
 pub fn want(
     sharpest: u32,
-    levels: u32,
-    finest: u32,
+    meta: &Meta,
     cap: u64,
-    reach: Reach,
     store: &Store,
     fetch: &Fetch,
-    fingerprint: &str,
     visible: impl Fn(u32) -> Vec<Addr>,
 ) -> Want {
-    let top = levels.saturating_sub(1);
+    let top = meta.top();
 
     // Целевой уровень: экранный пиксель, загрублённый до того, что имеет смысл
     // хотеть. Ограничений два, и оба здесь, потому что ответ у них один — какой
     // уровень стоит держать в видеопамяти. Предел детали источника: подробнее
     // него не отдадут, и хотеть такой уровень значит просить отказ. Потолок
     // аппетита: видимое обязано влезать в свою долю бюджета.
-    let mut target = sharpest.clamp(finest.min(top), top);
+    let mut target = sharpest.clamp(meta.finest().min(top), top);
     let mut cells = visible(target);
     while target < top && cells.len() as u64 > cap {
         target += 1;
         cells = visible(target);
     }
 
-    let ladder = ladder(target, top, reach);
+    let ladder = meta.ladder(target);
+    let fingerprint = meta.fingerprint.as_str();
     let (climbed, cells) = rung(
         &ladder,
         |level| match level == target {
@@ -682,34 +811,6 @@ fn rung(
     (last, cells_at(ladder[last]))
 }
 
-/// Лестница к цели: уровни, по которым имеет смысл ступать, от вершины к самой
-/// цели. Целью она всегда и кончается — ступать дальше некуда, — поэтому пустой
-/// не бывает.
-///
-/// Обычно в ней все уровни до единого: ступень стоит своих тайлов — точечного
-/// чтения у источника с произвольным доступом либо попадания в кэш у того, чей
-/// единственный проход построил всю пирамиду разом, — а показать грубое сразу
-/// лучше, чем не показывать ничего.
-///
-/// Но у источника, чей проход строит только запрошенный уровень и грубее
-/// ([`Reach::Coarser`] — JPEG, JPEG 2000: за подробным приходят заново),
-/// каждая ступень стоит целого чтения файла, и лестница умножала бы эту цену на
-/// число ступеней. Там их две: вершина, чтобы снимок появился, и сразу цель.
-fn ladder(target: u32, top: u32, reach: Reach) -> Vec<u32> {
-    let steps = match reach {
-        Reach::Coarser => (target < top).then_some(top).into_iter().collect(),
-        // Окно: промежуточных ступеней нет ни одной — лестница из одной цели
-        // (её дописывает `chain` ниже). Всякая ступень грубее цели стои́т у
-        // такого источника целого файла, то есть дороже самой цели, и «показать
-        // грубое сразу» обернулось бы «показать поздно и дорого». Грубый край
-        // закрывает соседний растр (у Sentinel-1 квиклук), а нет соседа — сама
-        // цель, взятая проходом.
-        Reach::Windowed => Vec::new(),
-        Reach::Pyramid | Reach::Exact => ((target + 1)..=top).rev().collect::<Vec<u32>>(),
-    };
-    steps.into_iter().chain([target]).collect()
-}
-
 // ── Что спрошено и что производится ────────────────────────────
 
 /// Учёт по одному заказчику: что уже спрошено, чего не спрашивать и чем
@@ -729,8 +830,8 @@ pub struct Fetch {
     /// Ячейками, а не уровнем: сорваться проход может от чего угодно — битый
     /// чанк, не выделилась текстура, оборвалось чтение, — и уровень тут ни при
     /// чём. Уровень, которого источник не отдаст в принципе, отсекается раньше
-    /// и не отказом, а его собственным пределом детали (`Described.finest`,
-    /// см. [`want`]): просить и получать один и тот же отказ незачем.
+    /// и не отказом, а его собственным пределом детали (`Meta::finest`, см.
+    /// [`want`]): просить и получать один и тот же отказ незачем.
     failed: HashSet<Addr>,
     /// Ячейки последнего оформленного заказа — того, что уехал в кэш. Ими
     /// меряется ход добычи, а не тем, что видно прямо сейчас: видимое есть
@@ -1303,17 +1404,72 @@ mod tests {
         }
     }
 
-    fn described() -> crate::proto::Described {
+    /// Строки провода: `levels` уровней. Без предела — точечные все (COG);
+    /// с пределом `unfit` — проход со своего уровня на каждом, и первые
+    /// `unfit` не влезают: так выглядит крупный JPEG, у которого предел
+    /// детали и бывает. Пик — по мегабайту на уровень от вершины, у нулевого
+    /// самый тяжёлый.
+    fn wire(levels: u32, unfit: u32) -> Vec<crate::proto::Level> {
+        (0..levels)
+            .map(|level| crate::proto::Level {
+                serve: match unfit {
+                    0 => crate::proto::Serve::Pointwise,
+                    _ => crate::proto::Serve::Pass,
+                } as i32,
+                from: match unfit {
+                    0 => 0,
+                    _ => level,
+                },
+                bytes: u64::from(levels - level) << 20,
+                fits: level >= unfit,
+            })
+            .collect()
+    }
+
+    /// Описание с таблицей на `levels` уровней и пределом детали `finest`.
+    fn described_with(levels: u32, finest: u32) -> crate::proto::Described {
         crate::proto::Described {
             fingerprint: "fp".into(),
             width: 10980,
             height: 10980,
             tile: pyramid::TILE,
-            levels: 6,
-            reach: Reach::Exact as i32,
-            finest: 0,
+            levels: wire(levels, finest),
             ..Default::default()
         }
+    }
+
+    fn described() -> crate::proto::Described {
+        described_with(6, 0)
+    }
+
+    /// Таблица для лестницы: `levels` уровней, обслуживание по уровню.
+    fn table(levels: u32, serve: impl Fn(u32) -> Serve) -> Meta {
+        Meta {
+            fingerprint: "s".into(),
+            width: 10980,
+            height: 10980,
+            rows: (0..levels).map(|level| Row { serve: serve(level), bytes: 0, fits: true }).collect(),
+        }
+    }
+
+    /// Четыре рода источника таблицей: точечно везде (COG), проход с
+    /// нулевого везде (PNG), проход со своего уровня на каждом (JPEG), окно —
+    /// точечно первые `pointwise` уровней и проход с нулевого дальше
+    /// (полосный TIFF).
+    fn exact(levels: u32) -> Meta {
+        table(levels, |_| Serve::Pointwise)
+    }
+    fn pyramid_of(levels: u32) -> Meta {
+        table(levels, |_| Serve::Pass { from: 0 })
+    }
+    fn coarser(levels: u32) -> Meta {
+        table(levels, |level| Serve::Pass { from: level })
+    }
+    fn windowed(levels: u32, pointwise: u32) -> Meta {
+        table(levels, |level| match level < pointwise {
+            true => Serve::Pointwise,
+            false => Serve::Pass { from: 0 },
+        })
     }
 
     /// Неквадратный и нечётный источник: стороны у него разные, и обе
@@ -1324,8 +1480,7 @@ mod tests {
         crate::proto::Described {
             width: 4001,
             height: 3001,
-            levels: pyramid::level_count(4001, 3001),
-            finest: 1,
+            levels: wire(pyramid::level_count(4001, 3001), 1),
             ..described()
         }
     }
@@ -1350,8 +1505,9 @@ mod tests {
     /// `finest.min(top)`, а слово о нём шло бы от необрезанного.
     #[test]
     fn предел_не_уходит_ниже_вершины() {
-        let deep = describe(&crate::proto::Described { finest: 10, ..odd() }).expect("годное");
-        let top = describe(&crate::proto::Described { finest: 3, ..odd() }).expect("годное");
+        let rows = pyramid::level_count(4001, 3001);
+        let deep = describe(&crate::proto::Described { levels: wire(rows, 10), ..odd() }).expect("годное");
+        let top = describe(&crate::proto::Described { levels: wire(rows, 3), ..odd() }).expect("годное");
 
         assert_eq!(deep.reachable(), top.reachable(), "предел ушёл ниже вершины пирамиды");
         assert_eq!(deep.reachable(), (501, 376));
@@ -1364,8 +1520,7 @@ mod tests {
         let tiny = describe(&crate::proto::Described {
             width: 300,
             height: 200,
-            levels: 1,
-            finest: 1,
+            levels: wire(1, 1),
             ..described()
         })
         .expect("описание годное");
@@ -1373,21 +1528,26 @@ mod tests {
         assert_eq!(tiny.capped(), None, "вершина названа пределом самой себя");
     }
 
-    /// Предел детали доезжает до лога — и лог при этом остаётся логом.
-    /// Целиком, а не вхождением: подпись здесь и живёт, а вхождение числа
-    /// одинаково находится и в перевёрнутой фразе, которая говорит обратное.
+    /// Предел детали доезжает до лога — и лог при этом остаётся логом: таблица
+    /// словами, а за ней та самая подпись предела, одна и та же на лог и на
+    /// экран.
     #[test]
-    fn лог_описания_называет_предел_детали() {
+    fn лог_описания_называет_таблицу_и_предел_детали() {
         let native = describe(&described()).expect("описание годное");
-        assert_eq!(native.note(), "10980×10980, уровней 6, произвольный доступ");
+        assert_eq!(native.note(), "10980×10980, уровней 6, точечно 0–5, пик 6 МБ");
 
-        let capped = describe(&crate::proto::Described { finest: 2, ..described() })
-            .expect("описание годное");
+        let capped = describe(&described_with(6, 2)).expect("описание годное");
+        let limit = capped.capped().expect("предел есть");
         assert_eq!(
             capped.note(),
-            "10980×10980, уровней 6, произвольный доступ, \
-             подробнее 2745×2745 из 10980×10980 не будет"
+            format!("10980×10980, уровней 6, проход со своего уровня на 0–5, пик 6 МБ, {limit}")
         );
+
+        // Отрезки таблицы: окно, проход с нулевого, проход со своего уровня.
+        assert_eq!(table_note(&windowed(7, 2).rows), "точечно 0–1, проход с 0 на 2–6");
+        assert_eq!(table_note(&pyramid_of(3).rows), "проход с 0 на 0–2");
+        assert_eq!(table_note(&coarser(4).rows), "проход со своего уровня на 0–3");
+        assert_eq!(table_note(&exact(1).rows), "точечно 0");
     }
 
     /// Отдающий своё разрешение молчит, а подрезанный говорит — и говорит
@@ -1414,8 +1574,14 @@ mod tests {
         let ok = |msg: crate::proto::Described| describe(&msg).is_ok();
         assert!(ok(described()));
 
-        let empty = crate::proto::Described { levels: 0, ..described() };
+        let empty = crate::proto::Described { levels: Vec::new(), ..described() };
         assert!(!ok(empty), "нулевая пирамида");
+
+        // Проход, начатый подробнее своего уровня, — опечатка производителя.
+        let mut upside = described();
+        upside.levels[1].serve = crate::proto::Serve::Pass as i32;
+        upside.levels[1].from = 2;
+        assert!(!ok(upside), "проход с уровня подробнее обслуживаемого");
 
         let failed = crate::proto::Described { error: "нет доступа".into(), ..described() };
         assert!(!ok(failed), "отказ производителя");
@@ -1531,15 +1697,27 @@ mod tests {
         assert_eq!(Store::new(TILE_BYTES).cap_tiles(["a", "b", "c"]), 1);
     }
 
+    /// Потолок аппетита не выше потолка запроса к кэшу: сколько бы видеопамяти
+    /// ни дали, заказ длиннее `MAX_QUERY_TILES` кэш отвергнет, а заказчик
+    /// прислал бы его снова. Число одно на обоих — из общего `tile.rs`.
+    #[test]
+    fn потолок_аппетита_не_выше_потолка_кэша() {
+        let vast = Store::new(u64::MAX / 4);
+        assert_eq!(vast.cap_tiles(["a"]), MAX_QUERY_TILES as u64);
+        assert!(Store::new(256 << 20).cap_tiles(["a"]) < MAX_QUERY_TILES as u64, "бюджет по умолчанию потолка не касается");
+    }
+
     /// Лестница идёт от вершины к цели и целью же кончается — ступать дальше
     /// некуда, поэтому пустой она не бывает.
     #[test]
     fn лестница_кончается_целью() {
-        assert_eq!(ladder(0, 3, Reach::Exact), vec![3, 2, 1, 0]);
-        assert_eq!(ladder(3, 3, Reach::Exact), vec![3]);
+        assert_eq!(exact(4).ladder(0), vec![3, 2, 1, 0]);
+        assert_eq!(exact(4).ladder(3), vec![3]);
         // Источнику, которому ступень стоит целого прохода, — две ступени.
-        assert_eq!(ladder(0, 5, Reach::Coarser), vec![5, 0]);
-        assert_eq!(ladder(5, 5, Reach::Coarser), vec![5]);
+        assert_eq!(coarser(6).ladder(0), vec![5, 0]);
+        assert_eq!(coarser(6).ladder(5), vec![5]);
+        // Цель глубже вершины обрезается ею.
+        assert_eq!(exact(4).ladder(9), vec![3]);
     }
 
     /// Ступень начинается с вершины пирамиды и спускается за добытым: пока
@@ -1548,7 +1726,7 @@ mod tests {
     fn ступень_идёт_сверху_вниз() {
         // По одной ячейке на уровень — считать здесь нечего, проверяется выбор.
         let cells_at = |level| vec![(level, 0, 0)];
-        let steps = ladder(0, 3, Reach::Exact);
+        let steps = exact(4).ladder(0);
         let at = |have: &dyn Fn(Addr) -> bool| {
             let (climbed, cells) = rung(&steps, cells_at, have);
             (steps[climbed], cells)
@@ -1559,7 +1737,7 @@ mod tests {
         assert_eq!(at(&|addr: Addr| addr.0 >= 2), (1, vec![(1, 0, 0)]));
         assert_eq!(at(&|_| true), (0, vec![(0, 0, 0)]), "всё есть — целевой");
         // Целевой и есть вершина — ступать некуда.
-        assert_eq!(rung(&ladder(3, 3, Reach::Exact), cells_at, |_| false).0, 0);
+        assert_eq!(rung(&exact(4).ladder(3), cells_at, |_| false).0, 0);
     }
 
     /// У источника, которому ступень стоит целого прохода по файлу, лестница
@@ -1568,23 +1746,23 @@ mod tests {
     #[test]
     fn дорогому_проходу_лестница_в_две_ступени() {
         let cells_at = |level| vec![(level, 0, 0)];
-        let step = |reach, have: &dyn Fn(Addr) -> bool| {
-            let steps = ladder(0, 5, reach);
+        let step = |meta: &Meta, have: &dyn Fn(Addr) -> bool| {
+            let steps = meta.ladder(0);
             steps[rung(&steps, cells_at, have).0]
         };
 
-        assert_eq!(step(Reach::Coarser, &|_| false), 5, "сперва вершина");
+        assert_eq!(step(&coarser(6), &|_| false), 5, "сперва вершина");
         // Вершина есть — дальше сразу цель, без четырёх промежуточных чтений.
-        assert_eq!(step(Reach::Coarser, &|addr: Addr| addr.0 == 5), 0);
+        assert_eq!(step(&coarser(6), &|addr: Addr| addr.0 == 5), 0);
         // А точечному чтению промежуточные ступени ничего не стоят.
-        assert_eq!(step(Reach::Exact, &|addr: Addr| addr.0 == 5), 4);
+        assert_eq!(step(&exact(6), &|addr: Addr| addr.0 == 5), 4);
     }
 
     /// Ступень держит любая недостающая ячейка, а не только все сразу: уровень
     /// с дырой — это уровень, который ещё едет.
     #[test]
     fn ступень_держит_одна_недостающая_ячейка() {
-        let steps = ladder(0, 2, Reach::Exact);
+        let steps = exact(3).ladder(0);
         let cells_at = |level| cells(level, 0..2, 0..2);
         let have = |addr: Addr| addr != (2, 1, 1);
         assert_eq!(steps[rung(&steps, cells_at, have).0], 2);
@@ -1604,7 +1782,8 @@ mod tests {
         };
         // Цель видна через длину лестницы: у точечного чтения ступеней ровно
         // столько, сколько уровней от вершины до цели включительно.
-        let at = |cap| want(0, 6, 0, cap, Reach::Exact, &store, &fetch, "s", visible);
+        let meta = exact(6);
+        let at = |cap| want(0, &meta, cap, &store, &fetch, visible);
         let steps = |cap| at(cap).steps;
 
         assert_eq!(steps(1000), 6, "потолок не жмёт — цель нулевая, под экранный пиксель");
@@ -1625,12 +1804,18 @@ mod tests {
         let store = Store::new(1 << 30);
         let fetch = Fetch::default();
         let visible = |level: u32| vec![(level, 0, 0)];
-        let at = |finest| want(0, 6, finest, u64::MAX, Reach::Exact, &store, &fetch, "s", visible);
+        let at = |finest| {
+            let meta = describe(&described_with(6, finest)).expect("годное");
+            want(0, &meta, u64::MAX, &store, &fetch, visible)
+        };
         let steps = |finest| at(finest).steps;
 
         assert_eq!(steps(0), 6, "цель нулевая");
-        assert_eq!(steps(2), 4, "подробнее второго источник не отдаст");
+        // Источник с пределом — проход со своего уровня на каждом (JPEG):
+        // лестница из вершины и цели, и цель — не подробнее предела.
+        assert_eq!(steps(2), 2, "подробнее второго источник не отдаст");
         assert_eq!(at(2).target, 2, "предел детали доехал до цели, а не только до лестницы");
+        assert_eq!(at(2).level, 5, "ступень — вершина, цель ещё не добыта");
         // Предел глубже вершины ничего не ломает: грубее вершины уровней нет.
         assert_eq!(steps(99), 1);
     }
@@ -1643,11 +1828,11 @@ mod tests {
         let store = Store::new(1 << 30);
         let fetch = Fetch::default();
         let visible = |level: u32| vec![(level, 0, 0)];
-        let want = |reach| want(0, 6, 0, u64::MAX, reach, &store, &fetch, "s", visible);
+        let want = |meta: &Meta| want(0, meta, u64::MAX, &store, &fetch, visible);
 
-        let exact = want(Reach::Exact);
+        let exact = want(&exact(6));
         assert_eq!((exact.steps, exact.climbed), (6, 0), "шесть уровней — шесть ступеней");
-        let coarser = want(Reach::Coarser);
+        let coarser = want(&coarser(6));
         assert_eq!((coarser.steps, coarser.climbed), (2, 0), "вершина и цель, вершина ещё не добыта");
     }
 
@@ -1706,9 +1891,7 @@ mod tests {
 
         // Пирамида в шесть уровней, экран просит второй, в памяти пусто —
         // значит ступень встанет на вершине, а целью останется второй.
-        let want = want(2, 6, 0, u64::MAX, Reach::Exact, &store, &fetch, "s", |level| {
-            cells(level, 0..1, 0..1)
-        });
+        let want = want(2, &exact(6), u64::MAX, &store, &fetch, |level| cells(level, 0..1, 0..1));
 
         assert_eq!(want.target, 2, "цель — то, ради чего строилась лестница");
         assert_eq!(want.level, 5, "ступень — вершина: ниже неё ещё ничего не добыто");
@@ -2313,24 +2496,29 @@ mod tests {
         assert_eq!(passes.stale("s", &"мы", &elsewhere, true).as_deref(), Some("c1"));
     }
 
-    /// У источника, читаемого окном, лестницы нет: всякая ступень грубее цели
-    /// стои́т ему целого файла, то есть дороже самой цели. «Показать грубое
-    /// сразу» обернулось бы «показать поздно и дорого».
+    /// Лестница читается из таблицы, и четыре рода источника дают четыре
+    /// лестницы: точечному — все ступени, проходу с нулевого — все (попадания
+    /// в кэш), проходу со своего уровня — вершина и цель, а окну — только его
+    /// точечные ступени над точечной целью: грубая ступень над ней стои́т
+    /// целого файла, то есть дороже самой цели, и «показать грубое сразу»
+    /// обернулось бы «показать поздно и дорого».
     ///
-    /// Числа настоящие: Sentinel-1 GRD 25309×17408 — семь уровней. У пирамиды
-    /// подробную картинку пришлось бы ждать через шесть ступеней, каждая из
-    /// которых читает файл насквозь; окном она берётся сразу.
+    /// Числа настоящие: Sentinel-1 GRD 25309×17408 — семь уровней, точечны два.
     #[test]
-    fn у_окна_лестницы_нет() {
-        let steps = |reach| ladder(0, 6, reach).len();
-        assert_eq!(steps(Reach::Windowed), 1, "окно полезло на грубые ступени");
-        assert_eq!(steps(Reach::Pyramid), 7, "у пирамиды ступени все");
-        assert_eq!(steps(Reach::Exact), 7);
-        assert_eq!(steps(Reach::Coarser), 2, "вершина и цель");
+    fn лестница_читается_из_таблицы() {
+        let steps = |meta: &Meta| meta.ladder(0).len();
+        assert_eq!(steps(&windowed(7, 2)), 2, "окно полезло на грубые ступени");
+        assert_eq!(steps(&pyramid_of(7)), 7, "у пирамиды ступени все");
+        assert_eq!(steps(&exact(7)), 7);
+        assert_eq!(steps(&coarser(7)), 2, "вершина и цель");
 
-        // Целью лестница кончается всегда — ступать дальше некуда.
-        assert_eq!(ladder(3, 6, Reach::Windowed), vec![3]);
-        assert_eq!(ladder(6, 6, Reach::Windowed), vec![6], "цель и есть вершина");
+        // Окно: над точечной целью — её точечные соседи; над целью, взятой
+        // проходом, — все уровни того же прохода.
+        assert_eq!(windowed(7, 2).ladder(0), vec![1, 0]);
+        assert_eq!(windowed(7, 2).ladder(3), vec![6, 5, 4, 3], "проход с нулевого строит их разом");
+        assert_eq!(windowed(7, 2).ladder(6), vec![6], "цель и есть вершина");
+        // Проход со своего уровня: вершина берётся, промежуточные — нет.
+        assert_eq!(coarser(7).ladder(2), vec![6, 2]);
     }
 
     /// Байты честны у прохода и лгут у точечного чтения, и у ОДНОГО источника
@@ -2343,32 +2531,21 @@ mod tests {
     /// двухгигабайтной гранулы, то есть ровно там, где она нужнее всего.
     #[test]
     fn байты_честны_у_прохода_и_лгут_у_точечного_чтения() {
-        let meta = |windowed| Meta {
-            fingerprint: "fp".into(),
-            width: 25309,
-            height: 17408,
-            levels: 7,
-            reach: Reach::Windowed,
-            finest: 0,
-            windowed,
-        };
-
         // Уровни 0 и 1 читаются окном, дальше — проходом.
-        let source = meta(2);
-        assert!(pointwise(&source, 0) && pointwise(&source, 1), "подробное не окном");
-        assert!(!pointwise(&source, 2) && !pointwise(&source, 6), "грубое объявлено окном");
+        let source = windowed(7, 2);
+        assert!(source.pointwise(0) && source.pointwise(1), "подробное не окном");
+        assert!(!source.pointwise(2) && !source.pointwise(6), "грубое объявлено окном");
+        assert!(!source.pointwise(7), "уровня нет — и окна нет");
 
         // И байты идут наружу ровно там, где их считал проход.
         let bytes = (3 << 20, 12 << 20);
-        assert_eq!(inside((0, 4), bytes, pointwise(&source, 2)).read, bytes, "проход молчит");
-        assert_eq!(inside((0, 4), bytes, pointwise(&source, 0)).read, (0, 0), "окно врёт байтами");
+        assert_eq!(inside((0, 4), bytes, source.pointwise(2)).read, bytes, "проход молчит");
+        assert_eq!(inside((0, 4), bytes, source.pointwise(0)).read, (0, 0), "окно врёт байтами");
 
         // У источника, который весь читается проходом, окна нет ни на одном
         // уровне; у произвольного доступа — на всех.
-        let pass = meta(0);
-        assert!((0..7).all(|level| !pointwise(&pass, level)));
-        let random = meta(7);
-        assert!((0..7).all(|level| pointwise(&random, level)));
+        assert!((0..7).all(|level| !pyramid_of(7).pointwise(level)));
+        assert!((0..7).all(|level| exact(7).pointwise(level)));
     }
 
 }

@@ -51,8 +51,8 @@ tile-part count; every header costs one reader window, so the first tile of a
 codec reads about a third of that file, and the next tile of the same codec
 reads from the last SOT. A codec lives for one `produce` call. Over the
 network a header costs a pool block, so a TCI of 121 tile-parts pays about
-half of its 129 MiB per `produce`; roadmap step 9 removes the walk with its
-own tile-part index. On the L2A granule measured on 2026-09-02 (opened by
+half of its 129 MiB per `produce`; the tile-part index of 0004 replaces the
+walk. On the L2A granule measured on 2026-09-02 (opened by
 `uitests/jp2canvas.txt`), the TCI describes with no detail limit and is served
 to level 0; the scenario asserts the limit's caption is absent. Start time of
 the module was not measured; the scenarios' durations did not change. The

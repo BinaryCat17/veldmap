@@ -878,7 +878,7 @@ pub fn progress_of(raster: &Raster, want: &tiles::Want) -> Progress {
     // Точечно ли читается ИМЕННО ЭТА ступень: у полосного источника подробная
     // идёт окном, а грубая — проходом, и байты честны только у второй.
     let pointwise =
-        raster.meta.as_ref().is_some_and(|meta| tiles::pointwise(meta, want.level));
+        raster.meta.as_ref().is_some_and(|meta| meta.pointwise(want.level));
     let inside = tiles::inside((ready, total), raster.pass, pointwise);
     Progress {
         ready,
@@ -1201,7 +1201,7 @@ impl Overlay {
             let meta = self.raster(role)?.meta.as_ref()?;
             // Достижимое разрешение, а не записанная ширина: подробнее своего
             // предела детали источник не отдаст, сколько бы пикселей в нём ни
-            // было (`Described.finest`). Считает это `Meta::reachable` — тот
+            // было (`Meta::finest`). Считает это `Meta::reachable` — тот
             // же ответ, что уходит в лог и в подпись слоя.
             Some(meta.reachable().0)
         };
@@ -1302,13 +1302,10 @@ impl Overlay {
     ) -> Wanted {
         let want = tiles::want(
             self.sharpest(meta, look),
-            meta.levels,
-            meta.finest,
+            meta,
             cap_tiles,
-            meta.reach,
             store,
             &raster.fetch,
-            &meta.fingerprint,
             |level| self.visible(meta, &raster.bounds, level, look, toll),
         );
         Wanted {
@@ -1346,7 +1343,7 @@ impl Overlay {
     /// строже судьи, которому обязан не перечить, — то есть отвергал бы
     /// видимое, и молча.
     pub fn bounds(&self, meta: &Meta) -> Vec<Vec<cull::Ball>> {
-        (0..meta.levels)
+        (0..meta.levels())
             .map(|level| {
                 let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
                 let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
@@ -1675,7 +1672,7 @@ pub fn pieces(overlay: &Overlay, wanted: &Wanted, store: &mut Store) -> Vec<Piec
 
     let mut found = Vec::with_capacity(wanted.want.cells.len());
     for &cell in &wanted.want.cells {
-        let Some((carrier, stored)) = store.carrier(&meta.fingerprint, cell, meta.levels) else {
+        let Some((carrier, stored)) = store.carrier(&meta.fingerprint, cell, meta.levels()) else {
             continue;
         };
         let (bind, tex) = (stored.bind.clone(), (stored.width, stored.height));
@@ -2116,11 +2113,27 @@ mod tests {
             fingerprint: "fp".into(),
             width,
             height,
-            levels: pyramid::level_count(width, height),
-            reach: crate::proto::image_tiler::Reach::Exact,
-            finest: 0,
-            windowed: pyramid::level_count(width, height),
+            rows: vec![
+                tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true };
+                pyramid::level_count(width, height) as usize
+            ],
         }
+    }
+
+    /// То же описание с пределом детали — таблицей крупного JPEG: проход со
+    /// своего уровня на каждом, уровни подробнее `finest` не влезают.
+    fn limited(mut meta: Meta, finest: u32) -> Meta {
+        for (level, row) in meta.rows.iter_mut().enumerate() {
+            row.serve = tiles::Serve::Pass { from: level as u32 };
+            row.fits = level as u32 >= finest;
+        }
+        meta
+    }
+
+    /// Подпись предела, как её складывает сама пирамида: строкой целиком её
+    /// сверяет один тест у `Meta::capped`, здесь — что до слоя доезжает та же.
+    fn cap_line() -> String {
+        limited(meta(4001, 3001), 1).capped().expect("предел есть")
     }
 
     /// Пустое хранилище: в тестах тайлам взяться неоткуда — текстуры выдаёт
@@ -2195,7 +2208,7 @@ mod tests {
         let mut seen = 0;
         for (overlay, meta) in &cases {
             let bounds = overlay.bounds(meta);
-            assert_eq!(bounds.len(), meta.levels as usize, "уровней в таблице столько же");
+            assert_eq!(bounds.len(), meta.levels() as usize, "уровней в таблице столько же");
             // Камеру водят вокруг Земли, а не наводят на снимок: за лимбом и
             // живёт единственная ветвь, где запас что-то решает.
             for lat in [-70.0, -20.0, 0.0, 35.0, 80.0] {
@@ -2212,7 +2225,7 @@ mod tests {
                         let frame = cull::Frame::new(&look.view_proj, look.eye);
                         // Нулевой уровень пропускается: ячеек у него тысячи, а
                         // ломается не он — запас на нём и построен.
-                        for level in 1..meta.levels {
+                        for level in 1..meta.levels() {
                             let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
                             let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
                             for y in 0..grid_h {
@@ -2249,7 +2262,7 @@ mod tests {
     fn the_ball_forgives_the_cell_as_much_as_the_exact_test_does() {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
         let meta = meta(10980, 10980);
-        for level in 0..meta.levels {
+        for level in 0..meta.levels() {
             let grid_w = pyramid::grid(pyramid::level_size(meta.width, level));
             let grid_h = pyramid::grid(pyramid::level_size(meta.height, level));
             for (x, y) in [(0, 0), (grid_w / 2, grid_h / 2), (grid_w - 1, grid_h - 1)] {
@@ -2281,7 +2294,7 @@ mod tests {
             ..overlay(vec![raster(Role::Detailed, Some(meta(43200, 21600)))])
         };
         let meta = meta(43200, 21600);
-        let top = meta.levels - 1;
+        let top = meta.levels() - 1;
         let cell = pyramid::cell_image_rect(0, 0, top, meta.width, meta.height);
         let span = span_deg(&whole.frame, &meta, cell);
         let lifted = mesh::lift_m(span / f64::from(segments_for(span)) * std::f64::consts::SQRT_2);
@@ -2603,7 +2616,7 @@ mod tests {
     /// даёт ровно ту же землю на пиксель.
     #[test]
     fn detail_is_judged_by_reachable_width_not_by_the_written_one() {
-        let coarse = Meta { finest: 1, ..meta(4000, 4000) };
+        let coarse = limited(meta(4000, 4000), 1);
         let overlay = overlay(vec![
             raster(Role::Preview, Some(meta(2000, 2000))),
             raster(Role::Detailed, Some(coarse)),
@@ -2628,7 +2641,7 @@ mod tests {
     fn the_reachable_width_rounds_up_like_the_pyramid_does() {
         let overlay = overlay(vec![
             raster(Role::Preview, Some(meta(2000, 2000))),
-            raster(Role::Detailed, Some(Meta { finest: 1, ..meta(4001, 4001) })),
+            raster(Role::Detailed, Some(limited(meta(4001, 4001), 1))),
         ]);
 
         assert!(
@@ -2640,7 +2653,7 @@ mod tests {
     /// Подрезанный растр — неквадратный и нечётный: подпись называет обе его
     /// стороны, и квадратный стенд не отличил бы ширину от высоты.
     fn capped(role: Role, width: u32, height: u32, finest: u32) -> Raster {
-        raster(role, Some(Meta { finest, ..meta(width, height) }))
+        raster(role, Some(limited(meta(width, height), finest)))
     }
 
     /// Предел детали доезжает до подписи слоя. Сам по себе он молчалив: растр
@@ -2655,7 +2668,7 @@ mod tests {
         assert_eq!(native.said(true), "", "предела нет, а слой на что-то жалуется");
 
         let capped = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
-        assert_eq!(capped.said(true), "подробнее 2001×1501 из 4001×3001 не будет");
+        assert_eq!(capped.said(true), cap_line());
     }
 
     /// Пока слой не осел, предел молчит — а жалобы говорятся всегда: они про
@@ -2698,7 +2711,7 @@ mod tests {
         };
         let settled = overlay.report(Some(&mine), &idle);
         assert!(!settled.working, "стенд не о том: за осевшим слоем осталась работа");
-        assert_eq!(settled.trouble, "подробнее 2001×1501 из 4001×3001 не будет");
+        assert_eq!(settled.trouble, cap_line());
 
         // А в полёте, но с непройденной лестницей, предел снова молчит: за этой
         // ступенью пойдёт следующая, и пойдёт сама. Одного полёта поэтому мало
@@ -2737,7 +2750,7 @@ mod tests {
         assert_eq!(on_preview.trouble, "", "предел подробного назван поверх превью");
 
         let on_detail = overlay.report(Some(&settled(Role::Detailed)), &idle);
-        assert_eq!(on_detail.trouble, "подробнее 2001×1501 из 4001×3001 не будет");
+        assert_eq!(on_detail.trouble, cap_line());
     }
 
     /// Предел называет тот растр, который деталь и решает. Превью обязано быть
@@ -2767,10 +2780,7 @@ mod tests {
         let overlay = overlay(rasters);
 
         assert!(overlay.detail_eclipsed(), "стенд не о том: подробный не отвергнут");
-        assert_eq!(
-            overlay.said(true),
-            "подробный растр не подробнее превью; подробнее 2001×1501 из 4001×3001 не будет"
-        );
+        assert_eq!(overlay.said(true), format!("подробный растр не подробнее превью; {}", cap_line()));
     }
 
     /// Отвергнутый растр не вправе замолчать предел слоя, даже сравнявшись с
@@ -2786,7 +2796,7 @@ mod tests {
 
         assert!(overlay.detail_eclipsed(), "стенд не о том: равенство обязано быть отказом");
         assert!(
-            overlay.said(true).contains("подробнее 2001×1501 из 4001×3001 не будет"),
+            overlay.said(true).contains(&cap_line()),
             "предел слоя замолчал отвергнутым растром: {}",
             overlay.said(true)
         );
@@ -2799,10 +2809,7 @@ mod tests {
         let mut overlay = overlay(vec![capped(Role::Detailed, 4001, 3001, 1)]);
         overlay.binding_trouble = Some("узлы сетки не годятся".into());
 
-        assert_eq!(
-            overlay.said(true),
-            "подробнее 2001×1501 из 4001×3001 не будет; узлы сетки не годятся"
-        );
+        assert_eq!(overlay.said(true), format!("{}; узлы сетки не годятся", cap_line()));
     }
 
     /// А без превью подробный кладётся, каким бы он ни был: сравнивать не с
@@ -2850,7 +2857,7 @@ mod tests {
     fn empty_store_asks_for_the_top_of_the_pyramid() {
         let overlay = overlay(vec![raster(Role::Detailed, Some(meta(10980, 10980)))]);
         let wanted = overlay.wanted(&look_at(&overlay, 5.0), u64::MAX, &store(), &Toll::default());
-        assert_eq!(wanted[0].choice.level, meta(10980, 10980).levels - 1);
+        assert_eq!(wanted[0].choice.level, meta(10980, 10980).levels() - 1);
         assert_eq!(wanted[0].want.cells.len(), 1, "вершина — один тайл");
     }
 
@@ -4089,7 +4096,7 @@ mod tests {
             // Ячейки берутся по всем ступеням: у вершины пирамиды ячейка одна и
             // занимает весь растр, у нулевой — их сетка, и края её обрезаны
             // самим растром.
-            for level in 0..meta.levels {
+            for level in 0..meta.levels() {
                 let side = pyramid::grid(pyramid::level_size(width, level));
                 let down = pyramid::grid(pyramid::level_size(height, level));
                 for (x, y) in [(0, 0), (side - 1, down - 1), (side / 2, down / 2)] {
@@ -4145,8 +4152,9 @@ mod tests {
         let mut raster = raster(Role::Detailed, Some(meta(1024, 1024)));
         // Проход, читающий источник насквозь: у общего помощника здесь
         // произвольный доступ, а он байты наружу не пускает (см. ниже).
-        raster.meta.as_mut().expect("описание задано").reach =
-            crate::proto::image_tiler::Reach::Pyramid;
+        for row in &mut raster.meta.as_mut().expect("описание задано").rows {
+            row.serve = tiles::Serve::Pass { from: 0 };
+        }
         raster.pass = (3 << 20, 12 << 20);
         let want = tiles::Want {
             level: 2,

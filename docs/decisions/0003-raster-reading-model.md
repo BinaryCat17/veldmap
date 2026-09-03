@@ -54,6 +54,6 @@ with halved overviews: every level pointwise. Sentinel-2 TCI 10980² as JPEG
 2000 read by codestream tiles (0002) is pointwise on every level, detail limit
 0; as a JPEG it would be level 1, the first whose frame at the decoder's scale
 fits `FULL_DECODE_BUDGET`. PVI 343² with 8×8 chunks is a
-degenerate grid and reads by a pass. What the record obliges: the wire keeps
-`reach`, `windowed`, `finest` until the table itself travels (roadmap step 10);
-a new format adds rows, not a `match` arm elsewhere.
+degenerate grid and reads by a pass. What the record obliges: the wire
+carries the table itself (`Described.levels`), and a new format adds rows,
+not a `match` arm elsewhere.

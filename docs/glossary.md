@@ -27,10 +27,17 @@ and in the logs. Where one word carries two senses in the tree, both are given.
 | pointwise reading | точечное чтение | reading only the chunks under the requested tiles |
 | cascade | каскад | the tiler's downscaling chain that turns rows of its base level — level 0, or the level a decoder produced — into tiles of every coarser level |
 | ladder, step | лестница, ступень | the consumer's order of levels from coarse to fine, a step being one level asked for; in the tiler, also the halving of sizes from level to level |
-| detail limit | предел детали | `finest`: the finest level a source will ever serve — the first row of the level table that fits |
-| level table | таблица уровней | one row per pyramid level: how it is served (pointwise or by a pass), what a step costs, the memory peak, whether it fits |
+| detail limit | предел детали | the finest level a source will ever serve — the first row of the level table that fits (`Meta::finest` on the consumer's side) |
+| level table | таблица уровней | one row per pyramid level: how it is served (pointwise or by a pass from some level), what a step costs, the memory peak, whether it fits; it travels in the description as `Described.levels`, and the consumer derives the ladder, the pointwise levels and the detail limit from it |
 | peak | пик | the memory a piece of work needs at its highest, as named terms summed against the instance's free memory |
+| appetite cap | потолок аппетита | the most cells a consumer orders at once: its share of the video memory budget, never above the cache's `MAX_QUERY_TILES` |
 | binding | привязка | how raster pixels map to the Earth; four kinds, from the catalogue's footprint up to a lattice of tie points |
+| seating, footing | посадка, отступ | seating: how a coordinate lattice relates to the raster it binds — the sample offset and step; footing: the retreat of the lattice from a ragged edge of the coordinates so that it stays rectangular |
+| lift | вынос | the one height above the ellipsoid at which everything lying on the surface is drawn (`SURFACE_LIFT_M`) |
+| warp mesh | варп-сетка | the mesh a raster cell is drawn with on the globe: quads whose corners go through the binding, dense enough that their sag stays under the lift |
+| ribbon, hatching | лента, штриховка | on the globe: the band of screen width drawn around the selected outline; the fan of strokes filling a scene's place while its raster is on the way |
+| seam, run | шов, пробег | of a band outline: where the ring's longitude sweep crosses zero, and the stretch between two such crossings — a band has no sides, and its outline is drawn as the loops the runs close |
+| ball, probe | шар, проба | the visibility test of a cell: a bounding ball against the frame's planes and the horizon rejects cheaply, nine probe points through the binding decide the rest |
 | scene, product, part | снимок, продукт, часть | what a person sees as one acquisition; what the catalogue lists; the products folded into one scene |
 | quicklook | квиклук | the small preview raster of a scene |
 | pane | панель | a place on the screen that holds tabs; the screen is a tree of panes |

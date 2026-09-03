@@ -1,0 +1,22 @@
+# Мутации wrap-крейта тайлера — механики потребителя над таблицей уровней.
+# Формат — buildgen/mutate.py.
+
+имя: лестница не берёт уровни того же прохода, что и цель
+файл: veldmodules/image-tiler/wraps/rust/src/tiles.rs
+было:                 from.is_none() || from == goal || (level == top && from == Some(top))
+стало:                 from.is_none() || (level == top && from == Some(top))
+
+имя: предел детали — последняя влезающая строка
+файл: veldmodules/image-tiler/wraps/rust/src/tiles.rs
+было:         self.rows.iter().position(|row| row.fits).map_or(self.top(), |at| at as u32)
+стало:         self.rows.iter().rposition(|row| row.fits).map_or(self.top(), |at| at as u32)
+
+имя: потолок аппетита не режется потолком кэша
+файл: veldmodules/image-tiler/wraps/rust/src/tiles.rs
+было:             .clamp(1, MAX_QUERY_TILES as u64)
+стало:             .max(1)
+
+имя: проход подробнее своего уровня принимается описанием
+файл: veldmodules/image-tiler/wraps/rust/src/tiles.rs
+было:                 Serve::Pass { from } if from > level as u32 => {
+стало:                 Serve::Pass { from } if from > level as u32 && false => {

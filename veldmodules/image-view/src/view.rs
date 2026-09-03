@@ -171,14 +171,11 @@ pub fn wanted(view: &View, store: &Store, cap: u64) -> Option<tiles::Want> {
     let empty = rect.0 >= rect.2 || rect.1 >= rect.3;
 
     Some(tiles::want(
-        camera.level(meta.levels),
-        meta.levels,
-        meta.finest,
+        camera.level(meta.levels()),
+        meta,
         cap,
-        meta.reach,
         store,
         &view.fetch,
-        &meta.fingerprint,
         |level| match empty {
             true => Vec::new(),
             false => {
@@ -202,13 +199,13 @@ pub fn quads(view: &View, store: &mut Store, cap: u64, phase: f32) -> Vec<Quad> 
     let inside = tiles::inside(
         view.fetch.ordered(),
         (view.read_bytes, view.total_bytes),
-        tiles::pointwise(meta, want.level),
+        meta.pointwise(want.level),
     );
     let strength = ripple_strength(inside.share as f32);
 
     let mut quads = Vec::with_capacity(want.cells.len());
     for cell in want.cells {
-        let Some((addr, stored)) = store.carrier(&meta.fingerprint, cell, meta.levels) else {
+        let Some((addr, stored)) = store.carrier(&meta.fingerprint, cell, meta.levels()) else {
             continue;
         };
         let (bind, tex) = (stored.bind.clone(), (stored.width, stored.height));
@@ -304,11 +301,17 @@ mod tests {
             fingerprint: "t".into(),
             width,
             height,
-            levels: pyramid::level_count(width, height),
-            reach: crate::proto::image_tiler::Reach::Exact,
-            finest: 0,
-            windowed: pyramid::level_count(width, height),
+            rows: vec![
+                tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true };
+                pyramid::level_count(width, height) as usize
+            ],
         }
+    }
+
+    /// Подпись предела, как её складывает сама пирамида: строкой целиком её
+    /// сверяет один тест у `Meta::capped`, здесь — что до канвы доезжает та же.
+    fn cap_line() -> String {
+        shown_with(1).meta().expect("снимок показан").capped().expect("предел есть")
     }
 
     /// Показ с пределом детали: снимок «отдаётся» вчетверо мельче своего, и
@@ -321,7 +324,16 @@ mod tests {
         let mut view = View::new("снимок".into());
         view.shown = Some(Shown {
             resource: veldsdk::OwnedResource::from_raw_id(1),
-            meta: Some(Meta { finest, ..meta(4001, 3001) }),
+            // Таблица крупного JPEG: проход со своего уровня на каждом,
+            // уровни подробнее `finest` не влезают.
+            meta: Some({
+                let mut meta = meta(4001, 3001);
+                for (level, row) in meta.rows.iter_mut().enumerate() {
+                    row.serve = tiles::Serve::Pass { from: level as u32 };
+                    row.fits = level as u32 >= finest;
+                }
+                meta
+            }),
         });
         view
     }
@@ -331,7 +343,7 @@ mod tests {
     #[test]
     fn a_capped_source_says_so() {
         assert_eq!(shown_with(0).said(true), "", "предела нет, а канва на что-то жалуется");
-        assert_eq!(shown_with(1).said(true), "подробнее 2001×1501 из 4001×3001 не будет");
+        assert_eq!(shown_with(1).said(true), cap_line());
     }
 
     /// Пока канва не осела — предел молчит. Заказчик показывает жалобу
@@ -360,11 +372,7 @@ mod tests {
 
         view.stuck = None;
         view.landed();
-        assert_eq!(
-            view.said(true),
-            "подробнее 2001×1501 из 4001×3001 не будет",
-            "предел детали снят приехавшим тайлом"
-        );
+        assert_eq!(view.said(true), cap_line(), "предел детали снят приехавшим тайлом");
     }
 
     #[test]

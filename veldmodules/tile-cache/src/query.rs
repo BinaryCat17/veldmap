@@ -12,16 +12,6 @@ use veldsdk::proto::fs::FsReadRequest;
 use crate::module::{layout, store, tile, State};
 use crate::proto::tile_cache::{QueryDone, QueryRequest, TileAddr, TileResult};
 
-/// Потолок числа тайлов в одном запросе. Экран — это десятки тайлов;
-/// тысячи означают ошибку в расчёте видимого у заказчика, и честнее отказать,
-/// чем молча открыть тысячи файлов.
-///
-/// Заказчик своё желаемое режет по бюджету видеопамяти
-/// (`tiles::Store::cap_tiles` — при умолчании в 256 МиБ это 128 ячеек), и пока
-/// его доля бюджета меньше этого числа тайлов, потолок не срабатывает вовсе.
-/// Больше 2 ГиБ на одну пирамиду — и он начнёт отказывать законным запросам, а
-/// выхода из такого отказа у заказчика нет: он пришлёт тот же список.
-const MAX_QUERY_TILES: usize = 1024;
 
 /// Запрос в обслуживании.
 pub struct Query {
@@ -55,8 +45,8 @@ pub fn on_query(state: &mut State, req: QueryRequest) {
     if !layout::valid_key(&req.fingerprint) {
         return fail(format!("негодный ключ кэша: '{}'", req.fingerprint));
     }
-    if req.tiles.len() > MAX_QUERY_TILES {
-        return fail(format!("{} тайлов за раз — больше потолка {}", req.tiles.len(), MAX_QUERY_TILES));
+    if req.tiles.len() > tile::MAX_QUERY_TILES {
+        return fail(format!("{} тайлов за раз — больше потолка {}", req.tiles.len(), tile::MAX_QUERY_TILES));
     }
     if req.tiles.is_empty() {
         crate::emit::on_query_done(&QueryDone { misses: Vec::new(), error: String::new() }, &correlation);

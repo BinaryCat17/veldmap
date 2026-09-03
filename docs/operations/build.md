@@ -17,7 +17,10 @@ a change in the host core is the slowest.
 Cargo commands are not echoed; a failing one is printed in full, and
 `--verbose` echoes them all. `--debug` is not needed: a debug build checks
 something other than what runs, and its wasm modules instantiate noticeably
-slower.
+slower. `--windows --dist-dir <dir>` cross-builds the host for
+`x86_64-pc-windows-gnu` (`x86_64-w64-mingw32-gcc` on the machine) and lays the
+binary, the plugins and `runtime/` out in `<dir>`; `run-native.py --debug` and
+`--config <dir>` are in [configuration](configuration.md).
 
 **Only this command.** `cargo build` or `cargo check` on a single crate skips
 code generation and builds part of the tree, so a schema that drifted from the

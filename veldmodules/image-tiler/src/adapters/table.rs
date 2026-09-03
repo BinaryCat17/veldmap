@@ -1,7 +1,7 @@
 //! Таблица уровней источника: как обслуживается каждый уровень, чего он стоит
-//! и влезает ли в память. Одна на описание и производство: из неё выводятся
-//! `reach`, `windowed` и `finest` для провода (`Described`), и по ней же
-//! `adapters::produce` выбирает рукав — правило записано один раз.
+//! и влезает ли в память. Одна на описание и производство: она же строками
+//! уезжает на провод (`Described.levels`), и по ней же `adapters::produce`
+//! выбирает рукав — правило записано один раз.
 //!
 //! Строки считаются по заголовку, без пикселей: у TIFF по сетке чанков
 //! (`Grid::footprint`), у остальных по кадру и правилам их декодеров. Пик —
@@ -13,7 +13,6 @@ use super::super::cascade;
 use super::super::pyramid;
 use super::grid::Overview;
 use super::{frame_fits, jpeg, netcdf, Info, Kind, Tie};
-use crate::proto::image_tiler::Reach;
 
 /// Как уровень обслуживается.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,37 +111,16 @@ impl Info {
         self.levels().into_iter().nth(level as usize)
     }
 
-    /// Сколько уровней от нулевого читаются точечно (`Described.windowed`) —
-    /// длина точечного начала таблицы.
+    /// Сколько уровней от нулевого читаются точечно — длина точечного начала
+    /// таблицы.
     pub fn windowed(&self) -> u32 {
         self.levels().iter().take_while(|row| row.serve == Serve::Pointwise).count() as u32
     }
 
-    /// Что закроет один проход по источнику (`Described.reach`) — по столбцу
-    /// обслуживания: точечно везде — [`Reach::Exact`]; точечно на части
-    /// уровней — [`Reach::Windowed`], и лестница промежуточных ступеней не
-    /// строит, потому что грубая ступень стоила бы целого прохода; всё одним
-    /// проходом с нулевого — [`Reach::Pyramid`]; проход на каждую ступень со
-    /// своего уровня — [`Reach::Coarser`].
-    pub fn reach(&self) -> Reach {
-        let rows = self.levels();
-        let pointwise = rows.iter().filter(|row| row.serve == Serve::Pointwise).count();
-        if pointwise == rows.len() {
-            return Reach::Exact;
-        }
-        if pointwise > 0 {
-            return Reach::Windowed;
-        }
-        match rows.iter().all(|row| row.serve == Serve::Pass { from: 0 }) {
-            true => Reach::Pyramid,
-            false => Reach::Coarser,
-        }
-    }
-
-    /// Предел детали (`Described.finest`): первый уровень, который влезает.
-    /// Не влезает ни один — вершина; такой источник описание не отдаёт
-    /// (`adapters::checked`), и ответ здесь — на случай таблицы, посчитанной
-    /// мимо описания.
+    /// Предел детали: первый уровень, который влезает. Не влезает ни один —
+    /// вершина; такой источник описание не отдаёт (`adapters::checked`), и
+    /// ответ здесь — на случай таблицы, посчитанной мимо описания. Потребитель
+    /// считает то же по строкам провода (`tiles::Meta::finest`).
     pub fn finest(&self) -> u32 {
         let rows = self.levels();
         let top = rows.len().saturating_sub(1) as u32;
@@ -244,32 +222,28 @@ mod tests {
         // Каждый уровень TCI — точечно из своей копии либо из самой мелкой
         // (вершине копии не достаётся: разрешений пять, уровней шесть).
         assert!(tci().levels().iter().all(|row| row.serve == Serve::Pointwise));
-        assert_eq!(tci().reach(), Reach::Exact);
     }
 
-    /// Столбец обслуживания выводит три скаляра провода: точечно везде —
-    /// `Exact`, на части — `Windowed` и `windowed` ровно по длине точечного
-    /// начала, проходом с нулевого — `Pyramid`, проходом со своего уровня —
-    /// `Coarser`.
+    /// Столбец обслуживания у четырёх родов источника: точечно везде (COG), на
+    /// части уровней (полосный — точечное начало ровно по длине окна), проходом
+    /// с нулевого на всех (PNG), проходом со своего уровня на каждом (JPEG).
     #[test]
-    fn скаляры_провода_выводятся_из_столбца_обслуживания() {
+    fn столбец_обслуживания_различает_четыре_рода_источника() {
         let exact = cog(4 * TILE, 4 * TILE);
-        assert_eq!(exact.reach(), Reach::Exact);
         assert_eq!(exact.windowed(), exact.levels().len() as u32);
 
         let strips = stripped(25309, 17408);
-        assert_eq!(strips.reach(), Reach::Windowed);
         let rows = strips.levels();
         let prefix = rows.iter().take_while(|row| row.serve == Serve::Pointwise).count() as u32;
         assert!(prefix > 0 && prefix < rows.len() as u32, "окно на части уровней: {prefix}");
         assert_eq!(strips.windowed(), prefix);
+        assert!(rows[prefix as usize..].iter().all(|row| row.serve == Serve::Pass { from: 0 }));
 
         let png = Info::plain(2048, 2048, Kind::Png { interlaced: false });
-        assert_eq!(png.reach(), Reach::Pyramid);
         assert_eq!(png.windowed(), 0);
+        assert!(png.levels().iter().all(|row| row.serve == Serve::Pass { from: 0 }));
 
         let jpeg = Info::plain(2048, 2048, Kind::Jpeg);
-        assert_eq!(jpeg.reach(), Reach::Coarser);
         assert!(jpeg.levels().iter().enumerate().all(|(at, row)| row.serve == Serve::Pass { from: at as u32 }));
     }
 
@@ -295,7 +269,6 @@ mod tests {
     fn вырожденная_сетка_идёт_проходом() {
         let pvi = Info::plain(343, 343, Kind::Tiff(Layout::of(true, (8, 8), Vec::new(), RGB8)));
         assert!(pvi.levels().iter().all(|row| row.serve == Serve::Pass { from: 0 }));
-        assert_eq!(pvi.reach(), Reach::Pyramid);
 
         // А полоса в одну строку во всю ширину сеткой не вырождена: она
         // крупнее порога, и нулевой уровень читается точечно.

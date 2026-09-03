@@ -27,7 +27,6 @@ use super::table::Serve;
 /// Байт на пиксель фикстур: все они RGB8.
 const RGB8: u32 = 3;
 use super::{describe, produce, Info, Kind, Metered};
-use crate::proto::image_tiler::Reach;
 
 /// Окно читателя SDK — то, чем меряются чтения.
 const WINDOW: u64 = 256 * 1024;
@@ -282,7 +281,7 @@ fn direct_equals_pass_on_exact_halves() {
     let (file, _, _) = tiled_cog(2 * TILE, 2 * TILE, 1);
     let handle = fake::mount(file);
     let info = described(&handle);
-    assert_eq!(info.reach(), Reach::Exact);
+    assert!(info.levels().iter().all(|row| row.serve == Serve::Pointwise));
     let direct = produced(&handle, &info, 1, &[(0, 0)]);
     assert_eq!(direct.len(), 1);
     assert_eq!(direct[0].0, (1, 0, 0));
@@ -302,15 +301,15 @@ fn direct_equals_pass_on_exact_halves() {
     assert_eq!(direct[0].1, pass[0], "копия из файла и ужатие каскада разошлись");
 }
 
-/// `Info::reach()` и рукав `produce` спрашивают одно и то же — и обязаны
-/// отвечать согласно на всякой раскладке и всяком уровне. Обе стороны читают
-/// таблицу уровней, а та — `Grid::pointwise`, так что держит это правило
-/// вывода `reach()`, и оно проверяется здесь против самого окна: `Exact` при
-/// окне на всех уровнях, иначе `Windowed` с окном ровно на нижних. Оборванная
-/// цепочка — 32·TILE с одной копией: верхний уровень читался бы из неё
-/// областью больше `REGION_CAP`, и окно кончается раньше уровней.
+/// Таблица уровней, которая уезжает на провод, и рукав `produce` спрашивают
+/// одно и то же — и обязаны отвечать согласно на всякой раскладке и всяком
+/// уровне. Обе стороны читают одну таблицу, а та — `Grid::pointwise`, и здесь
+/// столбец обслуживания проверяется против самого окна: точечное начало ровно
+/// там, где окно, и проход с нулевого за ним. Оборванная цепочка — 32·TILE с
+/// одной копией: верхний уровень читался бы из неё областью больше
+/// `REGION_CAP`, и окно кончается раньше уровней.
 #[test]
-fn reach_and_the_produce_branch_agree() {
+fn the_level_table_and_the_produce_branch_agree() {
     let tiles = (TILE, TILE);
     let overviews = |count: usize, (mut w, mut h): (u32, u32)| -> Vec<Overview> {
         (1..=count).map(|image| {
@@ -336,16 +335,14 @@ fn reach_and_the_produce_branch_agree() {
             .map(|level| info.level(level).expect("уровень есть").serve == Serve::Pointwise)
             .collect();
         assert_eq!(served, branch, "{name}: таблица уровней разошлась с правилом окна");
-        match info.reach() {
-            Reach::Exact => assert!(branch.iter().all(|&b| b), "{name}: Exact, но рукав прохода на {branch:?}"),
-            Reach::Windowed => {
-                let pointwise = info.windowed() as usize;
-                assert!(branch[..pointwise].iter().all(|&b| b), "{name}: окно обещано, а рукав — проход: {branch:?}");
-                assert!(pointwise == branch.len() || !branch[pointwise], "{name}: за концом окна рукав всё ещё окно: {branch:?}");
-                partial_seen |= pointwise > 0 && pointwise < branch.len();
-            }
-            other => panic!("{name}: у TIFF не бывает {other:?}"),
-        }
+        let pointwise = info.windowed() as usize;
+        assert!(branch[..pointwise].iter().all(|&b| b), "{name}: окно обещано, а рукав — проход: {branch:?}");
+        assert!(pointwise == branch.len() || !branch[pointwise], "{name}: за концом окна рукав всё ещё окно: {branch:?}");
+        assert!(
+            info.levels()[pointwise..].iter().all(|row| row.serve == Serve::Pass { from: 0 }),
+            "{name}: за окном у TIFF только проход с нулевого"
+        );
+        partial_seen |= pointwise > 0 && pointwise < branch.len();
     }
     assert!(partial_seen, "ни одна раскладка не дала окно на части уровней — таблица проверяет не всё");
 }

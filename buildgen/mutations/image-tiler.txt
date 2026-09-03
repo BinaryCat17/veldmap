@@ -31,10 +31,10 @@
 было:             for cx in sx0 / cw..=(sx0 + rw - 1) / cw {
 стало:             for cx in 0..=(sx0 + rw - 1) / cw {
 
-имя: Exact при окне на части уровней
+имя: таблица объявляет проходом уровень, читаемый окном
 файл: veldmodules/image-tiler/src/adapters/table.rs
-было:         if pointwise == rows.len() {
-стало:         if pointwise > 0 {
+было:                         Level { serve: Serve::Pointwise, pixels: footprint.held, fits: peak.fits(), peak }
+стало:                         Level { serve: Serve::Pass { from: 0 }, pixels: footprint.held, fits: peak.fits(), peak }
 
 имя: вырожденная сетка читается точечно
 файл: veldmodules/image-tiler/src/adapters/grid.rs

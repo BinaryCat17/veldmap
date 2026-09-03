@@ -378,7 +378,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         .unwrap_or_default();
     // Точечно ли читается запрошенный уровень: от этого зависит, ждать ли
     // конца своего прохода молча или переспрашивать кэш.
-    let pointwise = view.meta().is_some_and(|meta| tiles::pointwise(meta, level));
+    let pointwise = view.meta().is_some_and(|meta| meta.pointwise(level));
     let missed = view.fetch.missed(
         &state.passes,
         &ctx.fingerprint,
@@ -635,7 +635,7 @@ fn want_tiles(state: &mut State, key: &str) {
     let Some(want) = view::wanted(view, &state.tiles, cap) else { return };
     let Some((fingerprint, pointwise)) = view
         .meta()
-        .map(|meta| (meta.fingerprint.clone(), tiles::pointwise(meta, want.level)))
+        .map(|meta| (meta.fingerprint.clone(), meta.pointwise(want.level)))
     else {
         return;
     };
@@ -767,7 +767,7 @@ fn view_state(
     let inside = tiles::inside(
         ordered,
         (view.read_bytes, view.total_bytes),
-        meta.zip(want).is_some_and(|(meta, want)| tiles::pointwise(meta, want.level)),
+        meta.zip(want).is_some_and(|(meta, want)| meta.pointwise(want.level)),
     );
     let working = view.working(passes, want);
     ViewState {
@@ -828,10 +828,10 @@ mod tests {
                 fingerprint: "t".into(),
                 width: 4001,
                 height: 3001,
-                levels: pyramid::level_count(4001, 3001),
-                reach: crate::proto::image_tiler::Reach::Exact,
-                finest: 1,
-                windowed: 0,
+                // Таблица крупного JPEG: проход со своего уровня, нулевой не влезает.
+                rows: (0..pyramid::level_count(4001, 3001))
+                    .map(|level| tiles::Row { serve: tiles::Serve::Pass { from: level }, bytes: 0, fits: level >= 1 })
+                    .collect(),
             }),
         });
 
@@ -848,7 +848,8 @@ mod tests {
             tiles::Want { level: 0, target: 0, cells: Vec::new(), steps: 1, climbed: 0 };
         let settled = view_state(&view, "снимок", Some(&want), &idle);
         assert!(!settled.working, "стенд не о том: за осевшей канвой осталась работа");
-        assert_eq!(settled.trouble, "подробнее 2001×1501 из 4001×3001 не будет");
+        let limit = view.meta().expect("снимок показан").capped().expect("предел есть");
+        assert_eq!(settled.trouble, limit);
 
         // А на полпути — снова молчит: за этой ступенью пойдёт следующая.
         let climbing = tiles::Want { steps: 2, ..want };

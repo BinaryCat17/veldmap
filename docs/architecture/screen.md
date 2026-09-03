@@ -90,7 +90,7 @@ where they are asked for.
 
 The row led to is named three times: the catalogue opens its folder, the list
 goes to its page and highlights the row, and the scroll is aimed at it —
-`Scrollable.scroll_to` in the layout, once per change of value. Otherwise the
+`Scrollable.scroll_to` in the layout, once per numbered request (`ScrollTo.request`; the offset alone does not repeat). Otherwise the
 row would lie below the edge of the screen, and "led to" would mean "opened
 the same folder".
 
@@ -144,3 +144,201 @@ the window, the columns do not slim for that, and the stretching name would
 collapse to nothing. The order in which they give way runs from reference to
 necessary: date, size, loading, state, format and last the icon
 (`DROP_ORDER`); the name and the buttons never leave (`components::table::fit`).
+
+## A row's three states
+
+**Selection, outline and show are three independent states of a row**
+(`handlers::outline`, `handlers::overlay`). The checkbox is selection — the set
+a batch action works on. The outline icon says whether the scene is outlined on
+the globe; the globe icon whether it lies there as a raster. Folded into one,
+each would answer for the other: removing an outline would take the scene out
+of the set to be deleted, and showing it would put it into the next batch
+action nobody asked for. So showing does not tick the checkbox, "Clear the
+globe" and removing one outline leave a selection alone (`outline::clear`,
+`outline::drop_one`), and ticking draws nothing.
+
+Outline and show are toggles with one mechanism: pressed once, the scene is on
+the globe; pressed again, it is off (`outline::toggle_outline`,
+`overlay::on_toggle_pressed`). Neither moves the camera. **Focus is a third
+intent and a third icon** (`outline::focus`, sent as the one `Focus` command by
+`handlers::globe::focus_on`): "show it here" and "take me there" in one press
+would take each other's answer — a second scene could not be laid next to the
+first without flying to it. Focus takes the frame it already has — the drawn
+outline, or the frame computed when the layer was shown — and never asks the
+catalogue for it; it also picks the scene, because one goes there to be told
+where it is.
+
+Outlines are one set per application, not per tab (`State::outlines`): the
+globe is one, lists are many, and "the outlines of this tab" does not answer
+"what is on the globe". The set is a **request, not what is drawn**: geometry
+belongs to the catalogue, the way to it is the network, and seconds pass
+between the press and the ring. So the icon lights at once and the tooltip
+says what stands between (`OnOutline` in `components::row`): asking the
+catalogue; no geometry for this scene; could not ask — the same press then asks
+again instead of cancelling; drawn. What is drawn lives apart in
+`State::outlined`, rebuilt from the requests by `outline::refresh`: geometry
+is taken from a search result that holds the product, otherwise asked of the
+provider (`on_locate`), and every answer is cached in `State::located` so one
+key never travels twice. Nothing is outlined without a request — a page of
+results is a grid over the Earth behind which no scene is seen. Selection, by
+contrast, is per list (`selected` in `state::listing`, see
+[limitations](../limitations.md)).
+
+A scene row carries at most three quick icons, all about the globe: outline,
+raster, focus (`table::quick`). Everything else — download, pause, open,
+preview — is a menu item: the row is narrow, a pane is half a window, and a
+fourth icon would take from the name; these three earn their place by saying
+their state in colour, which a menu item cannot. A disabled icon keeps its
+place, drawn in the line colour rather than the ink (`IconTone::Idle`): focus
+on a scene that is not on the globe, the globe on a scene the provider says
+cannot be viewed — hidden, it would let the neighbours slide under the cursor.
+A row that is not a scene — a file inside one — gets "show the scene on the
+globe" as a menu item acting on the scene's key; a path folder gets nothing,
+since the catalogue answers its name with "no such product".
+
+## Row tints
+
+**Four tints, precedence in the role** (`theme::RowTint`): plain; dim — a
+hidden layer; marked — ticked for a batch action; picked — the one highlight
+of the screen. The renderer picks the whole state of a box and does not mix it
+with rest (`Interaction` in `veldmodules/ui-service/types.proto`), so "marked
+and under the cursor" is not expressible in the protocol; whoever names the
+colour folds them, and names the precedence there too: the highlight is one
+per screen and outranks marks, of which a list holds fifty. Marked is weaker
+than picked — an equal fill would erase the difference between "the main
+thing now" and "what I gathered". **Hover is never lighter than rest**: each
+tint carries its own hover pair (`row_faces`), because the common `ROW_HOVER`
+is lighter than the accent fills and a picked row would lose its highlight
+under the cursor. The table (`table::tint`) and the layer list (`view::shown`)
+read the same role.
+
+## Batch actions
+
+Batch buttons stand in the list heading as icons and **appear only when there
+is something to do** (`handlers::library::batch`, drawn by `list_screen`): a
+row can be selected that is not on disk, and one that is downloaded whole, and
+a visible button with nothing to do promises an action and does not perform
+it. Whether there is something to do is answered by the same analysis that
+later performs it (`fetch_of`, `deletions_of`) — a second answer to "what will
+be done" would drift from the first.
+
+Both unfold a scene into files: the library keeps files and knows no scenes,
+so deletion takes its entries (`files_of`) and download first asks the
+provider what the scene consists of (`on_download_snapshot`). A file is judged
+exactly — complete and running are skipped, interrupted is resumed; a scene
+is skipped only when walked and complete, because what it lacks is known to
+the provider, not to us. **Batch "download" is not the row's item**: on a row
+the download is a toggle whose second press pauses (`on_download_pressed`);
+the batch action is named by one word and does one thing.
+
+**Selection leaves only what deletion actually took, and only files**
+(`on_delete_selected`): in "Downloaded" the row behind a deleted file is gone,
+and a selection left on it would be counted in the heading to the end of the
+session. A scene stays selected — its files are gone from disk, the scene
+lives in the catalogue. "Clear selection" clears the whole selection of its
+list, not the shown page (`outline::unmark_all`): a selection survives a
+change of folder, and the heading counts it.
+
+## Progress in the list
+
+**The progress of a show is seen in the list, not on the globe.** There a
+scene is either drawn or still absent, the wait runs to tens of seconds, and
+"pressed, nothing happened" looks broken. The globe reports
+`on_overlay_progress` — the whole set, a row per overlay; the topic is a
+snapshot (`veldmodules/globe/schema.yaml`), so an unchanged set does not reach
+the bus. The browser stores the figures without interpreting them (`Progress`
+in `state::overlay`); an overlay missing from a report means "the globe does
+not know it yet", not "done", and its figures stay.
+
+It is shown in one place: the ЗАГРУЗКА column of the scene's row — a caption
+and a bar under it (`table::progress_cell`). The scene's row in whichever
+list it stands, and not the file rows under it (`load_of`). The column is one
+for two kinds of work, because the question is one — "is something going on,
+and how much is left" — and a download to disk outranks a network show in it:
+the disk changes what lies on the machine, a show is derived and repeatable.
+**Numbers belong to this column**: while it is shown, the neighbouring
+СОСТОЯНИЕ column answers with a word — "downloading", "interrupted" — two
+cells with the same fraction do not say twice as much; when the column is
+gone, the numbers return there (`status_look`).
+
+The caption is built in parts, senior to junior (`Progress::parts`): the
+pyramid step, bytes read, tiles of the step. The step names what the bar
+measures, bytes are the only thing moving during a long sequential read, tiles
+are what moves within a step. Squeezed, the caption drops parts from the tail
+(`fit_label`); the whole phrase is in the tooltip, and the layer line in "On
+view" says the same phrase from the same parts — two places cannot disagree
+about one piece of work.
+
+**The strip under the row is a fallback, not a second voice** (`strip_shown`):
+it is drawn exactly where the column is not. The column gives way after date
+and size and before state and format (`DROP_ORDER`); in a pane of half the
+window — the "list plus globe" layout in which one watches a show — it is
+gone (asserted by `the_loading_column_outlives_the_reference_ones`), and
+without the strip nothing about the network load would be visible without
+hovering. While the raster is being described there is no share to draw, and
+the strip is filled whole at half strength (`Pace::Unknown`) rather than left
+empty: an empty track says nothing, and it is exactly how every show begins.
+**Its height is taken, not added**: the row pitch is computed in one place
+(`theme::ROW_PITCH`) and the list is scrolled to a row by it, so the strip is
+cut out of `ROW_HEIGHT`. The place is taken while the scene is on the globe,
+not while work is going on — otherwise the row would jump by `ONTO_GLOBE` at
+the very moment the work finished, on every layer.
+
+## The globe icon
+
+**The globe icon is lit when the scene is on the globe** (`table::quick`):
+lit — lies as a raster and is seen; half — lies but cannot be seen now, on
+its way or hidden; rest — not there. What the scene is to the globe is
+computed in one place for all three lists, `components::rows::onto_globe`, by
+the scene's key and not the row's: the globe is one, lists are many, and
+three expressions by place would drift silently. The same place answers the
+strip under the row, the layer line and the hatching of the place of a scene
+on its way (`outline::under_way`): the question of all four is "what is
+happening to this scene on the globe now". Two more faces: warning — the last
+show failed, the reason is in the tooltip, and the icon is still pressable,
+since the failure may have been the network (`State::unshowable`); disabled —
+the provider says the product cannot be viewed (`Row::unviewable`).
+
+**The label names what the press does, not what is**: on a lying scene it is
+"remove from the globe", not a second show; on one still asked of the
+catalogue, "cancel". The icon stands in the row of every scene — search,
+catalogue, downloaded. A found product carries its footprint; a catalogue or
+downloaded row has only a key, and the product is restored by the provider
+(`on_locate`) — one request answers both the show and the outline. The answer
+arrives seconds later and is first asked whether it is still wanted
+(`State::showing`): "Clear the globe" is pressed in that time, and laying the
+scene after it would put back what was taken off.
+
+## "On view" and the strip under the globe
+
+**"On view" shows what covers the globe** (`view::shown`): every layer, top of
+the screen being top of the globe, with opacity, hide, focus, remove, and in
+the menu reorder and the two transitions to the scene — preview and
+catalogue. **Shown is everything on the globe, not the rasters alone**: a
+scene can be there as an outline only, and then this is the one place to
+remove it from without walking back to the list. Layers and outlines are two
+groups — two independent states, asked different things — and a scene lying
+as a raster is not listed twice. A hidden layer stays in the set with its
+resources and is not drawn; the header's one button names the action it does —
+hide all, or show all. Where a layer stands is the layer line: assembling,
+hidden, the progress phrase, or the raster's refusal once there is nothing
+left to wait for.
+
+The strip under the globe tab goes the other way (`view::globe`): it names
+the scene — the picked one, else the top visible layer — leads to it by the
+same two transitions, and **"Clear the globe" takes everything at once**,
+rasters and outlines together (`overlay::clear_all`, `outline::clear`): a
+person sees one globe and has nothing to split them by. The named scene
+displaces the size of the area and the hint about the controls: the name
+takes what is left of the strip, and the layout gives the buttons their room
+first — in a half-window pane it is exactly they that would slide off the
+edge.
+
+**An overlay from a search result lives the life of the result**
+(`OverlayState::source`): it leaves with the product when the result set
+changes (`overlay::keep_only`) and with the closing of the tab
+(`overlay::source_closed`), and its leaving is said aloud in the notice, since
+no one pressed anything. What was shown by key — from the catalogue or from
+downloads — depends on no result set and is removed only by hand. Outlines
+are tied to no tab: the product a search held is cached at the first draw
+(`State::located`), so an outline outlives its result set.

@@ -33,8 +33,8 @@ use veldsdk::graphics as gfx;
 use veldmap_tile_cache_wrap::tile::TILE_FORMAT;
 
 use crate::proto::image_tiler::{
-    Described, DescribeRequest, GeoTie, Placement, ProduceDone, ProduceProgress, ProduceRequest,
-    TileResult,
+    Described, DescribeRequest, GeoTie, Level, Placement, ProduceDone, ProduceProgress,
+    ProduceRequest, Serve, TileResult,
 };
 use crate::proto::tile_cache::StoreTile;
 
@@ -282,10 +282,24 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
         width: info.width,
         height: info.height,
         tile: pyramid::TILE,
-        levels: pyramid::level_count(info.width, info.height),
-        reach: info.reach() as i32,
-        finest: info.finest(),
-        windowed: info.windowed(),
+        // Таблица уровней — та же, по которой `produce` выберет рукав: строка
+        // на уровень, как она посчитана, без пересказа скалярами.
+        levels: info
+            .levels()
+            .iter()
+            .map(|row| Level {
+                serve: match row.serve {
+                    adapters::table::Serve::Pointwise => Serve::Pointwise,
+                    adapters::table::Serve::Pass { .. } => Serve::Pass,
+                } as i32,
+                from: match row.serve {
+                    adapters::table::Serve::Pass { from } => from,
+                    adapters::table::Serve::Pointwise => 0,
+                },
+                bytes: row.peak.total(),
+                fits: row.fits,
+            })
+            .collect(),
         ties: info
             .ties
             .iter()
@@ -370,8 +384,8 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     let (kept, _, neighbour) = parsed(state, resource.id, resource.size, &bytes, req.near)?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
 
-    // Спрашивается вес разбора, а не цена прохода: `Reach::Pyramid` покрывает и
-    // PNG с мелочью, чей разбор лежит в лёгком слоте. Чужого тяжёлого в этой
+    // Спрашивается вес разбора, а не рукав производства: проходом с нулевого
+    // идут и PNG с мелочью, чей разбор лежит в лёгком слоте. Чужого тяжёлого в этой
     // точке нет — его снял `clear_for` на входе, — так что сторож здесь
     // защищает не от него, а от того, что вход однажды переставят: отпускать
     // по лёгкому проходу нечего, и молчаливым такое отпускание быть не должно.

@@ -1,8 +1,7 @@
 """Правила документации, которые держатся механически (docs/decisions/0001).
 
-Область — docs/ и CLAUDE.md. README попадёт сюда, когда станет короче
-пятидесяти строк: сегодня номера строк и пути в нём снимаются вместе с его
-разделами, а не тестом.
+Область — docs/, CLAUDE.md и README.md: README — указатели на страницы docs/,
+и ссылки в нём держатся тем же правилом.
 
 Правила три.
 
@@ -38,7 +37,7 @@ OUTSIDE = ("~/", "/home/", "/Users/", ".claude/")
 
 
 def pages() -> list[str]:
-    found = ["CLAUDE.md"]
+    found = ["CLAUDE.md", "README.md"]
     for root, _dirs, files in os.walk(DOCS_DIR):
         for name in sorted(files):
             if name.endswith(".md"):

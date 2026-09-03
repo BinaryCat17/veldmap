@@ -1007,7 +1007,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         // конца своего прохода молча или переспрашивать кэш (проход кладёт в
         // него больше, чем отдаёт заказчику).
         let pointwise =
-            raster.meta.as_ref().is_some_and(|meta| tiles::pointwise(meta, level));
+            raster.meta.as_ref().is_some_and(|meta| meta.pointwise(level));
         let missed = raster.fetch.missed(
             &state.passes,
             &ctx.fingerprint,
@@ -1184,7 +1184,7 @@ fn want_overlay(state: &mut State, key: &str, wanted: overlay::Wanted) {
     let label = overlay.label.clone();
 
     let owner = (key.to_string(), wanted.choice.role);
-    let pointwise = tiles::pointwise(meta, wanted.want.level);
+    let pointwise = meta.pointwise(wanted.want.level);
     if let Some(correlation) = state.passes.stale(&fingerprint, &owner, &wanted.want, pointwise) {
         crate::cancel::image_tiler::on_produce(&correlation);
     }
