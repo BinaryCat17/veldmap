@@ -30,13 +30,14 @@ rust:
       features: ["gif", "bmp", "webp"]
     # Кодек тайлов кэша: чистый Rust, миллисекунды на тайл и в wasm.
     qoi: "0.4"
-    # JPEG 2000 (квиклуки и гранулы Sentinel-2): чистый Rust, кадр целиком с
-    # пропуском уровней DWT; ни области, ни тайла не читает. Чем это
-    # заменяется — docs/decisions/0002-jpeg2000-decoder.md.
-    hayro-jpeg2000:
-      version: "0.4"
+    # JPEG 2000 (квиклуки и гранулы Sentinel-2): порт OpenJPEG на Rust,
+    # декодирует один тайл кодстрима на факторе разрешения — чанк драйвера
+    # сетки (docs/decisions/0002-jpeg2000-decoder.md). Без `file-io`: файлов у
+    # wasm-модуля нет, поток строится поверх ресурса.
+    openjp2:
+      version: "0.6"
       default-features: false
-      features: ["std", "simd"]
+      features: ["std"]
     # NetCDF-4 (Sentinel-5P, климатика): это HDF5. Чистый Rust без libhdf5:
     # C-библиотека потребовала бы clang с бэкендом wasm32 и своей сборки под
     # каждую цель. Из фич — только чтение и deflate: пишущая половина и палитра

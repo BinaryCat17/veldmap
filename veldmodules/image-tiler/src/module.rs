@@ -129,10 +129,9 @@ impl State {
     ///
     /// Числа, которые это запрещают: осевшая плоскость величины бывает ростом
     /// в сотни мегабайт — потолок ей ставит `netcdf::affordable` по
-    /// [`crate::budget`], — а рядом проход JPEG 2000 просит ещё до
-    /// `jp2::DECODE_BUDGET`, и вдвоём с плоскостью они в `budget::INSTANCE`
-    /// укладываться не обязаны. Прочие потолки декодеров мельче и поодиночке
-    /// проходят, но запаса не оставляют.
+    /// [`crate::budget`], — а рядом работа над другим источником просит своё
+    /// (`adapters::table`), и вдвоём с плоскостью они в `budget::INSTANCE`
+    /// укладываться не обязаны.
     ///
     /// Цена известна и записана: пара «квиклук и гранула» описывается и
     /// производится вперемежку, и плоскость гранулы читается дважды. Дешевле
@@ -661,13 +660,13 @@ mod tests {
     /// растру и берёт его разбор готовым из лёгкого слота. Декодер этого
     /// прохода выделяет своё, и рядом с живой плоскостью ему не хватает:
     /// плоскость мерится против всего свободного (`budget::free()`), а проход
-    /// JPEG 2000 просит сверх неё ещё до своего `DECODE_BUDGET`.
+    /// просит сверх неё свой пик (`adapters::table`).
     #[test]
     fn чужая_работа_отпускает_тяжёлый_разбор() {
         let mut state = State { heavy: None, light: None };
 
         state.clear_for(2, true);
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jp2 { len: 0 }));
+        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
         state.clear_for(1, true);
         keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
 
@@ -700,7 +699,7 @@ mod tests {
     #[test]
     fn готовый_разбор_отпускает_чужую_плоскость() {
         let mut state = State { heavy: None, light: None };
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jp2 { len: 0 }));
+        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
         keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
 
         let bytes = Rc::new(Cell::new(0));

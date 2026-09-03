@@ -1,43 +1,80 @@
-//! JPEG 2000 (JP2/J2C): квиклуки и гранулы Sentinel-2.
+//! JPEG 2000 (JP2/J2C): квиклуки и гранулы Sentinel-2 — чанками драйвера.
 //!
-//! Декодер (hayro-jpeg2000) читает кадр целиком и умеет декодировать сразу в
-//! огрублённое разрешение: пропуск уровней DWT — та же ceil-лестница деления
-//! пополам, что у пирамиды, поэтому декод всегда ложится на её уровень.
-//! Но огрубление — лишь пожелание: палитровым файлам крейт молча его
-//! выключает, пропуск не бывает глубже размеченного в файле числа уровней
-//! DWT, а floor-математика выбора пропуска на нечётных размерах отстаёт на
-//! ступень — декод выходит запрошенным уровнем или мельче. Каскад стартует с
-//! фактического уровня: запрошенные тайлы производятся по пути, а уровни
-//! мельче бонусом уезжают в кэш.
-//!
-//! Ни области, ни тайла крейт не декодирует, отсюда две границы. Память
-//! прохода растёт с площадью декодируемого кадра, поэтому бюджет проверяется
-//! дважды: по запрошенному уровню до чтения файла и по фактическим размерам
-//! декода (`Image::width/height`, уже с учётом пропуска) до самого декода; не
-//! влезает — честный отказ, и уровни, которым он заведомо достанется,
-//! таблица уровней объявляет заранее (`adapters::table`, по [`fits`]). Файл
-//! при этом читается целиком на каждый проход. А описание источника не
-//! декодирует ничего: размеры
-//! читаются своим разбором заголовка (`header_dims`) из первых килобайт —
-//! тянуть гигабайтный файл ради describe нельзя.
+//! Чанк — тайл кодстрима на факторе разрешения: декодирует его openjp2 за
+//! unsafe-островом (`codec.rs`), а какие чанки читать и когда идти проходом,
+//! решает общий драйвер сетки чанков (`grid.rs`) по раскладке из главного
+//! заголовка ([`Layout`]). Описание кодека не запускает: размеры, сетку тайлов
+//! и число разрешений читает свой разбор головы файла ([`codestream`]),
+//! привязку — коробка GMLJP2 ([`gml_placement`]). Что решено и почему —
+//! `docs/decisions/0002-jpeg2000-decoder.md`.
 
+use std::cell::{Cell, RefCell};
 use std::io::Read;
+use std::rc::Rc;
 
-use hayro_jpeg2000::{ColorSpace, DecodeSettings, DecoderContext, Image};
-
-use super::super::cascade::{Cascade, Emit};
+use super::super::cascade::Emit;
 use super::super::pyramid;
-use super::radiometry::Pixel;
-use super::{to_rgba, Info, Kind, Metered, Placement};
-
-/// Потолок памяти одного прохода: сам файл, f32-плоскости декодера, его
-/// интерливленный выход и RGBA. Считается до чтения; уровень, не влезающий в
-/// потолок, — отказ, а не смерть инстанса на пределе в 1 ГБ.
-const DECODE_BUDGET: u64 = 512 * 1024 * 1024;
+use super::codec::{Decoder, Format, Header, Tile};
+use super::grid::{self, Chunked, Grid, Overview};
+use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples};
+use super::{Info, Kind, Metered, Placement};
 
 /// Сколько головы файла хватает заголовку: сигнатурные боксы, ftyp, jp2h
 /// лежат первыми, а у сырого кодстрима SIZ — сразу за SOC.
 const HEAD: usize = 64 * 1024;
+
+/// Байт на отсчёт у декодера: плоскости `i32` у образа и столько же у тайлового
+/// кодера внутри — счёт памяти чанка ведётся по ним, а не по разрядности файла.
+const SAMPLE_BYTES: u32 = 8;
+
+/// Раскладка файла для драйвера: сетка тайлов кодстрима с копиями по
+/// разрешениям — и то, чего драйверу знать не нужно, а чанку нужно.
+pub struct Layout {
+    pub grid: Grid,
+    /// Тайлов кодстрима по горизонтали и вертикали — одна сетка на всех
+    /// факторах: индекс тайла у кодека от разрешения не зависит.
+    pub tiles: (u32, u32),
+    /// Длина файла: кодек считает по ней остаток потока.
+    pub len: u64,
+    format: Format,
+    /// Ноль — «нет данных»: у гранулы Sentinel-2 годные значения 1..255, и
+    /// поля снимка приезжают нулём. Ставится только файлу с привязкой GMLJP2:
+    /// у произвольного JP2 чёрному никто не запрещал быть цветом.
+    nodata: Option<f32>,
+    /// Растяг показа отсчётов шире байта — один на файл, иначе соседние тайлы
+    /// разошлись бы яркостью (см. `tiff::Layout`).
+    stretch: RefCell<Option<Mapping>>,
+}
+
+impl Layout {
+    /// Копия на факторе `f` есть, пока тайл делится на `2^f` без остатка: так
+    /// сетка тайлов на уменьшенной решётке остаётся равномерной, и она же
+    /// — сетка чанков копии. Дальше уровни берут самую мелкую копию по общему
+    /// правилу драйвера.
+    pub fn of(codestream: &Codestream, len: u64, format: Format, nodata: Option<f32>) -> Self {
+        let width = codestream.canvas.0 - codestream.origin.0;
+        let height = codestream.canvas.1 - codestream.origin.1;
+        let (tw, th) = codestream.tile;
+        let overviews = (1..u32::from(codestream.resolutions))
+            .take_while(|factor| tw % (1 << factor) == 0 && th % (1 << factor) == 0)
+            .map(|factor| Overview {
+                image: factor as usize,
+                width: pyramid::level_size(width, factor),
+                height: pyramid::level_size(height, factor),
+                chunk: (tw >> factor, th >> factor),
+            })
+            .collect();
+        let depth = u32::from(codestream.components) * SAMPLE_BYTES;
+        Self {
+            grid: Grid { tiled: true, chunk: codestream.tile, overviews, depth },
+            tiles: codestream.grid(),
+            len,
+            format,
+            nodata,
+            stretch: RefCell::new(None),
+        }
+    }
+}
 
 pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     // Длина берётся в `u64` и сравнивается там же: у модуля `usize`
@@ -47,27 +84,38 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     let mut head = vec![0u8; len.min(HEAD as u64) as usize];
     reader.read_exact(&mut head).map_err(|e| format!("jp2: чтение заголовка: {}", e))?;
     let (width, height) = header_dims(&head)?;
-    // Раскладка кодстрима — не про показ, а про то, чего стои́т чтение куска:
-    // единица чтения у JPEG 2000 это тайл. Здесь она только называется в
-    // журнале — способ чтения по ней не выбирается, декодер читает кадр
-    // целиком (см. шапку). Отказ здесь не приговор: растр читается по-прежнему.
-    match codestream(&head) {
-        Ok(layout) => {
-            let (across, down) = layout.grid();
-            veldsdk::log::debug!(target: "perf",
-                "jp2 {}×{}: тайлов {}×{} по {}×{}, начало {:?}, компонент {}, разрешений {}, \
-                 прогрессия {}, слоёв {}, тайл-партов в TLM {}, PLT у первого тайл-парта {}, GML {}",
-                width, height, across, down, layout.tile.0, layout.tile.1,
-                layout.origin, layout.components, layout.resolutions, layout.progression,
-                layout.layers,
-                layout.tlm_parts.map_or("нет TLM".to_string(), |n| n.to_string()),
-                layout.plt_first.map_or("не видно", |plt| if plt { "есть" } else { "нет" }),
-                if gml_text(&head).is_some() { "есть" } else { "нет" });
-        }
-        Err(why) => veldsdk::log::debug!(target: "perf", "jp2 {}×{}: {}", width, height, why),
+    let layout = codestream(&head)?;
+    // Ненулевое начало холста сдвигает уменьшенную решётку декодера на пиксель
+    // против лестницы пирамиды (ADR 0002): такой файл не читается, а не
+    // читается со швами.
+    if layout.origin != (0, 0) || layout.tile_origin != (0, 0) {
+        return Err(format!(
+            "jp2: начало холста {:?} и сетки тайлов {:?} не в нуле — уменьшенная решётка \
+             декодера разошлась бы с лестницей пирамиды",
+            layout.origin, layout.tile_origin
+        ));
     }
-    let mut info = Info::plain(width, height, Kind::Jp2 { len });
-    info.placement = gml_placement(&head, width, height);
+    if (layout.canvas.0 - layout.origin.0, layout.canvas.1 - layout.origin.1) != (width, height) {
+        return Err("jp2: размеры контейнера и кодстрима разошлись".to_string());
+    }
+    let (across, down) = layout.grid();
+    veldsdk::log::debug!(target: "perf",
+        "jp2 {}×{}: тайлов {}×{} по {}×{}, компонент {}, разрешений {}, \
+         прогрессия {}, слоёв {}, тайл-партов в TLM {}, PLT у первого тайл-парта {}, GML {}",
+        width, height, across, down, layout.tile.0, layout.tile.1,
+        layout.components, layout.resolutions, layout.progression, layout.layers,
+        layout.tlm_parts.map_or("нет TLM".to_string(), |n| n.to_string()),
+        layout.plt_first.map_or("не видно", |plt| if plt { "есть" } else { "нет" }),
+        if gml_text(&head).is_some() { "есть" } else { "нет" });
+
+    let format = match head.starts_with(CODESTREAM_MAGIC) {
+        true => Format::J2k,
+        false => Format::Jp2,
+    };
+    let placement = gml_placement(&head, width, height);
+    let nodata = placement.is_some().then_some(0.0);
+    let mut info = Info::plain(width, height, Kind::Jp2(Layout::of(&layout, len, format, nodata)));
+    info.placement = placement;
     Ok(info)
 }
 
@@ -249,164 +297,156 @@ fn pair(values: Vec<f64>) -> Option<(f64, f64)> {
     }
 }
 
-/// Влезает ли декод уровня `w`×`h` в бюджет декодера — по тем же [`estimate`]
-/// и [`DECODE_BUDGET`], которыми [`produce`] потом и отказывает. Спрашивает
-/// это таблица уровней (`adapters::table`): заказчику незачем просить то, что
-/// заведомо получит отказ.
-pub(super) fn fits(len: u64, w: u32, h: u32) -> bool {
-    estimate(len, w, h) <= DECODE_BUDGET
+/// Чанки JP2 за трейтом драйвера: декодер на факторе образа, растяг файла и
+/// ключ «нет данных». Читатели заводятся здесь же: кодеку нужен свой поток, и
+/// смена фактора — это новый кодек над новым читателем того же ресурса.
+pub struct Chunks<'a> {
+    resource: u64,
+    layout: &'a Layout,
+    bytes: Rc<Cell<u64>>,
+    decoder: Option<(u32, Decoder<Metered>)>,
 }
 
-pub fn produce(
-    mut reader: Metered,
-    len: u64,
+impl<'a> Chunks<'a> {
+    pub fn new(resource: u64, layout: &'a Layout, bytes: Rc<Cell<u64>>) -> Self {
+        Self { resource, layout, bytes, decoder: None }
+    }
+
+    /// Декодер на факторе `factor` — готовый или открытый заново.
+    fn aim(&mut self, factor: u32) -> Result<&mut Decoder<Metered>, String> {
+        if !matches!(&self.decoder, Some((at, _)) if *at == factor) {
+            let reader = Metered::new(self.resource, self.layout.len, self.bytes.clone());
+            let decoder = Decoder::open(reader, self.layout.len, self.layout.format, factor)
+                .map_err(|why| format!("jp2: {}", why))?;
+            let header = decoder.header();
+            if header.uneven {
+                return Err("jp2: компоненты разной решётки или разрядности не разложить в RGBA".to_string());
+            }
+            if header.components == 0 || header.components > 4 {
+                return Err(format!("jp2: {} компонентов не разложить в RGBA", header.components));
+            }
+            self.decoder = Some((factor, decoder));
+        }
+        Ok(&mut self.decoder.as_mut().expect("декодер только что открыт").1)
+    }
+
+    /// Растяг файла — готовый либо посчитанный по выборке самой мелкой копии
+    /// и запомненный. Байтовым отсчётам растяг не нужен: у них тождество и
+    /// ключ «нет данных».
+    fn mapping(&mut self) -> Result<Mapping, String> {
+        if let Some(ready) = *self.layout.stretch.borrow() {
+            return Ok(ready);
+        }
+        // Раскладка берётся ссылкой до декодера: тот заимствует `self` целиком.
+        let layout = self.layout;
+        let nodata = layout.nodata;
+        let coarsest = layout.grid.overviews.len() as u32;
+        let decoder = self.aim(coarsest)?;
+        let header = decoder.header();
+        let built = match header.precision <= 8 {
+            true => Mapping::identity(nodata),
+            false => {
+                // Выборка — четыре тайла вразброс по сетке кодстрима, на самом
+                // мелком факторе, прореженные до общего порога выборки; цвет
+                // берётся из первого компонента. Сетка тайлов у кодека одна на
+                // все факторы, и считать её по уменьшенному чанку нельзя.
+                let mut values = Vec::new();
+                let total = layout.tiles.0 * layout.tiles.1;
+                let mut picks = [0, total / 3, 2 * total / 3, total.saturating_sub(1)].to_vec();
+                picks.dedup();
+                let offset = sample_offset(header);
+                for &index in &picks {
+                    decoder.tile(index, |tile| {
+                        let plane = tile.planes[0];
+                        let step = (plane.len() * picks.len() / radiometry::STRETCH_SAMPLES).max(1);
+                        for at in (0..plane.len()).step_by(step) {
+                            let v = (plane[at] + offset) as f32;
+                            if radiometry::is_data(v, nodata) {
+                                values.push(v);
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+                match percentile_stretch(&mut values) {
+                    Some((lo, hi)) => Mapping::stretched(lo, hi, nodata),
+                    None => Mapping::identity(nodata),
+                }
+            }
+        };
+        *layout.stretch.borrow_mut() = Some(built);
+        Ok(built)
+    }
+}
+
+impl Chunked for Chunks<'_> {
+    fn chunk(&mut self, image: usize, index: u32) -> Result<(Vec<u8>, u32, u32), String> {
+        let mapping = self.mapping()?;
+        let decoder = self.aim(image as u32)?;
+        let header = decoder.header();
+        decoder.tile(index, |tile| Ok((rgba(tile, header, &mapping), tile.width, tile.height)))
+    }
+}
+
+/// Сдвиг, переводящий знаковый отсчёт в беззнаковый той же разрядности.
+fn sample_offset(header: Header) -> i32 {
+    match header.signed {
+        true => 1 << header.precision.saturating_sub(1).min(30),
+        false => 0,
+    }
+}
+
+/// Плоскости тайла — в RGBA по раскладке пикселя: отсчёты до байта
+/// дотягиваются до байта сдвигом, шире байта идут через растяг файла.
+fn rgba(tile: &Tile<'_>, header: Header, mapping: &Mapping) -> Vec<u8> {
+    let pixels = (tile.width as usize) * (tile.height as usize);
+    let channels = tile.planes.len();
+    let pixel = Pixel::named(channels);
+    let offset = sample_offset(header);
+    if header.precision <= 8 {
+        let top = (1i32 << header.precision) - 1;
+        let shift = 8 - header.precision;
+        let mut samples = vec![0u8; pixels * channels];
+        for (c, plane) in tile.planes.iter().enumerate() {
+            for (at, value) in plane.iter().take(pixels).enumerate() {
+                samples[at * channels + c] = (((value + offset).clamp(0, top)) << shift) as u8;
+            }
+        }
+        return mapping.rgba(&Samples::U8(&samples), pixel, pixels);
+    }
+    let mut samples = vec![0u16; pixels * channels];
+    for (c, plane) in tile.planes.iter().enumerate() {
+        for (at, value) in plane.iter().take(pixels).enumerate() {
+            samples[at * channels + c] = (value + offset).clamp(0, i32::from(u16::MAX)) as u16;
+        }
+    }
+    mapping.rgba(&Samples::U16(&samples), pixel, pixels)
+}
+
+/// Точечное чтение тайлов уровня — драйвером по тайлам кодстрима.
+pub fn produce_direct(
+    resource: u64,
+    bytes: &Rc<Cell<u64>>,
     info: &Info,
+    layout: &Layout,
     level: u32,
+    wants: &[(u32, u32)],
     emit: Emit,
 ) -> Result<(), String> {
-    let lw = pyramid::level_size(info.width, level);
-    let lh = pyramid::level_size(info.height, level);
-    // Быстрый отказ до чтения файла: запрошенный уровень — нижняя граница
-    // памяти декода.
-    let cost = estimate(len, lw, lh);
-    if cost > DECODE_BUDGET {
-        return Err(format!(
-            "jp2: уровень {}×{} не влезает в бюджет декодера (≈{} МиБ) — возьмите уровень грубее",
-            lw, lh, cost >> 20
-        ));
-    }
-
-    // Файл целиком: декодеру нужен непрерывный срез. Через Metered — чтение
-    // и есть та часть прохода, чей ход стоит показывать.
-    let mut data = Vec::with_capacity(len as usize);
-    reader.read_to_end(&mut data).map_err(|e| format!("jp2: чтение: {}", e))?;
-
-    let settings = DecodeSettings {
-        target_resolution: Some((lw, lh)),
-        ..DecodeSettings::default()
-    };
-    let image = Image::new(&data, &settings).map_err(|e| format!("jp2: {:?}", e))?;
-    match image.color_space() {
-        ColorSpace::Gray | ColorSpace::RGB => {}
-        // ICC-профиль не применяется — для превью числа берутся как есть.
-        ColorSpace::Icc { .. } => {}
-        // Кодопоток без бокса цвета — обычный JP2, а не поломка: чем считать
-        // компоненты, там просто не сказано. Сколько их и сходятся ли они по
-        // длине, проверяется ниже по самим компонентам, а не по имени модели.
-        ColorSpace::Unknown { .. } => {}
-        other => return Err(format!("jp2: цветовая модель {:?} не поддерживается", other)),
-    }
-
-    // Фактические размеры декода известны только теперь (см. заголовок файла:
-    // огрубление — пожелание) — бюджет пересчитывается до самого декода.
-    let (dw, dh) = (image.width(), image.height());
-    let cost = estimate(len, dw, dh);
-    if cost > DECODE_BUDGET {
-        return Err(format!(
-            "jp2: файл не даёт декодировать грубее {}×{}, а это не влезает в бюджет (≈{} МиБ)",
-            dw, dh, cost >> 20
-        ));
-    }
-    let base = ladder_level(info.width, info.height, dw, dh, level).ok_or_else(|| {
-        format!("jp2: декод {}×{} мимо лестницы пирамиды {}×{}", dw, dh, info.width, info.height)
-    })?;
-
-    let mut ctx = DecoderContext::default();
-    let decoded = image.decode(&mut ctx).map_err(|e| format!("jp2: {:?}", e))?;
-    let components = decoded.components();
-    let channels = components.len();
-    if channels == 0 || channels > 4 {
-        return Err(format!("jp2: {} компонентов не разложить в RGBA", channels));
-    }
-    if components.iter().any(|c| c.samples().len() != components[0].samples().len()) {
-        return Err("jp2: субдискретизация компонентов не поддерживается".to_string());
-    }
-    if components[0].samples().len() != (dw as usize) * (dh as usize) {
-        return Err(format!(
-            "jp2: декод отдал {} сэмплов вместо {}×{}",
-            components[0].samples().len(),
-            dw,
-            dh
-        ));
-    }
-
-    let samples = decoded.data_u8();
-    drop(data);
-
-    let mut rgba = to_rgba(&samples, Pixel::named(channels), (dw as usize) * (dh as usize));
-    drop(samples);
-
-    // У файлов без собственной альфы поля гранулы приезжают нулём: у
-    // Sentinel-2 ноль зарезервирован под «нет данных» (валидные значения —
-    // 1..255). Прозрачность здесь, а не у потребителей: тайл — готовый RGBA.
-    if matches!(channels, 1 | 3) {
-        key_margins(&mut rgba, dw, dh);
-    }
-
-    let mut cascade = Cascade::new(base, dw, dh);
-    cascade.push_rows(&rgba, dh, emit)?;
-    cascade.finish(emit)
+    let mut chunks = Chunks::new(resource, layout, bytes.clone());
+    grid::direct(&mut chunks, &layout.grid, (info.width, info.height), level, wants, emit)
 }
 
-/// Прозрачность полей: заливка от краёв кадра по нулевым пикселям. Выбить
-/// весь чёрный нельзя — настоящему чёрному в произвольном JP2 никто не
-/// запрещал быть, — а поле гранулы от него отличается ровно тем, что
-/// примыкает к краю. Внутренние нули остаются цветом.
-fn key_margins(rgba: &mut [u8], w: u32, h: u32) {
-    let (w, h) = (w as usize, h as usize);
-    if w == 0 || h == 0 {
-        return;
-    }
-    let zero = |rgba: &[u8], px: usize| rgba[px * 4..px * 4 + 3] == [0, 0, 0];
-
-    let mut seen = vec![false; w * h];
-    let mut queue: Vec<usize> = Vec::new();
-    let push = |rgba: &[u8], seen: &mut [bool], queue: &mut Vec<usize>, px: usize| {
-        if !seen[px] && zero(rgba, px) {
-            seen[px] = true;
-            queue.push(px);
-        }
-    };
-
-    for x in 0..w {
-        push(rgba, &mut seen, &mut queue, x);
-        push(rgba, &mut seen, &mut queue, (h - 1) * w + x);
-    }
-    for y in 0..h {
-        push(rgba, &mut seen, &mut queue, y * w);
-        push(rgba, &mut seen, &mut queue, y * w + w - 1);
-    }
-
-    while let Some(px) = queue.pop() {
-        rgba[px * 4 + 3] = 0;
-        let (x, y) = (px % w, px / w);
-        if x > 0 {
-            push(rgba, &mut seen, &mut queue, px - 1);
-        }
-        if x + 1 < w {
-            push(rgba, &mut seen, &mut queue, px + 1);
-        }
-        if y > 0 {
-            push(rgba, &mut seen, &mut queue, px - w);
-        }
-        if y + 1 < h {
-            push(rgba, &mut seen, &mut queue, px + w);
-        }
-    }
-}
-
-/// Пик памяти прохода при декоде в w×h: сам файл, f32-плоскости декодера
-/// (до четырёх каналов), его интерливленный u8-выход и RGBA.
-pub(super) fn estimate(file_len: u64, w: u32, h: u32) -> u64 {
-    file_len + u64::from(w) * u64::from(h) * (4 * 4 + 4 + 4)
-}
-
-/// Уровень пирамиды с такими размерами, от нулевого до `up_to`. Декод обязан
-/// лежать на ceil-лестнице пирамиды — размеры мимо неё значат, что декодер
-/// считает пропуск иначе, и доверять его выходу нельзя.
-fn ladder_level(width: u32, height: u32, dw: u32, dh: u32, up_to: u32) -> Option<u32> {
-    (0..=up_to)
-        .find(|k| (pyramid::level_size(width, *k), pyramid::level_size(height, *k)) == (dw, dh))
+/// Проход по тайлам кодстрима на родном разрешении — драйвером.
+pub fn produce_pass(
+    resource: u64,
+    bytes: &Rc<Cell<u64>>,
+    info: &Info,
+    layout: &Layout,
+    emit: Emit,
+) -> Result<(), String> {
+    let mut chunks = Chunks::new(resource, layout, bytes.clone());
+    grid::pass(&mut chunks, &layout.grid, (info.width, info.height), emit)
 }
 
 // ── Разбор заголовка без декодера ──────────────────────────────
@@ -985,38 +1025,57 @@ mod tests {
         assert_eq!(step(16, 32, 4096), 48);
     }
 
+    /// Ключ «нет данных»: ноль всеми цветовыми каналами — прозрачность, и
+    /// только у файла, которому он назначен; знаковые отсчёты сдвигаются в
+    /// беззнаковые, разрядность до байта дотягивается до байта.
     #[test]
-    fn ladder_level_locates_actual_decode_step() {
-        // Нечётные стороны: ceil-деление, как у pyramid::level_size.
-        assert_eq!(ladder_level(1301, 523, 1301, 523, 3), Some(0));
-        assert_eq!(ladder_level(1301, 523, 651, 262, 3), Some(1));
-        // Грубее запрошенного декод не бывает — глубже up_to не ищется.
-        assert_eq!(ladder_level(1301, 523, 326, 131, 1), None);
-        // floor-лестница (650 = 1301/2 с округлением вниз) — не наша.
-        assert_eq!(ladder_level(1301, 523, 650, 262, 3), None);
+    fn samples_become_rgba_by_the_file_rules() {
+        let planes = [vec![0, 200, 0], vec![0, 100, 0], vec![0, 50, 7]];
+        let tile = Tile { x0: 0, y0: 0, width: 3, height: 1, planes: planes.iter().map(|p| p.as_slice()).collect() };
+        let header = Header { x0: 0, y0: 0, width: 3, height: 1, components: 3, precision: 8, signed: false, uneven: false };
+        let keyed = rgba(&tile, header, &Mapping::identity(Some(0.0)));
+        assert_eq!(&keyed[0..4], &[0, 0, 0, 0], "ноль всеми каналами — поле");
+        assert_eq!(&keyed[4..8], &[200, 100, 50, 255]);
+        assert_eq!(&keyed[8..12], &[0, 0, 7, 255], "ноль не всеми каналами — цвет");
+        let plain = rgba(&tile, header, &Mapping::identity(None));
+        assert_eq!(&plain[0..4], &[0, 0, 0, 255], "без ключа поле — чёрный цвет");
+
+        let signed = [vec![-8, 7]];
+        let tile = Tile { x0: 0, y0: 0, width: 2, height: 1, planes: signed.iter().map(|p| p.as_slice()).collect() };
+        let header = Header { precision: 4, signed: true, components: 1, width: 2, ..header };
+        let grey = rgba(&tile, header, &Mapping::identity(None));
+        assert_eq!(&grey[0..4], &[0, 0, 0, 255], "минимум знакового — ноль");
+        assert_eq!(&grey[4..8], &[240, 240, 240, 255], "максимум четырёх бит — почти байт");
     }
 
+    /// Раскладка драйвера из главного заголовка: чанк — тайл кодстрима, копии —
+    /// пока тайл делится на два, глубина — по плоскостям декодера.
     #[test]
-    fn budget_refuses_native_tci_but_takes_overview() {
-        // TCI Sentinel-2: 10980² в родном разрешении — за потолком,
-        // уровень 2 — в бюджете.
-        assert!(estimate(120 << 20, 10980, 10980) > DECODE_BUDGET);
-        assert!(estimate(120 << 20, 2745, 2745) <= DECODE_BUDGET);
-    }
+    fn the_layout_follows_the_codestream() {
+        let cs = Codestream {
+            canvas: (10980, 10980),
+            origin: (0, 0),
+            tile: (1024, 1024),
+            tile_origin: (0, 0),
+            components: 3,
+            resolutions: 5,
+            progression: 0,
+            layers: 1,
+            tlm_parts: Some(121),
+            plt_first: Some(true),
+        };
+        let layout = Layout::of(&cs, 130 << 20, Format::Jp2, Some(0.0));
+        assert_eq!(layout.grid.chunk, (1024, 1024));
+        assert_eq!(layout.tiles, (11, 11));
+        assert_eq!(layout.grid.overviews.len(), 4, "четыре копии при пяти разрешениях");
+        assert_eq!((layout.grid.overviews[3].width, layout.grid.overviews[3].chunk), (687, (64, 64)));
+        assert_eq!(layout.grid.depth, 3 * SAMPLE_BYTES);
 
-    #[test]
-    fn margins_key_edge_connected_zeros_only() {
-        // 3×3: нулевой угол — поле, нулевой центр — настоящий чёрный.
-        let mut rgba = Vec::new();
-        for v in [0u8, 5, 5, 5, 0, 5, 5, 5, 5] {
-            rgba.extend_from_slice(&[v, v, v, 255]);
-        }
-        key_margins(&mut rgba, 3, 3);
-        let alphas: Vec<u8> = rgba.chunks(4).map(|px| px[3]).collect();
-        assert_eq!(alphas, vec![0, 255, 255, 255, 255, 255, 255, 255, 255]);
-        // Цвет ключёванного не трогается: усреднение взвешено по альфе, и
-        // кромёжный пиксель не обязан быть чёрным заранее.
-        assert_eq!(&rgba[..3], &[0, 0, 0]);
+        // Копии кончаются там, где тайл перестаёт делиться на два: у 300
+        // это фактор 3, у нечётного тайла копий нет вовсе.
+        let even = Codestream { tile: (300, 300), canvas: (600, 600), ..cs };
+        assert_eq!(Layout::of(&even, 1, Format::J2k, None).grid.overviews.len(), 2);
+        let odd = Codestream { tile: (301, 301), canvas: (602, 602), ..cs };
+        assert!(Layout::of(&odd, 1, Format::J2k, None).grid.overviews.is_empty());
     }
 }
-

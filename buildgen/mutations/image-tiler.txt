@@ -50,3 +50,18 @@
 файл: veldmodules/image-tiler/src/budget.rs
 было: self.total() <= free()
 стало: true
+
+имя: копии JP2 не обрываются на неделимом тайле
+файл: veldmodules/image-tiler/src/adapters/jp2.rs
+было: .take_while(|factor| tw % (1 << factor) == 0 && th % (1 << factor) == 0)
+стало: .take_while(|_| true)
+
+имя: знаковый отсчёт не сдвигается в беззнаковый
+файл: veldmodules/image-tiler/src/adapters/jp2.rs
+было: true => 1 << header.precision.saturating_sub(1).min(30),
+стало: true => 0,
+
+имя: отказ кодека не выбрасывает кодек
+файл: veldmodules/image-tiler/src/adapters/codec.rs
+было: self.dead = true;
+стало: self.dead = self.dead;

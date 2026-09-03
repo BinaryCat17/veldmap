@@ -166,6 +166,10 @@ pub mod calls {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn init() -> i32 {
+    // Ключи thread-local модуля — свои, не libc (см. `veldsdk::tsd`); ссылка
+    // здесь затем, чтобы их определения попали в модуль при линковке.
+    #[cfg(target_arch = "wasm32")]
+    let _ = veldsdk::tsd::linked();
     let _ = veldsdk::logging::init();
     // Конфиг приезжает входом вызова: хост кладёт его и при загрузке, и при
     // каждом воскрешении (см. plugins::PluginSpec::run_init) — второго пути нет.

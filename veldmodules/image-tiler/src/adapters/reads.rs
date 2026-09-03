@@ -18,6 +18,7 @@ use veldsdk::fake;
 
 use super::super::pyramid::{self, TILE};
 use super::super::resample::halve;
+use super::codec::fixture::{gray_j2k, tiled_j2k};
 use super::grid::Overview;
 use super::tiff::{self, Layout};
 use super::table::Serve;
@@ -346,4 +347,137 @@ fn reach_and_the_produce_branch_agree() {
         }
     }
     assert!(partial_seen, "ни одна раскладка не дала окно на части уровней — таблица проверяет не всё");
+}
+
+// ── JPEG 2000 ──────────────────────────────────────────────────
+
+/// Шум, который не сжимается: файл выходит ростом с растр, и окна чтения одного
+/// тайла отличимы от чтения всего файла.
+fn noise(width: u32, height: u32) -> Vec<u8> {
+    let mut state = 0x9E37_79B9u32;
+    (0..width * height * 3)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// Тайл-парты сырого кодстрима по маркерам SOT: (смещение, длина Psot).
+fn tile_parts(j2k: &[u8]) -> Vec<(u64, u64)> {
+    let mut parts = Vec::new();
+    let mut at = 2usize;
+    while at + 4 <= j2k.len() && j2k[at] == 0xFF {
+        match j2k[at + 1] {
+            0x90 => {
+                let psot = u32::from_be_bytes(j2k[at + 6..at + 10].try_into().unwrap()) as usize;
+                let len = if psot == 0 { j2k.len() - at } else { psot };
+                parts.push((at as u64, len as u64));
+                at += len;
+            }
+            0xD9 => break,
+            _ => at += 2 + usize::from(u16::from_be_bytes([j2k[at + 2], j2k[at + 3]])),
+        }
+    }
+    parts
+}
+
+/// Описание JPEG 2000 читает только голову файла: сетку тайлов и разрешения
+/// даёт главный заголовок, кодек не запускается.
+#[test]
+fn describing_a_jp2_reads_the_head_only() {
+    fake::install();
+    let (w, h) = (2 * TILE, 2 * TILE);
+    let file = tiled_j2k(w, h, TILE, 3, &noise(w, h));
+    assert!(file.len() as u64 > 8 * WINDOW, "фикстура обязана быть в несколько окон");
+    let handle = fake::mount(file);
+
+    let info = described(&handle);
+    let Kind::Jp2(layout) = &info.kind else { panic!("не JP2") };
+    assert_eq!(layout.grid.chunk, (TILE, TILE));
+    assert_eq!(layout.grid.overviews.len(), 2, "две копии при трёх разрешениях");
+    let asked = windows();
+    assert!(asked.iter().all(|win| overlaps(*win, (0, WINDOW))), "описание ушло за голову: {:?}", asked);
+}
+
+/// Тайл нулевого уровня стои́т своего тайл-парта и заголовков вокруг него,
+/// не чужих данных. Цена названа точно: до своего тайла кодек читает
+/// заголовки SOT предыдущих (по окну читателя на каждый), а на первом тайле
+/// кодека — ещё и всех последующих до конца кодстрима: так OpenJPEG сверяет
+/// число тайл-партов (issue 254), и делает это один раз на кодек. Второй тайл
+/// того же заказа идёт от последнего прочитанного SOT и ничего лишнего не
+/// читает. Сам тайл приезжает без потерь.
+#[test]
+fn a_jp2_tile_reads_its_tile_part_and_only_headers_beyond() {
+    fake::install();
+    let (w, h) = (4 * TILE, 4 * TILE);
+    let rgb = noise(w, h);
+    let file = tiled_j2k(w, h, TILE, 3, &rgb);
+    let parts = tile_parts(&file);
+    assert_eq!(parts.len(), 16, "по тайл-парту на тайл");
+    let len = file.len() as u64;
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    let head = fake::reads().len();
+
+    let tiles = produced(&handle, &info, 0, &[(1, 1), (2, 1)]);
+    assert_eq!(tiles.len(), 2);
+    assert_eq!(tiles[0].0, (0, 1, 1));
+    assert_eq!(tiles[0].1, rgb_to_rgba(&tile_bytes(&rgb, w, h, 1, 1)), "обратимый тайл разошёлся с исходником");
+    assert_eq!(tiles[1].1, rgb_to_rgba(&tile_bytes(&rgb, w, h, 2, 1)));
+
+    // Данные читались только у своих двух тайл-партов (5 и 6); окна, лежащие
+    // за ними, начинаются ровно на SOT чужого тайл-парта либо на EOC — это
+    // заголовки, и их не больше, чем тайл-партов за своими.
+    let asked = &windows()[head..];
+    let own = (parts[5].0, parts[6].0 + parts[6].1 - parts[5].0);
+    assert!(asked.iter().any(|win| overlaps(*win, own)), "свои тайл-парты не читались: {:?}", asked);
+    let beyond: Vec<(u64, u64)> = asked.iter().copied().filter(|win| win.0 >= own.0 + own.1).collect();
+    let headers_only = beyond
+        .iter()
+        .all(|win| parts.iter().any(|part| part.0 == win.0) || win.0 == len - 2);
+    assert!(headers_only, "за своими тайл-партами читались данные: {:?}", beyond);
+    assert!(beyond.len() <= parts.len() - 7 + 1, "чужих заголовков прочитано больше, чем есть: {:?}", beyond);
+}
+
+/// Вырожденная сетка (тайл 8×8, как у квиклука PVI) идёт проходом, и проход
+/// отдаёт растр без потерь.
+#[test]
+fn a_degenerate_jp2_grid_goes_by_a_lossless_pass() {
+    fake::install();
+    let (w, h) = (96u32, 64u32);
+    let rgb = noise(w, h);
+    let handle = fake::mount(tiled_j2k(w, h, 8, 2, &rgb));
+    let info = described(&handle);
+    assert!(info.levels().iter().all(|row| row.serve == Serve::Pass { from: 0 }), "сетка 8×8 вырождена");
+
+    let tiles = produced(&handle, &info, 0, &[(0, 0)]);
+    assert_eq!(tiles.len(), 1, "один уровень — один тайл");
+    assert_eq!(tiles[0].1, rgb_to_rgba(&rgb));
+}
+
+/// Полоса шире байта (12 бит, как у Sentinel-2 кроме TCI) с копиями читается
+/// через растяг файла: выборка берётся по сетке тайлов кодстрима, а не по
+/// уменьшенному чанку, и уровень из копии приезжает с яркостью, а не пустым.
+#[test]
+fn a_twelve_bit_band_with_overviews_is_stretched() {
+    fake::install();
+    // Ширина в четыре тайла: на уровне 1 их два, и градиент виден между ними.
+    let (w, h, tile) = (4 * TILE, 2 * TILE, 256u32);
+    let samples: Vec<u16> = (0..w * h).map(|at| ((at % w) * 4095 / (w - 1)) as u16).collect();
+    let handle = fake::mount(gray_j2k(w, h, tile, 3, 12, &samples));
+    let info = described(&handle);
+    let Kind::Jp2(layout) = &info.kind else { panic!("не JP2") };
+    assert_eq!(layout.grid.overviews.len(), 2);
+
+    // Уровень 1 — из копии на факторе 1: и растяг, и тайлы на уменьшенной сетке.
+    let tiles = produced(&handle, &info, 1, &[(0, 0), (1, 0)]);
+    assert_eq!(tiles.len(), 2);
+    let (left, right) = (&tiles[0].1, &tiles[1].1);
+    assert!(left.iter().step_by(4).any(|v| *v > 0), "левый тайл пуст");
+    let mean = |rgba: &Vec<u8>| rgba.iter().step_by(4).map(|v| u64::from(*v)).sum::<u64>() / (rgba.len() as u64 / 4);
+    assert!(mean(right) > mean(left), "градиент растёт слева направо: {} против {}", mean(left), mean(right));
+    assert!(left.iter().skip(3).step_by(4).all(|a| *a == 255), "без ключа nodata прозрачных нет");
 }

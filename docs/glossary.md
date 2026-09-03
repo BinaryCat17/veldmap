@@ -21,7 +21,7 @@ and in the logs. Where one word carries two senses in the tree, both are given.
 | fingerprint | отпечаток | the identity of raster bytes for the tile cache: length, head, tail, plus tile side and decode revision |
 | pyramid, level, tile | пирамида, уровень, тайл | level 0 is native resolution and each level halves it; a tile is `TILE` pixels square |
 | overview | копия | a reduced copy of the raster stored inside the same TIFF |
-| chunk | чанк | the smallest readable unit of a raster file: a TIFF tile or strip, an HDF5 chunk |
+| chunk | чанк | the smallest readable unit of a raster file: a TIFF tile or strip, a JPEG 2000 codestream tile, an HDF5 chunk |
 | pass | проход | one sequential read of a source that builds levels through the cascade |
 | pointwise reading | точечное чтение | reading only the chunks under the requested tiles |
 | cascade | каскад | the tiler's downscaling chain that turns rows of its base level — level 0, or the level a decoder produced — into tiles of every coarser level |

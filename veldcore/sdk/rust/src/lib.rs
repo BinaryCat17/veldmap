@@ -27,6 +27,10 @@ pub mod runtime;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fake;
 
+/// Ключи thread-local однопоточного модуля — перекрывают libc реактора.
+#[cfg(target_arch = "wasm32")]
+pub mod tsd;
+
 pub use serde_json;
 pub use prost;
 pub use anyhow;

@@ -17,6 +17,7 @@ use image::ImageFormat;
 use super::cascade::Emit;
 use super::pyramid;
 
+pub mod codec;
 pub mod full;
 pub mod grid;
 pub mod jp2;
@@ -140,9 +141,8 @@ pub enum Kind {
     /// PNG потоком по строкам; чересстрочный (Adam7) — кадром целиком.
     Png { interlaced: bool },
     Jpeg,
-    /// JPEG 2000: декодируется целиком, но сразу в масштаб уровня (пропуск
-    /// уровней DWT); бюджет декодера считается от длины файла (`jp2::estimate`).
-    Jp2 { len: u64 },
+    /// JPEG 2000: тайлы кодстрима — чанки драйвера, копии — уровни разрешения.
+    Jp2(jp2::Layout),
     Tiff(tiff::Layout),
     /// Форматы без потокового пути: декодируются целиком, они малы по природе.
     Full(ImageFormat),
@@ -290,7 +290,7 @@ pub fn produce(
     bytes: &Rc<Cell<u64>>,
     emit: Emit,
 ) -> Result<(), String> {
-    let reader = Metered::new(resource_id, len, bytes.clone());
+    let reader = || Metered::new(resource_id, len, bytes.clone());
     let row = info.level(level).ok_or_else(|| {
         format!("уровня {} нет: у растра их {}", level, pyramid::level_count(info.width, info.height))
     })?;
@@ -301,15 +301,19 @@ pub fn produce(
         // приезжает медленно; уровень, взятый отказом, не приезжает никогда —
         // поэтому точечным таблица называет только то, что драйвер отдаст.
         (Kind::Tiff(layout), table::Serve::Pointwise) => {
-            tiff::produce_direct(reader, info, layout, level, wants, emit)
+            tiff::produce_direct(reader(), info, layout, level, wants, emit)
         }
-        (Kind::Tiff(layout), table::Serve::Pass { .. }) => tiff::produce_pass(reader, info, layout, emit),
+        (Kind::Tiff(layout), table::Serve::Pass { .. }) => tiff::produce_pass(reader(), info, layout, emit),
+        // Кодеку нужен свой поток на каждый фактор, и читателей JP2 заводит сам.
+        (Kind::Jp2(layout), table::Serve::Pointwise) => {
+            jp2::produce_direct(resource_id, bytes, info, layout, level, wants, emit)
+        }
+        (Kind::Jp2(layout), table::Serve::Pass { .. }) => jp2::produce_pass(resource_id, bytes, info, layout, emit),
         // У остальных путь один, и строка таблицы говорит лишь, откуда он
         // начинается.
-        (Kind::Png { .. }, _) => png::produce_pass(reader, info, emit),
-        (Kind::Jpeg, _) => jpeg::produce(reader, info, level, emit),
-        (Kind::Jp2 { .. }, _) => jp2::produce(reader, len, info, level, emit),
-        (Kind::Full(format), _) => full::produce(reader, info, *format, emit),
+        (Kind::Png { .. }, _) => png::produce_pass(reader(), info, emit),
+        (Kind::Jpeg, _) => jpeg::produce(reader(), info, level, emit),
+        (Kind::Full(format), _) => full::produce(reader(), info, *format, emit),
         // Файл уже прочитан описанием, и читателя этому проходу не нужно.
         (Kind::Netcdf(source), _) => netcdf::produce(info, source, emit),
     }

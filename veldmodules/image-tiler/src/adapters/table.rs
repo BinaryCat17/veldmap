@@ -6,14 +6,13 @@
 //! Строки считаются по заголовку, без пикселей: у TIFF по сетке чанков
 //! (`Grid::footprint`), у остальных по кадру и правилам их декодеров. Пик —
 //! `budget::Peak`, столбец «влезает» — его сверка со свободным вместе с
-//! потолком пути, если у пути он свой: `FULL_DECODE_BUDGET` у кадра целиком,
-//! `jp2::DECODE_BUDGET` у декодера JPEG 2000 до его замены (ADR 0002).
+//! потолком пути, если у пути он свой: `FULL_DECODE_BUDGET` у кадра целиком.
 
 use super::super::budget::Peak;
 use super::super::cascade;
 use super::super::pyramid;
 use super::grid::Overview;
-use super::{frame_fits, jp2, jpeg, netcdf, Info, Kind, Tie};
+use super::{frame_fits, jpeg, netcdf, Info, Kind, Tie};
 use crate::proto::image_tiler::Reach;
 
 /// Как уровень обслуживается.
@@ -51,17 +50,20 @@ impl Info {
             .map(|level| {
                 let lw = pyramid::level_size(self.width, level);
                 let lh = pyramid::level_size(self.height, level);
+                // Сетка чанков — точечно, где окно и правда окно, иначе проходом.
+                let chunked = |grid: &super::grid::Grid| match grid.footprint(base, level) {
+                    Some(footprint) => {
+                        let peak = grid.direct_peak(base, level).expect("уровень точечный");
+                        Level { serve: Serve::Pointwise, pixels: footprint.held, fits: peak.fits(), peak }
+                    }
+                    None => {
+                        let peak = grid.pass_peak(base);
+                        pass(peak.clone(), peak.fits())
+                    }
+                };
                 match &self.kind {
-                    Kind::Tiff(layout) => match layout.grid.footprint(base, level) {
-                        Some(footprint) => {
-                            let peak = layout.grid.direct_peak(base, level).expect("уровень точечный");
-                            Level { serve: Serve::Pointwise, pixels: footprint.held, fits: peak.fits(), peak }
-                        }
-                        None => {
-                            let peak = layout.grid.pass_peak(base);
-                            pass(peak.clone(), peak.fits())
-                        }
-                    },
+                    Kind::Tiff(layout) => chunked(&layout.grid),
+                    Kind::Jp2(layout) => chunked(&layout.grid),
                     // Потоковый PNG: строка и полосы каскада.
                     Kind::Png { interlaced: false } => {
                         let peak = Peak::new()
@@ -92,13 +94,6 @@ impl Info {
                             peak,
                         }
                     }
-                    // Декодер читает файл целиком и считает свой пик сам.
-                    Kind::Jp2 { len } => Level {
-                        serve: Serve::Pass { from: level },
-                        pixels: whole,
-                        fits: jp2::fits(*len, lw, lh),
-                        peak: Peak::new().with("декод", jp2::estimate(*len, lw, lh)),
-                    },
                     // Плоскость уже осела в разборе; проход разворачивает её полосами.
                     Kind::Netcdf(source) => {
                         let peak = Peak::new()
@@ -161,8 +156,9 @@ impl Info {
         let ties = (self.ties.len() * std::mem::size_of::<Tie>()) as u64;
         let kind = match &self.kind {
             Kind::Tiff(layout) => (layout.grid.overviews.len() * std::mem::size_of::<Overview>()) as u64,
+            Kind::Jp2(layout) => (layout.grid.overviews.len() * std::mem::size_of::<Overview>()) as u64,
             Kind::Netcdf(source) => source.plane_bytes(),
-            Kind::Png { .. } | Kind::Jpeg | Kind::Jp2 { .. } | Kind::Full(_) => 0,
+            Kind::Png { .. } | Kind::Jpeg | Kind::Full(_) => 0,
         };
         ties + kind
     }
@@ -172,8 +168,28 @@ impl Info {
 mod tests {
     use super::super::super::budget;
     use super::super::super::pyramid::TILE;
+    use super::super::codec::Format;
+    use super::super::jp2;
     use super::super::tiff::Layout;
     use super::*;
+
+    /// TCI гранулы Sentinel-2 как JPEG 2000: 10980², тайлы 1024², пять
+    /// разрешений (ADR 0002).
+    fn tci() -> Info {
+        let codestream = jp2::Codestream {
+            canvas: (10980, 10980),
+            origin: (0, 0),
+            tile: (1024, 1024),
+            tile_origin: (0, 0),
+            components: 3,
+            resolutions: 5,
+            progression: 0,
+            layers: 1,
+            tlm_parts: Some(121),
+            plt_first: Some(true),
+        };
+        Info::plain(10980, 10980, Kind::Jp2(jp2::Layout::of(&codestream, 130 << 20, Format::Jp2, Some(0.0))))
+    }
 
     /// Байт на пиксель RGB8 — таблице геометрии глубина сэмпла безразлична.
     const RGB8: u32 = 3;
@@ -202,7 +218,7 @@ mod tests {
     /// декодер кадра целиком влезает не везде, и таблица это говорит.
     ///
     /// Размеры настоящие: Sentinel-1 GRD полосный и он же COG, Landsat 7,
-    /// квиклук, TCI Sentinel-2 как JPEG 2000.
+    /// квиклук, TCI Sentinel-2 как JPEG 2000 — тайлами кодстрима.
     #[test]
     fn настоящие_размеры_влезают_по_таблице() {
         let sources = [
@@ -210,6 +226,7 @@ mod tests {
             cog(25309, 17408),
             cog(8271, 8391),
             Info::plain(2422, 1940, Kind::Png { interlaced: false }),
+            tci(),
         ];
         for info in &sources {
             let rows = info.levels();
@@ -223,10 +240,10 @@ mod tests {
             assert_eq!(info.finest(), 0, "{}×{}", info.width, info.height);
         }
 
-        let tci = Info::plain(10980, 10980, Kind::Jp2 { len: 120 << 20 });
-        let rows = tci.levels();
-        assert!(!rows[0].fits && !rows[1].fits, "родное и половинное разрешение TCI под hayro не влезают");
-        assert!(rows[2..].iter().all(|row| row.fits), "с уровня 2 влезает всё");
+        // Каждый уровень TCI — точечно из своей копии либо из самой мелкой
+        // (вершине копии не достаётся: разрешений пять, уровней шесть).
+        assert!(tci().levels().iter().all(|row| row.serve == Serve::Pointwise));
+        assert_eq!(tci().reach(), Reach::Exact);
     }
 
     /// Столбец обслуживания выводит три скаляра провода: точечно везде —
@@ -255,14 +272,12 @@ mod tests {
         assert!(jpeg.levels().iter().enumerate().all(|(at, row)| row.serve == Serve::Pass { from: at as u32 }));
     }
 
-    /// Предел детали — первый влезающий уровень: у TCI под hayro это уровень
-    /// 2 (как считал сам адаптер), у JPEG во весь TCI — первый, чей кадр в
-    /// масштабе декодера влезает в потолок кадра; у точечного COG — нулевой.
+    /// Предел детали — первый влезающий уровень: у JPEG во весь TCI — первый,
+    /// чей кадр в масштабе декодера влезает в потолок кадра; у точечных COG и
+    /// TCI как JPEG 2000 — нулевой.
     #[test]
     fn предел_детали_это_первый_влезающий_уровень() {
-        let tci = Info::plain(10980, 10980, Kind::Jp2 { len: 120 << 20 });
-        assert_eq!(tci.finest(), 2);
-        assert!(!tci.level(1).unwrap().fits && tci.level(2).unwrap().fits);
+        assert_eq!(tci().finest(), 0);
 
         let jpeg = Info::plain(10980, 10980, Kind::Jpeg);
         let finest = jpeg.finest();
