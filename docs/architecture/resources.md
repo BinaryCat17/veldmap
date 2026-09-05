@@ -88,12 +88,12 @@ several times — preview, the same raster on the globe, a second layer — and
 every opening would fetch the same bytes. The pool's ownership key is
 therefore the object: the address without its query, the length, and a
 validator (`ETag`, or `Last-Modified` without it) read by the same probe that
-learns the size. The signature of a storage object lives in the query
-(`s3::object` presigns the address for `OBJECT_LIFETIME`, a week — the limit
-of SigV4 — where a signature in the headers is accepted for a quarter of an
-hour), so two openings have different address strings and one object, the
-log prints the address without it, and a layer outlives any session without
-being signed again; length and validator keep a re-uploaded object from
+learns the size. The signature of a storage object lives in the headers
+(`s3::object`; the storage refuses a presigned address, [ADR 0005](../decisions/0005-network-reading.md)),
+so two openings of one object share the address string as well as the key.
+The key drops the query and the log prints addresses without it because a
+query is not part of an object's identity, and on another server it may carry
+a key or a signature; length and validator keep a re-uploaded object from
 inheriting foreign blocks. A server that gives neither
 gets no shared key: guessing identity by path and length would cost a swapped
 middle of a file. Blocks do not outlive their last reader: the key counts

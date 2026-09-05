@@ -107,10 +107,9 @@ What each format reads per level is the table in
   and the network delivers a whole block of `BLOCK` for each
   ([ADR 0005](decisions/0005-network-reading.md)): the coarsest level of a
   Sentinel-2 granule needs about a megabyte and receives one block per
-  tile-part — for 121 tile-parts about 60 MiB of 129, by arithmetic; the
-  measurement is due. A tile of several tile-parts pays a probe per
-  tile-part. Removing it needs a block sized by the read, which the ADR
-  leaves untouched.
+  tile-part — 68 MiB of 129 for 121 tile-parts, measured in the ADR. A tile
+  of several tile-parts pays a probe per tile-part. Removing it needs a block
+  sized by the read, which the ADR leaves untouched.
 - **A JPEG 2000 whose canvas or tile grid does not start at zero is refused
   at describe** (`veldmodules/image-tiler/src/adapters/jp2.rs`): the
   decoder's reduced grid is up to a pixel off the tiler's halving ladder.
@@ -122,12 +121,15 @@ What each format reads per level is the table in
   `range.rs`). Sequential formats — PNG, JPEG, GIF, BMP, WebP — are read by a
   pass over the whole file, so the first remote show of one costs its
   download in traffic; afterwards the tiles come from the cache.
-- **A signature is issued once, for a week.** The address of a storage object
-  is presigned when it is opened (`OBJECT_LIFETIME` in
-  `veldmodules/data-provider/src/s3.rs`); a 401 or 403 in the middle of a read
-  is a definite refusal, not retried (`ranged` in `range.rs`), and the object
-  is not signed again. A layer kept for longer than a week loses its source
-  and has to be opened anew.
+- **A signature is issued once.** The authorisation of a remote object is
+  issued in the request headers when it is opened, and the storage accepts
+  it for a quarter of an hour after `x-amz-date`; a 401 or 403 in the middle
+  of a read is a definite refusal, not retried (`ranged` in `range.rs`), and
+  the object is not signed again. A layer that outlives its signature loses
+  its source and has to be opened anew. A presigned address is refused by the
+  storage ([ADR 0005](decisions/0005-network-reading.md)), so removing this
+  needs re-signing on 401/403 — an exchange between `network` and
+  `data-provider`.
 - **Sizes.** `MAX_SOURCE_SIDE` bounds every raster at describe, and
   `FULL_DECODE_BUDGET` bounds what a whole-frame decoder may produce — JPEG
   at the finest scale that fits, interlaced PNG, GIF, BMP, WebP

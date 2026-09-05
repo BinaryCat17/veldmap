@@ -107,6 +107,24 @@ def test_every_refusal_is_named_and_the_verdict_survives():
     assert runner.outcome(1, both) == "НЕ СОШЁЛСЯ + ОТКАЗ ВИДЕОКАРТЫ + ТРАП МОДУЛЯ"
 
 
+def test_a_host_panic_is_named_with_its_reason():
+    """Паника хоста видна вердикту вместе с причиной: с `panic = "abort"` она
+    не доходит до лога, и без stderr сценарий кончался бы «не сошёлся» ни с
+    чего.
+    """
+    runner = load_runner()
+    stderr = (
+        "thread '<unnamed>' (1) panicked at /rustc/x/library/core/src/ops/function.rs:250:5:\n"
+        "there is no reactor running, must be called from the context of a Tokio 1.x runtime\n"
+        "note: run with `RUST_BACKTRACE=1`\n"
+    )
+
+    verdict = runner.outcome(250, "", stderr=stderr)
+    assert verdict.startswith("НЕ СОШЁЛСЯ + ПАНИКА ХОСТА: there is no reactor running"), verdict
+    assert runner.outcome(0, "", stderr="") == "сошёлся"
+    assert runner.panicked("thread 'x' panicked at a.rs:1:1:") == ["ПАНИКА ХОСТА"], "без строки причины — одно слово"
+
+
 def test_a_quiet_log_leaves_the_return_code_alone():
     """Без отказов исход решает только код возврата."""
     runner = load_runner()

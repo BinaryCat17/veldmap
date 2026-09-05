@@ -130,9 +130,15 @@ A run fails not only on a check that did not hold: an unparseable scenario
 line, a runner that did not come up, and a run cut short before the end are
 failures too. A silent zero would declare the unchecked checked.
 
-**Two failures the scenario cannot see are failures of the run as well.** Both
-are found in `host.log`, because no step could name them: they do not touch
-the markup, and the scenario has no elements to notice them by.
+**Three failures the scenario cannot see are failures of the run as well.**
+Two are found in `host.log`, because no step could name them: they do not
+touch the markup, and the scenario has no elements to notice them by. The
+third is found in the host's stderr, which the runner keeps in
+`runtime/logs/host.stderr` and beside the scenario as `<name>.stderr`: a
+**host panic** (`ПАНИКА ХОСТА`, with the line after `panicked at` as its
+reason). The host is built with `panic = "abort"`, so a panic on any thread
+ends the process before the log hears of it, and without stderr the verdict
+would be a bare "did not hold" (`run-uitests.py::panicked`).
 
 The first is a **GPU refusal** (`ОТКАЗ ВИДЕОКАРТЫ`). A shader that did not compile, or a vertex
 layout that drifted from it, does not crash the application: the window lives,

@@ -28,9 +28,11 @@ const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 pub fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
-        // Первым клиента может запросить и оконное чтение — а оно идёт с
-        // blocking-пула, где контекст рантайма надо назвать явно, иначе
-        // клиенту не к чему привязать таймеры и резолвер.
+        // Клиенту при сборке нужен контекст рантайма (резолвер, таймеры), и
+        // зовут его только там, где контекст есть: из задач, с blocking-пула
+        // (его потоки контекст несут) и изнутри `block_on` у чтения по сети
+        // (`range::fetcher`). Вход сюда явный — на случай, когда первым
+        // клиента спрашивает поток, вошедший в рантайм лишь через `block_on`.
         let _guard = tokio::runtime::Handle::current().enter();
         reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)

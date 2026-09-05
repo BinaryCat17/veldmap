@@ -1,4 +1,4 @@
-# 0005 — Network reading: prefetch, readahead by consumption, a week's signature
+# 0005 — Network reading: prefetch and readahead by consumption
 
 Status: accepted (2026-09-05). Rests on the excerpt (0004) and the reading
 model (0003).
@@ -12,10 +12,10 @@ probe per tile-part, and headers two blocks apart look sequential often
 enough that the coarsest level of a Sentinel-2 granule delivered 84 % of
 129 MiB for the megabyte it needed (0004); a tile order of a COG asks its
 chunks one miss at a time, each miss a request of half a second. The
-signature of a storage object was issued in the request headers, which the
+signature of a storage object is issued in the request headers, which the
 storage accepts for a quarter of an hour after `x-amz-date`, so a layer kept
-on the globe longer than that lost its source at the next miss — 401/403 is
-not retried, and nothing signed the object again.
+on the globe longer than that loses its source at the next miss — 401/403 is
+not retried, and nothing signs the object again.
 
 ## Decision
 
@@ -30,18 +30,22 @@ TIFF by its catalogue, JPEG 2000 with a TLM by its probes and then by the
 pieces of the assembled excerpt. **The readahead doubles only a consumed
 request**: a miss right after the previous request, whose last block the
 reader read to its end; a probe never does. **The readahead belongs to the
-object**, keyed like the pool, so two openings continue one pass. **The
-object's address is presigned for `OBJECT_LIFETIME`**, a week — the limit of
-SigV4 in a query — and listings keep their header signature; the log prints
-addresses without the query. A single read larger than the instance's memory
-is refused by the host before allocating.
+object**, keyed like the pool, so two openings continue one pass. The
+signature stays in the headers, and the log prints addresses without their
+query. A single read larger than the instance's memory is refused by the host
+before allocating.
 
 ## Rejected
 
-Re-signing on 401/403 through an exchange between `network` and
-`data-provider`: the read is a synchronous ABI call on the blocking pool, and
-a bus round trip inside it buys what a presigned query gives by the standard.
-Guessing the access pattern from the misses alone: no rule on misses tells a
+A presigned address (the signature in the query, `X-Amz-Expires` up to a
+week): measured on 2026-09-05 against `eodata.dataspace.copernicus.eu` with
+a key the keys manager lists as valid to 2029 — the storage answers HTTP 403
+`InvalidAccessKeyId` to a presigned GET for every expiry tried (900 s to
+604 800 s, with and without the empty-body hash), while the same key in the
+headers answers 206; so the signature stays in the headers, and re-signing on
+401/403 — an exchange between `network` and `data-provider` — remains the
+way to a layer that outlives a quarter of an hour (roadmap). Guessing the
+access pattern from the misses alone: no rule on misses tells a
 chain of probes from a pass, while the reader knows. Parallel requests on
 every miss: a pass already coalesces into one request, and only a named order
 is worth several connections. Moving the block size or the pool ceiling: the
@@ -57,18 +61,31 @@ in-memory network (`range.rs`): reading windows of half a block in sequence
 requests 1, 2, 4, 8, 16 blocks, a chain of 16-byte probes at block starts
 requests one block each time, one read of 12 blocks requests 1, 2, 4, 8; a
 prefetch of four ranges over blocks 0, 1, 5 (present), 7, 8 makes two requests
-and every read that follows is a hit. The wire numbers of the same day could
-not be taken: the storage key was revoked that afternoon
-(`InvalidAccessKeyId` on the header signature as well), so the share
-delivered for the coarsest level of the T31TGK granule — 84 % under 0004 — and
-the count of requests for a row of COG tiles are still to be measured, and
-whether the storage accepts a presigned address is unverified against it.
-`uitests/jp2remote.txt` keeps its promise at `delivered 95` until then. What
-the decision costs: an order is synchronous, so the first tile of a pointwise
+and every read that follows is a hit. On the wire (2026-09-05, two runs of
+`uitests/jp2remote.txt` on a cold tile cache, the T31TGK granule of
+129.0 MiB): the coarsest level orders 121 probes — 112 runs, 134 blocks — and
+by its end 68.0 MiB (52 %) have arrived in 115 requests of 605 KiB on average,
+the same in both runs, against 109.6 MiB (84 %) in 64 requests of 1.71 MiB on
+2026-09-03 under 0004; the next two levels come from the pool in 0.7 s and
+1.8 s; the finer two levels order 26 single-block runs for their 60 tiles, the
+other pieces already lying in the probe blocks; the resource closes at
+81.0 MiB (62 %) and 141 requests against 115.6 MiB (89 %) and 76. The coarsest
+level took 59 s in one run and 84 s in the other against 75 s once under 0004
+— within the spread of a shared network, so bytes and requests are the
+result, time is not: a probe of 64 KiB still buys a block of 512 KiB, and the
+eight-fold overhead is the block, not the readahead — the next number to
+spend is the block size under a named order. A row of COG tiles over the
+network (a Sentinel-1 GRD COG of 382.1 MiB in the canvas, levels 6 to 1): 6
+chunks under 12 tiles came in one request, 12 chunks under 40 tiles in three,
+24.6 MiB (6 %) in 11 requests for the whole ladder; unmeasured under the old
+rule, where adjacent chunks read in order coalesced by doubling and a chunk
+apart from the last request cost a request of its own. The scenario promises
+`delivered 70`. What the decision costs: an order is synchronous, so the first tile of a pointwise
 level waits for the whole order; the pieces of a JPEG 2000 excerpt are
 ordered per tile, one run at a time, so the finer levels do not fill
 `IN_FLIGHT`; two unrelated readers of one object share one readahead state,
 and a fingerprint read resets a pass's run to one block. What it obliges: a
 source that knows its chunk offsets names them (NetCDF does not yet — its
 file chunks are an index walk away); `IN_FLIGHT` connections are held only
-for a named order; a layer older than a week has to be opened anew.
+for a named order; a layer older than a quarter of an hour has to be opened
+anew.

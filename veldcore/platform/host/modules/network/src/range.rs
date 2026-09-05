@@ -8,11 +8,11 @@
 //! завершится ошибкой сразу, а не посреди чтения) и формат допускает
 //! произвольный доступ.
 //!
-//! Адрес и заголовки — снимок на момент открытия (см. RemoteOpenRequest):
-//! ресурс живёт ровно столько, сколько действительна подпись в них. У объекта
-//! хранилища она лежит в адресе (presign SigV4, `s3::object` у провайдера) и
-//! живёт неделю — дольше любого сеанса; отказ 401/403 посреди чтения поэтому
-//! не переспрашивается.
+//! Заголовки авторизации — снимок на момент открытия (см. RemoteOpenRequest):
+//! ресурс живёт ровно столько, сколько они действительны. Для подписи SigV4 в
+//! заголовках это четверть часа — достаточно, чтобы открыть и декодировать, но
+//! не для слоя, который держат на шаре часами; отказ 401/403 посреди чтения
+//! не переспрашивается, и переподписи пока нет (ADR 0005).
 
 use super::State;
 use veldmap_host_util::bindings::network as bus;
@@ -108,8 +108,9 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
     });
 }
 
-/// Адрес без строки запроса — для журнала и для ключа владения: в запросе
-/// лежит подпись, она действительна неделю, и журналу она не принадлежит.
+/// Адрес без строки запроса — для журнала и для ключа владения: строка запроса
+/// не часть тождества объекта, а у чужого сервера в ней может лежать ключ или
+/// подпись, и журналу такое не принадлежит.
 fn without_query(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
 }
@@ -204,9 +205,9 @@ pub struct Blocks {
 
 /// Чем один и тот же объект хранилища узнаётся в двух разных открытиях.
 ///
-/// Адрес без запроса, потому что подпись живёт в запросе: превью и скачивание
-/// подписывают один и тот же путь порознь, и строки адресов у них разные, а
-/// байты — одни и те же. Длина и валидатор — чтобы перевыложенный объект не
+/// Адрес без запроса: объект — это путь, а строка запроса у чужого сервера
+/// бывает подписью или ключом, то есть разной у двух открытий одних и тех же
+/// байт. Длина и валидатор — чтобы перевыложенный объект не
 /// достался в наследство прежнему: путь у него тот же самый, и по одному пути
 /// новые байты легли бы под старый ключ.
 ///
@@ -565,6 +566,29 @@ fn with_retries<T>(what: &str, mut once: impl FnMut() -> Result<T, Attempt>) -> 
     }
 }
 
+/// Поход в сеть за диапазоном адреса `url` с заголовками `headers` — то, чем
+/// живёт [`HttpRange`].
+///
+/// Рантайм нужен только походу: `read_at` зовётся хостом с blocking-пула,
+/// prefetch — со своих потоков, и асинхронный запрос надо кому-то отдать.
+/// Запрос собирается ВНУТРИ `block_on`, а не доводом к нему: клиент заводит
+/// таймер `read_timeout` (`http::client`) уже при сборке future, таймеру нужен
+/// контекст рантайма, а у потока prefetch его нет — собранный снаружи запрос
+/// падает «there is no reactor running», и с `panic = "abort"` это уносит весь
+/// хост. Держит это правило тест `запрос_собирается_внутри_block_on`.
+fn fetcher(runtime: tokio::runtime::Handle, url: String, headers: HashMap<String, String>) -> Fetch {
+    Box::new(move |from, to| {
+        runtime.block_on(async {
+            let response = super::http::get(&url, &headers, Some((from, to)))
+                .send()
+                .await
+                .map_err(|e| Attempt::Broken(e.into()))?;
+            ranged(response.status(), from, to)?;
+            response.bytes().await.map_err(|e| Attempt::Broken(e.into()))
+        })
+    })
+}
+
 impl HttpRange {
     /// Пробный запрос первого байта: заодно проверяет, что сервер понимает
     /// Range, и узнаёт полный размер из Content-Range.
@@ -574,7 +598,7 @@ impl HttpRange {
         let len = with_retries(&format!("открытие {}", without_query(url)), || {
             shutting_down()?;
             let response = runtime
-                .block_on(super::http::get(url, &headers, Some((0, 1))).send())
+                .block_on(async { super::http::get(url, &headers, Some((0, 1))).send().await })
                 .map_err(|e| Attempt::Broken(e.into()))?;
             probed(response.status(), without_query(url))?;
             // Валидатор берётся тем же пробным запросом: второго повода
@@ -605,23 +629,11 @@ impl HttpRange {
             validator,
         });
 
-        // Рантайм нужен только походу в сеть: read_at вызывается хостом с
-        // blocking-пула, где асинхронный запрос надо кому-то отдать.
-        let fetch: Fetch = {
-            let (url, headers) = (url.to_string(), headers);
-            Box::new(move |from, to| {
-                let response = runtime
-                    .block_on(super::http::get(&url, &headers, Some((from, to))).send())
-                    .map_err(|e| Attempt::Broken(e.into()))?;
-                ranged(response.status(), from, to)?;
-                runtime.block_on(response.bytes()).map_err(|e| Attempt::Broken(e.into()))
-            })
-        };
-        Ok(Self::over(url, len, blocks, identity, fetch))
+        Ok(Self::over(url, len, blocks, identity, fetcher(runtime, url.to_string(), headers)))
     }
 
-    /// Носитель над готовым походом в сеть — тем, что собрал `open`, либо
-    /// тем, что подложил тест.
+    /// Носитель над готовым походом в сеть — тем, что собрал [`fetcher`],
+    /// либо тем, что подложил тест.
     fn over(url: &str, len: u64, blocks: Arc<Blocks>, identity: Option<Identity>, fetch: Fetch) -> Self {
         Self {
             url: url.to_string(),
@@ -1059,8 +1071,8 @@ mod tests {
     }
 
     /// Два открытия одного и того же объекта читают один пул: превью снимка и
-    /// его же наложение на шар подписывают один путь порознь, и строки адресов
-    /// у них разные — а байты одни и те же.
+    /// его же наложение на шар открывают один путь порознь — а байты одни и те
+    /// же.
     #[test]
     fn один_объект_читается_одним_ключом() {
         let pool = Blocks::default();
@@ -1329,6 +1341,39 @@ mod reads {
         source.prefetch(&[]).unwrap();
         source.prefetch(&[(100 * BLOCK, 10), (5, 0)]).unwrap();
         assert_eq!(asked.lock().unwrap().len(), before);
+    }
+
+    /// Поход в сеть собирается внутри `block_on`, и потому идёт с любого
+    /// потока — в том числе с потоков prefetch, где контекста рантайма нет.
+    /// Сервер — петля на этой машине, отвечающая одним готовым ответом 206:
+    /// это единственное место, где хост зовёт reqwest не из рантайма, и ничем,
+    /// кроме живого запроса, жадный таймер клиента не держится.
+    #[test]
+    fn запрос_собирается_внутри_block_on() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("петля");
+        let port = listener.local_addr().expect("адрес").port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("соединение");
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request);
+            let body = b"0123456789abcdef";
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-15/32\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).expect("заголовки");
+            socket.write_all(body).expect("тело");
+        });
+
+        let runtime = tokio::runtime::Runtime::new().expect("рантайм");
+        let fetch = fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), HashMap::new());
+        // Чужой поток без контекста рантайма — как у prefetch.
+        let fetched = std::thread::spawn(move || fetch(0, 16).map(|bytes| bytes.to_vec()))
+            .join()
+            .expect("поток без контекста рантайма не должен падать");
+        assert_eq!(fetched.map_err(|e| match e { Attempt::Broken(e) | Attempt::Refused(e) => e.to_string() }), Ok(b"0123456789abcdef".to_vec()));
+        server.join().expect("сервер");
     }
 
     /// Сорвавшаяся серия не выбрасывает соседних по пачке: привезённое ложится
