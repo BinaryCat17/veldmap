@@ -52,35 +52,13 @@ pub struct Config {}
 /// разберёт файл заново — ответ от этого не меняется, меняется только цена.
 ///
 /// Цена и есть причина. `describe` и `produce` приходят парой на один и тот же
-/// ресурс, а разбор — это распаковка всей плоскости: у гранулы OLCI это восемь
-/// миллионов отсчётов, и без memo они распаковываются дважды на один показ.
-/// Файл при этом читается один раз и без него (блоки держит носитель), а
-/// платится именно распаковка и пробы величин.
-///
-/// Слота два, по весу разбора. Тяжёлый — тот, что держит при себе отсчёты
-/// величины: у NetCDF это вся плоскость, и мерится она против всего
-/// свободного (`budget::free()`). Держать два таких разом лимит памяти
-/// инстанса не переживёт, поэтому тяжёлый один и живёт
-/// ровно столько, сколько с ним работают (см. [`State::clear_for`]): проход по
-/// чужому разбору тратит память декодера так же, как новый разбор.
-///
-/// Лёгкий — заголовки и каталоги (TIFF, JPEG, PNG). Порознь они затем, что
-/// растры приходят парами вперемежку — описали квиклук, описали гранулу,
-/// произвели квиклук, произвели гранулу, — и одним слотом каждый вытеснял бы
-/// каждого: разбор квиклука не пережил бы даже своего собственного прохода.
-///
-/// Чего два слота НЕ дают: разбор гранулы всё равно не переживёт прохода по
-/// квиклуку, потому что память декодера его не переживает (см.
-/// [`State::clear_for`]). Слоты экономят лёгкий разбор, а тяжёлый экономят
-/// только там, где между его описанием и проходом никого нет, — так открывает
-/// одиночный снимок канва просмотра.
+/// ресурс, а за одним описанием идёт столько проходов, сколько у источника
+/// ступеней; разбор — это заголовки и каталоги, у NetCDF ещё и выборка окон
+/// величины (`netcdf::describe`), и по сети каждый стои́т походов к блочному
+/// пулу. Отсчётов разбор не держит ни у одного формата: они читаются окнами
+/// по заказу, и держать в memo нечего, кроме раскладки.
 struct Parsed {
     resource: u64,
-    /// Лежит ли источник на диске. В ключе memo, а не рядом с ним: разбор
-    /// зависит от этого довода (по сети у NetCDF свой потолок терпения), и
-    /// ключ, знающий только про ресурс, однажды отдаст разбор, сделанный при
-    /// другом ответе.
-    near: bool,
     info: adapters::Info,
     /// Ключ этого источника в кэше тайлов. Лежит рядом с разбором затем, что
     /// считается он тем же чтением файла: голова и хвост по 64 КиБ, то есть у
@@ -90,77 +68,55 @@ struct Parsed {
     fingerprint: String,
 }
 
+/// Сколько разборов лежит в memo. Два, потому что растры приходят парами
+/// вперемежку — описали квиклук, описали гранулу, произвели квиклук,
+/// произвели гранулу, — и одним слотом каждый вытеснял бы каждого: разбор
+/// квиклука не пережил бы даже своего собственного прохода. Больше незачем:
+/// заказчиков у тайлера двое, и у каждого на виду одна пара.
+const MEMO_SLOTS: usize = 2;
+
 pub struct State {
-    heavy: Option<Parsed>,
-    light: Option<Parsed>,
+    /// Разборы от свежего к старому; лишний выпадает с хвоста.
+    kept: Vec<Parsed>,
 }
 
 pub fn hook_init(_config: Config) -> anyhow::Result<State> {
-    Ok(State { heavy: None, light: None })
+    Ok(State { kept: Vec::new() })
 }
 
 impl State {
-    /// Положить разбор в слот по его весу. Тяжёлый — тот, что держит при себе
-    /// отсчёты величины; лёгкий — заголовки. Своим слотом каждому затем, что
-    /// иначе дешёвый вытеснял бы дорогой.
+    /// Положить разбор свежим; старейший сверх [`MEMO_SLOTS`] выпадает.
     fn keep(&mut self, kept: Parsed) {
-        match kept.info.holds_samples() {
-            true => self.heavy = Some(kept),
-            false => self.light = Some(kept),
-        }
+        self.kept.retain(|other| other.resource != kept.resource);
+        self.kept.insert(0, kept);
+        self.kept.truncate(MEMO_SLOTS);
     }
 
-    /// Отпустить то, чего нельзя держать вдвоём: отсчёты величины.
-    ///
-    /// Когда именно — решает [`Self::clear_for`]; отдельно отсюда зовётся
-    /// только конец прохода, которому разбор больше не понадобится. Лёгкий при
-    /// этом остаётся — он стои́т заголовков, и вытеснять его незачем.
-    fn release_heavy(&mut self) {
-        self.heavy = None;
-    }
-
-    /// Освободить память под работу с этим ресурсом.
-    ///
-    /// Правило привязано к тому, чем сейчас будут работать, а не к тому,
-    /// случился ли разбор: отсчёты величины живут ровно столько, сколько с
-    /// ними работают. Взятый готовым лёгкий разбор — это тоже работа, и
-    /// декодер под неё выделяет своё; идя поверх живой плоскости, он упирается
-    /// в лимит инстанса.
-    ///
-    /// Числа, которые это запрещают: осевшая плоскость величины бывает ростом
-    /// в сотни мегабайт — потолок ей ставит `netcdf::affordable` по
-    /// [`crate::budget`], — а рядом работа над другим источником просит своё
-    /// (`adapters::table`), и вдвоём с плоскостью они в `budget::INSTANCE`
-    /// укладываться не обязаны.
-    ///
-    /// Цена известна и записана: пара «квиклук и гранула» описывается и
-    /// производится вперемежку, и плоскость гранулы читается дважды. Дешевле
-    /// дважды прочитать, чем однажды упереться в лимит: там трап, а за ним
-    /// пустой терминальный ответ, который заказчик читает удачей.
-    fn clear_for(&mut self, resource_id: u64, near: bool) {
-        let ours = self.kept(resource_id, near).is_some_and(|kept| kept.info.holds_samples());
-        if !ours {
-            self.release_heavy();
+    /// Отметить разбор ресурса свежим; `false` — его в memo нет.
+    fn touch(&mut self, resource_id: u64) -> bool {
+        match self.kept.iter().position(|kept| kept.resource == resource_id) {
+            Some(at) => {
+                let kept = self.kept.remove(at);
+                self.kept.insert(0, kept);
+                true
+            }
+            None => false,
         }
     }
 
     /// Сколько памяти держат разборы чужих источников, лежащие в memo: работа
     /// над своим идёт рядом с ними, и её пик обязан учесть их слагаемым.
-    fn neighbour_footprint(&self, resource_id: u64, near: bool) -> u64 {
-        [self.heavy.as_ref(), self.light.as_ref()]
-            .into_iter()
-            .flatten()
-            .filter(|kept| kept.resource != resource_id || kept.near != near)
+    fn neighbour_footprint(&self, resource_id: u64) -> u64 {
+        self.kept
+            .iter()
+            .filter(|kept| kept.resource != resource_id)
             .map(|kept| kept.info.footprint())
             .sum()
     }
 
-    /// Разбор этого ресурса, если он лежит в каком-нибудь из слотов.
-    fn kept(&self, resource_id: u64, near: bool) -> Option<&Parsed> {
-        [self.heavy.as_ref(), self.light.as_ref()]
-            .into_iter()
-            .flatten()
-            .find(|kept| kept.resource == resource_id && kept.near == near)
+    /// Разбор этого ресурса, если он лежит в memo.
+    fn kept(&self, resource_id: u64) -> Option<&Parsed> {
+        self.kept.iter().find(|kept| kept.resource == resource_id)
     }
 }
 
@@ -177,25 +133,20 @@ fn parsed<'a>(
     resource_id: u64,
     size: u64,
     bytes: &Rc<Cell<u64>>,
-    near: bool,
 ) -> Result<(&'a Parsed, Duration, u64), String> {
     let mut stamped = Duration::ZERO;
-    // Место освобождается до развилки, а не в ветке промаха: взять разбор
-    // готовым — это тоже работа, и памяти декодера она стои́т столько же,
-    // сколько новый разбор.
-    state.clear_for(resource_id, near);
-    if state.kept(resource_id, near).is_none() {
+    if state.touch(resource_id) {
+        veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
+    } else {
         veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт)", resource_id, size);
         let began = Instant::now();
         let fingerprint = fingerprint::fingerprint(resource_id, size)?;
         stamped = began.elapsed();
-        let info = adapters::describe(resource_id, size, bytes, near)?;
-        state.keep(Parsed { resource: resource_id, near, info, fingerprint });
-    } else {
-        veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
+        let info = adapters::describe(resource_id, size, bytes)?;
+        state.keep(Parsed { resource: resource_id, info, fingerprint });
     }
-    let neighbour = state.neighbour_footprint(resource_id, near);
-    Ok((state.kept(resource_id, near).expect("разбор только что положен"), stamped, neighbour))
+    let neighbour = state.neighbour_footprint(resource_id);
+    Ok((state.kept(resource_id).expect("разбор только что положен"), stamped, neighbour))
 }
 
 pub fn on_describe(state: &mut State, req: DescribeRequest) {
@@ -224,8 +175,7 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
     // Привязка приезжает из соседнего файла и в memo не идёт: она свойство
     // пары «растр и его координаты», а memo знает только про растр.
     let mut ties = Vec::new();
-    let (kept, stamped, _) =
-        parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)), req.near)?;
+    let (kept, stamped, _) = parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)))?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
     let read = began.elapsed();
 
@@ -381,15 +331,9 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
 
     let bytes = Rc::new(Cell::new(0u64));
-    let (kept, _, neighbour) = parsed(state, resource.id, resource.size, &bytes, req.near)?;
+    let (kept, _, neighbour) = parsed(state, resource.id, resource.size, &bytes)?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
 
-    // Спрашивается вес разбора, а не рукав производства: проходом с нулевого
-    // идут и PNG с мелочью, чей разбор лежит в лёгком слоте. Чужого тяжёлого в этой
-    // точке нет — его снял `clear_for` на входе, — так что сторож здесь
-    // защищает не от него, а от того, что вход однажды переставят: отпускать
-    // по лёгкому проходу нечего, и молчаливым такое отпускание быть не должно.
-    let single_pass = info.holds_samples();
     // Пик работы сверяется со свободным до неё — вместе с разбором соседа,
     // который лежит в memo и памяти не отпускает. Строка таблицы та же, по
     // которой описание обещало «влезает»; отказ здесь называет слагаемые.
@@ -397,69 +341,32 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
         Some(row) => row.peak.with("разбор соседа", neighbour).admit(),
         None => Ok(()),
     };
-    // Заказ проверяется отдельной функцией, а не по месту: у проверок свои
-    // выходы, и уйти по любому из них, не отпустив разбор, значит оставить
-    // висеть отсчёты величины — ровно то, от чего memo и освобождают ниже.
-    let planned = plan(info, req).and_then(|ordered| admitted.map(|()| ordered));
+    let ordered = plan(info, req)?;
+    admitted?;
 
-    let mut sink = None;
-    let outcome = match planned {
-        Err(why) => Err(why),
-        Ok(ordered) => {
-            let wants: BTreeSet<(u32, u32)> = ordered.iter().copied().collect();
-            let mut ready = Sink {
-                correlation,
-                owner,
-                fingerprint,
-                want_level: req.level,
-                wants,
-                want_total: ordered.len() as u32,
-                done: 0,
-                bytes: bytes.clone(),
-                // У источника, чей разбор уже держит отсчёты величины, байты
-                // прохода о работе впереди не говорят ничего: читать больше
-                // нечего, а стои́т время разворот плоскости в пирамиду.
-                // Знаменатель нулём — это и есть «мерить нечем» (см.
-                // `tiles::readable`), и подпись тогда идёт ступенями и
-                // ячейками, а не мегабайтами.
-                total_bytes: match info.holds_samples() {
-                    true => 0,
-                    false => resource.size,
-                },
-                reported: 0,
-            };
-            let outcome = {
-                let mut emit = |level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]| {
-                    ready.emit(level, tx, ty, w, h, rgba)
-                };
-                adapters::produce(
-                    resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit,
-                )
-            };
-            sink = Some(ready);
-            outcome
-        }
+    let wants: BTreeSet<(u32, u32)> = ordered.iter().copied().collect();
+    let mut sink = Sink {
+        correlation,
+        owner,
+        fingerprint,
+        want_level: req.level,
+        wants,
+        want_total: ordered.len() as u32,
+        done: 0,
+        bytes: bytes.clone(),
+        total_bytes: resource.size,
+        reported: 0,
     };
-    // Разбор, из которого проход строит всю пирамиду разом, после него не
-    // нужен: второго прохода по такому источнику не будет, пока не спросят
-    // заново, — а держит он с собой отсчёты величины, то есть сотни мегабайт
-    // памяти инстанса. Остаётся он у тех, к кому
-    // приходят за каждой ступенью отдельно (тайловый TIFF, JPEG 2000), — там
-    // разбор это заголовки, и он дёшев.
-    //
-    // Отпускается до разбора исхода, а не после: сорвавшийся проход — самый
-    // обычный конец (оборвалось чтение по сети), и уйти по `?`, оставив
-    // сотни мегабайт висеть, значит не сделать ровно того, ради чего это здесь.
-    if single_pass {
-        state.release_heavy();
+    {
+        let mut emit = |level: u32, tx: u32, ty: u32, w: u32, h: u32, rgba: &[u8]| {
+            sink.emit(level, tx, ty, w, h, rgba)
+        };
+        adapters::produce(resource.id, resource.size, info, req.level, &ordered, &bytes, &mut emit)?;
     }
-    outcome?;
 
     // Проход кончился, а запрошенное не всё отдано — это ошибка адаптера,
     // и молчать о ней значит показать заказчику дыру без причины.
-    if let Some(sink) = sink
-        && !sink.wants.is_empty()
-    {
+    if !sink.wants.is_empty() {
         return Err(format!("адаптер не произвёл {} из запрошенных тайлов", sink.wants.len()));
     }
     Ok(())
@@ -606,149 +513,70 @@ mod tests {
     use crate::proto::image_tiler::TileAddr;
 
     fn keep(state: &mut State, resource: u64, info: adapters::Info) {
-        state.keep(Parsed { resource, near: true, info, fingerprint: String::new() });
+        state.keep(Parsed { resource, info, fingerprint: String::new() });
     }
 
-    /// Лёгкий разбор не вытесняет тяжёлый. У наложения растров два, и приходят
-    /// они парами вперемежку: описали квиклук, описали гранулу, произвели
-    /// квиклук, произвели гранулу. Одним слотом квиклук выбрасывал бы разбор
-    /// гранулы ровно между её описанием и производством — и вся плоскость
-    /// разворачивалась бы второй раз, уже после того, как заказчик решил, что
-    /// снимок вот-вот появится.
-    #[test]
-    fn лёгкий_разбор_не_вытесняет_тяжёлый() {
-        let mut state = State { heavy: None, light: None };
-
-        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
-
-        assert!(state.kept(1, true).is_some(), "гранула на месте");
-        assert!(state.kept(2, true).is_some(), "и квиклук рядом");
+    fn quicklook() -> adapters::Info {
+        adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg)
     }
 
-    /// Отпускается тяжёлый, а лёгкий остаётся. Отпусти мы не тот — квиклук
-    /// пережил бы гранулу, а гранула разбиралась бы заново, то есть ровно то,
-    /// ради чего слоты и разведены. Когда звать — решает `clear_for`, здесь
-    /// проверено только само отпускание.
+    /// Пара растров наложения переживает друг друга. Приходят они парами
+    /// вперемежку: описали квиклук, описали гранулу, произвели квиклук,
+    /// произвели гранулу. Одним слотом квиклук выбрасывал бы разбор гранулы
+    /// ровно между её описанием и производством.
     #[test]
-    fn отпускается_тяжёлый_а_лёгкий_остаётся() {
-        let mut state = State { heavy: None, light: None };
-        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
-
-        state.release_heavy();
-
-        assert!(state.kept(1, true).is_none(), "плоскость отпущена");
-        assert!(state.kept(2, true).is_some(), "заголовки остались");
-    }
-
-    /// А тяжёлый тяжёлый вытесняет: две плоскости разом лимит памяти инстанса
-    /// не переживёт, и это единственное, ради чего слот вообще ограничен.
-    #[test]
-    fn тяжёлый_разбор_вытесняет_тяжёлый() {
-        let mut state = State { heavy: None, light: None };
-
-        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
-        keep(&mut state, 2, adapters::Info::heavy(3000, 2404));
-
-        assert!(state.kept(1, true).is_none(), "первая плоскость отпущена");
-        assert!(state.kept(2, true).is_some());
-    }
-
-    /// И лёгкий лёгкий вытесняет тоже: держать их без счёта незачем, а разбор
-    /// заголовков стоит одного чтения головы файла.
-    #[test]
-    fn лёгкий_разбор_вытесняет_лёгкий() {
-        let mut state = State { heavy: None, light: None };
-
+    fn пара_разборов_живёт_в_memo_вместе() {
+        let mut state = State { kept: Vec::new() };
         keep(&mut state, 1, adapters::Info::plain(64, 64, adapters::Kind::Png { interlaced: false }));
-        keep(&mut state, 2, adapters::Info::plain(64, 64, adapters::Kind::Png { interlaced: false }));
+        keep(&mut state, 2, quicklook());
 
-        assert!(state.kept(1, true).is_none());
-        assert!(state.kept(2, true).is_some());
+        assert!(state.touch(1), "гранула на месте");
+        assert!(state.touch(2), "и квиклук рядом");
+        assert!(state.kept(1).is_some() && state.kept(2).is_some());
     }
 
-    /// Тяжёлый разбор не переживает чужой работы. Тайлер один на всех
-    /// заказчиков, поэтому последовательность собирается сама: канва просмотра
-    /// держит разобранную гранулу, а шар в это время идёт проходом по своему
-    /// растру и берёт его разбор готовым из лёгкого слота. Декодер этого
-    /// прохода выделяет своё, и рядом с живой плоскостью ему не хватает:
-    /// плоскость мерится против всего свободного (`budget::free()`), а проход
-    /// просит сверх неё свой пик (`adapters::table`).
+    /// Третий разбор вытесняет тот, к которому дольше не обращались, а не
+    /// тот, что положен раньше: разбор, взятый готовым, свеж так же, как
+    /// новый.
     #[test]
-    fn чужая_работа_отпускает_тяжёлый_разбор() {
-        let mut state = State { heavy: None, light: None };
+    fn вытесняется_давно_не_спрошенный() {
+        let mut state = State { kept: Vec::new() };
+        keep(&mut state, 1, quicklook());
+        keep(&mut state, 2, quicklook());
+        assert!(state.touch(1), "первый спрошен снова");
 
-        state.clear_for(2, true);
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
-        state.clear_for(1, true);
-        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
+        keep(&mut state, 3, quicklook());
 
-        state.clear_for(2, true);
-
-        assert!(state.kept(2, true).is_some(), "квиклук взят готовым");
-        assert!(state.kept(1, true).is_none(), "а плоскость гранулы отпущена");
+        assert!(state.kept(1).is_some(), "спрошенный остался");
+        assert!(state.kept(2).is_none(), "давно не спрошенный выпал");
+        assert!(state.kept(3).is_some());
+        assert!(!state.touch(2), "выпавшего готовым не взять");
+        assert_eq!(state.kept.len(), MEMO_SLOTS);
     }
 
-    /// Со своим разбором работа идёт, его не трогая: иначе проход по грануле
-    /// начинался бы с того, что выбрасывает плоскость, которую сам же сейчас и
-    /// читает, — то есть разбирал бы её на каждую ступень заново.
+    /// Тот же ресурс, разобранный снова, не занимает второго слота.
     #[test]
-    fn своя_работа_тяжёлый_разбор_не_трогает() {
-        let mut state = State { heavy: None, light: None };
-        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
+    fn повторный_разбор_того_же_ресурса_занимает_тот_же_слот() {
+        let mut state = State { kept: Vec::new() };
+        keep(&mut state, 1, quicklook());
+        keep(&mut state, 2, quicklook());
+        keep(&mut state, 1, quicklook());
 
-        state.clear_for(1, true);
-
-        assert!(state.kept(1, true).is_some(), "работаем ею же — она на месте");
-    }
-
-    /// Разбор, взятый готовым, тоже освобождает место. Проверяется здесь
-    /// именно шов — что `parsed` спрашивает об этом ДО развилки «промах или
-    /// попадание», а не внутри промаха: сама политика верна и будучи
-    /// невызванной.
-    ///
-    /// До хоста этот путь не доходит: на попадании `parsed` только берёт
-    /// готовое из слота.
-    #[test]
-    fn готовый_разбор_отпускает_чужую_плоскость() {
-        let mut state = State { heavy: None, light: None };
-        keep(&mut state, 2, adapters::Info::plain(2422, 1940, adapters::Kind::Jpeg));
-        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
-
-        let bytes = Rc::new(Cell::new(0));
-        let (kept, _, _) = parsed(&mut state, 2, 0, &bytes, true).expect("разбор лежит готовым");
-        assert!(!kept.info.holds_samples(), "готовым взят лёгкий разбор");
-
-        assert!(state.kept(1, true).is_none(), "а плоскость гранулы отпущена");
-        assert!(state.kept(2, true).is_some(), "сам же он на месте");
+        assert_eq!(state.kept.len(), 2);
+        assert!(state.kept(1).is_some() && state.kept(2).is_some());
     }
 
     /// Сосед в memo входит в пик работы над своим источником: чужой разбор
     /// считается, свой — нет.
     #[test]
     fn сосед_в_memo_входит_в_пик() {
-        let mut state = State { heavy: None, light: None };
+        let mut state = State { kept: Vec::new() };
         let mut tiff = adapters::Info::plain(64, 64, adapters::Kind::Jpeg);
         tiff.ties = vec![adapters::Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }];
         keep(&mut state, 2, tiff);
 
-        assert!(state.neighbour_footprint(1, true) > 0, "чужой разбор не посчитан");
-        assert_eq!(state.neighbour_footprint(2, true), 0, "свой разбор — не сосед");
-    }
-
-    /// Тот же ресурс, прочитанный иначе, — чужой. Разбор зависит от того, лежит
-    /// файл на диске или тянется по сети (по сети у величины свой потолок
-    /// терпения), и держать оба разом значит держать две плоскости: осевшую
-    /// старую и пик чтения новой.
-    #[test]
-    fn разбор_того_же_ресурса_с_другим_доступом_не_свой() {
-        let mut state = State { heavy: None, light: None };
-        keep(&mut state, 1, adapters::Info::heavy(1500, 1202));
-
-        state.clear_for(1, false);
-
-        assert!(state.kept(1, true).is_none(), "разбор по сети своим не считается");
+        assert!(state.neighbour_footprint(1) > 0, "чужой разбор не посчитан");
+        assert_eq!(state.neighbour_footprint(2), 0, "свой разбор — не сосед");
     }
 
     fn asked(level: u32, tiles: &[(u32, u32)]) -> ProduceRequest {

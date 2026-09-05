@@ -220,7 +220,6 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     view.stuck = None;
     view.read_bytes = 0;
     view.total_bytes = resource.size;
-    view.near = msg.near;
     view.camera = None;
     view.drawn = None;
     view.shown = None;
@@ -245,7 +244,6 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
         // Канве привязка не нужна вовсе: она показывает растр как картинку, а
         // не кладёт его на Землю.
         geolocation: None,
-        near: view.near,
     }, &correlation);
 
     report(state, &msg.view);
@@ -390,8 +388,8 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
     );
     // Ручку источника и подпись берём здесь же: дальше `state` занят учётом, и
     // держать на нём ссылку в вид одновременно нельзя.
-    let (handle, label, near) = match view.shown.as_ref() {
-        Some(shown) => (shown.resource.handle(), view.label.clone(), view.near),
+    let (handle, label) = match view.shown.as_ref() {
+        Some(shown) => (shown.resource.handle(), view.label.clone()),
         None => return,
     };
 
@@ -429,7 +427,6 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
-        near,
     }, &correlation);
 
     report(state, &ctx.view);

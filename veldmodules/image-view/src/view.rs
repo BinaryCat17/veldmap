@@ -31,10 +31,6 @@ pub struct View {
     pub describe: veldsdk::Latest,
     pub read_bytes: u64,
     pub total_bytes: u64,
-    /// Снимок лежит на диске, а не за проводом. Своего смысла у признака здесь
-    /// нет — его пересказывают тайлеру, у которого от этого зависит потолок
-    /// источника, читаемого только целиком (см. `DescribeRequest.near`).
-    pub near: bool,
     /// Смотреть не на что: ресурс не открылся или не описался.
     pub error: Option<String>,
     /// Кадр неполон: сорвался проход, отказал кэш. Снимок при этом жив, и
@@ -91,7 +87,6 @@ impl View {
             describe: veldsdk::Latest::default(),
             read_bytes: 0,
             total_bytes: 0,
-            near: false,
             error: None,
             trouble: None,
             stuck: None,

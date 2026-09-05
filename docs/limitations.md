@@ -86,16 +86,21 @@ in [georeference](architecture/georeference.md); these are the edges.
 What each format reads per level is the table in
 [imagery](architecture/imagery.md).
 
-- **A NetCDF variable is read whole at describe.** Whether a variable is fit
-  to show and how to stretch it is known only from all its samples, so
-  `describe` — declared fast — reads candidate variables into f32 until one
-  is neither empty nor flat, and every level is a pass from level 0 over that
-  plane; a remote variable heavier than `WIRE_PLANE`
-  (`veldmodules/image-tiler/src/adapters/netcdf.rs`) is refused with the
-  advice to download the scene. The file itself is read on demand — HDF5 is
-  addressed at absolute offsets — so the file's length costs nothing; the
-  plane does. Removing it needs a describe that samples rows and a level-0
-  grid read in row windows into raw samples.
+- **A NetCDF variable is judged by a sample, and some variables cost the
+  plane.** `describe` reads up to `SAMPLE_WINDOWS` row windows of a
+  candidate (`veldmodules/image-tiler/src/adapters/netcdf.rs`) to tell an
+  empty or flat variable from a measured one and to set the stretch; a
+  variable measured only outside those windows is skipped as empty. The row
+  window is cut along the file's leading axis, and only along it
+  (`rows_of`): a unit leading axis (Sentinel-5P, `[1, scanline,
+  ground_pixel]`) or a variable written as one chunk (SYNERGY) makes the
+  window the whole plane, so the level table says a tile of level 0 costs
+  the plane, and describe and every tile read it whole. Any variable of no
+  more than `SAMPLE_WINDOWS` windows (OLCI GIFAPAR: three chunks of 5026
+  rows) is likewise read whole by the sample and again by the first tiles —
+  one window at a time, so it costs the memory of a window, not of the plane.
+  Removing the plane-sized window needs a window along a named axis in the
+  HDF5 reader.
 - **A JPEG 2000 over the network delivers most of the file for its coarsest
   level.** The excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) changes
   what is asked — one probe of `PROBE` bytes per tile-part

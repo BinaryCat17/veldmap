@@ -63,8 +63,8 @@ and are answered by the raised instance.
 
 Correctness after a kill is a property of how the participants are built, not
 of how carefully they finish. Cancellable is whoever has nothing to lose:
-`image-tiler` keeps a memo of the parsed source between calls (the heavy slot
-holds a NetCDF plane, the light one headers), but nothing that an answer
+`image-tiler` keeps a memo of the parsed source between calls (headers, a
+chunk grid, a stretch — never samples), but nothing that an answer
 depends on, and its durable state — the tile cache — is owned by the
 unkillable `tile-cache`. Everything that must survive a break is already on
 disk by then: a `.part` file stays as the point of resumption, sidecars and

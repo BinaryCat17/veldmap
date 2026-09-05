@@ -3,16 +3,17 @@
 //! уезжает на провод (`Described.levels`), и по ней же `adapters::produce`
 //! выбирает рукав — правило записано один раз.
 //!
-//! Строки считаются по заголовку, без пикселей: у TIFF по сетке чанков
-//! (`Grid::footprint`), у остальных по кадру и правилам их декодеров. Пик —
-//! `budget::Peak`, столбец «влезает» — его сверка со свободным вместе с
-//! потолком пути, если у пути он свой: `FULL_DECODE_BUDGET` у кадра целиком.
+//! Строки считаются по заголовку, без пикселей: у TIFF, JPEG 2000 и NetCDF по
+//! сетке чанков (`Grid::footprint`), у остальных по кадру и правилам их
+//! декодеров. Пик — `budget::Peak`, столбец «влезает» — его сверка со
+//! свободным вместе с потолком пути, если у пути он свой: `FULL_DECODE_BUDGET`
+//! у кадра целиком.
 
 use super::super::budget::Peak;
 use super::super::cascade;
 use super::super::pyramid;
 use super::grid::Overview;
-use super::{frame_fits, jpeg, netcdf, Info, Kind, Tie};
+use super::{frame_fits, jpeg, Info, Kind, Tie};
 
 /// Как уровень обслуживается.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +64,8 @@ impl Info {
                 match &self.kind {
                     Kind::Tiff(layout) => chunked(&layout.grid),
                     Kind::Jp2(layout) => chunked(&layout.grid),
+                    // Окна строк во всю ширину — сетка без копий, как полосный TIFF.
+                    Kind::Netcdf(layout) => chunked(&layout.grid),
                     // Потоковый PNG: строка и полосы каскада.
                     Kind::Png { interlaced: false } => {
                         let peak = Peak::new()
@@ -93,14 +96,6 @@ impl Info {
                             peak,
                         }
                     }
-                    // Плоскость уже осела в разборе; проход разворачивает её полосами.
-                    Kind::Netcdf(source) => {
-                        let peak = Peak::new()
-                            .with("плоскость", source.plane_bytes())
-                            .with("каскад", cascade::bytes(self.width, self.height))
-                            .with("полоса", netcdf::strip_bytes(self.width, self.height));
-                        pass(peak.clone(), peak.fits())
-                    }
                 }
             })
             .collect()
@@ -127,16 +122,15 @@ impl Info {
         rows.iter().position(|row| row.fits).map_or(top, |at| at as u32)
     }
 
-    /// Сколько памяти держит сам разбор, пока лежит в memo: узлы привязки,
-    /// сетка копий, у NetCDF — осевшая плоскость. Слагаемое пика соседней
-    /// работы (`module::State::neighbour_footprint`).
+    /// Сколько памяти держит сам разбор, пока лежит в memo: узлы привязки и
+    /// сетка копий. Слагаемое пика соседней работы
+    /// (`module::State::neighbour_footprint`).
     pub fn footprint(&self) -> u64 {
         let ties = (self.ties.len() * std::mem::size_of::<Tie>()) as u64;
         let kind = match &self.kind {
             Kind::Tiff(layout) => (layout.grid.overviews.len() * std::mem::size_of::<Overview>()) as u64,
             Kind::Jp2(layout) => (layout.grid.overviews.len() * std::mem::size_of::<Overview>()) as u64,
-            Kind::Netcdf(source) => source.plane_bytes(),
-            Kind::Png { .. } | Kind::Jpeg | Kind::Full(_) => 0,
+            Kind::Netcdf(_) | Kind::Png { .. } | Kind::Jpeg | Kind::Full(_) => 0,
         };
         ties + kind
     }
@@ -146,8 +140,11 @@ impl Info {
 mod tests {
     use super::super::super::budget;
     use super::super::super::pyramid::TILE;
+    use hdf5_pure::DType;
+
     use super::super::codec::Format;
     use super::super::jp2;
+    use super::super::netcdf;
     use super::super::tiff::Layout;
     use super::*;
 
@@ -172,6 +169,12 @@ mod tests {
 
     /// Байт на пиксель RGB8 — таблице геометрии глубина сэмпла безразлична.
     const RGB8: u32 = 3;
+
+    /// Гранула Sentinel-5P уровня 2: величина `[1, 4172, 450]` f32 — единичная
+    /// нулевая ось, окно строк ростом с плоскость.
+    fn s5p() -> Info {
+        Info::plain(450, 4172, Kind::Netcdf(netcdf::Layout::of(450, 4172, 4172, DType::F32)))
+    }
 
     /// Полосный TIFF без копий, как пишет GDAL гранулу Sentinel-1 GRD без
     /// внутренних тайлов: полоса в одну строку во всю ширину.
@@ -275,14 +278,44 @@ mod tests {
         assert_eq!(stripped(25309, 17408).level(0).unwrap().serve, Serve::Pointwise);
     }
 
-    /// Разбор соседа весит столько, сколько держит: у плоскости NetCDF —
-    /// плоскость, у заголовков — узлы привязки и копии.
+    /// Разбор соседа весит столько, сколько держит: узлы привязки и копии;
+    /// отсчётов не держит никто, и раскладка NetCDF весит как раскладка.
     #[test]
     fn след_разбора_считается_по_тому_что_он_держит() {
         assert_eq!(Info::plain(64, 64, Kind::Jpeg).footprint(), 0);
         let mut tiff = cog(4096, 4096);
         tiff.ties = (0..441).map(|_| Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }).collect();
         assert!(tiff.footprint() >= 441 * 32, "узлы привязки не посчитаны");
-        assert_eq!(Info::heavy(1500, 1202).footprint(), 0, "пустая плоскость — ноль");
+        assert_eq!(s5p().footprint(), 0, "раскладка величины отсчётов не держит");
+    }
+
+    /// Величина NetCDF по окнам строк: гранула Sentinel-5P с единичной
+    /// нулевой осью и величина SYNERGY одним чанком — окно ростом с плоскость,
+    /// и нулевой уровень у них точечный ценой всей плоскости; у гранулы OLCI,
+    /// чанкованной по строкам, нулевой уровень стои́т двух окон — двух третей
+    /// плоскости, и таблица говорит это честно, — а грубые идут проходом с
+    /// нулевого, как у полосного TIFF.
+    ///
+    /// Размеры настоящие: S5P CO 4172×450 f32, SYNERGY AOD 4022×324 f32,
+    /// OLCI LRR GIFAPAR 1217×15076 u8 чанками файла по 5026 строк.
+    #[test]
+    fn величина_netcdf_обслуживается_по_сетке_окон_строк() {
+        for info in [s5p(), Info::plain(4022, 324, Kind::Netcdf(netcdf::Layout::of(4022, 324, 324, DType::F32)))] {
+            let rows = info.levels();
+            let whole = u64::from(info.width) * u64::from(info.height);
+            assert_eq!(rows[0].serve, Serve::Pointwise, "{}×{}", info.width, info.height);
+            assert_eq!(rows[0].pixels, whole, "окно и есть плоскость — тайл стои́т её целиком");
+            assert!(rows.iter().all(|row| row.fits));
+            assert_eq!(info.finest(), 0);
+        }
+
+        let olci = Info::plain(1217, 15076, Kind::Netcdf(netcdf::Layout::of(1217, 15076, 5026, DType::U8)));
+        let rows = olci.levels();
+        assert_eq!(rows[0].serve, Serve::Pointwise);
+        assert_eq!(rows[0].pixels, 2 * 5026 * 1217, "тайл нулевого уровня стои́т двух окон");
+        assert!(rows[0].pixels < u64::from(olci.width) * u64::from(olci.height), "но не плоскости");
+        assert_eq!(olci.windowed(), 5, "точечно 0–4");
+        assert_eq!(rows[5].serve, Serve::Pass { from: 0 }, "вершина — проходом с нулевого");
+        assert!(rows.iter().all(|row| row.fits));
     }
 }

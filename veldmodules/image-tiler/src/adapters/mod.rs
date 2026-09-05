@@ -42,9 +42,9 @@ mod reads;
 /// **Цену каскада — у тех, кто её не считает.** Полосы каскада растут от
 /// ширины (около пяти килобайт на колонку, [`crate::cascade::bytes`]): на этой
 /// стороне они просят около трети свободной памяти инстанса, то есть проходят.
-/// NetCDF складывает эту цену со своей сам ([`netcdf::affordable`]) и потому
-/// отвергает раньше; у PNG, JPEG и полосного TIFF своего счёта нет, и по
-/// стороне это их единственная граница.
+/// Сетка чанков складывает эту цену с полосой и свежим чанком сама
+/// (`Grid::pass_peak`) и потому отвергает раньше; у PNG и JPEG своего счёта
+/// нет, и по стороне это их единственная граница.
 pub const MAX_SOURCE_SIDE: u32 = 65_536;
 
 /// Потолок для путей без потоковой развёртки (gif/bmp/webp, Adam7-PNG,
@@ -148,9 +148,9 @@ pub enum Kind {
     /// Форматы без потокового пути: декодируются целиком, они малы по природе.
     Full(ImageFormat),
     /// NetCDF-4: не картинка, а набор измеренных величин. Одна из них выбрана
-    /// показываемой ещё при описании — вместе с открытым файлом она и лежит
-    /// здесь (см. `netcdf::Source`).
-    Netcdf(Box<netcdf::Source>),
+    /// показываемой при описании, и её сетка — окна строк во всю ширину —
+    /// чанки драйвера (см. `netcdf::Layout`).
+    Netcdf(netcdf::Layout),
 }
 
 impl Info {
@@ -169,36 +169,11 @@ impl Info {
         }
     }
 
-    /// Разбор тяжёлого вида — того, что держит при себе отсчёты величины.
-    /// Тестам, которые проверяют правила о весе разбора, а не о его
-    /// содержимом.
-    #[cfg(test)]
-    pub fn heavy(width: u32, height: u32) -> Self {
-        Self::plain(width, height, Kind::Netcdf(Box::new(netcdf::Source::hollow())))
-    }
-
-    /// Разбор держит при себе отсчёты величины — то есть тяжёл.
-    ///
-    /// Так устроен только NetCDF: годность величины видна лишь по её
-    /// значениям, поэтому разбор их читает и оставляет показу. У прочих разбор
-    /// — это заголовки, а байты идут проходом.
-    ///
-    /// Это про память, а не про провод: файл читается по требованию, и сколько
-    /// его уехало по проводу, отсюда не следует вовсе (см. `netcdf::Resource`).
-    pub fn holds_samples(&self) -> bool {
-        matches!(self.kind, Kind::Netcdf(_))
-    }
-
 }
 
 /// Заголовок растра: формат, размеры, раскладка. Дешёвый и для гигабайтного
 /// файла — читаются заголовки и каталоги, не пиксели.
-pub fn describe(
-    resource_id: u64,
-    len: u64,
-    bytes: &Rc<Cell<u64>>,
-    near: bool,
-) -> Result<Info, String> {
+pub fn describe(resource_id: u64, len: u64, bytes: &Rc<Cell<u64>>) -> Result<Info, String> {
     let mut reader = Metered::new(resource_id, len, bytes.clone());
     let mut head = [0u8; 32];
     let read = reader.read(&mut head).map_err(|e| format!("чтение заголовка: {}", e))?;
@@ -215,7 +190,7 @@ pub fn describe(
         // смещениями, и оборачивать это в последовательный поток значило бы
         // отнять у него ровно то, чем он и дёшев (см. `netcdf::Resource`).
         drop(reader);
-        let info = netcdf::describe(resource_id, len, near)?;
+        let info = netcdf::describe(resource_id, len)?;
         return checked(info);
     }
     // Классический NetCDF-3 — другой формат, и читателя у него здесь нет.
@@ -310,13 +285,19 @@ pub fn produce(
             jp2::produce_direct(resource_id, bytes, info, layout, level, wants, emit)
         }
         (Kind::Jp2(layout), table::Serve::Pass { .. }) => jp2::produce_pass(resource_id, bytes, info, layout, emit),
+        // HDF5 ходит по файлу вразброс абсолютными смещениями, и читателя
+        // ресурса NetCDF заводит сам (см. `netcdf::Resource`).
+        (Kind::Netcdf(layout), table::Serve::Pointwise) => {
+            netcdf::produce_direct(resource_id, len, bytes, info, layout, level, wants, emit)
+        }
+        (Kind::Netcdf(layout), table::Serve::Pass { .. }) => {
+            netcdf::produce_pass(resource_id, len, bytes, info, layout, emit)
+        }
         // У остальных путь один, и строка таблицы говорит лишь, откуда он
         // начинается.
         (Kind::Png { .. }, _) => png::produce_pass(reader(), info, emit),
         (Kind::Jpeg, _) => jpeg::produce(reader(), info, level, emit),
         (Kind::Full(format), _) => full::produce(reader(), info, *format, emit),
-        // Файл уже прочитан описанием, и читателя этому проходу не нужно.
-        (Kind::Netcdf(source), _) => netcdf::produce(info, source, emit),
     }
 }
 

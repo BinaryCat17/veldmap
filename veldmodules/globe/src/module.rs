@@ -486,9 +486,6 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         // Координаты приходят во владение вместе с растром, и без него они
         // никому не нужны: отпускать их надо на каждом выходе из этого круга,
         // иначе файл остаётся открытым до конца жизни модуля.
-        // Читается до того, как имя займёт свой, здешний растр: у пришедшего и
-        // у заведённого поля одинаковы по смыслу, но это разные штуки.
-        let near = raster.near;
         let Some(handle) = raster.resource else {
             release_coordinates(raster.geolocation);
             continue;
@@ -520,7 +517,6 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         });
         let mut raster = Raster::new(role, veldsdk::OwnedResource::new(handle.clone()));
         raster.geolocation = coordinates.clone().map(veldsdk::OwnedResource::new);
-        raster.near = near;
 
         let correlation = raster.describe.begin();
         state.pending_describe.insert(correlation.clone(), (incoming.key.clone(), role));
@@ -529,7 +525,6 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
                 resource: Some(handle),
                 label: label.clone(),
                 geolocation: coordinates,
-                near: raster.near,
             },
             &correlation,
         );
@@ -966,7 +961,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         .unwrap_or_default();
     state.perf.pass(perf::Pass::Answer, &toll, began.elapsed(), Instant::now());
 
-    let Some((label, produce_list, resource, near)) = ({
+    let Some((label, produce_list, resource)) = ({
         let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
         let label = overlay.label.clone();
         // Слой скрыли, пока кэш искал: заводить под него проход — занять
@@ -1018,7 +1013,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             |addr| desired.contains(&addr),
         );
         match missed {
-            Missed::Produce(cells) => Some((label, cells, raster.resource.handle(), raster.near)),
+            Missed::Produce(cells) => Some((label, cells, raster.resource.handle())),
             // Ждём чужой проход молча: его конец пересчитает нужное всем.
             Missed::Waiting => return,
             Missed::Closed => None,
@@ -1051,7 +1046,6 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
-        near,
     }, &correlation);
 }
 

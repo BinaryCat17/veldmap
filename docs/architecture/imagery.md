@@ -239,8 +239,7 @@ property of their raster, and without it they are released). The globe
   and loses its running pass (`release_pass`: production is one per source,
   and a hidden layer must not hold it from a visible one); its tiles stay in
   the store, so showing it again opens nothing;
-- `OverlayRaster.near` travels through to `DescribeRequest.near`;
-  `Overlay.rough` says the quad is a bounding box, not a binding
+- `Overlay.rough` says the quad is a bounding box, not a binding
   ([georeference.md](georeference.md)).
 
 The appetite cap shared among the pyramids being drawn is in
@@ -270,8 +269,8 @@ modules' `schema.yaml`; this is the order of one show:
    size, tile side, the level table (`levels`: for every level how it is
    served, its memory peak, whether it fits), the georeference (`ties` or
    `placement`), `binding_trouble`, or an error.
-   Declared fast, and it decodes nothing — except NetCDF, which reads whole
-   variables here (see the table).
+   Declared fast: it decodes nothing but the sample windows of a NetCDF
+   candidate (see the table).
 2. `tile-cache` `on_query` → `on_tile`… `on_query_done`: what the disk cache
    already holds for this fingerprint and level.
 3. `image-tiler` `on_produce` (cancellable) → `on_produced`,
@@ -291,9 +290,9 @@ side is [viewing-pipeline.md](viewing-pipeline.md).
 
 ## What is read, per format
 
-The tiler does not see whether a resource is a file or a remote object, but it
-is told whether it is near (`near` in the requests), and NetCDF branches on
-that. Bytes come through `ResourceReader` windows, except for NetCDF, which
+The tiler does not see whether a resource is a file or a remote object, and
+no request tells it: what a level costs is the level table's to say, row by
+row. Bytes come through `ResourceReader` windows, except for NetCDF, which
 reads the HDF5 file at absolute offsets through the host directly
 (`netcdf::Resource`, below). The format is detected by content
 (`veldmodules/image-tiler/src/adapters/mod.rs`): JPEG 2000, NetCDF-4 and
@@ -321,7 +320,7 @@ sequential `pass` feeding the cascade — belong to the chunk grid driver
 | JPEG 2000 (`openjp2`, [ADR 0002](../decisions/0002-jpeg2000-decoder.md), [ADR 0004](../decisions/0004-jp2-excerpt.md)) | a chunk is one codestream tile decoded at a resolution factor (`adapters/codec.rs`, the only `unsafe` of the tiler); the copies are the resolution levels while the tile side divides by two; rows as for TIFF — a Sentinel-2 granule (tiles of 1024², five resolutions) is pointwise on every level, detail limit 0; a degenerate grid (PVI, tiles of 8²) goes by a pass | with a TLM index, the codec reads an excerpt (`adapters/excerpt.rs`): the main header, the tile's own tile-parts — cut after the packets of the level's resolution when PLT and the progression allow it — and EOC; a granule's coarsest level costs one 64 KiB probe per tile. Without TLM, the tile-parts under the requested tiles plus the SOT headers the decoder walks: those before the tile, and once per codec all those after it | the same chunk cache and region ceiling; zero is transparent only in a file with a GMLJP2 binding |
 | JPEG | every level a pass from itself: the frame decodes at the decoder's scale (1/8, 1/4, 1/2, 1; `jpeg::decoded_size`), is brought to the level's grid, and the cascade goes down from it — a pass from the level itself on every row; the detail limit is the first level whose decoded frame fits | nothing | `FULL_DECODE_BUDGET` on the decoded frame |
 | PNG; GIF, BMP, WebP | one pass from level 0 on every row; the cascade builds all levels; a streaming PNG costs a row, an interlaced PNG and the others a whole frame | nothing | `FULL_DECODE_BUDGET` on the whole-frame paths, `MAX_SOURCE_SIDE` |
-| NetCDF-4 (HDF5) | one pass from level 0 on every row, over the plane kept by describe; metadata on demand through a metadata cache (`METADATA_CACHE`); at describe, candidate variables are read whole into f32 in order of preference until one is neither empty nor flat, and the winner is kept as the heavy memo until the pass; the pass feeds the cascade in strips of `TILE` rows | the file: only the chunks of the variables probed and of the coordinate grids; a plane itself: nothing | `PROBE_BUDGET` (bytes read while probing), `TIES_BUDGET` for the coordinate grids, `WIRE_PLANE` for a remote variable — the three measures of `affordable` are below |
+| NetCDF-4 (HDF5) | the chunk grid driver over a grid of row windows: a chunk is `rows` rows across the full width, read by the reader's row window (`read_*_rows`) and typed as `Samples`; no copies, so rows as for a stripped TIFF — the fine levels pointwise, the rest by a pass from level 0. The window is cut along the file's leading axis only (`rows_of`): a bundle of the file's chunk rows up to `TILE`, the chunk itself when taller, `TILE` for a contiguous layout; a unit leading axis (Sentinel-5P) or a single-chunk variable (SYNERGY) makes the window the whole plane, and the row then says a level-0 tile costs the plane. Metadata on demand through a metadata cache (`METADATA_CACHE`); describe reads headers and up to `SAMPLE_WINDOWS` windows of each candidate in order of preference until one is neither empty nor flat in the sample | the chunks under the requested tiles; at describe, the sample windows of the variables probed and the coordinate grids whole | `TIES_BUDGET` for the coordinate grids; the chunk depth counts the reader's copies (`depth_of`) |
 
 `MAX_SOURCE_SIDE` applies to every format at describe. The table travels
 whole, and the consumer derives from its rows the ladder of steps to a target,
@@ -371,9 +370,9 @@ disk cache would depend on the order of orders. The sample is
 `STRETCH_SAMPLES` values (2²⁰), one threshold for everyone who samples: a
 TIFF takes up to four chunks spread over its smallest overview
 (`Layout::stats`), a JPEG 2000 of precision above 8 bits four tiles at the
-coarsest factor, a NetCDF plane a stride coprime with its width
-(`netcdf::sampling_step`), so that a swath's unmeasured edge columns do not
-make the sample. Only the colour samples of a pixel go in: alpha and unshown
+coarsest factor, a NetCDF variable up to four row windows at a stride coprime
+with its width (`netcdf::sampling_step`), so that a swath's unmeasured edge
+columns do not make the sample. Only the colour samples of a pixel go in: alpha and unshown
 bands would move the percentiles. A flat field — equal percentiles — lands in
 the middle of the scale, not at its bottom, where a black frame is
 indistinguishable from emptiness; the half-width is taken from the value's
@@ -416,12 +415,14 @@ file's coordinates come from — `swath_pair`, `grid_axes`, the sibling file —
 is [georeference.md](georeference.md).
 
 **Reading.** The file is HDF5, addressed by absolute offsets, and it is read
-on demand: `netcdf::Resource` is the `hdf5_pure::Source` — two numbers, the
-resource id and its length — whose `read_at` is `veldsdk::abi::resource_read`
-at an offset; a short answer is `UnexpectedEof`, not "what there was". The
-reader's metadata cache is `METADATA_CACHE`; raw chunks do not go into it.
-The file's length enters no ceiling: gigabytes not reached cost neither
-memory nor wire.
+on demand: `netcdf::Resource` is the `hdf5_pure::Source` — the resource id,
+its length and a high-water mark of the read (`reached`, the pass's progress)
+— whose `read_at` is `veldsdk::abi::resource_read` at an offset; a short
+answer is `UnexpectedEof`, not "what there was". The reader's metadata cache
+is `METADATA_CACHE`; raw chunks do not go into it. The file's length enters no
+ceiling: gigabytes not reached cost neither memory nor wire. Samples are read
+in row windows (`read_rows`): `read_u8_rows`, `read_u16_rows`,
+`read_i16_rows` typed as `Samples`, everything else through `read_f32_rows`.
 
 **The sieve** (`survey`, `describe_item`). A candidate is two-dimensional
 with unit axes dropped (`Item.plane`) and numeric; not marked `flag_values`
@@ -448,38 +449,43 @@ alphabetically, which is determinacy, not choice. Selection, not a sieve: a
 file that says nothing about place is still shown, on the catalogue's
 footprint.
 
-**Reading chooses** (`describe`). Candidates are read whole into f32 in that
-order (`plane`). One with no `is_data` value is skipped — SLSTR carries
-quantities measured over the ocean only, solid `_FillValue` over land, and
-shown it would be a transparent frame without a word; a flat one (`spread`)
-is the answer of last resort. The flat one is remembered as a variable, not
-as its samples, and reread at the end if nothing better came: `affordable`
-admits one plane at a time, and two held at once could pass the instance's
-memory — a trap, not a refusal. `PROBE_BUDGET` (`budget::free()`) is the
-bytes probes may read before giving up — asked before a probe, charged after
-a successful one; a walk cut short names what it did not check (`skipped`),
-and a file with no candidate at all is refused with `explain`, in the words
-the decision was made with. The winner's samples stay as the heavy memo until
-the pass (the table above).
+**A sample chooses** (`describe`, `probed`, `sampled`). Candidates are
+sampled in that order: up to `SAMPLE_WINDOWS` row windows spread over the
+height, the first and the last at the edges, each subsampled at a stride
+coprime with the width (`sampling_step`) so that the whole sample stays under
+`STRETCH_SAMPLES`. One with no `is_data` value in the sample is skipped — SLSTR
+carries quantities measured over the ocean only, solid `_FillValue` over land,
+and shown it would be a transparent frame without a word; a flat one
+(`spread`) is the answer of last resort, kept with its layout and never reread.
+A variable measured only outside the sample windows is skipped as empty: that
+is the price of not reading the plane. A variable of no more than
+`SAMPLE_WINDOWS` windows — the plane-sized window of Sentinel-5P and SYNERGY,
+the three chunks of 5026 rows of OLCI GIFAPAR — is read whole by the sample,
+one window at a time: the sample saves the memory of a window, not bytes, and
+the first tiles read the same rows again (over the network from the block
+pool). Skipped candidates are named in the
+log (`skipped`), and a file with no candidate at all is refused with
+`explain`, in the words the decision was made with. The winner leaves describe
+as a `Layout`: the row grid, the sample type, the fill mark and the stretch
+computed from the same sample (`mapping`); no samples stay in the memo.
 
 **Marks and packing.** `_FillValue` (`Item.fill`) is the nodata mark of the
 display. `scale_factor` and `add_offset` are not applied to the shown quantity
-(`plane`): the transform is linear and increasing, the stretch is by
+(`mapping`): the transform is linear and increasing, the stretch is by
 percentiles of the same values, and "no data" is compared with the raw value
 as written. Coordinates are unpacked (`unpacked`): Sentinel-3 writes them as
 scaled integers, and unscaled they are not degrees.
 
-**Three measures of a quantity** (`affordable`, in this order: memory first,
-because its refusal is final; the wire one is cured by downloading, and the
-refusal says so). `read`: the plane plus the raw samples beside it while it
-is assembled (`peak_per_pixel`), against `budget::free()`. `pass`: the f32
-plane plus the cascade strips and the RGBA strip (`cascade::bytes`,
-`strip_bytes`), against the same. Unless `near`, `wire`: the compressed bytes
-of the variable in the file — the storage size of its chunks — against
-`WIRE_PLANE`; a quantity is compressed in the file, and measuring the wait by
-the unpacked size would refuse over the network a file that is far smaller on
-the wire. Three refusals, worded apart. The Sentinel-5P L1B cube reaches none
-of them: the provider extinguishes the product type before a download
+**Memory is the grid's count.** A window of rows is a chunk of the grid, and
+its cost is the driver's: `Grid::direct_peak` for a pointwise level,
+`Grid::pass_peak` for a pass, with the chunk depth from `depth_of` — the raw
+window, the decompressed file chunk beside it while the window is assembled,
+and the typed copy the reader makes for 16-bit and f32 samples (or the f32 it
+unpacks the rest into). A variable whose window is the plane asks for the
+plane in every term, and the row's `fits` says whether that is admitted; there
+is no ceiling of NetCDF's own. The coordinate grids are still read whole
+(`read_f32`), against `TIES_BUDGET` (`ties_peak`). The Sentinel-5P L1B cube is
+never described: the provider extinguishes the product type before a download
 (`hopeless_type`, above), and inside such a file its tables lose by
 `placeable`.
 
@@ -489,13 +495,13 @@ An instance has `budget::INSTANCE` of linear memory, `budget::RESERVE` of it is
 always taken, and `budget::free()` is what work on a source may use
 (`veldmodules/image-tiler/src/budget.rs`). Every path sums the memory of its
 work into a `budget::Peak` of named terms — strip, chunk, cascade, region,
-frame, plane — and asks `admit()` against `free()`; the table's `fits` column
+frame — and asks `admit()` against `free()`; the table's `fits` column
 is the same sum computed at describe, and `produce` adds the parse of a
 neighbouring source still held in the memo before it starts. Two shares are
 set from the budget: the chunk cache of pointwise reading (`budget::CHUNK_CACHE`)
 and, from it, the region a tile may read (`grid::REGION_CAP`). The ceilings
-that stay named are those of a path's own decoder: `FULL_DECODE_BUDGET` for a
-frame decoded whole, and the NetCDF probe and wire limits.
+that stay named are those of a path's own decoder — `FULL_DECODE_BUDGET` for a
+frame decoded whole — and `TIES_BUDGET` for the coordinate grids of a swath.
 
 ## Fingerprint and cache
 

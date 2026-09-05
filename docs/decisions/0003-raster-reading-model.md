@@ -21,8 +21,8 @@ pixels, the memory peak of that work as named terms (`budget::Peak`), and
 whether it fits. The three scalars on the wire — `reach`, `windowed`, `finest`
 — and the branch taken by `produce` are all read from that table. A **chunk
 grid driver** (`adapters/grid.rs`) owns the two loops over any source that
-reads in chunks, behind the trait `Chunked`; TIFF supplies chunks, later
-JPEG 2000 and NetCDF do. **One memory count**: `budget::free()` is the only
+reads in chunks, behind the trait `Chunked`; TIFF, JPEG 2000 and NetCDF
+supply chunks. **One memory count**: `budget::free()` is the only
 limit, every path sums its terms into a `Peak` and asks `admit()`; the cache of
 chunks is a named share of it, and the region ceiling follows from the cache.
 A level is pointwise when its chunk grid is not degenerate (a chunk of at least

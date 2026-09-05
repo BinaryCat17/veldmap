@@ -1,40 +1,28 @@
 //! NetCDF-4 (он же HDF5): измеренная величина → растр.
 //!
-//! Файл этот не картинка, а набор именованных величин: температура
-//! поверхности, содержание газа в столбе воздуха, качество измерения, ошибка
-//! измерения. Показать его — значит выбрать из них ту, которая и есть
-//! измерение, узнать, где каждый её отсчёт лежит на Земле, и растянуть
-//! значения в яркость. Правила выбора — CF, то есть те же, которыми файл
-//! описывает себя сам (см. [`preferred`]); шаблонов имён миссий здесь нет.
-//!
-//! Читается он по требованию: HDF5 адресуется абсолютными смещениями и
-//! рассчитан на произвольный доступ, а ридер крейта держит в памяти
-//! метаданные да текущий чанк. Входом служит сам ресурс хоста (см.
-//! [`Resource`]) — пути у wasm-модуля нет вовсе, инстанс собирается без
-//! единого preopen (`plugins.rs` у ядра хоста), и всякий байт приходит к нему
-//! ресурсом.
-//!
-//! Поэтому длина файла ничего здесь не решает, и потолков по ней нет:
-//! семнадцать гигабайт стоят ровно тех чанков, которые понадобились. Стои́т
-//! показ величины — её отсчёты ложатся в память целиком и разворачиваются в
-//! f32, — и мерится этим (см. [`affordable`]).
-//!
-//! Тайлами и уровнями NetCDF всё равно не показать, и мешает этому не размер,
-//! а отсутствие копий: показать грубо, не прочитав подробно, здесь нечем.
-//! Наименьшая читаемая единица — чанк, а пишет их ESA по-разному: у гранулы
-//! SYNERGY величина лежит одним чанком целиком, у OLCI — полосами по первой
-//! оси. Оконное чтение крейта (`read_f32_rows`) режет как раз по ней, и каскад
-//! полосы принимает (`Cascade::push_rows`); плоскость здесь всё равно читается
-//! целиком, и держит её описание: годность величины и растяг видны только по
-//! всем её отсчётам (см. [`Source`], [`affordable`]).
+//! Файл — набор именованных величин, и показать его значит выбрать ту, что
+//! есть измерение (правила CF, см. [`preferred`]), узнать, где её отсчёты
+//! лежат на Земле, и растянуть значения в яркость. Читается он по требованию
+//! ресурсом хоста ([`Resource`]): HDF5 адресуется абсолютными смещениями.
+//! Величина — источник драйвера сетки чанков (`grid.rs`): сетка её — окна
+//! строк во всю ширину ([`rows_of`]), и что уровню достаётся, окно или
+//! проход, решает таблица уровней по этой сетке. Выбор величины и растяг —
+//! по выборке окон ([`describe`]); плоскость целиком нигде не держится.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use hdf5_pure::{AttrValue, DType, File, FileAccessProperties, FormatError, MetadataCacheConfig};
+use hdf5_pure::{
+    AttrValue, DType, Dataset, File, FileAccessProperties, FormatError, MetadataCacheConfig,
+};
 
-use super::super::budget;
-use super::super::cascade::{self, Cascade, Emit};
+use super::super::budget::Peak;
+use super::super::cascade::Emit;
 use super::super::pyramid::TILE;
+use super::grid::{self, Chunked, Grid};
 use super::radiometry::{self, percentile_stretch, Mapping, Pixel, Samples, STRETCH_SAMPLES};
 use super::{placed, Info, Kind, Tie};
 
@@ -50,17 +38,6 @@ pub const MAGIC: &[u8] = b"\x89HDF\r\n\x1a\x0a";
 /// формата, который сам же и назвал читаемым. Опознать их стои́т четырёх байт.
 pub const CLASSIC: [&[u8]; 2] = [b"CDF\x01", b"CDF\x02"];
 
-/// Потолок величины, тянущейся по сети. Мерится им не память, а ожидание:
-/// пока величина едет, на шаре не появляется ничего, и спектральный куб
-/// Sentinel-5P такого ожидания не стоит ради ответа «это измерения, а не
-/// изображение». Скорость канала не измерена, число назначено.
-///
-/// Мерится величина, а не файл: файл читается по требованию, и его длина
-/// провода не стои́т. Отказ по этому потолку поправим — те же байты, взятые с
-/// диска, приходят мгновенно, — и говорится это вслух, чтобы человеку было что
-/// сделать (см. [`affordable`]).
-const WIRE_PLANE: u64 = 96 * 1024 * 1024;
-
 /// Сколько памяти отдано кэшу метаданных ридера.
 ///
 /// Заголовки HDF5 читаются россыпью мелких кусков — суперблок, заголовки
@@ -70,18 +47,24 @@ const WIRE_PLANE: u64 = 96 * 1024 * 1024;
 /// не кладёт, иначе кэш метаданных держал бы данные.
 const METADATA_CACHE: usize = 8 * 1024 * 1024;
 
+/// Сколько окон строк читает выборка разбора — столько же чанков вразброс
+/// берут растягу TIFF и JPEG 2000 (`tiff::mapping`, `jp2::Chunks::mapping`).
+const SAMPLE_WINDOWS: u32 = 4;
+
 /// Ресурс хоста как источник байт для HDF5.
 ///
 /// Ридеру от файла нужны ровно два ответа — длина и байты с абсолютного
 /// смещения, — и ресурс даёт оба. Этим и живёт всё чтение по требованию:
 /// открытие стои́т заголовков, а не файла.
 ///
-/// Владеет он только двумя числами, и это не случайность: `Source` обязан быть
-/// `Send + Sync`, а разделяемое состояние на `Rc` этому не отвечает. Считать
-/// прочитанное поэтому здесь нечем — провод мерит хост (`network::perf`).
+/// `reached` — дальняя достигнутая позиция чтения, та же мерка, что у
+/// `Metered` (`adapters::Metered`): из неё растёт прогресс прохода. Атомиком,
+/// а не `Rc<Cell>`: `Source` обязан быть `Send + Sync`, хоть инстанс и
+/// однопоточный.
 struct Resource {
     id: u64,
     len: u64,
+    reached: Arc<AtomicU64>,
 }
 
 impl hdf5_pure::Source for Resource {
@@ -101,26 +84,25 @@ impl hdf5_pure::Source for Resource {
             });
         }
         buf.copy_from_slice(&got);
+        self.reached.fetch_max(offset + buf.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 }
 
-/// Файл поверх ресурса, читаемый по требованию.
-fn opened(resource_id: u64, len: u64) -> Result<File, String> {
+/// Файл поверх ресурса, читаемый по требованию; `reached` — куда дошло чтение.
+fn opened(resource_id: u64, len: u64, reached: Arc<AtomicU64>) -> Result<File, String> {
     let properties =
         FileAccessProperties::new().with_metadata_cache(MetadataCacheConfig::new(METADATA_CACHE));
-    File::from_source_with_options(Resource { id: resource_id, len }, properties)
+    File::from_source_with_options(Resource { id: resource_id, len, reached }, properties)
         .map_err(|why| format!("NetCDF: {}", why))
 }
 
-/// Байт памяти на отсчёт в пике чтения величины.
+/// Байт памяти на отсчёт в пике чтения решётки координат.
 ///
-/// Живут одновременно две вещи, и какие именно — зависит от того, что дороже.
-/// Чтение собирает сырые отсчёты в свой буфер, распаковывая в него чанк за
-/// чанком: пока идёт сборка, рядом с буфером лежит распакованный чанк, и у
-/// одночанковой величины он ростом со всю её — отсюда `2 · element`. Собранное
-/// потом разворачивается в f32, и на этом шаге живут обе копии — отсюда
-/// `element + 4`. Пик — большее из двух, то есть `element + max(element, 4)`.
+/// Решётка читается целиком (`read_f32`), и живут при этом две вещи разом:
+/// сырые отсчёты, собранные чанк за чанком, — рядом с ними распакованный чанк,
+/// у одночанковой решётки ростом со всю её, отсюда `2 · element`, — и они же,
+/// развёрнутые в f32, — отсюда `element + 4`. Пик — большее из двух.
 ///
 /// Считать по меньшему нельзя: перебор лимита инстанса кончается не отказом, а
 /// трапом — ровно тем, что потолок обязан предотвращать.
@@ -128,73 +110,11 @@ fn peak_per_pixel(element: u32) -> u32 {
     element + element.max(4)
 }
 
-/// Можно ли прочитать величину — по памяти и по терпению.
-///
-/// Памяти она просит в двух разных местах, и мерки эти складывать нельзя: они
-/// про разные моменты.
-///
-/// Обе она считает сама, из размеров и типа отсчёта: вызывающему остаётся
-/// сказать, что за растр, — забыть слагаемое ему нечем.
-///
-/// **Чтение** — сырые отсчёты и они же развёрнутые в f32 живут разом (см.
-/// [`peak_per_pixel`]).
-///
-/// **Работа рядом с осевшей плоскостью** — то, что живёт вместе с ней при
-/// проходе: сама плоскость в f32, полосы каскада ([`cascade::bytes`]) и полоса
-/// RGBA, которую проход отдаёт каскаду ([`strip_bytes`]). Решётки координат,
-/// читаемые при описании, сюда не входят — у них свой потолок
-/// ([`TIES_BUDGET`]), и что рядом с плоскостью он умещается, держит тест.
-///
-/// Величина, прошедшая по первой мерке, может упереться во вторую: обе эти
-/// работы растут от ширины, а первая мерка о ширине не знает ничего — ей всё
-/// равно, лежат отсчёты полосой или квадратом.
-///
-/// `wire` — сколько байт величины лежит в файле, то есть что придётся
-/// привезти. Мерка отдельная, потому что величина сжата: у гранулы OLCI
-/// тридцать пять мегабайт отсчётов лежат в четырёх с четвертью. Мерить
-/// ожидание развёрнутым объёмом значит отказывать по сети файлу, который
-/// приезжает за десять секунд.
-///
-/// Порядок проверок не переставить. Память проверяется первой затем, что её
-/// отказ окончателен, а сетевой лечится скачиванием и это лечение обещается
-/// вслух: сказанное наоборот обещало бы над непоместимой величиной лечение,
-/// которого нет.
-fn affordable(element: u32, width: u32, height: u32, wire: u64, near: bool) -> Result<(), String> {
-    let free = budget::free();
-    let pixels = u64::from(width) * u64::from(height);
-    let read = pixels.saturating_mul(u64::from(peak_per_pixel(element)));
-    let pass = pixels
-        .saturating_mul(4)
-        .saturating_add(cascade::bytes(width, height))
-        .saturating_add(strip_bytes(width, height));
-    if read > free {
-        return Err(format!(
-            "чтение величины займёт {} МБ, а в память помещается {} МБ",
-            budget::mb(read),
-            budget::mb(free)
-        ));
-    }
-    if pass > free {
-        return Err(format!(
-            "величина вместе с работой по ней займёт {} МБ, а в память помещается {} МБ",
-            budget::mb(pass),
-            budget::mb(free)
-        ));
-    }
-    if !near && wire > WIRE_PLANE {
-        return Err(format!(
-            "величина весит в файле {} МБ, и по сети это минуты — скачайте \
-             снимок, и он прочитается сразу",
-            budget::mb(wire)
-        ));
-    }
-    Ok(())
-}
-
 /// Потолок координатных решёток полосы съёмки: у неё широта и долгота лежат
-/// поотсчётно, то есть двумя такими же полями, как сама величина. Мельче
-/// потолка величины нарочно — привязка это добавка к показу, и платить за неё
-/// столько же, сколько за сам снимок, незачем: без неё снимок ляжет по контуру
+/// поотсчётно, то есть двумя такими же полями, как сама величина. Решётки
+/// читаются целиком — узлы привязки берутся из них вразброс, а окно строк
+/// крейта режет по одной оси, — и потолок держит эту пару в доле свободной
+/// памяти: привязка это добавка к показу, и снимок без неё ляжет по контуру
 /// каталога.
 const TIES_BUDGET: u64 = 64 * 1024 * 1024;
 
@@ -221,15 +141,6 @@ fn ties_peak(nodes: u64, element: u32) -> u64 {
 /// сравнивать порознь нечем.
 fn ties_fit(nodes: u64, element: u32) -> bool {
     ties_peak(nodes, element) <= TIES_BUDGET
-}
-
-/// Полоса RGBA, которую проход отдаёт каскаду.
-///
-/// Каскад копирует её к себе в полосу базового уровня, но копирует не отпуская:
-/// обе живут, пока идёт `push_rows`. Считается поэтому отдельным слагаемым, а
-/// не «внутри каскада».
-pub(super) fn strip_bytes(width: u32, height: u32) -> u64 {
-    u64::from(width) * u64::from(height.min(TILE)) * 4
 }
 
 /// Ширина отсчёта величины в байтах — по заголовку, без единого прочитанного
@@ -267,67 +178,139 @@ const TIE_CAP: u32 = 256;
 const MAX_DATASETS: usize = 512;
 const MAX_DEPTH: usize = 8;
 
-/// Сколько всего может быть прочитано пробами, прежде чем сдаться.
+/// Раскладка показываемой величины — то, что разбор оставляет производству.
 ///
-/// Счётом проб это не выражается: у гранулы SLSTR плоскость в 157×126
-/// отсчётов, и пустых подряд перед заполненной бывает десяток («только над
-/// океаном», «только над сушей», по алфавиту), — а у полосы Sentinel-5P одна
-/// плоскость стои́т мегабайтов, и второй такой пробы уже жалко. Потолок ростом
-/// со свободную память: сколько мы согласны держать ради показа, столько же
-/// согласны и прочитать ради выбора.
-///
-/// Держится при этом одна проба зараз — прочитанное прошлой отпускается, —
-/// поэтому в память они не складываются, а вот во время складываются, и
-/// считается здесь именно оно. То есть число отсюда меряет ожидание, а память
-/// стережёт [`affordable`], и по-разному: пробе довольно поместиться, а
-/// выбранной величине надо ещё пережить проход по себе.
-const PROBE_BUDGET: u64 = budget::free();
-
-/// То, что решено показывать, вместе с уже прочитанными отсчётами.
-///
-/// Сам файл здесь не держится: из него взято всё, что нужно показу. А вот
-/// отсчёты держатся — годность величины видна только по ним, значит к концу
-/// описания они уже прочитаны, и второе чтение стои́ло бы второго разбора
-/// файла целиком.
-pub struct Source {
-    /// Отсчёты показываемой величины, развёрнутые в f32.
-    ///
-    /// Держатся с описания, а не читаются заново: годность величины видна
-    /// только по ним (см. [`describe`]), значит к концу описания они уже
-    /// прочитаны — а второе чтение стои́т второго разбора всего файла. Сам
-    /// файл после этого не нужен и не держится: из него взято всё.
-    values: Vec<f32>,
+/// Файл не держится: открыть его стои́т заголовков, а держать — кэша метаданных
+/// на каждый разбор в memo. Отсчёты не держатся тем более: читаются они окнами
+/// по заказу, как чанки TIFF, — и растяг поэтому посчитан здесь же, по выборке
+/// разбора, чтобы соседние тайлы не разошлись швами (`Mapping`).
+pub struct Layout {
+    /// Сетка окон строк — то, чем живёт драйвер (см. [`rows_of`]).
+    pub grid: Grid,
     /// Путь показываемой величины внутри файла.
     path: String,
+    /// Тип отсчёта, как он записан в файле: им выбирается лестница чтения
+    /// (см. [`read_rows`]).
+    dtype: DType,
     /// Чем в ней помечено «нет данных» (`_FillValue`).
     fill: Option<f32>,
     /// Как величина называется в файле по-человечески — для журнала.
     said: String,
+    /// Растяг показа — один на файл.
+    mapping: Mapping,
 }
 
-impl Source {
-    /// Источник без единого отсчёта — тестам, которым нужен вид разбора, а не
-    /// его содержимое. Отдельной дверцей затем, что нутро источника закрыто
-    /// намеренно: отсчёты сюда кладёт только разбор файла.
-    #[cfg(test)]
-    pub fn hollow() -> Self {
-        Self { values: Vec::new(), path: String::new(), fill: None, said: String::new() }
+impl Layout {
+    /// Раскладка величины `width`×`height` с окном в `rows` строк (не выше
+    /// самой величины) и отсчётом типа `dtype`; растяг — тождество, имени и
+    /// метки нет. Тестам таблицы и чтения нужна сетка, а не файл; разбор
+    /// дописывает своё сам ([`probed`]).
+    pub fn of(width: u32, height: u32, rows: u32, dtype: DType) -> Self {
+        let rows = rows.clamp(1, height.max(1));
+        Self {
+            grid: Grid { tiled: false, chunk: (width, rows), overviews: Vec::new(), depth: depth_of(&dtype) },
+            path: String::new(),
+            dtype,
+            fill: None,
+            said: String::new(),
+            mapping: Mapping::identity(None),
+        }
     }
 
-    /// Сколько памяти держит осевшая плоскость величины.
-    pub fn plane_bytes(&self) -> u64 {
-        self.values.len() as u64 * 4
+    /// Строк в окне — высота чанка сетки.
+    fn rows(&self) -> u32 {
+        self.grid.chunk.1
+    }
+
+    /// Путь показываемой величины внутри файла.
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
 
-/// `near` — источник лежит на диске: тогда мерят память, а не терпение к сети
-/// (см. [`affordable`]).
+/// Высота окна строк — чанка сетки величины в `height` строк.
+///
+/// Крейт режет окно по нулевой оси файла, и только по ней. Единичная нулевая
+/// ось (время у гранулы Sentinel-5P: `[1, scanline, ground_pixel]`) значит,
+/// что первое окно — вся плоскость, а второго нет; чанк файла во всю высоту
+/// (величина SYNERGY, записанная одним чанком) — что меньше плоскости всё
+/// равно не прочесть: чанк распаковывается целиком. Оба честно кладутся в
+/// сетку окном в `height` строк, и таблица уровней тогда сама говорит, что
+/// уровень стои́т плоскости.
+///
+/// Иначе окно — связка чанков файла по строкам: наибольшее кратное их высоты
+/// не больше [`TILE`], а сам чанк, если он выше тайла. Мельче чанка окно не
+/// бывает (окно в половину чанка стои́т целого), крупнее тайла не нужно —
+/// тайлу уровня хватает двух соседних. У непрерывной раскладки чанков нет, и
+/// окно ей — тайл.
+fn rows_of(height: u32, leading: u64, chunk_rows: Option<u64>) -> u32 {
+    if leading <= 1 {
+        return height;
+    }
+    let chunk = match chunk_rows {
+        None => return TILE.min(height),
+        Some(rows) => u32::try_from(rows).unwrap_or(height).clamp(1, height),
+    };
+    if chunk >= TILE {
+        return chunk;
+    }
+    (chunk * (TILE / chunk)).min(height)
+}
+
+/// Байт памяти на отсчёт в свежем чанке — до развёртки в RGBA, которую
+/// драйвер прибавляет сам (`Grid::chunk_bytes`).
+///
+/// Считается по двум фазам чтения крейта, и берётся большая. **Сборка окна**
+/// (`read_raw_rows`): само окно, сжатый кусок файла и распакованный из него
+/// чанк живут разом — у одночанковой величины оба ростом с окно, и сжатый
+/// несжимаемых данных не меньше распакованного. **Развёртка** собранного:
+/// сырое окно и его копия — типизированная того же размера у отсчётов,
+/// которые показ разбирает сам (`Samples`), f32 у остальных; байтовым копия
+/// не нужна, сырое окно и есть они. Неузнанный тип считается восьмибайтовым:
+/// ошибиться в эту сторону значит отказать, в другую — упасть.
+fn depth_of(dtype: &DType) -> u32 {
+    let element = width_of(dtype).unwrap_or(8);
+    let assembled = 3 * element;
+    let unpacked = match dtype {
+        DType::U8 => element,
+        DType::U16 | DType::I16 | DType::F32 => 2 * element,
+        _ => element + 4,
+    };
+    assembled.max(unpacked)
+}
+
+/// Окно строк величины типизированными отсчётами — одной лестницей на выборку
+/// разбора и на чанки драйвера.
+///
+/// Байты, 16-битные целые и f32 показ разбирает сам (`Samples`); остальные
+/// разворачиваются в f32 — своей развёртки у них нет, а файла с ними в
+/// каталоге не встречалось. Копия эта посчитана в [`depth_of`].
+fn read_rows<T>(
+    dataset: &Dataset,
+    dtype: &DType,
+    start: u64,
+    rows: u32,
+    with: impl FnOnce(&Samples<'_>) -> T,
+) -> Result<T, String> {
+    let rows = u64::from(rows);
+    let failed =
+        |e: hdf5_pure::Error| format!("NetCDF: строки {}…{}: {}", start, start + rows, e);
+    Ok(match dtype {
+        DType::U8 => with(&Samples::U8(&dataset.read_u8_rows(start, rows).map_err(failed)?)),
+        DType::U16 => with(&Samples::U16(&dataset.read_u16_rows(start, rows).map_err(failed)?)),
+        DType::I16 => with(&Samples::I16(&dataset.read_i16_rows(start, rows).map_err(failed)?)),
+        _ => with(&Samples::F32(&dataset.read_f32_rows(start, rows).map_err(failed)?)),
+    })
+}
+
+/// Заголовки, выбор величины и её раскладка — без плоскости.
 ///
 /// Длина файла сюда не входит ни одним потолком, и это не упущение: читается
-/// он по требованию, и гигабайты, до которых дело не дошло, не стои́т ни
-/// памяти, ни провода.
-pub fn describe(resource_id: u64, len: u64, near: bool) -> Result<Info, String> {
-    let file = opened(resource_id, len)?;
+/// он по требованию, и гигабайты, до которых дело не дошло, не стоят ни
+/// памяти, ни провода. Стои́т описание выборки выбранной величины — и по одной
+/// на каждую отвергнутую до неё (см. [`sampled`]).
+pub fn describe(resource_id: u64, len: u64) -> Result<Info, String> {
+    let file = opened(resource_id, len, Arc::default())?;
 
     let surveyed = survey(&file)?;
     let order = preferred(&surveyed);
@@ -335,75 +318,44 @@ pub fn describe(resource_id: u64, len: u64, near: bool) -> Result<Info, String> 
         return Err(explain(&surveyed));
     }
 
-    // Пустая величина — не ответ, и узнаётся это только чтением. Гранула
+    // Пустая величина — не ответ, и узнаётся это только по отсчётам. Гранула
     // Sentinel-3 несёт величины, снятые не над всякой поверхностью («только
     // над океаном»), и над сушей такая лежит сплошным `_FillValue`:
     // показанная, она даёт прозрачный кадр без единого слова о том, почему на
     // шаре ничего нет. Однотонная — ответ последней очереди: показать её можно
     // (ровное поле встаёт в середину шкалы), но всякая соседка с перепадом
-    // говорит больше.
+    // говорит больше. Запоминается она вместе с раскладкой: выборка у неё уже
+    // прочитана, и второй раз за ней не ходят.
     //
-    // Запоминается при этом сама величина, а не её отсчёты, и они перечитываются
-    // в конце. Держать их значило бы держать в памяти инстанса две плоскости
-    // разом — эту и ту, что читается сейчас, — а [`affordable`] стережёт
-    // каждую порознь: двумя такими за гигабайт линейной памяти выходят.
-    // Перебор её отказом не кончается: он роняет инстанс трапом, то есть ровно
-    // тем, что потолок обязан предотвращать. Цена — второе чтение одной
-    // плоскости, и только там, где однотонными оказались все.
+    // Причина пропуска называется, а не глотается: ответом иначе стало бы
+    // «двумерных величин в файле нет», хотя выше установлено, что они есть.
     let mut skipped: Vec<String> = Vec::new();
-    let mut flat: Option<&Item> = None;
-    let mut probed: u64 = 0;
+    let mut flat: Option<(&Item, Layout)> = None;
     for chosen in &order {
         let Some((height, width)) = chosen.plane else { continue };
-        // Спрашивается до попытки, а списывается после удавшейся. Величина,
-        // отвергнутая потолком, не прочитана ни байтом: списать за неё значит
-        // и оборвать обход раньше времени, и соврать числом в отказе.
-        //
-        // Причина при этом названа, а не проглочена. Оборвись обход молча — и
-        // ответом стало бы «двумерных величин в файле нет», хотя выше уже
-        // установлено, что они есть: список `order` не пуст. Сказать человеку
-        // заведомую неправду хуже, чем сказать «дальше не смотрели».
-        if probed > PROBE_BUDGET {
-            skipped.push(format!(
-                "'{}' не проверена: пробами разобрано уже {} МБ",
-                chosen.path,
-                probed / (1024 * 1024)
-            ));
-            break;
-        }
-        let values = match plane(&file, &chosen.path, width, height, near) {
-            Ok(values) => values,
+        let (layout, values) = match probed(&file, chosen, width, height) {
+            Ok(read) => read,
             Err(why) => {
                 skipped.push(why);
                 continue;
             }
         };
-        probed += (values.len() as u64) * 4;
         match spread(&values, chosen.fill) {
-            Spread::Varying => {}
-            Spread::Empty => {
-                skipped.push(format!("'{}' пуста", chosen.path));
-                continue;
-            }
+            Spread::Varying => return told(&file, &surveyed, chosen, layout, &order, &skipped),
+            Spread::Empty => skipped.push(format!("'{}' пуста в выборке", chosen.path)),
             Spread::Flat => {
-                skipped.push(format!("'{}' однотонна", chosen.path));
-                flat.get_or_insert(chosen);
-                continue;
+                skipped.push(format!("'{}' однотонна в выборке", chosen.path));
+                flat.get_or_insert((chosen, layout));
             }
         }
-        return told(&file, &surveyed, chosen, values, &order, &skipped);
     }
     match flat {
-        Some(chosen) => {
-            let (height, width) = chosen.plane.expect("плоскость проверена при выборе");
-            let values = plane(&file, &chosen.path, width, height, near)?;
-            told(&file, &surveyed, chosen, values, &order, &skipped)
-        }
+        Some((chosen, layout)) => told(&file, &surveyed, chosen, layout, &order, &skipped),
         None => Err(match skipped.is_empty() {
             true => explain(&surveyed),
             // Причины у пропущенных разные — пустая, однотонная, не
-            // прочиталась, не поместилась, — и общая фраза обязана покрыть
-            // все: названная одной из них, она врала бы про остальные.
+            // прочиталась, — и общая фраза обязана покрыть все: названная
+            // одной из них, она врала бы про остальные.
             false => format!(
                 "NetCDF: ни одна из {} годных величин не подошла: {}",
                 skipped.len(),
@@ -411,6 +363,65 @@ pub fn describe(resource_id: u64, len: u64, near: bool) -> Result<Info, String> 
             ),
         }),
     }
+}
+
+/// Раскладка величины и выборка её отсчётов — то, по чему решают, она ли это,
+/// и с чем она уйдёт в производство.
+fn probed(file: &File, item: &Item, width: u32, height: u32) -> Result<(Layout, Vec<f32>), String> {
+    let failed = |e: hdf5_pure::Error| format!("NetCDF: {}: {}", item.path, e);
+    let dataset = file.dataset(&item.path).map_err(failed)?;
+    let dtype = dataset.dtype().map_err(failed)?;
+    let mut layout = Layout::of(width, height, rows_of(height, item.leading, item.chunk_rows), dtype);
+    // Окно допускается до чтения, той же меркой, что у свежего чанка драйвера
+    // (`Grid::chunk_bytes`): у величины с окном ростом с плоскость выборка и
+    // есть плоскость, и перебор лимита кончился бы трапом, а не отказом.
+    Peak::new()
+        .with("свежий чанк", layout.grid.chunk_bytes(layout.grid.chunk))
+        .admit()
+        .map_err(|why| format!("NetCDF: '{}' окном {} строк: {}", item.path, layout.rows(), why))?;
+    let values = sampled(&dataset, &layout, width, height)?;
+    layout.path = item.path.clone();
+    layout.fill = item.fill;
+    layout.said = item.said.clone();
+    layout.mapping = mapping(&item.path, &values, item.fill);
+    Ok((layout, values))
+}
+
+/// Выборка отсчётов величины — из окон вразброс по её высоте.
+///
+/// Окон до [`SAMPLE_WINDOWS`], первое и последнее — у краёв: край полосы
+/// съёмки не измерен вовсе, и годность величины по краям видна хуже всего.
+/// Внутри окна отсчёты берутся шагом, взаимно простым с шириной
+/// ([`sampling_step`]), и шаг разложен на все окна разом, чтобы выборка не
+/// переросла [`STRETCH_SAMPLES`]. Метки «нет данных» в выборке остаются:
+/// пустоту и однотонность по ним и узнают (см. [`spread`]).
+///
+/// Стои́т это окон, а не плоскости. Величина, у которой окон не больше, чем
+/// берёт выборка — окно-плоскость (см. [`rows_of`]) или три чанка по пять
+/// тысяч строк у OLCI, — читается ею целиком, по окну за раз: выборка
+/// бережёт память окна, а не байты, и первые тайлы прочтут то же ещё раз.
+/// Выборка — это выборка: величина с данными только вне её окон пройдёт как
+/// пустая, и следующий кандидат честнее ложного показа не будет; так лежит
+/// цена того, что плоскость не читается.
+fn sampled(dataset: &Dataset, layout: &Layout, width: u32, height: u32) -> Result<Vec<f32>, String> {
+    let rows = layout.rows();
+    let windows = height.div_ceil(rows).max(1);
+    // Окна расставлены равномерно от первого до последнего; у величины в
+    // меньшее число окон повторы схлопываются.
+    let mut picks: Vec<u32> = (0..SAMPLE_WINDOWS)
+        .map(|at| (u64::from(at) * u64::from(windows - 1) / u64::from(SAMPLE_WINDOWS - 1)) as u32)
+        .collect();
+    picks.dedup();
+    let per_window = (width as usize) * (rows as usize);
+    let stride = sampling_step(per_window * picks.len(), width as usize);
+    let mut values = Vec::with_capacity(per_window * picks.len() / stride + picks.len());
+    for &window in &picks {
+        let start = u64::from(window) * u64::from(rows);
+        read_rows(dataset, &layout.dtype, start, rows, |samples| {
+            values.extend((0..samples.len()).step_by(stride).map(|at| samples.get(at)));
+        })?;
+    }
+    Ok(values)
 }
 
 /// Привязка из отдельного файла координат — там, где растр её не несёт.
@@ -438,7 +449,7 @@ pub fn geolocation(
     if width < 2 || height < 2 {
         return Err(format!("растр {}×{} мельче узла привязки", width, height));
     }
-    let file = opened(resource_id, len)?;
+    let file = opened(resource_id, len, Arc::default())?;
     let items = survey(&file)?;
 
     // Плоскость координат в файле не одна: рядом с широтой лежит высота, а у
@@ -553,14 +564,14 @@ fn told(
     file: &File,
     surveyed: &[Item],
     chosen: &Item,
-    values: Vec<f32>,
+    layout: Layout,
     order: &[&Item],
     skipped: &[String],
 ) -> Result<Info, String> {
     let (height, width) = chosen.plane.ok_or_else(|| explain(surveyed))?;
     veldsdk::log::debug!(target: "decode",
-        "NetCDF: показывается '{}' ({}, единицы '{}') — {}×{}, {} из {} величин годятся{}",
-        chosen.path, chosen.said, chosen.units, width, height, order.len(), surveyed.len(),
+        "NetCDF: показывается '{}' ({}, единицы '{}') — {}×{}, окно {} строк, {} из {} величин годятся{}",
+        chosen.path, chosen.said, chosen.units, width, height, layout.rows(), order.len(), surveyed.len(),
         match skipped.is_empty() {
             true => String::new(),
             false => format!("; пропущено: {} ({})", skipped.len(), listed(skipped)),
@@ -570,12 +581,7 @@ fn told(
     Ok(Info {
         width,
         height,
-        kind: Kind::Netcdf(Box::new(Source {
-            values,
-            path: chosen.path.clone(),
-            fill: chosen.fill,
-            said: chosen.said.clone(),
-        })),
+        kind: Kind::Netcdf(layout),
         ties,
         // Координаты NetCDF записаны в градусах и решёткой: проекции здесь не
         // бывает вовсе.
@@ -595,39 +601,96 @@ fn listed(names: &[String]) -> String {
     }
 }
 
-pub fn produce(info: &Info, source: &Source, emit: Emit) -> Result<(), String> {
-    let values = &source.values;
-    let expected = (info.width as usize) * (info.height as usize);
-    if values.len() != expected {
-        return Err(format!(
-            "NetCDF: у '{}' {} отсчётов вместо {}×{}",
-            source.path, values.len(), info.width, info.height
-        ));
-    }
-    let mapping = mapping(&source.path, values, source.fill, info.width as usize);
+/// Чанки величины за трейтом драйвера: окно строк из файла, развёрнутое
+/// растягом разбора.
+struct Chunks<'a> {
+    dataset: Dataset,
+    layout: &'a Layout,
+    width: u32,
+    height: u32,
+    /// Куда дошло чтение файла — и счётчик прогресса, куда это переливается
+    /// после каждого чанка: ридер крейта в `Rc` не заглянет (см. [`Resource`]).
+    reached: Arc<AtomicU64>,
+    bytes: &'a Rc<Cell<u64>>,
+}
 
+impl<'a> Chunks<'a> {
+    fn open(
+        resource_id: u64,
+        len: u64,
+        bytes: &'a Rc<Cell<u64>>,
+        info: &Info,
+        layout: &'a Layout,
+    ) -> Result<Self, String> {
+        let reached = Arc::new(AtomicU64::new(bytes.get()));
+        let file = opened(resource_id, len, reached.clone())?;
+        let dataset =
+            file.dataset(&layout.path).map_err(|e| format!("NetCDF: {}: {}", layout.path, e))?;
+        Ok(Self { dataset, layout, width: info.width, height: info.height, reached, bytes })
+    }
+}
+
+impl Chunked for Chunks<'_> {
+    fn chunk(&mut self, _image: usize, index: u32) -> Result<(Vec<u8>, u32, u32), String> {
+        let rows = self.layout.rows();
+        let top = index.saturating_mul(rows);
+        if top >= self.height {
+            return Err(format!("NetCDF: окна {} нет: строк {}", index, self.height));
+        }
+        // Нижнее окно короче: строк у величины столько, сколько есть.
+        let dh = rows.min(self.height - top);
+        let pixels = (self.width as usize) * (dh as usize);
+        let mapping = self.layout.mapping;
+        let rgba = read_rows(&self.dataset, &self.layout.dtype, u64::from(top), dh, |samples| {
+            mapping.rgba(samples, Pixel::named(1), pixels)
+        })?;
+        if rgba.len() != pixels * 4 {
+            return Err(format!(
+                "NetCDF: у '{}' в окне {} {} отсчётов вместо {}×{}",
+                self.layout.path, index, rgba.len() / 4, self.width, dh
+            ));
+        }
+        self.bytes.set(self.bytes.get().max(self.reached.load(Ordering::Relaxed)));
+        Ok((rgba, self.width, dh))
+    }
+}
+
+/// Точечное чтение тайлов уровня — драйвером по окнам строк.
+pub fn produce_direct(
+    resource_id: u64,
+    len: u64,
+    bytes: &Rc<Cell<u64>>,
+    info: &Info,
+    layout: &Layout,
+    level: u32,
+    wants: &[(u32, u32)],
+    emit: Emit,
+) -> Result<(), String> {
+    let mut chunks = Chunks::open(resource_id, len, bytes, info, layout)?;
     veldsdk::log::debug!(target: "decode",
-        "NetCDF проход: '{}' ({}), {}×{}", source.path, source.said, info.width, info.height);
+        "NetCDF окном: '{}' ({}), уровень {}, окно {} строк", layout.path, layout.said, level, layout.rows());
+    grid::direct(&mut chunks, &layout.grid, (info.width, info.height), level, wants, emit)
+}
 
-    let width = info.width as usize;
-    let mut cascade = Cascade::new(0, info.width, info.height);
-    let mut top = 0u32;
-    while top < info.height {
-        // Полоса ровно в тайл: границы полос каскада стоят там же, и лишнего
-        // деления внутри него не случается.
-        let rows = TILE.min(info.height - top);
-        let from = (top as usize) * width;
-        let slice = &values[from..from + (rows as usize) * width];
-        let rgba = mapping.rgba(&Samples::F32(slice), Pixel::named(1), slice.len());
-        cascade.push_rows(&rgba, rows, emit)?;
-        top += rows;
-    }
-    cascade.finish(emit)
+/// Проход по величине сверху вниз — драйвером по окнам строк.
+pub fn produce_pass(
+    resource_id: u64,
+    len: u64,
+    bytes: &Rc<Cell<u64>>,
+    info: &Info,
+    layout: &Layout,
+    emit: Emit,
+) -> Result<(), String> {
+    let mut chunks = Chunks::open(resource_id, len, bytes, info, layout)?;
+    veldsdk::log::debug!(target: "decode",
+        "NetCDF проход: '{}' ({}), {}×{}, окно {} строк",
+        layout.path, layout.said, info.width, info.height, layout.rows());
+    grid::pass(&mut chunks, &layout.grid, (info.width, info.height), emit)
 }
 
 /// Разупакованные координаты: `значение · scale_factor + add_offset`.
 ///
-/// Показываемой величине эти коэффициенты не нужны (см. [`plane`]), а
+/// Показываемой величине эти коэффициенты не нужны (см. [`mapping`]), а
 /// координатам нужны обязательно: широта у Sentinel-3 записана целыми с шагом
 /// в миллионную долю градуса, и без разупаковки это не градусы, а десятки
 /// миллионов — то есть не привязка, а её отсутствие.
@@ -639,38 +702,7 @@ fn unpacked(item: &Item, values: Vec<f32>) -> Vec<f32> {
     values.into_iter().map(|value| (f64::from(value) * scale + offset) as f32).collect()
 }
 
-/// Отсчёты показываемой величины, развёрнутые в f32.
-///
-/// Через f32, а не по сырым байтам: порядок байтов в файле свой у каждой
-/// машины-писателя, и разбирает его крейт. Коэффициенты `scale_factor` и
-/// `add_offset` не применяются намеренно — преобразование это линейное и
-/// возрастающее, а растяг считается по перцентилям тех же значений: в яркость
-/// оно не вносит ничего, зато «нет данных» сравнивается с сырым значением, как
-/// оно и записано. Координатам они, наоборот, нужны — см. [`unpacked`].
-/// `near` — источник лежит на диске: мерка терпения тогда не применяется
-/// (см. [`affordable`]).
-fn plane(
-    file: &File,
-    path: &str,
-    width: u32,
-    height: u32,
-    near: bool,
-) -> Result<Vec<f32>, String> {
-    let dataset = file.dataset(path).map_err(|e| format!("NetCDF: {}: {}", path, e))?;
-    let pixels = u64::from(width) * u64::from(height);
-    let element = width_of(&dataset.dtype().map_err(|e| format!("NetCDF: {}", e))?).unwrap_or(8);
-    // Сколько байт величины лежит в файле — то, что поедет по проводу. У
-    // непрерывной раскладки чанков нет вовсе, и там это сами отсчёты.
-    let wire = match dataset.chunks() {
-        Ok(chunks) if !chunks.is_empty() => chunks.iter().map(|chunk| chunk.storage_size).sum(),
-        _ => pixels.saturating_mul(u64::from(element)),
-    };
-    affordable(element, width, height, wire, near)
-        .map_err(|why| format!("NetCDF {}×{}: {}", width, height, why))?;
-    dataset.read_f32().map_err(|e| format!("NetCDF: {}: {}", path, e))
-}
-
-/// Шаг выборки растяга по развёрнутой в строку плоскости.
+/// Шаг выборки растяга по развёрнутым в строку отсчётам.
 ///
 /// Взаимно простой с шириной: отсчёты лежат построчно, и шаг, у которого с
 /// шириной есть общий делитель, каждую строку попадает в одни и те же столбцы.
@@ -697,23 +729,18 @@ fn sampling_step(len: usize, width: usize) -> usize {
     stride
 }
 
-/// Растяг показа по выборке значений: те же перцентили, что у широких
+/// Растяг показа по выборке величины: те же перцентили, что у широких
 /// TIFF-сэмплов. «Нет данных» в выборку не идёт — иначе метка −9999 утянула бы
 /// нижний край и весь снимок вышел бы белым.
 ///
-/// `width` — ширина растра; по ней шаг выборки разводится со строкой (см.
-/// [`sampling_step`]).
-fn mapping(path: &str, values: &[f32], fill: Option<f32>, width: usize) -> Mapping {
-    let stride = sampling_step(values.len(), width);
-    // Считается, а не обходится: сама выборка ниже идёт тем же шагом, и второй
-    // проход по ней стоил бы столько же, сколько первый.
-    let taken = values.len().div_ceil(stride);
-    let mut sample: Vec<f32> = values
-        .iter()
-        .step_by(stride)
-        .copied()
-        .filter(|value| radiometry::is_data(*value, fill))
-        .collect();
+/// Коэффициенты `scale_factor` и `add_offset` не применяются намеренно:
+/// преобразование это линейное и возрастающее, а растяг считается по
+/// перцентилям тех же значений — в яркость оно не вносит ничего, зато «нет
+/// данных» сравнивается с сырым значением, как оно и записано. Координатам
+/// они, наоборот, нужны — см. [`unpacked`].
+fn mapping(path: &str, values: &[f32], fill: Option<f32>) -> Mapping {
+    let mut sample: Vec<f32> =
+        values.iter().copied().filter(|value| radiometry::is_data(*value, fill)).collect();
     let stretch = percentile_stretch(&mut sample);
 
     // Числа, по которым кадр вышел таким, а не другим. Без них «белый
@@ -722,15 +749,14 @@ fn mapping(path: &str, values: &[f32], fill: Option<f32>, width: usize) -> Mappi
     // остальные.
     veldsdk::log::debug!(target: "decode",
         "NetCDF растяг: '{}' — годных {} из {} в выборке, «нет данных» {:?}, растяг {:?}",
-        path, sample.len(), taken, fill, stretch);
+        path, sample.len(), values.len(), fill, stretch);
 
     match stretch {
         Some((lo, hi)) => Mapping::stretched(lo, hi, fill),
-        // Ни одного годного значения в выборке. Величина при этом не пуста —
-        // пустую отсеяло описание (см. [`spread`]), — значит выборка просто
-        // прошла мимо годных: они реже её шага. Растягивать не по чему, и
-        // выдумывать предел нельзя: любой назначенный белит всё, что выше
-        // него. Значения принимаются за байты — то же правило, что у TIFF.
+        // Ни одного годного значения — растягивать не по чему, и выдумывать
+        // предел нельзя: любой назначенный белит всё, что выше него. Значения
+        // принимаются за байты — то же правило, что у TIFF. Выбранной величине
+        // сюда не попасть: пустую по той же выборке отсеял [`spread`].
         None => Mapping::identity(fill),
     }
 }
@@ -761,7 +787,7 @@ struct Item {
     /// Упаковка величины: `scale_factor` и `add_offset`, как их записал файл.
     /// Единица и ноль — величина записана как есть.
     ///
-    /// Показу они не нужны (см. [`plane`]), а координатам нужны обязательно:
+    /// Показу они не нужны (см. [`mapping`]), а координатам нужны обязательно:
     /// широта пакуется целыми с шагом в миллионную долю градуса, и без
     /// разупаковки это не градусы, а десятки миллионов.
     packing: (f64, f64),
@@ -773,6 +799,10 @@ struct Item {
     coordinates: Vec<String>,
     /// Имена из `ancillary_variables`, разрешённые в пути файла.
     ancillary: Vec<String>,
+    /// Длина нулевой оси файла — по ней крейт режет окно строк (см. [`rows_of`]).
+    leading: u64,
+    /// Высота чанка файла по нулевой оси; `None` — раскладка не чанкованная.
+    chunk_rows: Option<u64>,
 }
 
 /// Обход файла: все величины с их заголовками.
@@ -864,6 +894,12 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
         .map(|name| resolve(group, &name))
         .collect();
 
+    // Окно строк крейт режет по нулевой оси файла, какой бы она ни была, и
+    // чанк файла — наименьшее, что читается: обоим место в раскладке
+    // ([`rows_of`]).
+    let leading = shape.first().copied().unwrap_or(1);
+    let chunk_rows = dataset.chunk_shape().ok().flatten().and_then(|chunk| chunk.first().copied());
+
     Some(Item {
         path: full.to_string(),
         group: group.to_string(),
@@ -882,6 +918,8 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
         units: text(&attrs, "units").to_ascii_lowercase(),
         coordinates,
         ancillary,
+        leading,
+        chunk_rows,
     })
 }
 
@@ -1603,6 +1641,7 @@ fn resolve(group: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::budget;
     use super::*;
 
     /// Узлы стоят по краям отрезка и равномерно между ними, без повторов:
@@ -2068,6 +2107,45 @@ mod tests {
         assert_eq!(resolution("[ 1.2.3 1000 ]"), None, "не число — не разрешение");
     }
 
+    /// Окно строк режется по нулевой оси файла, и только по ней. Единичная
+    /// нулевая ось и чанк во всю высоту — окно ростом с плоскость; иначе окно
+    /// — связка чанков файла не длиннее тайла, а чанк выше тайла — сам.
+    ///
+    /// Числа настоящие: у гранулы Sentinel-5P форма `[1, 4172, 450]`, у
+    /// величины SYNERGY AOD 324 строки одним чанком.
+    #[test]
+    fn окно_строк_режется_по_нулевой_оси_файла() {
+        assert_eq!(rows_of(4172, 1, Some(1)), 4172, "единичная ось — плоскость");
+        assert_eq!(rows_of(4172, 1, None), 4172);
+        assert_eq!(rows_of(324, 324, Some(324)), 324, "один чанк — плоскость");
+        assert_eq!(rows_of(15076, 15076, Some(100)), 500, "связка чанков не длиннее тайла");
+        assert_eq!(rows_of(15076, 15076, Some(TILE as u64)), TILE);
+        assert_eq!(rows_of(15076, 15076, Some(300)), 300, "второй чанк уже не влезает в тайл");
+        assert_eq!(rows_of(15076, 15076, Some(600)), 600, "чанк выше тайла берётся сам");
+        assert_eq!(rows_of(15076, 15076, None), TILE, "непрерывной раскладке окно — тайл");
+        assert_eq!(rows_of(300, 300, None), 300, "и не длиннее самой величины");
+        assert_eq!(rows_of(1217, 1217, Some(1)), TILE, "чанк в строку — связка в тайл");
+    }
+
+    /// Глубина свежего чанка — большая из двух фаз чтения крейта: сборка
+    /// окна (окно, сжатое, распакованный чанк — три отсчёта на отсчёт) и
+    /// развёртка (сырое и типизированное либо f32). Занижена — трап вместо
+    /// отказа.
+    #[test]
+    fn глубина_чанка_считает_копии_крейта() {
+        assert_eq!(depth_of(&DType::U8), 3, "байтам развёртка не нужна, решает сборка");
+        assert_eq!(depth_of(&DType::U16), 6);
+        assert_eq!(depth_of(&DType::I16), 6);
+        assert_eq!(depth_of(&DType::F32), 12);
+        assert_eq!(depth_of(&DType::F64), 24, "восьмибайтовый отсчёт: сборка дороже развёртки в f32");
+        assert_eq!(depth_of(&DType::I32), 12);
+        assert_eq!(depth_of(&DType::I8), 5, "у байта со знаком развёртка в f32 дороже сборки");
+        assert_eq!(depth_of(&DType::String), 24, "неузнанный тип считается восьмибайтовым");
+        let layout = Layout::of(450, 4172, 4172, DType::F32);
+        assert_eq!(layout.grid.depth, 12);
+        assert_eq!(layout.grid.chunk, (450, 4172));
+    }
+
     /// Шаг выборки разводится со строкой: общий делитель у шага и ширины
     /// оставил бы выборку в одних и тех же столбцах каждой строки, а у полосы
     /// съёмки крайние столбцы не измерены вовсе.
@@ -2108,7 +2186,7 @@ mod tests {
     fn stretch_ignores_the_fill_value() {
         let mut values = vec![-9999.0f32; 100];
         values.extend((0..=100i16).map(|value| f32::from(value) + 300.0));
-        let mapping = mapping("/проба", &values, Some(-9999.0), 1);
+        let mapping = mapping("/проба", &values, Some(-9999.0));
         // Поле «нет данных» — прозрачное, а живое значение попадает в середину
         // растяга, а не в белое.
         let out = mapping.rgba(&Samples::F32(&[-9999.0, 350.0]), Pixel::named(1), 2);
@@ -2184,6 +2262,8 @@ mod tests {
             units: String::new(),
             coordinates: Vec::new(),
             ancillary: Vec::new(),
+            leading: 10,
+            chunk_rows: None,
         };
         let coordinate = |path: &str, group: &str, units: &str| Item {
             units: units.to_string(),
@@ -2258,6 +2338,8 @@ mod tests {
             units: String::new(),
             coordinates: Vec::new(),
             ancillary: Vec::new(),
+            leading: 10,
+            chunk_rows: None,
         };
         let items = vec![
             item("/PRODUCT/SUPPORT_DATA/cloud_fraction", 2, true),
@@ -2311,60 +2393,11 @@ mod tests {
         assert!(explain(&none).contains("координаты"), "{}", explain(&none));
     }
 
-    /// Потолков два, и мерят они разное. По сети «слишком велика» значит минуты
-    /// ожидания впустую — и лечится это скачиванием, о чём отказ и говорит. С
-    /// диска те же байты приходят мгновенно, и упирается чтение уже в память:
-    /// такой отказ окончателен, и обещать по нему нечего.
-    ///
-    /// Мерится величина, а не файл: файл читается по требованию, и его длина
-    /// не стои́т ни памяти, ни провода.
+    /// Пик чтения решётки координат — большее из двух состояний, а не сумма и
+    /// не одно из них. Занизив его, потолок привязки пропускает пару, на
+    /// которой инстанс падает трапом; завысив — отвергает читаемую.
     #[test]
-    fn потолок_по_сети_лечится_диском_а_потолок_памяти_не_лечится() {
-        let refusal = |w, h, wire, near| match affordable(4, w, h, wire, near) {
-            Err(why) => why,
-            Ok(()) => unreachable!("величина обязана быть отвергнута"),
-        };
-        // Растр, помещающийся в память с запасом: 8192² по четыре байта — это
-        // 512 МиБ чтения и 320 прохода при свободных девятистах с лишним.
-        let (w, h) = (8192u32, 8192u32);
-        let between = (WIRE_PLANE + budget::free()) / 2;
-
-        let wire = refusal(w, h, between, false);
-        assert!(wire.contains("скачайте"), "отказ не назвал, чем лечится: {wire}");
-
-        // Та же величина с диска потолком не отсекается вовсе.
-        assert!(affordable(4, w, h, between, true).is_ok(), "скачанное отвергнуто терпением");
-
-        // А выше потолка памяти отказ одинаков с обеих сторон провода и
-        // скачиванием не лечится: быстрее диска источника не бывает.
-        for near in [false, true] {
-            let huge = refusal(32768, 32768, 1024, near);
-            assert!(huge.contains("помещается"), "{huge}");
-            assert!(!huge.contains("скачайте"), "обещано лечение, которого нет: {huge}");
-        }
-
-        // Живая гранула OLCI: 1217 в ширину и 15076 в высоту, по два байта на
-        // отсчёт — 105 МБ развёрнутых, а в файле сжато примерно в восьмую
-        // часть. Мерка терпения обязана смотреть на второе — иначе снимок,
-        // который приезжает за десяток секунд, отвергается по сети как долгий.
-        let held = 1217u64 * 15076 * u64::from(peak_per_pixel(2));
-        assert!(held > WIRE_PLANE, "развёрнутая величина не переросла потолок терпения");
-        assert!(
-            affordable(2, 1217, 15076, 4 * 1024 * 1024, false).is_ok(),
-            "сжатая гранула отвергнута по сети развёрнутым объёмом"
-        );
-
-        // А по мелкой величине не срабатывает ни один — иначе правило не о чем.
-        for near in [false, true] {
-            assert!(affordable(4, 64, 64, 1024, near).is_ok(), "мелкая величина отвергнута");
-        }
-    }
-
-    /// Пик памяти чтения — большее из двух состояний, а не сумма и не одно из
-    /// них. Занизив его, потолок пропускает величину, на которой инстанс
-    /// падает трапом; завысив — отвергает читаемую.
-    #[test]
-    fn пик_чтения_больший_из_двух_путей() {
+    fn пик_чтения_решётки_больший_из_двух_путей() {
         // Сборка сырых отсчётов рядом с распакованным чанком — `2 · element`;
         // разворот собранного в f32 — `element + 4`.
         for element in [1u32, 2, 4, 8] {
@@ -2375,72 +2408,6 @@ mod tests {
         assert_eq!(peak_per_pixel(2), 6);
         assert_eq!(peak_per_pixel(4), 8);
         assert_eq!(peak_per_pixel(8), 16, "восьмибайтовый отсчёт дороже развёртки в f32");
-    }
-
-    /// Порог отказа — это ровно свободная память, а не число рядом с ней.
-    ///
-    /// Растр берётся узкий и высокий: при такой ширине каскад и полоса стоя́т
-    /// килобайтов, и исход решает одна мерка чтения. Подмени `budget::free()`
-    /// литералом — граница сдвинется, и этот тест её сдвиг увидит.
-    #[test]
-    fn порог_отказа_совпадает_со_свободной_памятью() {
-        let (element, width) = (4u32, 4u32);
-        let pixels = budget::free() / u64::from(peak_per_pixel(element));
-        let height = u32::try_from(pixels / u64::from(width)).expect("высота в u32");
-
-        assert!(affordable(element, width, height, 0, true).is_ok(), "ровно у порога — проходит");
-        assert!(
-            affordable(element, width, height + 1, 0, true).is_err(),
-            "на строку выше порога — отвергается"
-        );
-    }
-
-    /// Решётки координат никогда не решают, влезет ли величина, — и потому в
-    /// мерку не входят.
-    ///
-    /// Держится это на самой мерке чтения: она уже ограничила осевшую плоскость
-    /// четырьмя пятыми свободного, потому что самый дешёвый отсчёт стои́т пяти
-    /// байт пика на четыре осевших. Прибавить к этому весь бюджет привязки —
-    /// всё равно останется запас. Подними [`TIES_BUDGET`] настолько, чтобы
-    /// перестало, — и молчаливой эта перемена не будет.
-    #[test]
-    fn решётки_координат_не_могут_решить_исход() {
-        let settled = budget::free() / u64::from(peak_per_pixel(1)) * 4;
-        assert!(
-            settled + TIES_BUDGET < budget::free(),
-            "осевшая плоскость {settled} и бюджет привязки {TIES_BUDGET} перевесили свободное"
-        );
-    }
-
-    /// Полоса RGBA живёт рядом с плоскостью и каскадом, а не внутри них: каскад
-    /// копирует её к себе, не отпуская. У предельной ширины она одна стои́т
-    /// больше всего запаса, отложенного на несчитаемое, — забыть её значит
-    /// пропустить растр, который упрётся в лимит уже без права на отказ.
-    #[test]
-    fn полоса_прохода_считается_отдельно_от_каскада() {
-        let width = super::super::MAX_SOURCE_SIDE;
-        assert_eq!(strip_bytes(width, 4096), u64::from(width) * u64::from(TILE) * 4);
-        assert!(
-            strip_bytes(width, 4096) > budget::RESERVE,
-            "полоса предельной ширины должна перевешивать весь запас — иначе тест ни о чём"
-        );
-        // У низкого растра полоса короче: строк меньше, чем тайл.
-        assert_eq!(strip_bytes(1000, 8), 1000 * 8 * 4);
-
-        // И то, ради чего это считается: растр, у которого одна лишь полоса и
-        // решает. Без неё в счёте он проходит — и упирается в лимит уже без
-        // права на отказ.
-        let (w, h) = (30_000u32, 6_400u32);
-        let plane = u64::from(w) * u64::from(h) * 4;
-        assert!(
-            plane + cascade::bytes(w, h) < budget::free(),
-            "без полосы растр обязан проходить — иначе решает не она"
-        );
-        assert!(
-            plane + cascade::bytes(w, h) + strip_bytes(w, h) > budget::free(),
-            "а с полосой — нет"
-        );
-        assert!(affordable(1, w, h, 0, true).is_err(), "растр обязан быть отвергнут");
     }
 
     /// Пик пары решёток выше их осевшего размера. Разница не теоретическая:
@@ -2461,34 +2428,6 @@ mod tests {
         // больший из двух типов, а не первый попавшийся.
         assert!(ties_peak(nodes, 8) > ties_peak(nodes, 4));
         assert!(ties_peak(nodes, 4) > ties_peak(nodes, 1));
-    }
-
-    /// Широкий растр отсекается проходом, а не чтением. Мерки эти считают
-    /// разное: чтению довольно, чтобы поместились две копии отсчётов, а проходу
-    /// нужны ещё полосы каскада — и растут они от ширины, о которой первая
-    /// мерка не знает ничего.
-    ///
-    /// Сама пара и есть то, ради чего заведён `budget`: порознь оба слагаемых
-    /// помещались и раньше.
-    #[test]
-    fn широкий_растр_отсекается_проходом_а_не_чтением() {
-        // Однобайтовая величина во всю дозволенную ширину. Чтение её — две
-        // копии отсчётов, проход — одна копия и каскад поверх; на этой высоте
-        // каскад и решает.
-        let (width, height) = (super::super::MAX_SOURCE_SIDE, 2600u32);
-        let pixels = u64::from(width) * u64::from(height);
-        let read = pixels * u64::from(peak_per_pixel(1));
-        let pass = pixels * 4 + cascade::bytes(width, height) + strip_bytes(width, height);
-
-        assert!(read < budget::free(), "по чтению растр обязан проходить: {read}");
-        assert!(pass > budget::free(), "а по проходу — нет: {pass}");
-
-        let why = affordable(1, width, height, 0, true).expect_err("проход обязан отсечь");
-        assert!(why.contains("работой"), "отказ не назвал, чем не влезло: {why}");
-
-        // Тот же растр вдвое ниже проходит целиком — значит отсекла именно
-        // сумма, а не ширина сама по себе.
-        assert!(affordable(1, width, height / 2, 0, true).is_ok(), "вдвое ниже обязан пройти");
     }
 
     /// Кэш заголовков помещается в запас, отложенный на всё несчитаемое: он и

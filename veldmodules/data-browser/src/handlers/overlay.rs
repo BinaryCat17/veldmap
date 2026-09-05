@@ -279,11 +279,11 @@ fn abandon(state: &mut State, overlay: OverlayState) {
         // убрали» — ресурс в нём наш, там его примут и отпустят. Снять с учёта
         // совсем нельзя: неопознанный ответ уходит в `discard`, а тот ресурса
         // не трогает — файл остался бы открытым до конца сеанса.
-        if let Some((_, role, part, _)) = state.opens.take(correlation) {
-            state.opens.insert(correlation.clone(), (String::new(), role, part, false));
+        if let Some((_, role, part)) = state.opens.take(correlation) {
+            state.opens.insert(correlation.clone(), (String::new(), role, part));
         }
     }
-    for (.., handle, _) in assembly.collected {
+    for (.., handle) in assembly.collected {
         veldsdk::resource::release(handle);
     }
 }
@@ -458,10 +458,7 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
             let local = state.library.local_name(&identifier).map(str::to_string);
             // Роль переводится сразу, на границе: дальше по нашему коду ездит
             // уже та, которую поймёт глобус.
-            // Чем открыт файл, помнится здесь же: ответ об открытии этого уже
-            // не несёт, а тайлеру от этого зависит потолок источника, который
-            // читается только целиком (см. `DescribeRequest.near`).
-            let correlation = state.opens.begin((key.clone(), role, part, local.is_some()));
+            let correlation = state.opens.begin((key.clone(), role, part));
             opens.push(correlation.clone());
             super::open_resource(identifier, local, &correlation);
         }
@@ -478,7 +475,7 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
 /// приехавший ресурс добьёт общий discard (см. module::on_open_result).
 pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
     let correlation = veldsdk::correlation();
-    let Some((key, role, part, near)) = state.opens.take(&correlation) else { return false };
+    let Some((key, role, part)) = state.opens.take(&correlation) else { return false };
 
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else {
         // Наложение убрали между запросом и ответом: ресурс наш, и отпустить
@@ -499,7 +496,7 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 
     assembly.opens.retain(|waiting| waiting != &correlation);
     match veldsdk::resource::accept(opened) {
-        Ok(handle) => assembly.collected.push((role, part, handle, near)),
+        Ok(handle) => assembly.collected.push((role, part, handle)),
         // Не открылось — наложение живёт тем, что открылось: без растра нет
         // роли, без координат нет привязки, и оба исхода объясняются ниже.
         Err(error) => veldsdk::log::warn!(target: "handlers", "файл наложения: {}", error),
@@ -530,16 +527,12 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 /// Сортировка устойчивая, но опираться на это нельзя: координаты привязаны к
 /// первому растру своей роли, и второго такого набор не несёт (см.
 /// `imagery::scan` у провайдера — по одному растру на роль).
-fn paired<H>(
-    collected: Vec<(OverlayRole, Part, H, bool)>,
-) -> (Vec<(OverlayRole, H, Option<H>, bool)>, Vec<H>) {
-    let mut pairs: Vec<(OverlayRole, H, Option<H>, bool)> = Vec::new();
+fn paired<H>(collected: Vec<(OverlayRole, Part, H)>) -> (Vec<(OverlayRole, H, Option<H>)>, Vec<H>) {
+    let mut pairs: Vec<(OverlayRole, H, Option<H>)> = Vec::new();
     let mut coordinates = Vec::new();
-    // Признак «с диска» остаётся при растре: он про то, чем открыт сам растр,
-    // а координаты — соседний файл со своей судьбой.
-    for (role, part, handle, near) in collected {
+    for (role, part, handle) in collected {
         match part {
-            Part::Raster => pairs.push((role, handle, None, near)),
+            Part::Raster => pairs.push((role, handle, None)),
             Part::Geolocation => coordinates.push((role, handle)),
         }
     }
@@ -577,7 +570,7 @@ fn finish(state: &mut State, key: &str) {
     // Передача владения — до сообщения: получив набор, глобус вправе сразу
     // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
     let mut rasters = Vec::new();
-    for (role, raster, coordinates, near) in pairs {
+    for (role, raster, coordinates) in pairs {
         let raster = match veldsdk::resource::hand_off(raster, "globe") {
             Ok(handle) => handle,
             Err(error) => {
@@ -606,7 +599,6 @@ fn finish(state: &mut State, key: &str) {
             resource: Some(raster),
             role: role as i32,
             geolocation: coordinates,
-            near,
         });
     }
     if rasters.is_empty() {
@@ -806,13 +798,13 @@ mod tests {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
         let quicklook = veldsdk::fake::mount(vec![1, 2, 3]);
         let raster = veldsdk::fake::mount(vec![4, 5, 6]);
-        state.opens.insert("open-1".to_string(), ("scene".to_string(), detailed, Part::Raster, false));
+        state.opens.insert("open-1".to_string(), ("scene".to_string(), detailed, Part::Raster));
 
         let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
         overlay.assembly = Some(Assembly {
             utm: None,
             opens: vec!["open-1".to_string()],
-            collected: vec![(preview, Part::Raster, quicklook, false), (detailed, Part::Raster, raster, true)],
+            collected: vec![(preview, Part::Raster, quicklook), (detailed, Part::Raster, raster)],
         });
 
         abandon(&mut state, overlay);
@@ -829,10 +821,7 @@ mod tests {
     #[test]
     fn превью_уезжает_впереди_подробного() {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected = vec![
-            (detailed, Part::Raster, "подробный", false),
-            (preview, Part::Raster, "квиклук", false),
-        ];
+        let collected = vec![(detailed, Part::Raster, "подробный"), (preview, Part::Raster, "квиклук")];
 
         let (pairs, orphans) = paired(collected);
 
@@ -847,24 +836,15 @@ mod tests {
     #[test]
     fn координаты_достаются_растру_своей_роли() {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        // Растры открыты по-разному: подробный уже на диске, квиклук по сети.
-        // Признак обязан остаться при своём растре — по нему тайлер меряет
-        // потолок источника, читаемого только целиком.
         let collected = vec![
-            (detailed, Part::Geolocation, "широты", true),
-            (preview, Part::Raster, "квиклук", false),
-            (detailed, Part::Raster, "подробный", true),
+            (detailed, Part::Geolocation, "широты"),
+            (preview, Part::Raster, "квиклук"),
+            (detailed, Part::Raster, "подробный"),
         ];
 
         let (pairs, orphans) = paired(collected);
 
-        assert_eq!(
-            pairs,
-            vec![
-                (preview, "квиклук", None, false),
-                (detailed, "подробный", Some("широты"), true),
-            ]
-        );
+        assert_eq!(pairs, vec![(preview, "квиклук", None), (detailed, "подробный", Some("широты"))]);
         assert!(orphans.is_empty());
     }
 
@@ -873,14 +853,11 @@ mod tests {
     #[test]
     fn координаты_без_своего_растра_возвращаются_отпустить() {
         let (preview, detailed) = (OverlayRole::OverlayPreview, OverlayRole::OverlayDetailed);
-        let collected = vec![
-            (detailed, Part::Geolocation, "широты", false),
-            (preview, Part::Raster, "квиклук", false),
-        ];
+        let collected = vec![(detailed, Part::Geolocation, "широты"), (preview, Part::Raster, "квиклук")];
 
         let (pairs, orphans) = paired(collected);
 
-        assert_eq!(pairs, vec![(preview, "квиклук", None, false)]);
+        assert_eq!(pairs, vec![(preview, "квиклук", None)]);
         assert_eq!(orphans, vec!["широты"]);
     }
 

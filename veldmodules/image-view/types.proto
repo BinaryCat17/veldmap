@@ -23,9 +23,8 @@ message ShowRequest {
   veldmap.core.ResourceHandle resource = 2;
   // Чем подписать источник в логах и задачах: у ресурса имени нет.
   string label = 3;
-  // Снимок лежит на диске, а не за проводом — см. `DescribeRequest.near` у
-  // тайлера. Едет насквозь: открывал ресурс приславший, и только он это знает.
-  bool near = 4;
+  // Занятый номер.
+  reserved 4;
 }
 
 message CloseView {

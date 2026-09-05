@@ -211,9 +211,6 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
         view: view.to_string(),
         resource: Some(resource),
         label: preview.label.clone(),
-        // Чем открыт снимок, уже сказано записью библиотеки: она и есть весь
-        // смысл `entry` (см. [`reopen`]), и второго правила заводить незачем.
-        near: preview.entry.is_some(),
     });
     true
 }

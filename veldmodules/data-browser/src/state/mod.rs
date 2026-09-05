@@ -230,7 +230,7 @@ pub struct State {
     /// Растры наложений: открытие ресурса у провайдера. Контекст — ключ
     /// наложения и роль растра; сборка помнит свои корреляции, чтобы снять их
     /// отсюда, когда наложение убирают (см. overlay::Assembly).
-    pub opens: Correlator<(String, crate::proto::globe::OverlayRole, overlay::Part, bool)>,
+    pub opens: Correlator<(String, crate::proto::globe::OverlayRole, overlay::Part)>,
     /// data-provider/on_imagery_result — какие растры у продукта. Контекст —
     /// ключ наложения, которое их ждёт.
     pub imageries: Correlator<String>,

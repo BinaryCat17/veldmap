@@ -159,7 +159,7 @@ fn near_head_or_ifd(window: (u64, u64), ifds: &[u64]) -> bool {
 
 /// Описать смонтированный файл.
 fn described(handle: &veldsdk::ResourceHandle) -> Info {
-    describe(handle.id, handle.size, &Rc::new(Cell::new(0)), true).expect("описывается")
+    describe(handle.id, handle.size, &Rc::new(Cell::new(0))).expect("описывается")
 }
 
 /// Произвести тайлы уровня: адрес → RGBA.
@@ -609,3 +609,295 @@ fn tlm_without_plt_reads_whole_tile_parts() {
     assert!(read_since(head) >= own, "тайл-парты целиком: прочитано {} при {} в них", read_since(head), own);
 }
 
+
+// ── NetCDF ─────────────────────────────────────────────────────
+
+use hdf5_pure::{AttrValue, FileBuilder};
+
+use super::netcdf;
+
+/// Метка «нет данных» фикстур NetCDF.
+const FILL: i16 = -9999;
+
+/// Отсчёты величины `width`×`height`: перепад по обеим осям, левый столбец —
+/// «нет данных», как у полосы съёмки с неизмеренным краем.
+fn nc_pattern(width: u32, height: u32) -> Vec<i16> {
+    (0..height)
+        .flat_map(|y| {
+            (0..width).map(move |x| match x {
+                0 => FILL,
+                _ => ((x * 7 + y * 3) % 2000) as i16,
+            })
+        })
+        .collect()
+}
+
+/// Величина фикстуры: имя в группе `PRODUCT`, форма (строки и столбцы —
+/// последние две неединичные оси), чанки с deflate либо непрерывная раскладка
+/// и сами отсчёты.
+struct Variable<'a> {
+    name: &'a str,
+    shape: &'a [u64],
+    chunk: Option<&'a [u64]>,
+    values: &'a [i16],
+}
+
+/// NetCDF-4 с величинами в группе `PRODUCT` — писателем того же крейта,
+/// которым файл и читается.
+fn netcdf_with(variables: &[Variable<'_>]) -> Vec<u8> {
+    let mut file = FileBuilder::new();
+    let mut product = file.create_group("PRODUCT");
+    for variable in variables {
+        let dataset = product.create_dataset(variable.name);
+        dataset.with_i16_data(variable.values).with_shape(variable.shape);
+        dataset.set_attr("_FillValue", AttrValue::I16(FILL));
+        dataset.set_attr("units", AttrValue::String("K".to_string()));
+        if let Some(chunk) = variable.chunk {
+            dataset.with_chunks(chunk).with_deflate(1);
+        }
+    }
+    file.add_group(product.finish());
+    file.finish().expect("HDF5 пишется")
+}
+
+/// Одна величина `temperature`.
+fn netcdf(shape: &[u64], chunk: Option<&[u64]>, values: &[i16]) -> Vec<u8> {
+    netcdf_with(&[Variable { name: "temperature", shape, chunk, values }])
+}
+
+/// Где в файле лежат отсчёты величины: (строка чанка, смещение, длина) —
+/// спрошено у читателя того же крейта. У непрерывной раскладки чанк один и
+/// стои́т на нулевой строке.
+fn nc_chunks(bytes: &[u8], name: &str) -> Vec<(u64, u64, u64)> {
+    let file = hdf5_pure::File::from_bytes(bytes.to_vec()).expect("файл читается");
+    let dataset = file.dataset(&format!("/PRODUCT/{name}")).expect("величина на месте");
+    match dataset.layout().expect("раскладка читается") {
+        hdf5_pure::Layout::Chunked { chunk_shape, .. } => {
+            // Строка чанка — по последней неединичной оси перед столбцами:
+            // у формы [1, h, w] это вторая ось.
+            let rows_axis = chunk_shape.len().saturating_sub(2);
+            dataset
+                .chunks()
+                .expect("чанки перечислимы")
+                .into_iter()
+                .map(|chunk| (chunk.offset[rows_axis], chunk.address, chunk.storage_size))
+                .collect()
+        }
+        hdf5_pure::Layout::Contiguous { address: Some(at), size } => vec![(0, at, size)],
+        other => panic!("раскладка фикстуры: {other:?}"),
+    }
+}
+
+/// Окна разбора величины — без окна шапки, которым общий `describe` узнаёт
+/// формат по сигнатуре: оно одно на все форматы и у мелкой фикстуры накрывает
+/// половину файла.
+fn nc_windows() -> Vec<(u64, u64)> {
+    windows().into_iter().filter(|win| *win != (0, WINDOW)).collect()
+}
+
+/// Сколько байт окон пришлось на отсчёты этих чанков.
+fn read_of(windows: &[(u64, u64)], chunks: &[(u64, u64, u64)]) -> u64 {
+    windows
+        .iter()
+        .map(|win| chunks.iter().map(|(_, at, len)| overlap_bytes(*win, (*at, *len))).sum::<u64>())
+        .sum()
+}
+
+/// Сколько чанков задето хоть одним окном.
+fn touched(windows: &[(u64, u64)], chunks: &[(u64, u64, u64)]) -> usize {
+    chunks.iter().filter(|(_, at, len)| windows.iter().any(|win| overlaps(*win, (*at, *len)))).count()
+}
+
+/// Описание величины читает заголовки и до четырёх окон строк вразброс, а не
+/// плоскость: у величины в 24 окна выборка — четыре из них по пять чанков,
+/// то есть шестая часть отсчётов; окно — связка чанков по сто строк не длиннее
+/// тайла.
+#[test]
+fn describing_a_netcdf_samples_four_row_windows() {
+    fake::install();
+    let (w, h) = (200u32, 12_000u32);
+    let bytes = netcdf(&[u64::from(h), u64::from(w)], Some(&[100, u64::from(w)]), &nc_pattern(w, h));
+    let chunks = nc_chunks(&bytes, "temperature");
+    assert_eq!(chunks.len(), 120);
+    let data: u64 = chunks.iter().map(|chunk| chunk.2).sum();
+    let handle = fake::mount(bytes);
+
+    let info = described(&handle);
+    assert_eq!((info.width, info.height), (w, h));
+    let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
+    assert_eq!(layout.grid.chunk, (w, 500), "окно — связка чанков по сто строк не длиннее тайла");
+    let asked = nc_windows();
+    let read = read_of(&asked, &chunks);
+    assert!(read > 0, "выборка не прочитала ни отсчёта");
+    assert!(read * 5 <= data, "выборка прочитала {read} из {data} байт отсчётов — больше пятой части");
+    assert_eq!(touched(&asked, &chunks), 4 * 5, "четыре окна по пять чанков");
+    assert_eq!(info.level(0).expect("уровень есть").serve, Serve::Pointwise);
+}
+
+/// Тайл нулевого уровня читает окна строк под собой и ничего сверх: тайл
+/// (0, 5) — строки 2560…3071, то есть окна 5 и 6 (строки 2500…3499), десять
+/// чанков; чужих строк — ни байта. «Нет данных» — прозрачно.
+#[test]
+fn a_netcdf_tile_reads_its_own_rows_only() {
+    fake::install();
+    let (w, h) = (200u32, 12_000u32);
+    let bytes = netcdf(&[u64::from(h), u64::from(w)], Some(&[100, u64::from(w)]), &nc_pattern(w, h));
+    let chunks = nc_chunks(&bytes, "temperature");
+    let handle = fake::mount(bytes);
+    let info = described(&handle);
+    let head = fake::reads().len();
+
+    let tiles = produced(&handle, &info, 0, &[(0, 5)]);
+
+    assert_eq!(tiles.len(), 1);
+    let asked = &windows()[head..];
+    let (own, foreign): (Vec<_>, Vec<_>) = chunks.iter().copied().partition(|(row, ..)| (2500..3500).contains(row));
+    assert_eq!(read_of(asked, &foreign), 0, "прочитаны чужие строки");
+    assert!(read_of(asked, &own) > 0);
+    assert_eq!(touched(asked, &own), 10, "два окна по пять чанков");
+
+    let rgba = &tiles[0].1;
+    assert_eq!(rgba.len(), (w as usize) * (TILE as usize) * 4);
+    assert_eq!(rgba[3], 0, "левый столбец — «нет данных» — прозрачен");
+    assert_eq!(rgba[7], 255, "а соседний измерен");
+}
+
+/// Окно и проход сходятся на одной величине: тайлы нулевого уровня окном те
+/// же, что отдаёт каскад прохода с нулевого.
+#[test]
+fn a_netcdf_window_equals_its_pass() {
+    fake::install();
+    let (w, h) = (200u32, 3_000u32);
+    let bytes = netcdf(&[u64::from(h), u64::from(w)], Some(&[100, u64::from(w)]), &nc_pattern(w, h));
+    let handle = fake::mount(bytes);
+    let info = described(&handle);
+    assert_eq!(info.level(0).expect("уровень есть").serve, Serve::Pointwise);
+    let direct = produced(&handle, &info, 0, &[(0, 0), (0, 5)]);
+    assert_eq!(direct.len(), 2);
+
+    let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
+    let mut pass = std::collections::BTreeMap::new();
+    let mut emit = |lvl: u32, tx: u32, ty: u32, _w: u32, _h: u32, rgba: &[u8]| {
+        if lvl == 0 {
+            pass.insert((tx, ty), rgba.to_vec());
+        }
+        Ok(())
+    };
+    netcdf::produce_pass(handle.id, handle.size, &Rc::new(Cell::new(0)), &info, layout, &mut emit)
+        .expect("проход идёт");
+    assert_eq!(pass.len(), 6, "проход отдал все тайлы нулевого уровня");
+    for ((_, tx, ty), rgba) in &direct {
+        assert_eq!(Some(rgba), pass.get(&(*tx, *ty)), "тайл {tx}:{ty} окном и проходом разошёлся");
+    }
+}
+
+/// Единичная нулевая ось (`[1, h, w]`, как время у Sentinel-5P): окно строк —
+/// вся плоскость, таблица говорит, что тайл стои́т её целиком, и описание с
+/// тайлом читают все отсчёты — честно, а не молча.
+#[test]
+fn a_unit_leading_axis_costs_the_plane() {
+    fake::install();
+    let (w, h) = (450u32, 1_200u32);
+    let bytes = netcdf(&[1, u64::from(h), u64::from(w)], Some(&[1, 100, u64::from(w)]), &nc_pattern(w, h));
+    let chunks = nc_chunks(&bytes, "temperature");
+    assert_eq!(chunks.len(), 12);
+    let data: u64 = chunks.iter().map(|chunk| chunk.2).sum();
+    let handle = fake::mount(bytes);
+
+    let info = described(&handle);
+    assert_eq!((info.width, info.height), (w, h), "единичная ось отброшена");
+    let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
+    assert_eq!(layout.grid.chunk, (w, h), "окно — плоскость");
+    let row = info.level(0).expect("уровень есть");
+    assert_eq!(row.serve, Serve::Pointwise);
+    assert_eq!(row.pixels, u64::from(w) * u64::from(h), "тайл стои́т плоскости");
+    let asked = nc_windows();
+    assert!(read_of(&asked, &chunks) >= data, "выборка — вся плоскость");
+    assert_eq!(touched(&asked, &chunks), chunks.len(), "задет каждый чанк");
+
+    let head = fake::reads().len();
+    let tiles = produced(&handle, &info, 0, &[(0, 0)]);
+    assert_eq!(tiles.len(), 1);
+    let asked = &windows()[head..];
+    assert!(read_of(asked, &chunks) >= data, "и тайл — тоже вся плоскость");
+    assert_eq!(touched(asked, &chunks), chunks.len());
+}
+
+/// Величина одним чанком (SYNERGY): меньше плоскости не прочесть, и сетка
+/// говорит то же, что у единичной оси.
+#[test]
+fn a_single_chunk_variable_costs_the_plane() {
+    fake::install();
+    let (w, h) = (400u32, 600u32);
+    let bytes = netcdf(&[u64::from(h), u64::from(w)], Some(&[u64::from(h), u64::from(w)]), &nc_pattern(w, h));
+    let chunks = nc_chunks(&bytes, "temperature");
+    assert_eq!(chunks.len(), 1);
+    let handle = fake::mount(bytes);
+
+    let info = described(&handle);
+    let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
+    assert_eq!(layout.grid.chunk, (w, h));
+    let row = info.level(0).expect("уровень есть");
+    assert_eq!((row.serve, row.pixels), (Serve::Pointwise, u64::from(w) * u64::from(h)));
+    assert!(read_of(&nc_windows(), &chunks) >= chunks[0].2);
+
+    // Непрерывная раскладка окно режет тайлом — читать меньше чанка ей не
+    // мешает ничто.
+    fake::install();
+    let plain = fake::mount(netcdf(&[u64::from(h), u64::from(w)], None, &nc_pattern(w, h)));
+    let Kind::Netcdf(layout) = &described(&plain).kind else { panic!("не NetCDF") };
+    assert_eq!(layout.grid.chunk, (w, TILE));
+}
+
+/// Однотонная величина — ответ последней очереди: измеренная соседка её
+/// обходит, а без соседки она показывается, и выборка её читается один раз —
+/// раскладка запоминается вместе с ней, перечитывать нечего.
+#[test]
+fn a_flat_variable_is_the_last_resort_and_is_read_once() {
+    let (w, h) = (64u32, 128u32);
+    let shape = [u64::from(h), u64::from(w)];
+    let flat = vec![7i16; (w * h) as usize];
+
+    fake::install();
+    let paired = netcdf_with(&[
+        Variable { name: "a_flat", shape: &shape, chunk: None, values: &flat },
+        Variable { name: "b_measured", shape: &shape, chunk: None, values: &nc_pattern(w, h) },
+    ]);
+    let handle = fake::mount(paired);
+    let Kind::Netcdf(layout) = &described(&handle).kind else { panic!("не NetCDF") };
+    assert_eq!(layout.path(), "/PRODUCT/b_measured", "измеренная обходит однотонную");
+
+    // Окон над отсчётами у одинокой однотонной столько же, сколько у одинокой
+    // измеренной: одна выборка, без перечитывания в конце.
+    let reads_over = |values: &[i16]| {
+        fake::install();
+        let file = netcdf_with(&[Variable { name: "alone", shape: &shape, chunk: None, values }]);
+        let chunks = nc_chunks(&file, "alone");
+        let handle = fake::mount(file);
+        let Kind::Netcdf(layout) = &described(&handle).kind else { panic!("не NetCDF") };
+        assert_eq!(layout.path(), "/PRODUCT/alone");
+        nc_windows().iter().filter(|win| chunks.iter().any(|(_, at, len)| overlaps(**win, (*at, *len)))).count()
+    };
+    let measured = reads_over(&nc_pattern(w, h));
+    assert!(measured > 0);
+    assert_eq!(reads_over(&flat), measured, "однотонная прочитана столько же раз, сколько измеренная");
+}
+
+/// Величина, пустая в выборке, уступает следующей по порядку: показанная, она
+/// дала бы прозрачный кадр без единого слова.
+#[test]
+fn an_empty_variable_yields_to_the_next() {
+    fake::install();
+    let (w, h) = (64u32, 128u32);
+    let empty = vec![FILL; (w * h) as usize];
+    let bytes = netcdf_with(&[
+        Variable { name: "a_empty", shape: &[u64::from(h), u64::from(w)], chunk: None, values: &empty },
+        Variable { name: "b_measured", shape: &[u64::from(h), u64::from(w)], chunk: None, values: &nc_pattern(w, h) },
+    ]);
+    let handle = fake::mount(bytes);
+
+    let info = described(&handle);
+    assert_eq!((info.width, info.height), (w, h));
+    let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
+    assert_eq!(layout.path(), "/PRODUCT/b_measured", "пустая первая по алфавиту уступила измеренной");
+}

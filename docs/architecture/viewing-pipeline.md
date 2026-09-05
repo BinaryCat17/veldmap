@@ -114,9 +114,9 @@ started it. A pass is stale when a finer target has been ordered, or — only
 for a pointwise level — when none of its cells is an ancestor of any visible
 cell any more (`Pass::abandoned_by`); judged by cells, not by level, because a
 coarser step is exactly what the pyramid is built from. Killing a stale pass
-kills the tiler's work in flight, and for a source read whole (NetCDF) that
-means reading it again, so a pass that fills the cache beyond its order is
-never abandoned. The host settles a killed pass with the same empty terminal
+kills the tiler's work in flight, and for a pass that means reading the
+source again, so a pass that fills the cache beyond its order is never
+abandoned. The host settles a killed pass with the same empty terminal
 reply it gives a fallen executor, so the one who killed it remembers the
 correlation (`Passes::finish`).
 
@@ -136,8 +136,8 @@ a luxury: a step can be one tile, and to hand it over a sequential source is
 read whole — by cells nothing happens all that time. Bytes are honest only
 where the source makes them so (`readable`): under pointwise reading the
 tiler's counter is a high-water mark of the read head, and over the network it
-jumps to the end of the file with the first window; a source whose parse
-already holds the samples (NetCDF) has read everything before the pass starts.
+jumps to the end of the file with the first window; a read that has reached
+the end of the file says nothing about the cascade still flushing after it.
 In both cases the denominator goes out as zero, and zero means "nothing to
 measure by", not "zero bytes": the caption then speaks in steps and cells,
 and it is the same rule for the bar and for the numbers beside it. Describing

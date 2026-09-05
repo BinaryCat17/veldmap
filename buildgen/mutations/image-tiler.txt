@@ -100,3 +100,38 @@
 файл: veldmodules/image-tiler/src/adapters/excerpt.rs
 было:         self.marked = body[0] & 0x06 != 0;
 стало:         self.marked = false;
+
+имя: единичная нулевая ось режется окном в тайл
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:     if leading <= 1 {
+стало:     if leading == 0 {
+
+имя: связка чанков длиннее тайла
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:     (chunk * (TILE / chunk)).min(height)
+стало:     (chunk * (TILE / chunk + 1)).min(height)
+
+имя: выборка разбора берёт одно окно
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:         .map(|at| (u64::from(at) * u64::from(windows - 1) / u64::from(SAMPLE_WINDOWS - 1)) as u32)
+стало:         .map(|_at| 0)
+
+имя: глубина чанка не считает копии крейта
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:     let assembled = 3 * element;
+стало:     let assembled = element;
+
+имя: выборка разбора берёт два окна
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было: const SAMPLE_WINDOWS: u32 = 4;
+стало: const SAMPLE_WINDOWS: u32 = 2;
+
+имя: однотонная величина перечитывается
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:         Some((chosen, layout)) => told(&file, &surveyed, chosen, layout, &order, &skipped),
+стало:         Some((chosen, _)) => told(&file, &surveyed, chosen, probed(&file, chosen, chosen.plane.unwrap().1, chosen.plane.unwrap().0)?.0, &order, &skipped),
+
+имя: окно строк читается с нулевой строки
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:         let top = index.saturating_mul(rows);
+стало:         let top = index.saturating_mul(rows) * 0;
