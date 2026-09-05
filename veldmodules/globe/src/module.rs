@@ -515,6 +515,14 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
                 }
             }
         });
+        // Второй растр той же роли — запасной первого, а не сосед: описывается
+        // он, только когда первый не описался (см. [`Raster::spares`]).
+        if let Some(first) = rasters.iter_mut().find(|raster: &&mut Raster| raster.role == role) {
+            first
+                .spares
+                .push((veldsdk::OwnedResource::new(handle), coordinates.map(veldsdk::OwnedResource::new)));
+            continue;
+        }
         let mut raster = Raster::new(role, veldsdk::OwnedResource::new(handle.clone()));
         raster.geolocation = coordinates.clone().map(veldsdk::OwnedResource::new);
 
@@ -767,6 +775,26 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
         Ok(meta) => meta,
         Err(error) => {
             veldsdk::log::warn!(target: "handlers", "{}: описание растра: {}", label, error);
+            // За не описавшимся растром бывает запасной файл — следующий
+            // встаёт на его место и описывается сам (см. [`Raster::spares`]).
+            let spare = overlay.raster_mut(role).and_then(|raster| {
+                let next = raster.next_spare()?;
+                Some((raster.describe.begin(), raster.spares.len(), next))
+            });
+            if let Some((correlation, left, (handle, coordinates))) = spare {
+                let named = match role {
+                    Role::Detailed => "подробный",
+                    Role::Preview => "превью",
+                };
+                veldsdk::log::info!(target: "handlers",
+                    "{}: запасной растр ({}) — ресурс {}, запасных ещё {}", label, named, handle.id, left);
+                state.pending_describe.insert(correlation.clone(), (key.to_string(), role));
+                crate::calls::image_tiler::on_describe(
+                    &DescribeRequest { resource: Some(handle), label, geolocation: coordinates },
+                    &correlation,
+                );
+                return;
+            }
             // Причина живёт у своего растра: их два, и вторая не отменяет
             // первую — слой живёт, пока жив хоть один, и сказать надо про оба.
             let said = match role {

@@ -9,14 +9,15 @@
 //! проход, решает таблица уровней по этой сетке. Выбор величины и растяг —
 //! по выборке окон ([`describe`]); плоскость целиком нигде не держится.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use hdf5_pure::{
-    AttrValue, DType, Dataset, File, FileAccessProperties, FormatError, MetadataCacheConfig,
+    AttrValue, ChunkCacheConfig, DType, Dataset, DatasetAccessProperties, File, FileAccessProperties,
+    FormatError, MetadataCacheConfig,
 };
 
 use super::super::budget::Peak;
@@ -97,61 +98,122 @@ fn opened(resource_id: u64, len: u64, reached: Arc<AtomicU64>) -> Result<File, S
         .map_err(|why| format!("NetCDF: {}", why))
 }
 
-/// Байт памяти на отсчёт в пике чтения решётки координат.
+/// Строки координатной решётки по требованию — регионом в одну строку.
 ///
-/// Решётка читается целиком (`read_f32`), и живут при этом две вещи разом:
-/// сырые отсчёты, собранные чанк за чанком, — рядом с ними распакованный чанк,
-/// у одночанковой решётки ростом со всю её, отсюда `2 · element`, — и они же,
-/// развёрнутые в f32, — отсюда `element + 4`. Пик — большее из двух.
-///
-/// Считать по меньшему нельзя: перебор лимита инстанса кончается не отказом, а
-/// трапом — ровно тем, что потолок обязан предотвращать.
-fn peak_per_pixel(element: u32) -> u32 {
-    element + element.max(4)
+/// Узлы привязки стоят на немногих строках ([`nodes`]), и читать ради них
+/// плоскость целиком незачем: у полукилометровой сетки SLSTR это 2400 строк
+/// по 3000 отсчётов на широту и столько же на долготу, а узлам нужны тридцать
+/// восемь строк. Строка читается регионом по оси строк плоскости ([`Item`]
+/// знает её форму и оси), разворачивается из упаковки и остаётся здесь на
+/// случай повторного вопроса: отступ решётки ([`footing`]) и сборка спрашивают
+/// одни и те же узлы дважды, а отступ по грязному краю — и соседние. Стоит
+/// это прочитанных строк: обычно десятки, у сплошь грязной решётки — до
+/// плоскости.
+struct Rows<'a> {
+    item: &'a Item,
+    /// Набор открыт один раз на все строки: кэш чанков крейта живёт в наборе,
+    /// а строка — срез чанков под ней, и открытый на каждую строку набор
+    /// распаковывал бы их заново. Пусто — не открылся, о чём сказано в журнале.
+    dataset: Option<Dataset>,
+    /// Прочитанные строки и те, что не прочитались (`None`): отступ решётки
+    /// спрашивает грязный край снова и снова, и неудача не должна стоить
+    /// повторного похода.
+    read: RefCell<HashMap<u32, Option<Rc<Vec<f32>>>>>,
+    /// Хоть одна строка не прочиталась — привязка не вышла из-за чтения, а не
+    /// из-за узлов, и сказать об этом надо тем словом.
+    failed: Cell<bool>,
 }
 
-/// Потолок координатных решёток полосы съёмки: у неё широта и долгота лежат
-/// поотсчётно, то есть двумя такими же полями, как сама величина. Решётки
-/// читаются целиком — узлы привязки берутся из них вразброс, а окно строк
-/// крейта режет по одной оси, — и потолок держит эту пару в доле свободной
-/// памяти: привязка это добавка к показу, и снимок без неё ляжет по контуру
-/// каталога.
-const TIES_BUDGET: u64 = 64 * 1024 * 1024;
+/// Потолок кэша чанков у решётки координат. Кэш держит строку чанков через всю
+/// плоскость — то, что делят соседние строки узлов; у полукилометровой сетки
+/// SLSTR это два чанка по 1,6 МБ. Решётка с чанками крупнее потолка читается
+/// верно, но медленно: каждая строка узлов распаковывает свои чанки снова.
+const ROW_CACHE_CAP: usize = 64 * 1024 * 1024;
 
-/// Пик чтения пары решёток координат.
-///
-/// Читаются они одна за другой, и на второй рядом с осевшей первой живут обе
-/// копии второй — сырые отсчёты и их развёртка в f32 (см. [`peak_per_pixel`]).
-/// Отсюда `4` за осевшую и пик за читаемую.
-///
-/// Считать по осевшему нельзя: у решёток OLCI, записанных целыми по четыре
-/// байта, пик — двенадцать байт на узел против восьми осевших на пару, и
-/// потолок, посчитанный по осевшим, обещает отказ там, где случится трап.
-///
-/// Спрашивают это оба места, где решётки читаются, — соседний файл координат и
-/// поотсчётные координаты самой величины. Порознь мерки разошлись бы, и одна и
-/// та же пара плоскостей проходила бы в одном месте и отвергалась в другом.
-fn ties_peak(nodes: u64, element: u32) -> u64 {
-    nodes.saturating_mul(u64::from(4 + peak_per_pixel(element)))
+impl<'a> Rows<'a> {
+    fn new(file: &File, item: &'a Item) -> Self {
+        let mut rows = Self {
+            item,
+            dataset: None,
+            read: RefCell::new(HashMap::new()),
+            failed: Cell::new(false),
+        };
+        match file.dataset(&item.path) {
+            Ok(dataset) => rows.dataset = Some(rows.cached(file, dataset)),
+            Err(why) => {
+                veldsdk::log::warn!(target: "decode", "NetCDF: решётка '{}' не открылась: {}", item.path, why);
+                rows.failed.set(true);
+            }
+        }
+        rows
+    }
+
+    /// Тот же набор с кэшем чанков под одну строку чанков через плоскость;
+    /// непрерывный набор кэша не просит и остаётся как есть.
+    fn cached(&self, file: &File, dataset: Dataset) -> Dataset {
+        let Some(chunk) = dataset.chunk_shape().ok().flatten() else { return dataset };
+        let element = dataset.element_size().unwrap_or(8);
+        let (_, columns_axis) = self.item.axes;
+        let chunk_bytes = chunk.iter().product::<u64>().saturating_mul(element);
+        let across = chunk
+            .get(columns_axis)
+            .filter(|&&side| side > 0)
+            .map_or(1, |&side| self.item.shape[columns_axis].div_ceil(side));
+        let budget = usize::try_from(chunk_bytes.saturating_mul(across)).unwrap_or(usize::MAX).min(ROW_CACHE_CAP);
+        let config = ChunkCacheConfig::new()
+            .with_max_bytes(budget)
+            .with_max_slots(usize::try_from(across).unwrap_or(usize::MAX).max(1));
+        file.dataset_with_options(&self.item.path, DatasetAccessProperties::new().with_chunk_cache(config))
+            .unwrap_or(dataset)
+    }
+
+    /// Строка `row` плоскости целиком, прочитанная или из памяти.
+    fn row(&self, row: u32) -> Option<Rc<Vec<f32>>> {
+        if let Some(known) = self.read.borrow().get(&row) {
+            return known.clone();
+        }
+        let values = self.dataset.as_ref().and_then(|dataset| {
+            let (rows_axis, columns_axis) = self.item.axes;
+            let mut start = vec![0u64; self.item.shape.len()];
+            let mut count = vec![1u64; self.item.shape.len()];
+            start[rows_axis] = u64::from(row);
+            count[columns_axis] = self.item.shape[columns_axis];
+            match dataset.read_f32_region(&start, &count) {
+                Ok(values) => Some(Rc::new(unpacked(self.item, values))),
+                Err(why) => {
+                    // Первая неудача — в журнал; остальные лягут в кэш молча.
+                    if !self.failed.replace(true) {
+                        veldsdk::log::warn!(target: "decode", "NetCDF: строка {} '{}' не прочиталась: {}", row, self.item.path, why);
+                    }
+                    None
+                }
+            }
+        });
+        self.read.borrow_mut().insert(row, values.clone());
+        values
+    }
+
+    /// Отсчёт в строке `row` и столбце `column`; `None` — за краем или не
+    /// прочитался.
+    fn value(&self, row: u32, column: u32) -> Option<f64> {
+        self.row(row)?.get(column as usize).map(|value| f64::from(*value))
+    }
+
+    /// Хоть одна строка не прочиталась или набор не открылся.
+    fn failed(&self) -> bool {
+        self.failed.get()
+    }
+
+    /// Сколько строк прочитано — для журнала.
+    fn read_rows(&self) -> usize {
+        self.read.borrow().values().filter(|row| row.is_some()).count()
+    }
 }
 
-/// Влезает ли пара решёток в отведённый привязке бюджет.
-///
-/// Сравнение живёт здесь, а не у обоих зовущих: разойтись им нечем, если
-/// сравнивать порознь нечем.
-fn ties_fit(nodes: u64, element: u32) -> bool {
-    ties_peak(nodes, element) <= TIES_BUDGET
-}
-
-/// Ширина отсчёта величины в байтах — по заголовку, без единого прочитанного
-/// отсчёта. Неузнанный тип считается самым дорогим: ошибиться в эту сторону
-/// значит отказать, в другую — упасть.
-fn element_of(file: &File, item: &Item) -> u32 {
-    file.dataset(&item.path)
-        .and_then(|dataset| dataset.dtype())
-        .ok()
-        .and_then(|dtype| width_of(&dtype))
-        .unwrap_or(8)
+/// Отказ привязки словами о чтении: строки координат не прочитались, и узлы
+/// тут не при чём — снимок ляжет догадкой из-за нас, а не из-за файла.
+fn unread(lat: &Item, lon: &Item) -> String {
+    format!("координаты '{}' и '{}' не прочитались", lat.path, lon.path)
 }
 
 /// Наименьшая сторона решётки опорных точек. Столько же, сколько несёт гранула
@@ -515,43 +577,26 @@ pub fn geolocation(
             geo_w, geo_h, width, height
         ));
     }
-    // Потолок меряется развёрнутыми отсчётами, а не длиной файла: он сжат, и
-    // тем же потолком меряет свои решётки `swath` — иначе одна и та же пара
-    // плоскостей проходила бы здесь и отвергалась там.
-    //
-    // Пиком, а не осевшим: решётки читаются одна за другой, и на второй рядом с
-    // осевшей первой живут обе копии второй (см. [`ties_peak`]). Считать по
-    // осевшему значит обещать отказ там, где случится трап.
-    let nodes = u64::from(geo_w) * u64::from(geo_h);
-    if !ties_fit(nodes, element_of(&file, lat).max(element_of(&file, lon))) {
-        return Err(format!(
-            "решётки координат {}×{} не влезают в бюджет привязки ({} МБ)",
-            geo_w, geo_h, TIES_BUDGET / (1024 * 1024)
-        ));
-    }
-
-    let read = |item: &Item| {
-        file.dataset(&item.path)
-            .and_then(|dataset| dataset.read_f32())
-            .map(|values| unpacked(item, values))
-            .map_err(|e| format!("чтение '{}': {}", item.path, e))
-    };
-    let (lat_values, lon_values) = (read(lat)?, read(lon)?);
+    // Решётки читаются строками узлов, а не плоскостью (см. [`Rows`]): потолка
+    // на их размер здесь нет, есть цена строк, которые спросила решётка.
+    let (north, east) = (Rows::new(&file, lat), Rows::new(&file, lon));
 
     let attrs = globals(&file);
     let seat = seating(raster, frame(&attrs), subsampling(&attrs), (width, height), (geo_w, geo_h))?;
     let at = |row: u32, column: u32| -> Option<(f64, f64)> {
-        let index = (row as usize) * (geo_w as usize) + (column as usize);
-        Some((f64::from(*lat_values.get(index)?), f64::from(*lon_values.get(index)?)))
+        Some((north.value(row, column)?, east.value(row, column)?))
     };
     let ties = lattice((0, geo_h - 1), (0, geo_w - 1), seat, at);
     if ties.is_empty() {
-        return Err(nodes_unfit(geo_w, geo_h));
+        return Err(match north.failed() || east.failed() {
+            true => unread(lat, lon),
+            false => nodes_unfit(geo_w, geo_h),
+        });
     }
     veldsdk::log::debug!(target: "decode",
-        "NetCDF привязка из соседнего файла: сетка {}×{} ('{}' и '{}'), шаг {:.2}×{:.2} пикселя от {:+.1}×{:+.1}, узлов {}",
+        "NetCDF привязка из соседнего файла: сетка {}×{} ('{}' и '{}'), шаг {:.2}×{:.2} пикселя от {:+.1}×{:+.1}, узлов {}, строк прочитано {}",
         geo_w, geo_h, lat.path, lon.path,
-        seat.step.0, seat.step.1, seat.origin.0, seat.origin.1, ties.len());
+        seat.step.0, seat.step.1, seat.origin.0, seat.origin.1, ties.len(), north.read_rows() + east.read_rows());
     Ok(ties)
 }
 
@@ -1056,16 +1101,18 @@ fn ties(file: &File, items: &[Item], chosen: &Item) -> (Vec<Tie>, Option<String>
         true => (Vec::new(), said(nodes_unfit(width, height))),
         false => (ties, None),
     };
-    match swath(file, items, chosen) {
-        Swath::Found(lat, lon) => {
-            let at = |row: u32, column: u32| -> Option<(f64, f64)> {
-                let index = (row as usize) * (width as usize) + (column as usize);
-                Some((f64::from(*lat.get(index)?), f64::from(*lon.get(index)?)))
-            };
-            return told(lattice(rows, columns, Seating::SAME, at));
+    if let Some((lat, lon)) = swath_pair(items, chosen) {
+        // Поотсчётные координаты читаются строками узлов (см. [`Rows`]):
+        // полоса съёмки стои́т своих строк узлов, а не плоскости.
+        let (north, east) = (Rows::new(file, lat), Rows::new(file, lon));
+        let at = |row: u32, column: u32| -> Option<(f64, f64)> {
+            Some((north.value(row, column)?, east.value(row, column)?))
+        };
+        let ties = lattice(rows, columns, Seating::SAME, at);
+        if ties.is_empty() && (north.failed() || east.failed()) {
+            return (Vec::new(), said(unread(lat, lon)));
         }
-        Swath::Refused(why) => return (Vec::new(), said(why)),
-        Swath::Absent => {}
+        return told(ties);
     }
     if let Some((lat, lon)) = grid(items, chosen, file) {
         // Оси одномерные, и негодность у них разделима: негодная широта уносит
@@ -1462,35 +1509,6 @@ fn lattice(
     ties
 }
 
-/// Поотсчётные широта и долгота полосы съёмки — те, которые величина назвала
-/// в `coordinates`.
-fn swath(file: &File, items: &[Item], chosen: &Item) -> Swath {
-    let Some(plane) = chosen.plane else { return Swath::Absent };
-    // Не нашлось — обычный ответ, а не беда: так лежит регулярная сетка, у
-    // которой поотсчётных координат нет вовсе.
-    let Some((lat, lon)) = swath_pair(items, chosen) else { return Swath::Absent };
-    // Бюджет проверяется здесь, а не в начале: у регулярной сетки жаловаться на
-    // размер поотсчётных было бы не про неё.
-    let pixels = u64::from(plane.0) * u64::from(plane.1);
-    if !ties_fit(pixels, element_of(file, lat).max(element_of(file, lon))) {
-        return Swath::Refused(format!(
-            "поотсчётные координаты {}×{} не влезают в бюджет привязки ({} МБ)",
-            plane.1,
-            plane.0,
-            TIES_BUDGET / (1024 * 1024)
-        ));
-    }
-    let read =
-        |item: &Item| Some(unpacked(item, file.dataset(&item.path).ok()?.read_f32().ok()?));
-    match (read(lat), read(lon)) {
-        (Some(north), Some(east)) => Swath::Found(north, east),
-        _ => Swath::Refused(format!(
-            "координаты '{}' и '{}' не прочитались",
-            lat.path, lon.path
-        )),
-    }
-}
-
 /// Пара поотсчётных координат величины — по заголовкам, без единого
 /// прочитанного отсчёта.
 ///
@@ -1547,18 +1565,6 @@ fn grid_axes<'a>(items: &'a [Item], chosen: &Item) -> Option<(&'a Item, &'a Item
 /// читая: форма и единицы записаны рядом с именем.
 fn placeable(items: &[Item], chosen: &Item) -> bool {
     swath_pair(items, chosen).is_some() || grid_axes(items, chosen).is_some()
-}
-
-/// Чем кончился поиск поотсчётных координат.
-///
-/// Тремя ответами, а не двумя: «их нет» и «есть, да взять нельзя» — разные
-/// вещи, и сведённые в пустоту они кончаются одной подписью на оба случая.
-/// Первое — обычный ход (так лежит регулярная сетка), второе надо сказать
-/// вслух: снимок ляжет догадкой из-за нашего потолка, а не из-за файла.
-enum Swath {
-    Found(Vec<f32>, Vec<f32>),
-    Absent,
-    Refused(String),
 }
 
 /// Оси регулярной сетки: ряды широт и долгот той же длины, что стороны растра.
@@ -2444,43 +2450,6 @@ mod tests {
             .collect();
         assert!(preferred(&none).is_empty());
         assert!(explain(&none).contains("координаты"), "{}", explain(&none));
-    }
-
-    /// Пик чтения решётки координат — большее из двух состояний, а не сумма и
-    /// не одно из них. Занизив его, потолок привязки пропускает пару, на
-    /// которой инстанс падает трапом; завысив — отвергает читаемую.
-    #[test]
-    fn пик_чтения_решётки_больший_из_двух_путей() {
-        // Сборка сырых отсчётов рядом с распакованным чанком — `2 · element`;
-        // разворот собранного в f32 — `element + 4`.
-        for element in [1u32, 2, 4, 8] {
-            let peak = peak_per_pixel(element);
-            assert_eq!(peak, (2 * element).max(element + 4), "элемент {element}");
-        }
-        assert_eq!(peak_per_pixel(1), 5);
-        assert_eq!(peak_per_pixel(2), 6);
-        assert_eq!(peak_per_pixel(4), 8);
-        assert_eq!(peak_per_pixel(8), 16, "восьмибайтовый отсчёт дороже развёртки в f32");
-    }
-
-    /// Пик пары решёток выше их осевшего размера. Разница не теоретическая:
-    /// у решёток, записанных целыми по четыре байта, счёт по осевшему занижает
-    /// нужное в полтора раза — а пропущенная им пара упрётся в лимит инстанса
-    /// уже без права на отказ.
-    #[test]
-    fn пик_решёток_выше_их_осевшего_размера() {
-        let nodes = 1_000_000u64;
-        let settled = nodes * 4 * 2;
-        for element in [1u32, 2, 4, 8] {
-            let peak = ties_peak(nodes, element);
-            assert!(peak > settled, "элемент {element}: пик {peak} не выше осевших {settled}");
-        }
-        // Решётки OLCI: четырёхбайтовые целые, двенадцать байт на узел.
-        assert_eq!(ties_peak(nodes, 4), nodes * 12);
-        // Чем шире отсчёт, тем дороже пара, — и потому у пары спрашивается
-        // больший из двух типов, а не первый попавшийся.
-        assert!(ties_peak(nodes, 8) > ties_peak(nodes, 4));
-        assert!(ties_peak(nodes, 4) > ties_peak(nodes, 1));
     }
 
     /// Кэш заголовков помещается в запас, отложенный на всё несчитаемое: он и

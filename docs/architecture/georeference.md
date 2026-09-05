@@ -85,11 +85,11 @@ variable as placeable when the variable to show is chosen (`placeable`,
   (`northing`; `degree_north` too) and the one in `degrees_east` (`easting`).
   Uniqueness is the rule: two latitudes of one shape are the question
   "which", and the file has no answer — an SLSTR granule holds `latitude_in`
-  and `latitude_tx`, but of different shapes, so they do not collide. Reading
-  is refused when the pair does not fit `TIES_BUDGET` (64 MiB), measured as
-  the peak of reading two grids — `ties_peak`: the settled first plus the raw
-  and unpacked copies of the second — the same sum the coordinate file is
-  measured by, so one pair cannot pass in one place and fail in the other.
+  and `latitude_tx`, but of different shapes, so they do not collide. The
+  pair is read by the rows the lattice's nodes stand on, one row region per
+  node row and per coordinate (`Rows`), so a swath's size sets no ceiling:
+  the half-kilometre SLSTR grid of 2400 rows by 3000 columns costs 38 rows of
+  each, each chunk under them inflated once.
 - **Grid axes** (`grid_axes`): one-dimensional variables in the variable's
   group or in the root whose length equals the raster's rows (`northing`) or
   columns (`easting`).
@@ -157,13 +157,16 @@ Sentinel-3 keeps the measurement in one `.nc` and latitude with longitude in
 another file of the same product. Which file it is, the provider knows — the
 layout of a product is its business (`geolocation` in
 `veldmodules/data-provider/src/imagery.rs`): only a sibling in the raster's
-own folder, in this order — `geodetic_tx.nc` when the raster's name ends in a
-grid tag (`grid_tag`: two letters, the grid from `a b c i f t`, the view
-from `n o x`), then `geodetic_<tag>.nc`, then `tie_geo_coordinates.nc`,
+own folder, in this order — for a raster whose name ends in a grid tag
+(`grid_tag`: two letters, the grid from `a b c i f t`, the view from `n o x`)
+`geodetic_tx.nc` then `geodetic_<tag>.nc` on a kilometre grid (`i`, `f`) and
+the tie grid itself, and `geodetic_<tag>.nc` then `geodetic_tx.nc` on a
+half-kilometre grid (`a`, `b`, `c`); then `tie_geo_coordinates.nc`,
 `geo_coordinates.nc` and `geolocation.nc` (SYNERGY). The tie grid `tx` goes
-first because it is far cheaper than the per-sample file; its nodes stand on
-the instrument's nominal grid, and the provider's comment records the measured
-offset from the per-sample coordinates — under a pixel of a kilometre
+first on a kilometre grid because it is far cheaper than the per-sample file;
+its nodes stand on the instrument's nominal grid, and the provider's comment
+records the measured offset from the per-sample coordinates — under a pixel
+of a kilometre
 raster, and the floor of any binding taken from that file.
 
 The name rides as `ImageryRaster.geolocation`; `data-browser` opens it as a
@@ -179,8 +182,8 @@ reason travels in `binding_trouble` prefixed "файл координат".
 `netcdf::geolocation` takes the densest pair of `northing`/`easting` planes
 of one shape, unique per shape (the file holds altitude beside latitude, and
 SLSTR's the coordinates of neighbouring grids); refuses a grid denser than
-the raster — those are someone else's coordinates — one under 2×2, and one
-over `TIES_BUDGET`; unpacks; then seats the grid on the raster.
+the raster — those are someone else's coordinates — and one under 2×2; reads
+the node rows, unpacked; then seats the grid on the raster.
 
 **Seating** (`seating`). The grid may be sparser than the raster (OLCI's tie
 grid) and, for SLSTR's `tx`, wider than it on both sides; how it relates to
@@ -434,8 +437,7 @@ lattice in a projection, a degenerate matrix, a tie that is not a place or
 not finite all end here. A foreign datum does **not**: it is about a binding
 that was taken, and in this field it would tell the viewer "place unknown" of
 a scene lying in its place. A NetCDF words its reasons separately (`ties`):
-per-sample coordinates over `TIES_BUDGET`, coordinates that could not be
-read, nodes that make no lattice (`nodes_unfit`, one text for the raster's
+nodes that make no lattice (`nodes_unfit`, one text for the raster's
 own grid and for the coordinate file), or no coordinates at all for the named
 variable — and its coordinate file adds its own, prefixed "файл координат".
 When nothing was placed, both halves travel, each naming its file; when

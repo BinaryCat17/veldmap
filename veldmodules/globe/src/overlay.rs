@@ -622,6 +622,12 @@ pub struct Raster {
     /// (Sentinel-3). Держится ровно затем, чтобы освободиться вместе с
     /// растром: спрашивают его один раз, при описании.
     pub geolocation: Option<veldsdk::OwnedResource>,
+    /// Запасные файлы той же роли с их координатами, в порядке предпочтения:
+    /// провайдер называет их за выбранным, когда выбор по именам может
+    /// ошибиться (пустой ночью видимый канал SLSTR), и следующий встаёт на
+    /// место не описавшегося ([`Raster::next_spare`]). Отпускаются вместе с
+    /// растром.
+    pub spares: Vec<(veldsdk::OwnedResource, Option<veldsdk::OwnedResource>)>,
     /// Описание растра. Присваивается только через [`Raster::describe_as`]: с
     /// размерами меняются и узлы варп-сеток, а кэш их об этом иначе не узнает.
     pub meta: Option<Meta>,
@@ -669,6 +675,7 @@ impl Raster {
             role,
             resource,
             geolocation: None,
+            spares: Vec::new(),
             meta: None,
             bounds: Vec::new(),
             trouble: None,
@@ -680,6 +687,23 @@ impl Raster {
         }
     }
 
+    /// Следующий запасной файл — на место не описавшегося: растр остаётся тем
+    /// же (роль, место в наложении), а всё, что знал о прежнем файле, начинает
+    /// с чистого. Ответ — ресурсы нового файла для описания; `None` — запасных
+    /// не осталось. Прежний файл отпускается здесь же, вместе с координатами.
+    pub fn next_spare(&mut self) -> Option<(veldsdk::ResourceHandle, Option<veldsdk::ResourceHandle>)> {
+        if self.spares.is_empty() {
+            return None;
+        }
+        let (resource, geolocation) = self.spares.remove(0);
+        let spares = std::mem::take(&mut self.spares);
+        let mut fresh = Raster::new(self.role, resource);
+        fresh.geolocation = geolocation;
+        fresh.spares = spares;
+        *self = fresh;
+        Some((self.resource.as_ref().clone(), self.geolocation.as_ref().map(|owned| owned.as_ref().clone())))
+    }
+
     /// Принять описание растра.
     ///
     /// Методом, а не присваиванием поля: из размеров растра считаются узлы
@@ -687,8 +711,9 @@ impl Raster {
     /// нового описания те же самые, так что по ним расхождения не видно.
     ///
     /// Сегодня чистить нечего: описание растр получает один раз за свою жизнь
-    /// (`describe` заводится в `adopt_overlay`), а до него кэш пуст. Правило
-    /// стои́т здесь, чтобы второе описание не оказалось тихой поломкой.
+    /// (`describe` заводится в `adopt_overlay`, а у запасного — в
+    /// `describe_settled`, на растре, начатом с чистого), а до него кэш пуст.
+    /// Правило стои́т здесь, чтобы второе описание не оказалось тихой поломкой.
     pub fn describe_as(&mut self, meta: Meta) {
         self.meta = Some(meta);
         self.mesh.clear();
@@ -2167,6 +2192,30 @@ mod tests {
             Raster::new(role, veldsdk::OwnedResource::from_raw_id(u64::from(role as u32) + 1));
         raster.meta = meta_of;
         raster
+    }
+
+    /// Запасной встаёт на место не описавшегося тем же растром: роль и место
+    /// прежние, знание о файле — с чистого листа; кончились запасные — ответ
+    /// пуст, и растр остаётся при последнем файле.
+    #[test]
+    fn a_spare_takes_the_place_of_the_failed_file() {
+        let mut raster = raster(Role::Detailed, Some(meta(2000, 2000)));
+        raster.trouble = Some("подробный растр не открылся: пусто".into());
+        raster.spares = vec![
+            (veldsdk::OwnedResource::from_raw_id(11), Some(veldsdk::OwnedResource::from_raw_id(12))),
+            (veldsdk::OwnedResource::from_raw_id(13), None),
+        ];
+
+        let (resource, coordinates) = raster.next_spare().expect("запасной есть");
+        assert_eq!((resource.id, coordinates.map(|c| c.id)), (11, Some(12)));
+        assert_eq!(raster.resource.as_ref().id, 11);
+        assert!(raster.meta.is_none() && raster.trouble.is_none(), "о новом файле ещё ничего не известно");
+        assert_eq!(raster.role, Role::Detailed);
+        assert_eq!(raster.spares.len(), 1);
+
+        assert_eq!(raster.next_spare().map(|(r, c)| (r.id, c.is_none())), Some((13, true)));
+        assert!(raster.next_spare().is_none(), "запасных больше нет");
+        assert_eq!(raster.resource.as_ref().id, 13, "растр остаётся при последнем");
     }
 
     /// Взгляд на снимок в упор: камера наведена на середину рамки, так что

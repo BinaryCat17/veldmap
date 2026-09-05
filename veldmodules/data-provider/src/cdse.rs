@@ -274,14 +274,17 @@ fn raster(identifier: String, role: imagery::Role, keys: &[String]) -> ImageryRa
 ///
 /// `keys` — ключи самого продукта: ими объясняется пустой ответ, и ключи
 /// зеркала для этого не годятся — спрашивали не о нём.
-fn imagery_response(
-    identifier: &str,
-    keys: &[String],
-    found: Vec<(String, imagery::Role)>,
-) -> ImageryResponse {
-    let empty = found.is_empty();
-    let rasters =
-        found.into_iter().map(|(key, role)| raster(key, role, keys)).collect::<Vec<_>>();
+fn imagery_response(identifier: &str, keys: &[String], found: imagery::Scan) -> ImageryResponse {
+    let empty = found.rasters.is_empty();
+    // Запасные подробные — вслед за выбранным, той же ролью: потребитель
+    // пробует их по порядку, когда выбранный не описался (см.
+    // `imagery::spares`).
+    let rasters = found
+        .rasters
+        .into_iter()
+        .chain(found.alternates.into_iter().map(|key| (key, imagery::Role::Detailed)))
+        .map(|(key, role)| raster(key, role, keys))
+        .collect::<Vec<_>>();
 
     // Рамка — только когда её видно из имени (тайл Sentinel-2). Ошибка разбора
     // не валит ответ: без рамки потребитель живёт на футпринте каталога.
@@ -524,7 +527,7 @@ pub fn on_http_result(
                         return;
                     }
                     crate::emit::on_imagery_result(
-                        &imagery_response(&identifier, &keys, known.rasters),
+                        &imagery_response(&identifier, &keys, known),
                         &pending.correlation_id,
                     );
                 }
@@ -551,7 +554,7 @@ pub fn on_http_result(
                 log::debug!(target: "handlers",
                     "Манифест '{}' измерений не назвал — выбор по именам файлов", identifier);
             }
-            let found = imagery::scan(&identifier, &keys, &measured, downloaded).rasters;
+            let found = imagery::scan(&identifier, &keys, &measured, downloaded);
             crate::emit::on_imagery_result(
                 &imagery_response(&identifier, &keys, found),
                 &pending.correlation_id,

@@ -155,3 +155,8 @@
 файл: veldmodules/image-tiler/src/adapters/jp2.rs
 было:             pieces.extend(pieces_of(&segments));
 стало:             let _ = pieces_of(&segments);
+
+имя: решётка координат читается по столбцам вместо строк
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:         start[rows_axis] = u64::from(row);
+стало:         start[columns_axis] = u64::from(row).min(self.item.shape[columns_axis] - 1);

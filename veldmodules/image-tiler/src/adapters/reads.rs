@@ -670,7 +670,12 @@ fn netcdf(shape: &[u64], chunk: Option<&[u64]>, values: &[i16]) -> Vec<u8> {
 /// стои́т на нулевой строке.
 fn nc_chunks(bytes: &[u8], name: &str) -> Vec<(u64, u64, u64)> {
     let file = hdf5_pure::File::from_bytes(bytes.to_vec()).expect("файл читается");
-    let dataset = file.dataset(&format!("/PRODUCT/{name}")).expect("величина на месте");
+    // Величины фикстур лежат в `PRODUCT`; координаты — в корне, и зовутся с `../`.
+    let path = match name.strip_prefix("../") {
+        Some(root) => format!("/{root}"),
+        None => format!("/PRODUCT/{name}"),
+    };
+    let dataset = file.dataset(&path).expect("величина на месте");
     match dataset.layout().expect("раскладка читается") {
         hdf5_pure::Layout::Chunked { chunk_shape, .. } => {
             // Строка чанка — по последней неединичной оси перед столбцами:
@@ -820,6 +825,77 @@ fn a_unit_leading_axis_windows_along_the_next_one() {
     assert_eq!(tiles.len(), 1);
     let asked = &windows()[head..];
     assert_eq!(touched(asked, &chunks), 10, "тайл читает два своих окна — десять чанков из шестидесяти");
+}
+
+/// Файл координат полосы съёмки: широта и долгота плоскостями `rows`×`columns`
+/// f32, чанк файла — `chunk_rows` строк во всю ширину.
+fn coordinates(columns: u32, rows: u32, chunk_rows: u32) -> Vec<u8> {
+    let mut file = FileBuilder::new();
+    let cell = |at: usize, per: f32| (at as f32) * per;
+    let lat: Vec<f32> = (0..rows * columns).map(|at| 40.0 + cell((at / columns) as usize, 0.01)).collect();
+    let lon: Vec<f32> = (0..rows * columns).map(|at| 30.0 + cell((at % columns) as usize, 0.01)).collect();
+    for (name, values, units) in [("latitude", &lat, "degrees_north"), ("longitude", &lon, "degrees_east")] {
+        let dataset = file.create_dataset(name);
+        dataset
+            .with_f32_data(values)
+            .with_shape(&[u64::from(rows), u64::from(columns)])
+            .with_chunks(&[u64::from(chunk_rows), u64::from(columns)])
+            .with_deflate(1);
+        dataset.set_attr("units", AttrValue::String(units.to_string()));
+    }
+    file.finish().expect("HDF5 пишется")
+}
+
+/// Решётки координат читаются строками узлов, а не плоскостью: у сетки в
+/// шестьсот строк узлов двадцать один ряд, и задеты ровно их чанки — у широты
+/// и у долготы по двадцать одному из шестисот. Привязка при этом собирается
+/// целиком, решётка в 21×21 узел.
+#[test]
+fn ties_read_the_rows_of_their_nodes_not_the_plane() {
+    fake::install();
+    let (w, h) = (300u32, 600u32);
+    let bytes = coordinates(w, h, 1);
+    let lat_chunks = nc_chunks(&bytes, "../latitude");
+    let lon_chunks = nc_chunks(&bytes, "../longitude");
+    assert_eq!((lat_chunks.len(), lon_chunks.len()), (600, 600));
+    let handle = fake::mount(bytes);
+
+    let ties = netcdf::geolocation(handle.id, handle.size, None, w, h).expect("привязка собирается");
+    assert_eq!(ties.len(), 21 * 21, "решётка узлов");
+    let asked = nc_windows();
+    assert_eq!(touched(&asked, &lat_chunks), 21, "широта — только строки узлов");
+    assert_eq!(touched(&asked, &lon_chunks), 21, "долгота — только строки узлов");
+    // Углы решётки стоят на первой и последней строках и столбцах файла.
+    let corner = ties.iter().find(|tie| tie.px < 1.0 && tie.py < 1.0).expect("угол");
+    assert!((corner.lat - 40.0).abs() < 1e-3 && (corner.lon - 30.0).abs() < 1e-3);
+    let far = ties.iter().find(|tie| tie.px > 299.0 && tie.py > 599.0).expect("дальний угол");
+    assert!((far.lat - 45.99).abs() < 1e-2 && (far.lon - 32.99).abs() < 1e-2);
+}
+
+/// Чанк решётки координат распаковывается один раз, сколько бы строк узлов
+/// на нём ни стояло: набор открыт на всю решётку, и его кэш держит строку
+/// чанков. Чанк здесь крупнее кэша крейта по умолчанию (267 строк по 1500 —
+/// 1,6 МБ, как у полукилометровой сетки SLSTR), так что кэш обязан быть
+/// назначен под него; иначе каждая из 21 строки узлов читала бы свой чанк
+/// снова.
+#[test]
+fn a_coordinate_chunk_is_inflated_once_however_many_node_rows_it_holds() {
+    fake::install();
+    let (w, h) = (1500u32, 600u32);
+    let bytes = coordinates(w, h, 267);
+    let lat_chunks = nc_chunks(&bytes, "../latitude");
+    let lon_chunks = nc_chunks(&bytes, "../longitude");
+    assert_eq!((lat_chunks.len(), lon_chunks.len()), (3, 3));
+    let handle = fake::mount(bytes);
+
+    let ties = netcdf::geolocation(handle.id, handle.size, None, w, h).expect("привязка собирается");
+    assert_eq!(ties.len(), 21 * 24, "решётка узлов: 21 строка, 24 столбца");
+    let asked = nc_windows();
+    for chunks in [&lat_chunks, &lon_chunks] {
+        let stored: u64 = chunks.iter().map(|chunk| chunk.2).sum();
+        assert_eq!(touched(&asked, chunks), 3, "узлы стоят на всех трёх чанках");
+        assert_eq!(read_of(&asked, chunks), stored, "каждый чанк прочитан ровно один раз");
+    }
 }
 
 /// Величина одним чанком (SYNERGY): меньше плоскости не прочесть, и сетка

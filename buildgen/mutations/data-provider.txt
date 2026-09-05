@@ -1,0 +1,12 @@
+# Мутации отбора растров продукта и файла координат.
+# Формат — buildgen/mutate.py; крейт — модуль data-provider.
+
+имя: густота сетки не участвует в отборе
+файл: veldmodules/data-provider/src/imagery.rs
+было:                     grid_rank(key),
+стало:                     0,
+
+имя: полукилометровой сетке достаётся опорная решётка
+файл: veldmodules/data-provider/src/imagery.rs
+было:         let order = match grid_rank(raster).0 == 0 {
+стало:         let order = match false {

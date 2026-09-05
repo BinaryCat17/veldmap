@@ -189,7 +189,11 @@ probed rows of a quad, the widest row of a lattice, measured as
 measurable, and such a layer wants nothing. The preview raster is always
 wanted first; the detailed one is added over it when the preview's native
 resolution is coarser than the screen and the detailed raster is finer than
-the preview (`Overlay::wanted`, `detail_eclipsed`). From there on — the
+the preview (`Overlay::wanted`, `detail_eclipsed`). A detailed raster whose
+description fails gives its place to the next spare the provider named with
+it (`Raster::spares`, `next_spare`): the same raster, a fresh file, described
+anew — a night SLSTR granule's visible channel is fill, and the thermal one
+behind it carries the data and the binding. From there on — the
 target coarsened to the detail limit and the appetite cap, the ladder, the
 store — is the shared mechanics of
 [viewing-pipeline.md](viewing-pipeline.md).

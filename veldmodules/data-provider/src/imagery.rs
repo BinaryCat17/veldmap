@@ -113,36 +113,71 @@ pub fn scan(product: &str, keys: &[String], measured: &[String], downloaded: boo
         // Порядок выбора: сперва то, что похоже на цветной снимок целиком;
         // потом измерительный формат против показного; потом названное
         // величиной самого продукта; потом всё, кроме объявивших себя
-        // подсобными; а не различило ни одно из четырёх — по алфавиту: это уже
-        // не выбор, а определённость, одному продукту один и тот же ответ от
-        // запуска к запуску.
-        let detailed = among
-            .into_iter()
-            .filter(|key| !a_quicklook(key) && !a_decoration(key))
-            .min_by_key(|key| {
-                (
-                    !a_whole_picture(key),
-                    a_picture_format(key),
-                    !names_the_measurand(key, product),
-                    an_aside(key),
-                    file_name(key),
-                )
-            });
-        if let Some(detailed) = detailed {
-            rasters.push((detailed.clone(), Role::Detailed));
+        // подсобными; потом самая густая сетка записи, если имя её называет
+        // ([`grid_rank`]); а не различило ни одно из пяти — по алфавиту: это
+        // уже не выбор, а определённость, одному продукту один и тот же ответ
+        // от запуска к запуску.
+        let mut ranked: Vec<&String> =
+            among.into_iter().filter(|key| !a_quicklook(key) && !a_decoration(key)).collect();
+        ranked.sort_by_key(|key| {
+            (
+                !a_whole_picture(key),
+                a_picture_format(key),
+                !names_the_measurand(key, product),
+                an_aside(key),
+                grid_rank(key),
+                file_name(key),
+            )
+        });
+        let mut alternates = Vec::new();
+        if let Some((detailed, rest)) = ranked.split_first() {
+            rasters.push(((*detailed).clone(), Role::Detailed));
+            alternates = spares(detailed, rest);
         }
         // Сюда доходят только неузнанные раскладки, и подробный растр здесь
         // выбран именами файлов — то есть догадкой. Ею и отличается случай,
         // ради которого стои́т идти за манифестом.
-        return Scan { rasters, guessed: true };
+        return Scan { rasters, alternates, guessed: true };
     }
 
-    Scan { rasters, guessed: false }
+    Scan { rasters, alternates: Vec::new(), guessed: false }
 }
 
-/// Что вышло из [`scan`]: растры с ролями и то, чем выбран подробный.
+/// Запасные подробные растры за выбранным: лучший файл каждой сетки грубее
+/// его, по порядку ранга ([`grid_rank`]), без опорной и без файлов, чьё имя о
+/// сетке молчит — калибровочная таблица прибора запасным растром не годится.
+///
+/// Выбор по имени не видит, что в файле: у гранулы SLSTR, снятой ночью,
+/// видимые каналы записаны сплошным «нет данных», и полукилометровый
+/// `S1_radiance_an.nc` — пустой. Тайлер такое отвергает как пустое, и слой
+/// остался бы без подробного растра и без его привязки, хотя рядом лежит
+/// километровый тепловой канал с данными. Поэтому вместе с выбранным
+/// называется, что пробовать следом: по одному на сетку, потому что соседи
+/// по сетке пусты по той же причине. Без хвостов сеток (OLCI, Landsat) запасных
+/// нет — второго ответа имена не дают.
+fn spares<'a>(detailed: &String, rest: &[&'a String]) -> Vec<String> {
+    let chosen = grid_rank(detailed).0;
+    let mut seen = Vec::new();
+    rest.iter()
+        .filter(|key| {
+            let grid = grid_rank(key).0;
+            let fresh = grid_tag(key).is_some() && grid > chosen && grid < 2 && !seen.contains(&grid);
+            if fresh {
+                seen.push(grid);
+            }
+            fresh
+        })
+        .map(|key| (*key).clone())
+        .collect()
+}
+
+/// Что вышло из [`scan`]: растры с ролями, запасные за подробным и то, чем
+/// выбран подробный.
 pub struct Scan {
     pub rasters: Vec<(String, Role)>,
+    /// Подробные растры на случай, если выбранный не откроется или пуст, в
+    /// порядке предпочтения (см. [`spares`]).
+    pub alternates: Vec<String>,
     /// Подробный растр выбран догадкой по именам файлов, а не раскладкой
     /// известной миссии. Только такому выбору и нужен манифест: у Sentinel-1 и
     /// Sentinel-2 раскладка названа, и лишний подписанный запрос на сотни
@@ -313,10 +348,15 @@ fn names_the_measurand(key: &str, product: &str) -> bool {
 ///  * `geodetic_tx.nc` — опорная сетка съёмки, общая всем сеткам SLSTR: на
 ///    порядок дешевле поотсчётной, а стои́т она в своём отсчёте прибора и
 ///    садится на растр только через смещения, объявленные обоими файлами
-///    (см. `image-tiler::netcdf::seating`);
+///    (см. `image-tiler::netcdf::seating`). Первый ответ у километровых
+///    сеток (`i`, `f`) и у самой опорной;
 ///  * `geodetic_<сетка>.nc` — поотсчётные координаты той сетки, на которой
 ///    записан растр (SLSTR держит их по одному файлу на сетку: `_in`, `_an`,
-///    `_fn`), — когда опорной в продукте нет;
+///    `_fn`). Первый ответ у полукилометровых сеток (`a`, `b`, `c`): узлы
+///    опорной отходят от поотсчётных на 453 м медианно и 1667 м в худшем —
+///    меньше километрового пикселя и один-три полукилометровых, — а привязка
+///    грубее растра съедала бы его подробность. У остальных — когда опорной в
+///    продукте нет;
 ///  * `tie_geo_coordinates.nc` — опорная сетка OLCI: у полного разрешения это
 ///    1,2 МБ против 50 МБ поотсчётного файла, а узлов в ней хватает с
 ///    запасом (привязка всё равно берётся решёткой);
@@ -334,25 +374,27 @@ pub fn geolocation(keys: &[String], raster: &str) -> Option<String> {
         let wanted = format!("{}/{}", folder, name);
         keys.iter().find(|key| key.as_str() == wanted).cloned()
     };
-    // Опорная сетка съёмки — первый ответ у всякой сетки SLSTR, и она же самый
-    // дешёвый: у гранулы `SL_2_LST` это 394 КБ против 2,2 МБ поотсчётного
-    // файла. Платится за это точностью, и цена измерена: узлы `tx` стоят на
-    // номинальной решётке прибора и отходят от поотсчётных координат на 453 м
-    // медианно, 825 м на девяносто пятом и 1667 м в худшем. Меньше пикселя
-    // километрового растра, и это же — пол привязки: сгущать по такому файлу
-    // решётку не за чем, ниже собственного смещения она не опустится.
+    // Опорная сетка съёмки — первый ответ у километровой сетки SLSTR, и она
+    // же самый дешёвый: у гранулы `SL_2_LST` это 394 КБ против 2,2 МБ
+    // поотсчётного файла. Платится за это точностью, и цена измерена: узлы
+    // `tx` стоят на номинальной решётке прибора и отходят от поотсчётных
+    // координат на 453 м медианно, 825 м на девяносто пятом и 1667 м в
+    // худшем. Меньше пикселя километрового растра, и это же — пол привязки:
+    // сгущать по такому файлу решётку не за чем, ниже собственного смещения
+    // она не опустится. У полукилометровой сетки то же смещение — один-три
+    // пикселя, и ей первым отвечает поотсчётный файл её сетки.
     //
     // Растру, записанному на самой опорной сетке (`met_tx.nc`), тот же файл и
     // достаётся — своей сетки у него нет другой.
-    if grid_tag(raster).is_some()
-        && let Some(found) = sibling("geodetic_tx.nc")
-    {
-        return Some(found);
-    }
-    if let Some(grid) = grid_tag(raster)
-        && let Some(found) = sibling(&format!("geodetic_{}.nc", grid))
-    {
-        return Some(found);
+    if let Some(grid) = grid_tag(raster) {
+        let own = format!("geodetic_{}.nc", grid);
+        let order = match grid_rank(raster).0 == 0 {
+            true => [own.as_str(), "geodetic_tx.nc"],
+            false => ["geodetic_tx.nc", own.as_str()],
+        };
+        if let Some(found) = order.iter().find_map(|name| sibling(name)) {
+            return Some(found);
+        }
     }
     sibling("tie_geo_coordinates.nc")
         .or_else(|| sibling("geo_coordinates.nc"))
@@ -381,6 +423,33 @@ fn grid_tag(key: &str) -> Option<&str> {
     let (grid, view) = (sign.next()?, sign.next()?);
     let shaped = sign.next().is_none() && GRIDS.contains(&grid) && VIEWS.contains(&view);
     shaped.then_some(tag)
+}
+
+/// Ранг сетки записи по её хвосту ([`grid_tag`]): чем меньше, тем гуще —
+/// (сетка, обзор). Сетки `a`, `b`, `c` — полкилометра, `i` и `f` — километр,
+/// `t` — опорная, реже всех; надирный обзор (`n`) прежде косого (`o`): косой
+/// у́же и снят под углом, а общая опорная (`x`) — последней. Имя без хвоста
+/// сетки ничего о ней не говорит и считается километровым надирным: ни лучше,
+/// ни хуже обычного измерения, чтобы у продукта без таких хвостов (OLCI,
+/// Landsat) ранг не решал ничего.
+///
+/// Мерка эта — про густоту сетки, а не про размер файла: одна сетка занимает
+/// у SLSTR три октавы байт, и километровый тепловой канал весит больше
+/// полукилометрового видимого; размером густоту не измерить.
+fn grid_rank(key: &str) -> (u8, u8) {
+    let Some(tag) = grid_tag(key) else { return (1, 0) };
+    let mut sign = tag.chars();
+    let grid = match sign.next() {
+        Some('a' | 'b' | 'c') => 0,
+        Some('i' | 'f') => 1,
+        _ => 2,
+    };
+    let view = match sign.next() {
+        Some('n') => 0,
+        Some('o') => 1,
+        _ => 2,
+    };
+    (grid, view)
 }
 
 /// Расширения, за которыми стои́т растр. Перечислены они здесь и только здесь:
@@ -1043,9 +1112,67 @@ mod tests {
         );
     }
 
-    /// У SLSTR сеток несколько, и опорная общая им всем: растр сетки `in`
-    /// привязывается `geodetic_tx.nc` — на порядок более дешёвым, чем
-    /// поотсчётный `geodetic_in.nc`.
+    /// Гранула SLSTR уровня 1: измерений двадцать восемь, и первые четыре
+    /// довода у всех одинаковы — решает густота сетки, а не алфавит.
+    /// Полукилометровый видимый канал надирного обзора берёт верх над
+    /// километровым тепловым, который стои́т раньше по алфавиту; косой обзор
+    /// той же сетки — после надирного. Имена настоящие, с гранулы `SL_1_RBT`.
+    #[test]
+    fn the_densest_grid_wins_among_the_swath_measurements() {
+        const PRODUCT: &str = "eodata/…/S3A_SL_1_RBT____20260824T174507_0540_PS1_O_NR_005.SEN3";
+        let names = [
+            "quicklook.jpg", "F1_BT_fn.nc", "F1_BT_fo.nc", "F1_BT_in.nc", "F1_BT_io.nc",
+            "F2_BT_in.nc", "S1_radiance_an.nc", "S1_radiance_ao.nc", "S4_radiance_bn.nc",
+            "S5_radiance_cn.nc", "S7_BT_in.nc", "S8_BT_in.nc", "S9_BT_io.nc", "met_tx.nc",
+            "cartesian_an.nc", "flags_an.nc", "indices_an.nc", "time_an.nc", "geodetic_an.nc",
+            "geodetic_tx.nc", "viscal.nc", "xfdumanifest.xml",
+        ];
+        let granule: Vec<String> = names.iter().map(|name| format!("eodata/…/S3A_SL_1_RBT.SEN3/{name}")).collect();
+        let rasters = scan_rasters(PRODUCT, &granule, &[]);
+        assert_eq!(rasters.len(), 2, "{:?}", rasters);
+        assert!(rasters[0].0.ends_with("quicklook.jpg") && rasters[0].1 == Role::Preview);
+        assert!(rasters[1].0.ends_with("/S1_radiance_an.nc"), "{:?}", rasters[1]);
+
+        // Запасной — лучший файл сетки грубее: километровый надир; опорная
+        // сетка запасным не идёт.
+        let found = scan(PRODUCT, &granule, &[], false);
+        assert_eq!(found.alternates, vec![format!("eodata/…/S3A_SL_1_RBT.SEN3/F1_BT_fn.nc")]);
+
+        // Названные манифестом измерения — те же двадцать восемь; ответ тот же.
+        let measured: Vec<String> = names
+            .iter()
+            .filter(|name| name.contains("radiance") || name.contains("_BT_"))
+            .map(|name| name.to_string())
+            .collect();
+        assert!(scan_rasters(PRODUCT, &granule, &measured)[1].0.ends_with("/S1_radiance_an.nc"));
+
+        // Косой обзор той же полукилометровой сетки берёт верх над километровым
+        // надиром: сетка прежде обзора. Без полукилометровых сеток вовсе —
+        // километровый надир, по алфавиту среди равных.
+        let half_km = |key: &String| ["_an.nc", "_ao.nc", "_bn.nc", "_bo.nc", "_cn.nc", "_co.nc"].iter().any(|tail| key.ends_with(tail));
+        let nadir_half_km = |key: &String| ["_an.nc", "_bn.nc", "_cn.nc"].iter().any(|tail| key.ends_with(tail));
+        let no_nadir: Vec<String> = granule.iter().filter(|key| !nadir_half_km(key)).cloned().collect();
+        assert!(scan_rasters(PRODUCT, &no_nadir, &[])[1].0.ends_with("/S1_radiance_ao.nc"), "{:?}", scan_rasters(PRODUCT, &no_nadir, &[]));
+        let coarse: Vec<String> = granule.iter().filter(|key| !half_km(key)).cloned().collect();
+        assert!(scan_rasters(PRODUCT, &coarse, &[])[1].0.ends_with("/F1_BT_fn.nc"), "{:?}", scan_rasters(PRODUCT, &coarse, &[]));
+        assert_eq!(grid_rank("x/S1_radiance_an.nc"), (0, 0));
+        assert_eq!(grid_rank("x/S1_radiance_ao.nc"), (0, 1));
+        assert_eq!(grid_rank("x/F1_BT_fn.nc"), (1, 0));
+        assert_eq!(grid_rank("x/met_tx.nc"), (2, 2));
+        assert_eq!(grid_rank("x/gifapar.nc"), (1, 0), "имя без сетки — километровый надир");
+
+        // У гранулы без хвостов сеток запасных нет: второго ответа имена не дают.
+        let olci: Vec<String> = ["quicklook.jpg", "gifapar.nc", "iwv.nc", "otci.nc"]
+            .iter()
+            .map(|name| format!("eodata/…/S3A_OL_2_LRR.SEN3/{name}"))
+            .collect();
+        assert!(scan("eodata/…/S3A_OL_2_LRR.SEN3", &olci, &[], false).alternates.is_empty());
+    }
+
+    /// У SLSTR сеток несколько, и опорная общая им всем: растр километровой
+    /// сетки `in` привязывается `geodetic_tx.nc` — на порядок более дешёвым,
+    /// чем поотсчётный `geodetic_in.nc`, — а полукилометровой `an` первым
+    /// отвечает её поотсчётный файл: опорная сетка сдвинула бы его на пиксели.
     #[test]
     fn slstr_takes_the_cheap_tie_grid_of_the_swath() {
         let slstr: Vec<String> = [
@@ -1080,6 +1207,14 @@ mod tests {
             geolocation(&lean, &lean[0]),
             Some("eodata/…/S3A_SL_2_LST.SEN3/geodetic_in.nc".to_string())
         );
+        // Полукилометровая сетка берёт свой поотсчётный файл прежде опорной, а
+        // без него — опорную.
+        let rbt: Vec<String> = ["S1_radiance_an.nc", "geodetic_an.nc", "geodetic_tx.nc"]
+            .iter()
+            .map(|name| format!("eodata/…/S3A_SL_1_RBT.SEN3/{name}"))
+            .collect();
+        assert_eq!(geolocation(&rbt, &rbt[0]), Some(rbt[1].clone()));
+        assert_eq!(geolocation(&rbt[..1].iter().chain(&rbt[2..]).cloned().collect::<Vec<_>>(), &rbt[0]), Some(rbt[2].clone()));
         // Хвост из двух букв сеткой ещё не делает: так кончаются и служебный
         // `LST_ancillary_ds.nc`, и `chl_nn.nc` у OLCI.
         assert_eq!(grid_tag("x/LST_ancillary_ds.nc"), None);
