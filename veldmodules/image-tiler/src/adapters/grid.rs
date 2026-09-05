@@ -342,6 +342,15 @@ pub trait Chunked {
     /// краевых чанков полезная часть короче сетки. Индекс — `ряд × чанков в
     /// ряду + колонка`.
     fn chunk(&mut self, image: usize, index: u32) -> Result<(Vec<u8>, u32, u32), String>;
+
+    /// Чанки `indices` образа `image` сейчас прочтут — источник, знающий, где
+    /// они лежат в файле, называет это носителю (`veldsdk::abi::
+    /// resource_prefetch`), и по проводу они едут разом, несколькими
+    /// запросами в полёте, а не по промаху за промахом. Умолчание — ничего:
+    /// не всякий источник знает свои смещения.
+    fn prefetch(&mut self, _image: usize, _indices: &[u32]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Декодированные чанки одного образа, RGBA8. Вытеснение — по старшинству и
@@ -431,6 +440,27 @@ pub fn direct<S: Chunked>(
         "прямой доступ: уровень {} ({}×{}) из образа {} ({}×{}), тайлов {}, сетка {}",
         level, lw, lh, image, sw, sh, wants.len(),
         if aligned { "своя" } else { "чужая" });
+
+    // Чанки под всеми заказанными тайлами — носителю наперёд, одним заказом
+    // (см. [`Chunked::prefetch`]); та же геометрия, что и у сборки ниже.
+    // Сорвавшийся заказ прохода не валит: чанки приедут обычным чтением.
+    let mut needed = std::collections::BTreeSet::new();
+    for &(tx, ty) in wants {
+        let (tw, th) = (pyramid::tile_extent(tx, lw), pyramid::tile_extent(ty, lh));
+        let Region { sx0, sx1, sy0, sy1, .. } = region_of((tx, ty), (tw, th), (lw, lh), (sw, sh), aligned);
+        if sx1 <= sx0 || sy1 <= sy0 {
+            continue;
+        }
+        for cy in sy0 / u64::from(ch)..=(sy1 - 1) / u64::from(ch) {
+            for cx in sx0 / u64::from(cw)..=(sx1 - 1) / u64::from(cw) {
+                needed.insert((cy * u64::from(across) + cx) as u32);
+            }
+        }
+    }
+    let needed: Vec<u32> = needed.into_iter().collect();
+    if let Err(why) = source.prefetch(image, &needed) {
+        veldsdk::log::debug!(target: "decode", "чанки наперёд не привезены, читаем по промахам: {}", why);
+    }
 
     for &(tx, ty) in wants {
         let tw = pyramid::tile_extent(tx, lw);

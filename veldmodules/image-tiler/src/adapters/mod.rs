@@ -277,9 +277,11 @@ pub fn produce(
         // приезжает медленно; уровень, взятый отказом, не приезжает никогда —
         // поэтому точечным таблица называет только то, что драйвер отдаст.
         (Kind::Tiff(layout), table::Serve::Pointwise) => {
-            tiff::produce_direct(reader(), info, layout, level, wants, emit)
+            tiff::produce_direct(reader(), resource_id, info, layout, level, wants, emit)
         }
-        (Kind::Tiff(layout), table::Serve::Pass { .. }) => tiff::produce_pass(reader(), info, layout, emit),
+        (Kind::Tiff(layout), table::Serve::Pass { .. }) => {
+            tiff::produce_pass(reader(), resource_id, info, layout, emit)
+        }
         // Кодеку нужен свой поток на каждый фактор, и читателей JP2 заводит сам.
         (Kind::Jp2(layout), table::Serve::Pointwise) => {
             jp2::produce_direct(resource_id, bytes, info, layout, level, wants, emit)

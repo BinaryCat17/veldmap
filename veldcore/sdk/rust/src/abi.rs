@@ -29,6 +29,7 @@ mod host {
         pub fn veld_resource_write(id: u64, offset: u64, ptr: u64, len: u64) -> u64;
         pub fn veld_resource_upload_image(id: u64, ptr: u64, len: u64) -> u64;
         pub fn veld_resource_read(id: u64, offset: u64, size: u64) -> u64;
+        pub fn veld_resource_prefetch(id: u64, ptr: u64, len: u64) -> u64;
 
         pub fn veld_resource_texture_size(id: u64) -> u64;
 
@@ -101,6 +102,9 @@ mod host {
     }
     pub unsafe fn veld_resource_upload_image(_id: u64, _ptr: u64, _len: u64) -> u64 { fake::unsupported("заливать текстуры") }
     pub unsafe fn veld_resource_read(id: u64, offset: u64, size: u64) -> u64 { fake::resource_read(id, offset, size) }
+    pub unsafe fn veld_resource_prefetch(id: u64, ptr: u64, len: u64) -> u64 {
+        fake::resource_prefetch(id, unsafe { bytes(ptr, len) })
+    }
     pub unsafe fn veld_resource_texture_size(_id: u64) -> u64 { 0 }
     pub unsafe fn veld_task_kill(ptr: u64, len: u64) -> u64 { fake::task_kill(unsafe { text(ptr, len) }) }
     pub unsafe fn veld_resource_alloc_buffer(size: u64, _usage: u64, _mapped: u64) -> u64 { fake::alloc_bytes(size) }
@@ -241,6 +245,26 @@ pub fn resource_read(id: u64, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>
     unsafe {
         let packed = veld_resource_read(id, offset, size);
         take_host_response(packed, "resource_read")
+    }
+}
+
+/// Называет хосту диапазоны `(смещение, длина)`, которые вызывающий сейчас
+/// прочтёт: носитель за проводом привозит их разом и несколькими запросами в
+/// полёте, а не по промахам одного за другим; файлу и памяти это ничего не
+/// стоит. Байт не читает — за ними идёт [`resource_read`], и попадает он уже
+/// в привезённое. Пустой список — ничего.
+pub fn resource_prefetch(id: u64, ranges: &[(u64, u64)]) -> anyhow::Result<()> {
+    if ranges.is_empty() {
+        return Ok(());
+    }
+    let mut wire = Vec::with_capacity(ranges.len() * 16);
+    for (offset, len) in ranges {
+        wire.extend_from_slice(&offset.to_le_bytes());
+        wire.extend_from_slice(&len.to_le_bytes());
+    }
+    unsafe {
+        let packed = veld_resource_prefetch(id, wire.as_ptr() as u64, wire.len() as u64);
+        take_host_response(packed, "resource_prefetch").map(|_| ())
     }
 }
 

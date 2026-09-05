@@ -10,3 +10,28 @@
 файл: veldcore/platform/host/modules/network/src/range.rs
 было:             false => 1,
 стало:             false => (self.run * 2).max(1).min(READAHEAD / BLOCK),
+
+имя: разгон не требует дочитанного блока
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:         let run = match index == self.next && self.deep {
+стало:         let run = match index == self.next {
+
+имя: дочитанным считается любой блок, а не последний запроса
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:         if index + 1 == self.next {
+стало:         if index < self.next {
+
+имя: серии prefetch не склеиваются
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:             Some((first, count)) if *first + *count == index && *count < max_run => *count += 1,
+стало:             Some((first, count)) if false && *first + *count == index && *count < max_run => *count += 1,
+
+имя: prefetch спрашивает и лежащие в пуле блоки
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:         indices.retain(|&index| !self.blocks.has(self.owner, index));
+стало:         let _ = &indices;
+
+имя: закрытие соседа сбивает разгон всем объектам
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:         pool.readahead.remove(&owner);
+стало:         pool.readahead.clear();

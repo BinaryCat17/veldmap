@@ -448,16 +448,18 @@ struct Chunks<R: Read + Seek> {
     decoder: Decoder<R>,
     mapping: Mapping,
     at: Option<(usize, Pixel)>,
+    /// Ресурс, по которому идёт читатель: ему называются чанки наперёд.
+    resource: u64,
 }
 
 impl<R: Read + Seek> Chunks<R> {
-    fn new(reader: R, layout: &Layout) -> Result<Self, String> {
+    fn new(reader: R, resource: u64, layout: &Layout) -> Result<Self, String> {
         let mut decoder = Decoder::new(reader).map_err(|e| format!("tiff: {}", e))?;
         // Байтовым файлам растяг не стоит ни одного лишнего чтения. Где после
         // него останется декодер, не обещано (см. [`stretch`]) — первое чтение
         // наводит его само.
         let mapping = stretch(layout, &mut decoder)?;
-        Ok(Self { decoder, mapping, at: None })
+        Ok(Self { decoder, mapping, at: None, resource })
     }
 
     /// Наводит декодер на образ и отвечает его цветовой моделью. Копии бывают
@@ -483,24 +485,42 @@ impl<R: Read + Seek> Chunked for Chunks<R> {
         let data = self.decoder.read_chunk(index).map_err(|e| format!("tiff: {}", e))?;
         Ok((chunk_rgba(&self.mapping, &data, pixel, dw, dh)?, dw, dh))
     }
+
+    /// Где чанки лежат в файле, говорят теги образа — смещения и длины тайлов
+    /// либо полос; наведённый на образ декодер их уже прочитал.
+    fn prefetch(&mut self, image: usize, indices: &[u32]) -> Result<(), String> {
+        self.aim(image)?;
+        let (offsets, counts) = match self.decoder.get_tag_unsigned::<u32>(Tag::TileWidth).is_ok() {
+            true => (Tag::TileOffsets, Tag::TileByteCounts),
+            false => (Tag::StripOffsets, Tag::StripByteCounts),
+        };
+        let offsets = self.decoder.get_tag_u64_vec(offsets).map_err(|e| format!("tiff: {}", e))?;
+        let counts = self.decoder.get_tag_u64_vec(counts).map_err(|e| format!("tiff: {}", e))?;
+        let ranges: Vec<(u64, u64)> = indices
+            .iter()
+            .filter_map(|&index| Some((*offsets.get(index as usize)?, *counts.get(index as usize)?)))
+            .collect();
+        veldsdk::abi::resource_prefetch(self.resource, &ranges).map_err(|e| e.to_string())
+    }
 }
 
 /// Точечное чтение тайлов уровня — драйвером по чанкам файла.
 pub fn produce_direct<R: Read + Seek>(
     reader: R,
+    resource: u64,
     info: &Info,
     layout: &Layout,
     level: u32,
     wants: &[(u32, u32)],
     emit: Emit,
 ) -> Result<(), String> {
-    let mut chunks = Chunks::new(reader, layout)?;
+    let mut chunks = Chunks::new(reader, resource, layout)?;
     grid::direct(&mut chunks, &layout.grid, (info.width, info.height), level, wants, emit)
 }
 
 /// Последовательный проход по базовому IFD — драйвером по чанкам файла.
-pub fn produce_pass<R: Read + Seek>(reader: R, info: &Info, layout: &Layout, emit: Emit) -> Result<(), String> {
-    let mut chunks = Chunks::new(reader, layout)?;
+pub fn produce_pass<R: Read + Seek>(reader: R, resource: u64, info: &Info, layout: &Layout, emit: Emit) -> Result<(), String> {
+    let mut chunks = Chunks::new(reader, resource, layout)?;
     grid::pass(&mut chunks, &layout.grid, (info.width, info.height), emit)
 }
 

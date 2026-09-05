@@ -17,6 +17,13 @@ pub trait RangeSource: Send + Sync {
     /// `offset + size <= len()` (см. `MemoryManager::read`). Клампить
     /// повторно не нужно — иначе правило хвоста у каждого носителя своё.
     fn read_at(&self, offset: u64, size: u64) -> anyhow::Result<Vec<u8>>;
+
+    /// Читатель назвал диапазоны, которые сейчас прочтёт: носителю за
+    /// проводом это повод привезти их разом, а не по промахам. Файлу и памяти
+    /// делать нечего — умолчание молчит.
+    fn prefetch(&self, _ranges: &[(u64, u64)]) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Файл на диске: байты остаются на нём, читаются по смещению. Так открываются
@@ -486,9 +493,11 @@ impl MemoryManager {
     /// Чтение за концом — не ошибка, а короткий (возможно пустой) ответ, как
     /// у файла: читатель идёт окнами, и последнее окно почти всегда неполное
     /// (`ResourceReader` в SDK). Правило одно на все носители и проверяется
-    /// здесь, а не в каждом из них.
+    /// здесь, а не в каждом из них. Размер сверх памяти инстанса — отказ до
+    /// выделения (см. [`admitted`]).
     pub fn read(&self, region_id: ResourceId, offset: u64, size: u64) -> anyhow::Result<Vec<u8>> {
         if size == 0 { return Ok(Vec::new()); }
+        admitted(size)?;
 
         // Что читаем, вынесено из-под guard'а реестра: Cpu копируется сразу
         // (это memcpy), Range/Buffer отдают Arc, а блокирующее чтение идёт
@@ -594,6 +603,20 @@ impl MemoryManager {
         }
     }
 
+    /// Диапазоны, которые читатель сейчас прочтёт, — носителю (см.
+    /// [`RangeSource::prefetch`]). Память и буферы привозить неоткуда, и для
+    /// них это ничего не делает; нет ресурса — отказ, как у чтения.
+    pub fn prefetch(&self, region_id: ResourceId, ranges: &[(u64, u64)]) -> anyhow::Result<()> {
+        let source = self.registry.payload(region_id, |payload| match payload {
+            ResourcePayload::Data(DataBacking::Range(source)) => Some(source.clone()),
+            _ => None,
+        }).ok_or_else(|| anyhow::anyhow!("Ресурс {} не найден", region_id))?;
+        match source {
+            Some(source) => source.prefetch(ranges),
+            None => Ok(()),
+        }
+    }
+
     /// Нужно ли выполнять операцию на blocking-пуле (см. `DataBacking::read_blocks`).
     pub fn read_blocks(&self, region_id: ResourceId) -> bool {
         self.registry.payload(region_id, |p| match p {
@@ -624,9 +647,32 @@ impl MemoryManager {
     // освобождение одно — `ResourceRegistry::unregister`.
 }
 
+/// Влезает ли одно чтение в память инстанса.
+///
+/// Ответ ложится в линейную память гостя, и больше её он не примет; хост же
+/// выделяет под него `Vec` до всякой проверки — чтение в терабайт от сбитого
+/// гостя валило бы хост, а не гостя. Потолок — тот же лимит инстанса, второго
+/// числа не нужно.
+fn admitted(size: u64) -> anyhow::Result<()> {
+    match size > crate::INSTANCE_MEMORY_LIMIT {
+        true => Err(anyhow::anyhow!(
+            "чтение {} байт отвергнуто: больше памяти инстанса ({})", size, crate::INSTANCE_MEMORY_LIMIT)),
+        false => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Чтение крупнее памяти инстанса отвергается до выделения: гость такого
+    /// ответа не примет, а хост не должен падать вместо него.
+    #[test]
+    fn чтение_крупнее_памяти_инстанса_отвергается() {
+        assert!(admitted(crate::INSTANCE_MEMORY_LIMIT).is_ok(), "ровно лимит — ещё принимается");
+        assert!(admitted(crate::INSTANCE_MEMORY_LIMIT + 1).is_err());
+        assert!(admitted(0).is_ok());
+    }
 
     /// Готовый фьючер отдаёт значение без исполнителя, а неготовый честно
     /// говорит «не сразу». На этой разнице стои́т весь съём области ошибок:

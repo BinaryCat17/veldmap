@@ -130,6 +130,53 @@ pub fn add_to_linker(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
         })
     })?;
 
+    // veld_resource_prefetch(id, ptr, len) → тегированный ответ без байт.
+    // Диапазоны — пары (смещение, длина) по 16 байт LE в памяти гостя: он
+    // называет, что сейчас прочтёт, и носитель за проводом привозит это
+    // разом, а не по промахам (см. `RangeSource::prefetch`); файлу и памяти
+    // это ничего не стоит. Чтения байт здесь нет — за ними идёт
+    // veld_resource_read, и попадает он уже в привезённое.
+    linker.func_wrap_async("env", "veld_resource_prefetch", |mut caller: Caller<'_, HostState>, (id, ptr, len): (u64, u64, u64)| {
+        Box::new(async move {
+            let instance_id = caller.data().instance_id;
+            let registry = caller.data().registry.clone();
+            let memory = caller.data().memory.clone();
+            // Кривой список — отказ, а не пустой заказ: сбитый гость обязан
+            // узнать, что его заказ пропал (так же отвечает и запись).
+            let ranges: anyhow::Result<Vec<(u64, u64)>> = match caller.get_export("memory") {
+                Some(Extern::Memory(m)) => match m.data(&caller).get(ptr as usize..(ptr + len) as usize) {
+                    Some(bytes) if len % 16 == 0 => Ok(bytes.chunks_exact(16).map(|pair| {
+                        let word = |at: usize| u64::from_le_bytes(pair[at..at + 8].try_into().expect("восемь байт"));
+                        (word(0), word(8))
+                    }).collect()),
+                    Some(_) => Err(anyhow::anyhow!("prefetch ресурса {}: список диапазонов не из пар по 16 байт ({} байт)", id, len)),
+                    None => Err(anyhow::anyhow!("prefetch ресурса {}: список диапазонов выходит за память гостя", id)),
+                },
+                _ => Err(anyhow::anyhow!("prefetch ресурса {}: у гостя нет памяти", id)),
+            };
+
+            let result = if !registry.check_access(id, instance_id, crate::registry::Access::Read) {
+                Err(anyhow::anyhow!("чтение ресурса {} запрещено", id))
+            } else if let Err(why) = ranges {
+                Err(why)
+            } else {
+                let ranges = ranges.expect("отказ разобран выше");
+                // Провод — на blocking-пул, как и чтение: prefetch ждёт свои
+                // запросы, а поток рантайма остаётся свободным.
+                match tokio::task::spawn_blocking(move || memory.prefetch(id, &ranges)).await {
+                    Ok(inner) => inner.map(|()| Vec::new()),
+                    Err(e) if e.is_cancelled() => {
+                        Err(anyhow::anyhow!("prefetch ресурса {} снят вместе с задачей", id))
+                    }
+                    Err(e) => Err(anyhow::anyhow!("prefetch ресурса {} упал с паникой: {}", id, e)),
+                }
+            };
+
+            let buf = tagged_response(result);
+            write_response_back(&mut caller, &buf).await
+        })
+    })?;
+
     // veld_resource_texture_size(id) → (width << 32 | height), 0 — не текстура,
     // не найдена или доступ запрещён. Нужен тому, кто рисует чужую текстуру:
     // вписать её в отведённое место можно только зная её пропорции, а размеры

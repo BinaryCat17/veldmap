@@ -171,7 +171,7 @@ bus (`veldsdk::abi`, implemented in `veldcore/platform/host/core/src/abi.rs`):
 | bus and log | `veld_host_publish`, `veld_host_log` |
 | system | `veld_random_bytes` |
 | creating resources | `veld_resource_alloc_cpu`, `veld_resource_alloc_buffer`, `veld_resource_alloc_texture`, `veld_resource_create` |
-| resource data | `veld_resource_read`, `veld_resource_write`, `veld_resource_upload_image`, `veld_resource_texture_size` |
+| resource data | `veld_resource_read`, `veld_resource_prefetch`, `veld_resource_write`, `veld_resource_upload_image`, `veld_resource_texture_size` |
 | ownership | `veld_resource_transfer`, `veld_resource_grant_read`, `veld_resource_grant_write`, `veld_resource_free` |
 | graphics | `veld_graphics_execute` |
 | tasks | `veld_task_kill` |

@@ -135,3 +135,13 @@
 файл: veldmodules/image-tiler/src/adapters/netcdf.rs
 было:         let top = index.saturating_mul(rows);
 стало:         let top = index.saturating_mul(rows) * 0;
+
+имя: prefetch заказывает чанки с начала ряда
+файл: veldmodules/image-tiler/src/adapters/grid.rs
+было:             for cx in sx0 / u64::from(cw)..=(sx1 - 1) / u64::from(cw) {
+стало:             for cx in 0..=(sx1 - 1) / u64::from(cw) {
+
+имя: проба JP2 наперёд — весь тайл-парт
+файл: veldmodules/image-tiler/src/adapters/jp2.rs
+было:             .map(|part| (part.offset, part.len.min(excerpt::PROBE)))
+стало:             .map(|part| (part.offset, part.len))

@@ -9,10 +9,11 @@
 //! того объекта). Отсюда `Request` — пара, и создаётся она только здесь.
 
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aws_sigv4::http_request::{
-    sign, PercentEncodingMode, SignableRequest, SigningSettings, UriPathNormalizationMode,
+    sign, PercentEncodingMode, SignableBody, SignableRequest, SignatureLocation, SigningSettings,
+    UriPathNormalizationMode,
 };
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
@@ -26,6 +27,15 @@ const REGION: &str = "default";
 const BUCKET: &str = "eodata";
 /// sha256 пустого тела: у нас все запросы GET, тела нет ни у одного.
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+/// Срок подписи адреса объекта — предел, который SigV4 отпускает адресу.
+///
+/// Объект читается ресурсом столько, сколько слой лежит на шаре, — часами;
+/// подпись в заголовках хранилище принимает четверть часа от `x-amz-date`, и
+/// слой, переживший её, терял бы источник на первом же промахе в пул. Подпись
+/// в адресе живёт столько, сколько названо, и переподписывать ресурс посреди
+/// чтения незачем. Листинги и поиск идут заголовками: они отвечают сразу.
+const OBJECT_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Сколько объектов просить за раз. Листинг постраничный, продолжение — через
 /// continuation-token (см. `Listing::next_token`): страница здесь — размер
@@ -154,7 +164,7 @@ fn under_date(path: &str) -> bool {
 /// GET объекта целиком или диапазоном — Range к подписи не относится и
 /// добавляется транспортом (network).
 pub fn object(identity: &Identity, identifier: &str) -> Request {
-    signed(identity, &format!("/{}/{}", BUCKET, key(identifier)), &[])
+    signed(identity, &format!("/{}/{}", BUCKET, key(identifier)), &[], Some(OBJECT_LIFETIME))
 }
 
 /// Листинг одного уровня: папки отдаются как CommonPrefixes, а не разворотом
@@ -173,7 +183,7 @@ pub fn listing_deep(identity: &Identity, path: &str, token: &str) -> Request {
 /// Страница ListObjectsV2. Уровень и поддерево — один и тот же запрос к бакету,
 /// и подписывается он одинаково; вся разница между ними — в параметрах.
 fn page(identity: &Identity, path: &str, token: &str, by_level: bool) -> Request {
-    signed(identity, &format!("/{}/", BUCKET), &query(key(path), token, by_level))
+    signed(identity, &format!("/{}/", BUCKET), &query(key(path), token, by_level), None)
 }
 
 /// Параметры страницы листинга.
@@ -198,8 +208,10 @@ fn query<'a>(prefix: &'a str, token: &'a str, by_level: bool) -> Vec<(&'a str, &
     query
 }
 
-/// Единственное место, где рождается пара «адрес + подпись».
-fn signed(identity: &Identity, path: &str, query: &[(&str, &str)]) -> Request {
+/// Единственное место, где рождается пара «адрес + подпись». `lifetime` —
+/// подпись кладётся в адрес и живёт названный срок; без него — в заголовки,
+/// на четверть часа хранилища.
+fn signed(identity: &Identity, path: &str, query: &[(&str, &str)], lifetime: Option<Duration>) -> Request {
     // Через Url, а не форматированием: подписывается ровно та строка запроса,
     // которая уйдёт в сеть, — со всем процентным кодированием.
     let mut url = Url::parse(&format!("https://{}{}", HOST, path))
@@ -223,6 +235,11 @@ fn signed(identity: &Identity, path: &str, query: &[(&str, &str)]) -> Request {
     let mut settings = SigningSettings::default();
     settings.percent_encoding_mode = PercentEncodingMode::Single;
     settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+    settings.signature_location = match lifetime {
+        Some(_) => SignatureLocation::QueryParams,
+        None => SignatureLocation::Headers,
+    };
+    settings.expires_in = lifetime;
 
     let params = v4::SigningParams::builder()
         .identity(identity)
@@ -233,12 +250,19 @@ fn signed(identity: &Identity, path: &str, query: &[(&str, &str)]) -> Request {
         .build()
         .expect("параметры подписи заполнены целиком");
 
-    let headers = [("host", HOST), ("x-amz-content-sha256", EMPTY_SHA256)];
+    // В адресе тело не подписывается вовсе (UNSIGNED-PAYLOAD): у адреса нет
+    // заголовков, и sha256 тела класть некуда.
+    let signed_body = [("host", HOST), ("x-amz-content-sha256", EMPTY_SHA256)];
+    let presigned = [("host", HOST)];
+    let (headers, body): (&[(&str, &str)], SignableBody<'_>) = match lifetime {
+        Some(_) => (&presigned, SignableBody::UnsignedPayload),
+        None => (&signed_body, SignableBody::Bytes(&[])),
+    };
     let request = SignableRequest::new(
         "GET",
         &signable_path,
         headers.iter().map(|(name, value)| (*name, *value)),
-        aws_sigv4::http_request::SignableBody::Bytes(&[]),
+        body,
     ).expect("запрос к подписи собран из корректных строк");
 
     let (instructions, _signature) = sign(request, &params.into())
@@ -249,9 +273,19 @@ fn signed(identity: &Identity, path: &str, query: &[(&str, &str)]) -> Request {
     for (name, value) in instructions.headers() {
         signed.insert(name.to_string(), value.to_string());
     }
-    // Заголовок входит в подпись, но инструкции возвращают только вычисленные —
-    // тот, что подписывали, надо положить самим.
-    signed.insert("x-amz-content-sha256".to_string(), EMPTY_SHA256.to_string());
+    if lifetime.is_none() {
+        // Заголовок входит в подпись, но инструкции возвращают только
+        // вычисленные — тот, что подписывали, надо положить самим.
+        signed.insert("x-amz-content-sha256".to_string(), EMPTY_SHA256.to_string());
+    }
+    // Параметры подписи — в тот же адрес, что подписывали: пара строк запроса
+    // складывается тем же `Url`, чтобы кодирование не разошлось.
+    {
+        let mut pairs = url.query_pairs_mut();
+        for (name, value) in instructions.params() {
+            pairs.append_pair(name, value);
+        }
+    }
 
     Request { url: url.to_string(), headers: signed }
 }
@@ -349,6 +383,32 @@ fn push(entries: &mut Vec<Entry>, entry: Entry, requested: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_identity() -> Identity {
+        let credentials = aws_credential_types::Credentials::new("AK", "SK", None, None, "test");
+        Identity::new(credentials, None)
+    }
+
+    /// Адрес объекта подписан в самом адресе на неделю — предел SigV4: слой
+    /// на шаре живёт часами, а заголовочную подпись хранилище принимает
+    /// четверть часа. Листинг остаётся с подписью в заголовках.
+    #[test]
+    fn адрес_объекта_подписан_в_адресе_на_неделю() {
+        let identity = test_identity();
+        let request = object(&identity, "eodata/Sentinel-2/T31TGK/TCI_10m.jp2");
+        let url = Url::parse(&request.url).expect("адрес разбирается");
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.path(), "/eodata/Sentinel-2/T31TGK/TCI_10m.jp2");
+        assert_eq!(query.get("X-Amz-Expires").map(String::as_str), Some("604800"));
+        assert!(query.contains_key("X-Amz-Signature") && query.contains_key("X-Amz-Date"), "{query:?}");
+        assert_eq!(query.get("X-Amz-Algorithm").map(String::as_str), Some("AWS4-HMAC-SHA256"));
+        assert!(request.headers.is_empty(), "подпись в адресе — заголовков нет: {:?}", request.headers);
+
+        let listing = listing(&identity, "eodata/Sentinel-2/", "");
+        assert!(listing.headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")), "{:?}", listing.headers);
+        assert!(!listing.url.contains("X-Amz-Signature"), "листинг подписан заголовками: {}", listing.url);
+        assert!(listing.url.contains("list-type=2"));
+    }
 
     #[test]
     fn product_root_climbs_to_the_container() {

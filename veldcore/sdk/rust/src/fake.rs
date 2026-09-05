@@ -32,6 +32,14 @@ pub struct Read {
     pub size: u64,
 }
 
+/// Один заказ prefetch: диапазоны `(смещение, длина)`, названные хосту.
+/// Журналом, а не чтением: байт по нему не едет, и в [`reads`] он не входит.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prefetch {
+    pub id: u64,
+    pub ranges: Vec<(u64, u64)>,
+}
+
 /// Опубликованное модулем событие, разобранное из конверта.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Published {
@@ -67,6 +75,7 @@ struct State {
     resources: BTreeMap<u64, Resource>,
     next_id: u64,
     reads: Vec<Read>,
+    prefetches: Vec<Prefetch>,
     published: Vec<Published>,
     logged: Vec<Logged>,
     killed: Vec<String>,
@@ -111,6 +120,11 @@ pub fn mount(bytes: impl Into<Vec<u8>>) -> ResourceHandle {
 /// Все чтения с момента [`install`], по порядку.
 pub fn reads() -> Vec<Read> {
     installed(|s| s.reads.clone())
+}
+
+/// Все заказы prefetch с момента [`install`], по порядку.
+pub fn prefetches() -> Vec<Prefetch> {
+    installed(|s| s.prefetches.clone())
 }
 
 /// Все публикации с момента [`install`], по порядку.
@@ -280,6 +294,31 @@ pub(crate) fn resource_read(id: u64, offset: u64, size: u64) -> u64 {
                 let end = (offset + size).min(len);
                 Ok(r.bytes[offset as usize..end as usize].to_vec())
             }
+        }
+    }) else {
+        return 0;
+    };
+    respond(result)
+}
+
+/// prefetch — журнал и проверка, что ресурс читаем; байт по нему не едет:
+/// у фальшивого хоста нет провода, и привозить наперёд нечего. Диапазоны
+/// приходят парами по 16 байт LE, как их кладёт `abi::resource_prefetch`.
+pub(crate) fn resource_prefetch(id: u64, wire: &[u8]) -> u64 {
+    let ranges: Vec<(u64, u64)> = wire
+        .chunks_exact(16)
+        .map(|pair| {
+            let word = |at: usize| u64::from_le_bytes(pair[at..at + 8].try_into().expect("восемь байт"));
+            (word(0), word(8))
+        })
+        .collect();
+    let Some(result) = with(|s| {
+        s.prefetches.push(Prefetch { id, ranges });
+        match s.resources.get(&id) {
+            None => Err(format!("ресурс {} не найден", id)),
+            Some(r) if !r.readable() => Err(format!("чтение ресурса {} запрещено", id)),
+            Some(r) if r.opaque => Err(format!("ресурс {} — не байты", id)),
+            Some(_) => Ok(Vec::new()),
         }
     }) else {
         return 0;

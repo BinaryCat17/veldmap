@@ -380,6 +380,19 @@ impl<'a> Chunks<'a> {
             probes.push(probe);
         }
         let segments = excerpt::assemble(index, tile, factor, probes).map_err(|why| format!("jp2: {}", why))?;
+        // Куски файла в выдержке — носителю наперёд, прежде чем кодек пойдёт
+        // по ним окнами: у подробного уровня это весь тайл-парт, и по промахам
+        // он ехал бы блок за блоком.
+        let pieces: Vec<(u64, u64)> = segments
+            .iter()
+            .filter_map(|segment| match segment {
+                excerpt::Segment::File { offset, len } => Some((*offset, *len)),
+                excerpt::Segment::Bytes(_) => None,
+            })
+            .collect();
+        if let Err(why) = veldsdk::abi::resource_prefetch(self.resource, &pieces) {
+            veldsdk::log::debug!(target: "decode", "jp2: куски выдержки тайла {} наперёд не привезены: {}", tile, why);
+        }
         let reader = excerpt::Reader::over(self.resource, segments, self.bytes.clone());
         let len = reader.len();
         opened(Decoder::open(reader, len, self.layout.format, factor))
@@ -460,6 +473,20 @@ impl Chunked for Chunks<'_> {
     fn chunk(&mut self, image: usize, index: u32) -> Result<(Vec<u8>, u32, u32), String> {
         let mapping = self.mapping()?;
         self.decode(image as u32, index, |tile, header| Ok((rgba(tile, header, &mapping), tile.width, tile.height)))
+    }
+
+    /// С индексом известны пробы тайл-партов заказанных тайлов — они и едут
+    /// наперёд; куски за пробами называются по тайлу, когда собрана выдержка
+    /// (см. [`Chunks::excerpt`]). Без индекса кодек ведёт обход сам, и
+    /// предсказать его чтения нечем.
+    fn prefetch(&mut self, _image: usize, indices: &[u32]) -> Result<(), String> {
+        let Some(index) = &self.layout.index else { return Ok(()) };
+        let probes: Vec<(u64, u64)> = indices
+            .iter()
+            .flat_map(|&tile| index.parts_of(tile))
+            .map(|part| (part.offset, part.len.min(excerpt::PROBE)))
+            .collect();
+        veldsdk::abi::resource_prefetch(self.resource, &probes).map_err(|e| e.to_string())
     }
 }
 

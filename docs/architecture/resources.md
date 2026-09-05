@@ -52,8 +52,23 @@ blocks of `BLOCK` bytes — two reader windows, and no more: a big block would
 cost the most exactly where reads are fewest, behind the head and the tail
 that the fingerprint takes, and that is the first thing every show does. A
 sequential pass grows on its own: a miss that lands exactly where the
-previous request ended doubles the fetch up to `READAHEAD`, a jump elsewhere
-resets it to one block. The pool is one per process with a ceiling of
+previous request ended, after the reader has read that request's last block
+to its end, doubles the fetch up to `READAHEAD`; a jump elsewhere, or a
+request left unread — a chain of probes at tile-part headers two blocks
+apart — resets it to one block (`Readahead`, [ADR 0005](../decisions/0005-network-reading.md)).
+The readahead belongs to the object, not to the opening: a preview and a
+globe layer of the same file continue one pass. A reader that knows what it
+is about to read says so instead of being guessed at: `veld_resource_prefetch`
+names ranges, the network fetches the missing blocks under them as runs of
+adjacent blocks, no run longer than `READAHEAD` and no order larger than
+`PREFETCH_CAP`, `IN_FLIGHT` requests at a time, into the same pool; the reads
+that follow are hits, and the readahead is not touched. The chunk grid driver
+of the tiler orders the chunks under the tiles it was asked for before it
+reads them (`Chunked::prefetch`): a TIFF by the offsets and byte counts of
+its catalogue, a JPEG 2000 with a TLM by the probes of its tile-parts and,
+once the excerpt is assembled, by its file pieces. A single read larger than
+the instance's memory is refused by the host before it allocates
+(`INSTANCE_MEMORY_LIMIT`). The pool is one per process with a ceiling of
 `POOL_LIMIT`, evicting the oldest block whoever owns it; not per resource,
 because a scene opens as many resources as its layers, and a per-resource
 ceiling would multiply invisibly; and not "your own first", because under
@@ -73,9 +88,13 @@ several times — preview, the same raster on the globe, a second layer — and
 every opening would fetch the same bytes. The pool's ownership key is
 therefore the object: the address without its query, the length, and a
 validator (`ETag`, or `Last-Modified` without it) read by the same probe that
-learns the size. The signature lives in the query, so two openings have
-different address strings and one object; length and validator keep a
-re-uploaded object from inheriting foreign blocks. A server that gives neither
+learns the size. The signature of a storage object lives in the query
+(`s3::object` presigns the address for `OBJECT_LIFETIME`, a week — the limit
+of SigV4 — where a signature in the headers is accepted for a quarter of an
+hour), so two openings have different address strings and one object, the
+log prints the address without it, and a layer outlives any session without
+being signed again; length and validator keep a re-uploaded object from
+inheriting foreign blocks. A server that gives neither
 gets no shared key: guessing identity by path and length would cost a swapped
 middle of a file. Blocks do not outlive their last reader: the key counts
 references, and closing the last opening drops them all, as any closed

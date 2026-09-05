@@ -101,17 +101,16 @@ What each format reads per level is the table in
   one window at a time, so it costs the memory of a window, not of the plane.
   Removing the plane-sized window needs a window along a named axis in the
   HDF5 reader.
-- **A JPEG 2000 over the network delivers most of the file for its coarsest
-  level.** The excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) changes
-  what is asked — one probe of `PROBE` bytes per tile-part
-  (`veldmodules/image-tiler/src/adapters/excerpt.rs`) — and not what is
-  delivered: the readahead of the network module doubles a request whose miss
-  lands right after the previous one (`READAHEAD` in
-  `veldcore/platform/host/modules/network/src/range.rs`), and tile-part
-  headers two pool blocks apart look like a sequential pass to it; the
-  measured share is in the ADR. A tile of several tile-parts pays a probe per
-  tile-part. Removing it needs a prefetch of several ranges in flight in
-  place of the doubling readahead.
+- **A JPEG 2000 over the network pays a pool block per tile-part.** The
+  excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) asks one probe of
+  `PROBE` bytes per tile-part (`veldmodules/image-tiler/src/adapters/excerpt.rs`),
+  and the network delivers a whole block of `BLOCK` for each
+  ([ADR 0005](decisions/0005-network-reading.md)): the coarsest level of a
+  Sentinel-2 granule needs about a megabyte and receives one block per
+  tile-part — for 121 tile-parts about 60 MiB of 129, by arithmetic; the
+  measurement is due. A tile of several tile-parts pays a probe per
+  tile-part. Removing it needs a block sized by the read, which the ADR
+  leaves untouched.
 - **A JPEG 2000 whose canvas or tile grid does not start at zero is refused
   at describe** (`veldmodules/image-tiler/src/adapters/jp2.rs`): the
   decoder's reduced grid is up to a pixel off the tiler's halving ladder.
@@ -123,12 +122,12 @@ What each format reads per level is the table in
   `range.rs`). Sequential formats — PNG, JPEG, GIF, BMP, WebP — are read by a
   pass over the whole file, so the first remote show of one costs its
   download in traffic; afterwards the tiles come from the cache.
-- **A signature is issued once.** The authorisation of a remote object is
-  issued when it is opened; a 401 or 403 in the middle of a read is a
-  definite refusal, not retried (`ranged` in `range.rs`), and the object is
-  not signed again. A layer that outlives its signature loses its source and
-  has to be opened anew. Removing it needs re-signing on 401/403 — an
-  exchange between `network` and `data-provider`.
+- **A signature is issued once, for a week.** The address of a storage object
+  is presigned when it is opened (`OBJECT_LIFETIME` in
+  `veldmodules/data-provider/src/s3.rs`); a 401 or 403 in the middle of a read
+  is a definite refusal, not retried (`ranged` in `range.rs`), and the object
+  is not signed again. A layer kept for longer than a week loses its source
+  and has to be opened anew.
 - **Sizes.** `MAX_SOURCE_SIDE` bounds every raster at describe, and
   `FULL_DECODE_BUDGET` bounds what a whole-frame decoder may produce — JPEG
   at the finest scale that fits, interlaced PNG, GIF, BMP, WebP

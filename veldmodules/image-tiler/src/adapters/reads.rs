@@ -260,7 +260,7 @@ fn a_pass_reads_the_file_once() {
         Ok(())
     };
     let reader = Metered::new(handle.id, handle.size, Rc::new(Cell::new(0)));
-    tiff::produce_pass(reader, &info, layout, &mut emit).expect("проход идёт");
+    tiff::produce_pass(reader, handle.id, &info, layout, &mut emit).expect("проход идёт");
     assert_eq!(tiles.len(), 4 + 1, "оба уровня пирамиды: {:?}", tiles);
 
     let asked = &windows()[head..];
@@ -296,7 +296,7 @@ fn direct_equals_pass_on_exact_halves() {
         Ok(())
     };
     let reader = Metered::new(handle.id, handle.size, Rc::new(Cell::new(0)));
-    tiff::produce_pass(reader, &info, layout, &mut emit).expect("проход идёт");
+    tiff::produce_pass(reader, handle.id, &info, layout, &mut emit).expect("проход идёт");
     assert_eq!(pass.len(), 1);
     assert_eq!(direct[0].1, pass[0], "копия из файла и ужатие каскада разошлись");
 }
@@ -900,4 +900,56 @@ fn an_empty_variable_yields_to_the_next() {
     assert_eq!((info.width, info.height), (w, h));
     let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
     assert_eq!(layout.path(), "/PRODUCT/b_measured", "пустая первая по алфавиту уступила измеренной");
+}
+
+// ── Наперёд ────────────────────────────────────────────────────
+
+/// Прямое чтение называет носителю чанки под заказанными тайлами наперёд —
+/// ровно свои, по смещениям и длинам из каталога TIFF, одним заказом на проход,
+/// — а описание не заказывает ничего.
+#[test]
+fn direct_reading_names_its_chunks_ahead() {
+    fake::install();
+    let (file, base_tiles, _) = tiled_cog(2 * TILE, 2 * TILE, 1);
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    assert!(fake::prefetches().is_empty(), "описание ничего не заказывает наперёд");
+
+    produced(&handle, &info, 0, &[(1, 0), (0, 1)]);
+
+    let asked = fake::prefetches();
+    assert_eq!(asked.len(), 1, "один заказ на проход: {asked:?}");
+    assert_eq!(asked[0].id, handle.id);
+    let mut ranges = asked[0].ranges.clone();
+    ranges.sort_unstable();
+    let mut expected = vec![base_tiles[1], base_tiles[2]];
+    expected.sort_unstable();
+    assert_eq!(ranges, expected, "заказаны ровно тайлы (1,0) и (0,1) базового образа");
+}
+
+/// С индексом тайлы называют носителю наперёд пробы своих тайл-партов — одним
+/// заказом на проход, — а куски выдержки за пробами по тайлу, когда она
+/// собрана: на подробном уровне это остаток тайл-парта за пробой.
+#[test]
+fn an_indexed_jp2_names_its_probes_and_pieces_ahead() {
+    fake::install();
+    let (w, h) = (4 * TILE, 4 * TILE);
+    let rgb = noise(w, h);
+    let file = addressed_j2k(w, h, TILE, 3, INDEXED, &rgb);
+    let parts = tile_parts(&file);
+    let handle = fake::mount(file);
+    let info = described(&handle);
+    assert!(fake::prefetches().is_empty());
+
+    produced(&handle, &info, 0, &[(1, 1), (2, 1)]);
+
+    let asked = fake::prefetches();
+    assert!(asked.len() >= 2, "заказ проб и заказы кусков: {asked:?}");
+    assert!(asked.iter().all(|order| order.id == handle.id));
+    let probes: Vec<(u64, u64)> = [5usize, 6].iter().map(|&at| (parts[at].0, PROBE.min(parts[at].1))).collect();
+    assert_eq!(asked[0].ranges, probes, "первый заказ — пробы обоих тайлов");
+    let pieces: Vec<(u64, u64)> = asked[1..].iter().flat_map(|order| order.ranges.clone()).collect();
+    assert!(!pieces.is_empty(), "куски выдержки не заказаны");
+    let own = |(at, len): &(u64, u64)| [parts[5], parts[6]].iter().any(|part| *at >= part.0 && at + len <= part.0 + part.1);
+    assert!(pieces.iter().all(own), "куски вне своих тайл-партов: {pieces:?}");
 }
