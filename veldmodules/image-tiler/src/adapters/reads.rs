@@ -791,36 +791,35 @@ fn a_netcdf_window_equals_its_pass() {
     }
 }
 
-/// Единичная нулевая ось (`[1, h, w]`, как время у Sentinel-5P): окно строк —
-/// вся плоскость, таблица говорит, что тайл стои́т её целиком, и описание с
-/// тайлом читают все отсчёты — честно, а не молча.
+/// Единичная нулевая ось (`[1, h, w]`, как время у Sentinel-5P) окну не
+/// мешает: оно режется регионом по оси строк плоскости — связкой из пяти
+/// чанков файла по сто строк, — описание читает свои окна, а тайл — свои,
+/// и плоскость не читает никто.
 #[test]
-fn a_unit_leading_axis_costs_the_plane() {
+fn a_unit_leading_axis_windows_along_the_next_one() {
     fake::install();
-    let (w, h) = (450u32, 1_200u32);
+    let (w, h) = (450u32, 6_000u32);
     let bytes = netcdf(&[1, u64::from(h), u64::from(w)], Some(&[1, 100, u64::from(w)]), &nc_pattern(w, h));
     let chunks = nc_chunks(&bytes, "temperature");
-    assert_eq!(chunks.len(), 12);
-    let data: u64 = chunks.iter().map(|chunk| chunk.2).sum();
+    assert_eq!(chunks.len(), 60);
     let handle = fake::mount(bytes);
 
     let info = described(&handle);
     assert_eq!((info.width, info.height), (w, h), "единичная ось отброшена");
     let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
-    assert_eq!(layout.grid.chunk, (w, h), "окно — плоскость");
+    assert_eq!(layout.grid.chunk, (w, 500), "окно — пять чанков файла, не плоскость");
     let row = info.level(0).expect("уровень есть");
     assert_eq!(row.serve, Serve::Pointwise);
-    assert_eq!(row.pixels, u64::from(w) * u64::from(h), "тайл стои́т плоскости");
+    // Таблица считает худший тайл: сдвинутый на границу окна, он задевает три.
+    assert_eq!(row.pixels, u64::from(w) * 1500, "тайл стои́т до трёх окон, не плоскости");
     let asked = nc_windows();
-    assert!(read_of(&asked, &chunks) >= data, "выборка — вся плоскость");
-    assert_eq!(touched(&asked, &chunks), chunks.len(), "задет каждый чанк");
+    assert_eq!(touched(&asked, &chunks), 4 * 5, "выборка — четыре окна по пять чанков, не плоскость");
 
     let head = fake::reads().len();
     let tiles = produced(&handle, &info, 0, &[(0, 0)]);
     assert_eq!(tiles.len(), 1);
     let asked = &windows()[head..];
-    assert!(read_of(asked, &chunks) >= data, "и тайл — тоже вся плоскость");
-    assert_eq!(touched(asked, &chunks), chunks.len());
+    assert_eq!(touched(asked, &chunks), 10, "тайл читает два своих окна — десять чанков из шестидесяти");
 }
 
 /// Величина одним чанком (SYNERGY): меньше плоскости не прочесть, и сетка

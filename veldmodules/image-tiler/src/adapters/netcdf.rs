@@ -187,6 +187,11 @@ const MAX_DEPTH: usize = 8;
 pub struct Layout {
     /// Сетка окон строк — то, чем живёт драйвер (см. [`rows_of`]).
     pub grid: Grid,
+    /// Форма величины в файле и оси её плоскости в этой форме — (строки,
+    /// столбцы): окно строк читается регионом по оси строк, на каком бы месте
+    /// файл её ни держал, а единичные оси берутся нулём (см. [`read_rows`]).
+    shape: Vec<u64>,
+    axes: (usize, usize),
     /// Путь показываемой величины внутри файла.
     path: String,
     /// Тип отсчёта, как он записан в файле: им выбирается лестница чтения
@@ -209,6 +214,8 @@ impl Layout {
         let rows = rows.clamp(1, height.max(1));
         Self {
             grid: Grid { tiled: false, chunk: (width, rows), overviews: Vec::new(), depth: depth_of(&dtype) },
+            shape: vec![u64::from(height), u64::from(width)],
+            axes: (0, 1),
             path: String::new(),
             dtype,
             fill: None,
@@ -222,20 +229,33 @@ impl Layout {
         self.grid.chunk.1
     }
 
+    /// Окно строк с `top` в `rows` строк как регион файла: по оси строк — окно,
+    /// не длиннее величины, по оси столбцов — вся ширина, по остальным осям —
+    /// нулевой отсчёт.
+    fn region(&self, top: u64, rows: u32) -> (Vec<u64>, Vec<u64>) {
+        let (rows_axis, columns_axis) = self.axes;
+        let mut start = vec![0u64; self.shape.len()];
+        let mut count = vec![1u64; self.shape.len()];
+        start[rows_axis] = top;
+        count[rows_axis] = u64::from(rows).min(self.shape[rows_axis].saturating_sub(top));
+        count[columns_axis] = self.shape[columns_axis];
+        (start, count)
+    }
+
     /// Путь показываемой величины внутри файла.
     pub fn path(&self) -> &str {
         &self.path
     }
 }
 
-/// Высота окна строк — чанка сетки величины в `height` строк.
+/// Строк в окне величины высотой `height`, у которой чанк файла по оси строк
+/// — `chunk_rows` (`None` — раскладка непрерывная).
 ///
-/// Крейт режет окно по нулевой оси файла, и только по ней. Единичная нулевая
-/// ось (время у гранулы Sentinel-5P: `[1, scanline, ground_pixel]`) значит,
-/// что первое окно — вся плоскость, а второго нет; чанк файла во всю высоту
-/// (величина SYNERGY, записанная одним чанком) — что меньше плоскости всё
-/// равно не прочесть: чанк распаковывается целиком. Оба честно кладутся в
-/// сетку окном в `height` строк, и таблица уровней тогда сама говорит, что
+/// Окно режется по оси строк плоскости, где бы файл её ни держал: единичные
+/// оси (время у Sentinel-5P, `[1, scanline, ground_pixel]`) на окно не влияют.
+/// Величина, записанная одним чанком во всю высоту (SYNERGY), ложится окном в
+/// `height` строк: что меньше плоскости всё равно не прочесть — чанк
+/// распаковывается целиком, — и таблица уровней тогда честно говорит, что
 /// уровень стои́т плоскости.
 ///
 /// Иначе окно — связка чанков файла по строкам: наибольшее кратное их высоты
@@ -243,10 +263,7 @@ impl Layout {
 /// бывает (окно в половину чанка стои́т целого), крупнее тайла не нужно —
 /// тайлу уровня хватает двух соседних. У непрерывной раскладки чанков нет, и
 /// окно ей — тайл.
-fn rows_of(height: u32, leading: u64, chunk_rows: Option<u64>) -> u32 {
-    if leading <= 1 {
-        return height;
-    }
+fn rows_of(height: u32, chunk_rows: Option<u64>) -> u32 {
     let chunk = match chunk_rows {
         None => return TILE.min(height),
         Some(rows) => u32::try_from(rows).unwrap_or(height).clamp(1, height),
@@ -261,7 +278,7 @@ fn rows_of(height: u32, leading: u64, chunk_rows: Option<u64>) -> u32 {
 /// драйвер прибавляет сам (`Grid::chunk_bytes`).
 ///
 /// Считается по двум фазам чтения крейта, и берётся большая. **Сборка окна**
-/// (`read_raw_rows`): само окно, сжатый кусок файла и распакованный из него
+/// (`read_raw_region`): само окно, сжатый кусок файла и распакованный из него
 /// чанк живут разом — у одночанковой величины оба ростом с окно, и сжатый
 /// несжимаемых данных не меньше распакованного. **Развёртка** собранного:
 /// сырое окно и его копия — типизированная того же размера у отсчётов,
@@ -282,24 +299,27 @@ fn depth_of(dtype: &DType) -> u32 {
 /// Окно строк величины типизированными отсчётами — одной лестницей на выборку
 /// разбора и на чанки драйвера.
 ///
-/// Байты, 16-битные целые и f32 показ разбирает сам (`Samples`); остальные
-/// разворачиваются в f32 — своей развёртки у них нет, а файла с ними в
-/// каталоге не встречалось. Копия эта посчитана в [`depth_of`].
+/// Окно читается регионом файла ([`Layout::region`]): по оси строк плоскости,
+/// сколько бы осей файл ни держал перед ней. Байты, 16-битные целые и f32
+/// показ разбирает сам (`Samples`); остальные разворачиваются в f32 — своей
+/// развёртки у них нет, а файла с ними в каталоге не встречалось. Копия эта
+/// посчитана в [`depth_of`].
 fn read_rows<T>(
     dataset: &Dataset,
-    dtype: &DType,
-    start: u64,
+    layout: &Layout,
+    top: u64,
     rows: u32,
     with: impl FnOnce(&Samples<'_>) -> T,
 ) -> Result<T, String> {
-    let rows = u64::from(rows);
-    let failed =
-        |e: hdf5_pure::Error| format!("NetCDF: строки {}…{}: {}", start, start + rows, e);
-    Ok(match dtype {
-        DType::U8 => with(&Samples::U8(&dataset.read_u8_rows(start, rows).map_err(failed)?)),
-        DType::U16 => with(&Samples::U16(&dataset.read_u16_rows(start, rows).map_err(failed)?)),
-        DType::I16 => with(&Samples::I16(&dataset.read_i16_rows(start, rows).map_err(failed)?)),
-        _ => with(&Samples::F32(&dataset.read_f32_rows(start, rows).map_err(failed)?)),
+    let (start, count) = layout.region(top, rows);
+    let failed = |e: hdf5_pure::Error| {
+        format!("NetCDF: строки {}…{}: {}", top, top + count[layout.axes.0], e)
+    };
+    Ok(match layout.dtype {
+        DType::U8 => with(&Samples::U8(&dataset.read_u8_region(&start, &count).map_err(failed)?)),
+        DType::U16 => with(&Samples::U16(&dataset.read_u16_region(&start, &count).map_err(failed)?)),
+        DType::I16 => with(&Samples::I16(&dataset.read_i16_region(&start, &count).map_err(failed)?)),
+        _ => with(&Samples::F32(&dataset.read_f32_region(&start, &count).map_err(failed)?)),
     })
 }
 
@@ -371,7 +391,9 @@ fn probed(file: &File, item: &Item, width: u32, height: u32) -> Result<(Layout, 
     let failed = |e: hdf5_pure::Error| format!("NetCDF: {}: {}", item.path, e);
     let dataset = file.dataset(&item.path).map_err(failed)?;
     let dtype = dataset.dtype().map_err(failed)?;
-    let mut layout = Layout::of(width, height, rows_of(height, item.leading, item.chunk_rows), dtype);
+    let mut layout = Layout::of(width, height, rows_of(height, item.chunk_rows), dtype);
+    layout.shape = item.shape.clone();
+    layout.axes = item.axes;
     // Окно допускается до чтения, той же меркой, что у свежего чанка драйвера
     // (`Grid::chunk_bytes`): у величины с окном ростом с плоскость выборка и
     // есть плоскость, и перебор лимита кончился бы трапом, а не отказом.
@@ -417,7 +439,7 @@ fn sampled(dataset: &Dataset, layout: &Layout, width: u32, height: u32) -> Resul
     let mut values = Vec::with_capacity(per_window * picks.len() / stride + picks.len());
     for &window in &picks {
         let start = u64::from(window) * u64::from(rows);
-        read_rows(dataset, &layout.dtype, start, rows, |samples| {
+        read_rows(dataset, layout, start, rows, |samples| {
             values.extend((0..samples.len()).step_by(stride).map(|at| samples.get(at)));
         })?;
     }
@@ -641,7 +663,7 @@ impl Chunked for Chunks<'_> {
         let dh = rows.min(self.height - top);
         let pixels = (self.width as usize) * (dh as usize);
         let mapping = self.layout.mapping;
-        let rgba = read_rows(&self.dataset, &self.layout.dtype, u64::from(top), dh, |samples| {
+        let rgba = read_rows(&self.dataset, self.layout, u64::from(top), dh, |samples| {
             mapping.rgba(samples, Pixel::named(1), pixels)
         })?;
         if rgba.len() != pixels * 4 {
@@ -799,9 +821,12 @@ struct Item {
     coordinates: Vec<String>,
     /// Имена из `ancillary_variables`, разрешённые в пути файла.
     ancillary: Vec<String>,
-    /// Длина нулевой оси файла — по ней крейт режет окно строк (см. [`rows_of`]).
-    leading: u64,
-    /// Высота чанка файла по нулевой оси; `None` — раскладка не чанкованная.
+    /// Форма величины в файле и оси плоскости в ней (строки, столбцы) — по
+    /// ним окно строк становится регионом (см. [`Layout::region`]).
+    shape: Vec<u64>,
+    axes: (usize, usize),
+    /// Высота чанка файла по оси строк плоскости; `None` — раскладка не
+    /// чанкованная.
     chunk_rows: Option<u64>,
 }
 
@@ -869,7 +894,17 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
     // Ось координатной сетки — это ряд, а не плоскость; величина — плоскость.
     // Единичные оси отбрасываются: время у гранулы Sentinel-5P записано осью
     // длины один, и без этого всякая её величина была бы трёхмерной.
-    let sides: Vec<u64> = shape.iter().copied().filter(|side| *side > 1).collect();
+    let wide: Vec<usize> =
+        shape.iter().enumerate().filter(|(_, side)| **side > 1).map(|(at, _)| at).collect();
+    let sides: Vec<u64> = wide.iter().map(|&at| shape[at]).collect();
+    // Оси плоскости в форме файла — две неединичные. Регион читается только у
+    // плоскости (`describe` берёт величину с `plane`), а плоскость — это ровно
+    // две таких оси; координатной оси и величине иного ранга пара не нужна и
+    // ставится любая.
+    let axes = match wide.as_slice() {
+        [rows, columns] => (*rows, *columns),
+        _ => (0, shape.len().saturating_sub(1)),
+    };
     let plane = match sides.as_slice() {
         [rows, columns] if numeric => Some((fit(*rows)?, fit(*columns)?)),
         _ => None,
@@ -894,11 +929,10 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
         .map(|name| resolve(group, &name))
         .collect();
 
-    // Окно строк крейт режет по нулевой оси файла, какой бы она ни была, и
-    // чанк файла — наименьшее, что читается: обоим место в раскладке
-    // ([`rows_of`]).
-    let leading = shape.first().copied().unwrap_or(1);
-    let chunk_rows = dataset.chunk_shape().ok().flatten().and_then(|chunk| chunk.first().copied());
+    // Чанк файла — наименьшее, что читается, и мерится он по оси строк
+    // плоскости ([`rows_of`]).
+    let chunk_rows =
+        dataset.chunk_shape().ok().flatten().and_then(|chunk| chunk.get(axes.0).copied());
 
     Some(Item {
         path: full.to_string(),
@@ -918,7 +952,8 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
         units: text(&attrs, "units").to_ascii_lowercase(),
         coordinates,
         ancillary,
-        leading,
+        shape,
+        axes,
         chunk_rows,
     })
 }
@@ -2107,24 +2142,40 @@ mod tests {
         assert_eq!(resolution("[ 1.2.3 1000 ]"), None, "не число — не разрешение");
     }
 
-    /// Окно строк режется по нулевой оси файла, и только по ней. Единичная
-    /// нулевая ось и чанк во всю высоту — окно ростом с плоскость; иначе окно
-    /// — связка чанков файла не длиннее тайла, а чанк выше тайла — сам.
+    /// Окно строк режется по оси строк плоскости: чанк во всю высоту — окно
+    /// ростом с плоскость; иначе окно — связка чанков файла не длиннее тайла,
+    /// а чанк выше тайла — сам. Сколько единичных осей стоит перед строками,
+    /// окно не спрашивает.
     ///
-    /// Числа настоящие: у гранулы Sentinel-5P форма `[1, 4172, 450]`, у
-    /// величины SYNERGY AOD 324 строки одним чанком.
+    /// Числа настоящие: у величины SYNERGY AOD 324 строки одним чанком, у
+    /// OLCI 15076 строк чанками по 5026.
     #[test]
-    fn окно_строк_режется_по_нулевой_оси_файла() {
-        assert_eq!(rows_of(4172, 1, Some(1)), 4172, "единичная ось — плоскость");
-        assert_eq!(rows_of(4172, 1, None), 4172);
-        assert_eq!(rows_of(324, 324, Some(324)), 324, "один чанк — плоскость");
-        assert_eq!(rows_of(15076, 15076, Some(100)), 500, "связка чанков не длиннее тайла");
-        assert_eq!(rows_of(15076, 15076, Some(TILE as u64)), TILE);
-        assert_eq!(rows_of(15076, 15076, Some(300)), 300, "второй чанк уже не влезает в тайл");
-        assert_eq!(rows_of(15076, 15076, Some(600)), 600, "чанк выше тайла берётся сам");
-        assert_eq!(rows_of(15076, 15076, None), TILE, "непрерывной раскладке окно — тайл");
-        assert_eq!(rows_of(300, 300, None), 300, "и не длиннее самой величины");
-        assert_eq!(rows_of(1217, 1217, Some(1)), TILE, "чанк в строку — связка в тайл");
+    fn окно_строк_режется_по_оси_строк_плоскости() {
+        assert_eq!(rows_of(324, Some(324)), 324, "один чанк — плоскость");
+        assert_eq!(rows_of(15076, Some(100)), 500, "связка чанков не длиннее тайла");
+        assert_eq!(rows_of(15076, Some(TILE as u64)), TILE);
+        assert_eq!(rows_of(15076, Some(300)), 300, "второй чанк уже не влезает в тайл");
+        assert_eq!(rows_of(15076, Some(600)), 600, "чанк выше тайла берётся сам");
+        assert_eq!(rows_of(15076, Some(5026)), 5026);
+        assert_eq!(rows_of(15076, None), TILE, "непрерывной раскладке окно — тайл");
+        assert_eq!(rows_of(300, None), 300, "и не длиннее самой величины");
+        assert_eq!(rows_of(1217, Some(1)), TILE, "чанк в строку — связка в тайл");
+    }
+
+    /// Регион окна: по оси строк — окно, обрезанное высотой величины, по оси
+    /// столбцов — вся ширина, по единичным осям — нулевой отсчёт, где бы они
+    /// ни стояли.
+    #[test]
+    fn регион_окна_ложится_по_осям_плоскости() {
+        let mut layout = Layout::of(450, 4172, 256, DType::F32);
+        assert_eq!(layout.region(512, 256), (vec![512, 0], vec![256, 450]));
+        assert_eq!(layout.region(4096, 256), (vec![4096, 0], vec![76, 450]), "нижнее окно короче");
+        layout.shape = vec![1, 4172, 450];
+        layout.axes = (1, 2);
+        assert_eq!(layout.region(512, 256), (vec![0, 512, 0], vec![1, 256, 450]));
+        layout.shape = vec![4172, 1, 450, 1];
+        layout.axes = (0, 2);
+        assert_eq!(layout.region(0, 256), (vec![0, 0, 0, 0], vec![256, 1, 450, 1]));
     }
 
     /// Глубина свежего чанка — большая из двух фаз чтения крейта: сборка
@@ -2262,7 +2313,8 @@ mod tests {
             units: String::new(),
             coordinates: Vec::new(),
             ancillary: Vec::new(),
-            leading: 10,
+            shape: vec![10, 10],
+            axes: (0, 1),
             chunk_rows: None,
         };
         let coordinate = |path: &str, group: &str, units: &str| Item {
@@ -2338,7 +2390,8 @@ mod tests {
             units: String::new(),
             coordinates: Vec::new(),
             ancillary: Vec::new(),
-            leading: 10,
+            shape: vec![10, 10],
+            axes: (0, 1),
             chunk_rows: None,
         };
         let items = vec![

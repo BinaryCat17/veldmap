@@ -91,16 +91,17 @@ What each format reads per level is the table in
   candidate (`veldmodules/image-tiler/src/adapters/netcdf.rs`) to tell an
   empty or flat variable from a measured one and to set the stretch; a
   variable measured only outside those windows is skipped as empty. The row
-  window is cut along the file's leading axis, and only along it
-  (`rows_of`): a unit leading axis (Sentinel-5P, `[1, scanline,
-  ground_pixel]`) or a variable written as one chunk (SYNERGY) makes the
-  window the whole plane, so the level table says a tile of level 0 costs
-  the plane, and describe and every tile read it whole. Any variable of no
+  window is cut along the plane's row axis wherever the file keeps it
+  (`rows_of`), so a unit leading axis (Sentinel-5P, `[1, scanline,
+  ground_pixel]`) does not widen it; a variable written as one chunk
+  (SYNERGY) does make the window the whole plane, since a chunk decodes
+  whole, so the level table says a tile of level 0 costs the plane, and
+  describe and every tile read it whole. Any variable of no
   more than `SAMPLE_WINDOWS` windows (OLCI GIFAPAR: three chunks of 5026
   rows) is likewise read whole by the sample and again by the first tiles —
   one window at a time, so it costs the memory of a window, not of the plane.
-  Removing the plane-sized window needs a window along a named axis in the
-  HDF5 reader.
+  A variable no taller than a tile (`TILE` rows) is one window whatever its
+  layout, as the Sentinel-5P NRTI slices in the catalogue are.
 - **A JPEG 2000 over the network pays a pool block per tile-part.** The
   excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) asks one probe of
   `PROBE` bytes per tile-part (`veldmodules/image-tiler/src/adapters/excerpt.rs`),
