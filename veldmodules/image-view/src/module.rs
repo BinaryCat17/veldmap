@@ -575,7 +575,11 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
         // в этом: ответить на это раньше сборки нечем.
         view.glowing = quads.iter().any(|quad| quad.glow > 0.0);
         let target = view.target.as_ref().expect("место проверено выше");
-        match gpu::render(device, target, &mut view.vertices, &quads) {
+        // Буфер вершин — всякий раз не тот, что у прошлого кадра (см.
+        // `View::vertices`).
+        let turn = view.turn;
+        view.turn ^= 1;
+        match gpu::render(device, target, &mut view.vertices[turn], &quads) {
             // Снимается только СВОЯ жалоба — на застрявший кадр. Чужую
             // («производство сорвалось») успешный кадр не трогает: она держится
             // до приехавшего тайла (см. `View::landed`), а перерисовка той же
