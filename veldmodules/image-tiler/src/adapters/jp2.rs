@@ -10,6 +10,7 @@
 //! `docs/decisions/0002-jpeg2000-decoder.md` и `0004-jp2-excerpt.md`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::rc::Rc;
 
@@ -336,11 +337,32 @@ pub struct Chunks<'a> {
     layout: &'a Layout,
     bytes: Rc<Cell<u64>>,
     walker: Option<(u32, Decoder<Metered>)>,
+    /// Выдержки, собранные заказом наперёд, по (фактор, тайл): их куски уже
+    /// названы носителю одним заказом на все тайлы, и кодек берёт выдержку
+    /// отсюда, не собирая её второй раз (см. [`Chunked::prefetch`]).
+    planned: HashMap<(u32, u32), Vec<excerpt::Segment>>,
 }
 
 impl<'a> Chunks<'a> {
     pub fn new(resource: u64, layout: &'a Layout, bytes: Rc<Cell<u64>>) -> Self {
-        Self { resource, layout, bytes, walker: None }
+        Self { resource, layout, bytes, walker: None, planned: HashMap::new() }
+    }
+
+    /// Выдержка тайла `tile` на факторе `factor`: пробы его тайл-партов
+    /// читаются здесь, сборка — у `excerpt`. Счётчик `bytes` — сумма проб и
+    /// окон, а у кодека над всем файлом (`Metered`) — дальняя достигнутая
+    /// позиция; в прогресс оба идут как «прочитано», и сумма перевалит за
+    /// размер файла только при повторном чтении одного места.
+    fn assembled(&self, index: &excerpt::Index, tile: u32, factor: u32) -> Result<Vec<excerpt::Segment>, String> {
+        let mut probes = Vec::new();
+        for part in index.parts_of(tile) {
+            let size = part.len.min(excerpt::PROBE);
+            let probe = veldsdk::abi::resource_read(self.resource, part.offset, size)
+                .map_err(|e| format!("jp2: проба тайл-парта тайла {}: {}", tile, e))?;
+            self.bytes.set(self.bytes.get() + probe.len() as u64);
+            probes.push(probe);
+        }
+        excerpt::assemble(index, tile, factor, probes).map_err(|why| format!("jp2: {}", why))
     }
 
     /// Тайл `index` на факторе `factor` — плоскости и заголовок кодека
@@ -351,7 +373,9 @@ impl<'a> Chunks<'a> {
         index: u32,
         read: impl FnOnce(&Tile<'_>, Header) -> Result<T, String>,
     ) -> Result<T, String> {
-        match &self.layout.index {
+        // Раскладка берётся ссылкой до выдержки: та заимствует `self` целиком.
+        let layout = self.layout;
+        match &layout.index {
             Some(excerpt) => {
                 let mut decoder = self.excerpt(excerpt, index, factor)?;
                 let header = decoder.header();
@@ -365,34 +389,21 @@ impl<'a> Chunks<'a> {
         }
     }
 
-    /// Кодек над выдержкой тайла: пробы его тайл-партов читаются здесь,
-    /// сборка и чтение остального — у `excerpt`. Счётчик `bytes` здесь —
-    /// сумма проб и окон, а у кодека над всем файлом (`Metered`) — дальняя
-    /// достигнутая позиция; в прогресс оба идут как «прочитано», и сумма
-    /// перевалит за размер файла только при повторном чтении одного места.
-    fn excerpt(&self, index: &excerpt::Index, tile: u32, factor: u32) -> Result<Decoder<excerpt::Reader>, String> {
-        let mut probes = Vec::new();
-        for part in index.parts_of(tile) {
-            let size = part.len.min(excerpt::PROBE);
-            let probe = veldsdk::abi::resource_read(self.resource, part.offset, size)
-                .map_err(|e| format!("jp2: проба тайл-парта тайла {}: {}", tile, e))?;
-            self.bytes.set(self.bytes.get() + probe.len() as u64);
-            probes.push(probe);
-        }
-        let segments = excerpt::assemble(index, tile, factor, probes).map_err(|why| format!("jp2: {}", why))?;
-        // Куски файла в выдержке — носителю наперёд, прежде чем кодек пойдёт
-        // по ним окнами: у подробного уровня это весь тайл-парт, и по промахам
-        // он ехал бы блок за блоком.
-        let pieces: Vec<(u64, u64)> = segments
-            .iter()
-            .filter_map(|segment| match segment {
-                excerpt::Segment::File { offset, len } => Some((*offset, *len)),
-                excerpt::Segment::Bytes(_) => None,
-            })
-            .collect();
-        if let Err(why) = veldsdk::abi::resource_prefetch(self.resource, &pieces) {
-            veldsdk::log::debug!(target: "decode", "jp2: куски выдержки тайла {} наперёд не привезены: {}", tile, why);
-        }
+    /// Кодек над выдержкой тайла — собранной заказом наперёд либо здесь.
+    /// Выдержка, собранная здесь, называет свои куски файла носителю прежде,
+    /// чем кодек пойдёт по ним окнами: у подробного уровня это весь
+    /// тайл-парт, и по промахам он ехал бы блок за блоком.
+    fn excerpt(&mut self, index: &excerpt::Index, tile: u32, factor: u32) -> Result<Decoder<excerpt::Reader>, String> {
+        let segments = match self.planned.remove(&(factor, tile)) {
+            Some(planned) => planned,
+            None => {
+                let segments = self.assembled(index, tile, factor)?;
+                if let Err(why) = veldsdk::abi::resource_prefetch(self.resource, &pieces_of(&segments)) {
+                    veldsdk::log::debug!(target: "decode", "jp2: куски выдержки тайла {} наперёд не привезены: {}", tile, why);
+                }
+                segments
+            }
+        };
         let reader = excerpt::Reader::over(self.resource, segments, self.bytes.clone());
         let len = reader.len();
         opened(Decoder::open(reader, len, self.layout.format, factor))
@@ -475,19 +486,50 @@ impl Chunked for Chunks<'_> {
         self.decode(image as u32, index, |tile, header| Ok((rgba(tile, header, &mapping), tile.width, tile.height)))
     }
 
-    /// С индексом известны пробы тайл-партов заказанных тайлов — они и едут
-    /// наперёд; куски за пробами называются по тайлу, когда собрана выдержка
-    /// (см. [`Chunks::excerpt`]). Без индекса кодек ведёт обход сам, и
-    /// предсказать его чтения нечем.
-    fn prefetch(&mut self, _image: usize, indices: &[u32]) -> Result<(), String> {
-        let Some(index) = &self.layout.index else { return Ok(()) };
+    /// С индексом заказ идёт в два хода: пробы тайл-партов всех заказанных
+    /// тайлов, затем — по пробам собраны выдержки — куски файла всех тайлов
+    /// одним заказом. По тайлу куски ехали бы запросом за запросом: у
+    /// подробного уровня это по куску на тайл, и полсотни тайлов стоили бы
+    /// полсотни задержек подряд. Собранные выдержки остаются у чанков
+    /// ([`Chunks::planned`]). Без индекса кодек ведёт обход сам, и предсказать
+    /// его чтения нечем.
+    fn prefetch(&mut self, image: usize, indices: &[u32]) -> Result<(), String> {
+        let layout = self.layout;
+        let Some(index) = &layout.index else { return Ok(()) };
         let probes: Vec<(u64, u64)> = indices
             .iter()
             .flat_map(|&tile| index.parts_of(tile))
             .map(|part| (part.offset, part.len.min(excerpt::PROBE)))
             .collect();
-        veldsdk::abi::resource_prefetch(self.resource, &probes).map_err(|e| e.to_string())
+        veldsdk::abi::resource_prefetch(self.resource, &probes).map_err(|e| e.to_string())?;
+
+        let factor = image as u32;
+        let mut pieces = Vec::new();
+        let mut assembled = Vec::with_capacity(indices.len());
+        for &tile in indices {
+            let segments = self.assembled(index, tile, factor)?;
+            pieces.extend(pieces_of(&segments));
+            assembled.push((tile, segments));
+        }
+        // Выдержки остаются и без привезённых кусков — их прочтут по промахам;
+        // а сорвавшаяся сборка не оставляет ни одной, и тайлы соберут свои сами.
+        let ordered = veldsdk::abi::resource_prefetch(self.resource, &pieces).map_err(|e| e.to_string());
+        for (tile, segments) in assembled {
+            self.planned.insert((factor, tile), segments);
+        }
+        ordered
     }
+}
+
+/// Куски файла в выдержке — то, что называют носителю наперёд.
+fn pieces_of(segments: &[excerpt::Segment]) -> Vec<(u64, u64)> {
+    segments
+        .iter()
+        .filter_map(|segment| match segment {
+            excerpt::Segment::File { offset, len } => Some((*offset, *len)),
+            excerpt::Segment::Bytes(_) => None,
+        })
+        .collect()
 }
 
 /// Сдвиг, переводящий знаковый отсчёт в беззнаковый той же разрядности.

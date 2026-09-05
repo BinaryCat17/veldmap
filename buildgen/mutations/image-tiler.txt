@@ -150,3 +150,8 @@
 файл: veldmodules/image-tiler/src/adapters/jp2.rs
 было:             .map(|part| (part.offset, part.len.min(excerpt::PROBE)))
 стало:             .map(|part| (part.offset, part.len))
+
+имя: куски выдержек не заказываются разом
+файл: veldmodules/image-tiler/src/adapters/jp2.rs
+было:             pieces.extend(pieces_of(&segments));
+стало:             let _ = pieces_of(&segments);

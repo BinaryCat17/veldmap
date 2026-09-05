@@ -927,8 +927,9 @@ fn direct_reading_names_its_chunks_ahead() {
 }
 
 /// С индексом тайлы называют носителю наперёд пробы своих тайл-партов — одним
-/// заказом на проход, — а куски выдержки за пробами по тайлу, когда она
-/// собрана: на подробном уровне это остаток тайл-парта за пробой.
+/// заказом на проход, — а за ними куски выдержек всех тайлов вторым заказом,
+/// когда выдержки собраны по пробам: на подробном уровне это остаток
+/// тайл-парта за пробой. По тайлу куски не заказываются — выдержка уже собрана.
 #[test]
 fn an_indexed_jp2_names_its_probes_and_pieces_ahead() {
     fake::install();
@@ -943,12 +944,14 @@ fn an_indexed_jp2_names_its_probes_and_pieces_ahead() {
     produced(&handle, &info, 0, &[(1, 1), (2, 1)]);
 
     let asked = fake::prefetches();
-    assert!(asked.len() >= 2, "заказ проб и заказы кусков: {asked:?}");
+    assert_eq!(asked.len(), 2, "заказ проб и один заказ кусков на оба тайла: {asked:?}");
     assert!(asked.iter().all(|order| order.id == handle.id));
     let probes: Vec<(u64, u64)> = [5usize, 6].iter().map(|&at| (parts[at].0, PROBE.min(parts[at].1))).collect();
     assert_eq!(asked[0].ranges, probes, "первый заказ — пробы обоих тайлов");
-    let pieces: Vec<(u64, u64)> = asked[1..].iter().flat_map(|order| order.ranges.clone()).collect();
+    let pieces: Vec<(u64, u64)> = asked[1].ranges.clone();
     assert!(!pieces.is_empty(), "куски выдержки не заказаны");
+    let in_part = |part: (u64, u64)| pieces.iter().any(|(at, len)| *at >= part.0 && at + len <= part.0 + part.1);
+    assert!(in_part(parts[5]) && in_part(parts[6]), "куски обоих тайлов в одном заказе: {pieces:?}");
     let own = |(at, len): &(u64, u64)| [parts[5], parts[6]].iter().any(|part| *at >= part.0 && at + len <= part.0 + part.1);
     assert!(pieces.iter().all(own), "куски вне своих тайл-партов: {pieces:?}");
 }

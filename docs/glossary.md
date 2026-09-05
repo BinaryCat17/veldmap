@@ -17,7 +17,7 @@ and in the logs. Where one word carries two senses in the tree, both are given.
 | lease | аренда | a resource's owner plus its lists of readers and writers; the host checks them on every call; ownership is transferred, grants are not revoked |
 | carrier | носитель | what stands behind a byte resource: a file or a remote object behind `RangeSource`, or bytes held in host memory; on the globe, also the tile a cell is drawn with — its own or a piece of the nearest ancestor |
 | reader window | окно читателя | the slice `ResourceReader` fetches per host call (`WINDOW`) |
-| pool block | блок пула | the smallest unit the network service fetches and keeps in its pool (`BLOCK`); a request grows past it by readahead |
+| pool block | блок пула | the smallest unit the network service fetches and keeps in its pool (`BLOCK`): the size of a probe; a read takes the blocks it needs in one request, and a pass grows past that by readahead |
 | fingerprint | отпечаток | the identity of raster bytes for the tile cache: length, head, tail, plus tile side and decode revision |
 | pyramid, level, tile | пирамида, уровень, тайл | level 0 is native resolution and each level halves it; a tile is `TILE` pixels square |
 | overview | копия | a reduced copy of the raster stored inside the same TIFF |

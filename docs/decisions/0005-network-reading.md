@@ -81,11 +81,35 @@ chunks under 12 tiles came in one request, 12 chunks under 40 tiles in three,
 rule, where adjacent chunks read in order coalesced by doubling and a chunk
 apart from the last request cost a request of its own. The scenario promises
 `delivered 70`. What the decision costs: an order is synchronous, so the first tile of a pointwise
-level waits for the whole order; the pieces of a JPEG 2000 excerpt are
-ordered per tile, one run at a time, so the finer levels do not fill
-`IN_FLIGHT`; two unrelated readers of one object share one readahead state,
+level waits for the whole order; two unrelated readers of one object share one readahead state,
 and a fingerprint read resets a pass's run to one block. What it obliges: a
 source that knows its chunk offsets names them (NetCDF does not yet — its
 file chunks are an index walk away); `IN_FLIGHT` connections are held only
 for a named order; a layer older than a quarter of an hour has to be opened
 anew.
+
+## Amended 2026-09-05: a block of 64 KiB, and a two-phase JPEG 2000 order
+
+The block is the size of a probe and of a fingerprint edge, `BLOCK` = 64 KiB,
+so an order buys the blocks under it and a probe from an arbitrary offset
+touches two; a read names its length, and the network fetches the blocks it
+still needs in one request (`Readahead::plan`), so a long window costs no
+more requests than before while a chain of small reads costs no more bytes
+than it asks. The JPEG 2000 chunks order in two moves: the probes of every
+tile asked for, then — the excerpts assembled from those probes — the file
+pieces of all those tiles in one order, instead of one order per tile as the
+excerpt opened. Measured on the wire (two runs each of `uitests/jp2remote.txt`
+on a cold tile cache, the same T31TGK granule of 129.0 MiB): the coarsest
+level's 121 probes bring 15.4 MiB (11 %) in 122 requests of 128 KiB, the
+level passing in 26–30 s against 68.0 MiB (52 %) in 115 requests and 59 s
+above; levels 4 and 3 order no pieces — their excerpts lie inside the probes —
+and pass in 0.6 s and 1.8–2.1 s as before; level 2 orders the pieces of its
+36 tiles as 109 runs and passes in 23–24 s against 17.8 s, since the probe
+blocks used to hold most of those pieces; level 1 orders 24 runs of 130 blocks
+and passes in 14–16 s against 21 s; the resource closes at 31.0 MiB (24 %) and
+255 requests, 70–77 s after opening, against 81.0 MiB (62 %), 141 requests and
+108 s. Bytes are the result; requests grew because a piece no longer lies in
+the block its probe bought. Without the second move the same bytes cost
+123–126 s: levels 2 and 1 took 91–92 s with 133 per-tile orders of one run
+each, against 38–40 s with it and 39 s above. A read longer than `READAHEAD`
+still goes in requests of `READAHEAD` each. The scenario promises `delivered 35`.

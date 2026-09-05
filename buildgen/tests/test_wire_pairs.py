@@ -30,6 +30,12 @@ PAIRS = [
     ("лимит линейной памяти инстанса",
      ("veldcore/platform/host/core/src/lib.rs", "INSTANCE_MEMORY_LIMIT"),
      ("veldmodules/image-tiler/src/budget.rs", "INSTANCE")),
+    ("блок сети — проба JPEG 2000",
+     ("veldcore/platform/host/modules/network/src/range.rs", "BLOCK"),
+     ("veldmodules/image-tiler/src/adapters/excerpt.rs", "PROBE")),
+    ("блок сети — край отпечатка",
+     ("veldcore/platform/host/modules/network/src/range.rs", "BLOCK"),
+     ("veldmodules/image-tiler/src/fingerprint.rs", "SAMPLE")),
 ]
 
 NUMBER = re.compile(r"^[\d\s.*/+\-()_]+$")

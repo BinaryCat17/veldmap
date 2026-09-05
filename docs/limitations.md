@@ -102,15 +102,15 @@ What each format reads per level is the table in
   one window at a time, so it costs the memory of a window, not of the plane.
   A variable no taller than a tile (`TILE` rows) is one window whatever its
   layout, as the Sentinel-5P NRTI slices in the catalogue are.
-- **A JPEG 2000 over the network pays a pool block per tile-part.** The
+- **A JPEG 2000 over the network pays a request per tile-part.** The
   excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) asks one probe of
   `PROBE` bytes per tile-part (`veldmodules/image-tiler/src/adapters/excerpt.rs`),
-  and the network delivers a whole block of `BLOCK` for each
+  and a probe from an arbitrary offset touches two pool blocks of `BLOCK`
   ([ADR 0005](decisions/0005-network-reading.md)): the coarsest level of a
-  Sentinel-2 granule needs about a megabyte and receives one block per
-  tile-part — 68 MiB of 129 for 121 tile-parts, measured in the ADR. A tile
-  of several tile-parts pays a probe per tile-part. Removing it needs a block
-  sized by the read, which the ADR leaves untouched.
+  Sentinel-2 granule needs about a megabyte and receives 15.4 MiB of 129 in
+  122 requests for 121 tile-parts, measured in the ADR — the requests, not
+  the bytes, are the cost, four at a time. A tile of several tile-parts
+  pays a probe per tile-part.
 - **A JPEG 2000 whose canvas or tile grid does not start at zero is refused
   at describe** (`veldmodules/image-tiler/src/adapters/jp2.rs`): the
   decoder's reduced grid is up to a pixel off the tiler's halving ladder.

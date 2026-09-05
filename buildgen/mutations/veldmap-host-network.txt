@@ -35,3 +35,8 @@
 файл: veldcore/platform/host/modules/network/src/range.rs
 было:         pool.readahead.remove(&owner);
 стало:         pool.readahead.clear();
+
+имя: чтение не называет сети свою длину
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:         let run = run.max(needed).min(READAHEAD / BLOCK);
+стало:         let run = run.min(READAHEAD / BLOCK);

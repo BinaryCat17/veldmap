@@ -21,12 +21,18 @@ use veldmap_host_util::{blocking, opened, opened_handle, Caller, RangeSource};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Размер блока кэша — наименьший кусок, которым ходят в сеть. Вдвое крупнее
-/// окна читателя (256 КиБ), и не больше: за 64 килобайтами заголовка не должны
-/// ехать мегабайты. У eodata запрос стоит около полусекунды, а мегабайт — около
-/// секунды, поэтому случайному чтению дешевле сходить ещё раз, чем взять
-/// вчетверо больше нужного.
-const BLOCK: u64 = 512 * 1024;
+/// Размер блока кэша — зерно пула и заказа, наименьший кусок, которым ходят
+/// в сеть. Ровно проба JPEG 2000 (`excerpt::PROBE`) и край отпечатка: заказ
+/// наперёд покупает блоки под названными диапазонами и ничего сверх, проба
+/// со случайного смещения задевает два. Мельче незачем: запрос у eodata стоит
+/// задержки под секунду при любой длине (по трассам jp2remote — 0,8–1 с при
+/// четырёх в полёте), и 64 КиБ едут за её долю. Крупнее —
+/// значит платить за то, чего никто не спросит: у гранулы Sentinel-2 самый
+/// грубый уровень заказывает 121 пробу, и блок в полмегабайта везёт за ними
+/// 68 МиБ из 129 (замер в ADR 0005). Длинному чтению мелкий блок не в
+/// тягость: читатель называет длину, и она едет одним запросом (см.
+/// [`Readahead::plan`]).
+const BLOCK: u64 = 64 * 1024;
 /// Потолок упреждающего чтения: последовательный проход разгоняется до него,
 /// чтобы не платить задержкой запроса за каждый блок (см. [`Readahead`]).
 const READAHEAD: u64 = 8 * 1024 * 1024;
@@ -143,7 +149,7 @@ struct HttpRange {
     fetched: std::sync::atomic::AtomicU64,
     /// Сколько диапазонов доставлено. Вместе с `fetched` это средняя длина
     /// запроса, а она и есть ответ на то, включился разгон или нет: без него
-    /// всякий запрос ровно в блок (см. [`Readahead`]).
+    /// всякий запрос ровно в длину чтения (см. [`Readahead`]).
     ///
     /// Походов в сеть было не меньше: сорвавшийся диапазон переспрашивается до
     /// `ATTEMPTS` раз, и все попытки, кроме последней, сюда не идут.
@@ -152,9 +158,9 @@ struct HttpRange {
     /// реестром уже после носителя, поэтому не поле, а ячейка (см.
     /// [`HttpRange::answers_to`]).
     id: std::sync::atomic::AtomicU64,
-    /// Попаданий в пул: чтений, которым блок нашёлся готовым. Считает не
-    /// блоки, а обращения — окно читателя (256 КиБ) вдвое мельче блока,
-    /// поэтому один блок отдаётся дважды.
+    /// Попаданий в пул: обращений за блоком, которым он нашёлся готовым.
+    /// Считает блоки, а не чтения — окно читателя (256 КиБ) это четыре блока,
+    /// и одно чтение из пула даёт четыре попадания.
     hits: std::sync::atomic::AtomicU64,
     /// Блоков этого ресурса привезено — вместе с упреждающими, которых никто
     /// не спрашивал. Больше, чем блоков у файла, значит одно: пул вытеснил
@@ -189,7 +195,7 @@ impl Drop for HttpRange {
 /// блок пула и есть самый ненужный, чей бы он ни был.
 ///
 /// Блоки хранятся под Arc: читатель ходит окнами по 256 КБ (ResourceReader),
-/// и копировать ради каждого окна весь блок незачем.
+/// по четыре блока за раз, и копировать их ради каждого окна незачем.
 #[derive(Default)]
 pub struct Blocks {
     pool: Mutex<Pool>,
@@ -280,8 +286,8 @@ impl Blocks {
 
     /// Сколько блоков брать на промахе `index` объекта `owner` (см.
     /// [`Readahead::plan`]).
-    fn plan(&self, owner: u64, index: u64, total: u64) -> u64 {
-        self.pool.lock().unwrap().readahead.entry(owner).or_default().plan(index, total)
+    fn plan(&self, owner: u64, index: u64, total: u64, needed: u64) -> u64 {
+        self.pool.lock().unwrap().readahead.entry(owner).or_default().plan(index, total, needed)
     }
 
     /// Читатель объекта `owner` дочитал блок `index` до конца (см.
@@ -364,16 +370,17 @@ impl Blocks {
 /// Разгон последовательного чтения: сколько блоков брать одним запросом.
 ///
 /// Мелкий блок хорош случайному чтению и плох проходу по файлу — на каждый
-/// блок пришлась бы задержка запроса. Поэтому блок остаётся мелким, а проход
-/// узнаётся по двум приметам разом: промах пришёлся ровно туда, где кончился
-/// прошлый запрос, и читатель дочитал прошлый запрос до конца. Одной первой
-/// мало: заголовки тайл-партов JPEG 2000 лежат через два блока, цепочка проб
-/// по 64 КиБ то и дело попадает ровно за конец прошлого запроса, а
-/// разогнавшись, везёт мегабайты того, чего никто не спросит — 84 % файла
-/// ради самого грубого уровня (замер в ADR 0004). Проход же дочитывает каждый
-/// блок: тогда кусок удваивается, и уже через несколько промахов запросы идут
-/// мегабайтами. Скачок в сторону и недочитанный запрос сбрасывают разгон —
-/// там снова дешевле взять один блок.
+/// блок пришлась бы задержка запроса. Поэтому блок остаётся мелким, чтение
+/// берёт одним запросом столько блоков, сколько ему нужно, а проход узнаётся
+/// по двум приметам разом: промах пришёлся ровно туда, где кончился прошлый
+/// запрос, и читатель дочитал прошлый запрос до конца. Одной первой мало:
+/// цепочка проб по блоку — заголовки тайл-партов JPEG 2000 — то и дело
+/// попадает ровно за конец прошлого запроса, а разогнавшись, везёт мегабайты
+/// того, чего никто не спросит — 84 % файла ради самого грубого уровня (замер
+/// в ADR 0004). Проход же дочитывает каждый блок: тогда кусок удваивается, и
+/// уже через несколько промахов запросы идут мегабайтами. Скачок в сторону и
+/// недочитанный запрос сбрасывают разгон — там снова дешевле взять ровно
+/// названное.
 ///
 /// Состояние — у объекта, а не у открытия (см. [`Pool::readahead`]): превью
 /// и слой шара читают один файл, и проход, начатый одним, продолжает другой.
@@ -388,13 +395,16 @@ struct Readahead {
 }
 
 impl Readahead {
-    /// Сколько блоков брать, начиная с промаха на `index`. `total` — всего
-    /// блоков у ресурса: за конец файла упреждать нечего.
-    fn plan(&mut self, index: u64, total: u64) -> u64 {
+    /// Сколько блоков брать, начиная с промаха на `index`: не меньше `needed`
+    /// — столько читателю осталось дочитать в этом же чтении, и делить их на
+    /// запросы незачем, длину он назвал сам, — и не меньше разгона. `total` —
+    /// всего блоков у ресурса: за конец файла упреждать нечего.
+    fn plan(&mut self, index: u64, total: u64, needed: u64) -> u64 {
         let run = match index == self.next && self.deep {
-            true => (self.run * 2).min(READAHEAD / BLOCK),
+            true => self.run * 2,
             false => 1,
         };
+        let run = run.max(needed).min(READAHEAD / BLOCK);
         let run = run.clamp(1, total.saturating_sub(index).max(1));
         self.next = index + run;
         self.run = run;
@@ -676,8 +686,9 @@ impl HttpRange {
     /// привезённых блоков больше, чем их у файла.
     ///
     /// Первая строка ресурса приходит после первого же запроса, и длина
-    /// запроса в ней всегда одна: разгон начинается с блока (см.
-    /// [`Readahead`]). Читать её надо как «чтение началось», а не как итог.
+    /// запроса в ней — длина первого чтения: разгон начинается с того, что
+    /// читатель назвал (см. [`Readahead`]). Читать её надо как «чтение
+    /// началось», а не как итог.
     fn report(&self, closing: bool) {
         use std::sync::atomic::Ordering::Relaxed;
         let fetched = self.fetched.load(Relaxed);
@@ -704,14 +715,15 @@ impl HttpRange {
     }
 
     /// Блок из кэша или из сети. Промах тянет не один блок, а столько, сколько
-    /// назначил разгон, — и одним запросом: цена запроса не зависит от того,
-    /// сколько в нём байт (см. [`Readahead`]).
-    fn block(&self, index: u64) -> anyhow::Result<Arc<[u8]>> {
+    /// нужно этому чтению (`needed`) и сколько назначил разгон, — и одним
+    /// запросом: цена запроса не зависит от того, сколько в нём байт (см.
+    /// [`Readahead`]).
+    fn block(&self, index: u64, needed: u64) -> anyhow::Result<Arc<[u8]>> {
         if let Some(data) = self.blocks.get(self.owner, index) {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(data);
         }
-        let run = self.blocks.plan(self.owner, index, self.len.div_ceil(BLOCK));
+        let run = self.blocks.plan(self.owner, index, self.len.div_ceil(BLOCK), needed);
         let data = self.fetch_run(index, run)?;
         let wanted = self.store(index, &data);
         // После раскладки, а не до неё: иначе счёт блоков отстаёт от того
@@ -841,8 +853,13 @@ impl RangeSource for HttpRange {
         let mut position = offset;
         while (out.len() as u64) < size {
             let index = position / BLOCK;
-            let block = self.block(index)?;
             let start = (position % BLOCK) as usize;
+            // Сколько блоков ещё нужно этому чтению — их сеть везёт одним
+            // запросом, а не догоняет удвоением (см. [`Readahead::plan`]); до
+            // первого лежащего в пуле: за ним чтение продолжится попаданием.
+            let remaining = (start as u64 + size - out.len() as u64).div_ceil(BLOCK);
+            let needed = (1..remaining).take_while(|&ahead| !self.blocks.has(self.owner, index + ahead)).count() as u64 + 1;
+            let block = self.block(index, needed)?;
             let take = ((size - out.len() as u64) as usize).min(block.len() - start);
             out.extend_from_slice(&block[start..start + take]);
             position += take as u64;
@@ -866,39 +883,38 @@ mod tests {
     /// Проход разгоняется, скачок в сторону — нет, и цепочка проб, попавших
     /// ровно за конец прошлого запроса, — тоже нет: проход дочитывает блоки
     /// до конца, проба — нет. Цена ошибки несимметрична: не разогнаться на
-    /// проходе значит платить задержкой за каждые полмегабайта, а разогнаться
-    /// на пробах — тянуть мегабайты ради заголовков.
+    /// проходе значит платить задержкой за каждый блок, а разогнаться на
+    /// пробах — тянуть мегабайты ради заголовков.
     #[test]
     fn sequential_reads_speed_up_random_ones_do_not() {
         let total = 1024;
+        let cap = READAHEAD / BLOCK;
         let mut readahead = Readahead::default();
 
         // Первый промах — один блок: о проходе ещё ничего не известно.
-        assert_eq!(readahead.plan(0, total), 1);
-        // Дальше подряд и дочитывая — удвоение до потолка.
-        let cap = READAHEAD / BLOCK;
-        readahead.consumed(0);
-        assert_eq!(readahead.plan(1, total), 2);
-        readahead.consumed(2);
-        assert_eq!(readahead.plan(3, total), 4);
-        readahead.consumed(6);
-        assert_eq!(readahead.plan(7, total), 8);
-        readahead.consumed(14);
-        assert_eq!(readahead.plan(15, total), cap);
-        readahead.consumed(15 + cap - 1);
-        assert_eq!(readahead.plan(15 + cap, total), cap, "выше потолка не растёт");
+        assert_eq!(readahead.plan(0, total, 1), 1);
+        // Дальше подряд и дочитывая — удвоение до потолка, и выше него не растёт.
+        let (mut at, mut run) = (0, 1);
+        for _ in 0..12 {
+            readahead.consumed(at + run - 1);
+            at += run;
+            run = (run * 2).min(cap);
+            assert_eq!(readahead.plan(at, total, 1), run, "промах на {at}");
+        }
+        assert_eq!(run, cap, "потолок достигнут");
 
         // Скачок в сторону сбрасывает разгон.
-        readahead.consumed(15 + 2 * cap - 1);
-        assert_eq!(readahead.plan(500, total), 1);
+        readahead.consumed(at + run - 1);
+        let jump = at + run + 100;
+        assert_eq!(readahead.plan(jump, total, 1), 1);
 
         // Промах ровно за концом прошлого запроса, который не дочитали, — не
-        // проход: так идут пробы тайл-партов JPEG 2000 через два блока.
-        assert_eq!(readahead.plan(501, total), 1, "недочитанный запрос не разгоняет");
-        readahead.consumed(500);
-        assert_eq!(readahead.plan(502, total), 1, "дочитанным считается последний блок запроса, а не любой");
-        readahead.consumed(502);
-        assert_eq!(readahead.plan(503, total), 2);
+        // проход: так идут пробы тайл-партов JPEG 2000.
+        assert_eq!(readahead.plan(jump + 1, total, 1), 1, "недочитанный запрос не разгоняет");
+        readahead.consumed(jump);
+        assert_eq!(readahead.plan(jump + 2, total, 1), 1, "дочитанным считается последний блок запроса, а не любой");
+        readahead.consumed(jump + 2);
+        assert_eq!(readahead.plan(jump + 3, total, 1), 2);
     }
 
     /// Серии prefetch: подряд идущие блоки склеиваются, серия не длиннее
@@ -917,8 +933,9 @@ mod tests {
     #[test]
     fn readahead_stops_at_the_last_block() {
         let mut readahead = Readahead::default();
-        assert_eq!(readahead.plan(8, 10), 1);
-        assert_eq!(readahead.plan(9, 10), 1, "остался один блок");
+        assert_eq!(readahead.plan(8, 10, 1), 1);
+        assert_eq!(readahead.plan(9, 10, 1), 1, "остался один блок");
+        assert_eq!(readahead.plan(8, 10, 5), 2, "и названная длина за край не выходит");
     }
 
     /// Переспрашивается только то, что проходит само. Отказ повторять нельзя
@@ -1204,22 +1221,53 @@ mod reads {
         }
         assert_eq!(runs(&asked), vec![1; 12]);
 
-        // И через блок — тоже.
+        // И через блок — тоже: проба со смещением задевает два блока и везёт
+        // два, разгона нет.
         let (source, asked) = in_memory(pattern(40 * BLOCK));
         for block in (0..24).step_by(2) {
             source.read_at(block * BLOCK + 100, 64 * 1024).unwrap();
         }
-        assert!(runs(&asked).iter().all(|run| *run == 1), "{:?}", runs(&asked));
+        assert!(runs(&asked).iter().all(|run| *run == 2), "{:?}", runs(&asked));
     }
 
-    /// Одно длинное чтение — тоже проход: блоки внутри него дочитываются до
-    /// конца, и запросы растут, не дожидаясь следующего окна; последний
-    /// запрос упреждает за край чтения — это и есть разгон.
+    /// Одно длинное чтение едет одним запросом: читатель назвал длину, и
+    /// делить её на удвоения незачем. Чтение вслед за ним — проход, и
+    /// разгон удваивает уже этот запрос, а не начинает с блока.
     #[test]
-    fn one_long_read_speeds_up_within_itself() {
+    fn one_long_read_goes_in_one_request_and_the_pass_goes_on() {
         let (source, asked) = in_memory(pattern(40 * BLOCK));
         source.read_at(0, 12 * BLOCK).unwrap();
-        assert_eq!(runs(&asked), vec![1, 2, 4, 8]);
+        assert_eq!(runs(&asked), vec![12]);
+        source.read_at(12 * BLOCK, 4 * BLOCK).unwrap();
+        assert_eq!(runs(&asked), vec![12, 24]);
+    }
+
+    /// Чтение покупает свои блоки и ничего сверх: окно читателя в четыре
+    /// блока — один запрос ровно в четыре; проба в блок со случайного смещения
+    /// — два блока, задетых ею, что чтением, что заказом наперёд.
+    #[test]
+    fn a_read_names_its_length_and_a_probe_buys_its_blocks() {
+        let (source, asked) = in_memory(pattern(40 * BLOCK));
+        source.read_at(4 * BLOCK, 4 * BLOCK).unwrap();
+        assert_eq!(asked.lock().unwrap().as_slice(), &[(4 * BLOCK, 8 * BLOCK)]);
+
+        // Проба JPEG 2000 — 64 КиБ с начала тайл-парта, а тот лежит где угодно.
+        source.read_at(20 * BLOCK + 100, 64 * 1024).unwrap();
+        assert_eq!(asked.lock().unwrap()[1], (20 * BLOCK, 22 * BLOCK));
+        source.prefetch(&[(30 * BLOCK + 100, 64 * 1024)]).unwrap();
+        assert_eq!(asked.lock().unwrap()[2], (30 * BLOCK, 32 * BLOCK));
+        assert_eq!(asked.lock().unwrap().len(), 3);
+
+        // Названная длина упирается в лежащий блок: чтение 30..34 находит 30 и
+        // 31 в пуле и везёт только 32..34 — одним запросом, не по блоку.
+        source.read_at(30 * BLOCK, 4 * BLOCK).unwrap();
+        assert_eq!(asked.lock().unwrap()[3], (32 * BLOCK, 34 * BLOCK));
+        // А лежащий посреди названной длины делит её: 36..40 при готовом 38 —
+        // это 36..38, попадание, 39..40.
+        source.prefetch(&[(38 * BLOCK, 1)]).unwrap();
+        source.read_at(36 * BLOCK, 4 * BLOCK).unwrap();
+        let tail = asked.lock().unwrap()[4..].to_vec();
+        assert_eq!(tail, vec![(38 * BLOCK, 39 * BLOCK), (36 * BLOCK, 38 * BLOCK), (39 * BLOCK, 40 * BLOCK)]);
     }
 
     /// Разгон принадлежит объекту: второе открытие того же файла продолжает
@@ -1242,12 +1290,12 @@ mod reads {
         let first = opened(first_asked.clone());
         let second = opened(second_asked.clone());
 
-        // Первое открытие дочитывает три блока — запросы 1, 2.
+        // Первое открытие дочитывает три блока — запрос в три.
         first.read_at(0, 3 * BLOCK).unwrap();
-        assert_eq!(runs(&first_asked), vec![1, 2]);
+        assert_eq!(runs(&first_asked), vec![3]);
         // Второе продолжает с четвёртого — и получает удвоение, а не единицу.
         second.read_at(3 * BLOCK, BLOCK).unwrap();
-        assert_eq!(runs(&second_asked), vec![4]);
+        assert_eq!(runs(&second_asked), vec![6]);
     }
 
     /// Закрытие одного ресурса не сбивает разгон другого: у каждого объекта
@@ -1271,11 +1319,11 @@ mod reads {
         let leaving = opened("http://host/b", Arc::new(Mutex::new(Vec::new())));
 
         staying.read_at(0, 3 * BLOCK).unwrap();
-        assert_eq!(runs(&asked), vec![1, 2]);
+        assert_eq!(runs(&asked), vec![3]);
         drop(leaving);
 
         staying.read_at(3 * BLOCK, BLOCK).unwrap();
-        assert_eq!(runs(&asked), vec![1, 2, 4], "проход продолжился, хотя сосед закрылся");
+        assert_eq!(runs(&asked), vec![3, 6], "проход продолжился, хотя сосед закрылся");
     }
 
     /// prefetch привозит недостающие блоки сериями подряд идущих, ровно те,

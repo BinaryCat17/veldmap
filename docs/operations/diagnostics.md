@@ -42,12 +42,13 @@ All four are `debug`, that is, `trace.log` only.
 ## Three rules of reading
 
 1. **The first network line of a resource is "reading started", not a
-   total**: readahead starts from one block, so it always says one request.
-   The request length further on is the readahead at work; a length of one
-   block means no readahead at all. Delivered is not what went over the wire —
+   total**: a read takes the blocks it needs, so the first line says one
+   request of the read's own length. A request longer than the reads further
+   on is the readahead at work; requests no longer than the reads mean no
+   readahead at all. Delivered is not what went over the wire —
    a failed range is asked again up to `ATTEMPTS` times, and only the last
-   try counts. Pool hits count reads, not blocks: the reader's window is
-   smaller than a block, and one block is handed out twice. A second opening
+   try counts. Pool hits count blocks looked up, not reads: the reader's
+   window of 256 KiB spans four blocks, so one read from the pool is four hits. A second opening
    of the same object hits from the start, and that is not a counting fault:
    blocks belong to the object, not to the opening. More blocks fetched than
    the file has means the pool evicted and refetched; the pool is per process,

@@ -48,14 +48,15 @@ through `fs/on_write` — and is freed by the reply.
 For a remote object a window becomes an HTTP request, and the price of one is
 twofold: the request itself and the bytes per megabyte. The network module
 (`veldcore/platform/host/modules/network/src/range.rs`) keeps a pool of
-blocks of `BLOCK` bytes — two reader windows, and no more: a big block would
-cost the most exactly where reads are fewest, behind the head and the tail
-that the fingerprint takes, and that is the first thing every show does. A
-sequential pass grows on its own: a miss that lands exactly where the
-previous request ended, after the reader has read that request's last block
-to its end, doubles the fetch up to `READAHEAD`; a jump elsewhere, or a
-request left unread — a chain of probes at tile-part headers two blocks
-apart — resets it to one block (`Readahead`, [ADR 0005](../decisions/0005-network-reading.md)).
+blocks of `BLOCK` bytes — the size of a JPEG 2000 probe and of a fingerprint
+edge, so an order buys the blocks under it and nothing beyond, and a probe
+from an arbitrary offset touches two. A read takes the blocks it still needs
+in one request, however long it is, so the small block costs a long window
+nothing. A sequential pass grows on its own: a miss that lands exactly where
+the previous request ended, after the reader has read that request's last
+block to its end, doubles the fetch up to `READAHEAD`; a jump elsewhere, or a
+request left unread — a chain of probes at tile-part headers — resets it to
+what the read names (`Readahead`, [ADR 0005](../decisions/0005-network-reading.md)).
 The readahead belongs to the object, not to the opening: a preview and a
 globe layer of the same file continue one pass. A reader that knows what it
 is about to read says so instead of being guessed at: `veld_resource_prefetch`
@@ -66,7 +67,8 @@ that follow are hits, and the readahead is not touched. The chunk grid driver
 of the tiler orders the chunks under the tiles it was asked for before it
 reads them (`Chunked::prefetch`): a TIFF by the offsets and byte counts of
 its catalogue, a JPEG 2000 with a TLM by the probes of its tile-parts and,
-once the excerpt is assembled, by its file pieces. A single read larger than
+once the excerpts are assembled from those probes, by the file pieces of
+every tile asked for in a second order. A single read larger than
 the instance's memory is refused by the host before it allocates
 (`INSTANCE_MEMORY_LIMIT`). The pool is one per process with a ceiling of
 `POOL_LIMIT`, evicting the oldest block whoever owns it; not per resource,
