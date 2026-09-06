@@ -1,0 +1,22 @@
+# Мутации браузера данных: сборка наложения и строка слоя.
+# Формат — buildgen/mutate.py; крейт — модуль data-browser.
+
+имя: лежащий подробным называется первым файлом ответа, а не названным номером
+файл: veldmodules/data-browser/src/handlers/overlay.rs
+было:             .and_then(|at| overlay.files.get(at as usize))
+стало:             .and_then(|_at| overlay.files.get(0))
+
+имя: координаты достаются растру по роли, а не по номеру
+файл: veldmodules/data-browser/src/handlers/overlay.rs
+было:         match pairs.iter_mut().find(|(_, other, ..)| *other == ordinal) {
+стало:         match pairs.iter_mut().find(|(role, ..)| *role == OverlayRole::OverlayDetailed) {
+
+имя: имя файла склеивается точкой и с тем, что сказано не о нём
+файл: veldmodules/data-browser/src/view/shown.rs
+было:     if !overlay.detailed_trouble.is_empty() {
+стало:     if overlay.detailed.is_some() || !overlay.detailed_trouble.is_empty() {
+
+имя: слова о подробном режутся вместе с именем, а не своим пределом
+файл: veldmodules/data-browser/src/view/shown.rs
+было:         let room = if shown.is_empty() { TROUBLE_CHARS } else { room(&shown).max(TROUBLE_CHARS / 4) };
+стало:         let room = TROUBLE_CHARS;

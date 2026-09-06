@@ -1,0 +1,22 @@
+# Мутации глобуса: запасные растры наложения.
+# Формат — buildgen/mutate.py; крейт — модуль globe.
+
+имя: запасной не переносит свой номер
+файл: veldmodules/globe/src/overlay.rs
+было:         fresh.ordinal = ordinal;
+стало:         fresh.ordinal = self.ordinal;
+
+имя: запасной встаёт с прежним знанием о файле
+файл: veldmodules/globe/src/overlay.rs
+было:         *self = fresh;
+стало:         self.resource = fresh.resource; self.geolocation = fresh.geolocation; self.spares = fresh.spares; self.ordinal = fresh.ordinal;
+
+имя: предел детали ложится к подробному, даже когда деталь решает превью
+файл: veldmodules/globe/src/overlay.rs
+было:         let cap_about_detailed = self.decider().is_some_and(|raster| raster.role == Role::Detailed);
+стало:         let cap_about_detailed = self.decider().is_some();
+
+имя: отказ превью попадает в слова о подробном
+файл: veldmodules/globe/src/overlay.rs
+было:                     Role::Preview => rest.push(trouble.clone()),
+стало:                     Role::Preview => about_detailed.push(trouble.clone()),

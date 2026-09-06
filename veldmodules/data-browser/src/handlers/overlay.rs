@@ -55,6 +55,12 @@ fn role_for_globe(role: crate::proto::data_provider::ImageryRole) -> OverlayRole
     }
 }
 
+/// Последний сегмент ключа хранилища — имя файла, каким его показывают в строке
+/// слоя. Ключ папки с косой чертой на конце называется папкой.
+fn file_name(identifier: &str) -> &str {
+    identifier.trim_end_matches('/').rsplit('/').next().unwrap_or_default()
+}
+
 /// «На глобус» из строки списка — и обратно: тот же значок снимает то, что
 /// положил.
 ///
@@ -439,6 +445,8 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
         y1: utm.y1,
     });
     let mut opens = Vec::new();
+    // Имена файлов по номеру в ответе — ими потом называется лежащий подробным.
+    let files: Vec<String> = response.rasters.iter().map(|raster| raster.identifier.clone()).collect();
     // Порядковый номер растра в ответе — им координаты находят свой растр:
     // подробных бывает несколько (выбранный и запасные), и роли на это не
     // хватает.
@@ -470,6 +478,7 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
     // Запрос растров кончился — его корреляция больше не наша.
     overlay.imagery = None;
+    overlay.files = files;
     overlay.assembly = Some(Assembly { utm, opens, collected: Vec::new() });
 }
 
@@ -533,7 +542,7 @@ pub fn on_opened(state: &mut State, opened: &ResourceOpened) -> bool {
 /// Порядок номеров внутри роли сохраняется — он и есть порядок предпочтения.
 fn paired<H>(
     collected: Vec<(OverlayRole, u32, Part, H)>,
-) -> (Vec<(OverlayRole, H, Option<H>)>, Vec<H>) {
+) -> (Vec<(OverlayRole, u32, H, Option<H>)>, Vec<H>) {
     let mut pairs: Vec<(OverlayRole, u32, H, Option<H>)> = Vec::new();
     let mut coordinates = Vec::new();
     for (role, ordinal, part, handle) in collected {
@@ -551,7 +560,7 @@ fn paired<H>(
             None => orphans.push(handle),
         }
     }
-    (pairs.into_iter().map(|(role, _, raster, coordinates)| (role, raster, coordinates)).collect(), orphans)
+    (pairs, orphans)
 }
 
 /// Все открытия этого наложения кончились — передать владение глобусу и
@@ -576,7 +585,7 @@ fn finish(state: &mut State, key: &str) {
     // Передача владения — до сообщения: получив набор, глобус вправе сразу
     // считать ресурсы своими. При отказе хелпер освободил ресурс сам.
     let mut rasters = Vec::new();
-    for (role, raster, coordinates) in pairs {
+    for (role, ordinal, raster, coordinates) in pairs {
         let raster = match veldsdk::resource::hand_off(raster, "globe") {
             Ok(handle) => handle,
             Err(error) => {
@@ -605,6 +614,7 @@ fn finish(state: &mut State, key: &str) {
             resource: Some(raster),
             role: role as i32,
             geolocation: coordinates,
+            ordinal,
         });
     }
     if rasters.is_empty() {
@@ -689,6 +699,13 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
             continue;
         };
         overlay.trouble = said.trouble.clone();
+        overlay.detailed_trouble = said.detailed_trouble.clone();
+        // Номер от глобуса — в имя файла: глобус имён не знает, а строке слоя
+        // нужно имя, и стоять оно обязано рядом с приговором о том же файле.
+        overlay.detailed = said
+            .detailed
+            .and_then(|at| overlay.files.get(at as usize))
+            .map(|identifier| file_name(identifier).to_string());
         overlay.progress = Progress {
             ready: said.ready,
             total: said.total,
@@ -831,7 +848,7 @@ mod tests {
 
         let (pairs, orphans) = paired(collected);
 
-        let order: Vec<_> = pairs.iter().map(|(_, raster, ..)| *raster).collect();
+        let order: Vec<_> = pairs.iter().map(|(_, _, raster, ..)| *raster).collect();
         assert_eq!(order, ["квиклук", "подробный"]);
         assert!(orphans.is_empty());
     }
@@ -850,7 +867,7 @@ mod tests {
 
         let (pairs, orphans) = paired(collected);
 
-        assert_eq!(pairs, vec![(preview, "квиклук", None), (detailed, "подробный", Some("широты"))]);
+        assert_eq!(pairs, vec![(preview, 0, "квиклук", None), (detailed, 1, "подробный", Some("широты"))]);
         assert!(orphans.is_empty());
     }
 
@@ -873,12 +890,51 @@ mod tests {
         assert_eq!(
             pairs,
             vec![
-                (preview, "квиклук", None),
-                (detailed, "видимый", Some("широты an")),
-                (detailed, "тепловой", Some("широты tx")),
+                (preview, 0, "квиклук", None),
+                (detailed, 1, "видимый", Some("широты an")),
+                (detailed, 2, "тепловой", Some("широты tx")),
             ]
         );
         assert!(orphans.is_empty());
+    }
+
+    /// Номер от глобуса становится именем файла: лежащий подробным называется
+    /// последним сегментом ключа из ответа провайдера, а пустой номер — нет
+    /// подробного — оставляет строку без имени.
+    #[test]
+    fn лежащий_подробным_называется_именем_файла() {
+        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
+        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
+        overlay.files = vec![
+            "eodata/S3A.SEN3/quicklook.jpg".to_string(),
+            "eodata/S3A.SEN3/S1_radiance_an.nc".to_string(),
+            "eodata/S3A.SEN3/F1_BT_fn.nc".to_string(),
+        ];
+        state.overlays.push(overlay);
+        let progress = |detailed: Option<u32>| crate::proto::globe::OverlaysProgress {
+            overlays: vec![crate::proto::globe::OverlayProgress {
+                key: "scene".to_string(),
+                detailed,
+                ..Default::default()
+            }],
+        };
+
+        on_overlay_progress(&mut state, progress(Some(2)));
+        assert_eq!(state.overlays[0].detailed.as_deref(), Some("F1_BT_fn.nc"), "запасной назван своим именем");
+        on_overlay_progress(&mut state, progress(None));
+        assert_eq!(state.overlays[0].detailed, None);
+        on_overlay_progress(&mut state, progress(Some(9)));
+        assert_eq!(state.overlays[0].detailed, None, "номер вне ответа — имени нет");
+    }
+
+    /// Имя файла — последний сегмент ключа; ключ папки называется папкой, а
+    /// ключ без косых — сам собой.
+    #[test]
+    fn имя_файла_это_последний_сегмент_ключа() {
+        assert_eq!(file_name("eodata/S3A.SEN3/F1_BT_fn.nc"), "F1_BT_fn.nc");
+        assert_eq!(file_name("eodata/S3A.SEN3/"), "S3A.SEN3");
+        assert_eq!(file_name("quicklook.jpg"), "quicklook.jpg");
+        assert_eq!(file_name(""), "");
     }
 
     /// Координаты, чей растр не открылся, наложению не файл: их возвращают
@@ -890,7 +946,7 @@ mod tests {
 
         let (pairs, orphans) = paired(collected);
 
-        assert_eq!(pairs, vec![(preview, "квиклук", None)]);
+        assert_eq!(pairs, vec![(preview, 0, "квиклук", None)]);
         assert_eq!(orphans, vec!["широты"]);
     }
 

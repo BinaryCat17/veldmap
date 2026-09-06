@@ -622,12 +622,15 @@ pub struct Raster {
     /// (Sentinel-3). Держится ровно затем, чтобы освободиться вместе с
     /// растром: спрашивают его один раз, при описании.
     pub geolocation: Option<veldsdk::OwnedResource>,
-    /// Запасные файлы той же роли с их координатами, в порядке предпочтения:
-    /// провайдер называет их за выбранным, когда выбор по именам может
-    /// ошибиться (пустой ночью видимый канал SLSTR), и следующий встаёт на
-    /// место не описавшегося ([`Raster::next_spare`]). Отпускаются вместе с
+    /// Номер растра у приславшего (`OverlayRaster.ordinal`): им приславший
+    /// узнаёт, какой файл лежит подробным, — имён здесь нет.
+    pub ordinal: u32,
+    /// Запасные файлы той же роли — номер, ресурс и координаты, в порядке
+    /// предпочтения: провайдер называет их за выбранным, когда выбор по именам
+    /// может ошибиться (пустой ночью видимый канал SLSTR), и следующий встаёт
+    /// на место не описавшегося ([`Raster::next_spare`]). Отпускаются вместе с
     /// растром.
-    pub spares: Vec<(veldsdk::OwnedResource, Option<veldsdk::OwnedResource>)>,
+    pub spares: Vec<(u32, veldsdk::OwnedResource, Option<veldsdk::OwnedResource>)>,
     /// Описание растра. Присваивается только через [`Raster::describe_as`]: с
     /// размерами меняются и узлы варп-сеток, а кэш их об этом иначе не узнает.
     pub meta: Option<Meta>,
@@ -675,6 +678,7 @@ impl Raster {
             role,
             resource,
             geolocation: None,
+            ordinal: 0,
             spares: Vec::new(),
             meta: None,
             bounds: Vec::new(),
@@ -695,9 +699,10 @@ impl Raster {
         if self.spares.is_empty() {
             return None;
         }
-        let (resource, geolocation) = self.spares.remove(0);
+        let (ordinal, resource, geolocation) = self.spares.remove(0);
         let spares = std::mem::take(&mut self.spares);
         let mut fresh = Raster::new(self.role, resource);
+        fresh.ordinal = ordinal;
         fresh.geolocation = geolocation;
         fresh.spares = spares;
         *self = fresh;
@@ -1020,6 +1025,7 @@ impl Overlay {
         // `said` от этого не зависит вовсе.
         let drawn = mine.map(|wanted| wanted.choice.role);
         let settled = !working && drawn == self.decider().map(|it| it.role);
+        let (detailed_trouble, trouble) = self.said_split(settled);
         crate::proto::globe::OverlayProgress {
             key: self.key.clone(),
             ready: self.progress.ready,
@@ -1027,12 +1033,14 @@ impl Overlay {
             working,
             share: self.progress.share,
             error: self.error.clone(),
-            trouble: self.said(settled),
+            trouble,
             step: self.progress.step,
             steps: self.progress.steps,
             blank: self.blank(),
             pass_read: self.progress.pass.0,
             pass_total: self.progress.pass.1,
+            detailed: self.raster(Role::Detailed).map(|raster| raster.ordinal),
+            detailed_trouble,
         }
     }
 
@@ -1058,6 +1066,34 @@ impl Overlay {
             .chain(self.binding_trouble.clone())
             .collect();
         said.join("; ")
+    }
+
+    /// То же, разложенное по тому, о ком сказано: (о подробном растре, обо
+    /// всём остальном). О подробном — его отказ и предел детали, когда деталь
+    /// решает он; остальное — отказ превью, предел превью, отказ привязки.
+    /// Приславшему нужна эта граница: имя файла он ставит перед словами о нём,
+    /// а предел превью или отказ привязки под именем подробного файла читались
+    /// бы как сказанное о нём.
+    pub fn said_split(&self, settled: bool) -> (String, String) {
+        let cap = settled.then(|| self.detail_cap()).flatten();
+        let cap_about_detailed = self.decider().is_some_and(|raster| raster.role == Role::Detailed);
+        let (mut about_detailed, mut rest) = (Vec::new(), Vec::new());
+        for raster in &self.rasters {
+            if let Some(trouble) = &raster.trouble {
+                match raster.role {
+                    Role::Detailed => about_detailed.push(trouble.clone()),
+                    Role::Preview => rest.push(trouble.clone()),
+                }
+            }
+        }
+        if let Some(cap) = cap {
+            match cap_about_detailed {
+                true => about_detailed.push(cap),
+                false => rest.push(cap),
+            }
+        }
+        rest.extend(self.binding_trouble.clone());
+        (about_detailed.join("; "), rest.join("; "))
     }
 
     /// Растр, решающий деталь слоя: самый подробный из кладущихся.
@@ -2201,14 +2237,16 @@ mod tests {
     fn a_spare_takes_the_place_of_the_failed_file() {
         let mut raster = raster(Role::Detailed, Some(meta(2000, 2000)));
         raster.trouble = Some("подробный растр не открылся: пусто".into());
+        raster.ordinal = 1;
         raster.spares = vec![
-            (veldsdk::OwnedResource::from_raw_id(11), Some(veldsdk::OwnedResource::from_raw_id(12))),
-            (veldsdk::OwnedResource::from_raw_id(13), None),
+            (2, veldsdk::OwnedResource::from_raw_id(11), Some(veldsdk::OwnedResource::from_raw_id(12))),
+            (3, veldsdk::OwnedResource::from_raw_id(13), None),
         ];
 
         let (resource, coordinates) = raster.next_spare().expect("запасной есть");
         assert_eq!((resource.id, coordinates.map(|c| c.id)), (11, Some(12)));
         assert_eq!(raster.resource.as_ref().id, 11);
+        assert_eq!(raster.ordinal, 2, "номер переходит вместе с файлом — по нему называют лежащий");
         assert!(raster.meta.is_none() && raster.trouble.is_none(), "о новом файле ещё ничего не известно");
         assert_eq!(raster.role, Role::Detailed);
         assert_eq!(raster.spares.len(), 1);
@@ -2746,6 +2784,7 @@ mod tests {
         let out = overlay.report(None, &idle);
         assert!(!out.working, "стенд не о том: слой считает, что работа идёт");
         assert_eq!(out.trouble, "", "предел объявлен слоем, который кадра не спрашивает");
+        assert_eq!(out.detailed_trouble, "", "предел объявлен слоем, который кадра не спрашивает");
 
         // Лестница в одну ступень и она же последняя — это и есть «добрано»:
         // за ней не пойдёт следующая (`Want::climbing`).
@@ -2755,7 +2794,9 @@ mod tests {
         };
         let settled = overlay.report(Some(&mine), &idle);
         assert!(!settled.working, "стенд не о том: за осевшим слоем осталась работа");
-        assert_eq!(settled.trouble, cap_line());
+        // Деталь решает подробный — предел сказан о нём, остальному нечего.
+        assert_eq!(settled.detailed_trouble, cap_line());
+        assert_eq!(settled.trouble, "");
 
         // А в полёте, но с непройденной лестницей, предел снова молчит: за этой
         // ступенью пойдёт следующая, и пойдёт сама. Одного полёта поэтому мало
@@ -2767,6 +2808,7 @@ mod tests {
         let midway = overlay.report(Some(&climbing), &idle);
         assert!(midway.working, "стенд не о том: лестница считается пройденной");
         assert_eq!(midway.trouble, "", "предел объявлен на полпути к цели");
+        assert_eq!(midway.detailed_trouble, "", "предел объявлен на полпути к цели");
     }
 
     /// Кадр может рисовать превью, пока подробный только описался: работы за
@@ -2792,9 +2834,11 @@ mod tests {
         let on_preview = overlay.report(Some(&settled(Role::Preview)), &idle);
         assert!(!on_preview.working, "стенд не о том: за слоем осталась работа");
         assert_eq!(on_preview.trouble, "", "предел подробного назван поверх превью");
+        assert_eq!(on_preview.detailed_trouble, "", "предел подробного назван поверх превью");
 
         let on_detail = overlay.report(Some(&settled(Role::Detailed)), &idle);
-        assert_eq!(on_detail.trouble, cap_line());
+        assert_eq!(on_detail.detailed_trouble, cap_line());
+        assert_eq!(on_detail.trouble, "", "предел подробного повторён вне слов о нём");
     }
 
     /// Предел называет тот растр, который деталь и решает. Превью обязано быть
@@ -2820,11 +2864,34 @@ mod tests {
     fn a_rejected_detail_hands_the_cap_over_to_the_preview() {
         let mut rasters =
             vec![capped(Role::Preview, 4001, 3001, 1), raster(Role::Detailed, Some(meta(1500, 1200)))];
-        rasters[1].trouble = Some("подробный растр не подробнее превью".into());
+        rasters[1].trouble = Some("не подробнее превью: подробный растр на шар не кладётся".into());
         let overlay = overlay(rasters);
 
         assert!(overlay.detail_eclipsed(), "стенд не о том: подробный не отвергнут");
-        assert_eq!(overlay.said(true), format!("подробный растр не подробнее превью; {}", cap_line()));
+        assert_eq!(
+            overlay.said(true),
+            format!("не подробнее превью: подробный растр на шар не кладётся; {}", cap_line())
+        );
+        // Разложенное по тому, о ком сказано: отказ — о подробном, предел —
+        // о превью, которое деталь и решает.
+        let (about_detailed, rest) = overlay.said_split(true);
+        assert_eq!(about_detailed, "не подробнее превью: подробный растр на шар не кладётся");
+        assert_eq!(rest, cap_line());
+    }
+
+    /// Предел детали ложится к подробному растру, когда деталь решает он, и
+    /// к остальному — когда превью; отказ превью и отказ привязки — всегда к
+    /// остальному, под именем подробного файла они читались бы как его.
+    #[test]
+    fn the_split_puts_the_cap_with_whoever_decides_the_detail() {
+        let mut overlay =
+            overlay(vec![raster(Role::Preview, Some(meta(1000, 1000))), capped(Role::Detailed, 4001, 3001, 1)]);
+        overlay.rasters[0].trouble = Some("квиклук не читается".into());
+        overlay.binding_trouble = Some("узлы сетки не годятся".into());
+        let (about_detailed, rest) = overlay.said_split(true);
+        assert_eq!(about_detailed, cap_line(), "подробный решает деталь — предел о нём");
+        assert_eq!(rest, "квиклук не читается; узлы сетки не годятся");
+        assert_eq!(overlay.said(true), format!("квиклук не читается; {}; узлы сетки не годятся", cap_line()));
     }
 
     /// Отвергнутый растр не вправе замолчать предел слоя, даже сравнявшись с
@@ -2835,7 +2902,7 @@ mod tests {
     fn a_rejected_detail_of_equal_width_does_not_mute_the_cap() {
         let mut rasters =
             vec![capped(Role::Preview, 4001, 3001, 1), raster(Role::Detailed, Some(meta(2001, 1501)))];
-        rasters[1].trouble = Some("подробный растр не подробнее превью".into());
+        rasters[1].trouble = Some("не подробнее превью: подробный растр на шар не кладётся".into());
         let overlay = overlay(rasters);
 
         assert!(overlay.detail_eclipsed(), "стенд не о том: равенство обязано быть отказом");

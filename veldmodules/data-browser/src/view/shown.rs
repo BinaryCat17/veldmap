@@ -458,6 +458,11 @@ struct Said {
     whole: Option<String>,
 }
 
+/// Сколько знаков имени файла помещается перед словами о нём. Имя режется
+/// отдельно от слов: срезанные вместе, они теряли бы то, ради чего стоят —
+/// «не подробнее превью» за именем в тридцать знаков не доехало бы до строки.
+const FILE_CHARS: usize = 16;
+
 fn state_said(overlay: &OverlayState) -> Option<Said> {
     let plain = |shown: &str, color| Said { shown: shown.to_string(), color, whole: None };
     let said = match (overlay.on_globe(), overlay.hidden) {
@@ -466,17 +471,63 @@ fn state_said(overlay: &OverlayState) -> Option<Said> {
         // Отказ растра говорится последним и остаётся насовсем: пока слой
         // чего-то ждёт, важнее ожидание, а когда дождался — только он и
         // объясняет, почему приближение больше ничего не даст.
-        (true, false) => match (overlay.progress.said(), overlay.trouble.as_str()) {
-            (Some(said), _) => plain(&said, theme::ACCENT_TEXT),
-            (None, "") => return None,
-            (None, trouble) => Said {
-                shown: format::ellipsize(trouble, TROUBLE_CHARS),
-                color: theme::INK_FAINT,
-                whole: Some(trouble.to_string()),
+        (true, false) => match overlay.progress.said() {
+            Some(said) => plain(&said, theme::ACCENT_TEXT),
+            None => match settled_said(overlay) {
+                Some((shown, whole)) => Said { shown, color: theme::INK_FAINT, whole: Some(whole) },
+                None => return None,
             },
         },
     };
     Some(said)
+}
+
+/// Подпись улёгшегося слоя: имя лежащего подробным файла, перед словами о нём
+/// и только перед ними (`detailed_trouble`), затем остальное (`trouble`).
+/// Предел превью или отказ привязки под именем подробного файла читались бы
+/// как сказанное о нём, поэтому граница между ними идёт с глобуса, а не
+/// проводится здесь. Имя без слов — слой улёгся, и сказать о нём больше
+/// нечего, кроме того, какой файл лёг; остальное идёт за ним через точку с
+/// запятой, своим утверждением. Пусто — нет ни имени, ни слов.
+///
+/// Показанное собирается по частям, каждая своим пределом: имя — [`FILE_CHARS`],
+/// слова о подробном — тем, что осталось от строки, остальное — только если
+/// место ещё есть. Срезанные одним махом, части теряли бы каждая свою суть;
+/// имя режется посередине (края узнаваемы), слова — с хвоста (суть впереди);
+/// целиком всё уходит в подсказку.
+fn settled_said(overlay: &OverlayState) -> Option<(String, String)> {
+    let mut shown: Vec<String> = Vec::new();
+    let mut whole: Vec<String> = Vec::new();
+    let room = |shown: &[String]| {
+        let taken: usize = shown.iter().map(|part| part.chars().count()).sum();
+        TROUBLE_CHARS.saturating_sub(taken + 3)
+    };
+    if let Some(file) = &overlay.detailed {
+        shown.push(format::ellipsize(file, FILE_CHARS));
+        whole.push(file.clone());
+    }
+    if !overlay.detailed_trouble.is_empty() {
+        let said = &overlay.detailed_trouble;
+        let room = if shown.is_empty() { TROUBLE_CHARS } else { room(&shown).max(TROUBLE_CHARS / 4) };
+        shown.push(format::head(said, room));
+        whole.push(said.clone());
+    }
+    let mut shown = shown.join(" · ");
+    let mut whole = whole.join(" · ");
+    if !overlay.trouble.is_empty() {
+        let rest = &overlay.trouble;
+        if whole.is_empty() {
+            shown = format::head(rest, TROUBLE_CHARS);
+            whole = rest.clone();
+        } else {
+            let room = TROUBLE_CHARS.saturating_sub(shown.chars().count() + 2);
+            if room >= TROUBLE_CHARS / 4 {
+                shown = format!("{}; {}", shown, format::head(rest, room));
+            }
+            whole = format!("{}; {}", whole, rest);
+        }
+    }
+    (!whole.is_empty()).then_some((shown, whole))
 }
 
 /// Та же подпись элементом. Врозь с [`state_said`] затем, что её ширину надо
@@ -495,3 +546,62 @@ fn state_label(overlay: &OverlayState) -> Element<Msg> {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::{settled_said, FILE_CHARS, TROUBLE_CHARS};
+    use crate::module::state::overlay::OverlayState;
+
+    fn overlay(detailed: Option<&str>, about_detailed: &str, rest: &str) -> OverlayState {
+        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
+        overlay.detailed = detailed.map(str::to_string);
+        overlay.detailed_trouble = about_detailed.to_string();
+        overlay.trouble = rest.to_string();
+        overlay
+    }
+
+    const REFUSAL: &str = "не подробнее превью: подробный растр на шар не кладётся";
+    const CAP: &str = "подробнее 2001×1501 из 4001×3001 не будет";
+
+    /// Имя файла стоит перед словами о нём и только перед ними: предел превью
+    /// идёт после, за точкой с запятой, без имени. Целиком — в подсказке, а в
+    /// строке имя и слова режутся порознь, так что суть слов доезжает.
+    #[test]
+    fn the_name_goes_before_the_words_about_its_file_only() {
+        let (shown, whole) = settled_said(&overlay(Some("F1_BT_fn.nc"), REFUSAL, CAP)).unwrap();
+        assert_eq!(whole, format!("F1_BT_fn.nc · {}; {}", REFUSAL, CAP));
+        assert!(shown.starts_with("F1_BT_fn.nc · не подробнее"), "{shown}");
+        assert!(shown.chars().count() <= TROUBLE_CHARS, "{shown}");
+        assert!(!shown.contains("4001×3001"), "остальному в строке места нет, оно в подсказке: {shown}");
+
+        // Короткие слова оставляют остальному место — оно дописывается.
+        let (shown, _) = settled_said(&overlay(Some("F1_BT_fn.nc"), "отвергнут", "мал")).unwrap();
+        assert_eq!(shown, "F1_BT_fn.nc · отвергнут; мал");
+
+        // Без слов о подробном имя — своё утверждение, за точкой с запятой;
+        // под точкой посередине предел превью читался бы как сказанное о нём.
+        let (shown, whole) = settled_said(&overlay(Some("F1_BT_fn.nc"), "", CAP)).unwrap();
+        assert_eq!(whole, format!("F1_BT_fn.nc; {}", CAP));
+        assert!(shown.starts_with("F1_BT_fn.nc; подробнее") && !shown.contains(" · "), "{shown}");
+
+        let long = "S3A_SL_1_RBT____20260824T174507_F1_BT_fn.nc";
+        let (shown, whole) = settled_said(&overlay(Some(long), REFUSAL, "")).unwrap();
+        assert_eq!(whole, format!("{} · {}", long, REFUSAL));
+        assert!(shown.contains("не подробнее превью"), "суть слов срезана вместе с именем: {shown}");
+        assert!(shown.find(" · ").is_some_and(|at| shown[..at].chars().count() <= FILE_CHARS), "{shown}");
+    }
+
+    /// Улёгшийся без слов слой называет файл, и только его; без имени и слов
+    /// подписи нет.
+    #[test]
+    fn a_settled_layer_with_nothing_to_say_names_its_file() {
+        assert_eq!(
+            settled_said(&overlay(Some("F1_BT_fn.nc"), "", "")),
+            Some(("F1_BT_fn.nc".to_string(), "F1_BT_fn.nc".to_string()))
+        );
+        assert_eq!(settled_said(&overlay(None, "", "")), None);
+        let (shown, whole) = settled_said(&overlay(None, REFUSAL, "")).unwrap();
+        assert_eq!(whole, REFUSAL, "слова о подробном без имени — как есть");
+        assert!(shown.chars().count() <= TROUBLE_CHARS && shown.starts_with("не подробнее"), "{shown}");
+    }
+}

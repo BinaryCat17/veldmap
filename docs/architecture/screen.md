@@ -321,8 +321,12 @@ groups — two independent states, asked different things — and a scene lying
 as a raster is not listed twice. A hidden layer stays in the set with its
 resources and is not drawn; the header's one button names the action it does —
 hide all, or show all. Where a layer stands is the layer line: assembling,
-hidden, the progress phrase, or the raster's refusal once there is nothing
-left to wait for.
+hidden, the progress phrase, or — once there is nothing left to wait for — the
+name of the file lying as the detailed raster, followed by the words about it
+(its refusal, its detail limit), then the rest (the preview's limit, a binding
+refusal); the name alone when there is nothing to say about it. The globe draws
+that line between the two (`OverlayProgress.detailed_trouble`); the row cuts
+the name and the words separately and hands the whole to the tooltip.
 
 The strip under the globe tab goes the other way (`view::globe`): it names
 the scene — the picked one, else the top visible layer — leads to it by the

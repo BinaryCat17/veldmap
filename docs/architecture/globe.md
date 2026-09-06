@@ -193,7 +193,15 @@ the preview (`Overlay::wanted`, `detail_eclipsed`). A detailed raster whose
 description fails gives its place to the next spare the provider named with
 it (`Raster::spares`, `next_spare`): the same raster, a fresh file, described
 anew — a night SLSTR granule's visible channel is fill, and the thermal one
-behind it carries the data and the binding. From there on — the
+behind it carries the data and the binding. The globe knows no file names;
+each raster carries the sender's `ordinal`, and the one lying detailed rides
+back in `OverlayProgress.detailed`, so the sender can name the file its layer
+row is talking about. The words about that raster — its refusal, and the
+detail limit when it decides the detail — travel apart from the rest
+(`OverlayProgress.detailed_trouble` against `trouble`, `Overlay::said_split`):
+the sender puts the name before them and only them, since the preview's limit
+or a binding refusal under the detailed file's name would read as said of it.
+From there on — the
 target coarsened to the detail limit and the appetite cap, the ladder, the
 store — is the shared mechanics of
 [viewing-pipeline.md](viewing-pipeline.md).

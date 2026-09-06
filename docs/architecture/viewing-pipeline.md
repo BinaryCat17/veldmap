@@ -160,7 +160,16 @@ about an attempt. `Meta::capped` words it once for both consumers
 cannot disagree by a pixel), and it is shown only when the consumer has
 settled — a show is going on and nothing remains to gather — because the
 consumer shows a complaint instead of progress, and a limit over an empty
-canvas would read as "loading is over, this is its ceiling". A large JPEG is
+canvas would read as "loading is over, this is its ceiling". On the globe's
+layer row the verdict stands after the name of the file it is about
+(`OverlayState.detailed`, named by the globe through `OverlayProgress.detailed`),
+and only the words about that file follow the name (`detailed_trouble`); the
+preview's limit comes after, on its own: a detailed raster has spares, and
+"not finer than the preview" said of an unnamed file would read as a word
+about the whole scene, while a preview's limit under the detailed file's name
+would read as its own. The row cuts the name in the middle and the words from
+the tail, each within its own budget, and hands the whole to the tooltip. A
+large JPEG is
 the plain case: its levels are each a pass from themselves, the native frame
 does not fit `FULL_DECODE_BUDGET`, the first fitting row is the first level
 whose decoded frame does, and the target is coarsened to it before the first

@@ -490,6 +490,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             release_coordinates(raster.geolocation);
             continue;
         };
+        let ordinal = raster.ordinal;
         let role = match raster.role() {
             crate::proto::globe::OverlayRole::OverlayPreview => Role::Preview,
             crate::proto::globe::OverlayRole::OverlayDetailed => Role::Detailed,
@@ -518,12 +519,15 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         // Второй растр той же роли — запасной первого, а не сосед: описывается
         // он, только когда первый не описался (см. [`Raster::spares`]).
         if let Some(first) = rasters.iter_mut().find(|raster: &&mut Raster| raster.role == role) {
-            first
-                .spares
-                .push((veldsdk::OwnedResource::new(handle), coordinates.map(veldsdk::OwnedResource::new)));
+            first.spares.push((
+                ordinal,
+                veldsdk::OwnedResource::new(handle),
+                coordinates.map(veldsdk::OwnedResource::new),
+            ));
             continue;
         }
         let mut raster = Raster::new(role, veldsdk::OwnedResource::new(handle.clone()));
+        raster.ordinal = ordinal;
         raster.geolocation = coordinates.clone().map(veldsdk::OwnedResource::new);
 
         let correlation = raster.describe.begin();
@@ -840,7 +844,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
     if overlay.detail_eclipsed()
         && let Some(raster) = overlay.raster_mut(Role::Detailed)
     {
-        let said = "подробный растр не подробнее превью — на шар не кладётся";
+        let said = "не подробнее превью: подробный растр на шар не кладётся";
         if raster.trouble.as_deref() != Some(said) {
             veldsdk::log::info!(target: "handlers", "{}: {}", label, said);
         }
@@ -1525,6 +1529,8 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             blank: false,
             pass_read: 0,
             pass_total: 0,
+            detailed: None,
+            detailed_trouble: String::new(),
         }))
         .collect();
 
