@@ -1,0 +1,12 @@
+# Мутации настольного раннера: часы кадров без окна.
+# Формат — buildgen/mutate.py; крейт — пакет воркспейса veldcore.
+
+имя: кадр рисуется раньше срока
+файл: veldcore/platform/host/runners/desktop/src/main.rs
+было:         if now < self.next {
+стало:         if false {
+
+имя: просроченный кадр догоняет расписание
+файл: veldcore/platform/host/runners/desktop/src/main.rs
+было:         self.next = now + self.period;
+стало:         self.next += self.period;

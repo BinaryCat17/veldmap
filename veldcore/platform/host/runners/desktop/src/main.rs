@@ -30,6 +30,56 @@ struct HostWindow {
     surface: Option<wgpu::BindGroup>,
 }
 
+/// Куда идёт кадр. Окно — обычный запуск: свопчейн, показ, темп от vsync.
+/// Без окна — прогон по сценарию под `run-uitests.py`: ввод там синтетический,
+/// снимок делается со своей текстуры (`capture::shoot`), а окно только
+/// забирало бы у хозяина фокус посреди его работы. Кадры тогда идут своим
+/// часом ([`Pace`]), блит в свопчейн и показ пропускаются; модули рисуют в
+/// свои текстуры, как и с окном.
+enum Screen {
+    Window {
+        window: Arc<winit::window::Window>,
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+    },
+    Offscreen {
+        pace: Pace,
+    },
+}
+
+/// Часы кадров без окна: кадр раз в период, как vsync на экране в 60 Гц.
+/// Не чаще — тик кадра это событие шины с неограниченной очередью, и лишние
+/// кадры копят у модулей отставание (см. `setup::init_wgpu` о темпе); и не
+/// реже, чем просят: просроченный кадр рисуется сразу, а следующий
+/// отсчитывается от него, а не от расписания — догонять пропущенные незачем.
+struct Pace {
+    period: std::time::Duration,
+    next: std::time::Instant,
+}
+
+impl Pace {
+    fn starting(at: std::time::Instant, period: std::time::Duration) -> Self {
+        Self { period, next: at }
+    }
+
+    /// Пора ли рисовать; «да» переносит срок следующего кадра.
+    fn due(&mut self, now: std::time::Instant) -> bool {
+        if now < self.next {
+            return false;
+        }
+        self.next = now + self.period;
+        true
+    }
+
+    /// Срок следующего кадра — до него цикл событий спит.
+    fn deadline(&self) -> std::time::Instant {
+        self.next
+    }
+}
+
+/// Период кадра без окна — экран в 60 Гц.
+const FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+
 /// Публикация UI-события в нейтральный топик app/on_ui_event.
 /// Адресация — в данных: plugin_id называет владельца окна.
 fn publish_ui_event(p: &impl veldmap_host_bindings::Publisher, owner: &str, event: app::ui_event::Event) {
@@ -80,9 +130,10 @@ struct App<'a> {
 
 /// Раннер после инициализации: окно, GPU и загруженные сервисы.
 struct Running {
-    window: Arc<winit::window::Window>,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
+    screen: Screen,
+    /// Формат кадра — свопчейна либо назначенный без окна: под него собран
+    /// блит, и в нём же модулям отданы текстуры окна.
+    format: wgpu::TextureFormat,
     device: Arc<wgpu::Device>,
     queue: Arc<Mutex<wgpu::Queue>>,
     compositor: Compositor,
@@ -156,15 +207,22 @@ impl Running {
         win_cfg: &window::PluginWindowConfig,
     ) -> anyhow::Result<Self> {
         // ── 1. Окно ────────────────────────────────────────────────────────
-        let mut attributes = winit::window::Window::default_attributes()
-            .with_title(win_cfg.title.clone())
-            .with_inner_size(winit::dpi::LogicalSize::new(win_cfg.width as f64, win_cfg.height as f64))
-            .with_resizable(win_cfg.resizable)
-            .with_fullscreen(win_cfg.fullscreen.then_some(winit::window::Fullscreen::Borderless(None)));
-        if let Some(pos) = &win_cfg.position {
-            attributes = attributes.with_position(winit::dpi::LogicalPosition::new(pos.x as f64, pos.y as f64));
-        }
-        let window = Arc::new(event_loop.create_window(attributes)?);
+        // Без окна — прогон по сценарию под run-uitests.py (см. [`Screen`]).
+        let headless = std::env::var_os("VELDMAP_HEADLESS").is_some_and(|v| v == "1");
+        let window = if headless {
+            log::info!(target: "render", "Прогон без окна: кадры своим часом, показ пропускается");
+            None
+        } else {
+            let mut attributes = winit::window::Window::default_attributes()
+                .with_title(win_cfg.title.clone())
+                .with_inner_size(winit::dpi::LogicalSize::new(win_cfg.width as f64, win_cfg.height as f64))
+                .with_resizable(win_cfg.resizable)
+                .with_fullscreen(win_cfg.fullscreen.then_some(winit::window::Fullscreen::Borderless(None)));
+            if let Some(pos) = &win_cfg.position {
+                attributes = attributes.with_position(winit::dpi::LogicalPosition::new(pos.x as f64, pos.y as f64));
+            }
+            Some(Arc::new(event_loop.create_window(attributes)?))
+        };
 
         // ── 2. GPU ──────────────────────────────────────────────────────────
         log::info!(target: "render", "Поднимаем wgpu (только Vulkan)...");
@@ -181,10 +239,16 @@ impl Running {
             flags: (wgpu::InstanceFlags::default() | wgpu::InstanceFlags::ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER).with_env(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let surface = instance.create_surface(window.clone())?;
-        let size = window.inner_size();
+        let surface = match &window {
+            Some(window) => Some(instance.create_surface(window.clone())?),
+            None => None,
+        };
+        let size = match &window {
+            Some(window) => (window.inner_size().width, window.inner_size().height),
+            None => (win_cfg.width as u32, win_cfg.height as u32),
+        };
         let (_adapter, device, queue, surface_config, surface_format, faults) =
-            veldmap_host_core::setup::init_wgpu(&instance, &surface, size.width, size.height).await?;
+            veldmap_host_core::setup::init_wgpu(&instance, surface.as_ref(), size.0, size.1).await?;
 
         // ── 3. Ядро и сервисы ──────────────────────────────────────────────
         let ctx = veldmap_host_core::setup::init_core_services(
@@ -214,17 +278,23 @@ impl Running {
         let script = capture::Script::from_env(
             ctx.config.log_path().parent().unwrap_or(std::path::Path::new(".")),
         )?;
+        if headless && script.is_none() {
+            anyhow::bail!("прогон без окна — только по сценарию (VELDMAP_SCRIPT): без окна приложение некому увидеть и закрыть");
+        }
+        let screen = match (window, surface, surface_config) {
+            (Some(window), Some(surface), Some(config)) => Screen::Window { window, surface, config },
+            _ => Screen::Offscreen { pace: Pace::starting(std::time::Instant::now(), FRAME) },
+        };
 
         Ok(Self {
-            window,
-            surface,
-            surface_config,
+            screen,
+            format: surface_format,
             device,
             queue,
             compositor,
             ctx,
             app_pub,
-            hw: HostWindow { owner: owner_name, size: (size.width, size.height), surface: None },
+            hw: HostWindow { owner: owner_name, size, surface: None },
             format_proto,
             ui_scale: win_cfg.ui_scale,
             cursor_pos: (0.0, 0.0),
@@ -244,7 +314,18 @@ impl Running {
     /// декларации окна. На X11/WSLg winit часто репортит 1.0 даже на HiDPI
     /// (Xft.dpi не задан), поэтому конфиг задаёт нижнюю границу.
     fn effective_scale(&self) -> f32 {
-        (self.window.scale_factor() as f32).max(self.ui_scale)
+        let reported = match &self.screen {
+            Screen::Window { window, .. } => window.scale_factor() as f32,
+            Screen::Offscreen { .. } => 1.0,
+        };
+        reported.max(self.ui_scale)
+    }
+
+    /// Просьба нарисовать кадр — окну; без окна кадры идут своим часом.
+    fn request_redraw(&self) {
+        if let Screen::Window { window, .. } = &self.screen {
+            window.request_redraw();
+        }
     }
 
     /// Детерминированный bootstrap: размер → готовность.
@@ -255,7 +336,7 @@ impl Running {
             &self.app_pub, &self.hw.owner,
             self.hw.size.0, self.hw.size.1, self.effective_scale(), self.format_proto,
         );
-        self.window.request_redraw();
+        self.request_redraw();
     }
 
     fn redraw(&mut self) {
@@ -289,30 +370,33 @@ impl Running {
         }
 
         use wgpu::CurrentSurfaceTexture as Acquired;
-        let frame = match self.surface.get_current_texture() {
-            // Suboptimal — кадр годный, но свопчейн разошёлся с окном; его
-            // рисуем и переконфигурируем со следующего.
-            Acquired::Success(f) | Acquired::Suboptimal(f) => f,
-            Acquired::Lost | Acquired::Outdated => {
-                self.surface.configure(&self.device, &self.surface_config);
-                log::debug!(target: "render", "Поверхность окна перенастроена после потери");
-                self.window.request_redraw();
-                return;
-            }
-            // Таймаут и перекрытое окно — пропуск кадра без перенастройки.
-            // Просьбу нарисовать снова при этом надо повторить: цикл событий
-            // ждёт (`ControlFlow::Wait`), а весь его завод — та самая просьба
-            // в конце `redraw`, до которой этот пропуск не доходит. Без неё
-            // приложение замирает насовсем и молча: ни кадров, ни ввода, ни
-            // строки в логе — а вместе с кадрами встают и часы прогона по
-            // сценарию.
-            other => {
-                log::debug!(target: "render", "Кадр пропущен: поверхность вернула {:?}", other);
-                self.window.request_redraw();
-                return;
-            }
+        let frame = match &self.screen {
+            Screen::Offscreen { .. } => None,
+            Screen::Window { surface, config, .. } => match surface.get_current_texture() {
+                // Suboptimal — кадр годный, но свопчейн разошёлся с окном; его
+                // рисуем и переконфигурируем со следующего.
+                Acquired::Success(f) | Acquired::Suboptimal(f) => Some(f),
+                Acquired::Lost | Acquired::Outdated => {
+                    surface.configure(&self.device, config);
+                    log::debug!(target: "render", "Поверхность окна перенастроена после потери");
+                    self.request_redraw();
+                    return;
+                }
+                // Таймаут и перекрытое окно — пропуск кадра без перенастройки.
+                // Просьбу нарисовать снова при этом надо повторить: цикл событий
+                // ждёт (`ControlFlow::Wait`), а весь его завод — та самая просьба
+                // в конце `redraw`, до которой этот пропуск не доходит. Без неё
+                // приложение замирает насовсем и молча: ни кадров, ни ввода, ни
+                // строки в логе — а вместе с кадрами встают и часы прогона по
+                // сценарию.
+                other => {
+                    log::debug!(target: "render", "Кадр пропущен: поверхность вернула {:?}", other);
+                    self.request_redraw();
+                    return;
+                }
+            },
         };
-        let surface_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let surface_view = frame.as_ref().map(|frame| frame.texture.create_view(&wgpu::TextureViewDescriptor::default()));
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         // 1) Render-опы модулей — в их таргеты (обычно текстура окна).
@@ -348,12 +432,12 @@ impl Running {
             );
         }
 
-        // 2) Блит приаттаченной поверхности в свопчейн.
-        {
+        // 2) Блит приаттаченной поверхности в свопчейн — когда он есть.
+        if let Some(surface_view) = &surface_view {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Compositor Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
+                    view: surface_view,
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.03, a: 1.0 }), store: wgpu::StoreOp::Store },
                     depth_slice: None,
@@ -384,13 +468,15 @@ impl Running {
             queue.submit(Some(encoder.finish()));
             queue.clone()
         };
-        queue.present(frame);
+        if let Some(frame) = frame {
+            queue.present(frame);
+        }
 
         self.play_script();
 
         // Модули рендерят в ответ на Frame-события: цикл кадров живёт
         // на хосте (темп задаёт present_mode/vsync).
-        self.window.request_redraw();
+        self.request_redraw();
     }
 
     /// Левая кнопка сценария там, где сейчас стоит его курсор.
@@ -467,7 +553,7 @@ impl Running {
                         compositor: &self.compositor,
                         surface: self.hw.surface.as_ref(),
                         size: self.hw.size,
-                        format: self.surface_config.format,
+                        format: self.format,
                     };
                     match capture::shoot(frame, &path) {
                         Ok(()) => log::info!(target: "render", "Снимок: {}", path.display()),
@@ -693,10 +779,25 @@ impl ApplicationHandler for App<'_> {
         veldmap_host_core::begin_shutdown();
     }
 
-    /// Сценарий дошёл до `exit` — закрываемся здесь, между кадрами.
+    /// Сценарий дошёл до `exit` — закрываемся здесь, между кадрами. Без окна
+    /// здесь же живёт и кадровый цикл: просить нарисовать некого, кадр
+    /// рисуется по часам, а цикл событий засыпает до следующего срока.
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.running.as_ref().is_some_and(|r| r.exit_requested) {
+        let Some(r) = self.running.as_mut() else { return };
+        if r.exit_requested {
             event_loop.exit();
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due = match &mut r.screen {
+            Screen::Offscreen { pace } => pace.due(now),
+            Screen::Window { .. } => false,
+        };
+        if due {
+            r.redraw();
+        }
+        if let Screen::Offscreen { pace } = &r.screen {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(pace.deadline()));
         }
     }
 
@@ -711,16 +812,18 @@ impl ApplicationHandler for App<'_> {
                 let width = new_size.width.max(1);
                 let height = new_size.height.max(1);
                 if (width, height) != r.hw.size {
-                    r.surface_config.width = width;
-                    r.surface_config.height = height;
-                    r.surface.configure(&r.device, &r.surface_config);
+                    if let Screen::Window { surface, config, .. } = &mut r.screen {
+                        config.width = width;
+                        config.height = height;
+                        surface.configure(&r.device, config);
+                    }
                     r.hw.size = (width, height);
 
                     // Старая поверхность блитится растянутой, пока владелец
                     // не приаттачит новую нужного размера.
                     publish_window_resized(&r.app_pub, &r.hw.owner, width, height, r.effective_scale(), r.format_proto);
                 }
-                r.window.request_redraw();
+                r.request_redraw();
             }
             WindowEvent::RedrawRequested => r.redraw(),
             WindowEvent::CursorMoved { position, .. } => {
@@ -752,7 +855,7 @@ impl ApplicationHandler for App<'_> {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 let scale = (scale_factor as f32).max(r.ui_scale);
                 publish_window_resized(&r.app_pub, &r.hw.owner, r.hw.size.0, r.hw.size.1, scale, r.format_proto);
-                r.window.request_redraw();
+                r.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => {
                 r.key_modifiers = m.state();
@@ -854,4 +957,28 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Pace;
+    use std::time::{Duration, Instant};
+
+    /// Кадр не чаще периода; просроченный рисуется сразу, и следующий
+    /// отсчитывается от него, а не от расписания.
+    #[test]
+    fn frames_keep_the_period_and_do_not_catch_up() {
+        let start = Instant::now();
+        let period = Duration::from_millis(10);
+        let mut pace = Pace::starting(start, period);
+
+        assert!(pace.due(start), "первый кадр — сразу");
+        assert!(!pace.due(start + Duration::from_millis(5)), "раньше срока не рисуем");
+        assert!(pace.due(start + period));
+        assert_eq!(pace.deadline(), start + 2 * period, "срок — период от кадра");
+
+        let late = start + Duration::from_millis(35);
+        assert!(pace.due(late), "просроченный — сразу");
+        assert_eq!(pace.deadline(), late + period, "следующий — от факта, не от расписания");
+    }
 }

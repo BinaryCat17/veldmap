@@ -17,6 +17,17 @@ python3 buildgen/run-uitests.py tabs menus # the named ones
 VELDMAP_SCRIPT=uitests/tabs.txt python3 buildgen/run-native.py   # one, by hand
 ```
 
+**Under the runner there is no window.** `run-uitests.py` sets
+`VELDMAP_HEADLESS=1`, and the host creates none: modules render into their
+textures as always, the frame tick comes from a 60 Hz clock instead of vsync,
+the blit into the swapchain and the present are skipped, and the screenshot is
+composed from the owner's texture, as it always was. Nothing appears on the
+desktop and nothing takes the focus of whoever is working at the machine — so
+a stray click or wheel of theirs cannot break a scenario either. To watch a
+scenario with your own eyes, run it by hand: the third command above opens the
+window. The variable needs a scenario: without one the application would have
+neither a window to see nor a way to close it, and the host refuses to start.
+
 Each scenario is a separate launch, and it starts cold. Two things survive a
 launch and are set aside for the run and restored at the end: the window
 layout (`runtime/state/data-browser.json`), otherwise a scenario would start

@@ -27,17 +27,18 @@ pub fn init_logging(config_dir: &str, host_config: &crate::config::HostConfig) -
 
 /// Поднимает графику: адаптер, устройство, очередь, настройку поверхности и
 /// ловушку отказов видеокарты. Ловушка выходит отсюда потому, что здесь ставят
-/// обработчик ошибок, — а нужна она выделяющему.
+/// обработчик ошибок, — а нужна она выделяющему. Без поверхности (прогон без
+/// окна) настройки нет, а формат кадра назначается.
 pub async fn init_wgpu<'a>(
     instance: &wgpu::Instance,
-    surface: &wgpu::Surface<'a>,
+    surface: Option<&wgpu::Surface<'a>>,
     window_width: u32,
     window_height: u32,
 ) -> anyhow::Result<(
     wgpu::Adapter,
     Arc<wgpu::Device>,
     Arc<Mutex<wgpu::Queue>>,
-    wgpu::SurfaceConfiguration,
+    Option<wgpu::SurfaceConfiguration>,
     wgpu::TextureFormat,
     Arc<crate::memory::GpuFaults>,
 )> {
@@ -70,7 +71,7 @@ pub async fn init_wgpu<'a>(
             log::warn!(target: "render", "Аппаратного адаптера не нашлось — берём программный");
             instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(surface),
+                compatible_surface: surface,
                 force_fallback_adapter: true,
                 ..Default::default()
             }).await.map_err(|e| anyhow::anyhow!("адаптер не выдан: {}", e))?
@@ -113,6 +114,13 @@ pub async fn init_wgpu<'a>(
     });
     let queue_arc = Arc::new(Mutex::new(queue));
 
+    // Без поверхности формат назначается: BGRA8 sRGB — тот же, что свопчейн
+    // Vulkan отдаёт первым среди sRGB, так что блит и текстуры модулей без
+    // окна те же, что с ним; рендер-аттачмент этого формата гарантирован
+    // всюду.
+    let Some(surface) = surface else {
+        return Ok((adapter, device_arc, queue_arc, None, wgpu::TextureFormat::Bgra8UnormSrgb, faults));
+    };
     let caps = surface.get_capabilities(&adapter);
     let surface_format = caps.formats.iter()
         .copied()
@@ -148,7 +156,7 @@ pub async fn init_wgpu<'a>(
     
     surface.configure(&device_arc, &config);
 
-    Ok((adapter, device_arc, queue_arc, config, surface_format, faults))
+    Ok((adapter, device_arc, queue_arc, Some(config), surface_format, faults))
 }
 
 #[derive(Clone)]
