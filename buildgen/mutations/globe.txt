@@ -20,3 +20,8 @@
 файл: veldmodules/globe/src/overlay.rs
 было:                     Role::Preview => rest.push(trouble.clone()),
 стало:                     Role::Preview => about_detailed.push(trouble.clone()),
+
+имя: величина в отчёте — у превью, когда подробный есть
+файл: veldmodules/globe/src/overlay.rs
+было:                 .and_then(|raster| raster.meta.as_ref())
+стало:                 .and_then(|_| self.raster(Role::Preview)).and_then(|raster| raster.meta.as_ref())

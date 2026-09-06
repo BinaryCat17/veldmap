@@ -102,6 +102,12 @@ What each format reads per level is the table in
   one window at a time, so it costs the memory of a window, not of the plane.
   A variable no taller than a tile (`TILE` rows) is one window whatever its
   layout, as the Sentinel-5P NRTI slices in the catalogue are.
+- **The variable of a NetCDF file is the tiler's choice.** It is named — the
+  canvas's properties bar and the layer row say which one is shown, with the
+  file's own words and units (`Described.variable`) — but not chosen:
+  `DescribeRequest` and `ProduceRequest` carry no variable, so a quantity the
+  CF rules rank lower (a second channel, a quality layer, a precision) cannot
+  be shown from the interface.
 - **A JPEG 2000 over the network pays a request per tile-part.** The
   excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) asks one probe of
   `PROBE` bytes per tile-part (`veldmodules/image-tiler/src/adapters/excerpt.rs`),

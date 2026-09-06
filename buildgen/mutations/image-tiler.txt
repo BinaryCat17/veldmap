@@ -160,3 +160,8 @@
 файл: veldmodules/image-tiler/src/adapters/netcdf.rs
 было:         start[rows_axis] = u64::from(row);
 стало:         start[columns_axis] = u64::from(row).min(self.item.shape[columns_axis] - 1);
+
+имя: смотрящему называется первая величина файла, а не выбранная
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:             path: chosen.path.clone(),
+стало:             path: surveyed[0].path.clone(),

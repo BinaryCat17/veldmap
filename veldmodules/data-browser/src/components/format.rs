@@ -131,6 +131,46 @@ pub fn head(text: &str, limit: usize) -> String {
     format!("{}…", kept)
 }
 
+/// Имя величины файла многих величин — последний сегмент её пути в файле:
+/// `/PRODUCT/carbonmonoxide_total_column` → `carbonmonoxide_total_column`.
+/// Группы до него — устройство файла, а не имя.
+pub fn variable_name(path: &str) -> &str {
+    path.rsplit_once('/').map_or(path, |(_, name)| name)
+}
+
+/// Величина словами: имя, единицы и как назвал её файл — что из этого файл
+/// назвал: «carbonmonoxide_total_column, mol m-2 — Vertically integrated CO
+/// column density». Имя первым: оно короче и по нему величину узнают; единицы
+/// сразу за ним, потому что слова файла бывают в полторы строки и режутся с
+/// хвоста ([`head`]) — единицы за ними пропадали бы первыми.
+pub fn variable(path: &str, said: &str, units: &str) -> String {
+    let mut text = variable_name(path).to_string();
+    if !units.is_empty() {
+        text = format!("{}, {}", text, units);
+    }
+    if !said.is_empty() {
+        text = format!("{} — {}", text, said);
+    }
+    text
+}
+
+/// Делит `room` знаков между частями длиной `lengths`: короткие берут своё
+/// целиком, длинные делят остаток поровну. Короткие — первыми: часть, которой
+/// хватает её доли, отдаёт неиспользованное длинным, и ни одна не режется,
+/// пока сумма влезает. Так собирается подсказка из имени файла, величины и
+/// беды: одна строка на троих, и каждый в ней узнаваем.
+pub fn share(lengths: &[usize], room: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&at| lengths[at]);
+    let mut shares = vec![0; lengths.len()];
+    let mut left = room;
+    for (rank, &at) in order.iter().enumerate() {
+        shares[at] = lengths[at].min(left / (lengths.len() - rank));
+        left -= shares[at];
+    }
+    shares
+}
+
 /// Что у всех имён страницы одинаково: сколько знаков совпало в начале и
 /// сколько в хвосте.
 ///
@@ -302,6 +342,31 @@ mod tests {
         assert_eq!(head("не подробнее превью", 40), "не подробнее превью");
         assert_eq!(head("не подробнее", 3), "не подробнее");
         assert_eq!(head("аб вг", 4), "аб…", "пробел перед многоточием висит");
+    }
+
+    /// Имя величины — последний сегмент пути; единицы и слова дописываются
+    /// только названные, единицы раньше слов.
+    #[test]
+    fn a_variable_is_named_by_its_last_segment_then_its_words() {
+        assert_eq!(variable_name("/PRODUCT/carbonmonoxide_total_column"), "carbonmonoxide_total_column");
+        assert_eq!(variable_name("F1_BT_fn"), "F1_BT_fn");
+        assert_eq!(
+            variable("/PRODUCT/carbonmonoxide_total_column", "Vertically integrated CO column", "mol m-2"),
+            "carbonmonoxide_total_column, mol m-2 — Vertically integrated CO column"
+        );
+        assert_eq!(variable("/F1_BT_fn", "", "K"), "F1_BT_fn, K");
+        assert_eq!(variable("/x", "brightness", ""), "x — brightness");
+        assert_eq!(variable("/x", "", ""), "x");
+    }
+
+    /// Короткие части берут своё, длинные делят остаток поровну; влезающее не
+    /// режется.
+    #[test]
+    fn a_line_is_shared_shortest_first() {
+        assert_eq!(share(&[11, 89, 55], 84), vec![11, 37, 36]);
+        assert_eq!(share(&[10, 20], 100), vec![10, 20]);
+        assert_eq!(share(&[50, 50], 60), vec![30, 30]);
+        assert_eq!(share(&[], 60), Vec::<usize>::new());
     }
 
     /// Пара с `date`: то, что она пишет днём, разбор возвращает обратно днём.

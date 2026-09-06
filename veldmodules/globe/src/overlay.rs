@@ -1041,6 +1041,15 @@ impl Overlay {
             pass_total: self.progress.pass.1,
             detailed: self.raster(Role::Detailed).map(|raster| raster.ordinal),
             detailed_trouble,
+            detailed_variable: self
+                .raster(Role::Detailed)
+                .and_then(|raster| raster.meta.as_ref())
+                .and_then(|meta| meta.variable.as_ref())
+                .map(|variable| crate::proto::globe::Variable {
+                    path: variable.path.clone(),
+                    said: variable.said.clone(),
+                    units: variable.units.clone(),
+                }),
         }
     }
 
@@ -2173,6 +2182,7 @@ mod tests {
                 tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true };
                 pyramid::level_count(width, height) as usize
             ],
+            variable: None,
         }
     }
 
@@ -2877,6 +2887,29 @@ mod tests {
         let (about_detailed, rest) = overlay.said_split(true);
         assert_eq!(about_detailed, "не подробнее превью: подробный растр на шар не кладётся");
         assert_eq!(rest, cap_line());
+    }
+
+    /// Величина в отчёте — у лежащего подробным, а не у превью: имя файла
+    /// приславший ставит перед ней, и величина квиклука под именем подробного
+    /// файла читалась бы как его.
+    #[test]
+    fn the_report_names_the_detailed_rasters_variable_not_the_previews() {
+        let with_variable = |path: &str, meta: Meta| Meta {
+            variable: Some(tiles::Variable { path: path.into(), said: String::new(), units: "K".into() }),
+            ..meta
+        };
+        let idle: Passes<&str> = Passes::default();
+        let both = overlay(vec![
+            raster(Role::Preview, Some(with_variable("/quicklook", meta(1000, 1000)))),
+            raster(Role::Detailed, Some(with_variable("/F1_BT_fn", meta(4001, 3001)))),
+        ]);
+        let said = both.report(None, &idle).detailed_variable.expect("величина подробного");
+        assert_eq!((said.path.as_str(), said.units.as_str()), ("/F1_BT_fn", "K"));
+
+        let preview_only = overlay(vec![raster(Role::Preview, Some(with_variable("/quicklook", meta(1000, 1000))))]);
+        assert_eq!(preview_only.report(None, &idle).detailed_variable, None, "величина превью названа подробной");
+        let undescribed = overlay(vec![raster(Role::Detailed, None)]);
+        assert_eq!(undescribed.report(None, &idle).detailed_variable, None);
     }
 
     /// Предел детали ложится к подробному растру, когда деталь решает он, и

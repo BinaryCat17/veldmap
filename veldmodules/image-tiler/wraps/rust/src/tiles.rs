@@ -142,6 +142,19 @@ pub struct Meta {
     /// Строка на уровень пирамиды, от нулевого к вершине; уровней столько,
     /// сколько строк.
     pub rows: Vec<Row>,
+    /// Какая из величин файла показана (`Described.variable`): у файла многих
+    /// величин выбор делает производитель, и смотрящий узнаёт о нём только
+    /// отсюда. Пусто у снимка.
+    pub variable: Option<Variable>,
+}
+
+/// Показываемая величина — как в файле и как файл назвал её словами; см.
+/// `Described.variable`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Variable {
+    pub path: String,
+    pub said: String,
+    pub units: String,
 }
 
 impl Meta {
@@ -226,10 +239,13 @@ impl Meta {
     /// тайлера.
     pub fn note(&self) -> String {
         let peak = self.rows.iter().map(|row| row.bytes).max().unwrap_or(0) / (1024 * 1024);
-        let said = format!(
+        let mut said = format!(
             "{}×{}, уровней {}, {}, пик {} МБ",
             self.width, self.height, self.levels(), table_note(&self.rows), peak
         );
+        if let Some(variable) = &self.variable {
+            said = format!("величина '{}', {}", variable.path, said);
+        }
         match self.capped() {
             Some(limit) => format!("{said}, {limit}"),
             None => said,
@@ -326,7 +342,12 @@ pub fn describe(msg: &crate::proto::Described) -> Result<Meta, String> {
     if msg.fingerprint.is_empty() {
         return Err("источник описан без отпечатка".to_string());
     }
-    Ok(Meta { fingerprint: msg.fingerprint.clone(), width: msg.width, height: msg.height, rows })
+    let variable = msg.variable.as_ref().map(|variable| Variable {
+        path: variable.path.clone(),
+        said: variable.said.clone(),
+        units: variable.units.clone(),
+    });
+    Ok(Meta { fingerprint: msg.fingerprint.clone(), width: msg.width, height: msg.height, rows, variable })
 }
 
 // ── Видеопамять ────────────────────────────────────────────────
@@ -1448,6 +1469,7 @@ mod tests {
             width: 10980,
             height: 10980,
             rows: (0..levels).map(|level| Row { serve: serve(level), bytes: 0, fits: true }).collect(),
+            variable: None,
         }
     }
 
@@ -1510,6 +1532,28 @@ mod tests {
 
         assert_eq!(deep.reachable(), top.reachable(), "предел ушёл ниже вершины пирамиды");
         assert_eq!(deep.reachable(), (501, 376));
+    }
+
+    /// Величина едет с описанием как есть и называется в строке журнала первой:
+    /// у файла многих величин без неё не понять, о чём остальное.
+    #[test]
+    fn величина_описания_доезжает_и_называется() {
+        let variable = crate::proto::Variable {
+            path: "/PRODUCT/carbonmonoxide_total_column".into(),
+            said: "Vertically integrated CO column density".into(),
+            units: "mol m-2".into(),
+        };
+        let meta = describe(&crate::proto::Described { variable: Some(variable), ..described() }).expect("годное");
+        assert_eq!(
+            meta.variable,
+            Some(Variable {
+                path: "/PRODUCT/carbonmonoxide_total_column".into(),
+                said: "Vertically integrated CO column density".into(),
+                units: "mol m-2".into(),
+            })
+        );
+        assert!(meta.note().starts_with("величина '/PRODUCT/carbonmonoxide_total_column', 10980×10980"), "{}", meta.note());
+        assert_eq!(describe(&described()).expect("годное").variable, None, "у снимка величины нет");
     }
 
     /// Растру в один уровень предел ничего не отнимает: вершина у него и есть

@@ -22,6 +22,7 @@ and in the logs. Where one word carries two senses in the tree, both are given.
 | pyramid, level, tile | пирамида, уровень, тайл | level 0 is native resolution and each level halves it; a tile is `TILE` pixels square |
 | overview | копия | a reduced copy of the raster stored inside the same TIFF |
 | chunk | чанк | the smallest readable unit of a raster file: a TIFF tile or strip, a JPEG 2000 codestream tile, an HDF5 chunk; the tiler's grid chunk of a NetCDF variable is a row window |
+| variable | величина | one measured quantity of a NetCDF file: a dataset whose plane of samples the tiler can show; a file holds many, the tiler shows one, chosen by CF rules and named to the viewer (`Described.variable`) |
 | row window | окно строк | the grid chunk of a NetCDF variable: `rows` rows across the full width, read by the HDF5 reader as a region along the plane's row axis — a bundle of the file's chunks up to a tile, or the whole plane when the file's chunk spans the height |
 | tile-part, excerpt | тайл-парт, выдержка | a tile-part is the unit a JPEG 2000 codestream is read in — a tile's data, or a slice of it, behind its own SOT header; an excerpt is the stream the tiler hands the decoder for one tile: the main header, that tile's tile-parts cut at the wanted resolution, and EOC |
 | pass | проход | one sequential read of a source that builds levels through the cascade |

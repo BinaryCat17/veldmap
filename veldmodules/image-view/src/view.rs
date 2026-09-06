@@ -315,6 +315,7 @@ mod tests {
                 tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true };
                 pyramid::level_count(width, height) as usize
             ],
+            variable: None,
         }
     }
 

@@ -1,0 +1,28 @@
+# Гранула Sentinel-5P уровня 2 одним файлом NetCDF (L2__CO) с диска в канве:
+# файл несёт десятки величин, показывается одна — по правилам CF выбирает её
+# тайлер (`netcdf::preferred`), — и без имени смотрящему не понять, на что он
+# смотрит. Имя едет с описанием (`Described.variable`) в состояние канвы
+# (`ViewState.variable`) и стои́т первым в полосе свойств под кадром:
+# «carbonmonoxide_total_column, mol m-2 · 215 × 372 · 332% · …» — слова файла
+# («Vertically integrated CO column») встают, только когда влезают целиком.
+#
+# Нужна гранула на диске: runtime/data/dem/source/S5P_NRTI_L2__CO_____….nc,
+# скачана приложением.
+#
+# Запрос сужает «Скачанное» до одной строки, поэтому значок «Открыть» один.
+# Ждётся имя величины: оно появляется только после того, как файл открыт,
+# описан и канва рассказала о показе, — то есть доказывает весь путь имени.
+100 timeout 60000
+500 wait tab_menu
+700 tap tab_menu
+1100 tap new_tab:downloaded
+1900 wait query
+2100 tap query
+2400 type S5P_NRTI_L2__CO
+3400 wait preview#1
+3600 tap preview#1
+4400 wait preview_fit
+4600 wait text:carbonmonoxide_total_column
+5400 absent text:не изображение
+5600 shot uitest-s5p
+5800 exit

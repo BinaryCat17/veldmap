@@ -480,6 +480,16 @@ log (`skipped`), and a file with no candidate at all is refused with
 as a `Layout`: the row grid, the sample type, the fill mark and the stretch
 computed from the same sample (`mapping`); no samples stay in the memo.
 
+**The choice is named, not offered.** The winner leaves describe as
+`Info.variable` too — its path in the file, its `long_name` or
+`standard_name`, its `units` as written — and travels as `Described.variable`
+into the consumers' `Meta.variable`: the canvas reports it in
+`ViewState.variable` and its properties bar names it first, the globe reports
+the detailed raster's in `OverlayProgress.detailed_variable` and the layer row
+names it after the file. Nothing travels the other way: `DescribeRequest` and
+`ProduceRequest` carry no variable, so the file shows the variable these rules
+pick and no other ([limitations](../limitations.md)).
+
 **Marks and packing.** `_FillValue` (`Item.fill`) is the nodata mark of the
 display. `scale_factor` and `add_offset` are not applied to the shown quantity
 (`mapping`): the transform is linear and increasing, the stretch is by

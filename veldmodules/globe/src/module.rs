@@ -1531,6 +1531,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             pass_total: 0,
             detailed: None,
             detailed_trouble: String::new(),
+            detailed_variable: None,
         }))
         .collect();
 

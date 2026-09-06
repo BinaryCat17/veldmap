@@ -33,7 +33,7 @@ use crate::proto::image_tiler::{
     TileAddr, TileResult as ProducedTile,
 };
 use crate::proto::image_view::{
-    camera_command::Command, CameraCommand, Canvas, CloseView, ShowRequest, ViewState,
+    camera_command::Command, CameraCommand, Canvas, CloseView, ShowRequest, Variable, ViewState,
 };
 use crate::proto::tile_cache::{
     QueryDone, QueryRequest, TileAddr as QueryAddr, TileResult as CachedTile,
@@ -798,6 +798,11 @@ fn view_state(
         // виду место не нужно: канвы для него в разметке всё равно нет, и
         // текстура под неё выделилась бы впустую.
         needs_place: view.target.is_none() && view.shown.is_some() && view.error.is_none(),
+        variable: meta.and_then(|meta| meta.variable.as_ref()).map(|variable| Variable {
+            path: variable.path.clone(),
+            said: variable.said.clone(),
+            units: variable.units.clone(),
+        }),
     }
 }
 
@@ -833,6 +838,7 @@ mod tests {
                 rows: (0..pyramid::level_count(4001, 3001))
                     .map(|level| tiles::Row { serve: tiles::Serve::Pass { from: level }, bytes: 0, fits: level >= 1 })
                     .collect(),
+                variable: None,
             }),
         });
 
@@ -857,6 +863,38 @@ mod tests {
         let midway = view_state(&view, "снимок", Some(&climbing), &idle);
         assert!(midway.working, "стенд не о том: лестница считается пройденной");
         assert_eq!(midway.trouble, "", "предел объявлен на полпути к цели");
+    }
+
+    /// Величина описания доезжает до заказчика как есть — и только когда
+    /// источник описан: без описания полю неоткуда взяться.
+    #[test]
+    fn величина_описания_доезжает_до_заказчика() {
+        use super::view::{Shown, View};
+        use veldmap_image_tiler_wrap::tiles::{self, Meta, Passes};
+
+        let idle: Passes<String> = Passes::default();
+        let mut view = View::new("снимок".into());
+        assert_eq!(view_state(&view, "снимок", None, &idle).variable, None);
+
+        view.shown = Some(Shown {
+            resource: veldsdk::OwnedResource::from_raw_id(1),
+            meta: Some(Meta {
+                fingerprint: "t".into(),
+                width: 215,
+                height: 372,
+                rows: vec![tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true }],
+                variable: Some(tiles::Variable {
+                    path: "/PRODUCT/carbonmonoxide_total_column".into(),
+                    said: "Vertically integrated CO column".into(),
+                    units: "mol m-2".into(),
+                }),
+            }),
+        });
+        let said = view_state(&view, "снимок", None, &idle).variable.expect("величина описана");
+        assert_eq!(
+            (said.path.as_str(), said.said.as_str(), said.units.as_str()),
+            ("/PRODUCT/carbonmonoxide_total_column", "Vertically integrated CO column", "mol m-2")
+        );
     }
 
     /// Пока рябить нечему, огрублённая фаза стои́т — и кадр, собранный из неё,

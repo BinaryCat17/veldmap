@@ -163,7 +163,10 @@ consumer shows a complaint instead of progress, and a limit over an empty
 canvas would read as "loading is over, this is its ceiling". On the globe's
 layer row the verdict stands after the name of the file it is about
 (`OverlayState.detailed`, named by the globe through `OverlayProgress.detailed`),
-and only the words about that file follow the name (`detailed_trouble`); the
+then the variable it shows when there is nothing worse to say about it
+(`detailed_variable`; the tooltip has it whatever the row shows), and only the
+words about that
+file follow the name (`detailed_trouble`); the
 preview's limit comes after, on its own: a detailed raster has spares, and
 "not finer than the preview" said of an unnamed file would read as a word
 about the whole scene, while a preview's limit under the detailed file's name

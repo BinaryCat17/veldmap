@@ -34,7 +34,7 @@ use veldmap_tile_cache_wrap::tile::TILE_FORMAT;
 
 use crate::proto::image_tiler::{
     Described, DescribeRequest, GeoTie, Level, Placement, ProduceDone, ProduceProgress,
-    ProduceRequest, Serve, TileResult,
+    ProduceRequest, Serve, TileResult, Variable,
 };
 use crate::proto::tile_cache::StoreTile;
 
@@ -266,6 +266,11 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
             y0: found.affine[5],
         }),
         error: String::new(),
+        variable: info.variable.as_ref().map(|variable| Variable {
+            path: variable.path.clone(),
+            said: variable.said.clone(),
+            units: variable.units.clone(),
+        }),
         // Оговорка едет ровно тогда, когда привязки в ответе нет: обещано полем
         // «привязку взять не удалось», и присланная вместе со взятой привязкой
         // она называла бы беду там, где её нет. Ловится это здесь, а не у

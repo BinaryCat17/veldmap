@@ -26,6 +26,17 @@ use crate::module::{theme, Msg, ViewMsg};
 /// Сколько места оставить имени в тулбаре: всё, кроме кнопок масштаба.
 const CONTROLS_WIDTH: f32 = 230.0;
 
+/// Сколько ширины полосы свойств отдано ходу показа справа: он появляется и
+/// исчезает на ходу, и величина, занявшая его место, толкала бы его за край.
+const PROGRESS_WIDTH: f32 = 260.0;
+
+/// Меньше этого знаков величине не оставляют: имя с единицами должно быть
+/// узнаваемо и в узкой панели, пусть и срезанным.
+const VARIABLE_CHARS_FLOOR: usize = 16;
+
+/// Разделитель фактов полосы; его ширина входит в счёт места под величину.
+const FACT_SEPARATOR: &str = "   ·   ";
+
 pub fn view(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     // Отказ вытесняет канву: показывать поверх мёртвого кадра нечего, а
     // причина отказа — единственное, что тут можно сообщить. Неполный кадр
@@ -40,7 +51,7 @@ pub fn view(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg>
         theme::hairline(theme::LINE_SOFT),
         container(body).background(theme::CHROME).width(Length::Fill).height(Length::Fill),
         theme::hairline(theme::LINE),
-        properties(state, preview),
+        properties(state, view, preview),
     ]
     .width(Length::Fill)
     .height(Length::Fill)
@@ -149,7 +160,7 @@ fn progress_line(preview: &PreviewState) -> Option<String> {
 /// Размеры — от канвы (описал тайлер); размер и время на диске — из библиотеки,
 /// и только у скачанного: за удалённым записи нет. Ничего из этого не
 /// вычисляется здесь — полоса только называет.
-fn properties(state: &State, preview: &PreviewState) -> Element<Msg> {
+fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     let entry = preview.entry.as_ref().and_then(|name| {
         state.library.entries.iter().find(|entry| &entry.name == name)
     });
@@ -172,8 +183,27 @@ fn properties(state: &State, preview: &PreviewState) -> Element<Msg> {
         }
     }
 
+    // Чем снимок является — первым: у файла многих величин размеры без имени
+    // величины не говорят, что́ показано. Ей достаётся то, что остальные факты
+    // и место под ход показа оставили от ширины панели — полоса одной строкой
+    // и не переносится. Слова файла бывают в полторы строки и встают только
+    // целиком: обрезанные, они читались бы хуже, чем имя с единицами без них.
+    if let Some(variable) = preview.view_state.as_ref().and_then(|view| view.variable.as_ref()) {
+        let taken: usize =
+            facts.iter().map(|fact| fact.chars().count() + FACT_SEPARATOR.chars().count()).sum();
+        let room = format::mono_fit(state.pane_width(view) - PROGRESS_WIDTH, theme::TEXT_SMALL)
+            .saturating_sub(taken)
+            .max(VARIABLE_CHARS_FLOOR);
+        let full = format::variable(&variable.path, &variable.said, &variable.units);
+        let said = match full.chars().count() <= room {
+            true => full,
+            false => format::head(&format::variable(&variable.path, "", &variable.units), room),
+        };
+        facts.insert(0, said);
+    }
+
     let mut parts: Vec<Element<Msg>> = vec![
-        mono::<Msg>(facts.join("   ·   "))
+        mono::<Msg>(facts.join(FACT_SEPARATOR))
             .size(theme::TEXT_SMALL)
             .color(theme::INK_SOFT)
             .single_line()

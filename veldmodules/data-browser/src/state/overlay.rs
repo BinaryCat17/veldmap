@@ -11,7 +11,7 @@
 
 use veldsdk::proto::core::ResourceHandle;
 
-use crate::proto::globe::{OverlayRaster, UtmFrame};
+use crate::proto::globe::{OverlayRaster, UtmFrame, Variable};
 use super::ViewId;
 
 pub struct OverlayState {
@@ -71,6 +71,11 @@ pub struct OverlayState {
     /// он (`OverlayProgress.detailed_trouble`); в `trouble` этого нет. Имя
     /// файла ставится перед этим и только перед этим.
     pub detailed_trouble: String,
+    /// Какая величина лежащего подробным файла показана
+    /// (`OverlayProgress.detailed_variable`): у файла многих величин выбор
+    /// делает тайлер, и в строке слоя это единственное место, где он назван.
+    /// Пусто — подробного нет, не описан или величина у него одна (снимок).
+    pub variable: Option<Variable>,
     /// Растры, уже переданные глобусу, и рамка, уехавшая вместе с ними.
     /// Владения за ними больше нет — это имена, которыми набор пересылается
     /// целиком, когда меняется его состав или показ: глобус узнаёт по ним, что
@@ -105,6 +110,7 @@ impl OverlayState {
             files: Vec::new(),
             detailed: None,
             detailed_trouble: String::new(),
+            variable: None,
             rasters: Vec::new(),
             utm: None,
         }

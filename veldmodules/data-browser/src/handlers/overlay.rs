@@ -700,6 +700,7 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
         };
         overlay.trouble = said.trouble.clone();
         overlay.detailed_trouble = said.detailed_trouble.clone();
+        overlay.variable = said.detailed_variable.clone();
         // Номер от глобуса — в имя файла: глобус имён не знает, а строке слоя
         // нужно имя, и стоять оно обязано рядом с приговором о том же файле.
         overlay.detailed = said
@@ -925,6 +926,25 @@ mod tests {
         assert_eq!(state.overlays[0].detailed, None);
         on_overlay_progress(&mut state, progress(Some(9)));
         assert_eq!(state.overlays[0].detailed, None, "номер вне ответа — имени нет");
+
+        // Величина едет с тем же отчётом и хранится как приехала: словами её
+        // называет строка слоя.
+        let variable = crate::proto::globe::Variable {
+            path: "/F1_BT_fn".to_string(),
+            said: "brightness temperature".to_string(),
+            units: "K".to_string(),
+        };
+        on_overlay_progress(&mut state, crate::proto::globe::OverlaysProgress {
+            overlays: vec![crate::proto::globe::OverlayProgress {
+                key: "scene".to_string(),
+                detailed: Some(2),
+                detailed_variable: Some(variable.clone()),
+                ..Default::default()
+            }],
+        });
+        assert_eq!(state.overlays[0].variable, Some(variable));
+        on_overlay_progress(&mut state, progress(Some(2)));
+        assert_eq!(state.overlays[0].variable, None, "отчёт без величины снимает прежнюю");
     }
 
     /// Имя файла — последний сегмент ключа; ключ папки называется папкой, а

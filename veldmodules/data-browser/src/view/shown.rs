@@ -463,6 +463,11 @@ struct Said {
 /// «не подробнее превью» за именем в тридцать знаков не доехало бы до строки.
 const FILE_CHARS: usize = 16;
 
+/// Сколько знаков в подсказке: одна строка, шире окна ей не быть — тот же
+/// предел, что у списка загрузок. Части подписи делят её между собой
+/// ([`format::share`]), каждая режется своим способом.
+const TOOLTIP_CHARS: usize = 90;
+
 fn state_said(overlay: &OverlayState) -> Option<Said> {
     let plain = |shown: &str, color| Said { shown: shown.to_string(), color, whole: None };
     let said = match (overlay.on_globe(), overlay.hidden) {
@@ -482,52 +487,86 @@ fn state_said(overlay: &OverlayState) -> Option<Said> {
     Some(said)
 }
 
-/// Подпись улёгшегося слоя: имя лежащего подробным файла, перед словами о нём
-/// и только перед ними (`detailed_trouble`), затем остальное (`trouble`).
-/// Предел превью или отказ привязки под именем подробного файла читались бы
-/// как сказанное о нём, поэтому граница между ними идёт с глобуса, а не
-/// проводится здесь. Имя без слов — слой улёгся, и сказать о нём больше
-/// нечего, кроме того, какой файл лёг; остальное идёт за ним через точку с
-/// запятой, своим утверждением. Пусто — нет ни имени, ни слов.
+/// Подпись улёгшегося слоя: имя лежащего подробным файла, его величина
+/// (`variable`) и слова о нём — только о нём (`detailed_trouble`), — затем
+/// остальное (`trouble`). Предел превью или отказ привязки под именем
+/// подробного файла читались бы как сказанное о нём, поэтому граница между
+/// ними идёт с глобуса, а не проводится здесь. Имя без слов — слой улёгся, и
+/// сказать о нём больше нечего, кроме того, какой файл лёг и какая его
+/// величина; остальное идёт за ним через точку с запятой, своим утверждением.
+/// Пусто — нет ни имени, ни слов.
 ///
 /// Показанное собирается по частям, каждая своим пределом: имя — [`FILE_CHARS`],
 /// слова о подробном — тем, что осталось от строки, остальное — только если
-/// место ещё есть. Срезанные одним махом, части теряли бы каждая свою суть;
-/// имя режется посередине (края узнаваемы), слова — с хвоста (суть впереди);
-/// целиком всё уходит в подсказку.
+/// место ещё есть. Величина в строке стои́т, пока о файле нечего сказать
+/// хуже: слова о беде старше имени того, что не показалось. Подсказка — та же
+/// подпись целиком, насколько её строка ([`TOOLTIP_CHARS`]) вмещает: части
+/// делят строку поровну, короткие берут своё ([`format::share`]), так что имя
+/// с единицами величины и суть беды доезжают при любом имени файла. Имя
+/// режется посередине (края узнаваемы), слова — с хвоста (суть впереди).
 fn settled_said(overlay: &OverlayState) -> Option<(String, String)> {
+    /// Как режется часть: имя — серединой, слова — хвостом.
+    enum Cut {
+        Middle,
+        Tail,
+    }
     let mut shown: Vec<String> = Vec::new();
-    let mut whole: Vec<String> = Vec::new();
+    // Части подсказки целиком, с тем, как каждую резать; остальное — последней.
+    let mut parts: Vec<(String, Cut)> = Vec::new();
     let room = |shown: &[String]| {
         let taken: usize = shown.iter().map(|part| part.chars().count()).sum();
-        TROUBLE_CHARS.saturating_sub(taken + 3)
+        match shown.is_empty() {
+            true => TROUBLE_CHARS,
+            false => TROUBLE_CHARS.saturating_sub(taken + 3).max(TROUBLE_CHARS / 4),
+        }
     };
     if let Some(file) = &overlay.detailed {
         shown.push(format::ellipsize(file, FILE_CHARS));
-        whole.push(file.clone());
+        parts.push((file.clone(), Cut::Middle));
+    }
+    if let Some(variable) = &overlay.variable {
+        if overlay.detailed_trouble.is_empty() {
+            shown.push(format::head(format::variable_name(&variable.path), room(&shown)));
+        }
+        parts.push((format::variable(&variable.path, &variable.said, &variable.units), Cut::Tail));
     }
     if !overlay.detailed_trouble.is_empty() {
         let said = &overlay.detailed_trouble;
-        let room = if shown.is_empty() { TROUBLE_CHARS } else { room(&shown).max(TROUBLE_CHARS / 4) };
-        shown.push(format::head(said, room));
-        whole.push(said.clone());
+        shown.push(format::head(said, room(&shown)));
+        parts.push((said.clone(), Cut::Tail));
     }
     let mut shown = shown.join(" · ");
-    let mut whole = whole.join(" · ");
+    let about_detailed = parts.len();
     if !overlay.trouble.is_empty() {
         let rest = &overlay.trouble;
-        if whole.is_empty() {
+        if about_detailed == 0 {
             shown = format::head(rest, TROUBLE_CHARS);
-            whole = rest.clone();
         } else {
             let room = TROUBLE_CHARS.saturating_sub(shown.chars().count() + 2);
             if room >= TROUBLE_CHARS / 4 {
                 shown = format!("{}; {}", shown, format::head(rest, room));
             }
-            whole = format!("{}; {}", whole, rest);
         }
+        parts.push((rest.clone(), Cut::Tail));
     }
-    (!whole.is_empty()).then_some((shown, whole))
+    if parts.is_empty() {
+        return None;
+    }
+    // Разделители — по три знака на стык (« · » длиннее «; » на один, и это
+    // запас, а не недостача).
+    let lengths: Vec<usize> = parts.iter().map(|(text, _)| text.chars().count()).collect();
+    let shares = format::share(&lengths, TOOLTIP_CHARS.saturating_sub(3 * (parts.len() - 1)));
+    let mut whole = String::new();
+    for (at, ((text, cut), share)) in parts.into_iter().zip(shares).enumerate() {
+        if at > 0 {
+            whole.push_str(if at < about_detailed { " · " } else { "; " });
+        }
+        whole.push_str(&match cut {
+            Cut::Middle => format::ellipsize(&text, share),
+            Cut::Tail => format::head(&text, share),
+        });
+    }
+    Some((shown, whole))
 }
 
 /// Та же подпись элементом. Врозь с [`state_said`] затем, что её ширину надо
@@ -536,9 +575,9 @@ fn state_label(overlay: &OverlayState) -> Element<Msg> {
     let Some(said) = state_said(overlay) else { return theme::nothing() };
     let label = text::<Msg>(said.shown).size(theme::TEXT_SMALL).color(said.color).single_line();
     match said.whole {
-        // Подсказка идёт одной строкой и шире окна не влезет — ужимаем и её,
-        // тем же пределом, что и у списка загрузок.
-        Some(whole) => tooltip(label, format::ellipsize(&whole, 90), TooltipPosition::TooltipTop)
+        // Подсказка собрана в свою строку ([`TOOLTIP_CHARS`]); срез здесь —
+        // страховка, а не правило.
+        Some(whole) => tooltip(label, format::ellipsize(&whole, TOOLTIP_CHARS), TooltipPosition::TooltipTop)
             .style(theme::panel())
             .text_size(theme::TEXT_SMALL)
             .into(),
@@ -549,7 +588,7 @@ fn state_label(overlay: &OverlayState) -> Element<Msg> {
 
 #[cfg(test)]
 mod tests {
-    use super::{settled_said, FILE_CHARS, TROUBLE_CHARS};
+    use super::{settled_said, FILE_CHARS, TOOLTIP_CHARS, TROUBLE_CHARS};
     use crate::module::state::overlay::OverlayState;
 
     fn overlay(detailed: Option<&str>, about_detailed: &str, rest: &str) -> OverlayState {
@@ -558,6 +597,46 @@ mod tests {
         overlay.detailed_trouble = about_detailed.to_string();
         overlay.trouble = rest.to_string();
         overlay
+    }
+
+    fn with_variable(mut overlay: OverlayState) -> OverlayState {
+        overlay.variable = Some(crate::proto::globe::Variable {
+            path: "/PRODUCT/carbonmonoxide_total_column".to_string(),
+            said: "Vertically integrated CO column".to_string(),
+            units: "mol m-2".to_string(),
+        });
+        overlay
+    }
+
+    /// Величина стои́т за именем файла, пока о нём нечего сказать хуже; при
+    /// словах о беде она остаётся в подсказке — перед словами, словами файла.
+    #[test]
+    fn the_variable_follows_the_name_until_there_is_trouble_to_tell() {
+        let (shown, whole) = settled_said(&with_variable(overlay(Some("S5P_CO.nc"), "", ""))).unwrap();
+        assert_eq!(whole, "S5P_CO.nc · carbonmonoxide_total_column, mol m-2 — Vertically integrated CO column");
+        assert_eq!(shown, "S5P_CO.nc · carbonmonoxide_total_column");
+
+        let (shown, whole) = settled_said(&with_variable(overlay(Some("S5P_CO.nc"), REFUSAL, ""))).unwrap();
+        assert!(whole.starts_with("S5P_CO.nc · carbonmonoxide_total_column, mol m-2") && whole.contains(" · не подробнее превью: подробный растр"), "{whole}");
+        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
+        assert!(shown.starts_with("S5P_CO.nc · не подробнее") && !shown.contains("carbonmonoxide"), "{shown}");
+    }
+
+    /// Подсказка — одна строка на всех: имя файла в восемьдесят знаков не
+    /// выталкивает из неё ни имя величины с единицами, ни суть беды. Части
+    /// делят строку поровну, короткие берут своё.
+    #[test]
+    fn the_tooltip_shares_its_line_so_every_part_is_recognisable() {
+        let long = "S5P_NRTI_L2__CO_____20260827T161616_20260827T162116_45971_03_020901_20260827T164732.nc";
+        let (_, whole) = settled_said(&with_variable(overlay(Some(long), "", ""))).unwrap();
+        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
+        assert!(whole.starts_with("S5P_NRTI_L2__CO_____") && whole.contains(".nc · carbonmonoxide_total_column, mol m-2"), "{whole}");
+
+        let (_, whole) = settled_said(&with_variable(overlay(Some(long), REFUSAL, CAP))).unwrap();
+        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
+        for part in ["S5P_NRTI_L", ".nc · carbonmonoxide_tota", " · не подробнее превью", "; подробнее 2001"] {
+            assert!(whole.contains(part), "в подсказке нет «{part}»: {whole}");
+        }
     }
 
     const REFUSAL: &str = "не подробнее превью: подробный растр на шар не кладётся";
@@ -569,7 +648,10 @@ mod tests {
     #[test]
     fn the_name_goes_before_the_words_about_its_file_only() {
         let (shown, whole) = settled_said(&overlay(Some("F1_BT_fn.nc"), REFUSAL, CAP)).unwrap();
-        assert_eq!(whole, format!("F1_BT_fn.nc · {}; {}", REFUSAL, CAP));
+        // Подсказка — одна строка на троих: суть отказа и начало предела
+        // доезжают оба, срезанные с хвоста.
+        assert!(whole.starts_with("F1_BT_fn.nc · не подробнее превью: подробный растр") && whole.contains("; подробнее 2001"), "{whole}");
+        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
         assert!(shown.starts_with("F1_BT_fn.nc · не подробнее"), "{shown}");
         assert!(shown.chars().count() <= TROUBLE_CHARS, "{shown}");
         assert!(!shown.contains("4001×3001"), "остальному в строке места нет, оно в подсказке: {shown}");
@@ -586,7 +668,8 @@ mod tests {
 
         let long = "S3A_SL_1_RBT____20260824T174507_F1_BT_fn.nc";
         let (shown, whole) = settled_said(&overlay(Some(long), REFUSAL, "")).unwrap();
-        assert_eq!(whole, format!("{} · {}", long, REFUSAL));
+        assert!(whole.starts_with(long) && whole.contains(" · не подробнее превью: подробный растр"), "{whole}");
+        assert!(whole.chars().count() <= TOOLTIP_CHARS, "{whole}");
         assert!(shown.contains("не подробнее превью"), "суть слов срезана вместе с именем: {shown}");
         assert!(shown.find(" · ").is_some_and(|at| shown[..at].chars().count() <= FILE_CHARS), "{shown}");
     }

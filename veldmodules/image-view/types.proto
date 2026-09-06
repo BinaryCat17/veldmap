@@ -107,4 +107,19 @@ message ViewState {
   uint32 total = 12;
   uint32 step = 13;
   uint32 steps = 14;
+  // Какая величина файла показана (из описания тайлера, `Described.variable`):
+  // у файла многих величин выбор делает тайлер, и смотрящему его иначе не
+  // видно. Пусто — источник не описан или величина одна и без имени (снимок).
+  optional Variable variable = 15;
+}
+
+// Показываемая величина файла многих величин — как в файле и как файл назвал
+// её словами; то же, что `Described.variable` тайлера.
+message Variable {
+  // Путь внутри файла (`/PRODUCT/carbonmonoxide_total_column`).
+  string path = 1;
+  // `long_name` либо `standard_name`; пусто — файл не назвал.
+  string said = 2;
+  // `units`, как записано в файле; пусто — не записано.
+  string units = 3;
 }

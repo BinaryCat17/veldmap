@@ -114,6 +114,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         // атрибутами; у GeoTIFF место записано самим растром.
         frame: None,
         binding_trouble,
+        variable: None,
     })
 }
 

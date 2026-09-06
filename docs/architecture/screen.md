@@ -120,6 +120,18 @@ ownership passes to the screen, and the screen hands it on to the canvas or
 the globe (see [resources](resources.md)). The bookkeeping of the wait is the
 caller's own — a preview tab, an overlay assembly — and so is the correlation.
 
+## The preview tab
+
+A preview tab is a frame the canvas (`image-view`) draws into a texture the
+screen delegates to it, a toolbar with the name and the scale, and a bar under
+the frame (`view::preview`). What the canvas shows it reports back
+(`ViewState`), and the bar only names it: the variable first, for a file of
+many (`ViewState.variable`, in the file's words and units), then the source
+size, the scale, and the library's size and date for a downloaded file. The
+bar is one line and does not wrap, so the variable gets what the other facts
+and the room kept for the progress phrase leave of the pane's width: the
+file's words only when they fit whole, else the name and units alone.
+
 ## Names, page numbers, columns
 
 **A name in a list is trimmed by what tells rows apart.** Cutting the middle
@@ -324,9 +336,13 @@ hide all, or show all. Where a layer stands is the layer line: assembling,
 hidden, the progress phrase, or — once there is nothing left to wait for — the
 name of the file lying as the detailed raster, followed by the words about it
 (its refusal, its detail limit), then the rest (the preview's limit, a binding
-refusal); the name alone when there is nothing to say about it. The globe draws
-that line between the two (`OverlayProgress.detailed_trouble`); the row cuts
-the name and the words separately and hands the whole to the tooltip.
+refusal); the name and the variable it shows (`OverlayProgress.detailed_variable`,
+a NetCDF file holds many) when there is nothing to say about it. The globe
+draws that line between the two (`OverlayProgress.detailed_trouble`); the row
+cuts the name and the words separately, and the tooltip carries the same
+parts on one line of `TOOLTIP_CHARS`, shared so that the short ones stay whole
+(`format::share`): the variable is there whatever the row shows, its name and
+units before the file's words, which are cut from the tail.
 
 The strip under the globe tab goes the other way (`view::globe`): it names
 the scene — the picked one, else the top visible layer — leads to it by the

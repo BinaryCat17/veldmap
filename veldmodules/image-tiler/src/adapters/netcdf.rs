@@ -655,6 +655,13 @@ fn told(
         placement: None,
         frame: frame(&globals(file)),
         binding_trouble,
+        // Выбор назван смотрящему: которая из десятков величин файла легла на
+        // экран, иначе не узнать — строка журнала выше ему не видна.
+        variable: Some(super::Variable {
+            path: chosen.path.clone(),
+            said: chosen.said.clone(),
+            units: chosen.units.clone(),
+        }),
     })
 }
 
@@ -860,7 +867,8 @@ struct Item {
     packing: (f64, f64),
     /// `long_name` или `standard_name`, если файл их назвал.
     said: String,
-    /// Что записано в `units`, приведённое к нижнему регистру.
+    /// Что записано в `units`, как записано: смотрящему единицы показываются
+    /// теми же буквами («K»), а сравнения с CF ведутся в нижнем регистре.
     units: String,
     /// Имена из `coordinates`, разрешённые в пути файла.
     coordinates: Vec<String>,
@@ -994,7 +1002,7 @@ fn describe_item(file: &File, full: &str, group: &str, depth: usize) -> Option<I
             attrs.get("add_offset").and_then(number).map_or(0.0, f64::from),
         ),
         said,
-        units: text(&attrs, "units").to_ascii_lowercase(),
+        units: text(&attrs, "units"),
         coordinates,
         ancillary,
         shape,
@@ -1589,7 +1597,7 @@ fn grid(items: &[Item], chosen: &Item, file: &File) -> Option<(Vec<f64>, Vec<f64
 /// другое. По первому слову, а не по вхождению: «m s-1» — это скорость.
 fn timing(item: &Item) -> bool {
     matches!(
-        item.units.split_whitespace().next().unwrap_or_default(),
+        item.units.split_whitespace().next().unwrap_or_default().to_ascii_lowercase().as_str(),
         "s" | "sec" | "secs" | "second" | "seconds"
             | "ms" | "millisecond" | "milliseconds"
             | "us" | "microsecond" | "microseconds"
@@ -1619,11 +1627,13 @@ fn angular(units: &str) -> bool {
 /// Широта ли это. По единицам измерения — так CF велит их и записывать; имя
 /// величины при этом бывает любым (`lat`, `latitude`, `LATITUDE`).
 fn northing(item: &Item) -> bool {
-    item.units.starts_with("degrees_north") || item.units.starts_with("degree_north")
+    let units = item.units.to_ascii_lowercase();
+    units.starts_with("degrees_north") || units.starts_with("degree_north")
 }
 
 fn easting(item: &Item) -> bool {
-    item.units.starts_with("degrees_east") || item.units.starts_with("degree_east")
+    let units = item.units.to_ascii_lowercase();
+    units.starts_with("degrees_east") || units.starts_with("degree_east")
 }
 
 // ── Мелочь ─────────────────────────────────────────────────────
@@ -2433,6 +2443,10 @@ mod tests {
         assert!(!timing(&with_units("m s-1")));
         assert!(!timing(&with_units("kelvin")));
         assert!(!timing(&with_units("")));
+        // Единицы хранятся как записаны — сравнение с CF регистра не видит.
+        assert!(timing(&with_units("Seconds since 2000-01-01 00:00:00")));
+        assert!(northing(&with_units("Degrees_North")) && easting(&with_units("degrees_East")));
+        assert!(!northing(&with_units("K")) && !easting(&with_units("K")));
         assert_eq!(
             order.iter().map(|item| item.path.as_str()).collect::<Vec<&str>>(),
             [

@@ -18,5 +18,15 @@
 
 имя: слова о подробном режутся вместе с именем, а не своим пределом
 файл: veldmodules/data-browser/src/view/shown.rs
-было:         let room = if shown.is_empty() { TROUBLE_CHARS } else { room(&shown).max(TROUBLE_CHARS / 4) };
-стало:         let room = TROUBLE_CHARS;
+было:             false => TROUBLE_CHARS.saturating_sub(taken + 3).max(TROUBLE_CHARS / 4),
+стало:             false => TROUBLE_CHARS,
+
+имя: имя величины стои́т в строке и поверх слов о беде
+файл: veldmodules/data-browser/src/view/shown.rs
+было:         if overlay.detailed_trouble.is_empty() {
+стало:         if true {
+
+имя: подсказка теряет слова файла о величине
+файл: veldmodules/data-browser/src/view/shown.rs
+было:         parts.push((format::variable(&variable.path, &variable.said, &variable.units), Cut::Tail));
+стало:         parts.push((format::variable_name(&variable.path).to_string(), Cut::Tail));

@@ -201,7 +201,9 @@ detail limit when it decides the detail — travel apart from the rest
 (`OverlayProgress.detailed_trouble` against `trouble`, `Overlay::said_split`):
 the sender puts the name before them and only them, since the preview's limit
 or a binding refusal under the detailed file's name would read as said of it.
-From there on — the
+The variable that raster shows (`Meta.variable`, from `Described.variable`)
+rides in `OverlayProgress.detailed_variable` the same way: the globe reports,
+the sender names. From there on — the
 target coarsened to the detail limit and the appetite cap, the ladder, the
 store — is the shared mechanics of
 [viewing-pipeline.md](viewing-pipeline.md).

@@ -975,6 +975,12 @@ fn an_empty_variable_yields_to_the_next() {
     assert_eq!((info.width, info.height), (w, h));
     let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
     assert_eq!(layout.path(), "/PRODUCT/b_measured", "пустая первая по алфавиту уступила измеренной");
+    // Смотрящему называется выбранная, а не первая, — и единицы теми же
+    // буквами, что в файле.
+    assert_eq!(
+        info.variable,
+        Some(super::Variable { path: "/PRODUCT/b_measured".into(), said: String::new(), units: "K".into() })
+    );
 }
 
 // ── Наперёд ────────────────────────────────────────────────────
