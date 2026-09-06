@@ -202,8 +202,14 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
     // и место под ход показа оставили от ширины панели — полоса одной строкой
     // и не переносится. Слова файла бывают в полторы строки и встают только
     // целиком: обрезанные, они читались бы хуже, чем имя с единицами без них.
-    // Величина — кнопка: под ней список всего, из чего выбирали.
-    if let Some((shown, variables)) = view_state.and_then(|view| view.variable.as_ref().map(|shown| (shown, &view.variables))) {
+    // Величина — кнопка: под ней список всего, из чего выбирают. Показанная —
+    // по слову канвы, а когда канва названной отказала — названная: кнопка
+    // и список обязаны пережить отказ, иначе другую не выбрать.
+    let shown = view_state
+        .and_then(|view| view.variable.clone())
+        .or_else(|| preview.variables.iter().find(|variable| variable.path == preview.variable).cloned());
+    if let Some(shown) = shown {
+        let variables = preview.variables.as_slice();
         let taken: usize =
             facts.iter().map(|fact| fact.chars().count() + FACT_SEPARATOR.chars().count()).sum();
         let room = format::mono_fit(state.pane_width(view) - PROGRESS_WIDTH - BUTTON_ROOM, theme::TEXT_SMALL)
@@ -221,8 +227,11 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
         )
         .padding(Padding { top: 2.0, bottom: 2.0, left: 8.0, right: 8.0 })
         .on_press(Msg::In(view, ViewMsg::PreviewVariables(!open)));
+        // Галочка — у того, что канва показывает; названной, которой она
+        // отказала, галочки нет: на экране её нет.
+        let ticked = view_state.and_then(|view| view.variable.as_ref()).map(|shown| shown.path.as_str()).unwrap_or_default();
         parts.push(
-            popover(anchor, open, || menu::panel(variable_items(view, variables, &shown.path)))
+            popover(anchor, open, || menu::panel(variable_items(view, variables, ticked)))
                 .gap(4.0)
                 .on_dismiss(Msg::In(view, ViewMsg::PreviewVariables(false)))
                 .into(),
@@ -257,9 +266,8 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
     .into()
 }
 
-/// Пункты списка величин файла: все, из кого выбирали, в порядке тайлера,
-/// показанная — с галочкой. Пока только список: пункт закрывает его, выбора
-/// другой величины за ним нет — запросы тайлера величины не несут. Длинный
+/// Пункты списка величин файла: все, из кого выбирают, в порядке тайлера,
+/// показанная — с галочкой; пункт называет свою величину канве. Длинный
 /// список обрезается числом ([`VARIABLES_LISTED`]), но показанной место
 /// гарантировано: обрезанная, она уходила бы в «и ещё N», и список из одних
 /// не показанных читался бы как «показана ни одна из них».
@@ -271,7 +279,7 @@ fn variable_items(
     let item = |variable: &crate::proto::image_view::Variable| {
         menu::Item::new(
             format::variable(&variable.path, &variable.said, &variable.units),
-            Msg::In(view, ViewMsg::PreviewVariables(false)),
+            Msg::In(view, ViewMsg::PreviewVariable(variable.path.clone())),
         )
         .selected(variable.path == shown)
     };

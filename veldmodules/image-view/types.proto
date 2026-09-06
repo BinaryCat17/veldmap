@@ -25,6 +25,16 @@ message ShowRequest {
   string label = 3;
   // Занятый номер.
   reserved 4;
+  // Какую величину файла показать (`DescribeRequest.variable`); пусто — выбор
+  // тайлера.
+  string variable = 5;
+}
+
+// Другая величина того же показа: описание заново с ней, ресурс прежний.
+message VariableRequest {
+  string view = 1;
+  // Путь из `ViewState.variables`; пусто — выбор тайлера.
+  string variable = 2;
 }
 
 message CloseView {
@@ -108,8 +118,8 @@ message ViewState {
   uint32 step = 13;
   uint32 steps = 14;
   // Какая величина файла показана (из описания тайлера, `Described.variable`):
-  // у файла многих величин выбор делает тайлер, и смотрящему его иначе не
-  // видно. Пусто — источник не описан или величина одна и без имени (снимок).
+  // выбор тайлера либо названная в `ShowRequest`/`VariableRequest`. Пусто —
+  // источник не описан или величина одна и без имени (снимок).
   optional Variable variable = 15;
   // Все величины файла, какие могли бы быть показаны, в порядке предпочтения
   // тайлера (`Described.variables`); показанная — среди них. Пусто у снимка.

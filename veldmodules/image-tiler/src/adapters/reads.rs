@@ -159,7 +159,12 @@ fn near_head_or_ifd(window: (u64, u64), ifds: &[u64]) -> bool {
 
 /// Описать смонтированный файл.
 fn described(handle: &veldsdk::ResourceHandle) -> Info {
-    describe(handle.id, handle.size, &Rc::new(Cell::new(0))).expect("описывается")
+    described_as(handle, "").expect("описывается")
+}
+
+/// Описание с названной величиной; пусто — выбор тайлера.
+fn described_as(handle: &veldsdk::ResourceHandle, variable: &str) -> Result<Info, String> {
+    describe(handle.id, handle.size, variable, &Rc::new(Cell::new(0)))
 }
 
 /// Произвести тайлы уровня: адрес → RGBA.
@@ -986,6 +991,38 @@ fn an_empty_variable_yields_to_the_next() {
         info.variables.iter().map(|variable| variable.path.as_str()).collect::<Vec<_>>(),
         ["/PRODUCT/a_empty", "/PRODUCT/b_measured"]
     );
+}
+
+/// Названная величина показывается, когда есть что показать, и отвергается
+/// словами, когда пуста; величина не из списка — отказ по имени.
+#[test]
+fn a_wanted_variable_is_shown_or_refused_by_its_sample() {
+    fake::install();
+    let (w, h) = (64u32, 128u32);
+    let empty = vec![FILL; (w * h) as usize];
+    let bytes = netcdf_with(&[
+        Variable { name: "a_empty", shape: &[u64::from(h), u64::from(w)], chunk: None, values: &empty },
+        Variable { name: "b_measured", shape: &[u64::from(h), u64::from(w)], chunk: None, values: &nc_pattern(w, h) },
+    ]);
+    let handle = fake::mount(bytes);
+
+    let info = described_as(&handle, "/PRODUCT/b_measured").expect("названная годная");
+    assert_eq!(info.variable.as_ref().map(|variable| variable.path.as_str()), Some("/PRODUCT/b_measured"));
+    let Kind::Netcdf(layout) = &info.kind else { panic!("не NetCDF") };
+    assert_eq!(layout.path(), "/PRODUCT/b_measured");
+    assert_eq!(info.variables.len(), 2, "список — весь, не одна названная");
+
+    let Err(refused) = described_as(&handle, "/PRODUCT/a_empty") else { panic!("пустая названная показана") };
+    assert!(refused.contains("пуста") && refused.contains("a_empty"), "{refused}");
+    let Err(unknown) = described_as(&handle, "/PRODUCT/nope") else { panic!("чужое имя показано") };
+    assert!(unknown.contains("nope") && unknown.contains("нет"), "{unknown}");
+
+    // У снимка величина одна: названная — отказ, а не молчаливый показ.
+    fake::install();
+    let (file, _, _) = tiled_cog(TILE, TILE, 1);
+    let tiff = fake::mount(file);
+    let Err(single) = described_as(&tiff, "/PRODUCT/nope") else { panic!("снимок показан с именем величины") };
+    assert!(single.contains("одной величины"), "{single}");
 }
 
 // ── Наперёд ────────────────────────────────────────────────────

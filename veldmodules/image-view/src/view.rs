@@ -16,6 +16,14 @@ use super::gpu::{self, Quad, Target};
 
 pub struct View {
     pub label: String,
+    /// Названная величина файла (`ShowRequest.variable`); пусто — выбор
+    /// тайлера. Едет в описание и в каждый проход: разбор у тайлера ключуется
+    /// ею.
+    pub variable: String,
+    /// Плоскость прежней величины, пока описывается другая: камера остаётся
+    /// от прежней и годится, только если плоскость та же, — иначе вписывать
+    /// заново (см. [`View::plane_changed`]).
+    pub previous_plane: Option<(u32, u32)>,
     pub target: Option<Target>,
     pub shown: Option<Shown>,
     /// Камера появляется первым вписыванием — когда известны и снимок, и
@@ -92,6 +100,8 @@ impl View {
     pub fn new(label: String) -> Self {
         Self {
             label,
+            variable: String::new(),
+            previous_plane: None,
             target: None,
             shown: None,
             camera: None,
@@ -111,6 +121,14 @@ impl View {
 
     pub fn meta(&self) -> Option<&Meta> {
         self.shown.as_ref()?.meta.as_ref()
+    }
+
+    /// Сменилась ли плоскость с описанием другой величины: кандидаты файла —
+    /// любые двумерные величины, и рядом с полосой в 1500 столбцов лежит
+    /// величина другой сетки. Камера, вписанная под прежнюю, показывала бы
+    /// новую мимо; спрашивается раз — прежняя плоскость при этом забывается.
+    pub fn plane_changed(&mut self, meta: &Meta) -> bool {
+        self.previous_plane.take().is_some_and(|(width, height)| (width, height) != (meta.width, meta.height))
     }
 
     /// Тайл лёг — жалоба на прошлое снимается. Картинка достраивается прямо
@@ -318,6 +336,20 @@ mod tests {
             variable: None,
             variables: Vec::new(),
         }
+    }
+
+    /// Смена величины сбрасывает камеру только вместе с плоскостью: та же
+    /// плоскость — кадр не дёргается, другая — вписывается заново; без
+    /// прежней плоскости (первое описание) сравнивать не с чем.
+    #[test]
+    fn the_camera_survives_a_variable_of_the_same_plane_only() {
+        let mut view = View::new("снимок".into());
+        assert!(!view.plane_changed(&meta(215, 372)), "первому описанию не с чем сравнивать");
+        view.previous_plane = Some((215, 372));
+        assert!(!view.plane_changed(&meta(215, 372)), "та же плоскость — камера цела");
+        assert_eq!(view.previous_plane, None, "прежняя плоскость спрошена и забыта");
+        view.previous_plane = Some((215, 372));
+        assert!(view.plane_changed(&meta(1500, 1200)), "другая плоскость не замечена");
     }
 
     /// Подпись предела, как её складывает сама пирамида: строкой целиком её

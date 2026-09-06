@@ -33,7 +33,7 @@ use crate::proto::image_tiler::{
     TileAddr, TileResult as ProducedTile,
 };
 use crate::proto::image_view::{
-    camera_command::Command, CameraCommand, Canvas, CloseView, ShowRequest, Variable, ViewState,
+    camera_command::Command, CameraCommand, Canvas, CloseView, ShowRequest, Variable, VariableRequest, ViewState,
 };
 use crate::proto::tile_cache::{
     QueryDone, QueryRequest, TileAddr as QueryAddr, TileResult as CachedTile,
@@ -211,6 +211,7 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
     if !msg.label.is_empty() {
         view.label = msg.label.clone();
     }
+    view.variable = msg.variable.clone();
 
     view.fetch.reset();
     view.error = None;
@@ -244,7 +245,45 @@ pub fn on_show(state: &mut State, msg: ShowRequest) {
         // Канве привязка не нужна вовсе: она показывает растр как картинку, а
         // не кладёт его на Землю.
         geolocation: None,
+        variable: view.variable.clone(),
     }, &correlation);
+
+    report(state, &msg.view);
+}
+
+/// Другая величина того же файла: описание заново с ней, ресурс прежний.
+/// Прежний проход уходит вместе с прежним отпечатком — его тайлы уже не про
+/// этот показ, — а камера остаётся, пока плоскость та же: вписывать заново
+/// значило бы дёргать кадр под рукой; другой плоскости ответит описание
+/// (`View::plane_changed`).
+pub fn on_variable(state: &mut State, msg: VariableRequest) {
+    let Some(view) = state.views.get(&msg.view) else { return };
+    let Some(resource) = view.shown.as_ref().map(|shown| shown.resource.handle()) else { return };
+    if view.variable == msg.variable {
+        return;
+    }
+    if let Some(fingerprint) = view.meta().map(|meta| meta.fingerprint.clone()) {
+        release_pass(state, &fingerprint, &msg.view);
+    }
+
+    let view = state.views.get_mut(&msg.view).expect("вид найден выше");
+    view.variable = msg.variable.clone();
+    view.previous_plane = view.meta().map(|meta| (meta.width, meta.height));
+    view.fetch.reset();
+    view.error = None;
+    view.trouble = None;
+    view.stuck = None;
+    view.drawn = None;
+    if let Some(shown) = &mut view.shown {
+        shown.meta = None;
+    }
+    let label = view.label.clone();
+    let correlation = view.describe.begin();
+    state.pending_describe.insert(correlation.clone(), msg.view.clone());
+    crate::calls::image_tiler::on_describe(
+        &DescribeRequest { resource: Some(resource), label, geolocation: None, variable: msg.variable },
+        &correlation,
+    );
 
     report(state, &msg.view);
 }
@@ -313,6 +352,10 @@ pub fn on_described(state: &mut State, msg: Described) {
 
     veldsdk::log::info!(target: "handlers", "{}: {}", view.label, meta.note());
 
+    // Другая величина другой плоскости — камера прежней вписала бы её мимо.
+    if view.plane_changed(&meta) {
+        view.camera = None;
+    }
     if let Some(shown) = &mut view.shown {
         shown.meta = Some(meta);
     }
@@ -422,11 +465,13 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         level,
         produce_list.clone(),
     );
+    let variable = state.views.get(&ctx.view).map(|view| view.variable.clone()).unwrap_or_default();
     crate::calls::image_tiler::on_produce(&ProduceRequest {
         resource: Some(handle),
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
+        variable,
     }, &correlation);
 
     report(state, &ctx.view);

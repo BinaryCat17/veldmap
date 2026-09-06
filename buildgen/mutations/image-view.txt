@@ -1,0 +1,7 @@
+# Мутации канвы: смена величины показа.
+# Формат — buildgen/mutate.py; крейт — модуль image-view.
+
+имя: камера сбрасывается и при той же плоскости
+файл: veldmodules/image-view/src/view.rs
+было:         self.previous_plane.take().is_some_and(|(width, height)| (width, height) != (meta.width, meta.height))
+стало:         self.previous_plane.take().is_some()

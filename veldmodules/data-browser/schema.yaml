@@ -45,7 +45,7 @@ dependencies:
   # рассылка состояния показа.
   image-view:
     subs: [on_view_state]
-    calls: [on_canvas, on_show, on_close, on_camera]
+    calls: [on_canvas, on_show, on_close, on_camera, on_variable]
   # Раскладка окна между запусками: как экран сложили, таким он и открывается
   # (см. handlers::persist). Пишет и читает её сам модуль — раскладка его, и
   # никто больше про неё не знает.

@@ -86,6 +86,10 @@ enum SavedTab {
     Preview {
         label: String,
         entry: Option<String>,
+        /// Величина, названная смотрящим; пусто — выбор тайлера. По умолчанию,
+        /// чтобы файл, записанный без неё, читался.
+        #[serde(default)]
+        variable: String,
     },
 }
 
@@ -263,7 +267,11 @@ fn save_tab(kind: &ViewKind) -> SavedTab {
         ViewKind::Globe(_) => SavedTab::Globe,
         ViewKind::Shown => SavedTab::Shown,
         ViewKind::Preview(preview) => {
-            SavedTab::Preview { label: preview.label.clone(), entry: preview.entry.clone() }
+            SavedTab::Preview {
+                label: preview.label.clone(),
+                entry: preview.entry.clone(),
+                variable: preview.confirmed_variable(),
+            }
         }
     }
 }
@@ -364,8 +372,8 @@ fn open_tab(state: &mut State, pane: PaneId, tab: &SavedTab) {
         SavedTab::Shown => {
             state.open_in(pane, ViewKind::Shown);
         }
-        SavedTab::Preview { label, entry } => {
-            super::preview::reopen(state, pane, label.clone(), entry.clone());
+        SavedTab::Preview { label, entry, variable } => {
+            super::preview::reopen(state, pane, label.clone(), entry.clone(), variable.clone());
         }
     }
 }
@@ -418,6 +426,49 @@ mod tests {
             body,
             "раскладка после чтения не та же"
         );
+    }
+
+    /// Названная величина превью переживает запись и чтение — и вкладка,
+    /// записанная без неё, читается с выбором тайлера.
+    #[test]
+    fn a_previews_variable_survives_the_round_trip() {
+        let mut before = state();
+        let pane = before.focused();
+        let view = super::super::nav::open_preview(&mut before, pane, "S5P_CO.nc".to_string(), Some("S5P_CO.nc".to_string()));
+        let preview = before.preview_mut(view).expect("вкладка");
+        preview.variable = "/PRODUCT/qa_value".to_string();
+        // Канва названную показывает — только такая и пишется: отвергнутая
+        // открывалась бы после перезапуска тем же отказом без списка под ним.
+        preview.view_state = Some(crate::proto::image_view::ViewState {
+            variable: Some(crate::proto::image_view::Variable { path: "/PRODUCT/qa_value".to_string(), ..Default::default() }),
+            ..Default::default()
+        });
+        let body = veldsdk::serde_json::to_vec(&snapshot(&before)).expect("снимок");
+
+        let mut after = state();
+        let saved: Saved = veldsdk::serde_json::from_slice(&body).expect("разбор снимка");
+        restore(&mut after, &saved);
+        let restored = after.views().iter().find_map(|view| match &view.kind {
+            ViewKind::Preview(preview) => Some(preview.variable.clone()),
+            _ => None,
+        });
+        assert_eq!(restored.as_deref(), Some("/PRODUCT/qa_value"));
+
+        let legacy: SavedTab = veldsdk::serde_json::from_str(r#"{"tab":"preview","label":"a.nc","entry":null}"#)
+            .expect("старая запись читается");
+        assert!(matches!(legacy, SavedTab::Preview { variable, .. } if variable.is_empty()));
+
+        // Отвергнутая названная (канва показывает не её) не пишется.
+        before.preview_mut(view).expect("вкладка").view_state = Some(Default::default());
+        let saved: Saved = veldsdk::serde_json::from_slice(&veldsdk::serde_json::to_vec(&snapshot(&before)).expect("снимок"))
+            .expect("разбор");
+        let mut again = state();
+        restore(&mut again, &saved);
+        let restored = again.views().iter().find_map(|view| match &view.kind {
+            ViewKind::Preview(preview) => Some(preview.variable.clone()),
+            _ => None,
+        });
+        assert_eq!(restored.as_deref(), Some(""), "отвергнутая величина записана во вкладку");
     }
 
     /// Второй глобус из поправленного руками файла не заводится: место под

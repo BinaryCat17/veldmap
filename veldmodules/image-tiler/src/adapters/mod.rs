@@ -88,9 +88,9 @@ pub struct Info {
     /// Говорит адаптер, а не потребитель: почему не сложилось, знает только
     /// тот, кто читал файл.
     pub binding_trouble: Option<String>,
-    /// Какая из величин файла показывается — у файла многих величин (NetCDF),
-    /// где выбор делает адаптер и смотрящему его не видно иначе. Пусто у
-    /// снимка: величина у него одна, и имени у неё нет.
+    /// Какая из величин файла показывается — у файла многих величин (NetCDF):
+    /// выбор адаптера либо названная заказчиком (`wanted` у [`describe`]).
+    /// Пусто у снимка: величина у него одна, и имени у неё нет.
     pub variable: Option<Variable>,
     /// Все величины файла, которые могли бы быть показаны, в порядке
     /// предпочтения адаптера; показанная — среди них. Годность здесь по
@@ -197,11 +197,17 @@ impl Info {
 
 /// Заголовок растра: формат, размеры, раскладка. Дешёвый и для гигабайтного
 /// файла — читаются заголовки и каталоги, не пиксели.
-pub fn describe(resource_id: u64, len: u64, bytes: &Rc<Cell<u64>>) -> Result<Info, String> {
+pub fn describe(resource_id: u64, len: u64, wanted: &str, bytes: &Rc<Cell<u64>>) -> Result<Info, String> {
     let mut reader = Metered::new(resource_id, len, bytes.clone());
     let mut head = [0u8; 32];
     let read = reader.read(&mut head).map_err(|e| format!("чтение заголовка: {}", e))?;
     reader.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+
+    // Величину называют файлу многих величин; у снимка она одна и без имени,
+    // и названная там — ошибка заказчика, а не выбор.
+    if !wanted.is_empty() && !head.starts_with(netcdf::MAGIC) {
+        return Err(format!("величина '{}' спрошена у файла одной величины", wanted));
+    }
 
     // Ни JPEG 2000, ни NetCDF, ни BigTIFF крейт `image` не знает — их сигнатуры
     // смотрятся до него.
@@ -214,7 +220,7 @@ pub fn describe(resource_id: u64, len: u64, bytes: &Rc<Cell<u64>>) -> Result<Inf
         // смещениями, и оборачивать это в последовательный поток значило бы
         // отнять у него ровно то, чем он и дёшев (см. `netcdf::Resource`).
         drop(reader);
-        let info = netcdf::describe(resource_id, len)?;
+        let info = netcdf::describe(resource_id, len, wanted)?;
         return checked(info);
     }
     // Классический NetCDF-3 — другой формат, и читателя у него здесь нет.

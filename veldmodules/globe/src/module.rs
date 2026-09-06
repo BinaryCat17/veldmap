@@ -537,6 +537,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
                 resource: Some(handle),
                 label: label.clone(),
                 geolocation: coordinates,
+                variable: String::new(),
             },
             &correlation,
         );
@@ -794,7 +795,7 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
                     "{}: запасной растр ({}) — ресурс {}, запасных ещё {}", label, named, handle.id, left);
                 state.pending_describe.insert(correlation.clone(), (key.to_string(), role));
                 crate::calls::image_tiler::on_describe(
-                    &DescribeRequest { resource: Some(handle), label, geolocation: coordinates },
+                    &DescribeRequest { resource: Some(handle), label, geolocation: coordinates, variable: String::new() },
                     &correlation,
                 );
                 return;
@@ -1078,6 +1079,8 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
+        // Шар величины не называет: у него выбор тайлера.
+        variable: String::new(),
     }, &correlation);
 }
 

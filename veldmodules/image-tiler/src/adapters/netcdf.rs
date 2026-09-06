@@ -391,13 +391,35 @@ fn read_rows<T>(
 /// он по требованию, и гигабайты, до которых дело не дошло, не стоят ни
 /// памяти, ни провода. Стои́т описание выборки выбранной величины — и по одной
 /// на каждую отвергнутую до неё (см. [`sampled`]).
-pub fn describe(resource_id: u64, len: u64) -> Result<Info, String> {
+///
+/// `wanted` — величина, названная заказчиком (путь из списка кандидатов);
+/// пусто — выбор по порядку [`preferred`]. Названная проверяется той же
+/// выборкой, что и выбранная: пустая над этим местом — отказ словами, а не
+/// прозрачный кадр, однотонная показывается.
+pub fn describe(resource_id: u64, len: u64, wanted: &str) -> Result<Info, String> {
     let file = opened(resource_id, len, Arc::default())?;
 
     let surveyed = survey(&file)?;
     let order = preferred(&surveyed);
     if order.is_empty() {
         return Err(explain(&surveyed));
+    }
+    if !wanted.is_empty() {
+        let Some(chosen) = order.iter().copied().find(|item| item.path == wanted) else {
+            return Err(format!("NetCDF: величины '{}' среди {} годных нет", wanted, order.len()));
+        };
+        let (height, width) = chosen.plane.ok_or_else(|| explain(&surveyed))?;
+        let (layout, values) = probed(&file, chosen, width, height)?;
+        return match spread(&values, chosen.fill) {
+            Spread::Empty => Err(format!("NetCDF: '{}' пуста в выборке — над этим местом не измерялась", wanted)),
+            Spread::Flat => {
+                // Ровное поле встанет в середину шкалы — и без слова о том
+                // спрашивало бы «почему серое?».
+                veldsdk::log::info!(target: "decode", "NetCDF: названная '{}' однотонна в выборке — ровным полем", wanted);
+                told(&file, &surveyed, chosen, layout, &order, &[])
+            }
+            Spread::Varying => told(&file, &surveyed, chosen, layout, &order, &[]),
+        };
     }
 
     // Пустая величина — не ответ, и узнаётся это только по отсчётам. Гранула
@@ -658,8 +680,8 @@ fn told(
         // Выбор назван смотрящему: которая из десятков величин файла легла на
         // экран, иначе не узнать — строка журнала выше ему не видна.
         variable: Some(named(chosen)),
-        // И все, из кого выбирали, в том же порядке: смотрящему видно, что ещё
-        // лежит в файле, — пока только видно.
+        // И все, из кого выбирают, в том же порядке: смотрящему видно, что ещё
+        // лежит в файле, и любую он вправе назвать (`describe` с `wanted`).
         variables: order.iter().map(|item| named(item)).collect(),
     })
 }

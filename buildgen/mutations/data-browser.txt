@@ -40,3 +40,13 @@
 файл: veldmodules/data-browser/src/view/preview.rs
 было:     let mut items: Vec<menu::Item> = variables.iter().take(VARIABLES_LISTED).map(item).collect();
 стало:     let mut items: Vec<menu::Item> = variables.iter().map(item).collect();
+
+имя: выбор показанной величины описывает файл заново
+файл: veldmodules/data-browser/src/handlers/preview.rs
+было:     if shown == Some(variable.as_str()) || preview.variable == variable {
+стало:     if false {
+
+имя: названная величина не записывается во вкладку
+файл: veldmodules/data-browser/src/handlers/persist.rs
+было:                 variable: preview.confirmed_variable(),
+стало:                 variable: String::new(),

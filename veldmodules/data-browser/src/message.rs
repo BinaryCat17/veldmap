@@ -448,6 +448,8 @@ messages! {
         PreviewZoom(val f32) = "preview_zoom";
         /// Раскрыть список величин файла под кадром или закрыть его.
         PreviewVariables(val bool) = "preview_variables";
+        /// Показать другую величину файла — путь из списка под кадром.
+        PreviewVariable(val String) = "preview_variable";
 
         // -- Глобус --
         //
@@ -654,6 +656,7 @@ mod tests {
             Msg::In(id(), ViewMsg::PreviewZoom(1.0)),
             Msg::In(id(), ViewMsg::PreviewVariables(true)),
             Msg::In(id(), ViewMsg::PreviewVariables(false)),
+            Msg::In(id(), ViewMsg::PreviewVariable("/PRODUCT/qa_value".into())),
             Msg::In(id(), ViewMsg::GlobeToggle("продукт".into())),
         ];
         messages.extend(NewTab::ALL.iter().map(|kind| Msg::NewTab(pane(), *kind)));

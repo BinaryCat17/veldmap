@@ -59,6 +59,10 @@ pub struct Config {}
 /// по заказу, и держать в memo нечего, кроме раскладки.
 struct Parsed {
     resource: u64,
+    /// Названная величина (`DescribeRequest.variable`); пусто — выбор
+    /// адаптера. Часть ключа memo: тот же ресурс с другой величиной — другой
+    /// разбор, и взятый готовым чужой отдал бы её отсчёты под своим отпечатком.
+    variable: String,
     info: adapters::Info,
     /// Ключ этого источника в кэше тайлов. Лежит рядом с разбором затем, что
     /// считается он тем же чтением файла: голова и хвост по 64 КиБ, то есть у
@@ -87,14 +91,15 @@ pub fn hook_init(_config: Config) -> anyhow::Result<State> {
 impl State {
     /// Положить разбор свежим; старейший сверх [`MEMO_SLOTS`] выпадает.
     fn keep(&mut self, kept: Parsed) {
-        self.kept.retain(|other| other.resource != kept.resource);
+        self.kept.retain(|other| !(other.resource == kept.resource && other.variable == kept.variable));
         self.kept.insert(0, kept);
         self.kept.truncate(MEMO_SLOTS);
     }
 
-    /// Отметить разбор ресурса свежим; `false` — его в memo нет.
-    fn touch(&mut self, resource_id: u64) -> bool {
-        match self.kept.iter().position(|kept| kept.resource == resource_id) {
+    /// Отметить разбор ресурса с этой величиной свежим; `false` — его в memo
+    /// нет.
+    fn touch(&mut self, resource_id: u64, variable: &str) -> bool {
+        match self.kept.iter().position(|kept| kept.resource == resource_id && kept.variable == variable) {
             Some(at) => {
                 let kept = self.kept.remove(at);
                 self.kept.insert(0, kept);
@@ -104,19 +109,20 @@ impl State {
         }
     }
 
-    /// Сколько памяти держат разборы чужих источников, лежащие в memo: работа
-    /// над своим идёт рядом с ними, и её пик обязан учесть их слагаемым.
-    fn neighbour_footprint(&self, resource_id: u64) -> u64 {
+    /// Сколько памяти держат чужие разборы, лежащие в memo, — другого ресурса
+    /// или того же с другой величиной: работа над своим идёт рядом с ними, и
+    /// её пик обязан учесть их слагаемым.
+    fn neighbour_footprint(&self, resource_id: u64, variable: &str) -> u64 {
         self.kept
             .iter()
-            .filter(|kept| kept.resource != resource_id)
+            .filter(|kept| !(kept.resource == resource_id && kept.variable == variable))
             .map(|kept| kept.info.footprint())
             .sum()
     }
 
-    /// Разбор этого ресурса, если он лежит в memo.
-    fn kept(&self, resource_id: u64) -> Option<&Parsed> {
-        self.kept.iter().find(|kept| kept.resource == resource_id)
+    /// Разбор этого ресурса с этой величиной, если он лежит в memo.
+    fn kept(&self, resource_id: u64, variable: &str) -> Option<&Parsed> {
+        self.kept.iter().find(|kept| kept.resource == resource_id && kept.variable == variable)
     }
 }
 
@@ -132,21 +138,23 @@ fn parsed<'a>(
     state: &'a mut State,
     resource_id: u64,
     size: u64,
+    variable: &str,
     bytes: &Rc<Cell<u64>>,
 ) -> Result<(&'a Parsed, Duration, u64), String> {
     let mut stamped = Duration::ZERO;
-    if state.touch(resource_id) {
+    if state.touch(resource_id, variable) {
         veldsdk::log::debug!(target: "decode", "разбор ресурса {} взят готовым", resource_id);
     } else {
-        veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт)", resource_id, size);
+        veldsdk::log::debug!(target: "decode", "разбираем ресурс {} ({} байт){}", resource_id, size,
+            match variable.is_empty() { true => String::new(), false => format!(", величина '{}'", variable) });
         let began = Instant::now();
-        let fingerprint = fingerprint::fingerprint(resource_id, size)?;
+        let fingerprint = fingerprint::fingerprint(resource_id, size, variable)?;
         stamped = began.elapsed();
-        let info = adapters::describe(resource_id, size, bytes)?;
-        state.keep(Parsed { resource: resource_id, info, fingerprint });
+        let info = adapters::describe(resource_id, size, variable, bytes)?;
+        state.keep(Parsed { resource: resource_id, variable: variable.to_string(), info, fingerprint });
     }
-    let neighbour = state.neighbour_footprint(resource_id);
-    Ok((state.kept(resource_id).expect("разбор только что положен"), stamped, neighbour))
+    let neighbour = state.neighbour_footprint(resource_id, variable);
+    Ok((state.kept(resource_id, variable).expect("разбор только что положен"), stamped, neighbour))
 }
 
 pub fn on_describe(state: &mut State, req: DescribeRequest) {
@@ -180,7 +188,7 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
     // Привязка приезжает из соседнего файла и в memo не идёт: она свойство
     // пары «растр и его координаты», а memo знает только про растр.
     let mut ties = Vec::new();
-    let (kept, stamped, _) = parsed(state, resource.id, resource.size, &Rc::new(Cell::new(0)))?;
+    let (kept, stamped, _) = parsed(state, resource.id, resource.size, &req.variable, &Rc::new(Cell::new(0)))?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
     let read = began.elapsed();
 
@@ -338,7 +346,7 @@ fn produce(state: &mut State, req: &ProduceRequest, correlation: &str) -> Result
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
 
     let bytes = Rc::new(Cell::new(0u64));
-    let (kept, _, neighbour) = parsed(state, resource.id, resource.size, &bytes)?;
+    let (kept, _, neighbour) = parsed(state, resource.id, resource.size, &req.variable, &bytes)?;
     let (info, fingerprint) = (&kept.info, kept.fingerprint.clone());
 
     // Пик работы сверяется со свободным до неё — вместе с разбором соседа,
@@ -520,7 +528,11 @@ mod tests {
     use crate::proto::image_tiler::TileAddr;
 
     fn keep(state: &mut State, resource: u64, info: adapters::Info) {
-        state.keep(Parsed { resource, info, fingerprint: String::new() });
+        keep_as(state, resource, "", info);
+    }
+
+    fn keep_as(state: &mut State, resource: u64, variable: &str, info: adapters::Info) {
+        state.keep(Parsed { resource, variable: variable.to_string(), info, fingerprint: String::new() });
     }
 
     fn quicklook() -> adapters::Info {
@@ -537,9 +549,9 @@ mod tests {
         keep(&mut state, 1, adapters::Info::plain(64, 64, adapters::Kind::Png { interlaced: false }));
         keep(&mut state, 2, quicklook());
 
-        assert!(state.touch(1), "гранула на месте");
-        assert!(state.touch(2), "и квиклук рядом");
-        assert!(state.kept(1).is_some() && state.kept(2).is_some());
+        assert!(state.touch(1, ""), "гранула на месте");
+        assert!(state.touch(2, ""), "и квиклук рядом");
+        assert!(state.kept(1, "").is_some() && state.kept(2, "").is_some());
     }
 
     /// Третий разбор вытесняет тот, к которому дольше не обращались, а не
@@ -550,14 +562,14 @@ mod tests {
         let mut state = State { kept: Vec::new() };
         keep(&mut state, 1, quicklook());
         keep(&mut state, 2, quicklook());
-        assert!(state.touch(1), "первый спрошен снова");
+        assert!(state.touch(1, ""), "первый спрошен снова");
 
         keep(&mut state, 3, quicklook());
 
-        assert!(state.kept(1).is_some(), "спрошенный остался");
-        assert!(state.kept(2).is_none(), "давно не спрошенный выпал");
-        assert!(state.kept(3).is_some());
-        assert!(!state.touch(2), "выпавшего готовым не взять");
+        assert!(state.kept(1, "").is_some(), "спрошенный остался");
+        assert!(state.kept(2, "").is_none(), "давно не спрошенный выпал");
+        assert!(state.kept(3, "").is_some());
+        assert!(!state.touch(2, ""), "выпавшего готовым не взять");
         assert_eq!(state.kept.len(), MEMO_SLOTS);
     }
 
@@ -570,7 +582,23 @@ mod tests {
         keep(&mut state, 1, quicklook());
 
         assert_eq!(state.kept.len(), 2);
-        assert!(state.kept(1).is_some() && state.kept(2).is_some());
+        assert!(state.kept(1, "").is_some() && state.kept(2, "").is_some());
+    }
+
+    /// Тот же ресурс с другой величиной — другой разбор: он не берётся готовым
+    /// вместо своего и не вытесняет его, а в пик входит соседом.
+    #[test]
+    fn разбор_того_же_ресурса_с_другой_величиной_не_свой() {
+        let mut state = State { kept: Vec::new() };
+        let mut heavy = quicklook();
+        heavy.ties = vec![adapters::Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }];
+        keep_as(&mut state, 1, "", quicklook());
+        keep_as(&mut state, 1, "/PRODUCT/qa_value", heavy);
+
+        assert_eq!(state.kept.len(), 2, "две величины одного файла — два разбора");
+        assert!(state.touch(1, "") && state.touch(1, "/PRODUCT/qa_value"));
+        assert!(!state.touch(1, "/PRODUCT/chi_square"), "неназванная величина взята готовой");
+        assert!(state.neighbour_footprint(1, "") > 0, "разбор другой величины — сосед");
     }
 
     /// Сосед в memo входит в пик работы над своим источником: чужой разбор
@@ -582,8 +610,8 @@ mod tests {
         tiff.ties = vec![adapters::Tie { px: 0.0, py: 0.0, lat: 0.0, lon: 0.0 }];
         keep(&mut state, 2, tiff);
 
-        assert!(state.neighbour_footprint(1) > 0, "чужой разбор не посчитан");
-        assert_eq!(state.neighbour_footprint(2), 0, "свой разбор — не сосед");
+        assert!(state.neighbour_footprint(1, "") > 0, "чужой разбор не посчитан");
+        assert_eq!(state.neighbour_footprint(2, ""), 0, "свой разбор — не сосед");
     }
 
     fn asked(level: u32, tiles: &[(u32, u32)]) -> ProduceRequest {

@@ -15,7 +15,8 @@
 //!
 //! Суффикс кодирует раскладку и правила производства (`-t<сторона тайла>q<ревизия
 //! декодирования>`): смена любого меняет ключ, и старые каталоги кэша просто
-//! стареют до вытеснения — без версий и миграций.
+//! стареют до вытеснения — без версий и миграций. Названная величина файла
+//! многих величин входит в свёртку: те же байты, другая величина — другие тайлы.
 
 use std::io::{Read, Seek, SeekFrom};
 
@@ -30,8 +31,9 @@ const SAMPLE: u64 = 64 * 1024;
 /// всплывали бы старые той же самой картинки.
 const DECODE_REV: u32 = 12;
 
-/// Отпечаток ресурса: `<fnv64 hex>-t<TILE>q<DECODE_REV>`.
-pub fn fingerprint(resource_id: u64, len: u64) -> Result<String, String> {
+/// Отпечаток ресурса: `<fnv64 hex>-t<TILE>q<DECODE_REV>`. `variable` —
+/// названная величина файла многих величин, пусто — выбор тайлера.
+pub fn fingerprint(resource_id: u64, len: u64, variable: &str) -> Result<String, String> {
     let mut reader = veldsdk::ResourceReader::new(resource_id, len);
     let (head, tail) = edges(len);
     let head = read_exact_at(&mut reader, head.0, head.1)?;
@@ -39,16 +41,24 @@ pub fn fingerprint(resource_id: u64, len: u64) -> Result<String, String> {
         Some((from, size)) => read_exact_at(&mut reader, from, size)?,
         None => Vec::new(),
     };
-    Ok(hash_of(len, &head, &tail))
+    Ok(hash_of(len, &head, &tail, variable))
 }
 
-/// Свёртка «длина ∥ голова ∥ хвост» по готовым срезам — одна и для чтения
-/// ресурса, и для тестов, у которых ресурса нет.
-fn hash_of(len: u64, head: &[u8], tail: &[u8]) -> String {
+/// Свёртка «длина ∥ голова ∥ хвост ∥ величина» по готовым срезам — одна и для
+/// чтения ресурса, и для тестов, у которых ресурса нет.
+///
+/// Величина — в свёртку, а не в текст ключа: имя кэша допускает только
+/// `[a-z0-9-]`, а пути величин несут слэш и заглавные. Пустая (выбор тайлера)
+/// в свёртку не входит: файл, показанный как раньше, остаётся при своих
+/// тайлах в кэше, и `DECODE_REV` поднимать незачем.
+fn hash_of(len: u64, head: &[u8], tail: &[u8], variable: &str) -> String {
     let mut hash = Fnv::new();
     hash.update(&len.to_le_bytes());
     hash.update(head);
     hash.update(tail);
+    if !variable.is_empty() {
+        hash.update(variable.as_bytes());
+    }
     format!("{:016x}-t{}q{}", hash.finish(), TILE, DECODE_REV)
 }
 
@@ -105,21 +115,28 @@ mod tests {
 
     #[test]
     fn same_edges_same_print() {
-        let a = hash_of(1000, b"head", b"tail");
-        let b = hash_of(1000, b"head", b"tail");
+        let a = hash_of(1000, b"head", b"tail", "");
+        let b = hash_of(1000, b"head", b"tail", "");
         assert_eq!(a, b);
     }
 
     #[test]
     fn every_ingredient_matters() {
-        let base = hash_of(1000, b"head", b"tail");
-        assert_ne!(base, hash_of(1001, b"head", b"tail"), "длина");
-        assert_ne!(base, hash_of(1000, b"heaD", b"tail"), "голова");
-        assert_ne!(base, hash_of(1000, b"head", b"taiL"), "хвост");
+        let base = hash_of(1000, b"head", b"tail", "");
+        assert_ne!(base, hash_of(1001, b"head", b"tail", ""), "длина");
+        assert_ne!(base, hash_of(1000, b"heaD", b"tail", ""), "голова");
+        assert_ne!(base, hash_of(1000, b"head", b"taiL", ""), "хвост");
+        // Величина разводит отпечатки тех же байт; выбор тайлера — как без неё.
+        assert_ne!(base, hash_of(1000, b"head", b"tail", "/PRODUCT/qa_value"), "величина");
+        assert_ne!(
+            hash_of(1000, b"head", b"tail", "/PRODUCT/qa_value"),
+            hash_of(1000, b"head", b"tail", "/PRODUCT/chi_square"),
+            "две величины"
+        );
         // Граница между кусками не теряется: (head, tail) ≠ (headt, ail)
         // было бы неверно требовать от свёртки подряд идущих байт — важно,
         // что ДЛИНА разводит такие пары раньше самих байт.
-        assert_ne!(hash_of(8, b"head", b"tail"), hash_of(9, b"headt", b"ail!"));
+        assert_ne!(hash_of(8, b"head", b"tail", ""), hash_of(9, b"headt", b"ail!", ""));
     }
 
     /// Голова и хвост не перехлёстываются и не оставляют дыры посередине
@@ -155,6 +172,6 @@ mod tests {
 
     #[test]
     fn suffix_pins_layout_and_decode_revision() {
-        assert!(hash_of(1, b"a", b"").ends_with(&format!("-t{}q{}", TILE, DECODE_REV)));
+        assert!(hash_of(1, b"a", b"", "").ends_with(&format!("-t{}q{}", TILE, DECODE_REV)));
     }
 }

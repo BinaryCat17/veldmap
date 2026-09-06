@@ -163,10 +163,25 @@
 
 имя: смотрящему называется первая величина файла, а не выбранная
 файл: veldmodules/image-tiler/src/adapters/netcdf.rs
-было:             path: chosen.path.clone(),
-стало:             path: surveyed[0].path.clone(),
+было:         variable: Some(named(chosen)),
+стало:         variable: Some(named(order[0])),
 
 имя: список величин без первой из них
 файл: veldmodules/image-tiler/src/adapters/netcdf.rs
 было:         variables: order.iter().map(|item| named(item)).collect(),
 стало:         variables: order.iter().skip(1).map(|item| named(item)).collect(),
+
+имя: названная величина не спрашивается — показывается выбор тайлера
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:     if !wanted.is_empty() {
+стало:     if false {
+
+имя: величина не входит в отпечаток
+файл: veldmodules/image-tiler/src/fingerprint.rs
+было:         hash.update(variable.as_bytes());
+стало:         let _ = variable;
+
+имя: разбор той же величины не отличается от разбора другой
+файл: veldmodules/image-tiler/src/module.rs
+было:         self.kept.retain(|other| !(other.resource == kept.resource && other.variable == kept.variable));
+стало:         self.kept.retain(|other| other.resource != kept.resource);

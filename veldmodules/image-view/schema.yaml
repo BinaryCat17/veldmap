@@ -19,6 +19,9 @@ interface:
       type: module/Canvas
     on_show:
       type: module/ShowRequest
+    # Другая величина того же показа (файл многих величин).
+    on_variable:
+      type: module/VariableRequest
     # Конец вида: показ гасится, ресурсы вида освобождаются.
     on_close:
       type: module/CloseView

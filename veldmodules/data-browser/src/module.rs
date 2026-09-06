@@ -165,6 +165,7 @@ fn on_view_message(state: &mut State, view: crate::module::state::ViewId, messag
         ViewMsg::PreviewFit => handlers::preview::on_fit(state, view),
         ViewMsg::PreviewZoom(direction) => handlers::preview::on_zoom_step(state, view, direction),
         ViewMsg::PreviewVariables(open) => handlers::preview::on_variables(state, view, open),
+        ViewMsg::PreviewVariable(variable) => handlers::preview::on_variable(state, view, variable),
         ViewMsg::GlobeResized(size) => handlers::globe::on_resized(state, view, size),
         ViewMsg::GlobePointer(event) => handlers::globe::on_pointer(state, view, event),
         ViewMsg::GlobeToggle(identifier) => handlers::overlay::on_toggle_pressed(state, view, identifier),

@@ -23,7 +23,7 @@
 use crate::module::state::{Open, State, ViewId, ViewKind};
 use crate::proto::data_provider::{ImageryResponse, ImageryRole};
 use crate::proto::image_view::{
-    camera_command::Command, CameraCommand, Canvas, Fit, Pan, ShowRequest, ViewState, ZoomAt,
+    camera_command::Command, CameraCommand, Canvas, Fit, Pan, ShowRequest, VariableRequest, ViewState, ZoomAt,
 };
 use crate::proto::ui_service::{PointerAction, PointerEvent, ViewportSize};
 use veldsdk::proto::core::ResourceOpened;
@@ -138,12 +138,15 @@ pub fn reopen(
     pane: crate::module::state::PaneId,
     label: String,
     entry: Option<String>,
+    variable: String,
 ) {
     if label.is_empty() {
         return;
     }
     let view = super::nav::open_preview(state, pane, label.clone(), entry.clone());
-    let correlation_id = state.preview_mut(view).expect("вид только что открыт").begin();
+    let preview = state.preview_mut(view).expect("вид только что открыт");
+    preview.variable = variable;
+    let correlation_id = preview.begin();
     state.previews.insert(correlation_id.clone(), view);
     super::open_resource(label, entry, &correlation_id);
 }
@@ -211,6 +214,7 @@ pub fn on_resource_opened(state: &mut State, opened: &ResourceOpened) -> bool {
         view: view.to_string(),
         resource: Some(resource),
         label: preview.label.clone(),
+        variable: preview.variable.clone(),
     });
     true
 }
@@ -327,6 +331,75 @@ pub fn on_variables(state: &mut State, view: ViewId, open: bool) {
     }
 }
 
+/// Другая величина файла — по выбору в списке под кадром: канва описывает
+/// ресурс заново с ней. Уже показанная или уже названная — нечего делать,
+/// кроме как закрыть список.
+pub fn on_variable(state: &mut State, view: ViewId, variable: String) {
+    state.close_menus();
+    let Some(preview) = state.preview_mut(view) else { return };
+    let shown = preview.view_state.as_ref().and_then(|state| state.variable.as_ref()).map(|shown| shown.path.as_str());
+    if shown == Some(variable.as_str()) || preview.variable == variable {
+        return;
+    }
+    preview.variable = variable.clone();
+    crate::calls::image_view::on_variable(&VariableRequest { view: view.to_string(), variable });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::module::state::Open;
+    use crate::proto::image_view::Variable;
+
+    fn state_with_preview() -> (State, ViewId) {
+        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).expect("состояние");
+        let pane = state.focused();
+        let view = super::super::nav::open_preview(&mut state, pane, "снимок".to_string(), None);
+        (state, view)
+    }
+
+    /// Выбор величины закрывает список, запоминается у вкладки и не
+    /// повторяется для показанной: выбранная по умолчанию тайлером остаётся
+    /// его выбором (пустым), а не становится названной.
+    #[test]
+    fn выбор_величины_запоминается_и_не_повторяется() {
+        let (mut state, view) = state_with_preview();
+        state.toggle_open(Open::Variables(view));
+        // Канва показывает выбор тайлера — щелчок по нему в списке ничего не
+        // называет: описание заново было бы тем же самым.
+        state.preview_mut(view).expect("вкладка").view_state = Some(ViewState {
+            variable: Some(Variable { path: "/PRODUCT/co".to_string(), ..Default::default() }),
+            ..Default::default()
+        });
+        on_variable(&mut state, view, "/PRODUCT/co".to_string());
+        assert!(matches!(state.open, Open::Nothing), "список не закрылся");
+        assert_eq!(state.preview_mut(view).expect("вкладка").variable, "", "показанная названа заново");
+
+        on_variable(&mut state, view, "/PRODUCT/qa_value".to_string());
+        assert_eq!(state.preview_mut(view).expect("вкладка").variable, "/PRODUCT/qa_value");
+    }
+
+    /// Список величин переживает отказ канвы: отчёт без списка прежнего не
+    /// стирает, отчёт со списком — заменяет.
+    #[test]
+    fn список_величин_переживает_отказ_канвы() {
+        let (mut state, view) = state_with_preview();
+        let listed = |paths: &[&str]| ViewState {
+            view: view.to_string(),
+            variables: paths.iter().map(|path| Variable { path: path.to_string(), ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        on_view_state(&mut state, listed(&["/a", "/b"]));
+        on_view_state(&mut state, ViewState { view: view.to_string(), error: "пуста".to_string(), ..Default::default() });
+        let names = |state: &mut State| {
+            state.preview_mut(view).expect("вкладка").variables.iter().map(|v| v.path.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(names(&mut state), ["/a", "/b"], "отказ стёр список");
+        on_view_state(&mut state, listed(&["/c"]));
+        assert_eq!(names(&mut state), ["/c"]);
+    }
+}
+
 /// Рассылка канвы о ходе показа. Чей это вид, сказано в самом сообщении;
 /// вкладку могли уже закрыть — тогда правда никому здесь не нужна.
 pub fn on_view_state(state: &mut State, view_state: ViewState) {
@@ -349,6 +422,12 @@ pub fn on_view_state(state: &mut State, view_state: ViewState) {
     let retry = view_state.needs_place && !preview.replaced;
     if !view_state.needs_place {
         preview.replaced = false;
+    }
+    // Список величин остаётся от последнего описания, назвавшего его: канва,
+    // отказавшая названной величине, шлёт пустой, а выбрать другую нужно как
+    // раз тогда.
+    if !view_state.variables.is_empty() {
+        preview.variables = view_state.variables.clone();
     }
     let size = preview.surface.as_ref().map(|place| (place.width, place.height));
     let label = preview.label.clone();
