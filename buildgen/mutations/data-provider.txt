@@ -15,3 +15,8 @@
 файл: veldmodules/data-provider/src/imagery.rs
 было:     } else if !is_raster(wanted) {
 стало:     } else if false {
+
+имя: чужой адрес подписывается своими ключами
+файл: veldmodules/data-provider/src/s3.rs
+было:     if parsed.scheme() != "https" || parsed.host_str() != Some(HOST) {
+стало:     if false {

@@ -80,10 +80,12 @@ up to `ATTEMPTS` times with a pause that doubles from `RETRY_PAUSE`: a show
 lives for minutes and goes to the network hundreds of times, connections do
 break, and without a retry one break would cost a whole pass of the producer
 and, with it, cells the consumer no longer asks for. Only what can pass on
-retry is retried — a definite refusal, an expired signature or a foreign
-path, comes back the same, and a pause before every block would stretch one
-message into minutes. A progress line goes to the log every `REPORT_STEP`
-bytes and on close.
+retry is retried — a definite refusal or a foreign path comes back the same,
+and a pause before every block would stretch one message into minutes. An
+expired signature is the one refusal that is answered rather than repeated:
+the object is signed again through the provider and the same request goes
+once more with the new headers (ADR 0005). A progress line goes to the log
+every `REPORT_STEP` bytes and on close.
 
 **Blocks belong to the object, not to the opening.** The same file is opened
 several times — preview, the same raster on the globe, a second layer — and

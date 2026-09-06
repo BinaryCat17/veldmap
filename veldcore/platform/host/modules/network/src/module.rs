@@ -22,13 +22,15 @@ pub struct State {
     /// Блоки всех открытых удалённых ресурсов под одним потолком. Живут здесь,
     /// а не в каждом ресурсе, потому что потолок у них общий (см. range.rs).
     blocks: Arc<range::Blocks>,
+    /// Чтения, ждущие новой подписи своего объекта (см. range.rs).
+    resigns: Arc<range::Resigns>,
 }
 
 pub fn hook_init(ctx: Arc<HostContext>) -> State {
-    State { tasks: Tasks::new(&ctx), ctx, blocks: Arc::default() }
+    State { tasks: Tasks::new(&ctx), ctx, blocks: Arc::default(), resigns: Arc::default() }
 }
 
 // -- Обработчики входящих топиков --
 pub use download::on_fs_download;
 pub use http::on_http;
-pub use range::on_open;
+pub use range::{on_open, on_resigned};

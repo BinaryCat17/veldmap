@@ -161,6 +161,22 @@ pub fn on_open(state: &mut State, request: crate::proto::data_provider::OpenRequ
     }, &correlation_id);
 }
 
+/// network просит подписать объект заново: подпись истекла посреди чтения.
+/// Ответ — заголовки с новой подписью либо пустые: ключей нет или адрес не
+/// наш, и чтение на той стороне отказывает своим словом.
+pub fn on_resign(state: &mut State, request: veldsdk::proto::network::ResignRequest) {
+    let headers = state
+        .identity
+        .as_ref()
+        .and_then(|identity| s3::resign(identity, &request.url))
+        .map(|signed| signed.headers)
+        .unwrap_or_default();
+    if headers.is_empty() {
+        log::warn!(target: "handlers", "{}: подписать заново нечем", request.url);
+    }
+    crate::calls::network::on_resigned(&veldsdk::proto::network::ResignResponse { url: request.url, headers });
+}
+
 /// network открыл удалённый ресурс — передаём владение заказчику.
 pub fn on_open_result(state: &mut State, opened: veldsdk::proto::core::ResourceOpened) {
     let correlation_id = veldsdk::correlation();

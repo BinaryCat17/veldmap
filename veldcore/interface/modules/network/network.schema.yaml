@@ -14,7 +14,15 @@ interface:
     # Открытие ресурса — один Range-запрос за заголовками, убивать нечего.
     on_open:
       type: network/RemoteOpenRequest
+    # Новая подпись объекта в ответ на on_resign; пара не объявлена — ответ
+    # узнаётся по адресу, а не по корреляции (см. network.proto).
+    on_resigned:
+      type: network/ResignResponse
   outputs:
+    # Подпись истекла посреди чтения: просьба подписать заново тому, у кого
+    # ключи. Широковещательно — сервис не знает, кто подписывал.
+    on_resign:
+      type: network/ResignRequest
     on_open_result:
       type: core/ResourceOpened
       replies_to: on_open

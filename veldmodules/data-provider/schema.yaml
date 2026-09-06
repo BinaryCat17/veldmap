@@ -55,6 +55,8 @@ interface:
 dependencies:
   # Открытие удалённого ресурса (подписать умеем только мы) и HTTP для
   # листинга бакета. Закачек здесь больше нет — их ведёт заказчик.
+  # Просьбу о новой подписи (on_resign) сеть шлёт всем; подписать умеем
+  # только мы — и отвечаем on_resigned.
   network:
-    subs: [on_http_result, on_open_result]
-    calls: [on_http, on_open]
+    subs: [on_http_result, on_open_result, on_resign]
+    calls: [on_http, on_open, on_resigned]

@@ -60,3 +60,8 @@
 файл: veldmodules/data-browser/src/handlers/overlay.rs
 было:         wanted: overlay.wanted_file.clone().unwrap_or_default(),
 стало:         wanted: String::new(),
+
+имя: квад уезжает порядком каталога
+файл: veldmodules/data-browser/src/handlers/overlay.rs
+было:         ([ul], [ur], [lr], [ll]) => [*ul, *ur, *lr, *ll],
+стало:         ([_ul], [_ur], [_lr], [_ll]) => corners,

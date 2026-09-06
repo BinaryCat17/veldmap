@@ -138,15 +138,21 @@ What each format reads per level is the table in
   `range.rs`). Sequential formats — PNG, JPEG, GIF, BMP, WebP — are read by a
   pass over the whole file, so the first remote show of one costs its
   download in traffic; afterwards the tiles come from the cache.
-- **A signature is issued once.** The authorisation of a remote object is
-  issued in the request headers when it is opened, and the storage accepts
-  it for a quarter of an hour after `x-amz-date`; a 401 or 403 in the middle
-  of a read is a definite refusal, not retried (`ranged` in `range.rs`), and
-  the object is not signed again. A layer that outlives its signature loses
-  its source and has to be opened anew. A presigned address is refused by the
-  storage ([ADR 0005](decisions/0005-network-reading.md)), so removing this
-  needs re-signing on 401/403 — an exchange between `network` and
-  `data-provider`.
+- **A signature is renewed only for reads, and only on a refusal.** The
+  authorisation of a remote object lives in the request headers. AWS S3
+  accepts such a signature for a quarter of an hour after `x-amz-date`; the
+  CDSE storage does not enforce that window at all — measured on 2026-09-06,
+  it answered 206 to signatures dated from fourteen minutes to thirty days
+  into the past ([ADR 0005](decisions/0005-network-reading.md)). A 401 or 403
+  in the middle of a read therefore never came from expiry here; when it
+  comes — another storage, a revoked key — `network` asks `data-provider` to
+  sign the object again and repeats the request once with the new headers
+  (`range.rs`, `on_resign` / `on_resigned`), a path held by unit tests and
+  never yet by a live refusal. Nothing else is renewed: a resumed download
+  (`download.rs`) and the opening probe go with the headers they were given,
+  and a provider without keys answers empty, which ends the read with
+  "nothing to sign with". The wait for the new signature is bounded (ten
+  seconds) and holds the reading thread.
 - **Sizes.** `MAX_SOURCE_SIDE` bounds every raster at describe, and
   `FULL_DECODE_BUDGET` bounds what a whole-frame decoder may produce — JPEG
   at the finest scale that fits, interlaced PNG, GIF, BMP, WebP

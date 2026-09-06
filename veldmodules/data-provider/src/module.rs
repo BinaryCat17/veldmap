@@ -90,4 +90,5 @@ pub use cdse::{
     // subs
     on_http_result,
     on_open_result,
+    on_resign,
 };

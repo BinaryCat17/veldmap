@@ -12,9 +12,10 @@ probe per tile-part, and headers two blocks apart look sequential often
 enough that the coarsest level of a Sentinel-2 granule delivered 84 % of
 129 MiB for the megabyte it needed (0004); a tile order of a COG asks its
 chunks one miss at a time, each miss a request of half a second. The
-signature of a storage object is issued in the request headers, which the
-storage accepts for a quarter of an hour after `x-amz-date`, so a layer kept
-on the globe longer than that loses its source at the next miss — 401/403 is
+signature of a storage object is issued in the request headers, which AWS S3
+accepts for a quarter of an hour after `x-amz-date` (this storage turned out
+not to enforce that — see the amendment of 2026-09-06), so a layer kept on the
+globe longer than that would lose its source at the next miss — 401/403 is
 not retried, and nothing signs the object again.
 
 ## Decision
@@ -87,6 +88,25 @@ source that knows its chunk offsets names them (NetCDF does not yet — its
 file chunks are an index walk away); `IN_FLIGHT` connections are held only
 for a named order; a layer older than a quarter of an hour has to be opened
 anew.
+
+## Amended 2026-09-06: the signature is renewed on 401/403, and the quarter-hour was never this storage's
+
+The exchange named above exists: a 401 or 403 in the middle of a read is no
+longer a refusal but an expired signature (`Attempt::Unsigned`). The reading
+thread asks for a new one over the bus — `network/on_resign`, a broadcast
+without a reply pair, answered by `data-provider/on_resigned` with the same
+address as the key, since only the provider holds the keys — waits up to ten
+seconds, replaces the headers shared with the fetch, and repeats the same
+request once. An empty answer (no keys, a foreign address, a dead provider)
+ends the read with the old refusal; the opening probe and a resumed download
+are not renewed. Measured the same day, before trusting the premise: a SigV4
+GET of two bytes of an OFFL granule with `x-amz-date` moved into the past —
+0, 14, 16, 20, 60, 120, 360 minutes, 1, 3, 7 and 30 days — was answered 206
+every time by `eodata.dataspace.copernicus.eu`; two scenario runs that held a
+layer for sixteen minutes and then read on saw no refusal either. The
+quarter-hour of the context is AWS's rule, not this storage's: the renewal
+stands as insurance for a storage that enforces it or a key revoked
+mid-read, held by unit tests, and has not fired against a live refusal.
 
 ## Amended 2026-09-05: a block of 64 KiB, and a two-phase JPEG 2000 order
 

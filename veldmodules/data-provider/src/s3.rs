@@ -158,6 +158,18 @@ pub fn object(identity: &Identity, identifier: &str) -> Request {
     signed(identity, &format!("/{}/{}", BUCKET, key(identifier)), &[])
 }
 
+/// Та же подпись заново — по адресу, а не по идентификатору: просит её
+/// network, у которого от объекта остался один адрес. Чужой адрес не
+/// подписывается: ключи — к своему хранилищу, а подпись на чужой путь ушла бы
+/// туда вместе с ними; без TLS — тоже, по той же причине.
+pub fn resign(identity: &Identity, url: &str) -> Option<Request> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some(HOST) {
+        return None;
+    }
+    Some(signed(identity, parsed.path(), &[]))
+}
+
 /// Листинг одного уровня: папки отдаются как CommonPrefixes, а не разворотом
 /// всего поддерева — отсюда delimiter.
 pub fn listing(identity: &Identity, path: &str, token: &str) -> Request {
@@ -379,6 +391,19 @@ mod tests {
         assert!(listing.headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")), "{:?}", listing.headers);
         assert!(!listing.url.contains("X-Amz-Signature"), "{}", listing.url);
         assert!(listing.url.contains("list-type=2"));
+    }
+
+    /// Подпись заново — на тот же адрес и своя; чужой адрес и адрес без TLS
+    /// не подписываются.
+    #[test]
+    fn переподпись_даёт_тот_же_адрес_и_только_своему_хранилищу() {
+        let identity = test_identity();
+        let request = object(&identity, "eodata/Sentinel-2/T31TGK/TCI_10m.jp2");
+        let again = resign(&identity, &request.url).expect("свой адрес подписывается");
+        assert_eq!(again.url, request.url);
+        assert!(again.headers.keys().any(|name| name.eq_ignore_ascii_case("authorization")), "{:?}", again.headers);
+        assert!(resign(&identity, "https://example.com/eodata/x.jp2").is_none(), "чужой адрес");
+        assert!(resign(&identity, "http://eodata.dataspace.copernicus.eu/eodata/x.jp2").is_none(), "без TLS ключи не уходят");
     }
 
     #[test]

@@ -1,25 +1,20 @@
 //! Удалённый файл как ресурс (топик network/open): читается Range-запросами,
-//! целиком не скачивается.
-//!
-//! Для читателя такой ресурс неотличим от файла — тот же `resource_read(id,
-//! offset, size)`. Поэтому декодер, умеющий работать окнами, снимает превью
-//! со снимка на гигабайты, вытянув заголовок и несколько тайлов: остальное
-//! по проводу не идёт. Условия — сервер отвечает на Range (иначе открытие
-//! завершится ошибкой сразу, а не посреди чтения) и формат допускает
-//! произвольный доступ.
-//!
-//! Заголовки авторизации — снимок на момент открытия (см. RemoteOpenRequest):
-//! ресурс живёт ровно столько, сколько они действительны. Для подписи SigV4 в
-//! заголовках это четверть часа — достаточно, чтобы открыть и декодировать, но
-//! не для слоя, который держат на шаре часами; отказ 401/403 посреди чтения
-//! не переспрашивается, и переподписи пока нет (ADR 0005).
+//! целиком не скачивается. Для читателя он неотличим от файла — тот же
+//! `resource_read(id, offset, size)`, — поэтому декодер, умеющий работать
+//! окнами, снимает превью со снимка на гигабайты, вытянув заголовок и
+//! несколько тайлов. Условия: сервер отвечает на Range (иначе открытие
+//! отказывает сразу, а не посреди чтения), формат допускает произвольный
+//! доступ. Подпись SigV4 в заголовках открытия по правилам AWS живёт четверть
+//! часа (хранилище CDSE её срока не проверяет — замер в ADR 0005): на 401/403
+//! посреди чтения носитель просит подписать объект заново того, у кого ключи
+//! (`on_resign` → data-provider → `on_resigned`), и читает дальше.
 
 use super::State;
 use veldmap_host_util::bindings::network as bus;
-use veldmap_host_util::bindings::proto::network::RemoteOpenRequest;
-use veldmap_host_util::{blocking, opened, opened_handle, shutdown, Caller, RangeSource, Shutdown};
+use veldmap_host_util::bindings::proto::network::{RemoteOpenRequest, ResignRequest, ResignResponse};
+use veldmap_host_util::{blocking, opened, opened_handle, shutdown, Caller, HostContext, RangeSource, Shutdown};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Размер блока кэша — зерно пула и заказа, наименьший кусок, которым ходят
 /// в сеть. Ровно проба JPEG 2000 (`excerpt::PROBE`) и край отпечатка: заказ
@@ -86,10 +81,11 @@ const PREFETCH_CAP: u64 = POOL_LIMIT / 2;
 pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
     let Caller { instance, correlation, .. } = caller;
     let blocks = state.blocks.clone();
+    let resign = resigner(Arc::downgrade(&state.ctx), state.resigns.clone());
 
     // Пробный запрос уходит в сеть, поэтому не в async-обработчике.
     blocking(&state.ctx, move |ctx| {
-        let result = match HttpRange::open(&req.url, req.headers, blocks) {
+        let result = match HttpRange::open(&req.url, req.headers, blocks, resign) {
             Ok(source) => {
                 let len = source.len();
                 let source = Arc::new(source);
@@ -114,6 +110,76 @@ pub fn on_open(state: &State, req: RemoteOpenRequest, caller: Caller) {
     });
 }
 
+/// Провайдер подписал объект заново (либо ответил пусто) — будим ждущих.
+pub fn on_resigned(state: &State, resp: ResignResponse, _caller: Caller) {
+    state.resigns.settle(&resp.url, resp.headers);
+}
+
+/// Сколько ждать новой подписи. Провайдер отвечает из памяти, без сети, и
+/// молчит только мёртвым — а мёртвого ждать дольше незачем.
+const RESIGN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Шаг ожидания: между шагами ожидание смотрит, не гасится ли хост, — ответа,
+/// которого никто не прочтёт, ждать незачем.
+const RESIGN_SLICE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Чтения, ждущие новой подписи: адрес → кто ждёт. Ключ — адрес, а не
+/// корреляция: просьба уходит событием без адресата и без пары, и ответ
+/// узнаётся по тому же адресу; два чтения одного объекта, истёкшие разом,
+/// ждут одного ответа.
+#[derive(Default)]
+pub struct Resigns {
+    waiting: Mutex<HashMap<String, Vec<std::sync::mpsc::SyncSender<HashMap<String, String>>>>>,
+}
+
+impl Resigns {
+    /// Встать в очередь за подписью адреса; ответ придёт в приёмник.
+    fn ask(&self, url: &str) -> std::sync::mpsc::Receiver<HashMap<String, String>> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        self.waiting.lock().unwrap().entry(url.to_string()).or_default().push(sender);
+        receiver
+    }
+
+    /// Подпись пришла (пустая — подписать нечем): всем, кто ждал этот адрес.
+    fn settle(&self, url: &str, headers: HashMap<String, String>) {
+        let waiting = self.waiting.lock().unwrap().remove(url).unwrap_or_default();
+        for waiter in waiting {
+            let _ = waiter.send(headers.clone());
+        }
+    }
+
+    /// Ответа не дождались — очередь адреса снимается целиком: молчащий
+    /// провайдер молчит и соседям, а поздний ответ никого не найдёт, и это не
+    /// беда. Без этого мёртвый провайдер копил бы здесь приёмники без предела.
+    fn abandon(&self, url: &str) {
+        self.waiting.lock().unwrap().remove(url);
+    }
+}
+
+/// Просьба о подписи по шине: событие провайдеру и ожидание его ответа на
+/// том же blocking-потоке, где идёт чтение. Контекст держится слабой ссылкой:
+/// сильная замкнула бы круг (контекст → реестр → носитель → эта просьба), и
+/// ресурс не закрывался бы на выходе.
+fn resigner(ctx: std::sync::Weak<HostContext>, resigns: Arc<Resigns>) -> Resign {
+    Box::new(move |url: &str| {
+        let ctx = ctx.upgrade()?;
+        let receiver = resigns.ask(url);
+        bus::emit::on_resign(&*ctx.publisher, &ResignRequest { url: url.to_string() });
+        let deadline = std::time::Instant::now() + RESIGN_WAIT;
+        let headers = loop {
+            match receiver.recv_timeout(RESIGN_SLICE) {
+                Ok(headers) => break headers,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    if !veldmap_host_util::shutting_down() && std::time::Instant::now() < deadline => {}
+                Err(_) => {
+                    resigns.abandon(url);
+                    return None;
+                }
+            }
+        };
+        (!headers.is_empty()).then_some(headers)
+    })
+}
+
 /// Адрес без строки запроса — для журнала и для ключа владения: строка запроса
 /// не часть тождества объекта, а у чужого сервера в ней может лежать ключ или
 /// подпись, и журналу такое не принадлежит.
@@ -129,12 +195,23 @@ fn without_query(url: &str) -> &str {
 /// заголовки, рантайм — живёт внутри замыкания, которое собирает [`HttpRange::open`].
 type Fetch = Box<dyn Fn(u64, u64) -> Result<bytes::Bytes, Attempt> + Send + Sync>;
 
+/// Новая подпись объекта по его адресу — тем же исключением, что и [`Fetch`]:
+/// подписать умеет только data-provider, просьба к нему идёт шиной и ждётся
+/// на blocking-потоке, а носитель под тестом обязан пережить истёкшую подпись
+/// без шины. `None` — подписать нечем либо ответа не дождались.
+type Resign = Box<dyn Fn(&str) -> Option<HashMap<String, String>> + Send + Sync>;
+
 /// Носитель поверх HTTP: блоки тянутся по требованию и кэшируются.
 struct HttpRange {
     /// Адрес — только для журнала: ходит в сеть [`HttpRange::fetch`].
     url: String,
     len: u64,
     fetch: Fetch,
+    /// Заголовки похода — общие с [`Fetch`]: новая подпись ложится сюда, и
+    /// следующий запрос уходит уже с ней.
+    headers: Arc<RwLock<HashMap<String, String>>>,
+    /// Новая подпись объекта, когда прежняя истекла (см. [`Resign`]).
+    resign: Resign,
     /// Общий на все ресурсы пул блоков и ключ владения в нём; там же и
     /// разгон — он принадлежит объекту, а не открытию (см. [`Readahead`]).
     blocks: Arc<Blocks>,
@@ -463,8 +540,11 @@ fn due(fetched: u64, reported: &std::sync::atomic::AtomicU64) -> bool {
 enum Attempt {
     /// Оборвалось: соединение, тело ответа, шлюз. Проходит само.
     Broken(anyhow::Error),
-    /// Отказано: не тот статус, чужой адрес, истёкшая подпись.
+    /// Отказано: не тот статус, чужой адрес. Повторять нечего.
     Refused(anyhow::Error),
+    /// Подпись истекла (401/403 посреди чтения): тот же запрос пройдёт с новой
+    /// подписью, и только с ней — повторять со старой нечего.
+    Unsigned(anyhow::Error),
 }
 
 /// Отказ идти в сеть, когда хост гасится: таймеры рантайма разбирают первыми, и
@@ -511,15 +591,15 @@ fn probed(status: reqwest::StatusCode, url: &str) -> Result<(), Attempt> {
 
 /// Исход чтения диапазона по статусу: только 206 — ответ 200 означал бы, что
 /// Range проигнорирован и пришёл весь файл, а принять его за блок значило бы
-/// сдвинуть все смещения. 401/403 посреди чтения — истёкшая подпись.
+/// сдвинуть все смещения. 401/403 посреди чтения — истёкшая подпись: сервер
+/// здесь один, хранилище провайдера; чужому новой подписи никто не даст, и
+/// отказ придёт тем же словом.
 fn ranged(status: reqwest::StatusCode, from: u64, to: u64) -> Result<(), Attempt> {
     if status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Ok(());
     }
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(Attempt::Refused(anyhow::anyhow!(
-            "доступ к удалённому ресурсу больше не действителен (HTTP {}): \
-             подпись выдана при открытии и могла истечь", status)));
+        return Err(Attempt::Unsigned(anyhow::anyhow!("подпись объекта истекла (HTTP {})", status)));
     }
     Err(refusal_or_hiccup(status, anyhow::anyhow!("чтение диапазона {}..{}: HTTP {}", from, to, status)))
 }
@@ -545,7 +625,7 @@ fn delivered(got: u64, expected: u64) -> Result<(), Attempt> {
 /// это она, и проверяется оно без сети и без ожидания.
 fn again(attempt: u32, outcome: &Attempt) -> Option<std::time::Duration> {
     match outcome {
-        Attempt::Refused(_) => None,
+        Attempt::Refused(_) | Attempt::Unsigned(_) => None,
         Attempt::Broken(_) if attempt >= ATTEMPTS => None,
         Attempt::Broken(_) => Some(RETRY_PAUSE * 2u32.pow(attempt - 1)),
     }
@@ -570,12 +650,12 @@ fn with_retries<T>(what: &str, mut once: impl FnMut() -> Result<T, Attempt>) -> 
             Err(outcome) => outcome,
         };
         let Some(pause) = again(attempt, &outcome) else {
-            let (Attempt::Broken(error) | Attempt::Refused(error)) = outcome;
+            let (Attempt::Broken(error) | Attempt::Refused(error) | Attempt::Unsigned(error)) = outcome;
             return Err(error);
         };
         log::warn!(target: "network", "{}: попытка {} из {} сорвалась, повтор через {} мс: {}",
                    what, attempt, ATTEMPTS, pause.as_millis(),
-                   match &outcome { Attempt::Broken(e) | Attempt::Refused(e) => e });
+                   match &outcome { Attempt::Broken(e) | Attempt::Refused(e) | Attempt::Unsigned(e) => e });
         std::thread::sleep(pause);
         attempt += 1;
     }
@@ -591,9 +671,17 @@ fn with_retries<T>(what: &str, mut once: impl FnMut() -> Result<T, Attempt>) -> 
 /// контекст рантайма, а у потока prefetch его нет — собранный снаружи запрос
 /// падает «there is no reactor running», и с `panic = "abort"` это уносит весь
 /// хост. Держит это правило тест `запрос_собирается_внутри_block_on`.
-fn fetcher(runtime: tokio::runtime::Handle, url: String, headers: HashMap<String, String>, shutdown: &'static Shutdown) -> Fetch {
+fn fetcher(
+    runtime: tokio::runtime::Handle,
+    url: String,
+    headers: Arc<RwLock<HashMap<String, String>>>,
+    shutdown: &'static Shutdown,
+) -> Fetch {
     Box::new(move |from, to| {
         awaited(&runtime, shutdown, async {
+            // Заголовки берутся на каждый запрос: между двумя запросами их
+            // могла заменить новая подпись.
+            let headers = headers.read().unwrap().clone();
             let response = super::http::get(&url, &headers, Some((from, to)))
                 .send()
                 .await
@@ -635,7 +723,7 @@ fn awaited<T>(
 impl HttpRange {
     /// Пробный запрос первого байта: заодно проверяет, что сервер понимает
     /// Range, и узнаёт полный размер из Content-Range.
-    fn open(url: &str, headers: HashMap<String, String>, blocks: Arc<Blocks>) -> anyhow::Result<Self> {
+    fn open(url: &str, headers: HashMap<String, String>, blocks: Arc<Blocks>, resign: Resign) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Handle::current();
         let mut validator = String::new();
         let len = with_retries(&format!("открытие {}", without_query(url)), || {
@@ -672,7 +760,9 @@ impl HttpRange {
             validator,
         });
 
-        Ok(Self::over(url, len, blocks, identity, fetcher(runtime, url.to_string(), headers, shutdown())))
+        let headers = Arc::new(RwLock::new(headers));
+        let fetch = fetcher(runtime, url.to_string(), headers.clone(), shutdown());
+        Ok(Self::over(url, len, blocks, identity, fetch).resigned_by(headers, resign))
     }
 
     /// Носитель над готовым походом в сеть — тем, что собрал [`fetcher`],
@@ -682,6 +772,8 @@ impl HttpRange {
             url: url.to_string(),
             len,
             fetch,
+            headers: Arc::default(),
+            resign: Box::new(|_| None),
             owner: blocks.claim_for(identity),
             blocks,
             fetched: std::sync::atomic::AtomicU64::new(0),
@@ -690,6 +782,27 @@ impl HttpRange {
             blocks_in: std::sync::atomic::AtomicU64::new(0),
             id: std::sync::atomic::AtomicU64::new(0),
             reported: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Носитель, умеющий переподписаться: заголовки, общие с походом, и тот,
+    /// кто подпишет заново.
+    fn resigned_by(mut self, headers: Arc<RwLock<HashMap<String, String>>>, resign: Resign) -> Self {
+        self.headers = headers;
+        self.resign = resign;
+        self
+    }
+
+    /// Подписать объект заново: заголовки заменяются целиком — подпись живёт не
+    /// в одном из них. Не подписали — отказ словом истёкшей подписи.
+    fn resign(&self, why: anyhow::Error) -> Result<(), Attempt> {
+        match (self.resign)(&self.url) {
+            Some(headers) => {
+                *self.headers.write().unwrap() = headers;
+                log::info!(target: "network", "{}: подпись истекла и выдана заново", self.name());
+                Ok(())
+            }
+            None => Err(Attempt::Refused(why.context("подписать заново нечем"))),
         }
     }
 
@@ -777,7 +890,18 @@ impl HttpRange {
             &format!("чтение диапазона {}..{} ({})", from, to, without_query(&self.url)),
             || {
                 shutting_down()?;
-                let data = (self.fetch)(from, to)?;
+                // Истёкшая подпись — не повтор, а новая подпись и тот же запрос
+                // ещё раз; истёкшая и новая — отказ, повторять нечем.
+                let data = match (self.fetch)(from, to) {
+                    Err(Attempt::Unsigned(why)) => {
+                        self.resign(why)?;
+                        (self.fetch)(from, to).map_err(|again| match again {
+                            Attempt::Unsigned(e) => Attempt::Refused(e.context("хранилище отвергло и новую подпись")),
+                            other => other,
+                        })?
+                    }
+                    outcome => outcome?,
+                };
                 delivered(data.len() as u64, expected)?;
                 Ok(data)
             },
@@ -972,17 +1096,20 @@ mod tests {
     }
 
     /// Переспрашивается только то, что проходит само. Отказ повторять нельзя
-    /// не из экономии: истёкшая подпись отказывает одинаково всем блокам, и
-    /// пауза перед каждым растянула бы одно сообщение на минуты.
+    /// не из экономии: отказ по существу одинаков для всех блоков, и пауза
+    /// перед каждым растянула бы одно сообщение на минуты; истёкшая подпись —
+    /// не повтор, а новая подпись (см. `fetch_run`).
     #[test]
     fn обрыв_переспрашивают_отказ_нет() {
         let broken = Attempt::Broken(anyhow::anyhow!("тело ответа оборвалось"));
-        let refused = Attempt::Refused(anyhow::anyhow!("HTTP 403"));
+        let refused = Attempt::Refused(anyhow::anyhow!("HTTP 404"));
+        let unsigned = Attempt::Unsigned(anyhow::anyhow!("HTTP 403"));
 
         assert_eq!(again(1, &broken), Some(RETRY_PAUSE));
         assert_eq!(again(2, &broken), Some(RETRY_PAUSE * 2), "пауза растёт");
         assert_eq!(again(ATTEMPTS, &broken), None, "попытки кончились");
-        assert_eq!(again(1, &refused), None, "от повтора подпись не оживёт");
+        assert_eq!(again(1, &refused), None, "от повтора адрес не появится");
+        assert_eq!(again(1, &unsigned), None, "истёкшая подпись повторяется не так, а с новой");
     }
 
     /// Осечку шлюза от отказа по существу отличает только код: тело у них
@@ -995,7 +1122,7 @@ mod tests {
         };
         assert!(hiccup(502), "шлюз перегружен — пройдёт само");
         assert!(hiccup(429), "слишком часто — тем более");
-        assert!(!hiccup(403), "подпись не станет действительной от повтора");
+        assert!(!hiccup(403), "отказ в доступе — не осечка");
         assert!(!hiccup(404), "и адрес не появится");
     }
 
@@ -1448,12 +1575,12 @@ mod reads {
         });
 
         let runtime = tokio::runtime::Runtime::new().expect("рантайм");
-        let fetch = fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), HashMap::new(), fresh_shutdown());
+        let fetch = fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), Arc::default(), fresh_shutdown());
         // Чужой поток без контекста рантайма — как у prefetch.
         let fetched = std::thread::spawn(move || fetch(0, 16).map(|bytes| bytes.to_vec()))
             .join()
             .expect("поток без контекста рантайма не должен падать");
-        assert_eq!(fetched.map_err(|e| match e { Attempt::Broken(e) | Attempt::Refused(e) => e.to_string() }), Ok(b"0123456789abcdef".to_vec()));
+        assert_eq!(fetched.map_err(|e| match e { Attempt::Broken(e) | Attempt::Refused(e) | Attempt::Unsigned(e) => e.to_string() }), Ok(b"0123456789abcdef".to_vec()));
         server.join().expect("сервер");
     }
 
@@ -1490,10 +1617,11 @@ mod reads {
         let runtime = tokio::runtime::Runtime::new().expect("рантайм");
         let shutdown = fresh_shutdown();
         let fetch: Arc<Fetch> =
-            Arc::new(fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), HashMap::new(), shutdown));
+            Arc::new(fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), Arc::default(), shutdown));
         let refused = |outcome: Result<bytes::Bytes, Attempt>| match outcome {
             Err(Attempt::Refused(e)) => e.to_string(),
             Err(Attempt::Broken(e)) => panic!("обрыв вместо отказа: {}", e),
+            Err(Attempt::Unsigned(e)) => panic!("истёкшая подпись вместо отказа: {}", e),
             Ok(bytes) => panic!("ответ вместо отказа: {} байт", bytes.len()),
         };
 
@@ -1510,6 +1638,86 @@ mod reads {
 
         release.send(()).ok();
         server.join().expect("сервер");
+    }
+
+    /// Истёкшая подпись не конец чтения: объект подписывается заново, и тот же
+    /// запрос уходит с новыми заголовками. Заголовки у похода и у носителя
+    /// одни — поход видит новую подпись без пересборки; живую подпись заново
+    /// не спрашивают.
+    #[test]
+    fn истёкшая_подпись_выдаётся_заново_и_чтение_продолжается() {
+        let bytes = pattern(4 * BLOCK);
+        let headers: Arc<RwLock<HashMap<String, String>>> = Arc::default();
+        let asked = Arc::new(Mutex::new(0u32));
+        let fetch: Fetch = {
+            let (bytes, headers) = (bytes.clone(), headers.clone());
+            Box::new(move |from, to| match headers.read().unwrap().get("x-amz-date").map(String::as_str) {
+                Some("fresh") => Ok(bytes::Bytes::copy_from_slice(&bytes[from as usize..to as usize])),
+                _ => Err(Attempt::Unsigned(anyhow::anyhow!("HTTP 403"))),
+            })
+        };
+        let resign: Resign = {
+            let asked = asked.clone();
+            Box::new(move |_url| {
+                *asked.lock().unwrap() += 1;
+                Some(HashMap::from([("x-amz-date".to_string(), "fresh".to_string())]))
+            })
+        };
+        let source = HttpRange::over("http://host/f", bytes.len() as u64, Arc::new(Blocks::default()), None, fetch)
+            .resigned_by(headers, resign);
+
+        assert_eq!(source.read_at(0, 16).expect("чтение с новой подписью"), &bytes[..16]);
+        assert_eq!(*asked.lock().unwrap(), 1, "подпись спрошена один раз");
+        assert!(source.read_at(BLOCK, 16).is_ok());
+        assert_eq!(*asked.lock().unwrap(), 1, "живая подпись заново не спрашивается");
+    }
+
+    /// Нечем подписать — отказ словом истёкшей подписи и без второго похода;
+    /// подписали, а хранилище отказало снова — отказ, называющий и это:
+    /// истёкшую и новую не повторяют.
+    #[test]
+    fn без_годной_новой_подписи_чтение_отказывает_без_повторов() {
+        let unsigned = |calls: &Arc<Mutex<u32>>| -> Fetch {
+            let calls = calls.clone();
+            Box::new(move |_, _| {
+                *calls.lock().unwrap() += 1;
+                Err(Attempt::Unsigned(anyhow::anyhow!("HTTP 403")))
+            })
+        };
+
+        let calls = Arc::new(Mutex::new(0u32));
+        let source = HttpRange::over("http://host/f", 4 * BLOCK, Arc::new(Blocks::default()), None, unsigned(&calls))
+            .resigned_by(Arc::default(), Box::new(|_| None));
+        let error = source.read_at(0, 16).expect_err("подписать нечем").to_string();
+        assert!(error.contains("подписать заново нечем"), "{}", error);
+        assert_eq!(*calls.lock().unwrap(), 1, "без подписи второго похода нет");
+
+        let calls = Arc::new(Mutex::new(0u32));
+        let stale = |_: &str| Some(HashMap::from([("x-amz-date".to_string(), "stale".to_string())]));
+        let source = HttpRange::over("http://host/f", 4 * BLOCK, Arc::new(Blocks::default()), None, unsigned(&calls))
+            .resigned_by(Arc::default(), Box::new(stale));
+        let error = format!("{:#}", source.read_at(0, 16).expect_err("хранилище отвергло и новую"));
+        assert!(error.contains("и новую подпись"), "{}", error);
+        assert_eq!(*calls.lock().unwrap(), 2, "новая подпись — ровно один повтор");
+    }
+
+    /// Просьбы о подписи ждут по адресу: один ответ будит всех, кто ждал этот
+    /// адрес, чужой адрес никого; снятая очередь ответа не получает.
+    #[test]
+    fn a_resign_answer_wakes_every_reader_of_its_url() {
+        let resigns = Resigns::default();
+        let first = resigns.ask("http://host/a");
+        let second = resigns.ask("http://host/a");
+        let other = resigns.ask("http://host/b");
+        resigns.settle("http://host/a", HashMap::from([("k".to_string(), "v".to_string())]));
+        let second_of = std::time::Duration::from_secs(1);
+        assert_eq!(first.recv_timeout(second_of).unwrap().get("k").map(String::as_str), Some("v"));
+        assert_eq!(second.recv_timeout(second_of).unwrap().len(), 1, "оба читателя адреса разбужены");
+        assert!(other.try_recv().is_err(), "чужой адрес не разбужен");
+
+        resigns.abandon("http://host/b");
+        resigns.settle("http://host/b", HashMap::from([("k".to_string(), "v".to_string())]));
+        assert!(other.try_recv().is_err(), "снятая очередь ответа не получает");
     }
 
     /// Сорвавшаяся серия не выбрасывает соседних по пачке: привезённое ложится
@@ -1559,8 +1767,8 @@ mod reads {
     }
 
     /// Только 206 значит «понимает Range»: 200 — отказ по существу, шлюз —
-    /// обрыв, чужой адрес — отказ; истёкшая подпись посреди чтения — отказ с
-    /// названной причиной; короткое тело — обрыв.
+    /// обрыв, чужой адрес — отказ; истёкшая подпись посреди чтения — свой
+    /// исход, за которым идёт новая подпись; короткое тело — обрыв.
     #[test]
     fn statuses_are_read_as_refusals_or_hiccups() {
         use reqwest::StatusCode;
@@ -1572,7 +1780,7 @@ mod reads {
 
         assert!(ranged(StatusCode::PARTIAL_CONTENT, 0, 1).is_ok());
         let expired = ranged(StatusCode::FORBIDDEN, 0, 1).unwrap_err();
-        assert!(matches!(&expired, Attempt::Refused(e) if e.to_string().contains("истечь")));
+        assert!(matches!(&expired, Attempt::Unsigned(e) if e.to_string().contains("истекла")));
         assert!(matches!(ranged(StatusCode::TOO_MANY_REQUESTS, 0, 1), Err(Attempt::Broken(_))));
 
         assert!(delivered(10, 10).is_ok());
