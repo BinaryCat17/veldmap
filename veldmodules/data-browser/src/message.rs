@@ -335,6 +335,9 @@ messages! {
         OverlayVariables(key Option<String>) = "overlay_variables";
         /// Показать на шаре другую величину файла слоя — путь из списка.
         OverlayVariable(key String, val String) = "overlay_variable";
+        /// Положить снимок на шар этим файлом: ключ снимка и ключ файла внутри
+        /// него, которому лечь подробным растром.
+        GlobeFile(key String, val String) = "globe_file";
 
         // -- Контуры --
         //
@@ -635,6 +638,7 @@ mod tests {
             Msg::OverlayVariables(Some("продукт".into())),
             Msg::OverlayVariables(None),
             Msg::OverlayVariable("продукт".into(), "/PRODUCT/qa_value".into()),
+            Msg::GlobeFile("продукт".into(), "продукт/F2_BT_in.nc".into()),
             Msg::OutlineToggle("продукт".into()),
             Msg::OutlineRemove("продукт".into()),
             Msg::OutlineFocus("продукт".into()),

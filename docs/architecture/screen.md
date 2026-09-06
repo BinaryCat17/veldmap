@@ -359,7 +359,16 @@ canvas (`components::variables`, `OverlayProgress.detailed_variables`), and an
 item names its variable to the globe (`OverlayRaster.variable`, the set sent
 again). The choice is pinned to the file by its ordinal and dropped when a
 spare takes the file's place; a refused variable leaves its complaint in the
-row and the list under it.
+row and the list under it. The file itself is chosen from the list: a file
+row inside a product — in the catalogue and among downloads alike — carries
+"put on the globe with this file" in its menu (`Msg::GlobeFile`), and the
+layer's rasters are asked again with it (`ImageryRequest.wanted`,
+`OverlayState.wanted_file`) — for a product not yet on the globe the wish
+waits for the catalogue's answer (`State::file_wishes`), for a layer still
+assembling it waits for the assembly's end; a cancelled show, a refused
+catalogue answer or a removed layer take the wish with them. A refused file
+(not a raster by name, the quicklook) comes back as a notice, and the layer
+lies with the layout's choice.
 
 The strip under the globe tab goes the other way (`view::globe`): it names
 the scene — the picked one, else the top visible layer — leads to it by the

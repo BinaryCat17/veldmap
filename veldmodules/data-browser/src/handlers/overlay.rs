@@ -103,6 +103,8 @@ pub fn on_toggle_pressed(state: &mut State, view: ViewId, identifier: String) {
     // [`on_located`]).
     if state.showing.remove(&identifier) {
         veldsdk::log::info!(target: "handlers", "показ '{}' отменён до ответа каталога", identifier);
+        // И просьба о файле с ним: её никто не ждёт.
+        state.file_wishes.remove(&identifier);
         send_set(state);
         return;
     }
@@ -152,7 +154,9 @@ pub fn on_located(state: &mut State, key: &str, response: LocateResponse) {
     let Some(product) = response.product else {
         veldsdk::log::warn!(target: "handlers", "показать на шаре не вышло: {}", response.error);
         state.notice = Some(format!("Показать на шаре не вышло: {}", response.error));
-        // Просьбы больше нет — значит нечего и штриховать (см. [`send_set`]).
+        // Просьбы больше нет — значит нечего и штриховать (см. [`send_set`]);
+        // и файлу, которым просили лечь, ждать нечего.
+        state.file_wishes.remove(key);
         send_set(state);
         return;
     };
@@ -194,30 +198,100 @@ pub fn show(state: &mut State, product: &DataProduct, source: Option<ViewId>) {
         return;
     }
 
-    state.overlays.push(OverlayState::new(
+    let mut overlay = OverlayState::new(
         product.identifier.clone(),
         product.name.clone(),
         product.folder,
         source,
         quad_of(product),
         footprint::frame(&product.footprint),
-    ));
+    );
+    // Просьба положить снимок этим файлом ждала продукта здесь (см.
+    // `State::file_wishes`); слой её и несёт дальше.
+    overlay.wanted_file = state.file_wishes.remove(&product.identifier);
+    state.overlays.push(overlay);
 
-    let correlation = state.imageries.begin(product.identifier.clone());
-    if let Some(overlay) = state.overlays.last_mut() {
-        overlay.imagery = Some(correlation.clone());
-    }
-    crate::calls::data_provider::on_imagery(&ImageryRequest {
-        // Скачан ли снимок, знаем только мы: у провайдера одно хранилище. От
-        // этого зависит состав растров — подробный, читаемый целым проходом,
-        // предлагается лишь тогда, когда файл под рукой.
-        downloaded: state.library.whole(&product.identifier),
-        identifier: product.identifier.clone(),
-    }, &correlation);
+    request_imagery(state, &product.identifier);
     // Набор наложений сам по себе не изменился — собирающийся в него не
     // попадает, — но изменилось то, что на шаре видно: место снимка помечается
     // штриховкой, пока картинки нет (см. [`send_set`]).
     send_set(state);
+}
+
+/// Спросить у провайдера растры слоя — с файлом, которым просили лечь, если
+/// просили. Одно место на первый запрос и на повторный со сменой файла.
+fn request_imagery(state: &mut State, key: &str) {
+    let correlation = state.imageries.begin(key.to_string());
+    let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
+    overlay.imagery = Some(correlation.clone());
+    let request = imagery_request(&state.library, overlay);
+    crate::calls::data_provider::on_imagery(&request, &correlation);
+}
+
+/// Чем спрашивать растры слоя: ключ снимка, скачан ли он и файл, которым
+/// просили лечь.
+fn imagery_request(library: &crate::module::state::LibraryState, overlay: &OverlayState) -> ImageryRequest {
+    ImageryRequest {
+        // Скачан ли снимок, знаем только мы: у провайдера одно хранилище. От
+        // этого зависит состав растров — подробный, читаемый целым проходом,
+        // предлагается лишь тогда, когда файл под рукой.
+        downloaded: library.whole(&overlay.identifier),
+        identifier: overlay.identifier.clone(),
+        wanted: overlay.wanted_file.clone().unwrap_or_default(),
+    }
+}
+
+/// Положить снимок на шар этим файлом — пункт меню файла внутри снимка.
+///
+/// Лежащему слою растры спрашиваются заново с названным файлом: приедут
+/// другие ресурсы, и глобус заменит набор (см. его `adopt_overlay`), прежний
+/// лежит до замены. Слоя ещё нет — продукт восстанавливается тем же ходом,
+/// что по значку шара, а просьба ждёт его в `State::file_wishes`. Сборка или
+/// запрос растров в полёте — просьба ждёт их конца: вторая сборка поверх
+/// первой оставила бы её открытия без хозяина. Отменённый показ, отказ
+/// каталога и снятый слой просьбу уносят с собой.
+pub fn on_file_pressed(state: &mut State, product: &str, file: String) {
+    state.close_menus();
+    place_file(state, product, file);
+}
+
+/// Положить снимок этим файлом — без закрытия меню: сюда приходит и просьба,
+/// дождавшаяся конца сборки (см. [`finish`]).
+fn place_file(state: &mut State, product: &str, file: String) {
+    state.unshowable.remove(product);
+    if let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == product) {
+        if overlay.wanted_file.as_deref() == Some(file.as_str()) {
+            return;
+        }
+        if overlay.imagery.is_some() || overlay.assembly.is_some() {
+            veldsdk::log::info!(target: "handlers", "'{}': растры ещё собираются — файл {} подождёт", overlay.label, file_name(&file));
+            state.file_wishes.insert(product.to_string(), file);
+            return;
+        }
+        overlay.wanted_file = Some(file);
+        overlay.variable_wanted = None;
+        request_imagery(state, product);
+        return;
+    }
+    state.file_wishes.insert(product.to_string(), file);
+    if state.showing.contains(product) {
+        return;
+    }
+    let found = match state.located.get(product) {
+        Some(Located::Found(found)) => Some(found.clone()),
+        _ => None,
+    };
+    if let Some(found) = found {
+        show(state, &found, None);
+        super::nav::on_new_globe(state);
+        return;
+    }
+    state.located.insert(product.to_string(), Located::Asking);
+    state.showing.insert(product.to_string());
+    let correlation = state.locates.begin(Locate::Overlay(product.to_string()));
+    crate::calls::data_provider::on_locate(&LocateRequest { identifier: product.to_string() }, &correlation);
+    send_set(state);
+    super::nav::on_new_globe(state);
 }
 
 /// Убрать одно наложение: ресурсы отпустить, набор переслать.
@@ -275,6 +349,9 @@ fn abandon(state: &mut State, overlay: OverlayState) {
     if let Some(correlation) = &overlay.imagery {
         state.imageries.take(correlation);
     }
+    // Просьба о файле, ждавшая конца сборки, уходит вместе со слоем: снятый
+    // слой её не исполнит, а следующий показ того же снимка её не просил.
+    state.file_wishes.remove(&overlay.identifier);
     let Some(assembly) = overlay.assembly else { return };
     // Открытия в полёте снимаются с общего учёта здесь: иначе их ответ
     // опознался бы следующей сборкой того же ключа, а его ресурс лёг бы в
@@ -418,6 +495,16 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     if !response.error.is_empty() {
         return give_up(state, &key, &label, format!("растры не спросились: {}", response.error));
     }
+    // Названному файлу отказано — словами на экран и просьбу снять: иначе
+    // нажатие того же пункта было бы пустым, а лёгший файл раскладки —
+    // необъяснённым.
+    if !response.wanted_refused.is_empty() {
+        state.notice = Some(format!("«{}»: {}", crate::module::components::format::ellipsize(&label, 40), response.wanted_refused));
+        if let Some(named) = state.overlays.iter_mut().find(|o| o.identifier == key) {
+            named.wanted_file = None;
+        }
+    }
+    let Some(overlay) = state.overlays.iter().find(|o| o.identifier == key) else { return };
     if response.rasters.is_empty() {
         // Причину называет провайдер — он один видел, что в продукте лежит.
         // Своя фраза остаётся на случай, когда он промолчал: пустая строка на
@@ -478,8 +565,7 @@ pub fn on_imagery_result(state: &mut State, response: ImageryResponse) {
     let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
     // Запрос растров кончился — его корреляция больше не наша.
     overlay.imagery = None;
-    overlay.files = files;
-    overlay.assembly = Some(Assembly { utm, opens, collected: Vec::new() });
+    overlay.assembly = Some(Assembly { utm, files, opens, collected: Vec::new() });
 }
 
 /// Открытие растра наложения. `false` — ответ не наш: чужая корреляция либо
@@ -627,6 +713,7 @@ fn finish(state: &mut State, key: &str) {
 
     overlay.utm = assembly.utm;
     overlay.rasters = rasters;
+    overlay.files = assembly.files;
     // Работа не кончилась, а началась: глобус получит растры и примется их
     // описывать — по сети это десятки секунд. Своего слова о ходе у нас нет и
     // не будет, его скажет он же (`on_overlay_progress`), но до первого его
@@ -634,6 +721,12 @@ fn finish(state: &mut State, key: &str) {
     // под строкой, и штрих на шаре — на глазах и без причины.
     overlay.progress = Progress { working: true, blank: true, ..Progress::default() };
     send_set(state);
+    // Просьба о файле, пришедшая во время сборки, исполняется здесь: набор,
+    // только что уехавший глобусу, тот сменит следующим — одно описание
+    // впустую, цена того, что просьбу не потеряли.
+    if let Some(file) = state.file_wishes.remove(key) {
+        place_file(state, key, file);
+    }
 }
 
 /// Отправить глобусу весь набор. Единственный способ что-либо ему сказать про
@@ -880,6 +973,7 @@ mod tests {
         let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
         overlay.assembly = Some(Assembly {
             utm: None,
+            files: Vec::new(),
             opens: vec!["open-1".to_string()],
             collected: vec![(preview, 0, Part::Raster, quicklook), (detailed, 1, Part::Raster, raster)],
         });
@@ -998,6 +1092,59 @@ mod tests {
         assert_eq!(state.overlays[0].variable, Some(variable));
         on_overlay_progress(&mut state, progress(Some(2)));
         assert_eq!(state.overlays[0].variable, None, "отчёт без величины снимает прежнюю");
+    }
+
+    /// Файл, которым просили лечь: у лежащего слоя — новый запрос растров с
+    /// ним; у слоя в сборке — ждёт её конца; у слоя, которого нет, — ждёт
+    /// продукта и уходит с первым запросом.
+    #[test]
+    fn файл_которым_просили_лечь_едет_в_запрос_растров() {
+        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
+        let raster = |ordinal: u32| crate::proto::globe::OverlayRaster { ordinal, ..Default::default() };
+        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
+        overlay.rasters = vec![raster(0), raster(1)];
+        state.overlays.push(overlay);
+
+        on_file_pressed(&mut state, "scene", "scene/F2_BT_in.nc".to_string());
+        let overlay = &state.overlays[0];
+        assert_eq!(overlay.wanted_file.as_deref(), Some("scene/F2_BT_in.nc"));
+        assert!(overlay.imagery.is_some(), "растры не спрошены заново");
+        assert!(state.file_wishes.is_empty());
+        let request = imagery_request(&state.library, overlay);
+        assert_eq!((request.identifier.as_str(), request.wanted.as_str()), ("scene", "scene/F2_BT_in.nc"), "просьба не едет в запрос");
+
+        // Запрос в полёте — вторая просьба ждёт, а не заводит второй запрос.
+        let pending = state.overlays[0].imagery.clone();
+        on_file_pressed(&mut state, "scene", "scene/S8_BT_in.nc".to_string());
+        assert_eq!(state.overlays[0].imagery, pending, "второй запрос поверх первого");
+        assert_eq!(state.file_wishes.get("scene").map(String::as_str), Some("scene/S8_BT_in.nc"));
+
+        // Слоя нет — просьба ждёт продукта; отменённый показ уносит её.
+        on_file_pressed(&mut state, "other", "other/a.nc".to_string());
+        assert_eq!(state.file_wishes.get("other").map(String::as_str), Some("other/a.nc"));
+        assert!(state.showing.contains("other"), "продукт не спрошен у провайдера");
+        let view: ViewId = "7".parse().expect("ViewId из строки");
+        on_toggle_pressed(&mut state, view, "other".to_string());
+        assert!(!state.file_wishes.contains_key("other"), "отменённый показ оставил просьбу");
+
+        // Тот же файл повторно — нечего делать.
+        state.overlays[0].imagery = None;
+        state.file_wishes.clear();
+        state.overlays[0].wanted_file = Some("scene/F2_BT_in.nc".to_string());
+        on_file_pressed(&mut state, "scene", "scene/F2_BT_in.nc".to_string());
+        assert!(state.overlays[0].imagery.is_none(), "тот же файл спрошен заново");
+
+        // Продукт под рукой — показ заводится сразу, и просьба уходит в слой.
+        let product = crate::proto::data_provider::DataProduct { identifier: "cached".to_string(), name: "cached".to_string(), ..Default::default() };
+        state.located.insert("cached".to_string(), Located::Found(product));
+        on_file_pressed(&mut state, "cached", "cached/b.nc".to_string());
+        let placed = state.overlays.iter().find(|o| o.identifier == "cached").expect("слой заведён");
+        assert_eq!(placed.wanted_file.as_deref(), Some("cached/b.nc"));
+        assert!(state.file_wishes.is_empty(), "просьба не ушла в слой");
+        // Снятый слой уносит и просьбу, ждавшую его сборки.
+        state.file_wishes.insert("cached".to_string(), "cached/c.nc".to_string());
+        remove(&mut state, "cached");
+        assert!(state.file_wishes.is_empty(), "снятый слой оставил просьбу");
     }
 
     /// Названная величина уезжает глобусу у растра с тем номером, о котором

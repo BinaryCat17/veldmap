@@ -103,10 +103,14 @@ What each format reads per level is the table in
   A variable no taller than a tile (`TILE` rows) is one window whatever its
   layout, as the Sentinel-5P NRTI slices in the catalogue are.
 - **The variable of a NetCDF file is chosen per view, and only among the
-  file's candidates.** The canvas's bar and the layer row name the shown
-  variable and offer the others the file could show (`Described.variables`,
-  `DescribeRequest.variable`, `OverlayRaster.variable`); the choice belongs
-  to the tab or the layer, not to the file — the same granule opened elsewhere
+  file's candidates; the file of a product is chosen per layer, and only
+  among the product's rasters.** The canvas's bar and the layer row name the
+  shown variable and offer the others the file could show
+  (`Described.variables`, `DescribeRequest.variable`,
+  `OverlayRaster.variable`); a file inside a product goes on the globe as the
+  layer's detailed raster from its row's menu (`ImageryRequest.wanted`), the
+  provider's own choice becoming a spare behind it. The choice belongs to the
+  tab or the layer, not to the file — the same granule opened elsewhere
   starts from the tiler's choice again; a tab's choice is saved with the tab,
   layers are not saved between launches at all. The
   list is judged by headers, so it also holds variables a sample would find

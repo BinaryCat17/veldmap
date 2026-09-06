@@ -75,6 +75,9 @@ pub fn on_view_product_pressed(state: &mut State, from: ViewId, identifier: Stri
         &crate::proto::data_provider::ImageryRequest {
             downloaded: state.library.whole(&identifier),
             identifier,
+            // Канва берёт подробный растр выбором провайдера: файл она
+            // открывает сама, из строки файла (см. `on_view_local_pressed`).
+            wanted: String::new(),
         },
         &correlation_id,
     );

@@ -90,6 +90,7 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::OverlayMenu(key) => handlers::overlay::menu(state, key),
         Msg::OverlayVariables(key) => handlers::overlay::variables_menu(state, key),
         Msg::OverlayVariable(key, variable) => handlers::overlay::variable(state, &key, variable),
+        Msg::GlobeFile(product, file) => handlers::overlay::on_file_pressed(state, &product, file),
         Msg::OutlineToggle(key) => handlers::outline::toggle_outline(state, key),
         Msg::OutlineRemove(key) => handlers::outline::drop_one(state, &key),
         Msg::OutlineFocus(key) => handlers::outline::focus(state, &key),

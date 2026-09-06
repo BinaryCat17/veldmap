@@ -1295,6 +1295,18 @@ fn menu_items(view: ViewId, row: &Row, here: &str) -> Vec<super::menu::Item> {
                 .glyph(theme::glyph::EYE),
         );
     }
+    // Файл внутри снимка кладёт снимок на шар собой: подробным растром слоя
+    // ложится он, а не выбор провайдера (см. handlers::overlay::on_file_pressed).
+    // Растр ли это, решит провайдер по имени, а тайлер — по содержимому;
+    // `unviewable` здесь ни при чём: у файла внутри снимка она говорит «на
+    // шар кладут снимок, а не файл» — ровно то, что этот пункт и делает
+    // иначе.
+    if !row.product.is_empty() && !row.is_snapshot() && !row.kind.is_folder() {
+        items.push(
+            Item::new("На шар этим файлом", Msg::GlobeFile(row.product.clone(), row.identifier.clone()))
+                .glyph(theme::glyph::GLOBE),
+        );
+    }
     // Показать на шаре можно всё, у чего есть ключ провайдера: у найденного
     // продукт с контуром уже под рукой, у строки каталога или скачанного его
     // восстанавливает провайдер по ключу (см. handlers::overlay). У снимка

@@ -55,3 +55,8 @@
 файл: veldmodules/data-browser/src/handlers/overlay.rs
 было:                 Some((ordinal, path)) if *ordinal == raster.ordinal => path.clone(),
 стало:                 Some((_, path)) => path.clone(),
+
+имя: файл, которым просили лечь, в запрос растров не едет
+файл: veldmodules/data-browser/src/handlers/overlay.rs
+было:         wanted: overlay.wanted_file.clone().unwrap_or_default(),
+стало:         wanted: String::new(),

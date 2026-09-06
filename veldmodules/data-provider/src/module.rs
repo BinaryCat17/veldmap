@@ -55,14 +55,14 @@ pub enum Asked {
     /// запроса и до самого выбора: от него зависит, предлагать ли подробный
     /// растр, который читается только целым проходом по файлу
     /// (см. `ImageryRequest.downloaded`).
-    Imagery { identifier: String, keys: Vec<String>, downloaded: bool },
+    Imagery { identifier: String, keys: Vec<String>, downloaded: bool, wanted: String },
     /// Манифест продукта — второй ход после обхода: ключи уже собраны, а какой
     /// из них измерение, называет он (см. `manifest`). Ключи едут с собой,
     /// потому что ответ на `on_imagery` собирается из них обоих.
     /// Манифест продукта — за ним идут, когда выбор растра иначе был бы
     /// догадкой. `downloaded` едет и здесь: он про то же самое, что и в
     /// [`Asked::Imagery`], и до выбора добирается только через это ожидание.
-    Manifest { identifier: String, keys: Vec<String>, downloaded: bool },
+    Manifest { identifier: String, keys: Vec<String>, downloaded: bool, wanted: String },
     /// Продукт по точному имени — обратный ход поиска. Имя хранится для
     /// объяснения пустого ответа: каталог на «не нашлось» отвечает молча.
     Locate { name: String },

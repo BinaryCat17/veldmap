@@ -207,6 +207,11 @@ pub struct State {
     /// выбору не спросить: ход к каталогу живёт секунды, убить его нечем, а
     /// «Снять с шара» за это время нажать успевают.
     pub showing: std::collections::HashSet<String>,
+    /// Файл, которым просили положить снимок на шар (`Msg::GlobeFile`), по
+    /// ключу снимка — пока показ не завёлся: продукт восстанавливается у
+    /// провайдера ходом к каталогу, и просьба ждёт его здесь (см.
+    /// `handlers::overlay::show`).
+    pub file_wishes: std::collections::HashMap<String, String>,
     /// Снимки, которые показать не вышло, и почему — по ключу снимка.
     ///
     /// Помнится затем, что отказ этот про сам снимок, а не про попытку:
@@ -300,6 +305,7 @@ impl State {
             measured: None,
             outlined: Vec::new(),
             showing: std::collections::HashSet::new(),
+            file_wishes: std::collections::HashMap::new(),
             outlines: std::collections::HashSet::new(),
             highlight: None,
             located: Default::default(),

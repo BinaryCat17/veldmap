@@ -171,6 +171,45 @@ fn spares<'a>(detailed: &String, rest: &[&'a String]) -> Vec<String> {
         .collect()
 }
 
+/// Названный смотрящим файл — подробным растром, а выбор раскладки — за ним
+/// запасным: смотрящему виднее, какой канал ему нужен, но файл, который не
+/// откроется, оставил бы слой без подробного вовсе. Названное не из продукта,
+/// не растр по имени (манифест) или квиклук — отказ словами (второй ответ)
+/// и растры раскладки: такой выбор не показать ничем, а молча заменить его
+/// значило бы соврать строкой слоя. Растр ли файл на самом деле, по имени не
+/// видно (`geodetic_*.nc` — тоже `.nc`): это скажет тайлер, описав его.
+/// Превью остаётся своё.
+pub fn preferring(scan: Scan, wanted: &str, keys: &[String]) -> (Scan, Option<String>) {
+    if wanted.is_empty() {
+        return (scan, None);
+    }
+    let refused = if !keys.iter().any(|key| key == wanted) {
+        Some("его нет в продукте")
+    } else if !is_raster(wanted) {
+        Some("по имени это не растр")
+    } else if scan.rasters.iter().any(|(key, role)| key == wanted && *role == Role::Preview) {
+        Some("это квиклук, он и так лежит превью")
+    } else {
+        None
+    };
+    if let Some(why) = refused {
+        let said = format!("файл '{}' подробным не лёг: {} — лежит выбор раскладки", file_name(wanted), why);
+        log::warn!(target: "handlers", "{}", said);
+        return (scan, Some(said));
+    }
+    let mut rasters: Vec<(String, Role)> =
+        scan.rasters.iter().filter(|(_, role)| *role == Role::Preview).cloned().collect();
+    rasters.push((wanted.to_string(), Role::Detailed));
+    let alternates = scan
+        .rasters
+        .iter()
+        .filter(|(key, role)| *role == Role::Detailed && key != wanted)
+        .map(|(key, _)| key.clone())
+        .chain(scan.alternates.into_iter().filter(|key| key != wanted))
+        .collect();
+    (Scan { rasters, alternates, guessed: scan.guessed }, None)
+}
+
 /// Что вышло из [`scan`]: растры с ролями, запасные за подробным и то, чем
 /// выбран подробный.
 pub struct Scan {
@@ -1110,6 +1149,38 @@ mod tests {
             geolocation(&olci[..2], &olci[0]),
             Some("eodata/…/S3A_OL_2_LFR.SEN3/geo_coordinates.nc".to_string())
         );
+    }
+
+    /// Названный файл ложится подробным, выбор раскладки уходит за ним
+    /// запасным, превью остаётся; названное не из продукта или не растр —
+    /// как не названное.
+    #[test]
+    fn a_wanted_file_lies_detailed_and_the_layouts_choice_becomes_a_spare() {
+        let keys: Vec<String> = ["p/quicklook.jpg", "p/S1_radiance_an.nc", "p/F2_BT_in.nc", "p/xfdumanifest.xml"]
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
+        let scan = || Scan {
+            rasters: vec![("p/quicklook.jpg".into(), Role::Preview), ("p/S1_radiance_an.nc".into(), Role::Detailed)],
+            alternates: vec!["p/F1_BT_fn.nc".into()],
+            guessed: true,
+        };
+        let (chosen, refused) = preferring(scan(), "p/F2_BT_in.nc", &keys);
+        assert_eq!(chosen.rasters, vec![("p/quicklook.jpg".to_string(), Role::Preview), ("p/F2_BT_in.nc".to_string(), Role::Detailed)]);
+        assert_eq!(chosen.alternates, vec!["p/S1_radiance_an.nc".to_string(), "p/F1_BT_fn.nc".to_string()]);
+        assert!(chosen.guessed && refused.is_none());
+
+        let (same, _) = preferring(scan(), "p/S1_radiance_an.nc", &keys);
+        assert_eq!(same.rasters, scan().rasters);
+        assert_eq!(same.alternates, vec!["p/F1_BT_fn.nc".to_string()], "названный выбор раскладки не стал своим же запасным");
+        // Отказ — словами и растрами раскладки: манифест, чужой файл, квиклук.
+        for (wanted, word) in [("p/xfdumanifest.xml", "не растр"), ("q/other.nc", "нет в продукте"), ("p/quicklook.jpg", "квиклук")] {
+            let (fallback, refused) = preferring(scan(), wanted, &keys);
+            assert_eq!(fallback.rasters, scan().rasters, "{wanted} лёг растром");
+            assert!(refused.as_deref().is_some_and(|said| said.contains(word)), "{wanted}: {refused:?}");
+        }
+        let (plain, refused) = preferring(scan(), "", &keys);
+        assert_eq!((plain.alternates, refused), (scan().alternates, None));
     }
 
     /// Гранула SLSTR уровня 1: измерений двадцать восемь, и первые четыре

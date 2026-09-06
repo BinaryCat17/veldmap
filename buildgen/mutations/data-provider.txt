@@ -10,3 +10,8 @@
 файл: veldmodules/data-provider/src/imagery.rs
 было:         let order = match grid_rank(raster).0 == 0 {
 стало:         let order = match false {
+
+имя: названный файл ложится подробным, даже если он не растр продукта
+файл: veldmodules/data-provider/src/imagery.rs
+было:     } else if !is_raster(wanted) {
+стало:     } else if false {

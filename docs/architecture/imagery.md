@@ -204,6 +204,16 @@ subtree), from the exact to the guessed:
   `ImageryDetailed` rasters in order of preference, and the globe describes
   the next when one fails (`Raster::spares`).
 
+**A file named by the viewer** goes first (`imagery::preferring`,
+`ImageryRequest.wanted`), after the manifest has had its say: the layer's
+detailed raster is the named file, and the layout's own choice follows it as
+the first spare with the layout's spares — a file that fails to describe must
+not leave the layer without a detailed raster. A name that is not in the
+product, not a raster by its suffix, or the quicklook itself is refused in
+words (`ImageryResponse.wanted_refused`) and the layout's rasters go instead;
+whether a file with a raster's suffix holds a picture is the tiler's to say.
+The preview stays the layout's.
+
 **The manifest** (`veldmodules/data-provider/src/manifest.rs`) is asked only
 when the layout was guessed: the named layouts have already said which file is
 the measurement, and a manifest is another signed request. `manifest::key`

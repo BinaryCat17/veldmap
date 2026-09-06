@@ -56,6 +56,7 @@ fn imagery_page(
     identifier: String,
     keys: Vec<String>,
     downloaded: bool,
+    wanted: String,
     token: &str,
 ) -> Result<(), String> {
     let path = format!("{}/", identifier.trim_end_matches('/'));
@@ -63,7 +64,7 @@ fn imagery_page(
         let Some(identity) = state.identity.as_ref() else { return Err(NO_KEYS.to_string()) };
         s3::listing_deep(identity, &path, token)
     };
-    let what = Asked::Imagery { identifier, keys, downloaded };
+    let what = Asked::Imagery { identifier, keys, downloaded, wanted };
     ask(state, correlation_id, listing.url, listing.headers, what);
     Ok(())
 }
@@ -218,6 +219,9 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
     // пустой листинг сказал бы «ничего нет» там, где на самом деле «это файл».
     // Растром такой продукт бывает и сам — тогда он же и единственный растр.
     if s3::is_single_object(&request.identifier) {
+        if !request.wanted.is_empty() {
+            log::info!(target: "handlers", "продукт-объект {} — названный файл ни к чему, он и есть растр", request.identifier);
+        }
         let response = match imagery::single(&request.identifier) {
             // Соседей у продукта-объекта нет по определению: в хранилище он
             // один ключ, и координатам лежать негде, кроме как в нём самом.
@@ -243,6 +247,7 @@ pub fn on_imagery(state: &mut State, request: ImageryRequest) {
         request.identifier,
         Vec::new(),
         request.downloaded,
+        request.wanted,
         "",
     ) {
         refuse_imagery(&correlation_id, error);
@@ -311,7 +316,7 @@ fn imagery_response(identifier: &str, keys: &[String], found: imagery::Scan) -> 
     if empty {
         log::info!(target: "handlers", "У '{}' наложению нечего показать: {}", name, reason);
     }
-    ImageryResponse { rasters, utm, error: String::new(), reason }
+    ImageryResponse { rasters, utm, error: String::new(), reason, wanted_refused: String::new() }
 }
 
 /// Продукт каталога по ключу хранилища. Подъём к корню — знание раскладки
@@ -476,7 +481,7 @@ pub fn on_http_result(
                 error,
             }, &pending.correlation_id);
         }
-        Asked::Imagery { identifier, mut keys, downloaded } => {
+        Asked::Imagery { identifier, mut keys, downloaded, wanted } => {
             let listing = from_storage(&response, |body| s3::parse_listing(body, &identifier));
 
             match listing {
@@ -491,6 +496,7 @@ pub fn on_http_result(
                             identifier,
                             keys,
                             downloaded,
+                            wanted,
                             &listing.next_token,
                         ) {
                             refuse_imagery(&pending.correlation_id, error);
@@ -516,7 +522,7 @@ pub fn on_http_result(
                         && let Some(identity) = state.identity.as_ref()
                     {
                         let object = s3::object(identity, manifest);
-                        let what = Asked::Manifest { identifier, keys, downloaded };
+                        let what = Asked::Manifest { identifier, keys, downloaded, wanted };
                         ask(
                             state,
                             pending.correlation_id,
@@ -526,8 +532,12 @@ pub fn on_http_result(
                         );
                         return;
                     }
+                    let (found, wanted_refused) = imagery::preferring(known, &wanted, &keys);
                     crate::emit::on_imagery_result(
-                        &imagery_response(&identifier, &keys, known),
+                        &ImageryResponse {
+                            wanted_refused: wanted_refused.unwrap_or_default(),
+                            ..imagery_response(&identifier, &keys, found)
+                        },
                         &pending.correlation_id,
                     );
                 }
@@ -537,7 +547,7 @@ pub fn on_http_result(
                 }
             }
         }
-        Asked::Manifest { identifier, keys, downloaded } => {
+        Asked::Manifest { identifier, keys, downloaded, wanted } => {
             // Манифест не достался — это не отказ продукту: раскладка
             // разбирается по именам файлов, как и до манифеста. Сказать об
             // этом стоит: выбор растра тогда объясняется другим правилом.
@@ -554,9 +564,13 @@ pub fn on_http_result(
                 log::debug!(target: "handlers",
                     "Манифест '{}' измерений не назвал — выбор по именам файлов", identifier);
             }
-            let found = imagery::scan(&identifier, &keys, &measured, downloaded);
+            let (found, wanted_refused) =
+                imagery::preferring(imagery::scan(&identifier, &keys, &measured, downloaded), &wanted, &keys);
             crate::emit::on_imagery_result(
-                &imagery_response(&identifier, &keys, found),
+                &ImageryResponse {
+                    wanted_refused: wanted_refused.unwrap_or_default(),
+                    ..imagery_response(&identifier, &keys, found)
+                },
                 &pending.correlation_id,
             );
         }
