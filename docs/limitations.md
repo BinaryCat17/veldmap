@@ -104,10 +104,12 @@ What each format reads per level is the table in
   layout, as the Sentinel-5P NRTI slices in the catalogue are.
 - **The variable of a NetCDF file is the tiler's choice.** It is named — the
   canvas's properties bar and the layer row say which one is shown, with the
-  file's own words and units (`Described.variable`) — but not chosen:
+  file's own words and units (`Described.variable`) — and the bar lists the
+  others the file could show (`Described.variables`), but none can be chosen:
   `DescribeRequest` and `ProduceRequest` carry no variable, so a quantity the
   CF rules rank lower (a second channel, a quality layer, a precision) cannot
-  be shown from the interface.
+  be shown from the interface. The list is judged by headers, so it also
+  holds variables a sample would find empty or flat in this granule.
 - **A JPEG 2000 over the network pays a request per tile-part.** The
   excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) asks one probe of
   `PROBE` bytes per tile-part (`veldmodules/image-tiler/src/adapters/excerpt.rs`),

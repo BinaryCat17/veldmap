@@ -165,3 +165,8 @@
 файл: veldmodules/image-tiler/src/adapters/netcdf.rs
 было:             path: chosen.path.clone(),
 стало:             path: surveyed[0].path.clone(),
+
+имя: список величин без первой из них
+файл: veldmodules/image-tiler/src/adapters/netcdf.rs
+было:         variables: order.iter().map(|item| named(item)).collect(),
+стало:         variables: order.iter().skip(1).map(|item| named(item)).collect(),

@@ -30,3 +30,13 @@
 файл: veldmodules/data-browser/src/view/shown.rs
 было:         parts.push((format::variable(&variable.path, &variable.said, &variable.units), Cut::Tail));
 стало:         parts.push((format::variable_name(&variable.path).to_string(), Cut::Tail));
+
+имя: в списке величин отмечена не показанная
+файл: veldmodules/data-browser/src/view/preview.rs
+было:                 .selected(variable.path == shown)
+стало:                 .selected(variable.path != shown)
+
+имя: список величин не обрезается числом
+файл: veldmodules/data-browser/src/view/preview.rs
+было:     let mut items: Vec<menu::Item> = variables.iter().take(VARIABLES_LISTED).map(item).collect();
+стало:     let mut items: Vec<menu::Item> = variables.iter().map(item).collect();

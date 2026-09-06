@@ -657,12 +657,16 @@ fn told(
         binding_trouble,
         // Выбор назван смотрящему: которая из десятков величин файла легла на
         // экран, иначе не узнать — строка журнала выше ему не видна.
-        variable: Some(super::Variable {
-            path: chosen.path.clone(),
-            said: chosen.said.clone(),
-            units: chosen.units.clone(),
-        }),
+        variable: Some(named(chosen)),
+        // И все, из кого выбирали, в том же порядке: смотрящему видно, что ещё
+        // лежит в файле, — пока только видно.
+        variables: order.iter().map(|item| named(item)).collect(),
     })
+}
+
+/// Величина словами файла — то, что о ней сообщается смотрящему.
+fn named(item: &Item) -> super::Variable {
+    super::Variable { path: item.path.clone(), said: item.said.clone(), units: item.units.clone() }
 }
 
 /// Перечисление для одной строки журнала: первые три и «и ещё N».

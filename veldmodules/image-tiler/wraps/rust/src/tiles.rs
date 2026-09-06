@@ -146,10 +146,14 @@ pub struct Meta {
     /// величин выбор делает производитель, и смотрящий узнаёт о нём только
     /// отсюда. Пусто у снимка.
     pub variable: Option<Variable>,
+    /// Все величины файла, какие могли бы быть показаны, в порядке
+    /// предпочтения производителя (`Described.variables`); показанная — среди
+    /// них. Пусто у снимка.
+    pub variables: Vec<Variable>,
 }
 
-/// Показываемая величина — как в файле и как файл назвал её словами; см.
-/// `Described.variable`.
+/// Величина файла многих величин — показанная или из списка — как в файле и
+/// как файл назвал её словами; см. `Described.variable`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Variable {
     pub path: String,
@@ -342,12 +346,19 @@ pub fn describe(msg: &crate::proto::Described) -> Result<Meta, String> {
     if msg.fingerprint.is_empty() {
         return Err("источник описан без отпечатка".to_string());
     }
-    let variable = msg.variable.as_ref().map(|variable| Variable {
+    let named = |variable: &crate::proto::Variable| Variable {
         path: variable.path.clone(),
         said: variable.said.clone(),
         units: variable.units.clone(),
-    });
-    Ok(Meta { fingerprint: msg.fingerprint.clone(), width: msg.width, height: msg.height, rows, variable })
+    };
+    Ok(Meta {
+        fingerprint: msg.fingerprint.clone(),
+        width: msg.width,
+        height: msg.height,
+        rows,
+        variable: msg.variable.as_ref().map(named),
+        variables: msg.variables.iter().map(named).collect(),
+    })
 }
 
 // ── Видеопамять ────────────────────────────────────────────────
@@ -1470,6 +1481,7 @@ mod tests {
             height: 10980,
             rows: (0..levels).map(|level| Row { serve: serve(level), bytes: 0, fits: true }).collect(),
             variable: None,
+            variables: Vec::new(),
         }
     }
 
@@ -1543,7 +1555,13 @@ mod tests {
             said: "Vertically integrated CO column density".into(),
             units: "mol m-2".into(),
         };
-        let meta = describe(&crate::proto::Described { variable: Some(variable), ..described() }).expect("годное");
+        let other = crate::proto::Variable { path: "/PRODUCT/qa_value".into(), ..Default::default() };
+        let meta = describe(&crate::proto::Described {
+            variable: Some(variable.clone()),
+            variables: vec![variable, other],
+            ..described()
+        })
+        .expect("годное");
         assert_eq!(
             meta.variable,
             Some(Variable {
@@ -1551,6 +1569,11 @@ mod tests {
                 said: "Vertically integrated CO column density".into(),
                 units: "mol m-2".into(),
             })
+        );
+        assert_eq!(
+            meta.variables.iter().map(|variable| variable.path.as_str()).collect::<Vec<_>>(),
+            ["/PRODUCT/carbonmonoxide_total_column", "/PRODUCT/qa_value"],
+            "список едет как есть, в порядке производителя"
         );
         assert!(meta.note().starts_with("величина '/PRODUCT/carbonmonoxide_total_column', 10980×10980"), "{}", meta.note());
         assert_eq!(describe(&described()).expect("годное").variable, None, "у снимка величины нет");

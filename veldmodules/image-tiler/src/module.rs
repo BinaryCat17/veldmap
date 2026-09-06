@@ -169,6 +169,11 @@ pub fn on_describe(state: &mut State, req: DescribeRequest) {
     crate::emit::on_described(&described, &correlation);
 }
 
+/// Величина на провод — как есть.
+fn wire_variable(variable: &adapters::Variable) -> Variable {
+    Variable { path: variable.path.clone(), said: variable.said.clone(), units: variable.units.clone() }
+}
+
 fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, String> {
     let resource = req.resource.clone().ok_or_else(|| "в запросе нет ресурса".to_string())?;
     let began = Instant::now();
@@ -266,11 +271,8 @@ fn describe(state: &mut State, req: &DescribeRequest) -> Result<Described, Strin
             y0: found.affine[5],
         }),
         error: String::new(),
-        variable: info.variable.as_ref().map(|variable| Variable {
-            path: variable.path.clone(),
-            said: variable.said.clone(),
-            units: variable.units.clone(),
-        }),
+        variable: info.variable.as_ref().map(wire_variable),
+        variables: info.variables.iter().map(wire_variable).collect(),
         // Оговорка едет ровно тогда, когда привязки в ответе нет: обещано полем
         // «привязку взять не удалось», и присланная вместе со взятой привязкой
         // она называла бы беду там, где её нет. Ловится это здесь, а не у

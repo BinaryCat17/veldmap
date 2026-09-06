@@ -749,6 +749,11 @@ fn report(state: &State, key: &str) {
     crate::emit::on_view_state(&current);
 }
 
+/// Величина на провод — как есть.
+fn wire_variable(variable: &tiles::Variable) -> Variable {
+    Variable { path: variable.path.clone(), said: variable.said.clone(), units: variable.units.clone() }
+}
+
 /// Чем показ выглядит снаружи — врозь с рассылкой затем, что проверяемо только
 /// это. Публикация в нативной сборке — заглушка (`veldsdk::abi`), и отправленное
 /// сообщение тесту не видно; собранное — видно.
@@ -798,11 +803,8 @@ fn view_state(
         // виду место не нужно: канвы для него в разметке всё равно нет, и
         // текстура под неё выделилась бы впустую.
         needs_place: view.target.is_none() && view.shown.is_some() && view.error.is_none(),
-        variable: meta.and_then(|meta| meta.variable.as_ref()).map(|variable| Variable {
-            path: variable.path.clone(),
-            said: variable.said.clone(),
-            units: variable.units.clone(),
-        }),
+        variable: meta.and_then(|meta| meta.variable.as_ref()).map(wire_variable),
+        variables: meta.map(|meta| meta.variables.iter().map(wire_variable).collect()).unwrap_or_default(),
     }
 }
 
@@ -839,6 +841,7 @@ mod tests {
                     .map(|level| tiles::Row { serve: tiles::Serve::Pass { from: level }, bytes: 0, fits: level >= 1 })
                     .collect(),
                 variable: None,
+                variables: Vec::new(),
             }),
         });
 
@@ -888,12 +891,22 @@ mod tests {
                     said: "Vertically integrated CO column".into(),
                     units: "mol m-2".into(),
                 }),
+                variables: vec![
+                    tiles::Variable { path: "/PRODUCT/carbonmonoxide_total_column".into(), said: String::new(), units: String::new() },
+                    tiles::Variable { path: "/PRODUCT/qa_value".into(), said: String::new(), units: String::new() },
+                ],
             }),
         });
-        let said = view_state(&view, "снимок", None, &idle).variable.expect("величина описана");
+        let state = view_state(&view, "снимок", None, &idle);
+        let said = state.variable.expect("величина описана");
         assert_eq!(
             (said.path.as_str(), said.said.as_str(), said.units.as_str()),
             ("/PRODUCT/carbonmonoxide_total_column", "Vertically integrated CO column", "mol m-2")
+        );
+        assert_eq!(
+            state.variables.iter().map(|variable| variable.path.as_str()).collect::<Vec<_>>(),
+            ["/PRODUCT/carbonmonoxide_total_column", "/PRODUCT/qa_value"],
+            "список величин едет заказчику как есть"
         );
     }
 

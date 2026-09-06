@@ -78,6 +78,8 @@ pub enum Open {
     /// Меню внутри списка названной вкладки: чип полосы или строка
     /// (см. [`listing::Menu`]).
     Listing(ViewId, listing::Menu),
+    /// Список величин файла под кадром превью названной вкладки.
+    Variables(ViewId),
 }
 
 /// Что на экране главное сейчас — один снимок на весь экран.
@@ -630,6 +632,11 @@ impl State {
     /// Раскрыто ли меню названного слоя «На просмотре».
     pub fn layer_menu(&self, key: &str) -> bool {
         matches!(&self.open, Open::Layer(open) if open == key)
+    }
+
+    /// Раскрыт ли список величин под кадром названной вкладки превью.
+    pub fn variables_menu(&self, view: ViewId) -> bool {
+        matches!(&self.open, Open::Variables(open) if *open == view)
     }
 
     /// Смена отбора в списке: страница сбрасывается, раскрытое гаснет. Общий

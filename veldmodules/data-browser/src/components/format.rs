@@ -140,12 +140,14 @@ pub fn variable_name(path: &str) -> &str {
 
 /// Величина словами: имя, единицы и как назвал её файл — что из этого файл
 /// назвал: «carbonmonoxide_total_column, mol m-2 — Vertically integrated CO
-/// column density». Имя первым: оно короче и по нему величину узнают; единицы
-/// сразу за ним, потому что слова файла бывают в полторы строки и режутся с
-/// хвоста ([`head`]) — единицы за ними пропадали бы первыми.
+/// column». Имя первым: оно короче и по нему величину узнают; единицы сразу за
+/// ним, потому что слова файла бывают в полторы строки и режутся с хвоста
+/// ([`head`]) — единицы за ними пропадали бы первыми. Безразмерное CF пишет
+/// единицей «1», и «qa_value, 1» читалось бы числом — такая единица не
+/// называется.
 pub fn variable(path: &str, said: &str, units: &str) -> String {
     let mut text = variable_name(path).to_string();
-    if !units.is_empty() {
+    if !units.is_empty() && units.trim() != "1" {
         text = format!("{}, {}", text, units);
     }
     if !said.is_empty() {
@@ -357,6 +359,7 @@ mod tests {
         assert_eq!(variable("/F1_BT_fn", "", "K"), "F1_BT_fn, K");
         assert_eq!(variable("/x", "brightness", ""), "x — brightness");
         assert_eq!(variable("/x", "", ""), "x");
+        assert_eq!(variable("/qa_value", "data quality value", "1"), "qa_value — data quality value");
     }
 
     /// Короткие части берут своё, длинные делят остаток поровну; влезающее не

@@ -323,8 +323,8 @@ message OverlayProgress {
   optional Variable detailed_variable = 15;
 }
 
-// Показываемая величина файла многих величин — как в файле и как файл назвал
-// её словами; то же, что `Described.variable` тайлера.
+// Величина файла многих величин — как в файле и как файл назвал её словами; то
+// же, что `Described.variable` тайлера.
 message Variable {
   // Путь внутри файла (`/PRODUCT/carbonmonoxide_total_column`).
   string path = 1;

@@ -15,11 +15,11 @@
 //! знала бы, куда возвращаться, только назвав другой вид по имени, а
 //! открывают превью из любого.
 
-use veld_ui_service_wrap::{column, row, viewport};
+use veld_ui_service_wrap::{column, popover, row, viewport};
 use crate::proto::ui_service::{
     container, mono, text, Alignment, Element, Length, Padding,
 };
-use crate::module::components::format;
+use crate::module::components::{format, menu};
 use crate::module::state::{PreviewState, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
 
@@ -36,6 +36,18 @@ const VARIABLE_CHARS_FLOOR: usize = 16;
 
 /// Разделитель фактов полосы; его ширина входит в счёт места под величину.
 const FACT_SEPARATOR: &str = "   ·   ";
+
+/// Сколько величин файла перечисляет раскрытый список; остальные — числом.
+/// У гранулы Sentinel-5P годных три десятка, и панель длиннее окна не
+/// раскрыть. Семнадцать строк списка — около 520 pt по метрикам
+/// `menu::line`: в окно в 768 pt встают; в панель деления в половину окна —
+/// нет, там всплывашка упирается в край и накрывает кнопку, оставаясь
+/// закрываемой щелчком мимо.
+const VARIABLES_LISTED: usize = 16;
+
+/// Что кнопка величины добавляет к ширине своего текста: отступы по краям и
+/// зазор полосы до следующего факта.
+const BUTTON_ROOM: f32 = 8.0 + 8.0 + crate::module::view::BAR_SPACING;
 
 pub fn view(state: &State, view: ViewId, preview: &PreviewState) -> Element<Msg> {
     // Отказ вытесняет канву: показывать поверх мёртвого кадра нечего, а
@@ -165,8 +177,9 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
         state.library.entries.iter().find(|entry| &entry.name == name)
     });
 
+    let view_state = preview.view_state.as_ref();
     let mut facts: Vec<String> = Vec::new();
-    if let Some(view) = &preview.view_state {
+    if let Some(view) = view_state {
         if view.source_width > 0 {
             facts.push(format!("{} × {}", view.source_width, view.source_height));
         }
@@ -183,33 +196,49 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
         }
     }
 
+    let mut parts: Vec<Element<Msg>> = Vec::new();
     // Чем снимок является — первым: у файла многих величин размеры без имени
     // величины не говорят, что́ показано. Ей достаётся то, что остальные факты
     // и место под ход показа оставили от ширины панели — полоса одной строкой
     // и не переносится. Слова файла бывают в полторы строки и встают только
     // целиком: обрезанные, они читались бы хуже, чем имя с единицами без них.
-    if let Some(variable) = preview.view_state.as_ref().and_then(|view| view.variable.as_ref()) {
+    // Величина — кнопка: под ней список всего, из чего выбирали.
+    if let Some((shown, variables)) = view_state.and_then(|view| view.variable.as_ref().map(|shown| (shown, &view.variables))) {
         let taken: usize =
             facts.iter().map(|fact| fact.chars().count() + FACT_SEPARATOR.chars().count()).sum();
-        let room = format::mono_fit(state.pane_width(view) - PROGRESS_WIDTH, theme::TEXT_SMALL)
+        let room = format::mono_fit(state.pane_width(view) - PROGRESS_WIDTH - BUTTON_ROOM, theme::TEXT_SMALL)
             .saturating_sub(taken)
             .max(VARIABLE_CHARS_FLOOR);
-        let full = format::variable(&variable.path, &variable.said, &variable.units);
+        let full = format::variable(&shown.path, &shown.said, &shown.units);
         let said = match full.chars().count() <= room {
             true => full,
-            false => format::head(&format::variable(&variable.path, "", &variable.units), room),
+            false => format::head(&format::variable(&shown.path, "", &shown.units), room),
         };
-        facts.insert(0, said);
+        let open = state.variables_menu(view);
+        let anchor = theme::surface_button(
+            mono::<Msg>(said).size(theme::TEXT_SMALL).color(theme::INK_SOFT).single_line(),
+            open,
+        )
+        .padding(Padding { top: 2.0, bottom: 2.0, left: 8.0, right: 8.0 })
+        .on_press(Msg::In(view, ViewMsg::PreviewVariables(!open)));
+        parts.push(
+            popover(anchor, open, || menu::panel(variable_items(view, variables, &shown.path)))
+                .gap(4.0)
+                .on_dismiss(Msg::In(view, ViewMsg::PreviewVariables(false)))
+                .into(),
+        );
+        if !facts.is_empty() {
+            facts.insert(0, String::new());
+        }
     }
-
-    let mut parts: Vec<Element<Msg>> = vec![
+    parts.push(
         mono::<Msg>(facts.join(FACT_SEPARATOR))
             .size(theme::TEXT_SMALL)
             .color(theme::INK_SOFT)
             .single_line()
             .into(),
-        theme::spacer().into(),
-    ];
+    );
+    parts.push(theme::spacer().into());
     // Ход показа — справа, у края: он меняется на глазах, и рядом со свойствами
     // дёргал бы их с места.
     if let Some(line) = progress_line(preview) {
@@ -226,4 +255,68 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
             .align_items(Alignment::Center),
     )
     .into()
+}
+
+/// Пункты списка величин файла: все, из кого выбирали, в порядке тайлера,
+/// показанная — с галочкой. Пока только список: пункт закрывает его, выбора
+/// другой величины за ним нет — запросы тайлера величины не несут. Длинный
+/// список обрезается числом ([`VARIABLES_LISTED`]), но показанной место
+/// гарантировано: обрезанная, она уходила бы в «и ещё N», и список из одних
+/// не показанных читался бы как «показана ни одна из них».
+fn variable_items(
+    view: ViewId,
+    variables: &[crate::proto::image_view::Variable],
+    shown: &str,
+) -> Vec<menu::Item> {
+    let item = |variable: &crate::proto::image_view::Variable| {
+        menu::Item::new(
+            format::variable(&variable.path, &variable.said, &variable.units),
+            Msg::In(view, ViewMsg::PreviewVariables(false)),
+        )
+        .selected(variable.path == shown)
+    };
+    let mut items: Vec<menu::Item> = variables.iter().take(VARIABLES_LISTED).map(item).collect();
+    if let Some(at) = variables.iter().position(|variable| variable.path == shown).filter(|&at| at >= VARIABLES_LISTED) {
+        items.truncate(VARIABLES_LISTED - 1);
+        items.push(item(&variables[at]));
+    }
+    if variables.len() > VARIABLES_LISTED {
+        items.push(menu::Item::note(format!("и ещё {}", variables.len() - VARIABLES_LISTED)));
+    }
+    items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{variable_items, VARIABLES_LISTED};
+    use crate::module::state::ViewId;
+    use crate::proto::image_view::Variable;
+
+    fn variable(path: &str, units: &str) -> Variable {
+        Variable { path: path.to_string(), said: String::new(), units: units.to_string() }
+    }
+
+    /// Список называет все величины в порядке тайлера, отмечает показанную и
+    /// обрезает длинный хвост числом.
+    #[test]
+    fn the_list_names_every_variable_and_marks_the_shown_one() {
+        let view: ViewId = "7".parse().expect("ViewId из строки");
+        let few = [variable("/PRODUCT/a", "K"), variable("/PRODUCT/b", "")];
+        let items = variable_items(view, &few, "/PRODUCT/b");
+        assert_eq!(items.iter().map(|item| item.named()).collect::<Vec<_>>(), ["a, K", "b"]);
+        assert_eq!(items.iter().map(|item| item.marked()).collect::<Vec<_>>(), [false, true]);
+
+        let many: Vec<Variable> = (0..VARIABLES_LISTED + 5).map(|at| variable(&format!("/v{at}"), "")).collect();
+        let items = variable_items(view, &many, "/v0");
+        assert_eq!(items.len(), VARIABLES_LISTED + 1);
+        assert_eq!(items.last().map(|item| item.named()), Some("и ещё 5"));
+        assert!(items[0].marked() && !items[1].marked());
+
+        // Показанная за обрезкой встаёт последней из перечисленных — с галочкой.
+        let items = variable_items(view, &many, "/v20");
+        assert_eq!(items.len(), VARIABLES_LISTED + 1);
+        assert_eq!(items[VARIABLES_LISTED - 1].named(), "v20");
+        assert!(items[VARIABLES_LISTED - 1].marked() && !items[0].marked());
+        assert_eq!(items.last().map(|item| item.named()), Some("и ещё 5"));
+    }
 }

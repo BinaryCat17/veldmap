@@ -446,6 +446,8 @@ messages! {
         PreviewFit = "preview_fit";
         /// Шаг масштаба вокруг центра: знак — направление.
         PreviewZoom(val f32) = "preview_zoom";
+        /// Раскрыть список величин файла под кадром или закрыть его.
+        PreviewVariables(val bool) = "preview_variables";
 
         // -- Глобус --
         //
@@ -650,6 +652,8 @@ mod tests {
             Msg::In(id(), ViewMsg::PreviewProduct("снимок.SAFE".into())),
             Msg::In(id(), ViewMsg::PreviewFit),
             Msg::In(id(), ViewMsg::PreviewZoom(1.0)),
+            Msg::In(id(), ViewMsg::PreviewVariables(true)),
+            Msg::In(id(), ViewMsg::PreviewVariables(false)),
             Msg::In(id(), ViewMsg::GlobeToggle("продукт".into())),
         ];
         messages.extend(NewTab::ALL.iter().map(|kind| Msg::NewTab(pane(), *kind)));

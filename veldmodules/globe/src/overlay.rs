@@ -2183,6 +2183,7 @@ mod tests {
                 pyramid::level_count(width, height) as usize
             ],
             variable: None,
+            variables: Vec::new(),
         }
     }
 

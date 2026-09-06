@@ -130,7 +130,13 @@ many (`ViewState.variable`, in the file's words and units), then the source
 size, the scale, and the library's size and date for a downloaded file. The
 bar is one line and does not wrap, so the variable gets what the other facts
 and the room kept for the progress phrase leave of the pane's width: the
-file's words only when they fit whole, else the name and units alone.
+file's words only when they fit whole, else the name and units alone. The
+variable is a button: under it lies the list of every variable the file could
+have shown (`ViewState.variables`, in the tiler's order of preference), the
+shown one ticked and always among the listed, a long list cut to
+`VARIABLES_LISTED` and a count. A list,
+not a choice: an item closes the panel, and the tiler's requests carry no
+variable ([limitations](../limitations.md)).
 
 ## Names, page numbers, columns
 

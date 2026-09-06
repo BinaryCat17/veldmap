@@ -21,11 +21,10 @@ const WIDTH: f32 = 214.0;
 /// которую подпись потом обрезается.
 const ITEM_OVERHEAD: f32 = 12.0 + 8.0 * 2.0 + 4.0 * 2.0 + theme::GUTTER;
 
-/// Галочка выбранного значения.
-
 pub struct Item {
     label: String,
-    message: Msg,
+    /// Что пункт шлёт нажатием; пусто — пункт-примечание, его не нажимают.
+    message: Option<Msg>,
     /// Пометка слева: галочка у выбранного значения или свой глиф у действия.
     mark: Option<&'static str>,
     /// Счётчик справа — сколько записей под этим значением.
@@ -36,7 +35,13 @@ pub struct Item {
 
 impl Item {
     pub fn new(label: impl Into<String>, message: Msg) -> Self {
-        Self { label: label.into(), message, mark: None, count: None, selected: false, danger: false }
+        Self { label: label.into(), message: Some(message), mark: None, count: None, selected: false, danger: false }
+    }
+
+    /// Примечание в панели — «и ещё 14»: не действие и не значение, нажимать
+    /// нечего, и выглядеть пунктом оно не должно.
+    pub fn note(label: impl Into<String>) -> Self {
+        Self { label: label.into(), message: None, mark: None, count: None, selected: false, danger: false }
     }
 
     /// Выбранное значение: галочка и подсветка.
@@ -57,6 +62,11 @@ impl Item {
     /// пунктов — это и есть то, что строка умеет.
     pub fn named(&self) -> &str {
         &self.label
+    }
+
+    /// Отмечен ли пункт как выбранное значение — для тех же тестов.
+    pub fn marked(&self) -> bool {
+        self.selected
     }
 
     pub fn glyph(mut self, glyph: &'static str) -> Self {
@@ -105,16 +115,29 @@ fn line(item: Item) -> Element<Msg> {
 
     let content = row![
         container(mark).width(Length::Fixed(12.0)),
-        container(text::<Msg>(item.label).size(theme::TEXT_BODY).single_line())
-            .width(Length::Fill),
+        container(
+            text::<Msg>(item.label)
+                .size(theme::TEXT_BODY)
+                .color(if item.message.is_some() { theme::INK } else { theme::INK_DIM })
+                .single_line()
+        )
+        .width(Length::Fill),
         count,
     ]
     .spacing(8.0)
     .width(Length::Fill)
     .align_items(Alignment::Center);
 
-    theme::menu_item(content, item.selected, item.danger)
-        .width(Length::Fill)
-        .on_press(item.message)
-        .into()
+    match item.message {
+        Some(message) => theme::menu_item(content, item.selected, item.danger)
+            .width(Length::Fill)
+            .on_press(message)
+            .into(),
+        // Теми же отступами, что у пункта, — строка в ряду; без подсветки и
+        // нажатия — не пункт.
+        None => container(content)
+            .padding(Padding { top: 6.0, bottom: 6.0, left: 9.0, right: 9.0 })
+            .width(Length::Fill)
+            .into(),
+    }
 }

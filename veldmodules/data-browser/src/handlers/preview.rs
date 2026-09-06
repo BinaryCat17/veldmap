@@ -20,7 +20,7 @@
 //! вида. Вкладку могли закрыть, пока ответ шёл, и тогда ответ наш, а
 //! показывать его негде.
 
-use crate::module::state::{State, ViewId, ViewKind};
+use crate::module::state::{Open, State, ViewId, ViewKind};
 use crate::proto::data_provider::{ImageryResponse, ImageryRole};
 use crate::proto::image_view::{
     camera_command::Command, CameraCommand, Canvas, Fit, Pan, ShowRequest, ViewState, ZoomAt,
@@ -316,6 +316,15 @@ pub fn on_zoom_step(state: &mut State, view: ViewId, direction: f32) {
         y: surface.height as f32 / 2.0,
         factor,
     }));
+}
+
+/// Список величин под кадром: раскрыть, закрыть щелчком мимо или повторным
+/// нажатием. Раскрытое одно на экран (см. `state::Open`).
+pub fn on_variables(state: &mut State, view: ViewId, open: bool) {
+    match open {
+        true => state.toggle_open(Open::Variables(view)),
+        false => state.close_menus(),
+    }
 }
 
 /// Рассылка канвы о ходе показа. Чей это вид, сказано в самом сообщении;

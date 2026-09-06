@@ -981,6 +981,11 @@ fn an_empty_variable_yields_to_the_next() {
         info.variable,
         Some(super::Variable { path: "/PRODUCT/b_measured".into(), said: String::new(), units: "K".into() })
     );
+    // Список — все, из кого выбирали, в порядке предпочтения: пустая в нём есть.
+    assert_eq!(
+        info.variables.iter().map(|variable| variable.path.as_str()).collect::<Vec<_>>(),
+        ["/PRODUCT/a_empty", "/PRODUCT/b_measured"]
+    );
 }
 
 // ── Наперёд ────────────────────────────────────────────────────

@@ -115,6 +115,7 @@ pub fn describe<R: Read + Seek>(reader: R) -> Result<Info, String> {
         frame: None,
         binding_trouble,
         variable: None,
+        variables: Vec::new(),
     })
 }
 
