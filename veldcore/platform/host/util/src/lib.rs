@@ -52,8 +52,9 @@ pub use resource::{opened, opened_handle};
 pub use veldmap_host_core::memory::RangeSource;
 
 // Носитель, который ходит в сеть, обязан знать, что хост гасится: отменить его
-// снаружи нечем — он живёт под синхронным ABI, а не под задачей.
-pub use veldmap_host_core::shutting_down;
+// снаружи нечем — он живёт под синхронным ABI, а не под задачей. Спрашивает
+// он флагом, а начатый поход бросает по уведомлению.
+pub use veldmap_host_core::{shutdown, shutting_down, Shutdown};
 
 // ── Протокол ────────────────────────────────────────────────────────────────
 // Protobuf-типы шины (veldmap.core): запросы/ответы/события.

@@ -34,24 +34,106 @@ pub use veldmap_host_bindings::proto::{app, core};
 /// которого те обязаны отказать сами.
 pub const INSTANCE_MEMORY_LIMIT: u64 = 1024 * 1024 * 1024;
 
-/// Хост гасится: рантайм вот-вот разберут.
+/// Гашение хоста: рантайм вот-вот разберут.
 ///
-/// Флаг нужен долгожителям на blocking-пуле, и прежде всего оконному чтению
+/// Нужно долгожителям на blocking-пуле, и прежде всего оконному чтению
 /// удалённого ресурса. Оно синхронно для гостя — вызов ABI памяти, а не задача,
 /// — и отменить его снаружи нечем: система задач до этого слоя не достаёт.
-/// Поэтому спрашивает оно само, и ответ у него один: в сеть больше не ходить.
-/// Таймеры рантайма разбирают первыми, и запрос, начатый после начала гашения,
-/// паникует внутри реквеста, — а результата такого чтения всё равно уже никто
-/// не ждёт.
-static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Поэтому чтение справляется само, и ответ у него один: в сеть больше не
+/// ходить, а начатый поход бросить. Именно бросить, а не доиграть: таймеры
+/// рантайма разбирают раньше, чем дожидаются blocking-потоков, и опрос
+/// таймера реквеста после этого — паника внутри tokio, а с `panic = "abort"` —
+/// конец хоста. Поэтому кроме флага здесь уведомление: поход в сеть ждёт его
+/// наравне с ответом сервера (`range::awaited` в модуле network), — и счёт
+/// походов в полёте: раннер ждёт, пока брошенные вернутся, прежде чем ронять
+/// рантайм ([`Shutdown::settled`]).
+pub struct Shutdown {
+    begun: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+    /// Походов в сеть в полёте — тех, кому объявление ещё предстоит уронить
+    /// запрос или кто с ним уже возвращается.
+    flying: std::sync::atomic::AtomicUsize,
+}
+
+impl Shutdown {
+    pub const fn new() -> Self {
+        Self {
+            begun: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::const_new(),
+            flying: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Объявить гашение: флаг — спрашивающим, уведомление — ждущим.
+    pub fn begin(&self) {
+        self.begun.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub fn begun(&self) -> bool {
+        self.begun.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Дождаться гашения; объявленное прежде — сразу. В очередь ждущих встаёт
+    /// раньше, чем смотрит на флаг: гашение, объявленное между взглядом и
+    /// очередью, иначе никого бы не разбудило.
+    pub async fn awaited(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.begun() {
+            notified.await;
+        }
+    }
+
+    /// Поход в сеть на время своей жизни: пока такие есть, [`Shutdown::settled`]
+    /// ждёт.
+    pub fn flight(&self) -> Flight<'_> {
+        self.flying.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Flight(self)
+    }
+
+    /// Дождаться, пока походы в полёте вернутся, но не дольше `limit`; ждёт
+    /// раннер — после объявления и до разборки рантайма. Объявление будит
+    /// поход, но поток, вытесненный посреди опроса своего запроса, докончит
+    /// опрос, когда его снова пустят, — и упрётся в таймер, если драйвер к тому
+    /// времени разобран. Предел — на случай похода, чей опрос застрял: ждать
+    /// его дольше, чем стоит выход, незачем.
+    pub fn settled(&self, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        while self.flying.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+}
+
+/// Поход в сеть, считаемый гашением, — пока жив (см. [`Shutdown::flight`]).
+pub struct Flight<'a>(&'a Shutdown);
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        self.0.flying.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+static SHUTDOWN: Shutdown = Shutdown::new();
 
 /// Объявить гашение. Зовёт раннер — раньше, чем роняет рантайм.
 pub fn begin_shutdown() {
-    SHUTTING_DOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+    SHUTDOWN.begin();
 }
 
 pub fn shutting_down() -> bool {
-    SHUTTING_DOWN.load(std::sync::atomic::Ordering::Relaxed)
+    SHUTDOWN.begun()
+}
+
+/// Гашение хоста — тем, кто его ждёт, а не только спрашивает.
+pub fn shutdown() -> &'static Shutdown {
+    &SHUTDOWN
 }
 
 pub struct CallContextInner {
@@ -127,5 +209,46 @@ impl Default for CoreConfig {
             trace_filter: default_trace_filter(),
             log_rate_limit_ms: default_log_rate_limit_ms(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Shutdown;
+
+    /// Гашение будит ждущего и не теряется: спросивший после него не ждёт.
+    #[tokio::test]
+    async fn shutdown_reaches_those_waiting_and_those_asking_after() {
+        let shutdown: &'static Shutdown = Box::leak(Box::new(Shutdown::new()));
+        let waiting = tokio::spawn(shutdown.awaited());
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished(), "до объявления ждущий ждёт");
+
+        shutdown.begin();
+        let second = std::time::Duration::from_secs(1);
+        tokio::time::timeout(second, waiting).await.expect("объявление будит ждущего").expect("задача");
+        tokio::time::timeout(second, shutdown.awaited()).await.expect("объявленное прежде — сразу");
+        assert!(shutdown.begun());
+    }
+
+    /// Гашение ждёт походов в полёте, пока они не вернутся, но не дольше
+    /// предела.
+    #[test]
+    fn shutdown_settles_when_the_flights_return_or_the_limit_runs_out() {
+        use std::time::Duration;
+        let shutdown = Shutdown::new();
+        assert!(shutdown.settled(Duration::ZERO), "без походов — сразу");
+        let flight = shutdown.flight();
+        assert!(!shutdown.settled(Duration::from_millis(20)), "поход в полёте держит до предела");
+        drop(flight);
+        assert!(shutdown.settled(Duration::ZERO), "вернувшийся отпускает");
+        std::thread::scope(|scope| {
+            let flight = shutdown.flight();
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                drop(flight);
+            });
+            assert!(shutdown.settled(Duration::from_secs(2)), "возврат с чужого потока дожидается");
+        });
     }
 }

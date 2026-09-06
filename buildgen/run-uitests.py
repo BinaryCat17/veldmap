@@ -112,6 +112,12 @@ def play(path: str, name: str) -> tuple[str, float]:
     """Один сценарий: чем он кончился."""
     env = os.environ.copy()
     env["VELDMAP_SCRIPT"] = path
+    # Паника хоста — со следом вызовов: под прогоном её никто не увидит живьём,
+    # а по одной строке причины место паники в чужом крейте не найти. Только
+    # панике: без второй переменной след снимал бы и каждый `anyhow::Error`,
+    # а хост ими отказывает в обычной работе.
+    env["RUST_BACKTRACE"] = "1"
+    env["RUST_LIB_BACKTRACE"] = "0"
     # Логи прошлого сценария убираем сами: хост перезаписывает их на старте, а
     # не дойдя до этого места (не разобранный конфиг, не поднявшееся окно), он
     # оставил бы на диске чужие — и отказ из них приписался бы этому прогону.
@@ -142,8 +148,8 @@ def play(path: str, name: str) -> tuple[str, float]:
         # отыгрываются по кадрам, поэтому вставший кадровый цикл держит и часы
         # сценария — свой предел ожидания не срабатывает, и прогон доезжает
         # досюда. Ответ при этом в логе уже лежит.
-        result = " + ".join(["ЗАВИС"] + unseen(host_log(), stderr=host_stderr()))
-    keep_log(name, promised is not None)
+        result = " + ".join(["ЗАВИС"] + unseen(host_log()))
+    keep_log(name, promised is not None, result != "сошёлся")
     return result, time.monotonic() - started
 
 
@@ -154,6 +160,11 @@ GPU_NEEDLE = "wgpu: "
 TRAP_NEEDLE = "поймал трап"
 # Слово паники Rust в stderr: печатает его стандартная библиотека, а не мы.
 PANIC_NEEDLE = "panicked at"
+# Код смерти хоста от собственной паники: с `panic = "abort"` это SIGABRT, а
+# лаунчер отдаёт его как оболочка — 128+N. Только при нём слово паники в stderr
+# — про хост: модули наследуют stderr через WASI, и паника гостя пишется туда
+# теми же словами, но хост её переживает — трапом, с поднятым заново инстансом.
+ABORTED = 128 + signal.SIGABRT
 # Строка сети о доставленном (`network::perf` в trace.log): формат, как его
 # пишет range.rs, и разбор той же строки.
 DELIVERED_FORMAT = "доставлено {:.1} из {:.1} МиБ ({}%)"
@@ -196,17 +207,42 @@ def outcome(returncode: int, log: str, trace: str = "", promised: int | None = N
     нужны оба. Почему так и почему порядок отказов постоянный — в
     docs/operations/ui-tests.md.
     """
-    found = unseen(log, trace, promised, stderr)
+    found = unseen(log, trace, promised, stderr, aborted=returncode == ABORTED)
     if returncode == 0:
         return " + ".join(found) if found else "сошёлся"
-    return " + ".join(["НЕ СОШЁЛСЯ"] + found)
+    return " + ".join([failed(returncode)] + found)
 
 
-def unseen(log: str, trace: str = "", promised: int | None = None, stderr: str = "") -> list[str]:
-    """Отказы, которых сценарий не заметил, — в порядке, названном у `outcome`."""
+def failed(returncode: int) -> str:
+    """«Не сошёлся» — и от какого сигнала умер хост, если от сигнала.
+
+    Смерть от сигнала лаунчер отдаёт кодом 128+N, как оболочка
+    (`run-native.py::exit_code`). Имя сигнала — единственное, что различает
+    панику хоста (`SIGABRT` при `panic = "abort"`), падение (`SIGSEGV`) и
+    убийство снаружи (`SIGKILL`), когда в stderr пусто. Отрицательный код —
+    убит сам лаунчер (так его смерть называет Popen): хост тогда не при чём.
+    """
+    try:
+        if returncode < 0:
+            return f"НЕ СОШЁЛСЯ (посредник убит {signal.Signals(-returncode).name})"
+        if 128 < returncode < 256:
+            return f"НЕ СОШЁЛСЯ ({signal.Signals(returncode - 128).name})"
+    except ValueError:
+        pass
+    return "НЕ СОШЁЛСЯ"
+
+
+def unseen(log: str, trace: str = "", promised: int | None = None, stderr: str = "",
+           aborted: bool = False) -> list[str]:
+    """Отказы, которых сценарий не заметил, — в порядке, названном у `outcome`.
+
+    Паника в stderr — хоста, только если хост от неё и умер (`aborted`, см.
+    `ABORTED`): иначе это паника гостя, а она уже названа трапом.
+    """
     found = [name for name, seen in (("ОТКАЗ ВИДЕОКАРТЫ", gpu_refused(log)),
                                      ("ТРАП МОДУЛЯ", module_trapped(log))) if seen]
-    found.extend(panicked(stderr))
+    if aborted:
+        found.extend(panicked(stderr))
     if promised is not None:
         found.extend(broken_promise(trace, promised))
     return found
@@ -283,18 +319,19 @@ def module_trapped(log: str) -> bool:
     return TRAP_NEEDLE in log
 
 
-def keep_log(name: str, with_trace: bool) -> None:
+def keep_log(name: str, with_trace: bool, with_stderr: bool) -> None:
     """Копия лога сценария рядом с ним: следующий запуск host.log затрёт.
 
     Полный поток остаётся только у сценария с ручательством за провод: вердикт
     вынесен по его строкам, и числа за вердиктом должны быть под рукой, а у
-    прочих сценариев trace.log — мегабайты ни о чём.
+    прочих сценариев trace.log — мегабайты ни о чём. stderr — у не сошедшегося:
+    у сошедшегося в нём та же консоль, что и в логе.
     """
     for source, kept in ((HOST_LOG, f"{name}.log"), (TRACE_LOG, f"{name}.trace.log"),
                          (HOST_STDERR, f"{name}.stderr")):
-        if source == TRACE_LOG and not with_trace:
+        if (source == TRACE_LOG and not with_trace) or (source == HOST_STDERR and not with_stderr):
             continue
-        if not os.path.exists(source) or (source == HOST_STDERR and os.path.getsize(source) == 0):
+        if not os.path.exists(source):
             continue
         with open(source, "rb") as original:
             text = original.read()

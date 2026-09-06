@@ -17,7 +17,7 @@
 use super::State;
 use veldmap_host_util::bindings::network as bus;
 use veldmap_host_util::bindings::proto::network::RemoteOpenRequest;
-use veldmap_host_util::{blocking, opened, opened_handle, Caller, RangeSource};
+use veldmap_host_util::{blocking, opened, opened_handle, shutdown, Caller, RangeSource, Shutdown};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -470,12 +470,17 @@ enum Attempt {
 /// Отказ идти в сеть, когда хост гасится: таймеры рантайма разбирают первыми, и
 /// запрос, начатый после этого, паникует внутри реквеста. Отказом, а не
 /// обрывом, — повторять тут нечего и некому: результата этого чтения уже никто
-/// не ждёт (см. `veldmap_host_core::shutting_down`).
+/// не ждёт (см. `veldmap_host_core::Shutdown`).
 fn shutting_down() -> Result<(), Attempt> {
     match veldmap_host_util::shutting_down() {
-        true => Err(Attempt::Refused(anyhow::anyhow!("хост завершается"))),
+        true => Err(halted()),
         false => Ok(()),
     }
+}
+
+/// Слово отказа гасящегося хоста — одно у не начатого похода и у брошенного.
+fn halted() -> Attempt {
+    Attempt::Refused(anyhow::anyhow!("хост завершается"))
 }
 
 /// Как читать неудачный статус: перегруженный шлюз и «слишком часто» проходят
@@ -586,9 +591,9 @@ fn with_retries<T>(what: &str, mut once: impl FnMut() -> Result<T, Attempt>) -> 
 /// контекст рантайма, а у потока prefetch его нет — собранный снаружи запрос
 /// падает «there is no reactor running», и с `panic = "abort"` это уносит весь
 /// хост. Держит это правило тест `запрос_собирается_внутри_block_on`.
-fn fetcher(runtime: tokio::runtime::Handle, url: String, headers: HashMap<String, String>) -> Fetch {
+fn fetcher(runtime: tokio::runtime::Handle, url: String, headers: HashMap<String, String>, shutdown: &'static Shutdown) -> Fetch {
     Box::new(move |from, to| {
-        runtime.block_on(async {
+        awaited(&runtime, shutdown, async {
             let response = super::http::get(&url, &headers, Some((from, to)))
                 .send()
                 .await
@@ -596,6 +601,34 @@ fn fetcher(runtime: tokio::runtime::Handle, url: String, headers: HashMap<String
             ranged(response.status(), from, to)?;
             response.bytes().await.map_err(|e| Attempt::Broken(e.into()))
         })
+    })
+}
+
+/// Поход в сеть под гашением хоста: ответ сервера либо отказ — что раньше.
+///
+/// Запрос, что в полёте в момент гашения, бросается, а не доигрывается:
+/// рантайм разбирает свои таймеры раньше, чем дожидается blocking-потоков, и
+/// опрос таймера реквеста после этого — паника внутри tokio («context … is
+/// being shutdown»), а с `panic = "abort"` — конец хоста. Разборка будит и
+/// таймер, поэтому гашение опрашивается первым (`biased`): разбуженный ею
+/// запрос отказывает, не опросив таймера. Бросить future можно в любой момент,
+/// а результата этого чтения уже никто не ждёт. Одного порядка мало потоку,
+/// вытесненному посреди опроса запроса: докончит он его, когда его пустят, —
+/// потому поход считается в полёте, и раннер ждёт таких перед разборкой
+/// (`Shutdown::settled`). Держит это правило тест
+/// `запрос_в_полёте_бросается_гашением`.
+fn awaited<T>(
+    runtime: &tokio::runtime::Handle,
+    shutdown: &Shutdown,
+    request: impl std::future::Future<Output = Result<T, Attempt>>,
+) -> Result<T, Attempt> {
+    let _flight = shutdown.flight();
+    runtime.block_on(async {
+        tokio::select! {
+            biased;
+            _ = shutdown.awaited() => Err(halted()),
+            outcome = request => outcome,
+        }
     })
 }
 
@@ -607,9 +640,9 @@ impl HttpRange {
         let mut validator = String::new();
         let len = with_retries(&format!("открытие {}", without_query(url)), || {
             shutting_down()?;
-            let response = runtime
-                .block_on(async { super::http::get(url, &headers, Some((0, 1))).send().await })
-                .map_err(|e| Attempt::Broken(e.into()))?;
+            let response = awaited(&runtime, shutdown(), async {
+                super::http::get(url, &headers, Some((0, 1))).send().await.map_err(|e| Attempt::Broken(e.into()))
+            })?;
             probed(response.status(), without_query(url))?;
             // Валидатор берётся тем же пробным запросом: второго повода
             // ходить за ним нет, а без него блоки этого объекта не разделить
@@ -639,7 +672,7 @@ impl HttpRange {
             validator,
         });
 
-        Ok(Self::over(url, len, blocks, identity, fetcher(runtime, url.to_string(), headers)))
+        Ok(Self::over(url, len, blocks, identity, fetcher(runtime, url.to_string(), headers, shutdown())))
     }
 
     /// Носитель над готовым походом в сеть — тем, что собрал [`fetcher`],
@@ -1415,12 +1448,67 @@ mod reads {
         });
 
         let runtime = tokio::runtime::Runtime::new().expect("рантайм");
-        let fetch = fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), HashMap::new());
+        let fetch = fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), HashMap::new(), fresh_shutdown());
         // Чужой поток без контекста рантайма — как у prefetch.
         let fetched = std::thread::spawn(move || fetch(0, 16).map(|bytes| bytes.to_vec()))
             .join()
             .expect("поток без контекста рантайма не должен падать");
         assert_eq!(fetched.map_err(|e| match e { Attempt::Broken(e) | Attempt::Refused(e) => e.to_string() }), Ok(b"0123456789abcdef".to_vec()));
+        server.join().expect("сервер");
+    }
+
+    /// Своё гашение на тест: общее — на весь процесс, и объявленное одним
+    /// тестом отказывало бы походам всех остальных.
+    fn fresh_shutdown() -> &'static Shutdown {
+        Box::leak(Box::new(Shutdown::new()))
+    }
+
+    /// Запрос, что в полёте в момент гашения, бросается отказом, а не
+    /// доигрывается до ответа или таймера: сервер держит соединение молча, и
+    /// поход возвращается по объявлению гашения; спросивший после него в сеть
+    /// не идёт вовсе — сервер принимает одно соединение, и второй поход упёрся
+    /// бы в отказ соединения, а не в слово гашения. Пока поход в полёте, гашение
+    /// его считает, а вернувшегося — нет.
+    #[test]
+    fn запрос_в_полёте_бросается_гашением() {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("петля");
+        let port = listener.local_addr().expect("адрес").port();
+        let (accepted, in_flight) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("соединение");
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request);
+            accepted.send(()).expect("тест ждёт запроса");
+            // Молчит, пока тест не отпустит; предел — чтобы сломанная отмена
+            // кончилась обрывом за секунды, а не таймером клиента за минуту.
+            let _ = held.recv_timeout(std::time::Duration::from_secs(3));
+            drop(socket);
+        });
+
+        let runtime = tokio::runtime::Runtime::new().expect("рантайм");
+        let shutdown = fresh_shutdown();
+        let fetch: Arc<Fetch> =
+            Arc::new(fetcher(runtime.handle().clone(), format!("http://127.0.0.1:{}/f", port), HashMap::new(), shutdown));
+        let refused = |outcome: Result<bytes::Bytes, Attempt>| match outcome {
+            Err(Attempt::Refused(e)) => e.to_string(),
+            Err(Attempt::Broken(e)) => panic!("обрыв вместо отказа: {}", e),
+            Ok(bytes) => panic!("ответ вместо отказа: {} байт", bytes.len()),
+        };
+
+        let flying = {
+            let fetch = fetch.clone();
+            std::thread::spawn(move || fetch(0, 16))
+        };
+        in_flight.recv().expect("сервер принял запрос");
+        assert!(!shutdown.settled(std::time::Duration::from_millis(20)), "поход в полёте держит гашение");
+        shutdown.begin();
+        assert_eq!(refused(flying.join().expect("поток")), "хост завершается");
+        assert!(shutdown.settled(std::time::Duration::ZERO), "вернувшийся поход гашение отпустил");
+        assert_eq!(refused(fetch(0, 16)), "хост завершается", "после объявления — без похода");
+
+        release.send(()).ok();
         server.join().expect("сервер");
     }
 

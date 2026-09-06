@@ -102,13 +102,19 @@ middle of a file. Blocks do not outlive their last reader: the key counts
 references, and closing the last opening drops them all, as any closed
 resource.
 
-Shutdown is asked by the read itself: it lives under the synchronous memory
+Shutdown is handled by the read itself: it lives under the synchronous memory
 ABI, not under a task, and nothing can cancel it from outside — at exit it may
-well be in flight, since breaking connections are what give the break. It
-must not go to the network again then: the runtime's timers are torn down
-first, and a new request would panic inside the client. So the runner raises
-the flag before dropping the runtime, and a retry checks
-`veldmap_host_core::shutting_down` right before going to the network.
+well be in flight. It must neither go to the network again nor play a request
+out: the runtime tears its timers down before it waits for the blocking
+threads, and polling the request's timer after that panics inside tokio — with
+`panic = "abort"`, the end of the host. So the runner announces the shutdown
+before dropping the runtime (`veldmap_host_core::Shutdown`): a retry checks the
+flag right before going to the network, and a request in flight waits for the
+announcement alongside the server's answer and is dropped on it, unpolled
+(`range::awaited`). Dropping is not enough for a thread preempted in the middle
+of polling its request — it finishes that poll when it runs again — so requests
+in flight are counted, and the runner waits for them to return, up to two
+seconds, before dropping the runtime (`Shutdown::settled`).
 
 ## Lease
 

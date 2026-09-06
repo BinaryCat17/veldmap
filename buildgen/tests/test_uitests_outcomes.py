@@ -119,10 +119,16 @@ def test_a_host_panic_is_named_with_its_reason():
         "note: run with `RUST_BACKTRACE=1`\n"
     )
 
-    verdict = runner.outcome(250, "", stderr=stderr)
-    assert verdict.startswith("НЕ СОШЁЛСЯ + ПАНИКА ХОСТА: there is no reactor running"), verdict
+    verdict = runner.outcome(134, "", stderr=stderr)
+    assert verdict.startswith("НЕ СОШЁЛСЯ (SIGABRT) + ПАНИКА ХОСТА: there is no reactor running"), verdict
     assert runner.outcome(0, "", stderr="") == "сошёлся"
     assert runner.panicked("thread 'x' panicked at a.rs:1:1:") == ["ПАНИКА ХОСТА"], "без строки причины — одно слово"
+
+    # Паника гостя пишется в тот же stderr (модули наследуют его через WASI),
+    # но хост её переживает трапом: паникой хоста она не называется.
+    trapped = f"... {runner.TRAP_NEEDLE} ...\n"
+    assert runner.outcome(0, trapped, stderr=stderr) == "ТРАП МОДУЛЯ"
+    assert runner.outcome(1, "", stderr=stderr) == "НЕ СОШЁЛСЯ", "умер не от паники — не паника"
 
 
 def test_a_quiet_log_leaves_the_return_code_alone():
@@ -131,6 +137,19 @@ def test_a_quiet_log_leaves_the_return_code_alone():
 
     assert runner.outcome(0, "") == "сошёлся"
     assert runner.outcome(1, "") == "НЕ СОШЁЛСЯ"
+
+
+def test_a_signal_is_named_in_the_verdict():
+    """Смерть хоста от сигнала названа по имени: код 128+N — так её отдаёт
+    лаунчер (`run-native.py::exit_code`), и только имя различает панику,
+    падение и убийство снаружи, когда stderr пуст.
+    """
+    runner = load_runner()
+
+    assert runner.outcome(139, "") == "НЕ СОШЁЛСЯ (SIGSEGV)"
+    assert runner.outcome(137, "") == "НЕ СОШЁЛСЯ (SIGKILL)"
+    assert runner.outcome(250, "") == "НЕ СОШЁЛСЯ", "код без сигнала за ним — просто код"
+    assert runner.outcome(-9, "") == "НЕ СОШЁЛСЯ (посредник убит SIGKILL)", "убит сам лаунчер — не хост"
 
 
 def test_the_delivered_line_is_read_as_the_network_writes_it():

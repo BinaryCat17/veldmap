@@ -1,4 +1,5 @@
-# Мутации ядра хоста: учёт обменов у диспетчера.
+# Мутации ядра хоста: учёт обменов у диспетчера и гашение (уведомление
+# ждущим, счёт походов в полёте).
 # Формат — buildgen/mutate.py; крейт — пакет воркспейса veldcore.
 
 имя: за отсутствующего подписчика хост не отвечает
@@ -10,3 +11,18 @@
 файл: veldcore/platform/host/core/src/dispatcher.rs
 было:                 .filter(|(name, _)| name == target)
 стало:                 .filter(|(_name, _)| true)
+
+имя: гашение не ждёт походов в полёте
+файл: veldcore/platform/host/core/src/lib.rs
+было:         while self.flying.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+стало:         while false {
+
+имя: поход в полёте не считается
+файл: veldcore/platform/host/core/src/lib.rs
+было:         self.flying.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+стало:         let _ = &self.flying;
+
+имя: объявленное прежде гашение ждущему не видно
+файл: veldcore/platform/host/core/src/lib.rs
+было:         if !self.begun() {
+стало:         if true {

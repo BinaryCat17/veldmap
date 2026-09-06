@@ -56,8 +56,11 @@ def main():
         print("Please run build first: python3 build.py")
         return 1
     
-    # Запускаем процесс напрямую (без cargo); stdout и stderr — в консоль.
-    process = subprocess.Popen(cmd, env=env, stdout=None, stderr=subprocess.STDOUT)
+    # Запускаем процесс напрямую (без cargo). Потоки хоста — наши же, каждый
+    # свой: в консоли это консоль, а под прогоном по сценарию stderr — файл,
+    # из которого прогон читает панику хоста (run-uitests.py); слитый в stdout
+    # он ушёл бы туда же, куда прогон отправляет stdout, — в никуда.
+    process = subprocess.Popen(cmd, env=env, stdout=None, stderr=None)
 
     # TERM, пришедший нам, — хосту: иначе убитый `timeout` или пределом
     # прогона посредник оставляет окно жить, и следующий запуск делит с ним
@@ -70,11 +73,23 @@ def main():
     try:
         # Код возврата хоста — наш собственный: по нему прогон по сценарию
         # отличает «сошлось» от «не сошлось», и глотать его нельзя.
-        return process.wait()
+        return exit_code(process.wait())
     except KeyboardInterrupt:
         print("\nShutting down.")
         process.wait()
         return 130
+
+
+def exit_code(status: int) -> int:
+    """Код возврата хоста, каким его отдаёт оболочка.
+
+    Убитый сигналом процесс Python называет отрицательным номером сигнала, а
+    `sys.exit` с таким числом даёт остаток от деления на 256 — код без смысла.
+    Оболочка называет ту же смерть кодом 128+N; так же и здесь, и прогон по
+    сценарию узнаёт по коду сигнал: `SIGABRT` — паника хоста с
+    `panic = "abort"`, `SIGSEGV` — падение, `SIGKILL` — убийство снаружи.
+    """
+    return status if status >= 0 else 128 - status
 
 if __name__ == "__main__":
     sys.exit(main() or 0)

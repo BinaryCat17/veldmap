@@ -134,11 +134,23 @@ failures too. A silent zero would declare the unchecked checked.
 Two are found in `host.log`, because no step could name them: they do not
 touch the markup, and the scenario has no elements to notice them by. The
 third is found in the host's stderr, which the runner keeps in
-`runtime/logs/host.stderr` and beside the scenario as `<name>.stderr`: a
-**host panic** (`ПАНИКА ХОСТА`, with the line after `panicked at` as its
-reason). The host is built with `panic = "abort"`, so a panic on any thread
-ends the process before the log hears of it, and without stderr the verdict
-would be a bare "did not hold" (`run-uitests.py::panicked`).
+`runtime/logs/host.stderr` and, beside a scenario that did not hold, as
+`<name>.stderr`: a **host panic** (`ПАНИКА ХОСТА`, with the line after
+`panicked at` as its reason; the backtrace is in the file, the runner sets
+`RUST_BACKTRACE`). The host is built with `panic = "abort"`, so its panic on
+any thread ends the process by `SIGABRT` before the log hears of it, and
+without stderr the verdict would be a bare "did not hold"
+(`run-uitests.py::panicked`). The word alone is not enough: modules inherit
+stderr through WASI, and a module's panic is written there in the same words,
+but the host survives it as a trap — so the panic is the host's only when the
+host died by `SIGABRT`. The stderr reaches the runner through the launcher,
+which leaves the host's streams its own (`run-native.py`): merged into stdout
+they would go where the runner sends stdout — nowhere. A host killed by a
+signal is named by it in the verdict (`НЕ СОШЁЛСЯ (SIGABRT)`): the launcher
+returns such a death as the shell would, 128+N (`run-native.py::exit_code`),
+and the name is what tells a panic (`SIGABRT`) from a crash (`SIGSEGV`) or a
+kill from outside when stderr is empty; a launcher killed from outside, with
+the host still alive, is named as such too.
 
 The first is a **GPU refusal** (`ОТКАЗ ВИДЕОКАРТЫ`). A shader that did not compile, or a vertex
 layout that drifted from it, does not crash the application: the window lives,

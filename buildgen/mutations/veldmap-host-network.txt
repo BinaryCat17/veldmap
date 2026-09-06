@@ -40,3 +40,18 @@
 файл: veldcore/platform/host/modules/network/src/range.rs
 было:         let run = run.max(needed).min(READAHEAD / BLOCK);
 стало:         let run = run.min(READAHEAD / BLOCK);
+
+имя: поход не бросается гашением
+файл: veldcore/platform/host/modules/network/src/range.rs
+было:             _ = shutdown.awaited() => Err(halted()),
+стало:             _ = std::future::pending::<()>() => Err(halted()),
+
+имя: гашение не будит ждущих походов
+файл: veldcore/platform/host/core/src/lib.rs
+было:         self.notify.notify_waiters();
+стало:         let _ = &self.notify;
+
+имя: гашение не запоминается, только будит
+файл: veldcore/platform/host/core/src/lib.rs
+было:         self.begun.store(true, std::sync::atomic::Ordering::SeqCst);
+стало:         let _ = &self.begun;
