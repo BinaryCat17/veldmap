@@ -614,6 +614,11 @@ fn arc_deg(from: (f64, f64), to: (f64, f64)) -> f64 {
     (to.0 - from.0).hypot(along)
 }
 
+/// Величина на провод — как есть.
+fn wire_variable(variable: &tiles::Variable) -> crate::proto::globe::Variable {
+    crate::proto::globe::Variable { path: variable.path.clone(), said: variable.said.clone(), units: variable.units.clone() }
+}
+
 /// Один растр наложения и все его ожидания.
 pub struct Raster {
     pub role: Role,
@@ -625,6 +630,15 @@ pub struct Raster {
     /// Номер растра у приславшего (`OverlayRaster.ordinal`): им приславший
     /// узнаёт, какой файл лежит подробным, — имён здесь нет.
     pub ordinal: u32,
+    /// Названная приславшим величина этого файла (`OverlayRaster.variable`);
+    /// пусто — выбор тайлера. Едет в описание и в каждый проход. У запасного
+    /// — пусто: он другой файл, и названное про прежний к нему не относится.
+    pub variable: String,
+    /// Величины файла, из каких выбирают, — от последнего описания, которое
+    /// их назвало (`Meta.variables`). Переживают отказ описания: отказавшее
+    /// названной величине списка не несёт, а выбрать другую нужно как раз
+    /// тогда.
+    pub variables: Vec<tiles::Variable>,
     /// Запасные файлы той же роли — номер, ресурс и координаты, в порядке
     /// предпочтения: провайдер называет их за выбранным, когда выбор по именам
     /// может ошибиться (пустой ночью видимый канал SLSTR), и следующий встаёт
@@ -679,6 +693,8 @@ impl Raster {
             resource,
             geolocation: None,
             ordinal: 0,
+            variable: String::new(),
+            variables: Vec::new(),
             spares: Vec::new(),
             meta: None,
             bounds: Vec::new(),
@@ -709,6 +725,26 @@ impl Raster {
         Some((self.resource.as_ref().clone(), self.geolocation.as_ref().map(|owned| owned.as_ref().clone())))
     }
 
+    /// Отказ описания. Названной величине — жалоба словами тайлера, файл на
+    /// месте: отказали не файлу, а выбору, и приславший назовёт другую —
+    /// запасной на его место не встаёт. Без названной — следующий запасной
+    /// файл на место (ответ — его ресурсы для описания), а нет запасных —
+    /// жалоба о растре, названная ролью.
+    pub fn refused(&mut self, error: String) -> Option<(veldsdk::ResourceHandle, Option<veldsdk::ResourceHandle>)> {
+        if !self.variable.is_empty() {
+            self.trouble = Some(error);
+            return None;
+        }
+        if let Some(next) = self.next_spare() {
+            return Some(next);
+        }
+        self.trouble = Some(match self.role {
+            Role::Detailed => format!("подробный растр не открылся: {}", error),
+            Role::Preview => format!("превью не открылось: {}", error),
+        });
+        None
+    }
+
     /// Принять описание растра.
     ///
     /// Методом, а не присваиванием поля: из размеров растра считаются узлы
@@ -720,6 +756,9 @@ impl Raster {
     /// `describe_settled`, на растре, начатом с чистого), а до него кэш пуст.
     /// Правило стои́т здесь, чтобы второе описание не оказалось тихой поломкой.
     pub fn describe_as(&mut self, meta: Meta) {
+        if !meta.variables.is_empty() {
+            self.variables = meta.variables.clone();
+        }
         self.meta = Some(meta);
         self.mesh.clear();
     }
@@ -786,6 +825,11 @@ pub struct Overlay {
     /// которому отказали в гранте, пропускается), и тогда набор расходился бы
     /// сам с собой навсегда — каждая пересылка выглядела бы новым наложением.
     pub sources: Vec<u64>,
+    /// Названные величины присланных растров, по одной на растр в порядке
+    /// присылки (`OverlayRaster.variable`). Вторая половина тождества набора:
+    /// те же ресурсы с другой величиной — то же наложение, но растр с ней
+    /// описывается заново ([`Overlay::revariabled`]).
+    pub variables: Vec<String>,
     /// Прозрачность слоя, 0..1. Доезжает до пикселя множителем к альфе
     /// носителя, поэтому прозрачное поле квиклука так и остаётся прозрачным,
     /// а не проступает вполсилы.
@@ -1045,11 +1089,11 @@ impl Overlay {
                 .raster(Role::Detailed)
                 .and_then(|raster| raster.meta.as_ref())
                 .and_then(|meta| meta.variable.as_ref())
-                .map(|variable| crate::proto::globe::Variable {
-                    path: variable.path.clone(),
-                    said: variable.said.clone(),
-                    units: variable.units.clone(),
-                }),
+                .map(wire_variable),
+            detailed_variables: self
+                .raster(Role::Detailed)
+                .map(|raster| raster.variables.iter().map(wire_variable).collect())
+                .unwrap_or_default(),
         }
     }
 
@@ -1126,6 +1170,35 @@ impl Overlay {
     /// отдаёт своё разрешение целиком.
     fn detail_cap(&self) -> Option<String> {
         self.decider()?.meta.as_ref()?.capped()
+    }
+
+    /// Слою нечем лечь и ждать нечего: ни один растр не описался, и ни у
+    /// одного нет названной величины. Отказ названной величине слоя не
+    /// хоронит: растр без описания, но при своём списке, и приславший назовёт
+    /// другую — снятый слой этого не даст.
+    pub fn doomed(&self) -> bool {
+        !self.rasters.iter().any(|raster| raster.meta.is_some())
+            && self.rasters.iter().all(|raster| raster.variable.is_empty())
+    }
+
+    /// Лежащие растры, для которых приславший назвал другую величину, чем та,
+    /// с которой они описаны: `wanted` — величина по ресурсу, как в присланном
+    /// наборе. Запасные не считаются: названное относится к файлу, который
+    /// лежит, а не к тем, что за ним. Ответ — роли, чьи растры описывать
+    /// заново.
+    pub fn revariabled(&self, wanted: &[(u64, String)]) -> Vec<Role> {
+        self.rasters
+            .iter()
+            .filter(|raster| {
+                let asked = wanted
+                    .iter()
+                    .find(|(id, _)| *id == raster.resource.as_ref().id)
+                    .map(|(_, variable)| variable.as_str())
+                    .unwrap_or_default();
+                asked != raster.variable
+            })
+            .map(|raster| raster.role)
+            .collect()
     }
 
     pub fn raster_mut(&mut self, role: Role) -> Option<&mut Raster> {
@@ -1972,6 +2045,28 @@ fn span_deg(frame: &Frame, meta: &Meta, cell: [f64; 4]) -> f64 {
     span
 }
 
+/// Наложение для тестов: рамка T40WFC (109.8 км на всю ширину растра) и
+/// названные растры; ключ — как назовут. Одно на тесты этого файла и на тесты
+/// обработчиков модуля.
+#[cfg(test)]
+pub(crate) fn stub(key: &str, rasters: Vec<Raster>) -> Overlay {
+    Overlay {
+        key: key.into(),
+        label: "снимок".into(),
+        frame: Frame::utm(projection::System::utm(40, false), 600_000.0, 7_690_200.0, 709_800.0, 7_800_000.0),
+        relaid: 0,
+        binding: Binding::Named,
+        binding_trouble: None,
+        rasters,
+        sources: Vec::new(),
+        variables: Vec::new(),
+        opacity: 1.0,
+        hidden: false,
+        error: String::new(),
+        progress: Progress::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2211,27 +2306,7 @@ mod tests {
     }
 
     fn overlay(rasters: Vec<Raster>) -> Overlay {
-        Overlay {
-            key: "k".into(),
-            label: "снимок".into(),
-            // Рамка T40WFC: 109.8 км на всю ширину растра.
-            frame: Frame::utm(
-                projection::System::utm(40, false),
-                600_000.0,
-                7_690_200.0,
-                709_800.0,
-                7_800_000.0,
-            ),
-            relaid: 0,
-            binding: Binding::Named,
-            binding_trouble: None,
-            rasters,
-            sources: Vec::new(),
-            opacity: 1.0,
-            hidden: false,
-            error: String::new(),
-            progress: Progress::default(),
-        }
+        stub("k", rasters)
     }
 
     fn raster(role: Role, meta_of: Option<Meta>) -> Raster {
@@ -2911,6 +2986,76 @@ mod tests {
         assert_eq!(preview_only.report(None, &idle).detailed_variable, None, "величина превью названа подробной");
         let undescribed = overlay(vec![raster(Role::Detailed, None)]);
         assert_eq!(undescribed.report(None, &idle).detailed_variable, None);
+    }
+
+    /// Другая величина у лежащего растра — описывать заново его одного: та же
+    /// величина и величина запасного не в счёт.
+    #[test]
+    fn a_raster_is_redescribed_only_when_its_own_variable_changes() {
+        let mut overlay = overlay(vec![raster(Role::Preview, Some(meta(1000, 1000))), raster(Role::Detailed, Some(meta(4001, 3001)))]);
+        let (preview, detailed) = (Role::Preview as u32 as u64 + 1, Role::Detailed as u32 as u64 + 1);
+        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, String::new())]), Vec::<Role>::new());
+        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, "/PRODUCT/qa_value".into())]), [Role::Detailed]);
+        // Названная запасному (другой ресурс) лежащего не трогает.
+        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, String::new()), (99, "/x".into())]), Vec::<Role>::new());
+        // Описанный с названной и присланный с пустой — тоже другой.
+        overlay.raster_mut(Role::Detailed).expect("подробный").variable = "/PRODUCT/qa_value".into();
+        assert_eq!(overlay.revariabled(&[(preview, String::new()), (detailed, String::new())]), [Role::Detailed]);
+    }
+
+    /// Отказ описания: названной величине — жалоба словами тайлера, запасной
+    /// остаётся при файле; без названной — запасной встаёт на место, а без
+    /// запасных — жалоба, названная ролью.
+    #[test]
+    fn a_refused_named_variable_keeps_the_file_and_its_spares() {
+        let with_spare = |role: Role| {
+            let mut raster = raster(role, None);
+            raster.spares.push((3, veldsdk::OwnedResource::from_raw_id(7), None));
+            raster
+        };
+        let mut named = with_spare(Role::Detailed);
+        named.variable = "/x".into();
+        assert!(named.refused("NetCDF: '/x' пуста в выборке".into()).is_none(), "запасной встал на место отвергнутого выбора");
+        assert_eq!(named.trouble.as_deref(), Some("NetCDF: '/x' пуста в выборке"));
+        assert_eq!(named.spares.len(), 1, "запасной ушёл");
+
+        let mut plain = with_spare(Role::Detailed);
+        let next = plain.refused("сломан".into()).expect("запасной встаёт на место");
+        assert_eq!((next.0.id, plain.ordinal), (7, 3));
+        assert_eq!(plain.trouble, None, "жалоба у растра, начатого с чистого");
+
+        let mut alone = raster(Role::Preview, None);
+        assert!(alone.refused("сломан".into()).is_none());
+        assert_eq!(alone.trouble.as_deref(), Some("превью не открылось: сломан"));
+    }
+
+    /// Слой хоронится, только когда не описался никто и никто не ждал
+    /// названной величины: отвергнутый выбор — не отказ файла.
+    #[test]
+    fn a_layer_with_a_refused_named_variable_is_not_doomed() {
+        let mut named = raster(Role::Detailed, None);
+        named.variable = "/x".into();
+        assert!(!overlay(vec![named]).doomed(), "отказ названной похоронил слой");
+        assert!(overlay(vec![raster(Role::Detailed, None)]).doomed(), "слой без описаний и без выбора жив");
+        assert!(!overlay(vec![raster(Role::Preview, Some(meta(10, 10))), raster(Role::Detailed, None)]).doomed());
+    }
+
+    /// Список величин переживает отказ описания: отчёт называет его, пока
+    /// растр без описания, — иначе после отказа названной другую не выбрать.
+    #[test]
+    fn the_variable_list_outlives_a_refused_description() {
+        let named = |path: &str| tiles::Variable { path: path.into(), said: String::new(), units: String::new() };
+        let mut described = meta(4001, 3001);
+        described.variables = vec![named("/a"), named("/b")];
+        let mut detailed = raster(Role::Detailed, None);
+        detailed.describe_as(described);
+        detailed.meta = None;
+        detailed.trouble = Some("NetCDF: '/b' пуста в выборке".into());
+        let overlay = overlay(vec![raster(Role::Preview, Some(meta(1000, 1000))), detailed]);
+        let idle: Passes<&str> = Passes::default();
+        let report = overlay.report(None, &idle);
+        assert_eq!(report.detailed_variables.iter().map(|v| v.path.as_str()).collect::<Vec<_>>(), ["/a", "/b"]);
+        assert_eq!(report.detailed_variable, None, "без описания показанной нет");
     }
 
     /// Предел детали ложится к подробному растру, когда деталь решает он, и

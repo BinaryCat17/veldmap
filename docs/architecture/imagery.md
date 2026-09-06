@@ -497,8 +497,10 @@ fingerprint both carry the variable, so the same bytes under another variable
 are another parse and other tiles (`fingerprint::hash_of`: the variable enters
 the hash, an empty one leaves it as it was — so naming the tiler's own choice
 by hand is a second key and a second production of the same tiles, the price
-of keeping every earlier cache valid). The globe never names one
-([limitations](../limitations.md)).
+of keeping every earlier cache valid). The globe names one the same way, per
+raster (`OverlayRaster.variable`): the layer's set arrives with the same
+resources and another variable, and the raster is described anew in place
+([globe](globe.md)).
 
 **Marks and packing.** `_FillValue` (`Item.fill`) is the nodata mark of the
 display. `scale_factor` and `add_offset` are not applied to the shown quantity

@@ -615,6 +615,7 @@ fn finish(state: &mut State, key: &str) {
             role: role as i32,
             geolocation: coordinates,
             ordinal,
+            variable: String::new(),
         });
     }
     if rasters.is_empty() {
@@ -667,7 +668,7 @@ fn send_set(state: &State) {
                 utm: overlay.utm.clone(),
                 quad,
                 rough,
-                rasters: overlay.rasters.clone(),
+                rasters: with_variable(&overlay.rasters, overlay.variable_wanted.as_ref()),
                 opacity: Some(overlay.opacity),
                 hidden: overlay.hidden,
             }
@@ -676,6 +677,47 @@ fn send_set(state: &State) {
 
     crate::calls::globe::on_overlay(&Overlays { overlays });
     super::outline::send(state);
+}
+
+/// Растры набора с названной величиной у того, о ком она сказана, — по
+/// номеру файла; у остальных пусто (выбор тайлера).
+fn with_variable(rasters: &[OverlayRaster], wanted: Option<&(u32, String)>) -> Vec<OverlayRaster> {
+    rasters
+        .iter()
+        .map(|raster| OverlayRaster {
+            variable: match wanted {
+                Some((ordinal, path)) if *ordinal == raster.ordinal => path.clone(),
+                _ => String::new(),
+            },
+            ..raster.clone()
+        })
+        .collect()
+}
+
+/// Список величин в строке слоя: раскрыть, закрыть щелчком мимо или
+/// повторным нажатием. Раскрытое одно на экран (см. `state::Open`).
+pub fn variables_menu(state: &mut State, key: Option<String>) {
+    match key {
+        Some(key) => state.toggle_open(Open::LayerVariables(key)),
+        None => state.close_menus(),
+    }
+}
+
+/// Другая величина лежащего подробным файла слоя — глобусу тем же набором:
+/// растр с названной величиной он опишет заново, ресурсы прежние. Показанная
+/// уже она — нечего делать, кроме как закрыть список.
+pub fn variable(state: &mut State, key: &str, variable: String) {
+    state.close_menus();
+    let Some(overlay) = state.overlays.iter_mut().find(|o| o.identifier == key) else { return };
+    if overlay.variable.as_ref().is_some_and(|shown| shown.path == variable) {
+        return;
+    }
+    let Some(ordinal) = overlay.detailed_ordinal else { return };
+    if overlay.variable_wanted.as_ref() == Some(&(ordinal, variable.clone())) {
+        return;
+    }
+    overlay.variable_wanted = Some((ordinal, variable));
+    send_set(state);
 }
 
 /// Ход добычи тайлов от глобуса: набор целиком, тем же правилом, что и сам
@@ -701,6 +743,17 @@ pub fn on_overlay_progress(state: &mut State, msg: crate::proto::globe::Overlays
         overlay.trouble = said.trouble.clone();
         overlay.detailed_trouble = said.detailed_trouble.clone();
         overlay.variable = said.detailed_variable.clone();
+        overlay.detailed_ordinal = said.detailed;
+        // Список — от последнего отчёта с ним: отказавшее названной величине
+        // описание списка не несёт, а выбрать другую нужно как раз тогда.
+        if !said.detailed_variables.is_empty() {
+            overlay.variables = said.detailed_variables.clone();
+        }
+        // Подробным лёг другой файл (запасной) — названное про прежний к нему
+        // не относится.
+        if overlay.variable_wanted.as_ref().is_some_and(|(ordinal, _)| said.detailed != Some(*ordinal)) {
+            overlay.variable_wanted = None;
+        }
         // Номер от глобуса — в имя файла: глобус имён не знает, а строке слоя
         // нужно имя, и стоять оно обязано рядом с приговором о том же файле.
         overlay.detailed = said
@@ -945,6 +998,49 @@ mod tests {
         assert_eq!(state.overlays[0].variable, Some(variable));
         on_overlay_progress(&mut state, progress(Some(2)));
         assert_eq!(state.overlays[0].variable, None, "отчёт без величины снимает прежнюю");
+    }
+
+    /// Названная величина уезжает глобусу у растра с тем номером, о котором
+    /// сказана, и снимается, когда подробным лёг другой файл; список величин
+    /// переживает отчёт без него.
+    #[test]
+    fn названная_величина_едет_к_своему_растру_и_снимается_с_запасным() {
+        let raster = |ordinal: u32| crate::proto::globe::OverlayRaster { ordinal, ..Default::default() };
+        let sent = with_variable(&[raster(0), raster(1), raster(2)], Some(&(1, "/PRODUCT/qa_value".to_string())));
+        assert_eq!(sent.iter().map(|r| r.variable.as_str()).collect::<Vec<_>>(), ["", "/PRODUCT/qa_value", ""]);
+        assert!(with_variable(&[raster(0)], None).iter().all(|r| r.variable.is_empty()));
+
+        let mut state = State::new(crate::module::handlers::Config { initial_view: None }).unwrap();
+        let mut overlay = OverlayState::new("scene".to_string(), "снимок".to_string(), false, None, None, None);
+        overlay.rasters = vec![raster(0), raster(1)];
+        state.overlays.push(overlay);
+        let listed = |detailed: Option<u32>, paths: &[&str]| crate::proto::globe::OverlaysProgress {
+            overlays: vec![crate::proto::globe::OverlayProgress {
+                key: "scene".to_string(),
+                detailed,
+                detailed_variables: paths
+                    .iter()
+                    .map(|path| crate::proto::globe::Variable { path: path.to_string(), ..Default::default() })
+                    .collect(),
+                ..Default::default()
+            }],
+        };
+        on_overlay_progress(&mut state, listed(Some(1), &["/a", "/b"]));
+        // Показанную шаром называть заново нечего: набор с названным выбором
+        // тайлера — второй отпечаток тех же тайлов.
+        state.overlays[0].variable = Some(crate::proto::globe::Variable { path: "/a".to_string(), ..Default::default() });
+        variable(&mut state, "scene", "/a".to_string());
+        assert_eq!(state.overlays[0].variable_wanted, None, "показанная названа заново");
+        variable(&mut state, "scene", "/b".to_string());
+        assert_eq!(state.overlays[0].variable_wanted, Some((1, "/b".to_string())));
+
+        // Отчёт без списка прежнего не стирает; тот же файл — названное живёт.
+        on_overlay_progress(&mut state, listed(Some(1), &[]));
+        assert_eq!(state.overlays[0].variables.len(), 2, "отказ стёр список");
+        assert_eq!(state.overlays[0].variable_wanted, Some((1, "/b".to_string())));
+        // Подробным лёг запасной — названное снято.
+        on_overlay_progress(&mut state, listed(Some(2), &["/c"]));
+        assert_eq!(state.overlays[0].variable_wanted, None);
     }
 
     /// Имя файла — последний сегмент ключа; ключ папки называется папкой, а

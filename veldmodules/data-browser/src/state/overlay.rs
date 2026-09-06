@@ -76,6 +76,16 @@ pub struct OverlayState {
     /// делает тайлер, и в строке слоя это единственное место, где он назван.
     /// Пусто — подробного нет, не описан или величина у него одна (снимок).
     pub variable: Option<Variable>,
+    /// Величины лежащего подробным файла, из каких выбирают
+    /// (`OverlayProgress.detailed_variables`), от последнего отчёта с ними.
+    pub variables: Vec<Variable>,
+    /// Номер лежащего подробным (`OverlayProgress.detailed`) — к нему
+    /// относится названная величина.
+    pub detailed_ordinal: Option<u32>,
+    /// Названная смотрящим величина: номер файла и путь. Уезжает глобусу в
+    /// `OverlayRaster.variable` того растра; снимается, когда подробным лёг
+    /// другой файл (запасной) — названное про прежний к нему не относится.
+    pub variable_wanted: Option<(u32, String)>,
     /// Растры, уже переданные глобусу, и рамка, уехавшая вместе с ними.
     /// Владения за ними больше нет — это имена, которыми набор пересылается
     /// целиком, когда меняется его состав или показ: глобус узнаёт по ним, что
@@ -111,6 +121,9 @@ impl OverlayState {
             detailed: None,
             detailed_trouble: String::new(),
             variable: None,
+            variables: Vec::new(),
+            detailed_ordinal: None,
+            variable_wanted: None,
             rasters: Vec::new(),
             utm: None,
         }

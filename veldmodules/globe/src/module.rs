@@ -409,8 +409,59 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         .flatten()
         .map(|handle| handle.id)
         .collect();
+    let incoming_variables: Vec<String> = incoming.rasters.iter().map(|raster| raster.variable.clone()).collect();
     if let Some(index) = state.overlays.iter().position(|o| o.key == incoming.key) {
         if state.overlays[index].sources == incoming_ids {
+            // Те же ресурсы, другая величина у лежащего растра — наложение
+            // прежнее, а растр описывается заново с ней: его тайлы под другим
+            // отпечатком, и прежний проход ему не нужен. Запасные
+            // остаются при нём.
+            if state.overlays[index].variables != incoming_variables {
+                let wanted: Vec<(u64, String)> = incoming
+                    .rasters
+                    .iter()
+                    .filter_map(|raster| raster.resource.as_ref().map(|handle| (handle.id, raster.variable.clone())))
+                    .collect();
+                let key = incoming.key.clone();
+                let roles = state.overlays[index].revariabled(&wanted);
+                let label = state.overlays[index].label.clone();
+                let mut requests = Vec::new();
+                for role in roles {
+                    let overlay = &mut state.overlays[index];
+                    let Some(raster) = overlay.raster_mut(role) else { continue };
+                    let variable = wanted
+                        .iter()
+                        .find(|(id, _)| *id == raster.resource.as_ref().id)
+                        .map(|(_, variable)| variable.clone())
+                        .unwrap_or_default();
+                    let previous = raster.meta.as_ref().map(|meta| meta.fingerprint.clone());
+                    raster.variable = variable.clone();
+                    raster.meta = None;
+                    raster.trouble = None;
+                    raster.fetch.reset();
+                    let correlation = raster.describe.begin();
+                    veldsdk::log::info!(target: "handlers", "{}: величина '{}' — растр описывается заново", label, variable);
+                    requests.push((role, previous, correlation, raster.resource.as_ref().clone(),
+                        raster.geolocation.as_ref().map(|owned| owned.as_ref().clone()), variable));
+                }
+                state.overlays[index].variables = incoming_variables;
+                for (role, previous, correlation, handle, coordinates, variable) in requests {
+                    if let Some(fingerprint) = previous {
+                        release_pass(state, &key, role, &fingerprint);
+                        // Тайлы прежней величины никому не нужны: под
+                        // её отпечаток не вернётся ни этот растр, ни выбор
+                        // тайлера, а бюджет видеопамяти они занимали бы до
+                        // вытеснения.
+                        forget_unless_held(state, &fingerprint);
+                    }
+                    state.pending_describe.insert(correlation.clone(), (key.clone(), role));
+                    crate::calls::image_tiler::on_describe(
+                        &DescribeRequest { resource: Some(handle), label: label.clone(), geolocation: coordinates, variable },
+                        &correlation,
+                    );
+                }
+                state.epoch += 1;
+            }
             // Растры те же — трогать нечего, кроме показа: слайдер
             // прозрачности и «скрыть» шлют тот же набор, и переоткрывать под
             // них ресурсы значило бы платить за движение ползунка декодом.
@@ -491,6 +542,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
             continue;
         };
         let ordinal = raster.ordinal;
+        let variable = raster.variable.clone();
         let role = match raster.role() {
             crate::proto::globe::OverlayRole::OverlayPreview => Role::Preview,
             crate::proto::globe::OverlayRole::OverlayDetailed => Role::Detailed,
@@ -528,6 +580,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         }
         let mut raster = Raster::new(role, veldsdk::OwnedResource::new(handle.clone()));
         raster.ordinal = ordinal;
+        raster.variable = variable.clone();
         raster.geolocation = coordinates.clone().map(veldsdk::OwnedResource::new);
 
         let correlation = raster.describe.begin();
@@ -537,7 +590,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
                 resource: Some(handle),
                 label: label.clone(),
                 geolocation: coordinates,
-                variable: String::new(),
+                variable,
             },
             &correlation,
         );
@@ -557,6 +610,7 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
         binding_trouble: None,
         rasters,
         sources: incoming_ids,
+        variables: incoming_variables,
         opacity,
         hidden,
         error: String::new(),
@@ -569,6 +623,17 @@ fn adopt_overlay(state: &mut State, incoming: crate::proto::globe::Overlay) {
 fn refuse(state: &mut State, key: String, label: &str, why: &str) {
     veldsdk::log::warn!(target: "handlers", "{}: {}", label, why);
     state.refused.push((key, why.to_string()));
+}
+
+/// Забыть тайлы отпечатка, если он не лежит описанием ни у одного растра ни
+/// одного наложения: тот же снимок в другом слое держит их живыми.
+fn forget_unless_held(state: &mut State, fingerprint: &str) {
+    let held = state.overlays.iter().any(|other| {
+        other.rasters.iter().any(|raster| raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == fingerprint))
+    });
+    if !held {
+        state.tiles.forget(fingerprint);
+    }
 }
 
 /// Конец наложения: производство убить, тайлы забыть (если отпечаток не живёт
@@ -589,14 +654,7 @@ fn drop_overlay(state: &mut State, mut overlay: Overlay) {
         // Тайлы забываются по другому счёту, чем убивается проход: держит их и
         // скрытый слой — показ обратно тогда мгновенный, — а вот работать на
         // скрытого не за чем.
-        let held = state.overlays.iter().any(|other| {
-            other.rasters.iter().any(|raster| {
-                raster.meta.as_ref().is_some_and(|meta| meta.fingerprint == fingerprint)
-            })
-        });
-        if !held {
-            state.tiles.forget(&fingerprint);
-        }
+        forget_unless_held(state, &fingerprint);
     }
 }
 
@@ -675,7 +733,7 @@ pub fn on_described(state: &mut State, msg: Described) {
         // А вот описаться не вышло ни одному — тогда слою нечем лечь вовсе, и
         // ждать больше нечего: молчание оставило бы у приславшего вечное
         // «готовится…».
-        if !overlay.rasters.iter().any(|raster| raster.meta.is_some()) {
+        if overlay.doomed() {
             veldsdk::log::warn!(target: "handlers",
                 "{}: ни один растр не описался — накладывать нечего", overlay.label);
             // Наружу уезжает не «не описался», а то, чем именно: причину знает
@@ -780,10 +838,12 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
         Ok(meta) => meta,
         Err(error) => {
             veldsdk::log::warn!(target: "handlers", "{}: описание растра: {}", label, error);
-            // За не описавшимся растром бывает запасной файл — следующий
-            // встаёт на его место и описывается сам (см. [`Raster::spares`]).
+            // Что делать с отказом, решает растр ([`Raster::refused`]): за не
+            // описавшимся файлом бывает запасной — следующий встаёт на его
+            // место и описывается сам; отказ названной величине оставляет
+            // файл на месте с жалобой словами тайлера.
             let spare = overlay.raster_mut(role).and_then(|raster| {
-                let next = raster.next_spare()?;
+                let next = raster.refused(error)?;
                 Some((raster.describe.begin(), raster.spares.len(), next))
             });
             if let Some((correlation, left, (handle, coordinates))) = spare {
@@ -799,15 +859,6 @@ fn describe_settled(state: &mut State, key: &str, role: Role, msg: Described) {
                     &correlation,
                 );
                 return;
-            }
-            // Причина живёт у своего растра: их два, и вторая не отменяет
-            // первую — слой живёт, пока жив хоть один, и сказать надо про оба.
-            let said = match role {
-                Role::Detailed => format!("подробный растр не открылся: {}", error),
-                Role::Preview => format!("превью не открылось: {}", error),
-            };
-            if let Some(raster) = overlay.raster_mut(role) {
-                raster.trouble = Some(said);
             }
             return;
         }
@@ -994,7 +1045,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         .unwrap_or_default();
     state.perf.pass(perf::Pass::Answer, &toll, began.elapsed(), Instant::now());
 
-    let Some((label, produce_list, resource)) = ({
+    let Some((label, produce_list, resource, variable)) = ({
         let Some(overlay) = state.overlays.iter_mut().find(|o| o.key == ctx.key) else { return };
         let label = overlay.label.clone();
         // Слой скрыли, пока кэш искал: заводить под него проход — занять
@@ -1046,7 +1097,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
             |addr| desired.contains(&addr),
         );
         match missed {
-            Missed::Produce(cells) => Some((label, cells, raster.resource.handle())),
+            Missed::Produce(cells) => Some((label, cells, raster.resource.handle(), raster.variable.clone())),
             // Ждём чужой проход молча: его конец пересчитает нужное всем.
             Missed::Waiting => return,
             Missed::Closed => None,
@@ -1079,8 +1130,7 @@ pub fn on_query_done(state: &mut State, msg: QueryDone) {
         level,
         tiles: produce_list.iter().map(|&(_, x, y)| TileAddr { x, y }).collect(),
         label,
-        // Шар величины не называет: у него выбор тайлера.
-        variable: String::new(),
+        variable,
     }, &correlation);
 }
 
@@ -1535,6 +1585,7 @@ fn report_progress(state: &mut State, wanted: &[(String, f32, overlay::Wanted)])
             detailed: None,
             detailed_trouble: String::new(),
             detailed_variable: None,
+            detailed_variables: Vec::new(),
         }))
         .collect();
 
@@ -1618,6 +1669,66 @@ pub fn on_ui_event(state: &mut State, event: app_proto::UiEvent) {
 #[cfg(test)]
 mod tests {
     use super::{advance_ripple, ripple_strength, RIPPLE_PERIOD_S};
+
+    /// Тот же набор с другой величиной у лежащего растра — то же наложение:
+    /// растр с ней описывается заново с чистого, сосед не трогается, тождество
+    /// набора запоминает величины.
+    #[test]
+    fn the_same_set_with_another_variable_redescribes_that_raster_only() {
+        use super::*;
+        use crate::proto::globe::{Overlay as Incoming, OverlayRaster, OverlayRole};
+        use veldsdk::proto::core::ResourceHandle;
+
+        let mut state = hook_init(Config { vram_budget_mb: 8 }).expect("состояние");
+        let described = |role: Role, id: u64| {
+            let mut raster = Raster::new(role, veldsdk::OwnedResource::from_raw_id(id));
+            raster.describe_as(tiles::Meta {
+                fingerprint: format!("fp{id}"),
+                width: 100,
+                height: 100,
+                rows: vec![tiles::Row { serve: tiles::Serve::Pointwise, bytes: 0, fits: true }],
+                variable: None,
+                variables: Vec::new(),
+            });
+            raster
+        };
+        let mut lying = overlay::stub("scene", vec![described(Role::Preview, 1), described(Role::Detailed, 2)]);
+        lying.sources = vec![1, 2];
+        lying.variables = vec![String::new(), String::new()];
+        state.overlays.push(lying);
+        let epoch = state.epoch;
+
+        let handle = |id: u64| Some(ResourceHandle { id, ..Default::default() });
+        let incoming = |variable: &str| Incoming {
+            key: "scene".into(),
+            rasters: vec![
+                OverlayRaster { resource: handle(1), role: OverlayRole::OverlayPreview as i32, ..Default::default() },
+                OverlayRaster {
+                    resource: handle(2),
+                    role: OverlayRole::OverlayDetailed as i32,
+                    variable: variable.into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        adopt_overlay(&mut state, incoming("/PRODUCT/qa_value"));
+
+        assert_eq!(state.overlays.len(), 1, "то же наложение заведено заново");
+        let overlay = &state.overlays[0];
+        let detailed = overlay.raster(Role::Detailed).expect("подробный на месте");
+        assert_eq!(detailed.variable, "/PRODUCT/qa_value");
+        assert!(detailed.meta.is_none() && detailed.describe.is_pending(), "подробный не описывается заново");
+        assert_eq!(detailed.resource.as_ref().id, 2, "ресурс прежний");
+        let preview = overlay.raster(Role::Preview).expect("превью на месте");
+        assert!(preview.meta.is_some() && !preview.describe.is_pending(), "превью тронуто");
+        assert_eq!(overlay.variables, vec![String::new(), "/PRODUCT/qa_value".to_string()]);
+        assert!(state.epoch > epoch, "эпоха стоит — кадр не пересчитается");
+
+        // Тот же набор снова — ничего не описывается.
+        adopt_overlay(&mut state, incoming("/PRODUCT/qa_value"));
+        assert_eq!(state.overlays[0].variables, vec![String::new(), "/PRODUCT/qa_value".to_string()]);
+    }
 
     /// Пока рябить нечему, огрублённая фаза стои́т — и кадр, собранный из неё,
     /// совпадает с прошлым. Это и есть выключатель перерисовки: сломайся он —

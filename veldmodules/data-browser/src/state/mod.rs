@@ -80,6 +80,9 @@ pub enum Open {
     Listing(ViewId, listing::Menu),
     /// Список величин файла под кадром превью названной вкладки.
     Variables(ViewId),
+    /// Список величин лежащего подробным файла в строке слоя «На просмотре»,
+    /// названного ключом снимка.
+    LayerVariables(String),
 }
 
 /// Что на экране главное сейчас — один снимок на весь экран.
@@ -637,6 +640,11 @@ impl State {
     /// Раскрыт ли список величин под кадром названной вкладки превью.
     pub fn variables_menu(&self, view: ViewId) -> bool {
         matches!(&self.open, Open::Variables(open) if *open == view)
+    }
+
+    /// Раскрыт ли список величин в строке названного слоя «На просмотре».
+    pub fn layer_variables(&self, key: &str) -> bool {
+        matches!(&self.open, Open::LayerVariables(open) if open == key)
     }
 
     /// Смена отбора в списке: страница сбрасывается, раскрытое гаснет. Общий

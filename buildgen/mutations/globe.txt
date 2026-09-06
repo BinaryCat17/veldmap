@@ -25,3 +25,23 @@
 файл: veldmodules/globe/src/overlay.rs
 было:                 .and_then(|raster| raster.meta.as_ref())
 стало:                 .and_then(|_| self.raster(Role::Preview)).and_then(|raster| raster.meta.as_ref())
+
+имя: другая величина у лежащего растра не замечается
+файл: veldmodules/globe/src/overlay.rs
+было:                 asked != raster.variable
+стало:                 false
+
+имя: отказ названной величине уводит к запасному файлу
+файл: veldmodules/globe/src/overlay.rs
+было:         if !self.variable.is_empty() {
+стало:         if false {
+
+имя: тот же набор с другой величиной принимается как прежний
+файл: veldmodules/globe/src/module.rs
+было:             if state.overlays[index].variables != incoming_variables {
+стало:             if false {
+
+имя: отказ названной величине хоронит слой
+файл: veldmodules/globe/src/overlay.rs
+было:             && self.rasters.iter().all(|raster| raster.variable.is_empty())
+стало:             && true

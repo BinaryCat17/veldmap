@@ -14,6 +14,7 @@ pub mod menu;
 pub mod row;
 pub mod rows;
 pub mod table;
+pub mod variables;
 
 pub use list_screen::Screen;
 pub use row::{

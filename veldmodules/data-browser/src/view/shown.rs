@@ -22,7 +22,7 @@ use crate::proto::ui_service::{
     container, mono, scrollable, text, tooltip, Alignment, Color, Element, Length, Padding,
     ScrollDirection, TooltipPosition,
 };
-use crate::module::components::{format, list_screen, menu, preview_of, table};
+use crate::module::components::{format, list_screen, menu, preview_of, table, variables};
 use crate::module::state::listing::Choice;
 use crate::module::state::{globe::Outlined, overlay::OverlayState, Shift, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
@@ -57,8 +57,10 @@ const NAME_GAPS: f32 = 8.0 * 2.0;
 /// Подпись меряется по себе самой: она стои́т справа от имени, растёт вместе с
 /// ходом добычи и в тесной панели отнимает у имени вдвое больше, чем отнимало
 /// постоянное число.
-fn row_name_chars(width: f32, state: &str) -> usize {
-    let room = width - NAME_OVERHEAD - format::text_width(state, theme::TEXT_SMALL);
+fn row_name_chars(width: f32, state: &str, buttoned: bool) -> usize {
+    // Подпись-кнопка шире своего текста на отступы (см. [`state_label`]).
+    let button = if buttoned { 16.0 } else { 0.0 };
+    let room = width - NAME_OVERHEAD - button - format::text_width(state, theme::TEXT_SMALL);
     format::mono_fit(room.max(60.0), theme::TEXT_MONO)
 }
 
@@ -178,7 +180,7 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
     };
 
     let said = state_said(overlay).map(|said| said.shown).unwrap_or_default();
-    let name_chars = row_name_chars(width, &said);
+    let name_chars = row_name_chars(width, &said, !overlay.variables.is_empty());
     let name = row![
         theme::row_glyph::<Msg>(
             theme::glyph::SATELLITE,
@@ -188,7 +190,7 @@ fn layer(state: &State, view: ViewId, overlay: &OverlayState, width: f32) -> Ele
             .size(theme::TEXT_MONO)
             .color(if dim { theme::INK_FAINT } else { theme::INK_SOFT }),
         theme::spacer(),
-        state_label(overlay),
+        state_label(state, overlay),
     ]
     .spacing(8.0)
     .align_items(Alignment::Center)
@@ -277,7 +279,7 @@ fn contour(state: &State, view: ViewId, outlined: &Outlined, width: f32) -> Elem
 
     let name = row![
         theme::row_glyph::<Msg>(theme::glyph::SATELLITE, theme::INK_FAINT),
-        mono::<Msg>(format::ellipsize(&outlined.label, row_name_chars(width, "контур")))
+        mono::<Msg>(format::ellipsize(&outlined.label, row_name_chars(width, "контур", false)))
             .size(theme::TEXT_MONO)
             .color(theme::INK_SOFT),
         theme::spacer(),
@@ -571,10 +573,14 @@ fn settled_said(overlay: &OverlayState) -> Option<(String, String)> {
 
 /// Та же подпись элементом. Врозь с [`state_said`] затем, что её ширину надо
 /// знать до сборки строки: место под имя считается по ней.
-fn state_label(overlay: &OverlayState) -> Element<Msg> {
+///
+/// У слоя с файлом многих величин подпись — кнопка: под ней список величин
+/// (`OverlayState.variables`), и пункт называет величину шару. Галочка — у
+/// той, что шар показывает; названной, которой он отказал, галочки нет.
+fn state_label(state: &State, overlay: &OverlayState) -> Element<Msg> {
     let Some(said) = state_said(overlay) else { return theme::nothing() };
     let label = text::<Msg>(said.shown).size(theme::TEXT_SMALL).color(said.color).single_line();
-    match said.whole {
+    let label: Element<Msg> = match said.whole {
         // Подсказка собрана в свою строку ([`TOOLTIP_CHARS`]); срез здесь —
         // страховка, а не правило.
         Some(whole) => tooltip(label, format::ellipsize(&whole, TOOLTIP_CHARS), TooltipPosition::TooltipTop)
@@ -582,7 +588,24 @@ fn state_label(overlay: &OverlayState) -> Element<Msg> {
             .text_size(theme::TEXT_SMALL)
             .into(),
         None => label.into(),
+    };
+    if overlay.variables.is_empty() {
+        return label;
     }
+    let key = overlay.identifier.clone();
+    let open = state.layer_variables(&key);
+    let anchor = theme::surface_button(label, open)
+        .padding(Padding { top: 2.0, bottom: 2.0, left: 8.0, right: 8.0 })
+        .on_press(Msg::OverlayVariables(if open { None } else { Some(key.clone()) }));
+    let shown = overlay.variable.as_ref().map(|shown| shown.path.as_str()).unwrap_or_default();
+    let named: Vec<variables::Named<'_>> = overlay.variables.iter().map(variables::Named::from).collect();
+    popover(anchor, open, || {
+        menu::panel(variables::items(&named, shown, |path| Msg::OverlayVariable(key.clone(), path)))
+    })
+    .align_x(Alignment::End)
+    .gap(4.0)
+    .on_dismiss(Msg::OverlayVariables(None))
+    .into()
 }
 
 

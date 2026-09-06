@@ -330,6 +330,11 @@ messages! {
         OverlayHideAll(val bool) = "overlay_hide_all";
         /// Меню слоя: порядок и переходы к снимку. `None` — закрыть раскрытое.
         OverlayMenu(key Option<String>) = "overlay_menu";
+        /// Раскрыть список величин лежащего подробным файла слоя или закрыть
+        /// раскрытый (`None`).
+        OverlayVariables(key Option<String>) = "overlay_variables";
+        /// Показать на шаре другую величину файла слоя — путь из списка.
+        OverlayVariable(key String, val String) = "overlay_variable";
 
         // -- Контуры --
         //
@@ -627,6 +632,9 @@ mod tests {
             Msg::OverlayHideAll(true),
             Msg::OverlayMenu(Some("продукт".into())),
             Msg::OverlayMenu(None),
+            Msg::OverlayVariables(Some("продукт".into())),
+            Msg::OverlayVariables(None),
+            Msg::OverlayVariable("продукт".into(), "/PRODUCT/qa_value".into()),
             Msg::OutlineToggle("продукт".into()),
             Msg::OutlineRemove("продукт".into()),
             Msg::OutlineFocus("продукт".into()),

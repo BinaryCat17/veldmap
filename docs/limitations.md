@@ -102,14 +102,18 @@ What each format reads per level is the table in
   one window at a time, so it costs the memory of a window, not of the plane.
   A variable no taller than a tile (`TILE` rows) is one window whatever its
   layout, as the Sentinel-5P NRTI slices in the catalogue are.
-- **The variable of a NetCDF file is chosen in the preview tab, not on the
-  globe.** The canvas's bar names the shown variable and offers the others
-  the file could show (`Described.variables`, `DescribeRequest.variable`); a
-  layer on the globe shows the tiler's choice, and nothing asks it for another
-  (`OverlayRaster` carries no variable). The list is judged by headers, so it
-  also holds variables a sample would find empty in this granule: chosen, such
-  a one is refused in words in place of the frame, and the list stays to pick
-  another.
+- **The variable of a NetCDF file is chosen per view, and only among the
+  file's candidates.** The canvas's bar and the layer row name the shown
+  variable and offer the others the file could show (`Described.variables`,
+  `DescribeRequest.variable`, `OverlayRaster.variable`); the choice belongs
+  to the tab or the layer, not to the file — the same granule opened elsewhere
+  starts from the tiler's choice again; a tab's choice is saved with the tab,
+  layers are not saved between launches at all. The
+  list is judged by headers, so it also holds variables a sample would find
+  empty in this granule: chosen, such a one is refused in words — in place of
+  the frame on the canvas, as the layer row's complaint on the globe — and the
+  list stays to pick another. A quantity the sieve drops — a flag, a
+  coordinate, an ancillary precision — cannot be chosen at all.
 - **A JPEG 2000 over the network pays a request per tile-part.** The
   excerpt ([ADR 0004](decisions/0004-jp2-excerpt.md)) asks one probe of
   `PROBE` bytes per tile-part (`veldmodules/image-tiler/src/adapters/excerpt.rs`),

@@ -88,6 +88,8 @@ pub fn on_ui_event(state: &mut State, event: crate::proto::ui_service::proto::Ui
         Msg::OverlayShift(key, shift) => handlers::overlay::shift(state, &key, shift),
         Msg::OverlayHideAll(hidden) => handlers::overlay::hide_all(state, hidden),
         Msg::OverlayMenu(key) => handlers::overlay::menu(state, key),
+        Msg::OverlayVariables(key) => handlers::overlay::variables_menu(state, key),
+        Msg::OverlayVariable(key, variable) => handlers::overlay::variable(state, &key, variable),
         Msg::OutlineToggle(key) => handlers::outline::toggle_outline(state, key),
         Msg::OutlineRemove(key) => handlers::outline::drop_one(state, &key),
         Msg::OutlineFocus(key) => handlers::outline::focus(state, &key),

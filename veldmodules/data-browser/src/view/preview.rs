@@ -19,7 +19,7 @@ use veld_ui_service_wrap::{column, popover, row, viewport};
 use crate::proto::ui_service::{
     container, mono, text, Alignment, Element, Length, Padding,
 };
-use crate::module::components::{format, menu};
+use crate::module::components::{format, menu, variables};
 use crate::module::state::{PreviewState, State, ViewId};
 use crate::module::{theme, Msg, ViewMsg};
 
@@ -36,14 +36,6 @@ const VARIABLE_CHARS_FLOOR: usize = 16;
 
 /// Разделитель фактов полосы; его ширина входит в счёт места под величину.
 const FACT_SEPARATOR: &str = "   ·   ";
-
-/// Сколько величин файла перечисляет раскрытый список; остальные — числом.
-/// У гранулы Sentinel-5P годных три десятка, и панель длиннее окна не
-/// раскрыть. Семнадцать строк списка — около 520 pt по метрикам
-/// `menu::line`: в окно в 768 pt встают; в панель деления в половину окна —
-/// нет, там всплывашка упирается в край и накрывает кнопку, оставаясь
-/// закрываемой щелчком мимо.
-const VARIABLES_LISTED: usize = 16;
 
 /// Что кнопка величины добавляет к ширине своего текста: отступы по краям и
 /// зазор полосы до следующего факта.
@@ -230,8 +222,11 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
         // Галочка — у того, что канва показывает; названной, которой она
         // отказала, галочки нет: на экране её нет.
         let ticked = view_state.and_then(|view| view.variable.as_ref()).map(|shown| shown.path.as_str()).unwrap_or_default();
+        let named: Vec<variables::Named<'_>> = variables.iter().map(variables::Named::from).collect();
         parts.push(
-            popover(anchor, open, || menu::panel(variable_items(view, variables, ticked)))
+            popover(anchor, open, || {
+                menu::panel(variables::items(&named, ticked, |path| Msg::In(view, ViewMsg::PreviewVariable(path))))
+            })
                 .gap(4.0)
                 .on_dismiss(Msg::In(view, ViewMsg::PreviewVariables(false)))
                 .into(),
@@ -264,67 +259,4 @@ fn properties(state: &State, view: ViewId, preview: &PreviewState) -> Element<Ms
             .align_items(Alignment::Center),
     )
     .into()
-}
-
-/// Пункты списка величин файла: все, из кого выбирают, в порядке тайлера,
-/// показанная — с галочкой; пункт называет свою величину канве. Длинный
-/// список обрезается числом ([`VARIABLES_LISTED`]), но показанной место
-/// гарантировано: обрезанная, она уходила бы в «и ещё N», и список из одних
-/// не показанных читался бы как «показана ни одна из них».
-fn variable_items(
-    view: ViewId,
-    variables: &[crate::proto::image_view::Variable],
-    shown: &str,
-) -> Vec<menu::Item> {
-    let item = |variable: &crate::proto::image_view::Variable| {
-        menu::Item::new(
-            format::variable(&variable.path, &variable.said, &variable.units),
-            Msg::In(view, ViewMsg::PreviewVariable(variable.path.clone())),
-        )
-        .selected(variable.path == shown)
-    };
-    let mut items: Vec<menu::Item> = variables.iter().take(VARIABLES_LISTED).map(item).collect();
-    if let Some(at) = variables.iter().position(|variable| variable.path == shown).filter(|&at| at >= VARIABLES_LISTED) {
-        items.truncate(VARIABLES_LISTED - 1);
-        items.push(item(&variables[at]));
-    }
-    if variables.len() > VARIABLES_LISTED {
-        items.push(menu::Item::note(format!("и ещё {}", variables.len() - VARIABLES_LISTED)));
-    }
-    items
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{variable_items, VARIABLES_LISTED};
-    use crate::module::state::ViewId;
-    use crate::proto::image_view::Variable;
-
-    fn variable(path: &str, units: &str) -> Variable {
-        Variable { path: path.to_string(), said: String::new(), units: units.to_string() }
-    }
-
-    /// Список называет все величины в порядке тайлера, отмечает показанную и
-    /// обрезает длинный хвост числом.
-    #[test]
-    fn the_list_names_every_variable_and_marks_the_shown_one() {
-        let view: ViewId = "7".parse().expect("ViewId из строки");
-        let few = [variable("/PRODUCT/a", "K"), variable("/PRODUCT/b", "")];
-        let items = variable_items(view, &few, "/PRODUCT/b");
-        assert_eq!(items.iter().map(|item| item.named()).collect::<Vec<_>>(), ["a, K", "b"]);
-        assert_eq!(items.iter().map(|item| item.marked()).collect::<Vec<_>>(), [false, true]);
-
-        let many: Vec<Variable> = (0..VARIABLES_LISTED + 5).map(|at| variable(&format!("/v{at}"), "")).collect();
-        let items = variable_items(view, &many, "/v0");
-        assert_eq!(items.len(), VARIABLES_LISTED + 1);
-        assert_eq!(items.last().map(|item| item.named()), Some("и ещё 5"));
-        assert!(items[0].marked() && !items[1].marked());
-
-        // Показанная за обрезкой встаёт последней из перечисленных — с галочкой.
-        let items = variable_items(view, &many, "/v20");
-        assert_eq!(items.len(), VARIABLES_LISTED + 1);
-        assert_eq!(items[VARIABLES_LISTED - 1].named(), "v20");
-        assert!(items[VARIABLES_LISTED - 1].marked() && !items[0].marked());
-        assert_eq!(items.last().map(|item| item.named()), Some("и ещё 5"));
-    }
 }

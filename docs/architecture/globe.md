@@ -202,8 +202,16 @@ detail limit when it decides the detail — travel apart from the rest
 the sender puts the name before them and only them, since the preview's limit
 or a binding refusal under the detailed file's name would read as said of it.
 The variable that raster shows (`Meta.variable`, from `Described.variable`)
-rides in `OverlayProgress.detailed_variable` the same way: the globe reports,
-the sender names. From there on — the
+rides in `OverlayProgress.detailed_variable` the same way, and the file's
+candidates in `detailed_variables`, kept from the last description that named
+them: the globe reports, the sender names — and names one back in
+`OverlayRaster.variable`. The same resources with another variable are the
+same overlay (`Overlay::revariabled`): the raster is described anew with it in
+place — its pass released, the tiles of the old fingerprint forgotten unless
+another layer holds them, the hatch back over the cell until the new
+description lands — and its spares stay. A named variable the tiler refuses does not hand the place to a spare
+and does not doom the layer: the refusal is that raster's complaint, the list
+stays, and the sender names another. From there on — the
 target coarsened to the detail limit and the appetite cap, the ladder, the
 store — is the shared mechanics of
 [viewing-pipeline.md](viewing-pipeline.md).

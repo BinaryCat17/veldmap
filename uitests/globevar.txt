@@ -1,0 +1,37 @@
+# Выбор величины на шаре: гранула Sentinel-5P уровня 2 (L2__CO) кладётся на
+# шар из выдачи поиска по сети, как в remote.txt; в строке слоя «На просмотре»
+# подпись «файл · величина» — кнопка, под ней список величин файла
+# (`OverlayProgress.detailed_variables`), и пункт называет величину шару
+# (`OverlayRaster.variable`): глобус описывает тот же растр заново с ней, а
+# строка называет её вместо прежней.
+#
+# Ждётся не картинка, а слово: `carbonmonoxide_total_col…` в строке слоя (имя
+# величины срезано с хвоста бюджетом строки) — слой описан и улёгся; после
+# выбора — `qa_value` там же, прежнего имени нет.
+# Дочитаться до резкого кадра слой может десятки секунд — сроком сценария
+# такое не меряют.
+#
+# Нужна сеть: выдача каталога и чтение гранулы по проводу.
+100 timeout 120000
+500 wait tab_menu
+700 tap tab_menu
+1100 tap new_tab:search
+1900 wait search_query
+2100 tap search_query
+2300 type S5P_NRTI_L2__CO_
+2500 key enter
+2700 wait text:Спрашиваем каталог
+2900 gone text:Спрашиваем каталог
+3100 wait globe_toggle#1
+3300 tap globe_toggle#1
+3500 tap tab_menu
+3900 tap new_tab:shown
+4700 wait overlay_remove
+5000 wait text:carbonmonoxide_total_col
+5400 tap text:carbonmonoxide_total_col
+6000 wait text:qa_value
+6200 tap text:qa_value
+7000 gone text:carbonmonoxide_total_col
+7200 wait text:qa_value
+7600 shot uitest-globevar
+7800 exit
