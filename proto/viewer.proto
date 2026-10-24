@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package veldmap.viewer.v1;
+
+import "common.proto";
+import "tiler.proto";
+
+service Viewer {
+  rpc PlaceViews (PlaceViewsRequest) returns (stream veldmap.common.v1.ItemResult) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  rpc RemoveViews (veldmap.common.v1.RemoveRequest) returns (stream veldmap.common.v1.ItemResult) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  rpc ControlCamera (CameraControlRequest) returns (stream veldmap.common.v1.ItemResult);
+
+  rpc ListViews (ListViewsRequest) returns (stream ViewEvent) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc WatchFrames (WatchFramesRequest) returns (stream veldmap.common.v1.TextureFrame) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+message ViewSpec {
+  string id = 1;
+  veldmap.common.v1.RasterSource source = 2;
+  string label = 3;
+  uint32 viewport_width = 4;
+  uint32 viewport_height = 5;
+  optional string variable_path = 6;
+}
+
+message PlaceViewsRequest {
+  repeated ViewSpec items = 1;
+  veldmap.common.v1.PlaceOptions options = 2;
+}
+
+message CameraControlRequest {
+  string view_id = 1;
+  oneof action {
+    bool fit = 2;
+    ZoomAt zoom_at = 3;
+    Pan pan = 4;
+  }
+}
+
+message ZoomAt {
+  float x = 1;
+  float y = 2;
+  float factor = 3;
+}
+
+message Pan {
+  float dx = 1;
+  float dy = 2;
+}
+
+message ViewStatus {
+  string id = 1;
+  uint32 source_width = 2;
+  uint32 source_height = 3;
+  double scale = 4;
+  uint64 read_bytes = 5;
+  uint64 total_bytes = 6;
+  bool working = 7;
+  uint32 ready_tiles = 8;
+  uint32 total_tiles = 9;
+  uint32 step = 10;
+  uint32 total_steps = 11;
+  optional string warning_message = 12;
+  optional veldmap.tiler.v1.RasterVariable active_variable = 13;
+  repeated veldmap.tiler.v1.RasterVariable candidate_variables = 14;
+}
+
+message ListViewsRequest {
+  veldmap.common.v1.ReadOptions options = 1;
+  optional veldmap.common.v1.Ids filter_to_views = 2;
+}
+
+message ViewEvent {
+  veldmap.common.v1.EventMeta meta = 1;
+  optional ViewStatus data = 2;
+}
+
+message WatchFramesRequest {
+  string view_id = 1;
+}

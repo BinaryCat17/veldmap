@@ -20,7 +20,7 @@ and talk over ConnectRPC on localhost sockets:
 
 - `proto/` — ConnectRPC contracts: stateless services stream finite lists,
   stateful ones stream event logs and live frames.
-- `crates/veldmap-proto` — prost messages and stubs, zero-copy `bytes::Bytes`.
+- `crates/veldmap-proto` — Buffa messages, views and ConnectRPC stubs; `Bytes` payloads.
 - `crates/veldmap-rpc` — stream, event-table and frame-broadcast helpers.
 - `crates/veldmap-core` — pyramid tiles, geodesy, ranged readers, GPU fallback.
 

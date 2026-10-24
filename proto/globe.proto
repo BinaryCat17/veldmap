@@ -1,0 +1,156 @@
+syntax = "proto3";
+
+package veldmap.globe.v1;
+
+import "common.proto";
+import "tiler.proto";
+
+service Globe {
+  rpc PlaceOutlines (PlaceOutlinesRequest) returns (stream veldmap.common.v1.ItemResult) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  rpc RemoveOutlines (veldmap.common.v1.RemoveRequest) returns (stream veldmap.common.v1.ItemResult) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  rpc PlaceOverlays (PlaceOverlaysRequest) returns (stream veldmap.common.v1.ItemResult) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  rpc RemoveOverlays (veldmap.common.v1.RemoveRequest) returns (stream veldmap.common.v1.ItemResult) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  rpc ControlCamera (GlobeCameraRequest) returns (stream veldmap.common.v1.ItemResult);
+
+  rpc ProbeSurface (ProbeSurfaceRequest) returns (stream ProbeSurfacePoint) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc ListOverlays (ListOverlaysRequest) returns (stream OverlayEvent) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc WatchFrames (WatchGlobeFramesRequest) returns (stream veldmap.common.v1.TextureFrame) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+enum OutlineStyle {
+  OUTLINE_STYLE_UNSPECIFIED = 0;
+  OUTLINE_STYLE_PLAIN       = 1;
+  OUTLINE_STYLE_SELECTED    = 2;
+  OUTLINE_STYLE_PENDING     = 3;
+}
+
+message OutlineItem {
+  string id = 1;
+  repeated veldmap.common.v1.GeoPoint points = 2;
+  OutlineStyle style = 3;
+}
+
+message PlaceOutlinesRequest {
+  repeated OutlineItem items = 1;
+  veldmap.common.v1.PlaceOptions options = 2;
+}
+
+enum OverlayRole {
+  OVERLAY_ROLE_UNSPECIFIED = 0;
+  OVERLAY_ROLE_PREVIEW     = 1;
+  OVERLAY_ROLE_DETAILED    = 2;
+}
+
+message OverlayRaster {
+  veldmap.common.v1.RasterSource source = 1;
+  OverlayRole role = 2;
+  optional veldmap.common.v1.RasterSource geolocation = 3;
+  uint32 ordinal = 4;
+  optional string variable_path = 5;
+}
+
+message OverlaySpec {
+  string id = 1;
+  string label = 2;
+  optional veldmap.common.v1.UtmFrame utm = 3;
+  repeated veldmap.common.v1.GeoPoint quad = 4;
+  bool rough_footprint = 5;
+  repeated OverlayRaster rasters = 6;
+  optional float opacity = 7;
+  bool hidden = 8;
+  uint32 z_order = 9;
+}
+
+message PlaceOverlaysRequest {
+  repeated OverlaySpec items = 1;
+  veldmap.common.v1.PlaceOptions options = 2;
+}
+
+message GlobeCameraRequest {
+  oneof action {
+    Orbit orbit = 1;
+    Zoom zoom = 2;
+    Focus focus = 3;
+    ViewportResize resize = 4;
+  }
+}
+
+message Orbit {
+  float dx = 1;
+  float dy = 2;
+}
+
+message Zoom {
+  float delta = 1;
+  float hold_x = 2;
+  float hold_y = 3;
+}
+
+message Focus {
+  veldmap.common.v1.GeoPoint at = 1;
+  double radius_deg = 2;
+}
+
+message ViewportResize {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message ProbeSurfaceRequest {
+  float x = 1;
+  float y = 2;
+}
+
+message ProbeSurfacePoint {
+  optional veldmap.common.v1.GeoPoint at = 1;
+}
+
+message OverlayStatus {
+  string id = 1;
+  uint32 ready_tiles = 2;
+  uint32 total_tiles = 3;
+  bool working = 4;
+  float progress_share = 5;
+  uint32 step = 6;
+  uint32 total_steps = 7;
+  bool describing = 8;
+  uint64 pass_read_bytes = 9;
+  uint64 pass_total_bytes = 10;
+  optional uint32 detailed_ordinal = 11;
+  optional string detailed_warning = 12;
+  optional string general_warning = 13;
+  optional veldmap.tiler.v1.RasterVariable detailed_variable = 14;
+  repeated veldmap.tiler.v1.RasterVariable detailed_candidates = 15;
+}
+
+message ListOverlaysRequest {
+  veldmap.common.v1.ReadOptions options = 1;
+  optional veldmap.common.v1.Ids filter_to_overlays = 2;
+}
+
+message OverlayEvent {
+  veldmap.common.v1.EventMeta meta = 1;
+  optional OverlayStatus data = 2;
+}
+
+message WatchGlobeFramesRequest {}

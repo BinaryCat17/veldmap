@@ -1055,13 +1055,13 @@ Task 15 builds the composed release from service libraries. Start with direct do
     4. Remove narrative Rust comments while retaining only the exceptional categories from Section 0.
   - **Verification:** `python3 -c "import pathlib; assert not pathlib.Path('CLAUDE.md').exists(); assert not pathlib.Path('docs/roadmap.md').exists(); assert not pathlib.Path('runtime/config/core.json').exists(); assert not list(pathlib.Path('.').rglob('mod.rs')); rs = list(pathlib.Path('veldmodules').rglob('*.rs')); assert all(not any(l.strip().startswith('//!') for l in p.read_text().splitlines()) and sum(1 for l in p.read_text().splitlines() if l.strip().startswith('//')) <= max(3, int(len(p.read_text().splitlines()) * 0.05)) for p in rs)"` exits 0.
 
-- [ ] **Task 3: Create the Workspace, ConnectRPC Contracts, and `veldmap-proto`**
+- [x] **Task 3: Create the Workspace, ConnectRPC Contracts, and `veldmap-proto`**
   - **Action:**
     1. Create `rust-toolchain.toml`, `.cargo/config.toml`, and the root Rust 2024 workspace with resolver 3, MSRV 1.88, shared dependencies, and strict lints denying `unsafe_op_in_unsafe_fn`, `dbg_macro`, and `todo`.
     2. Create the seven schemas in Section 3 with versioned packages and typed non-terminal item errors.
     3. Create `crates/veldmap-proto` with one `connectrpc-build` generation pass, generated views and service stubs, `BytesRepr::Bytes` for byte payloads, an `OUT_DIR` include file, and a descriptor set.
-    4. Add contract tests for success/error variants, event options, byte payload types, and Buffa encode/decode round trips. Retain `Cargo.lock`; do not add generated source directories.
-  - **Verification:** `cargo fmt --all -- --check`, `cargo test -p veldmap-proto`, `cargo clippy -p veldmap-proto --all-targets -- -D warnings`, and `cargo clippy -p veldmap-proto --all-targets --target wasm32-wasip2 -- -D warnings` succeed.
+    4. Create a temporary `src/main.rs` to check success/error variants, event options, byte payload types, and Buffa encode/decode round trips. Run it with `cargo run -p veldmap-proto`, then delete the entry point; do not add `#[cfg(test)]`, test files, test targets, or test dependencies. Retain `Cargo.lock`; do not add generated source directories.
+  - **Verification:** `cargo fmt --all -- --check`, the temporary `cargo run -p veldmap-proto` contract-check scenario with its entry point removed afterward, `cargo clippy -p veldmap-proto --all-targets -- -D warnings`, and `cargo clippy -p veldmap-proto --all-targets --target wasm32-wasip2 -- -D warnings` succeed.
 
 - [ ] **Task 4: Create `veldmap-rpc` and Prove WASI ConnectRPC Streaming**
   - **Action:**

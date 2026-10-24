@@ -1,0 +1,164 @@
+syntax = "proto3";
+
+package veldmap.common.v1;
+
+import "google/protobuf/timestamp.proto";
+
+enum ItemResultCode {
+  ITEM_RESULT_CODE_UNSPECIFIED = 0;
+  ITEM_RESULT_CODE_DONE        = 1;
+  ITEM_RESULT_CODE_CREATED     = 2;
+  ITEM_RESULT_CODE_UPDATED     = 3;
+  ITEM_RESULT_CODE_NO_ACTION   = 4;
+  ITEM_RESULT_CODE_REPLACED    = 5;
+}
+
+message ItemSuccess {
+  string id = 1;
+  ItemResultCode code = 2;
+}
+
+enum ItemErrorCode {
+  ITEM_ERROR_CODE_UNSPECIFIED        = 0;
+  ITEM_ERROR_CODE_INVALID_ARGUMENT   = 1;
+  ITEM_ERROR_CODE_NOT_FOUND          = 2;
+  ITEM_ERROR_CODE_ALREADY_EXISTS     = 3;
+  ITEM_ERROR_CODE_FAILED_PRECONDITION = 4;
+  ITEM_ERROR_CODE_PERMISSION_DENIED  = 5;
+  ITEM_ERROR_CODE_UNAUTHENTICATED    = 6;
+  ITEM_ERROR_CODE_RESOURCE_EXHAUSTED = 7;
+  ITEM_ERROR_CODE_UNAVAILABLE        = 8;
+  ITEM_ERROR_CODE_INTERNAL           = 9;
+  ITEM_ERROR_CODE_DATA_LOSS          = 10;
+}
+
+message ItemError {
+  string id = 1;
+  ItemErrorCode code = 2;
+  string message = 3;
+  bool retryable = 4;
+}
+
+message ItemResult {
+  oneof outcome {
+    ItemSuccess success = 1;
+    ItemError error = 2;
+  }
+}
+
+enum PlaceMode {
+  PLACE_MODE_UNSPECIFIED = 0;
+  PLACE_MODE_UPSERT      = 1;
+  PLACE_MODE_CREATE      = 2;
+  PLACE_MODE_UPDATE      = 3;
+}
+
+message PlaceOptions {
+  PlaceMode mode = 1;
+  bool dry_run = 2;
+  string reason = 3;
+}
+
+message RemoveOptions {
+  enum MissingPolicy {
+    MISSING_POLICY_UNSPECIFIED = 0;
+    MISSING_POLICY_OK          = 1;
+    MISSING_POLICY_ERROR       = 2;
+  }
+  MissingPolicy missing = 1;
+  bool dry_run = 2;
+  string reason = 3;
+}
+
+message RemoveRequest {
+  repeated string ids = 1;
+  RemoveOptions options = 2;
+}
+
+message ReadOptions {
+  enum View {
+    VIEW_UNSPECIFIED = 0;
+    VIEW_SNAPSHOT    = 1;
+    VIEW_EVENTS      = 2;
+  }
+  View view = 1;
+
+  oneof start {
+    string after_event_id = 2;
+    google.protobuf.Timestamp after_time = 3;
+  }
+
+  oneof end {
+    string before_event_id = 4;
+    google.protobuf.Timestamp before_time = 5;
+    bool live = 6;
+  }
+
+  uint32 max_events = 7;
+}
+
+message Ids {
+  repeated string ids = 1;
+}
+
+enum Op {
+  OP_UNSPECIFIED = 0;
+  OP_SNAPSHOT    = 1;
+  OP_CREATED     = 2;
+  OP_UPDATED     = 3;
+  OP_DELETED     = 4;
+}
+
+message EventMeta {
+  string event_id = 1;
+  string id = 2;
+  google.protobuf.Timestamp time = 3;
+  Op op = 4;
+}
+
+message GeoPoint {
+  double lat = 1;
+  double lon = 2;
+}
+
+message Ring {
+  repeated GeoPoint points = 1;
+}
+
+message UtmFrame {
+  uint32 zone = 1;
+  bool south = 2;
+  double x0 = 3;
+  double y0 = 4;
+  double x1 = 5;
+  double y1 = 6;
+}
+
+message RasterSource {
+  oneof location {
+    string local_path = 1;
+    string s3_identifier = 2;
+  }
+}
+
+message TileAddr {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+enum PixelFormat {
+  PIXEL_FORMAT_UNSPECIFIED  = 0;
+  PIXEL_FORMAT_RGBA8_UNORM  = 1;
+  PIXEL_FORMAT_RGBA8_SRGB   = 2;
+  PIXEL_FORMAT_QOI          = 3;
+}
+
+message TextureFrame {
+  string target_id = 1;
+  uint64 frame_seq = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  uint32 row_stride = 5;
+  PixelFormat format = 6;
+  bytes pixels = 7;
+}

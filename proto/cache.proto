@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package veldmap.cache.v1;
+
+import "common.proto";
+
+service Cache {
+  rpc QueryTiles (QueryTilesRequest) returns (stream CachedTileResult) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+
+  rpc PlaceTiles (PlaceTilesRequest) returns (stream veldmap.common.v1.ItemResult) {
+    option idempotency_level = IDEMPOTENT;
+  }
+}
+
+message QueryTilesRequest {
+  string fingerprint = 1;
+  uint32 level = 2;
+  repeated veldmap.common.v1.TileAddr tiles = 3;
+}
+
+message CachedTile {
+  veldmap.common.v1.TileAddr addr = 1;
+  bool hit = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  veldmap.common.v1.PixelFormat format = 5;
+  bytes pixels = 6;
+}
+
+message CachedTileResult {
+  oneof outcome {
+    CachedTile value = 1;
+    veldmap.common.v1.ItemError error = 2;
+  }
+}
+
+message TileRecord {
+  string id = 1;
+  string fingerprint = 2;
+  uint32 level = 3;
+  uint32 x = 4;
+  uint32 y = 5;
+  bytes qoi = 6;
+}
+
+message PlaceTilesRequest {
+  repeated TileRecord items = 1;
+  veldmap.common.v1.PlaceOptions options = 2;
+}
