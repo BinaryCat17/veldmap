@@ -14,6 +14,10 @@ pub const BIG_MAGIC: [&[u8]; 2] = [b"II\x2b\x00", b"MM\x00\x2b"];
 
 pub struct Layout {
     pub grid: Grid,
+    /// The file's single stretch: computed from the smallest copy or from base
+    /// chunks alike, it must not vary per request — neighbouring tiles would
+    /// come out with different brightness, and what lands in the disk cache
+    /// would depend on request order.
     stretch: RefCell<Option<Mapping>>,
 }
 
@@ -122,6 +126,9 @@ fn geokey(keys: &[u16], id: u16) -> Option<u16> {
         .map(|entry| entry[3])
 }
 
+// GeoKey 1025 = 2 is RasterPixelIsPoint: the coordinates name pixel centers,
+// while the binding counts corners, so everything moves by half a pixel. The
+// spec default is the corner and needs no shift.
 fn half_pixel(keys: &[u16]) -> f64 {
     if geokey(keys, 1025) == Some(2) { 0.5 } else { 0.0 }
 }

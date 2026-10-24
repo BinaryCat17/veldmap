@@ -27,6 +27,9 @@ pub fn on_store(state: &mut State, tile: StoreTile) {
     evict::maybe_sweep(state);
 }
 
+/// Marks a source alive: rewrites its directory marker, once per sweep window —
+/// the touched set is cleared by every eviction sweep, so an active source's
+/// marker is never older than a window and is never the sweep's victim.
 pub fn touch(state: &mut State, key: &str) {
     if state.touched.insert(key.to_string()) {
         write_file(state, layout::meta_path(key), layout::META_BODY);

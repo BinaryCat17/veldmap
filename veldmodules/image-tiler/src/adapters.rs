@@ -59,6 +59,9 @@ pub fn placed(lat: f64, lon: f64) -> bool {
 
 pub struct Placement {
     pub epsg: u32,
+    /// `x = a[0]·i + a[1]·j + a[2]`, `y = a[3]·i + a[4]·j + a[5]`, where (i, j)
+    /// is the pixel corner — zero at the raster's top left, j pointing down.
+    /// The RasterPixelIsPoint half pixel is already taken out, as at the nodes.
     pub affine: [f64; 6],
 }
 
@@ -242,6 +245,9 @@ pub fn to_rgba(samples: &[u8], pixel: radiometry::Pixel, pixels: usize) -> Vec<u
     rgba
 }
 
+/// A resource reader with a counter of the farthest position reached — honest
+/// progress of a long pass grows from it. Not the sum of reads: windows re-read
+/// after seeking back are not progress, and the sum would overrun the file size.
 pub struct Metered {
     inner: veldsdk::ResourceReader,
     pos: u64,

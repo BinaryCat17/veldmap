@@ -28,9 +28,13 @@ pub fn scan(product: &str, keys: &[String], measured: &[String], downloaded: boo
         let raster = |key: &str| {
             key.contains("/measurement/") && (key.ends_with(".tiff") || key.ends_with(".tif"))
         };
+        // A striped file is offered only when it is on disk: a detailed tile is
+        // a cheap window, but a coarse level needs every strip of the file — a
+        // whole pass. A tiled file with copies (-COG) has one for every level.
         let affordable = |key: &str| raster(key) && (downloaded || key.contains("_COG.SAFE/"));
         let measurement = keys
             .iter()
+            // Co-polarized (vv/hh) is preferred to cross-: its amplitude reads both land and sea.
             .find(|key| affordable(key) && (key.contains("-vv-") || key.contains("-hh-")))
             .or_else(|| keys.iter().find(|key| affordable(key)));
         if let Some(measurement) = measurement {

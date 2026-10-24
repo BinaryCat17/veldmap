@@ -57,6 +57,9 @@ pub struct LocalFile {
 
 impl LocalFile {
     pub fn from_entry(name: &str, size: u64, modified: i64) -> Option<(String, Self)> {
+        // Folded by name: `foo` and `foo.part` are one entry, `.part` winning —
+        // it says the entry is being worked on now. `.origin` sidecars and
+        // atomic-write `.tmp` tails are not catalogue entries at all.
         if name.ends_with(ORIGIN_SUFFIX) {
             return None;
         }

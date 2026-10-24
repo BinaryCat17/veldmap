@@ -1,7 +1,10 @@
 use glam::{DVec3, Vec3};
 
+/// WGS84 semi-major axis, metres.
 pub const SEMI_MAJOR_M: f64 = 6_378_137.0;
 
+/// WGS84 flattening: the polar radius is 21 km shorter than the equatorial —
+/// the 0.34% by which geodetic latitude differs from geocentric.
 pub(crate) const FLATTENING: f64 = 1.0 / 298.257_223_563;
 
 const ECCENTRICITY_SQ: f64 = FLATTENING * (2.0 - FLATTENING);

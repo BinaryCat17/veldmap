@@ -9,6 +9,10 @@ pub(super) const CHUNK_CACHE_BYTES: usize = budget::CHUNK_CACHE as usize;
 
 pub(super) const REGION_CAP: u64 = budget::CHUNK_CACHE / 2 / 4;
 
+/// Degenerate grid: a chunk smaller than this is read only by the pass.
+/// Pointwise pays a trip and a decoder launch per chunk, and for a few dozen
+/// pixels that costs more than the pixels themselves — this is how the
+/// Sentinel-2 PVI quicklook sits.
 pub(super) const MIN_CHUNK_PIXELS: u64 = 32 * 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +31,14 @@ pub struct Overview {
 
 pub struct Grid {
     pub tiled: bool,
+    /// Chunk grid of the base image: the tile for a tiled file, the full raster
+    /// width by `RowsPerStrip` rows for a striped one. The chunk is the smallest
+    /// readable unit — a window into half of a chunk costs the whole chunk — so
+    /// what a level costs is counted in chunks (`held`), not only in region
+    /// pixels.
     pub chunk: (u32, u32),
+    /// Overviews in discovery order. In a multi-page TIFF the following IFDs are
+    /// pages, not overviews — they must not replace the first image.
     pub overviews: Vec<Overview>,
     pub depth: u32,
 }

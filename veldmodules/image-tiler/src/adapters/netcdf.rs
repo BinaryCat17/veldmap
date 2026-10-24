@@ -64,6 +64,9 @@ struct Rows<'a> {
     failed: Cell<bool>,
 }
 
+/// Chunk-cache ceiling for the coordinate lattice: a row of chunks across the
+/// plane, what neighbouring node rows share. A larger chunk still reads
+/// correctly but slowly — every node row unpacks it again.
 const ROW_CACHE_CAP: usize = 64 * 1024 * 1024;
 
 impl<'a> Rows<'a> {
@@ -196,6 +199,11 @@ impl Layout {
     }
 }
 
+/// Rows in the read window of a variable `height` rows tall whose rows-axis
+/// chunk is `chunk_rows` (`None` — a contiguous layout). A window is never
+/// smaller than a chunk — the chunk is decoded whole, so half a chunk costs a
+/// whole one — and never taller than a tile needs: the largest run of whole
+/// chunks under `TILE`, or the chunk itself when it is taller than a tile.
 fn rows_of(height: u32, chunk_rows: Option<u64>) -> u32 {
     let chunk = match chunk_rows {
         None => return TILE.min(height),

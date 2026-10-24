@@ -107,6 +107,10 @@ pub fn describe(mut reader: Metered, len: u64) -> Result<Info, String> {
     Ok(info)
 }
 
+/// Georeference from the GMLJP2 box — the only place where JP2 speaks about
+/// the Earth. `None` — no box, a mismatched shape, or a grid about another
+/// raster: JP2 without georeference is routine, and the scene falls back to
+/// the catalogue outline.
 fn gml_placement(head: &[u8], width: u32, height: u32) -> Option<Placement> {
     let whole = gml_text(head)?;
     let text = slice_of(&whole, "<gml:RectifiedGrid", "</gml:RectifiedGrid>")?;
@@ -124,6 +128,12 @@ fn gml_placement(head: &[u8], width: u32, height: u32) -> Option<Placement> {
     let (first, second) = (offsets.next()?, offsets.next()?);
     let ((x_per_i, y_per_i), (x_per_j, y_per_j)) = ordered(first, second);
 
+    // The bounds only prove the grid is about this raster. By the letter of GML
+    // they are offsets from the origin — and then at `low = 1 1` the first sample
+    // would lie at `origin + v1 + v2` — while the Sentinel-2 granule writes
+    // one-based sample numbering here: following the letter would shift every
+    // tile of the scene by a pixel. The origin is pinned at pixel (0, 0), and
+    // `low` does not enter it.
     let (low, high) = (
         pair(numbers(after_tag(text, "<gml:low>")?)?)?,
         pair(numbers(after_tag(text, "<gml:high>")?)?)?,
@@ -137,6 +147,9 @@ fn gml_placement(head: &[u8], width: u32, height: u32) -> Option<Placement> {
         return None;
     }
 
+    // The GML origin is the center of the first sample, while the affine counts
+    // pixel corners: half a pixel is taken off — the same convention that
+    // removes it from RasterPixelIsPoint in GeoTIFF (see `half_pixel` in tiff.rs).
     Some(Placement {
         epsg,
         affine: [

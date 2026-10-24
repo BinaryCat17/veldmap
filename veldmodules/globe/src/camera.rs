@@ -94,6 +94,10 @@ impl Camera {
             Some(arc) if alpha > 0.0 => arc.tan() / alpha,
             _ => slope,
         };
+        // The hold is corrected by iteration: the arc is spherical, while the frame
+        // turns about the ellipsoid normal. One pass leaves about a pixel of drift
+        // per click, and each next click enlarges what has already moved — so the
+        // held place is asked again and the frame turned by what it still misses.
         let length = right.hypot(above);
         for _ in 0..2 {
             let Some((was_right, was_above)) = self.seen_at(held) else { return };

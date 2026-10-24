@@ -96,6 +96,12 @@ pub fn on_read_result(state: &mut State, opened: ResourceOpened) {
     }
 }
 
+/// Why a tile was not served. A miss and a failure look the same to the client
+/// — it goes to the producer — but the log tells them apart: an absent file is
+/// ordinary business, while a present but unreadable tile is not healed by the
+/// producer's rewrite and every retry costs a full pass over the source. Asked
+/// of the course of events, not of the error text: the filesystem words its
+/// failures differently on every OS.
 enum Miss {
     NoFile(String),
     Broken(String),

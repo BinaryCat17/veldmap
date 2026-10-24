@@ -62,6 +62,10 @@ pub fn on_download(state: &mut State, req: DownloadRequest) {
     catalog::publish(state);
 }
 
+/// Puts an entry into motion: clears `waiting` and asks for the signature — the
+/// only place a download starts, so `waiting` and "not yet signed" are one fact.
+/// A finished file is deleted here, when its queued replacement really starts,
+/// not at the press: until then it is still the user's only data for the entry.
 fn start(state: &mut State, id: &str) {
     let Some(dl) = state.downloads.get_mut(id) else { return };
     dl.waiting = false;
@@ -70,6 +74,8 @@ fn start(state: &mut State, id: &str) {
     if state.entry_for(&name).is_some_and(|file| !file.is_partial) {
         delete_data(state, &name);
     }
+    // A signature that never answers holds the slot: there is no task to kill
+    // and no end event will come — only a pause takes the entry off the books.
     crate::calls::data_provider::on_sign(&SignRequest { identifier }, id);
 }
 
@@ -115,6 +121,9 @@ pub fn on_signed(state: &mut State, signed: SignedUrl) {
     }
 }
 
+/// Pause: the `.part` stays where the break left it. Before the request reached
+/// the network (`loading`) no end event will come, so the entry is finished
+/// here; after that its own result closes it.
 pub fn on_pause(state: &mut State, req: ItemRequest) {
     let Some((task_id, dl)) = state.active_download(&req.name) else { return };
     let (task_id, loading) = (task_id.to_string(), dl.loading);

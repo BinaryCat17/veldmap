@@ -136,6 +136,12 @@ fn within(total: u64, limit: u64) -> bool {
     total <= limit
 }
 
+/// The eviction decision: the oldest sources until there is room again.
+///
+/// `alive` — sources touched within this sweep window — are never victims,
+/// whatever the marker's mtime says: the marker write is an asynchronous job
+/// with no ordering against the sweep listing, so freshness alone could send
+/// the very source being read right now under the knife.
 fn victims(
     mut sources: Vec<Source>,
     total: u64,
