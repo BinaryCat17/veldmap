@@ -1,7 +1,3 @@
-//! PNG: one zlib stream, no random access — only a full pass.
-//! Rows go into the cascade as they are decoded, so level tiles appear
-//! top to bottom, and memory does not depend on the file height.
-
 use std::io::{BufRead, Seek};
 
 use super::super::cascade::{Cascade, Emit};
@@ -17,8 +13,6 @@ pub fn describe<R: BufRead + Seek>(reader: R) -> Result<Info, String> {
 
 pub fn produce_pass<R: BufRead + Seek>(reader: R, info: &Info, emit: Emit) -> Result<(), String> {
     let mut decoder = png::Decoder::new(reader);
-    // The palette is expanded, 1/2/4 bits are padded up, 16 bits are shrunk to
-    // 8 — only four channel combinations remain below.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(|e| format!("png: {}", e))?;
 
@@ -32,8 +26,6 @@ pub fn produce_pass<R: BufRead + Seek>(reader: R, info: &Info, emit: Emit) -> Re
 
     let mut cascade = Cascade::new(0, w, h);
 
-    // An interlaced PNG rows go in Adam7 order, not top to bottom:
-    // there is no streaming path, the frame is decoded whole — hence the budget.
     if interlaced {
         if !frame_fits(w, h) {
             return Err(format!(

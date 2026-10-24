@@ -1,30 +1,11 @@
-//! Excerpt of a JPEG 2000 codestream for one tile: the main header, the tile
-//! parts of this tile no deeper than the needed resolution, and EOC — a stream
-//! in which the decoder has nothing to skip. Tile-part addresses come from the
-//! main-header TLM ([`Index`]); where a resolution ends inside a tile part —
-//! from the PLT of its header with packet counts per precinct
-//! ([`Coding::packets`]): with resolution in the outer loop of the progression,
-//! packets of coarse resolutions lie as a prefix. The cut-off tail is padded
-//! with empty packets — the codestream stays complete, and a strict decoder
-//! accepts it. The reader ([`Reader`]) splices the file pieces with the bytes
-//! rewritten here and never reads past the end of any piece. What is decided
-//! and why — `docs/decisions/0004-jp2-excerpt.md`.
-
 use std::cell::Cell;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
-/// How many bytes of a tile part are taken by the first read: the header (SOT,
-/// PLT, SOD) fits in hundreds of bytes, and the packets of the coarsest
-/// resolutions lie right behind — in a Sentinel-2 granule the three coarsest
-/// levels fit entirely, and the coarsest tile costs one read.
 pub const PROBE: u64 = 64 * 1024;
 
-/// Window for reading a file piece: like the SDK reader, but never past the
-/// end of the piece.
 const WINDOW: u64 = 256 * 1024;
 
-/// A tile part per TLM: whose it is and where it lies in the file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Part {
     pub tile: u32,
@@ -32,10 +13,6 @@ pub struct Part {
     pub len: u64,
 }
 
-/// Index of the file's tile parts and everything needed to assemble the
-/// excerpt without reading foreign bytes: the file bytes up to the first SOT
-/// (with JP2 boxes if it is a container) and the coding parameters for packet
-/// counting.
 #[derive(Debug)]
 pub struct Index {
     header: Rc<[u8]>,
@@ -44,11 +21,6 @@ pub struct Index {
 }
 
 impl Index {
-    /// Index from the head of the file of length `len`. A refusal names what
-    /// was missing: TLM, the main header in the head, or agreement of TLM with
-    /// the codestream length. The last one is not pedantry: addresses are
-    /// summed from lengths, and one extra entry would have led all tiles after
-    /// it into foreign data.
     pub fn of(head: &[u8], len: u64) -> Result<Self, String> {
         let (at, end) = super::jp2::codestream_span(head, len).ok_or("codestream not found in the file head")?;
         let cs = &head[at..];
@@ -62,10 +34,6 @@ impl Index {
                 0x53 => coding.read_coc(body)?,
                 0x5F | 0x60 => coding.changes = true,
                 0x55 => {
-                    // TLM: [Ztlm 1][Stlm 1][entries]; bits 4-5 of Stlm — the
-                    // width of Ttlm (0, 1, 2 bytes), bit 6 — the width of Ptlm
-                    // (2 or 4). There may be several segments, and entries go
-                    // in Ztlm order.
                     let (z, stlm) = (*body.first().ok_or("TLM is empty")?, *body.get(1).ok_or("TLM is empty")?);
                     if last_z.is_some_and(|last| z <= last) {
                         return Err("TLM segments out of order".to_string());
@@ -102,8 +70,6 @@ impl Index {
         let mut offset = at as u64 + sot as u64;
         let mut parts = Vec::with_capacity(entries.len());
         for (ordinal, (tile, len)) in entries.into_iter().enumerate() {
-            // Without Ttlm there is one tile part per tile, and the entries go
-            // by tile indices.
             let tile = tile.unwrap_or(ordinal as u32);
             if u64::from(tile) >= tiles || len < 14 {
                 return Err(format!("TLM entry {} is not for this codestream", ordinal));
@@ -117,7 +83,6 @@ impl Index {
         Ok(Self { header: Rc::from(&head[..at + sot]), parts, coding })
     }
 
-    /// Tile parts of the tile in codestream order.
     pub fn parts_of(&self, tile: u32) -> Vec<Part> {
         self.parts.iter().copied().filter(|part| part.tile == tile).collect()
     }
@@ -131,9 +96,6 @@ impl Index {
     }
 }
 
-/// Coding parameters that determine the tile's packet count: the canvas and
-/// tile grid from SIZ, subsampling, component steps and precincts from COD and
-/// COC (ISO 15444-1, B.6-B.12).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Coding {
     canvas: (u32, u32),
@@ -143,10 +105,7 @@ pub struct Coding {
     comps: Vec<Component>,
     layers: u16,
     progression: u8,
-    /// SOP or EPH: an empty packet is then not a single zero byte.
     marked: bool,
-    /// POC or PPM: the packet order is not set by a single progression, or
-    /// their headers are pulled out of the body.
     changes: bool,
 }
 
@@ -154,15 +113,11 @@ pub struct Coding {
 struct Component {
     dx: u8,
     dy: u8,
-    /// Precinct width and height exponents per resolution, from coarse to
-    /// fine; the length is the number of resolutions (steps + 1).
     precincts: Vec<(u8, u8)>,
 }
 
 impl Coding {
     fn from_siz(cs: &[u8]) -> Result<Self, String> {
-        // SOC, then SIZ: [FF51][Lsiz][Rsiz][Xsiz][Ysiz][XOsiz][YOsiz][XTsiz]
-        // [YTsiz][XTOsiz][YTOsiz][Csiz][Ssiz XRsiz YRsiz]×Csiz.
         let siz = 2usize;
         if cs.len() < siz + 40 {
             return Err("codestream without SIZ".to_string());
@@ -188,8 +143,6 @@ impl Coding {
         })
     }
 
-    /// COD: [Scod][SGcod: progression, layers u16, MCT][SPcod: steps, codeblock
-    /// ×2, style, wavelet, precincts per resolution when Scod&1].
     fn read_cod(&mut self, body: &[u8]) -> Result<(), String> {
         if body.len() < 10 {
             return Err("COD shorter than required".to_string());
@@ -204,7 +157,6 @@ impl Coding {
         Ok(())
     }
 
-    /// COC: [Ccoc 1 or 2][Scoc][SPcoc as in COD] — for one component.
     fn read_coc(&mut self, body: &[u8]) -> Result<(), String> {
         let wide = self.comps.len() > 256;
         let (index, rest) = match (wide, body) {
@@ -228,25 +180,16 @@ impl Coding {
         span(self.canvas.1, self.tile_origin.1, self.tile.1)
     }
 
-    /// Number of steps of the most decomposed component: the decoder factor is
-    /// counted from them.
     pub fn levels(&self) -> u32 {
         self.comps.iter().map(|comp| comp.precincts.len() as u32).max().unwrap_or(0).saturating_sub(1)
     }
 
-    /// Whether packets of coarse resolutions lie as a prefix of the tile part:
-    /// resolution is the outer loop for RLCP and RPCL always, for LRCP with a
-    /// single layer; POC and PPM break the order, SOP and EPH change the look
-    /// of an empty packet.
     pub fn prefixed(&self) -> bool {
         !self.changes
             && !self.marked
             && matches!((self.progression, self.layers), (0, 1) | (1, _) | (2, _))
     }
 
-    /// Packets of the tile at resolutions no higher than `through` (B.6:
-    /// precincts of the tile-component at each resolution, multiplied by the
-    /// layers).
     pub fn packets(&self, tile: u32, through: u32) -> u64 {
         let across = u64::from(self.across().max(1));
         let (p, q) = (u64::from(tile) % across, u64::from(tile) / across);
@@ -282,7 +225,6 @@ impl Coding {
     }
 }
 
-/// Tiles along one side (B.3).
 fn span(canvas: u32, origin: u32, step: u32) -> u32 {
     match step {
         0 => 0,
@@ -290,9 +232,6 @@ fn span(canvas: u32, origin: u32, step: u32) -> u32 {
     }
 }
 
-/// Precinct exponents per resolution: their own when bit 0 of the style is
-/// set — one byte per resolution, low nibble the width, high nibble the
-/// height; otherwise 2^15 everywhere.
 fn precincts_of(style: u8, levels: u8, tail: &[u8]) -> Result<Vec<(u8, u8)>, String> {
     let resolutions = usize::from(levels) + 1;
     match style & 1 {
@@ -304,7 +243,6 @@ fn precincts_of(style: u8, levels: u8, tail: &[u8]) -> Result<Vec<(u8, u8)>, Str
     }
 }
 
-/// A piece of the excerpt: bytes rewritten here, or a file piece as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
     Bytes(Rc<[u8]>),
@@ -320,20 +258,15 @@ impl Segment {
     }
 }
 
-/// Tile-part header parsed from the probe: where the data starts, packet
-/// lengths from PLT, and whether it overrides the coding.
 struct Head {
     sod: usize,
     plt: Option<Vec<u64>>,
     overrides: bool,
 }
 
-/// Header from the probe; `None` — the probe did not reach SOD.
 fn head_of(probe: &[u8]) -> Option<Head> {
     let mut walk = 12usize;
     let mut plt = Vec::new();
-    // Zplt of the last PLT segment: lengths are concatenated in segment order,
-    // and a segment out of place makes PLT unreadable — as with TLM.
     let mut last_z: Option<u8> = None;
     let mut ordered = true;
     let mut overrides = false;
@@ -363,7 +296,6 @@ fn head_of(probe: &[u8]) -> Option<Head> {
     None
 }
 
-/// PLT packet lengths: seven bits per byte, the high bit — "continuation".
 fn varints(bytes: &[u8]) -> Vec<u64> {
     let mut out = Vec::new();
     let mut value = 0u64;
@@ -377,15 +309,6 @@ fn varints(bytes: &[u8]) -> Vec<u64> {
     out
 }
 
-/// Excerpt of tile `tile` at factor `factor` from probes of its tile parts —
-/// `probe.len().min(part.len)` bytes from the start of each, in
-/// [`Index::parts_of`] order. Pieces: the main header, the tile parts (whole
-/// or up to the needed resolution with appended empty packets), EOC.
-///
-/// Cutting is possible when the progression puts resolutions in a prefix,
-/// every tile part has a PLT, the tile header does not override the coding,
-/// and the number of PLT entries matches the packet count; otherwise tile
-/// parts go whole — that is the granularity of the tile, and it is honest.
 pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> Result<Vec<Segment>, String> {
     let parts = index.parts_of(tile);
     if parts.is_empty() {
@@ -399,7 +322,6 @@ pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> 
         if probe.len() as u64 != part.len.min(PROBE) || probe.len() < 12 {
             return Err(format!("probe of tile part {} has the wrong length", ordinal));
         }
-        // SOT: [FF90][Lsot 10][Isot u16][Psot u32][TPsot][TNsot].
         let isot = u32::from(u16::from_be_bytes([probe[4], probe[5]]));
         let psot = u64::from(u32::from_be_bytes(probe[6..10].try_into().unwrap()));
         if probe[..4] != [0xFF, 0x90, 0x00, 0x0A] || isot != tile || (psot != 0 && psot != part.len) || usize::from(probe[10]) != ordinal {
@@ -421,10 +343,6 @@ pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> 
         && heads.iter().all(|head| head.as_ref().is_some_and(|head| !head.overrides))
         && parts.len() <= 255;
 
-    // Where the need ends: the tile part on which `wanted` packets
-    // accumulate, and how many of its packets fall inside that number. The
-    // need can end exactly on a tile-part boundary — then that part is whole
-    // and there are none after it.
     let ending = cut.then(|| {
         let mut before = 0u64;
         for (ordinal, head) in heads.iter().enumerate() {
@@ -448,14 +366,9 @@ pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> 
             }
             _ => (part.len, 0),
         };
-        // The header copy is ours, and anything in it can be rewritten: the
-        // tile-part length — together with the empty packets, the number of
-        // tile parts — how many of them are left.
         if keep < part.len || pad > 0 {
             probe[6..10].copy_from_slice(&((keep + pad) as u32).to_be_bytes());
         }
-        // The standard writes a tile-part count wider than a byte as zero —
-        // "not specified".
         probe[11] = u8::try_from(kept).unwrap_or(0);
         let probed = (probe.len() as u64).min(keep);
         probe.truncate(probed as usize);
@@ -471,12 +384,8 @@ pub fn assemble(index: &Index, tile: u32, factor: u32, probes: Vec<Vec<u8>>) -> 
     Ok(segments)
 }
 
-/// Reading a file piece: offset and length — exactly that many bytes.
 pub type Fetch = Box<dyn FnMut(u64, u64) -> io::Result<Vec<u8>>>;
 
-/// Reader of the excerpt: the pieces one after another, as one stream, with
-/// arbitrary seek. A file piece is read in windows never past its end; the
-/// `bytes` counter is the total read from the file.
 pub struct Reader {
     segments: Vec<Segment>,
     starts: Vec<u64>,
@@ -489,7 +398,6 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Over a module resource: file pieces are read from the host.
     pub fn over(resource: u64, segments: Vec<Segment>, bytes: Rc<Cell<u64>>) -> Self {
         Self::over_fetch(
             segments,

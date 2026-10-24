@@ -1,6 +1,3 @@
-//! Formats without a streaming path (gif/bmp/webp): the frame is decoded whole —
-//! such files are small by nature, and the budget enforces that.
-
 use std::io::{BufRead, Seek};
 
 use image::ImageFormat;
@@ -22,9 +19,6 @@ pub fn produce<R: BufRead + Seek>(
     format: ImageFormat,
     emit: Emit,
 ) -> Result<(), String> {
-    // No BufReader: the reader is already buffered by its own window (see Metered over
-    // ResourceReader) — a wrapper would create a second buffer and copy the window
-    // into it whole.
     let decoder = image::ImageReader::with_format(reader, format)
         .into_decoder()
         .map_err(|e| format!("{:?}: {}", format, e))?;

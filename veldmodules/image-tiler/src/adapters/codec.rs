@@ -1,12 +1,3 @@
-//! openjp2 behind a single unsafe island: a stream over a resource reader via
-//! C callbacks, an error handler, and decoding of a single codestream tile at a
-//! resolution factor ([`Decoder`]). The C port with raw pointers reads data from
-//! the network — hence three rules: the error handler is always in place
-//! (without it a failure has no reason), after any failure the codec is discarded
-//! (its state after a failure is undefined), and parsing starts only on a file
-//! that is going to be shown (`assert!` in parsing is an instance trap). All the
-//! `unsafe` of the tiler is here; `i32` slices go outward.
-
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::io::{Read, Seek, SeekFrom};
@@ -18,20 +9,14 @@ use openjp2::openjpeg::{
 };
 use openjp2::{opj_dparameters_t, opj_image, opj_stream_t, Codec, Stream, CODEC_FORMAT};
 
-/// How many bytes the codec asks of the reader at a time. The resource reader
-/// holds its own window, and this buffer only cuts calls: a smaller one would
-/// multiply them, a larger one would read past the end of the tile-part what
-/// nobody needs.
 const BUFFER: usize = 64 * 1024;
 
-/// What lies in the file: a JP2 container or a raw codestream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
     Jp2,
     J2k,
 }
 
-/// What the codec read from the main header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
     pub x0: u32,
@@ -39,17 +24,11 @@ pub struct Header {
     pub width: u32,
     pub height: u32,
     pub components: u32,
-    /// Sample precision of the first component and its signedness.
     pub precision: u32,
     pub signed: bool,
-    /// Components of a different grid or precision — such a tile cannot be laid
-    /// out into RGBA.
     pub uneven: bool,
 }
 
-/// A decoded tile at a resolution factor: its start in full-canvas coordinates
-/// (that is how the codec yields it), the dimensions on the reduced grid, and
-/// the component planes, one per component, `width × height` samples each.
 pub struct Tile<'a> {
     pub x0: u32,
     pub y0: u32,
@@ -58,12 +37,10 @@ pub struct Tile<'a> {
     pub planes: Vec<&'a [i32]>,
 }
 
-/// The reader behind the stream's user-data pointer.
 struct Source<R> {
     reader: R,
 }
 
-/// The codec's stream — destroyed together with the owner, on every exit.
 struct StreamHandle(*mut opj_stream_t);
 
 impl Drop for StreamHandle {
@@ -73,24 +50,17 @@ impl Drop for StreamHandle {
     }
 }
 
-/// A decoder of one file at one resolution factor. The factor is a property of
-/// the opening: changing it means opening again; the codec's state is not reused
-/// between tiles other than for the next tile.
 pub struct Decoder<R: Read + Seek> {
     codec: Codec,
     stream: StreamHandle,
-    /// Held for the pointer in the stream: lives exactly as long as the stream.
     _source: Box<Source<R>>,
     errors: Box<RefCell<String>>,
     image: Box<opj_image>,
     header: Header,
-    /// After a failure the codec is not touched: it is discarded.
     dead: bool,
 }
 
 impl<R: Read + Seek> Decoder<R> {
-    /// Opens a file of `len` bytes and reads the main header; `factor` is the
-    /// number of resolution levels by which tiles are yielded coarser than native.
     pub fn open(reader: R, len: u64, format: Format, factor: u32) -> Result<Self, String> {
         let kind = match format {
             Format::Jp2 => CODEC_FORMAT::OPJ_CODEC_JP2,
@@ -107,10 +77,7 @@ impl<R: Read + Seek> Decoder<R> {
         codec.decoder_set_strict_mode(1);
 
         let mut source = Box::new(Source { reader });
-        // SAFETY: the stream is created here and destroyed together with
-        // `StreamHandle`; the user data is `source`, which lives in `Decoder` no
-        // shorter than the stream; the callbacks cast the pointer back to the
-        // same type `R`.
+        // SAFETY: the stream dies with `StreamHandle`; `source` lives in `Decoder` no shorter, and the callbacks cast back to `Source<R>`.
         let mut stream = unsafe {
             let stream = opj_stream_create(BUFFER, 1);
             if stream.is_null() {
@@ -139,9 +106,6 @@ impl<R: Read + Seek> Decoder<R> {
         self.header
     }
 
-    /// Decodes tile `index` (row × tiles per row + column) and hands its planes
-    /// to `read` while they are alive. A failure discards the codec: the next
-    /// call answers with a failure straight away.
     pub fn tile<T>(
         &mut self,
         index: u32,
@@ -167,11 +131,8 @@ impl<R: Read + Seek> Decoder<R> {
     }
 }
 
-/// The stream as the codec's methods ask for it. Through `&mut`: the reference
-/// does not outlive the borrow of the owner, and there are never two at once.
 fn as_stream(stream: &mut StreamHandle) -> &mut Stream {
-    // SAFETY: behind the `opj_stream_create` pointer lies a `Stream`, only this
-    // `StreamHandle` owns it, and the borrow of the owner rules out a second access.
+    // SAFETY: behind the `opj_stream_create` pointer lies a `Stream`, owned solely by this `StreamHandle`.
     unsafe { &mut *(stream.0 as *mut Stream) }
 }
 
@@ -195,7 +156,6 @@ fn header_of(image: &opj_image) -> Result<Header, String> {
     })
 }
 
-/// A failure with the reason the codec named: without an error handler there is none.
 fn failure(errors: &RefCell<String>, what: &str) -> String {
     let said = errors.borrow().trim().to_string();
     match said.is_empty() {
@@ -208,11 +168,8 @@ unsafe extern "C" fn on_error(message: *const c_char, user: *mut c_void) {
     if message.is_null() || user.is_null() {
         return;
     }
-    // SAFETY: `user` is the `RefCell<String>` passed to `set_error_handler` and
-    // lives as long as the codec; the message is the codec's C string.
+    // SAFETY: `user` is the `RefCell<String>` passed to `set_error_handler`, living as long as the codec; the message is its C string.
     let (text, errors) = unsafe { (CStr::from_ptr(message).to_string_lossy(), &*(user as *const RefCell<String>)) };
-    // A panic across an `extern "C"` boundary is an abort; the borrow is always
-    // free here, and `try_borrow_mut` merely makes this a rule, not a hope.
     if let Ok(mut errors) = errors.try_borrow_mut() {
         if !errors.is_empty() {
             errors.push_str("; ");
@@ -222,9 +179,7 @@ unsafe extern "C" fn on_error(message: *const c_char, user: *mut c_void) {
 }
 
 unsafe extern "C" fn read<R: Read + Seek>(buffer: *mut c_void, bytes: usize, user: *mut c_void) -> usize {
-    // SAFETY: `user` is this decoder's `Source<R>`; the buffer is issued by the
-    // codec for `bytes` bytes. Zero is the end of file, as with `Read`;
-    // `usize::MAX` is a failure.
+    // SAFETY: `user` is this decoder's `Source<R>`, and the buffer is issued by the codec for `bytes` bytes.
     let (source, buffer) = unsafe {
         (&mut *(user as *mut Source<R>), std::slice::from_raw_parts_mut(buffer as *mut u8, bytes))
     };

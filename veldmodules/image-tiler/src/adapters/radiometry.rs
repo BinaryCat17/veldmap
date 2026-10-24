@@ -1,40 +1,9 @@
-//! Display radiometry: how TIFF samples become RGBA bytes.
-//!
-//! u8 is identity: the file is already in bytes. Wide formats (u16, i16, f32)
-//! do not fit in a byte, and they share no single "how to squeeze" rule: a DEM
-//! lies in meters, radar amplitude in DN with a handful of hot outliers, and
-//! the high byte of both yields a black frame. Display stretches the
-//! percentiles of the file's own sample: [2%, 98%] → [0, 255], edges clamp.
-//! This is a display rule, not data radiometry — measuring by tile bytes is
-//! meaningless.
-//!
-//! "No data" (GDAL_NODATA) is transparency: a pixel whose color channels all
-//! equal the declared value gets alpha 0 and black color. The comparison is
-//! exact and on the raw value, before the stretch.
-
-/// How many values suffice for a per-file stretch sample.
-///
-/// A percentile is about the shape of the distribution, not every single
-/// value: a million is plenty, while sorting a hundred million would spend
-/// more on the stretch than on the whole display. The threshold is shared by
-/// everyone who collects this sample: were it to diverge, the same file shown
-/// through two paths would stretch differently.
 pub const STRETCH_SAMPLES: usize = 1 << 20;
 
-/// Whether a sample is valid: a number and not a "no data" marker.
-///
-/// One predicate for every place that asks — the TIFF stretch sample, the
-/// NetCDF stretch sample, and the display itself. Were they to diverge, they
-/// would produce exactly what none of them intends: a value thrown out of the
-/// sample as invalid would appear on screen opaque — and, since it lies above
-/// the upper edge of the stretch, white. Non-numbers (`NaN`, infinities) are
-/// not data by their very meaning: float rasters often mark emptiness with
-/// them instead of a tag.
 pub fn is_data(value: f32, nodata: Option<f32>) -> bool {
     value.is_finite() && Some(value) != nodata
 }
 
-/// Chunk samples in typed form — what the display interprets.
 pub enum Samples<'a> {
     U8(&'a [u8]),
     U16(&'a [u16]),
@@ -56,7 +25,6 @@ impl Samples<'_> {
         self.len() == 0
     }
 
-    /// Sample value as a number — one ladder for stretching and statistics.
     pub fn get(&self, i: usize) -> f32 {
         match self {
             Samples::U8(v) => f32::from(v[i]),
@@ -66,8 +34,6 @@ impl Samples<'_> {
         }
     }
 
-    /// Alpha channel as a byte. Alpha is not stretched — it carries its own
-    /// meaning and its own full range of its format.
     fn alpha(&self, i: usize) -> u8 {
         match self {
             Samples::U8(v) => v[i],
@@ -78,25 +44,14 @@ impl Samples<'_> {
     }
 }
 
-/// How to read the samples of one pixel.
-///
-/// The sample count alone is not enough, and the difference is not subtle. Two
-/// samples in a named color model are grey with alpha, while two samples in a
-/// stack of measured quantities are two quantities, and the second one is not
-/// transparency: read as alpha, it would black out half the scene. So what
-/// decides is not the count but what the file calls itself.
 #[derive(Clone, Copy)]
 pub struct Pixel {
-    /// How many samples fall on one pixel — the stride through the array.
     pub channels: usize,
-    /// How many of the leading ones make up the color.
     colors: usize,
-    /// The last sample is transparency.
     alpha: bool,
 }
 
 impl Pixel {
-    /// The model named by the file: grey, grey with alpha, RGB, RGBA.
     pub fn named(channels: usize) -> Self {
         Self {
             channels,
@@ -108,10 +63,6 @@ impl Pixel {
         }
     }
 
-    /// A stack of measured quantities without color interpretation — how GDAL
-    /// writes anything that is not three or four color channels. The first one
-    /// is shown: which of them is the image, the file does not say, and
-    /// combining them into color would pass a guess off as measured data.
     pub fn stack(channels: usize) -> Self {
         Self { channels, colors: 1, alpha: false }
     }
@@ -125,17 +76,9 @@ impl Pixel {
     }
 }
 
-/// Display mapping for one file. Built once per file (see tiff.rs) and
-/// applied to all its chunks — otherwise adjacent tiles would each stretch
-/// their own way and part at the seams.
-///
-/// Copies for free: two bounds and the "no data" value. That is what lets it
-/// be kept ready at parse time instead of recomputed for every request.
 #[derive(Clone, Copy)]
 pub struct Mapping {
-    /// Stretch [lo, hi] → [0, 255]; `None` — the samples are already bytes.
     stretch: Option<(f32, f32)>,
-    /// The "no data" value — transparency.
     nodata: Option<f32>,
 }
 
@@ -144,15 +87,11 @@ impl Mapping {
         Self { stretch: None, nodata }
     }
 
-    /// `hi > lo` is the caller's concern (see [`percentile_stretch`]).
     pub fn stretched(lo: f32, hi: f32, nodata: Option<f32>) -> Self {
         Self { stretch: Some((lo, hi)), nodata }
     }
 
-    /// Unfolds samples into RGBA8 by the pixel layout (see [`Pixel`]); the tail
-    /// beyond `pixels` is dropped.
     pub fn rgba(&self, samples: &Samples<'_>, pixel: Pixel, pixels: usize) -> Vec<u8> {
-        // Bytes without stretch or keying — a ready path with no recomputation.
         if let (Samples::U8(v), None, None) = (samples, self.stretch, self.nodata) {
             return super::to_rgba(v, pixel, pixels);
         }
@@ -165,11 +104,6 @@ impl Mapping {
         let mut rgba = Vec::with_capacity(count * 4);
         for px in 0..count {
             let at = px * channels;
-            // Two distinct circumstances make a pixel empty, and they must not
-            // be confused. Every color channel is the "no data" marker: this
-            // is a field beyond the edge of the capture. Any one channel is not
-            // a number: such a pixel has no color at all, and one non-numeric
-            // channel spoils it entirely.
             let mut void = true;
             let mut broken = false;
             let mut bytes = [0u8; 3];
@@ -193,19 +127,6 @@ impl Mapping {
     }
 }
 
-/// Stretch from the file's own sample: the [2nd, 98th] percentiles of valid
-/// values. `None` — the sample is empty (the whole file is "no data" — nothing
-/// to stretch).
-///
-/// Coinciding percentiles mean a flat field, and it is opened **around** the
-/// value, not upward from it: upward would mean the whole field sits at the
-/// lower edge of the scale, that is a black frame indistinguishable from
-/// emptiness. A flat field belongs in the middle.
-///
-/// The step is taken from the magnitude of the value itself, not a unit: for
-/// f32 beyond 2²⁴ adding one does not change the number at all, and division
-/// by zero returns — and exactly such values stand as "no data" markers (the
-/// standard netCDF `_FillValue` is 9.96921e36).
 pub fn percentile_stretch(values: &mut [f32]) -> Option<(f32, f32)> {
     if values.is_empty() {
         return None;

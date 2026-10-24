@@ -1,5 +1,0 @@
-{
-  "log_filter": "veldmap=info,veldmap::ui-service::cosmic_text=error,wgpu_core::instance=error,warn",
-  "trace_filter": "veldmap=trace,veldmap::ui-service::cosmic_text=error,wgpu_core::instance=error,warn",
-  "log_rate_limit_ms": 10000
-}

@@ -1,51 +1,35 @@
 # VeldMap
 
-A desktop application for working with satellite imagery: walking and searching
-the provider catalogue (Copernicus Data Space), downloading products into a
-local library, and viewing them — including imagery that has not been
-downloaded, straight from remote storage. Built as a microkernel: a native Rust
-host with a WebAssembly runtime, while all application logic lives in isolated
-wasm modules that communicate over an event bus.
+Geospatial imagery workspace over Copernicus Data Space: catalogue search,
+local download library, 2D raster canvas and 3D WGS84 globe.
 
-## Requirements
+## Architecture
 
-| | |
-|---|---|
-| Rust | nightly (pinned in `veldcore/rust-toolchain.toml`) — for `-Zthreads` in `veldcore/.cargo/config.toml`; the code uses no unstable language features |
-| Build targets | `wasm32-wasip1` for the modules, `x86_64-unknown-linux-gnu` for the host |
-| Python | 3.10+ (code generation and build scripts; `buildgen/.venv` is created automatically) |
-| GPU | Vulkan |
-| Linking (Linux) | `clang` + `mold` |
-| Cross-compiling for Windows | `x86_64-w64-mingw32-gcc` |
+Seven Rust microservices compile to WASI 0.2 components (`wasm32-wasip2`)
+and talk over ConnectRPC on localhost sockets:
+
+| Service | Port | Contract |
+|---|---|---|
+| `data-provider` | 50051 | `provider.Provider` — stateless Copernicus CDSE adapter |
+| `data-library` | 50052 | `library.Library` — download manager and disk register |
+| `image-tiler` | 50053 | `tiler.Tiler` — raster describe and pyramid tiles |
+| `tile-cache` | 50054 | `cache.Cache` — QOI tile disk cache |
+| `image-view` | 50055 | `viewer.Viewer` — 2D raster canvas |
+| `globe` | 50056 | `globe.Globe` — 3D WGS84 ellipsoid |
+| `data-browser` | — | `iced` UI client of all services (`wasi-gfx`) |
+
+- `proto/` — ConnectRPC contracts: stateless services stream finite lists,
+  stateful ones stream event logs and live frames.
+- `crates/veldmap-proto` — prost messages and stubs, zero-copy `bytes::Bytes`.
+- `crates/veldmap-rpc` — stream, event-table and frame-broadcast helpers.
+- `crates/veldmap-core` — pyramid tiles, geodesy, ranged readers, GPU fallback.
 
 ## Build and run
 
 ```bash
-python3 buildgen/build.py          # the single build and check command
-python3 buildgen/run-native.py     # run
+cargo build --workspace --target wasm32-wasip2 --release
+process-compose up
 ```
 
-What the build does step by step, how to run the tests individually, how to run
-the interface scenarios — [docs/operations/](docs/operations/build.md). The
-development process — [CLAUDE.md](CLAUDE.md).
-
-## Copernicus access
-
-Catalogue browsing and downloading require S3 keys for Copernicus Data Space:
-copy [`.env.example`](.env.example) to `.env` and fill in your own
-(`COPERNICUS_ACCESS_KEY`, `COPERNICUS_ACCESS_SECRET`). Without them the build
-and the run still pass and catalogue search works, but storage listing, viewing
-over the network and downloading answer with a refusal. How the values reach
-the configs — [docs/operations/configuration.md](docs/operations/configuration.md).
-
-## Documentation
-
-- [docs/architecture/overview.md](docs/architecture/overview.md) — the map of
-  the repository, the microkernel, the services and pointers to the other pages.
-- [docs/glossary.md](docs/glossary.md) — terms; [docs/limitations.md](docs/limitations.md)
-  — what the application does not do and why; [docs/decisions/](docs/decisions/README.md)
-  — accepted decisions with their measurements.
-
-## License
-
-See [LICENSE](LICENSE).
+Runtime state lives under `runtime/`; set `COPERNICUS_ACCESS_KEY` and
+`COPERNICUS_ACCESS_SECRET` in `.env` (see `.env.example`) for downloads.

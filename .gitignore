@@ -32,3 +32,4 @@ __pycache__
 .pytest_cache
 rustc-ice*
 .mimocode
+sources-pack.txt

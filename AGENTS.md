@@ -7,12 +7,18 @@ Each chat session runs **statelessly without memory** of previous sessions.
 
 1. **Locate Your Task:** Find the **first** task in Section 5 marked `- [ ]` (or the specific task number requested by the user).
 2. **Scope Discipline:** Implement **only** that task. Do not jump ahead to future tasks.
-3. **Strict Architectural Rules:**
+3. **Strict Architectural & Code Purity Rules:**
    - **100% English Only:** Zero Cyrillic characters (`[\u0400-\u04FF]`) anywhere in source code, comments, UI labels, logs, docs, or commit messages.
+   - **Self-Documenting Code & Extreme-Case-Only Comments:** Code must be self-documenting through clear naming, small single-responsibility functions, strong domain types/enums, and `thiserror` error types mapped to ConnectRPC status codes. **Strip all legacy `//!` file-header essays, multi-sentence `///` prose blocks, and narrative `//` comments.** Comments are permitted **ONLY** in three extreme cases:
+     1. `// SAFETY:` invariants immediately above `unsafe` blocks (e.g., `openjp2` C FFI in `codec.rs`).
+     2. 1–2 line notes explaining external protocol or OS bugs (e.g., CDSE S3 rejecting presigned query URLs and requiring SigV4 headers, or X11/WSLg HiDPI scale reporting).
+     3. 1-line citations for non-trivial mathematical/geodetic standards (e.g., GOST R 51794-2008 Helmert parameters or Krüger's 4th-order series).
+     Total comment lines in any `.rs` file must not exceed 5% of the file's lines.
+   - **Concise, Non-Redundant Documentation:** Documentation in `README.md` and `docs/` must be brief (<= 80 lines per file), architectural, and never duplicate `.proto` message definitions or narrate code mechanics.
    - **No Legacy Host or Codegen:** Never reintroduce `veldcore/platform/host`, `veldsdk`, `buildgen/`, `schema.yaml`, `config.yaml`, `runner.yaml`, `host.yaml`, or `generated/` directories.
    - **No Tests During Rewrite:** Do not write `#[cfg(test)]` blocks, unit tests, `pytest` suites, or UI test scripts. Tests are intentionally omitted and will be rebuilt from scratch after the migration.
    - **All 7 Services Compile to WASM (`wasm32-wasip2`):** Every microservice under `services/` is a standard Rust binary crate compiled to `wasm32-wasip2` and orchestrated via `process-compose.yaml`.
-   - **Modern Rust 2024 Layout:** Use `edition = "2024"`, workspace dependency inheritance (`{ workspace = true }`), and modern module paths (`src/foo.rs` + `src/foo/bar.rs`, **never** `src/foo/mod.rs`).
+   - **Modern Rust 2024 Layout & Strict Lints:** Use `edition = "2024"`, workspace dependency inheritance (`{ workspace = true }`), workspace lints (`{ workspace = true }`), and modern module paths (`src/foo.rs` + `src/foo/bar.rs`, **never** `src/foo/mod.rs`).
 4. **Update State Constraint:** When your task compiles cleanly and passes verification, update **only** its checkbox in this `AGENTS.md` file from `- [ ]` to `- [x]`. Do **not** alter task descriptions or add session notes to `AGENTS.md`.
 
 ---
@@ -24,6 +30,7 @@ Each chat session runs **statelessly without memory** of previous sessions.
 ```text
 veldmap/
 ├── AGENTS.md
+├── README.md                   # Concise <= 35-line project overview & quickstart
 ├── Cargo.toml                  # Single Cargo workspace ([workspace.dependencies], [workspace.lints])
 ├── process-compose.yaml        # Orchestrates all 7 WASI 0.2 services
 ├── .env.example                # COPERNICUS_ACCESS_KEY and COPERNICUS_ACCESS_SECRET
@@ -48,12 +55,12 @@ veldmap/
 │   ├── globe/                  # Port 50056 — implements globe.Globe (wasi:webgpu + software fallback)
 │   └── data-browser/           # Client of 50051..50056 — standard iced UI via wasi-gfx (wasi:surface)
 ├── runtime/
-│   ├── config/                 # Per-service JSON configs
+│   ├── config/                 # Per-service JSON configs (7 service files only)
 │   ├── assets/                 # Fonts
 │   ├── data/                   # Downloads (dem/source) & tile cache (tiles/)
 │   ├── state/                  # Saved pane/tab layout (data-browser.json)
 │   └── logs/                   # Service logs
-└── docs/                       # Concise English documentation
+└── docs/                       # Concise English documentation (<= 80 lines per file)
     ├── overview.md
     ├── services.md
     ├── imagery-and-globe.md
@@ -77,7 +84,7 @@ veldmap/
 
 Do **not** build a macro DSL or custom ABI. `crates/veldmap-rpc` is a small, transparent library (~250 lines) that removes repetitive ConnectRPC/Tonic boilerplate across the 7 services:
 
-1. **`BoxStream<T>` Type Alias & `stream_items` Helper (for `provider.proto`, `tiler.proto`, `cache.proto`):**
+1. **`RpcStream<T>` Type Alias & `stream_from_rx` Helper (for `provider.proto`, `tiler.proto`, `cache.proto`):**
    ```rust
    pub type RpcStream<T> = Pin<Box<dyn ConnectError Stream<Item="Result<T,">> + Send + 'static>>;
 
@@ -88,7 +95,7 @@ Do **not** build a macro DSL or custom ABI. `crates/veldmap-rpc` is a small, tra
    Allows any handler to spawn a task and yield individual items or per-item ConnectRPC errors over a finite stream.
 
 2. **`EventTable<V>` Helper (for `library.proto`, `viewer.proto`, `globe.proto`):**
-   Implements the `host.proto` / `common.ReadOptions` contract in one reusable struct:
+   Implements the `common.ReadOptions` contract in one reusable struct:
    - Maintains current live entities (`BTreeMap<String, V>`) and a bounded ring-buffer of historical `(EventMeta, Option<V>)` mutations with sortable ULID `event_id` cursors and `Timestamp`s.
    - Provides `pub fn subscribe(&self, opts: ReadOptions) -> RpcStream<Event<V>>`:
      - If `opts.view == VIEW_SNAPSHOT` (or unspecified), immediately emits current items with `op = OP_SNAPSHOT`.
@@ -932,79 +939,92 @@ Execute **one** task per session. Mark `- [x]` **only** when the verification co
     4. Scan the entire repository for Cyrillic characters (`[\u0400-\u04FF]`) and translate any remaining strings or comments into clear English.
   - **Verification:** `python3 -c "import pathlib, re; assert not any(re.search(r'[\u0400-\u04FF]', p.read_text(errors='ignore')) for p in pathlib.Path('.').rglob('*') if p.is_file() and '.git' not in p.parts)"` exits 0.
 
-- [ ] **Task 2: Create Root Cargo Workspace, `.proto` Contracts, and `crates/veldmap-proto`**
+- [x] **Task 2: Purify Codebase Comments, Purge Legacy Docs/Configs, and Modernize Module Paths**
+  - **Action:**
+    1. Delete obsolete documentation, scripts, and legacy host configs:
+       - Delete `CLAUDE.md`, `docs/architecture/`, `docs/decisions/`, `docs/operations/`, `docs/glossary.md`, `docs/limitations.md`, and `docs/roadmap.md`.
+       - Delete `runtime/config/core.json`, `runtime/config/services.json`, `runtime/config/ui-service.json`, and `scripts/`.
+    2. Rewrite `README.md` into a concise (<= 35 lines) English overview of the WASI 0.2 (`wasm32-wasip2`) + ConnectRPC architecture matching Section 1.
+    3. Replace all legacy `mod.rs` files in `veldmodules/` with Rust 2024 module files (`veldmodules/data-browser/src/{components,handlers,state,view}.rs` and `veldmodules/image-tiler/src/adapters.rs`) and delete the `mod.rs` files.
+    4. Purify all `.rs` files in `veldmodules/` to enforce self-documenting code:
+       - Remove all `//!` module-level essay headers and historical chronicles.
+       - Remove all verbose `///` and `//` narrative comments that restate code mechanics or legacy bus/ABI rules.
+       - Retain comments **only** for `// SAFETY:` invariants on `unsafe` blocks (`codec.rs`), 1-line citations of geodetic/mathematical formulas, or 1-line external S3/OS quirk notes (<= 5% comment lines per file).
+  - **Verification:** `python3 -c "import pathlib; assert not pathlib.Path('CLAUDE.md').exists(); assert not pathlib.Path('docs/roadmap.md').exists(); assert not pathlib.Path('runtime/config/core.json').exists(); assert not list(pathlib.Path('.').rglob('mod.rs')); rs = list(pathlib.Path('veldmodules').rglob('*.rs')); assert all(not any(l.strip().startswith('//!') for l in p.read_text().splitlines()) and sum(1 for l in p.read_text().splitlines() if l.strip().startswith('//')) <= max(3, int(len(p.read_text().splitlines()) * 0.05)) for p in rs)"` exits 0.
+
+- [ ] **Task 3: Create Root Cargo Workspace, `.proto` Contracts, and `crates/veldmap-proto`**
   - **Action:**
     1. Create `proto/common.proto`, `proto/provider.proto`, `proto/library.proto`, `proto/tiler.proto`, `proto/cache.proto`, `proto/viewer.proto`, and `proto/globe.proto` matching Section 3 verbatim.
-    2. Create the root `Cargo.toml` (`edition = "2024"`, `[workspace.dependencies]`, `[workspace.lints]`).
+    2. Create the root `Cargo.toml` (`edition = "2024"`, `[workspace.dependencies]`, and strict `[workspace.lints]` denying `unsafe_op_in_unsafe_fn`, `dbg_macro`, and `todo`).
     3. Create `crates/veldmap-proto` with a `build.rs` that compiles all 7 `.proto` files using `prost-build` (`config.bytes(["."])` so all `bytes` fields use zero-copy `prost::bytes::Bytes`) and generates ConnectRPC / Tonic service traits and clients.
   - **Verification:** `cargo check -p veldmap-proto` and `cargo check -p veldmap-proto --target wasm32-wasip2` succeed with zero warnings.
 
-- [ ] **Task 3: Create `crates/veldmap-rpc` and `crates/veldmap-core`**
+- [ ] **Task 4: Create `crates/veldmap-rpc` and `crates/veldmap-core`**
   - **Action:**
     1. Create `crates/veldmap-rpc` implementing the stream and socket helpers specified in Section 2.1 (`RpcStream<T>`, `stream_from_rx`, `EventTable<V>` supporting `ReadOptions` `VIEW_SNAPSHOT`/`VIEW_EVENTS`/ULID cursors, `LatestFrameBroadcaster`, `alloc_aligned_bytes`, and 128 MiB message limits).
-    2. Create `crates/veldmap-core` migrating and modernizing the shared domain modules:
+    2. Create `crates/veldmap-core` migrating and modernizing the shared domain modules with self-documenting types and `thiserror` error enums:
        - `src/pyramid.rs` (from `veldmodules/image-tiler/src/pyramid.rs`)
        - `src/tile.rs` (from `veldmodules/tile-cache/src/tile.rs`)
        - `src/geodesy.rs` and `src/wheel.rs` (from `veldmodules/globe/src/`)
-       - `src/tiles.rs` (from `veldmodules/image-tiler/wraps/rust/src/tiles.rs`, storing `bytes::Bytes` RGBA8 tiles under the VRAM budget)
-       - `src/range.rs` (migrated from `network/src/range.rs`: 64 KiB block pool, readahead on consumed blocks, prefetch runs, local file + remote HTTP Range reader).
-       - `src/config.rs` (loads `/runtime/config/<service>.json` and expands `${VAR}` from `.env`).
-  - **Verification:** `cargo check -p veldmap-rpc -p veldmap-core --target wasm32-wasip2` succeeds.
+       - `src/tiles.rs` (storing `bytes::Bytes` RGBA8 tiles under the VRAM budget, pyramid ladder, and active pass state)
+       - `src/range.rs` (64 KiB block pool, readahead on consumed blocks, prefetch runs, local file + remote HTTP Range reader)
+       - `src/config.rs` (loads `/runtime/config/<service>.json` and expands `${VAR}` from `.env`)
+       - `src/gpu_fallback.rs` (pure-Rust software rasterizer fallback for headless 2D/3D frame rendering).
+  - **Verification:** `cargo clippy -p veldmap-rpc -p veldmap-core --target wasm32-wasip2 -- -D warnings` succeeds.
 
-- [ ] **Task 4: Migrate `services/data-provider` to WASI 0.2 & ConnectRPC (`provider.proto`)**
+- [ ] **Task 5: Migrate `services/data-provider` to WASI 0.2 & ConnectRPC (`provider.proto`)**
   - **Action:**
-    1. Move `veldmodules/data-provider` to `services/data-provider` as a `wasm32-wasip2` binary crate (`src/main.rs`, `src/catalogue.rs`, `src/s3.rs`, `src/scene.rs`, `src/imagery.rs`, `src/manifest.rs`, `src/mgrs.rs`, `src/time.rs`).
-    2. Implement `provider::Provider` on `127.0.0.1:50051` using `veldmap-rpc` finite streams.
-    3. Preserve all OData search queries, `FRESH_DAYS` fallback widening, scene/part folding, S3 SigV4 signing, manifest parsing, and MGRS UTM frame math.
-  - **Verification:** `cargo build -p veldmap-data-provider --target wasm32-wasip2 --release` produces `target/wasm32-wasip2/release/veldmap-data-provider.wasm`.
+    1. Move `veldmodules/data-provider` to `services/data-provider` as a `wasm32-wasip2` binary crate (`src/main.rs`, `src/catalogue.rs`, `src/s3.rs`, `src/scene.rs`, `src/imagery.rs`, `src/manifest.rs`, `src/mgrs.rs`, `src/time.rs`) and delete `veldmodules/data-provider`.
+    2. Implement `provider::Provider` on `127.0.0.1:50051` using `veldmap-rpc` finite streams and structured `thiserror` errors mapped to ConnectRPC status codes.
+    3. Preserve all OData search queries, `FRESH_DAYS` fallback widening, scene/part folding, S3 SigV4 signing, manifest parsing, and MGRS UTM frame math with clean, self-documenting code.
+  - **Verification:** `cargo build -p veldmap-data-provider --target wasm32-wasip2 --release` succeeds and `! test -d veldmodules/data-provider`.
 
-- [ ] **Task 5: Migrate `services/tile-cache` to WASI 0.2 & ConnectRPC (`cache.proto`)**
+- [ ] **Task 6: Migrate `services/tile-cache` to WASI 0.2 & ConnectRPC (`cache.proto`)**
   - **Action:**
-    1. Move `veldmodules/tile-cache` to `services/tile-cache` as a `wasm32-wasip2` binary crate serving `cache::Cache` on `127.0.0.1:50054`.
+    1. Move `veldmodules/tile-cache` to `services/tile-cache` as a `wasm32-wasip2` binary crate serving `cache::Cache` on `127.0.0.1:50054` and delete `veldmodules/tile-cache`.
     2. Read/write QOI tiles directly under `/runtime/data/tiles/` using standard `std::fs` / `tokio::fs` (atomic `.tmp` write + rename) and LRU budget eviction (`cache_limit_mb`).
-  - **Verification:** `cargo build -p veldmap-tile-cache --target wasm32-wasip2 --release` succeeds.
+  - **Verification:** `cargo build -p veldmap-tile-cache --target wasm32-wasip2 --release` succeeds and `! test -d veldmodules/tile-cache`.
 
-- [ ] **Task 6: Migrate `services/data-library` to WASI 0.2 & ConnectRPC (`library.proto`)**
+- [ ] **Task 7: Migrate `services/data-library` to WASI 0.2 & ConnectRPC (`library.proto`)**
   - **Action:**
-    1. Move `veldmodules/data-library` to `services/data-library` as a `wasm32-wasip2` binary crate serving `library::Library` on `127.0.0.1:50052`.
-    2. Merge the HTTP `.part` resumable downloader (`download.rs` from old `network` service) directly into `services/data-library`.
+    1. Move `veldmodules/data-library` to `services/data-library` as a `wasm32-wasip2` binary crate serving `library::Library` on `127.0.0.1:50052` and delete `veldmodules/data-library`.
+    2. Implement the HTTP `.part` resumable downloader (`src/download.rs`) directly in `services/data-library`.
     3. Use `ProviderClient` (`127.0.0.1:50051`) for `SignObjects` and `ResolveProductRoots`.
     4. Maintain `.origin` sidecar files under `/runtime/data/dem/source` and publish live state changes through `veldmap_rpc::EventTable<DownloadItem>` on `ListDownloads`.
-  - **Verification:** `cargo build -p veldmap-data-library --target wasm32-wasip2 --release` succeeds.
+  - **Verification:** `cargo build -p veldmap-data-library --target wasm32-wasip2 --release` succeeds and `! test -d veldmodules/data-library`.
 
-- [ ] **Task 7: Migrate `services/image-tiler` to WASI 0.2 & ConnectRPC (`tiler.proto`)**
+- [ ] **Task 8: Migrate `services/image-tiler` to WASI 0.2 & ConnectRPC (`tiler.proto`)**
   - **Action:**
-    1. Move `veldmodules/image-tiler` to `services/image-tiler` as a `wasm32-wasip2` binary crate serving `tiler::Tiler` on `127.0.0.1:50053` (replace `adapters/mod.rs` with `src/adapters.rs`).
-    2. Preserve all format adapters (`tiff`, `jp2`/`openjp2`, `excerpt`, `codec`, `jpeg`, `png`, `netcdf`/`hdf5-pure`, `grid`, `table`, `radiometry`, `resample`, `fingerprint`, `budget`).
+    1. Move `veldmodules/image-tiler` to `services/image-tiler` as a `wasm32-wasip2` binary crate serving `tiler::Tiler` on `127.0.0.1:50053` (`src/adapters.rs` + `src/adapters/*.rs`) and delete `veldmodules/image-tiler`.
+    2. Preserve all format adapters (`tiff`, `jp2`/`openjp2`, `excerpt`, `codec`, `jpeg`, `png`, `netcdf`/`hdf5-pure`, `grid`, `table`, `radiometry`, `resample`, `fingerprint`, `budget`) with self-documenting code and `thiserror` error handling.
     3. Open `common.RasterSource` via `veldmap_core::range` (calling `ProviderClient::sign_objects` for remote S3 keys).
     4. Stream produced tiles and progress over `ProduceTiles`, and asynchronously store QOI tiles to `CacheClient` (`127.0.0.1:50054`). Abort the pass immediately if the client drops the stream.
-  - **Verification:** `cargo build -p veldmap-image-tiler --target wasm32-wasip2 --release` succeeds.
+  - **Verification:** `cargo build -p veldmap-image-tiler --target wasm32-wasip2 --release` succeeds and `! test -d veldmodules/image-tiler`.
 
-- [ ] **Task 8: Migrate `services/image-view` to WASI 0.2 & ConnectRPC (`viewer.proto`)**
+- [ ] **Task 9: Migrate `services/image-view` to WASI 0.2 & ConnectRPC (`viewer.proto`)**
   - **Action:**
-    1. Move `veldmodules/image-view` to `services/image-view` as a `wasm32-wasip2` binary crate serving `viewer::Viewer` on `127.0.0.1:50055`.
+    1. Move `veldmodules/image-view` to `services/image-view` as a `wasm32-wasip2` binary crate serving `viewer::Viewer` on `127.0.0.1:50055` and delete `veldmodules/image-view`.
     2. Use `TilerClient` (`50053`), `CacheClient` (`50054`), and `veldmap_core::tiles` pyramid ladder mechanics.
     3. Render the 2D canvas into 64 KiB page-aligned `Bytes` (`PIXEL_FORMAT_RGBA8_SRGB`), broadcasting frames via `LatestFrameBroadcaster` (`WatchFrames`) and status updates via `EventTable<ViewStatus>` (`ListViews`).
-  - **Verification:** `cargo build -p veldmap-image-view --target wasm32-wasip2 --release` succeeds.
+  - **Verification:** `cargo build -p veldmap-image-view --target wasm32-wasip2 --release` succeeds and `! test -d veldmodules/image-view`.
 
-- [ ] **Task 9: Migrate `services/globe` to WASI 0.2 & ConnectRPC (`globe.proto`)**
+- [ ] **Task 10: Migrate `services/globe` to WASI 0.2 & ConnectRPC (`globe.proto`)**
   - **Action:**
-    1. Move `veldmodules/globe` to `services/globe` as a `wasm32-wasip2` binary crate serving `globe::Globe` on `127.0.0.1:50056`.
+    1. Move `veldmodules/globe` to `services/globe` as a `wasm32-wasip2` binary crate serving `globe::Globe` on `127.0.0.1:50056` and delete `veldmodules/globe`.
     2. Preserve all WGS84 ellipsoid geometry, `SURFACE_LIFT_M`, warp mesh sag subdivision, frustum/horizon ball + 9-probe culling, 4-rank georeference bindings, Transverse Mercator / Pulkovo 1942 Helmert datum math, outlines/ribbon/hatching, and quaternion slerp flights.
     3. Render the 3D scene into 64 KiB page-aligned `Bytes` (`PIXEL_FORMAT_RGBA8_SRGB`), streaming frames via `LatestFrameBroadcaster` (`WatchFrames`) and overlay progress via `EventTable<OverlayStatus>` (`ListOverlays`).
-  - **Verification:** `cargo build -p veldmap-globe --target wasm32-wasip2 --release` succeeds.
+  - **Verification:** `cargo build -p veldmap-globe --target wasm32-wasip2 --release` succeeds and `! test -d veldmodules/globe`.
 
-- [ ] **Task 10: Rewrite `services/data-browser` with Direct `iced` (`wasm32-wasip2`)**
+- [ ] **Task 11: Rewrite `services/data-browser` with Direct `iced` (`wasm32-wasip2`)**
   - **Action:**
-    1. Move `veldmodules/data-browser` to `services/data-browser` and replace all `mod.rs` files with modern Rust 2024 module paths (`src/state.rs`, `src/handlers.rs`, `src/view.rs`, `src/components.rs`).
+    1. Move `veldmodules/data-browser` to `services/data-browser` using modern Rust 2024 module paths (`src/state.rs`, `src/handlers.rs`, `src/view.rs`, `src/components.rs`) and delete `veldmodules/` completely.
     2. Rewrite the UI to use standard `iced 0.14` widgets directly (no `ui-service`), displaying `globe` and `image-view` `TextureFrame` streams via `iced::widget::image::Handle::from_rgba` inside `mouse_area`.
     3. Connect to `50051..50056` via `veldmap-proto` clients and `iced::Subscription::run`.
     4. Preserve all panes/tabs, layout persistence (`/runtime/state/data-browser.json`), catalogue/search/download tables, row states, batch actions, and NetCDF variable selectors.
-  - **Verification:** `cargo build -p veldmap-data-browser --target wasm32-wasip2 --release` succeeds.
+  - **Verification:** `cargo build -p veldmap-data-browser --target wasm32-wasip2 --release` succeeds and `! test -d veldmodules`.
 
-- [ ] **Task 11: Create `process-compose.yaml` and Rewrite Documentation (`docs/`)**
+- [ ] **Task 12: Create `process-compose.yaml` and Concise Documentation (`docs/`)**
   - **Action:**
     1. Create `process-compose.yaml` at the repository root orchestrating all 7 `.wasm` services (`data-provider`, `tile-cache`, `data-library`, `image-tiler`, `image-view`, `globe`, `data-browser`) with readiness probes and dependency ordering.
-    2. Replace all files in `docs/` with four clear, concise English documents: `docs/overview.md`, `docs/services.md`, `docs/imagery-and-globe.md`, and `docs/operations.md`.
-  - **Verification:** `cargo build --workspace --target wasm32-wasip2 --release` and `process-compose info` succeed with zero errors.
-  
+    2. Create four concise English documents in `docs/` (strictly <= 80 lines per file, referencing `.proto` contracts instead of duplicating them): `docs/overview.md`, `docs/services.md`, `docs/imagery-and-globe.md`, and `docs/operations.md`.
+  - **Verification:** `cargo clippy --workspace --target wasm32-wasip2 -- -D warnings` and `cargo build --workspace --target wasm32-wasip2 --release` succeed with zero errors.
