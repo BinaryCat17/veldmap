@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use buffa_codegen::BytesRepr;
 
-const SCHEMAS: [&str; 7] = [
+const SCHEMAS: [&str; 8] = [
     "common.proto",
     "provider.proto",
     "library.proto",
@@ -10,6 +10,7 @@ const SCHEMAS: [&str; 7] = [
     "cache.proto",
     "viewer.proto",
     "globe.proto",
+    "health.proto",
 ];
 
 fn main() {

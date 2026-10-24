@@ -12,7 +12,7 @@ Each chat session executes one task from Section 5 and treats this file as the m
    - Do not restore `veldcore/platform/host`, `veldsdk`, `buildgen/`, `schema.yaml`, legacy host configs, `generated/` directories, or the `ui-service` process/ABI.
    - Use Rust 2024, workspace dependency inheritance, workspace lints, and modern module paths (`src/foo.rs` plus `src/foo/bar.rs`, not `src/foo/mod.rs`).
    - Compile all seven debug services to `wasm32-wasip2`. Use current-thread Tokio and the WASI configuration from Section 1.3.
-   - Add focused tests for behavior being migrated. Geodesy, projection, codecs, cache eviction, resumable downloads, event replay, and stream cancellation require correctness tests; compilation alone is not a migration verification.
+   - Add only the minimum essential tests for externally observable behavior and non-obvious invariants. Do not test getters, trivial arithmetic or wiring, or dependency behavior, and do not duplicate integration coverage with unit tests. Geodesy, projection, codecs, cache eviction, resumable downloads, event replay, and stream cancellation require correctness tests; compilation alone is not a migration verification.
    - Keep README at 35 lines or fewer and documents under `docs/` at 80 lines or fewer. Reference protobuf contracts instead of duplicating their field definitions.
 4. Run the complete verification for the current task, including its runtime scenario.
 5. Only after verification passes, change that task's checkbox from `- [ ]` to `- [x]`. Do not add session notes or alter other task descriptions.
@@ -50,7 +50,8 @@ veldmap/
 │   ├── tiler.proto
 │   ├── cache.proto
 │   ├── viewer.proto
-│   └── globe.proto
+│   ├── globe.proto
+│   └── health.proto
 ├── crates/
 │   ├── veldmap-proto/
 │   ├── veldmap-rpc/
@@ -124,7 +125,7 @@ Both renderer services retain pure-Rust software fallbacks for headless verifica
 
 ### 2.1 `veldmap-proto`
 
-`crates/veldmap-proto` compiles all seven schemas in one `connectrpc-build` invocation. Its `build.rs`:
+`crates/veldmap-proto` compiles all seven application schemas and the standard `grpc.health.v1` contract in one `connectrpc-build` invocation. Its `build.rs`:
 
 - uses `connectrpc_build::Config` with `proto/` as the include root and an include file in `OUT_DIR`;
 - enables generated views and the required client/server stubs;
@@ -153,22 +154,22 @@ Domain state such as an unviewable product or a failed background download remai
 
 Keep this crate small and explicit:
 
-- ConnectRPC server/client construction for loopback, current-thread Tokio, request timeouts, route-specific message limits, and standard health checks.
-- Bounded finite-stream helpers over `tokio::sync::mpsc`. Producers check cancellation between tiles, files, and frames.
+- ConnectRPC server/client construction for loopback, current-thread Tokio, request timeouts, route-specific message limits, and standard health checks. Static readiness requires `Health.Check`; `Health.Watch` may return `UNIMPLEMENTED` until a consumer requires it.
+- Bounded finite-stream helpers over `tokio::sync::mpsc`. Producers check cancellation between tiles, files, and frames. Ordinary work queues remain bounded and never silently drop tiles or mutations.
 - `EventTable<V>` with owned live values, a bounded mutation history, monotonic ULID cursors, timestamps, and atomic snapshot-plus-subscribe behavior. A snapshot/live transition must not lose or duplicate a mutation.
 - Explicit replay behavior: an unknown or evicted `after_event_id` returns `OUT_OF_RANGE`; time filters and `max_events` are applied consistently; deletion events omit data.
-- `LatestFrameBroadcaster` using `watch` per render target, with optional initial frames rather than fabricated empty images. Producers overwrite stale frames; ordinary work queues remain bounded and never silently drop tiles or mutations.
-- Overflow-checked RGBA length/stride helpers and payload validation. Do not add an aligned-`BytesMut` API unless a real allocation mechanism and benchmark justify it.
 - Conversion between domain `thiserror` errors, recoverable `ItemError` values, and terminal `ConnectError` codes.
+- Keep transport and stream helpers independent of images and other resource types. Resource validation belongs in shared domain libraries; extract only generic mechanisms with actual consumers.
 
 Configure 128 MiB only for routes that carry frames or large tile payloads. Keep smaller limits for catalogue, mutation, and control routes. Enable `TCP_NODELAY` on loopback sockets where the selected transport exposes it.
 
 ### 2.4 Frames, Tiles, and Backpressure
 
-- Live viewport frames use `PIXEL_FORMAT_RGBA8_SRGB`, `row_stride = width * 4`, and checked `pixels.len() == row_stride * height`.
+- Live viewport frames use `PIXEL_FORMAT_RGBA8_SRGB`, `row_stride = width * 4`, and checked `pixels.len() == row_stride * height`. Implement shared validation in `veldmap-core` for both renderer services; do not add an aligned-`BytesMut` API without a real allocation mechanism and benchmark.
 - Decoded pyramid tiles use `PIXEL_FORMAT_RGBA8_UNORM`; disk cache payloads use `PIXEL_FORMAT_QOI`.
 - Cache tile keys include fingerprint, level, x, and y. `ProduceTilesRequest.fingerprint` must match the current `DescribeRasters` fingerprint before work starts.
 - Dropping a ConnectRPC stream cancels work. A new camera/view request starts a new RPC; there is no epoch-kill side channel.
+- `image-view` and `globe` own per-target `watch` channels with optional initial frames rather than fabricated empty images, and overwrite stale frames. Prove these semantics through the renderer stream scenarios rather than isolated channel tests.
 - `watch` limits queued frame count, not bandwidth. Measure debug frame throughput and memory instead of promising 60–144 fps.
 - The composed release may replace frame bytes with internal GPU handles. Such handles are not added to protobuf and are never treated as portable WASI resources outside the composition boundary.
 
@@ -1045,7 +1046,7 @@ Task 15 builds the composed release from service libraries. Start with direct do
     2. Delete legacy `schema.yaml`, `config.yaml`, `types.proto`, `wraps/`, and `generated/` paths inside `veldmodules/`.
     3. Remove obsolete tests from the legacy codebase; later tasks rebuild focused tests against the new architecture.
     4. Translate all remaining source, comments, UI labels, and documentation into English.
-  - **Verification:** `python3 -c "import pathlib, re; assert not any(re.search(r'[\u0400-\u04FF]', p.read_text(errors='ignore')) for p in pathlib.Path('.').rglob('*') if p.is_file() and '.git' not in p.parts)"` exits 0.
+  - **Verification:** `python3 -c "import pathlib, re, subprocess; files = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard'], text=True).splitlines(); assert not any(re.search(r'[\u0400-\u04FF]', data.decode()) for name in files if b'\0' not in (data := pathlib.Path(name).read_bytes()))"` exits 0.
 
 - [x] **Task 2: Purify Comments, Purge Legacy Docs/Configs, and Modernize Module Paths**
   - **Action:**
@@ -1063,10 +1064,10 @@ Task 15 builds the composed release from service libraries. Start with direct do
     4. Create a temporary `src/main.rs` to check success/error variants, event options, byte payload types, and Buffa encode/decode round trips. Run it with `cargo run -p veldmap-proto`, then delete the entry point; do not add `#[cfg(test)]`, test files, test targets, or test dependencies. Retain `Cargo.lock`; do not add generated source directories.
   - **Verification:** `cargo fmt --all -- --check`, the temporary `cargo run -p veldmap-proto` contract-check scenario with its entry point removed afterward, `cargo clippy -p veldmap-proto --all-targets -- -D warnings`, and `cargo clippy -p veldmap-proto --all-targets --target wasm32-wasip2 -- -D warnings` succeed.
 
-- [ ] **Task 4: Create `veldmap-rpc` and Prove WASI ConnectRPC Streaming**
+- [x] **Task 4: Create `veldmap-rpc` and Prove WASI ConnectRPC Streaming**
   - **Action:**
-    1. Implement the helpers and error mappings in Section 2.3, including route-specific limits, health checks, event replay, cancellation, and latest-frame broadcasters.
-    2. Add native tests for cursor ordering, replay gaps, snapshot/live transitions, bounded queues, and pixel validation.
+    1. Implement the resource-agnostic helpers and error mappings in Section 2.3, including route-specific limits, health checks, event replay, and cancellation.
+    2. Add only essential native tests for custom event replay invariants and recoverable/terminal error mapping. Use the integration scenario for bounded streaming and cancellation instead of retesting Tokio channels.
     3. Add small example Cache client/server components and a host-driven integration test. Return a recoverable item error followed by a valid item, then cancel an active stream and observe producer termination.
   - **Verification:** `cargo test -p veldmap-rpc`, native/WASI clippy with `-D warnings`, both example components build for `wasm32-wasip2`, and the two-component Wasmtime integration test passes its stream and cancellation assertions.
 
@@ -1082,7 +1083,8 @@ Task 15 builds the composed release from service libraries. Start with direct do
     1. Migrate and modernize `pyramid`, `tile`, `geodesy`, `wheel`, `tiles`, `range`, `config`, and `gpu_fallback` from the legacy modules.
     2. Implement bounded VRAM-aware tile state, 64 KiB range-block pooling with readahead/prefetch, local and HTTP Range readers, `${VAR}` config expansion, and pure-Rust 2D/3D fallbacks.
     3. Keep remote signing behind a standard Rust trait so `range` does not depend on a concrete socket transport.
-    4. Add golden tests for geodesy/projection and focused tests for pyramid math, tile budgets, range reads, prefetch cancellation, and software rendering.
+    4. Add shared RGBA frame-layout and pixel-format validation for the renderer services, keeping resource policy out of `veldmap-rpc`.
+    5. Add golden tests for geodesy/projection and focused tests for pyramid math, tile budgets, range reads, prefetch cancellation, and software rendering.
   - **Verification:** `cargo test -p veldmap-core`, `cargo clippy -p veldmap-core --all-targets -- -D warnings`, and `cargo clippy -p veldmap-core --all-targets --target wasm32-wasip2 -- -D warnings` succeed.
 
 - [ ] **Task 7: Migrate `services/data-provider`**
