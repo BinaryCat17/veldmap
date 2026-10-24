@@ -3,9 +3,9 @@
 Geospatial imagery workspace over Copernicus Data Space: catalogue search,
 local download library, 2D raster canvas and 3D WGS84 globe.
 
-## Architecture
+## Target architecture
 
-Seven Rust microservices compile to WASI 0.2 components (`wasm32-wasip2`)
+Seven Rust microservices will compile to WASI 0.2 components (`wasm32-wasip2`)
 and talk over ConnectRPC on localhost sockets:
 
 | Service | Port | Contract |
@@ -21,10 +21,10 @@ and talk over ConnectRPC on localhost sockets:
 - `proto/` — ConnectRPC contracts: stateless services stream finite lists,
   stateful ones stream event logs and live frames.
 - `crates/veldmap-proto` — Buffa messages, views and ConnectRPC stubs; `Bytes` payloads.
-- `crates/veldmap-rpc` — stream, event-table and frame-broadcast helpers.
+- `crates/veldmap-rpc` — stream, event-table, error and transport helpers.
 - `crates/veldmap-core` — pyramid tiles, geodesy, ranged readers, GPU fallback.
 
-## Build and run
+## Target build and run (after Task 14)
 
 ```bash
 cargo build --workspace --target wasm32-wasip2 --release

@@ -788,7 +788,7 @@ service Viewer {
     option idempotency_level = IDEMPOTENT;
   }
 
-  rpc ControlCamera (CameraControlRequest) returns (stream veldmap.common.v1.ItemResult);
+  rpc ControlCamera (CameraControlRequest) returns (veldmap.common.v1.ItemResult);
 
   rpc ListViews (ListViewsRequest) returns (stream ViewEvent) {
     option idempotency_level = NO_SIDE_EFFECTS;
@@ -892,9 +892,9 @@ service Globe {
     option idempotency_level = IDEMPOTENT;
   }
 
-  rpc ControlCamera (GlobeCameraRequest) returns (stream veldmap.common.v1.ItemResult);
+  rpc ControlCamera (GlobeCameraRequest) returns (veldmap.common.v1.ItemResult);
 
-  rpc ProbeSurface (ProbeSurfaceRequest) returns (stream ProbeSurfacePoint) {
+  rpc ProbeSurface (ProbeSurfaceRequest) returns (ProbeSurfacePoint) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 
@@ -1139,7 +1139,8 @@ Task 15 builds the composed release from service libraries. Start with direct do
     1. Extend the Task 5 shell with the legacy browser behavior and delete `veldmodules/` completely.
     2. Preserve panes/tabs, layout persistence, catalogue/search/download tables, row states, batch actions, NetCDF selectors, and camera interaction.
     3. Connect to all six backend/renderer services with generated ConnectRPC clients and iced subscriptions; composite latest viewer/globe frames through wgpu.
-    4. Exercise a complete user flow against local fixtures, including recoverable item errors, reconnects, live view resizing, and clean stream cancellation.
+    4. Coalesce camera input with bounded pending state and at most one in-flight `ControlCamera` RPC per view or globe. Accumulate pan/orbit deltas, preserve zoom anchoring and discrete-action ordering, collapse resize to the latest dimensions, and do not emit one RPC per raw pointer event.
+    5. Exercise a complete user flow against local fixtures, including recoverable item errors, reconnects, live view resizing, and clean stream cancellation.
   - **Verification:** native tests where applicable, native/WASI clippy with `-D warnings`, release WASI build, the real end-to-end window scenario, and `! test -d veldmodules` succeed.
 
 - [ ] **Task 14: Orchestrate and Document the Debug System**
@@ -1148,6 +1149,7 @@ Task 15 builds the composed release from service libraries. Start with direct do
     2. Use standard Connect health checks for backend readiness and keep service logs under `runtime/logs/`.
     3. Update the 35-line README and create concise `docs/overview.md`, `services.md`, `imagery-and-globe.md`, and `operations.md` (each at most 80 lines).
     4. Document exact pinned prerequisites, debug launch, deterministic fixture run, and optional live CDSE run without exposing secrets.
+    5. Measure and record representative debug `WatchFrames` throughput and memory at the configured window size before choosing any resolution or rate limits.
   - **Verification:** `cargo fmt --all -- --check`, `cargo test --workspace`, native/WASI workspace clippy with `-D warnings`, `cargo build --workspace --target wasm32-wasip2 --release`, and a complete `process-compose` user-flow smoke scenario all pass.
 
 - [ ] **Task 15: Build and Measure the Composed Release**

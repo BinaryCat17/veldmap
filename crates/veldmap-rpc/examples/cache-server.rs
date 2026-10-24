@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use connectrpc::{
-    ConnectError, RequestContext, Response, Router, ServiceRequest, ServiceResult, ServiceStream,
+    ConnectError, ErrorCode, RequestContext, Response, Router, ServiceRequest, ServiceResult,
+    ServiceStream,
 };
 use veldmap_proto::veldmap::cache::v1::{
     CACHE_PLACE_TILES_SPEC, CACHE_QUERY_TILES_SPEC, CACHE_SERVICE_NAME, Cache, CacheExt,
     CachedTile, CachedTileResult, PlaceTilesRequest, QueryTilesRequest,
 };
 use veldmap_proto::veldmap::common::v1::{ItemResult, TileAddr};
-use veldmap_rpc::error::{DomainError, DomainErrorKind};
+use veldmap_rpc::error::DomainError;
 use veldmap_rpc::health::install_health;
 use veldmap_rpc::stream::{BoundedSender, bounded_stream};
 use veldmap_rpc::transport::{RouteClass, TransportResult, bind_loopback, with_route_class};
@@ -91,8 +92,8 @@ fn finite_result(addr: TileAddr) -> Result<CachedTileResult, ConnectError> {
         return Ok(cache_miss(addr));
     }
     let id = format!("0/{}/{}", addr.x, addr.y);
-    let error = DomainError::new(DomainErrorKind::NotFound, "example tile is absent")
-        .into_item_error(id)?;
+    let error =
+        DomainError::new(ErrorCode::NotFound, "example tile is absent").into_item_error(id)?;
     Ok(CachedTileResult {
         outcome: error.into(),
         ..Default::default()

@@ -22,9 +22,9 @@ service Globe {
     option idempotency_level = IDEMPOTENT;
   }
 
-  rpc ControlCamera (GlobeCameraRequest) returns (stream veldmap.common.v1.ItemResult);
+  rpc ControlCamera (GlobeCameraRequest) returns (veldmap.common.v1.ItemResult);
 
-  rpc ProbeSurface (ProbeSurfaceRequest) returns (stream ProbeSurfacePoint) {
+  rpc ProbeSurface (ProbeSurfaceRequest) returns (ProbeSurfacePoint) {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
 

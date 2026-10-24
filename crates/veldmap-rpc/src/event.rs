@@ -99,10 +99,13 @@ where
         let state = self.lock();
         selection.validate_cursors(&state)?;
 
-        let mut initial = match selection.view {
+        let limit = selection.max_events.unwrap_or(usize::MAX);
+        let initial = match selection.view {
             View::VIEW_SNAPSHOT | View::VIEW_UNSPECIFIED => state
                 .live
                 .values()
+                .filter(|live| selection.includes(&live.meta))
+                .take(limit)
                 .map(|live| Event {
                     meta: EventMeta {
                         op: Op::OP_SNAPSHOT.into(),
@@ -111,12 +114,14 @@ where
                     data: Some(live.value.clone()),
                 })
                 .collect::<Vec<_>>(),
-            View::VIEW_EVENTS => state.history.iter().cloned().collect::<Vec<_>>(),
+            View::VIEW_EVENTS => state
+                .history
+                .iter()
+                .filter(|event| selection.includes(&event.meta))
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>(),
         };
-        initial.retain(|event| selection.includes(&event.meta));
-        if let Some(max_events) = selection.max_events {
-            initial.truncate(max_events);
-        }
         let mut receiver = selection.live.then(|| self.live_sender.subscribe());
         drop(state);
 
@@ -268,10 +273,10 @@ impl Selection {
         {
             Ulid::from_string(cursor)
                 .map_err(|_| ConnectError::invalid_argument("invalid event cursor"))?;
-            if !state
+            if state
                 .history
-                .iter()
-                .any(|event| &event.meta.event_id == cursor)
+                .binary_search_by(|event| event.meta.event_id.as_str().cmp(cursor.as_str()))
+                .is_err()
             {
                 return Err(ConnectError::out_of_range(
                     "event cursor is unknown or no longer retained",

@@ -1,37 +1,17 @@
 use connectrpc::{ConnectError, ErrorCode};
 use veldmap_proto::veldmap::common::v1::{ItemError, ItemErrorCode};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DomainErrorKind {
-    Canceled,
-    Unknown,
-    InvalidArgument,
-    DeadlineExceeded,
-    NotFound,
-    AlreadyExists,
-    PermissionDenied,
-    ResourceExhausted,
-    FailedPrecondition,
-    Aborted,
-    OutOfRange,
-    Unimplemented,
-    Internal,
-    Unavailable,
-    DataLoss,
-    Unauthenticated,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct DomainError {
-    kind: DomainErrorKind,
+    kind: ErrorCode,
     message: String,
     retryable: bool,
 }
 
 impl DomainError {
     #[must_use]
-    pub fn new(kind: DomainErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(kind: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -46,7 +26,7 @@ impl DomainError {
     }
 
     #[must_use]
-    pub fn kind(&self) -> DomainErrorKind {
+    pub fn kind(&self) -> ErrorCode {
         self.kind
     }
 
@@ -62,11 +42,11 @@ impl DomainError {
 
     #[must_use]
     pub fn into_connect_error(self) -> ConnectError {
-        ConnectError::new(self.kind.connect_code(), self.message)
+        ConnectError::new(self.kind, self.message)
     }
 
     pub fn into_item_error(self, id: impl Into<String>) -> Result<ItemError, ConnectError> {
-        let Some(code) = self.kind.item_code() else {
+        let Some(code) = item_code(self.kind) else {
             return Err(self.into_connect_error());
         };
         Ok(ItemError {
@@ -79,70 +59,42 @@ impl DomainError {
     }
 }
 
-impl DomainErrorKind {
-    fn connect_code(self) -> ErrorCode {
-        match self {
-            Self::Canceled => ErrorCode::Canceled,
-            Self::Unknown => ErrorCode::Unknown,
-            Self::InvalidArgument => ErrorCode::InvalidArgument,
-            Self::DeadlineExceeded => ErrorCode::DeadlineExceeded,
-            Self::NotFound => ErrorCode::NotFound,
-            Self::AlreadyExists => ErrorCode::AlreadyExists,
-            Self::PermissionDenied => ErrorCode::PermissionDenied,
-            Self::ResourceExhausted => ErrorCode::ResourceExhausted,
-            Self::FailedPrecondition => ErrorCode::FailedPrecondition,
-            Self::Aborted => ErrorCode::Aborted,
-            Self::OutOfRange => ErrorCode::OutOfRange,
-            Self::Unimplemented => ErrorCode::Unimplemented,
-            Self::Internal => ErrorCode::Internal,
-            Self::Unavailable => ErrorCode::Unavailable,
-            Self::DataLoss => ErrorCode::DataLoss,
-            Self::Unauthenticated => ErrorCode::Unauthenticated,
-        }
+fn item_code(code: ErrorCode) -> Option<ItemErrorCode> {
+    match code {
+        ErrorCode::InvalidArgument => Some(ItemErrorCode::InvalidArgument),
+        ErrorCode::NotFound => Some(ItemErrorCode::NotFound),
+        ErrorCode::AlreadyExists => Some(ItemErrorCode::AlreadyExists),
+        ErrorCode::PermissionDenied => Some(ItemErrorCode::PermissionDenied),
+        ErrorCode::ResourceExhausted => Some(ItemErrorCode::ResourceExhausted),
+        ErrorCode::FailedPrecondition => Some(ItemErrorCode::FailedPrecondition),
+        ErrorCode::Internal => Some(ItemErrorCode::Internal),
+        ErrorCode::Unavailable => Some(ItemErrorCode::Unavailable),
+        ErrorCode::DataLoss => Some(ItemErrorCode::DataLoss),
+        ErrorCode::Unauthenticated => Some(ItemErrorCode::Unauthenticated),
+        _ => None,
     }
+}
 
-    fn item_code(self) -> Option<ItemErrorCode> {
-        match self {
-            Self::InvalidArgument => Some(ItemErrorCode::InvalidArgument),
-            Self::NotFound => Some(ItemErrorCode::NotFound),
-            Self::AlreadyExists => Some(ItemErrorCode::AlreadyExists),
-            Self::PermissionDenied => Some(ItemErrorCode::PermissionDenied),
-            Self::ResourceExhausted => Some(ItemErrorCode::ResourceExhausted),
-            Self::FailedPrecondition => Some(ItemErrorCode::FailedPrecondition),
-            Self::Internal => Some(ItemErrorCode::Internal),
-            Self::Unavailable => Some(ItemErrorCode::Unavailable),
-            Self::DataLoss => Some(ItemErrorCode::DataLoss),
-            Self::Unauthenticated => Some(ItemErrorCode::Unauthenticated),
-            Self::Canceled
-            | Self::Unknown
-            | Self::DeadlineExceeded
-            | Self::Aborted
-            | Self::OutOfRange
-            | Self::Unimplemented => None,
-        }
-    }
-
-    fn from_item_code(code: Option<ItemErrorCode>) -> Self {
-        match code {
-            Some(ItemErrorCode::InvalidArgument) => Self::InvalidArgument,
-            Some(ItemErrorCode::NotFound) => Self::NotFound,
-            Some(ItemErrorCode::AlreadyExists) => Self::AlreadyExists,
-            Some(ItemErrorCode::PermissionDenied) => Self::PermissionDenied,
-            Some(ItemErrorCode::ResourceExhausted) => Self::ResourceExhausted,
-            Some(ItemErrorCode::FailedPrecondition) => Self::FailedPrecondition,
-            Some(ItemErrorCode::Internal) => Self::Internal,
-            Some(ItemErrorCode::Unavailable) => Self::Unavailable,
-            Some(ItemErrorCode::DataLoss) => Self::DataLoss,
-            Some(ItemErrorCode::Unauthenticated) => Self::Unauthenticated,
-            Some(ItemErrorCode::Unspecified) | None => Self::Unknown,
-        }
+fn from_item_code(code: Option<ItemErrorCode>) -> ErrorCode {
+    match code {
+        Some(ItemErrorCode::InvalidArgument) => ErrorCode::InvalidArgument,
+        Some(ItemErrorCode::NotFound) => ErrorCode::NotFound,
+        Some(ItemErrorCode::AlreadyExists) => ErrorCode::AlreadyExists,
+        Some(ItemErrorCode::PermissionDenied) => ErrorCode::PermissionDenied,
+        Some(ItemErrorCode::ResourceExhausted) => ErrorCode::ResourceExhausted,
+        Some(ItemErrorCode::FailedPrecondition) => ErrorCode::FailedPrecondition,
+        Some(ItemErrorCode::Internal) => ErrorCode::Internal,
+        Some(ItemErrorCode::Unavailable) => ErrorCode::Unavailable,
+        Some(ItemErrorCode::DataLoss) => ErrorCode::DataLoss,
+        Some(ItemErrorCode::Unauthenticated) => ErrorCode::Unauthenticated,
+        Some(ItemErrorCode::Unspecified) | None => ErrorCode::Unknown,
     }
 }
 
 impl From<ItemError> for DomainError {
     fn from(error: ItemError) -> Self {
         Self {
-            kind: DomainErrorKind::from_item_code(error.code.as_known()),
+            kind: from_item_code(error.code.as_known()),
             message: error.message,
             retryable: error.retryable,
         }
@@ -155,7 +107,7 @@ mod tests {
 
     #[test]
     fn recoverable_items_and_terminal_errors_remain_distinct() {
-        let item = DomainError::new(DomainErrorKind::Unavailable, "upstream unavailable")
+        let item = DomainError::new(ErrorCode::Unavailable, "upstream unavailable")
             .with_retryable(true)
             .into_item_error("tile-7")
             .unwrap();
@@ -165,7 +117,7 @@ mod tests {
         assert_eq!(item.message, "upstream unavailable");
         assert!(item.retryable);
 
-        let terminal = DomainError::new(DomainErrorKind::OutOfRange, "cursor evicted")
+        let terminal = DomainError::new(ErrorCode::OutOfRange, "cursor evicted")
             .into_item_error("download-1")
             .unwrap_err();
         assert_eq!(terminal.code, ErrorCode::OutOfRange);

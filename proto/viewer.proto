@@ -14,7 +14,7 @@ service Viewer {
     option idempotency_level = IDEMPOTENT;
   }
 
-  rpc ControlCamera (CameraControlRequest) returns (stream veldmap.common.v1.ItemResult);
+  rpc ControlCamera (CameraControlRequest) returns (veldmap.common.v1.ItemResult);
 
   rpc ListViews (ListViewsRequest) returns (stream ViewEvent) {
     option idempotency_level = NO_SIDE_EFFECTS;
